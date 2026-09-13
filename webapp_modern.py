@@ -9139,6 +9139,9 @@ def _apply_config_update(data):
 #     import when the operator opts in.
 CONFIG_EXPORT_EXCLUDE = {
     'openai_api_token',        # secret placeholder; real token lives in .env
+    'wdg_key',                 # WDGWars API key — per-operator secret, never share
+    'wigle_api_token',         # WiGLE API token — per-operator secret, never share
+    'wigle_api_name',          # WiGLE API name — per-operator credential
     'mac_scan_blacklist',      # per-device scan blacklist
     'rusense_node_positions',  # per-install physical node layout
     'rusense_node_names',      # per-install node naming
@@ -12715,7 +12718,17 @@ def wardriving_stop():
     """
     try:
         engine = _get_wardriving_engine()
+        finished_id = engine.session.session_id if getattr(engine, 'session', None) else None
         result = engine.stop()
+
+        # Auto-upload the just-finished wardrive if enabled (queued + retried
+        # until the box has connectivity).
+        if finished_id and shared_data.config.get('wardriving_auto_upload'):
+            try:
+                _auto_upload_enqueue(finished_id,
+                                     shared_data.config.get('wardriving_auto_upload_target', 'wdgwars'))
+            except Exception as _e:
+                logger.error(f"auto-upload enqueue failed: {_e}")
 
         ap_teardown = False
         if getattr(shared_data, 'wardrive_ap_active', False):
@@ -12822,6 +12835,246 @@ def wardriving_export(session_id):
     except Exception as e:
         logger.error(f"Wardriving export error: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Wardrive session upload -> WiGLE / WDGWars
+#
+# Ragnar already *exports* and *imports* WiGLE CSV; this adds the missing
+# piece - pushing a finished session straight to WiGLE and/or WDGWars
+# (wdgwars.pl, "WiGLE 2.0") through their upload APIs. Reuses the exact CSV
+# the export route produces, so the on-the-wire format is identical.
+# ---------------------------------------------------------------------------
+WIGLE_UPLOAD_URL = 'https://api.wigle.net/api/v2/file/upload'
+WDGWARS_UPLOAD_URL = 'https://wdgwars.pl/api/upload-csv'
+
+
+def _wardrive_session_csv(session_id):
+    """Build the WiGLE CSV for a session id (same path as the export route)."""
+    engine = _get_wardriving_engine()
+    from wardriving import WardrivingSession
+    session = WardrivingSession(engine.data_dir, session_id=session_id)
+    device_name = engine.device_name or shared_data.config.get('wardriving_device_name', 'Ragnar')
+    include_zigbee = bool(shared_data.config.get('wardriving_wigle_include_zigbee', False))
+    return session.export_wigle_csv(device_name=device_name, include_zigbee=include_zigbee)
+
+
+def _wardrive_located_count(csv_text):
+    """Count rows that carry a GPS fix (WiGLE cols 7/8 = lat/lon)."""
+    n = 0
+    for line in csv_text.splitlines()[2:]:          # skip WigleWifi banner + header
+        parts = line.split(',')
+        if len(parts) > 8 and parts[6].strip() and parts[7].strip():
+            n += 1
+    return n
+
+
+def _upload_wigle(csv_text):
+    name = (shared_data.config.get('wigle_api_name') or '').strip()
+    token = (shared_data.config.get('wigle_api_token') or '').strip()
+    if not (name and token):
+        return {'ok': False, 'error': 'WiGLE API name/token not configured'}
+    try:
+        import requests
+        r = requests.post(WIGLE_UPLOAD_URL, auth=(name, token),
+                          files={'file': ('ragnar.csv', csv_text, 'text/csv')},
+                          data={'donate': 'off'}, timeout=180)
+        try:
+            body = r.json()
+        except ValueError:
+            body = {'raw': r.text[:300]}
+        return {'ok': bool(r.ok and body.get('success', r.ok)),
+                'status': r.status_code, 'response': body}
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+
+def _upload_wdgwars(csv_text):
+    key = (shared_data.config.get('wdg_key') or '').strip()
+    if not key:
+        return {'ok': False, 'error': 'WDGWars API key not configured'}
+    try:
+        import requests
+        r = requests.post(WDGWARS_UPLOAD_URL, headers={'X-API-Key': key},
+                          files={'file': ('ragnar.csv', csv_text, 'text/csv')}, timeout=180)
+        try:
+            body = r.json()
+        except ValueError:
+            body = {'raw': r.text[:300]}
+        # WDGWars replies {"ok": true, ...} on accept, {"ok": false, "error": ...} otherwise
+        return {'ok': bool(r.ok and body.get('ok', r.ok)),
+                'status': r.status_code, 'response': body}
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Auto-upload: when a wardrive finishes, queue it and push to WDGWars/WiGLE.
+# The queue is persisted to disk, so an offline box simply retries every 60 s
+# until it has connectivity again - "upload when Wi-Fi comes back".
+# ---------------------------------------------------------------------------
+_AUTO_UPLOAD_SAVE_LOCK = threading.Lock()
+_AUTO_UPLOAD_PROC_LOCK = threading.Lock()
+_auto_upload_worker_started = False
+
+
+def _auto_upload_queue_path():
+    return os.path.join(_get_wardriving_engine().data_dir, 'pending_uploads.json')
+
+
+def _auto_upload_load():
+    try:
+        with open(_auto_upload_queue_path()) as f:
+            return json.load(f) or []
+    except Exception:
+        return []
+
+
+def _auto_upload_save(items):
+    with _AUTO_UPLOAD_SAVE_LOCK:
+        try:
+            with open(_auto_upload_queue_path(), 'w') as f:
+                json.dump(items, f)
+        except Exception as e:
+            logger.error(f"auto-upload queue save failed: {e}")
+
+
+def _auto_upload_enqueue(session_id, target):
+    items = _auto_upload_load()
+    if not any(i.get('session_id') == session_id for i in items):
+        items.append({'session_id': session_id, 'target': target,
+                      'added': time.time(), 'attempts': 0})
+        _auto_upload_save(items)
+        logger.info(f"auto-upload: queued session {session_id} -> {target}")
+    _auto_upload_start_worker()
+    threading.Thread(target=_auto_upload_process_once, daemon=True).start()
+
+
+def _auto_upload_process_once():
+    if not _AUTO_UPLOAD_PROC_LOCK.acquire(blocking=False):
+        return  # another pass is already running
+    try:
+        items = _auto_upload_load()
+        if not items:
+            return
+        remaining = []
+        for it in items:
+            sid = it.get('session_id')
+            target = (it.get('target') or 'wdgwars').lower()
+            it['attempts'] = it.get('attempts', 0) + 1
+            try:
+                csv_text = _wardrive_session_csv(sid)
+                if _wardrive_located_count(csv_text) == 0:
+                    # No GPS-located rows yet; keep it a while in case a fix arrives.
+                    if it['attempts'] < 30:
+                        remaining.append(it)
+                    continue
+                todo = ['wigle', 'wdgwars'] if target == 'both' else [target]
+                failed = []
+                for tgt in todo:
+                    res = _upload_wigle(csv_text) if tgt == 'wigle' else _upload_wdgwars(csv_text)
+                    if not res.get('ok'):
+                        failed.append(tgt)
+                if failed:
+                    it['target'] = 'both' if len(failed) == 2 else failed[0]
+                    remaining.append(it)      # retry later (probably offline)
+                else:
+                    logger.info(f"auto-upload: session {sid} uploaded ({target})")
+            except Exception as e:
+                logger.debug(f"auto-upload retry {sid}: {e}")
+                remaining.append(it)
+        _auto_upload_save(remaining)
+    finally:
+        _AUTO_UPLOAD_PROC_LOCK.release()
+
+
+def _auto_upload_worker():
+    while True:
+        try:
+            _auto_upload_process_once()
+        except Exception as e:
+            logger.error(f"auto-upload worker error: {e}")
+        time.sleep(60)
+
+
+def _auto_upload_start_worker():
+    global _auto_upload_worker_started
+    if _auto_upload_worker_started:
+        return
+    _auto_upload_worker_started = True
+    threading.Thread(target=_auto_upload_worker, daemon=True, name='wdg-auto-upload').start()
+
+
+@app.route('/api/wardriving/upload-config', methods=['GET', 'POST'])
+def wardriving_upload_config():
+    """Report (never reveal) or set WiGLE / WDGWars upload creds + auto-upload.
+
+    GET  -> configured booleans (no secrets) + auto_upload settings + queue size.
+    POST -> saves any of wigle_api_name / wigle_api_token / wdg_key /
+            auto_upload / auto_upload_target present.
+    """
+    try:
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            for k in ('wigle_api_name', 'wigle_api_token', 'wdg_key'):
+                if k in data:
+                    shared_data.config[k] = str(data[k]).strip()
+            if 'auto_upload' in data:
+                shared_data.config['wardriving_auto_upload'] = bool(data['auto_upload'])
+            if 'auto_upload_target' in data:
+                t = str(data['auto_upload_target']).lower()
+                if t in ('wigle', 'wdgwars', 'both'):
+                    shared_data.config['wardriving_auto_upload_target'] = t
+            shared_data.save_config()
+        # Resume the retry worker whenever auto-upload is on or items are pending.
+        if shared_data.config.get('wardriving_auto_upload') or _auto_upload_load():
+            _auto_upload_start_worker()
+        return jsonify({
+            'wigle_configured': bool((shared_data.config.get('wigle_api_name') or '').strip()
+                                     and (shared_data.config.get('wigle_api_token') or '').strip()),
+            'wdgwars_configured': bool((shared_data.config.get('wdg_key') or '').strip()),
+            'auto_upload': bool(shared_data.config.get('wardriving_auto_upload', False)),
+            'auto_upload_target': shared_data.config.get('wardriving_auto_upload_target', 'wdgwars'),
+            'pending': len(_auto_upload_load()),
+        })
+    except Exception as e:
+        logger.error(f"Wardriving upload-config error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/wardriving/upload/<session_id>', methods=['POST'])
+def wardriving_upload(session_id):
+    """Upload a session's WiGLE CSV to WiGLE and/or WDGWars.
+
+    Body: {"target": "wigle"|"wdgwars"|"both", "force": false}
+    Refuses a session with no GPS-located rows unless force=true, so we never
+    push location-less junk to the public databases.
+    """
+    try:
+        if not re.match(r'^[A-Za-z0-9_-]+$', session_id):
+            return jsonify({'error': 'Invalid session ID'}), 400
+        data = request.get_json(silent=True) or {}
+        target = (data.get('target') or 'wdgwars').lower()
+        if target not in ('wigle', 'wdgwars', 'both'):
+            return jsonify({'error': "target must be 'wigle', 'wdgwars' or 'both'"}), 400
+
+        csv_text = _wardrive_session_csv(session_id)
+        located = _wardrive_located_count(csv_text)
+        if located == 0 and not data.get('force'):
+            return jsonify({'success': False, 'located': 0,
+                            'error': 'No GPS-located networks in this session yet - get a fix first'}), 422
+
+        results = {}
+        if target in ('wigle', 'both'):
+            results['wigle'] = _upload_wigle(csv_text)
+        if target in ('wdgwars', 'both'):
+            results['wdgwars'] = _upload_wdgwars(csv_text)
+        overall = all(v.get('ok') for v in results.values())
+        return jsonify({'success': overall, 'located': located, 'results': results}), (200 if overall else 502)
+    except Exception as e:
+        logger.error(f"Wardriving upload error: {e}")
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/wardriving/gps')
 def wardriving_gps():
