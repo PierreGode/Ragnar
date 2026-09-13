@@ -1233,6 +1233,16 @@ alert flood or truncated record, expired cert, legacy version) — these are exp
 and attack shapes, not a broken session — else **clean**. Needs a SPAN/mirror port to
 see other hosts on a switched segment.
 
+**Dual-stack capture *(new in v5)*.** The capture filter is port-scoped for IPv4 and
+plain IPv6 (libpcap's `port` primitive matches both), and now also admits **IPv6
+traffic behind an extension header** — a narrow next-header clause
+(`ip6[6]` ∈ Hop-by-Hop/Routing/Fragment/AH/Dest-Opts), since `port` reads the
+transport port at a fixed offset that an EH chain shifts, so an EH-bearing TLS/QUIC
+flow would otherwise be dropped by the kernel filter before `parse_pcap` (which walks
+the chain via scapy) sees it. It is **not** a blanket `or ip6` — that would copy the
+whole v6 stream to userspace to drop it in Python, a needless load on a Pi Zero 2W —
+the same next-header-qualified shape the in-app vendor guards use.
+
 **Deduplicated results.** A browser routinely opens several parallel connections
 to the same host, and a QUIC client may retransmit its Initial — all with an
 identical fingerprint. These are collapsed into **one result** keyed on the
@@ -1809,8 +1819,12 @@ What it flags:
 Verdict is **clean → suspicious**: every SSH finding is posture, exposure or heuristic —
 none is a confirmed live compromise (regreSSHion can't be confirmed passively), so the scale
 does not reach "compromised". Capture is a short passive tcpdump snapshot dissected with
-Scapy. The parse+detect path is pure Python and self-tests without root (`ssh_watch.py
---selftest`, 201 checks; fixtures are bytes captured from a real OpenSSH server). Hardening
+Scapy; the filter is port-scoped for IPv4 and plain IPv6 and *(new in v3)* also admits
+**IPv6 behind an extension header** via a narrow `ip6[6]` next-header clause (not a blanket
+`or ip6` that would flood a Pi Zero 2W), since libpcap's `port` primitive can't chase an EH
+chain and the replay path already walks it via Scapy. The parse+detect path is pure Python and
+self-tests without root (`ssh_watch.py --selftest`, 204 checks; fixtures are bytes captured
+from a real OpenSSH server). Hardening
 it drives: upgrade sshd to **9.8p1+**, enable **strict KEX** and drop CBC-EtM / ChaCha where
 Terrapin matters, and remove SSH-1 / weak KEX / host-key / cipher / MAC offers. **API:**
 `GET /api/net/ssh-watch` (`seconds`, `grace_seconds`). **CLI:** `ssh-watch`, `ssh-selftest`.
@@ -2702,7 +2716,12 @@ in-app: **`JNPR-060`** (version posture) has no Junos version banner on this cap
 passive version extraction is a known dead end for this vendor, so version postures are
 **not** claimed; **`JNPR-062`** (VSTP BPDU on an L2PT UNI) is a non-IP LLC/SNAP frame
 not reconstructable from IP-onward hex (and is lab-deferred even in the standalone); and
-**`JNPR-063`** needs an operator-declared VTEP set the in-app guard has no config for. **Dual-stack** — the same attacks are detected over **IPv4 and
+**`JNPR-063`** needs an operator-declared VTEP set the in-app guard has no config for.
+*Juniper Guard v4* adds two VXLAN CVEs — **`CVE-2025-21595`** and **`CVE-2026-33781`** —
+but both are reachable only through those same skipped codes (version posture under
+`JNPR-060`, and the non-IP VSTP BPDU under `JNPR-062`), so there is **no new passively
+observable detection** to port; the one feasible VXLAN attack shape (`JNPR-061`,
+`CVE-2021-0254`) is already in-app. **Dual-stack** — the same attacks are detected over **IPv4 and
 IPv6** with the same codes (the logic keys on port + payload, which are identical
 over either family). libpcap's `port` primitive already matches plain v6, so the
 only real gap is a packet **behind an extension header**, where the next-header byte
