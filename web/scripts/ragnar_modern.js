@@ -30777,6 +30777,7 @@ async function _loadWardrivingCameras() {
 function renderWardrivingSessions(sessions) {
     const container = document.getElementById('wd-sessions-list');
     if (!container) return;
+    loadWardriveUploadConfig();
     if (!sessions || sessions.length === 0) {
         container.innerHTML = '<p class="text-gray-500 text-sm">No previous sessions.</p>';
         return;
@@ -30800,9 +30801,89 @@ function renderWardrivingSessions(sessions) {
                 <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=report" target="_blank" rel="noopener" class="text-xs text-emerald-400 hover:text-emerald-300 whitespace-nowrap font-semibold" onclick="event.stopPropagation()">Report</a>
                 <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=wigle" class="text-xs text-cyan-400 hover:text-cyan-300 whitespace-nowrap" onclick="event.stopPropagation()">WiGLE CSV</a>
                 <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=kml" class="text-xs text-purple-400 hover:text-purple-300 whitespace-nowrap" onclick="event.stopPropagation()">KML</a>
+                <button onclick="event.stopPropagation(); uploadWardriveSession('${s.session_id}','wdgwars')" class="text-xs text-fuchsia-400 hover:text-fuchsia-300 whitespace-nowrap font-semibold" title="Upload this session to WDGWars">↑ WDGWars</button>
+                <button onclick="event.stopPropagation(); uploadWardriveSession('${s.session_id}','wigle')" class="text-xs text-cyan-400 hover:text-cyan-300 whitespace-nowrap" title="Upload this session to WiGLE">↑ WiGLE</button>
             </div>
         </div>`;
     }).join('');
+}
+
+// ============================================================================
+// WARDRIVE UPLOADS -> WDGWars / WiGLE
+// Backend: GET/POST /api/wardriving/upload-config  and  POST /api/wardriving/upload/<id>
+// ============================================================================
+async function loadWardriveUploadConfig() {
+    const badge = document.getElementById('wd-upload-cfg-status');
+    if (!badge) return;
+    try {
+        const d = await (await fetch('/api/wardriving/upload-config')).json();
+        const parts = [];
+        if (d.wdgwars_configured) parts.push('WDGWars');
+        if (d.wigle_configured) parts.push('WiGLE');
+        if (parts.length) {
+            badge.textContent = parts.join(' + ') + ' ready';
+            badge.className = 'text-xs px-2 py-0.5 rounded-full bg-emerald-900/60 text-emerald-300';
+        } else {
+            badge.textContent = 'Keys not set';
+            badge.className = 'text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400';
+        }
+    } catch (e) { /* leave default badge */ }
+}
+
+function _wdUploadCfgMsg(msg, ok) {
+    const out = document.getElementById('wd-upload-cfg-result');
+    if (!out) return;
+    out.textContent = msg;
+    out.className = 'text-xs mt-2 ' + (ok ? 'text-emerald-400' : 'text-red-400');
+    out.classList.remove('hidden');
+}
+
+async function saveWardriveUploadConfig() {
+    const body = {};
+    const wdg = document.getElementById('wd-wdg-key')?.value.trim();
+    const wn = document.getElementById('wd-wigle-name')?.value.trim();
+    const wt = document.getElementById('wd-wigle-token')?.value.trim();
+    if (wdg) body.wdg_key = wdg;
+    if (wn) body.wigle_api_name = wn;
+    if (wt) body.wigle_api_token = wt;
+    if (Object.keys(body).length === 0) { _wdUploadCfgMsg('Enter at least one key first.', false); return; }
+    try {
+        const r = await fetch('/api/wardriving/upload-config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        });
+        const d = await r.json();
+        if (r.ok) {
+            _wdUploadCfgMsg('Keys saved.', true);
+            ['wd-wdg-key', 'wd-wigle-name', 'wd-wigle-token'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+            loadWardriveUploadConfig();
+        } else {
+            _wdUploadCfgMsg(d.error || 'Save failed.', false);
+        }
+    } catch (e) { _wdUploadCfgMsg('Save failed: ' + e.message, false); }
+}
+
+async function uploadWardriveSession(sessionId, target) {
+    const name = target === 'wdgwars' ? 'WDGWars' : 'WiGLE';
+    if (!confirm(`Upload session "${sessionId}" to ${name}?`)) return;
+    try {
+        const r = await fetch('/api/wardriving/upload/' + encodeURIComponent(sessionId), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target })
+        });
+        const d = await r.json();
+        if (r.ok && d.success) {
+            const res = (d.results && d.results[target]) || {};
+            const tid = res.response && (res.response.transid || res.response.id);
+            alert(`✓ Sent ${d.located} located networks to ${name}.` + (tid ? `\nTransID: ${tid}` : '\nQueued for processing.'));
+        } else if (r.status === 422) {
+            alert('No GPS-located networks in this session yet — do a drive with a fix first (or the export has no coordinates).');
+        } else {
+            const res = (d.results && d.results[target]) || {};
+            const reason = res.error || (res.response && (res.response.error || res.response.message)) || d.error || ('HTTP ' + r.status);
+            alert(`${name} upload failed: ${reason}`);
+        }
+    } catch (e) {
+        alert(`${name} upload error: ${e.message}`);
+    }
 }
 
 function selectWardrivingSession(sessionId) {
