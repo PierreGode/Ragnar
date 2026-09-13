@@ -30832,6 +30832,12 @@ async function loadWardriveUploadConfig() {
         ws.textContent = d.wigle_configured ? '✓ configured' : 'Not set';
         ws.className = 'text-xs ' + (d.wigle_configured ? 'text-emerald-400' : 'text-gray-500');
     }
+    const cb = document.getElementById('wd-auto-upload');
+    if (cb) cb.checked = !!d.auto_upload;
+    const sel = document.getElementById('wd-auto-upload-target');
+    if (sel && d.auto_upload_target) sel.value = d.auto_upload_target;
+    const aus = document.getElementById('wd-auto-upload-status');
+    if (aus) aus.textContent = (d.auto_upload ? '✓ on' : '') + (d.pending ? ` · ${d.pending} queued` : '');
 }
 
 function _wdUploadCfgMsg(msg, ok) {
@@ -30875,6 +30881,16 @@ async function saveWigleUploadCreds() {
         ['wd-wigle-name', 'wd-wigle-token'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
         loadWardriveUploadConfig();
     } catch (e) { if (ws) { ws.textContent = 'Save failed'; ws.className = 'text-xs text-red-400'; } }
+}
+
+async function saveAutoUpload() {
+    const on = !!document.getElementById('wd-auto-upload')?.checked;
+    const tgt = document.getElementById('wd-auto-upload-target')?.value || 'wdgwars';
+    const aus = document.getElementById('wd-auto-upload-status');
+    try {
+        await _postUploadConfig({ auto_upload: on, auto_upload_target: tgt });
+        loadWardriveUploadConfig();
+    } catch (e) { if (aus) { aus.textContent = 'save failed'; aus.className = 'text-red-400'; } }
 }
 
 async function uploadWardriveSession(sessionId, target) {

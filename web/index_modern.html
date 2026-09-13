@@ -7520,6 +7520,17 @@
                                 <button onclick="saveWdgUploadKey()" class="bg-fuchsia-600 hover:bg-fuchsia-700 text-white px-3 py-1.5 rounded text-xs transition-colors whitespace-nowrap">Save key</button>
                             </div>
                             <div class="text-xs text-gray-500 mt-2">Then use the <span class="text-fuchsia-400">↑ WDGWars</span> button on each session below.</div>
+                            <label class="flex items-center gap-2 text-xs text-gray-400 mt-3 flex-wrap cursor-pointer">
+                                <input type="checkbox" id="wd-auto-upload" onchange="saveAutoUpload()" class="accent-fuchsia-500">
+                                <span>Auto-upload finished wardrives</span>
+                                <select id="wd-auto-upload-target" onchange="saveAutoUpload()" class="bg-slate-700 text-white text-xs rounded px-1.5 py-0.5 border border-slate-600">
+                                    <option value="wdgwars">to WDGWars</option>
+                                    <option value="wigle">to WiGLE</option>
+                                    <option value="both">to both</option>
+                                </select>
+                                <span id="wd-auto-upload-status" class="text-gray-500"></span>
+                            </label>
+                            <div class="text-xs text-gray-500 mt-1">Offline? It queues and uploads automatically once Wi-Fi is back.</div>
                             <div id="wd-upload-cfg-result" class="text-xs mt-2 hidden"></div>
                         </div>
 
