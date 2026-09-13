@@ -30813,21 +30813,25 @@ function renderWardrivingSessions(sessions) {
 // Backend: GET/POST /api/wardriving/upload-config  and  POST /api/wardriving/upload/<id>
 // ============================================================================
 async function loadWardriveUploadConfig() {
-    const badge = document.getElementById('wd-upload-cfg-status');
-    if (!badge) return;
+    let d;
     try {
-        const d = await (await fetch('/api/wardriving/upload-config')).json();
-        const parts = [];
-        if (d.wdgwars_configured) parts.push('WDGWars');
-        if (d.wigle_configured) parts.push('WiGLE');
-        if (parts.length) {
-            badge.textContent = parts.join(' + ') + ' ready';
+        d = await (await fetch('/api/wardriving/upload-config')).json();
+    } catch (e) { return; }
+    const badge = document.getElementById('wd-upload-cfg-status');
+    if (badge) {
+        if (d.wdgwars_configured) {
+            badge.textContent = 'Key ready';
             badge.className = 'text-xs px-2 py-0.5 rounded-full bg-emerald-900/60 text-emerald-300';
         } else {
-            badge.textContent = 'Keys not set';
+            badge.textContent = 'Key not set';
             badge.className = 'text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400';
         }
-    } catch (e) { /* leave default badge */ }
+    }
+    const ws = document.getElementById('wd-wigle-cfg-status');
+    if (ws) {
+        ws.textContent = d.wigle_configured ? '✓ configured' : 'Not set';
+        ws.className = 'text-xs ' + (d.wigle_configured ? 'text-emerald-400' : 'text-gray-500');
+    }
 }
 
 function _wdUploadCfgMsg(msg, ok) {
@@ -30838,28 +30842,39 @@ function _wdUploadCfgMsg(msg, ok) {
     out.classList.remove('hidden');
 }
 
-async function saveWardriveUploadConfig() {
-    const body = {};
+async function _postUploadConfig(body) {
+    const r = await fetch('/api/wardriving/upload-config', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    return d;
+}
+
+async function saveWdgUploadKey() {
     const wdg = document.getElementById('wd-wdg-key')?.value.trim();
+    if (!wdg) { _wdUploadCfgMsg('Enter your WDGWars key first.', false); return; }
+    try {
+        await _postUploadConfig({ wdg_key: wdg });
+        _wdUploadCfgMsg('WDGWars key saved.', true);
+        const el = document.getElementById('wd-wdg-key'); if (el) el.value = '';
+        loadWardriveUploadConfig();
+    } catch (e) { _wdUploadCfgMsg('Save failed: ' + e.message, false); }
+}
+
+async function saveWigleUploadCreds() {
     const wn = document.getElementById('wd-wigle-name')?.value.trim();
     const wt = document.getElementById('wd-wigle-token')?.value.trim();
-    if (wdg) body.wdg_key = wdg;
+    const ws = document.getElementById('wd-wigle-cfg-status');
+    const body = {};
     if (wn) body.wigle_api_name = wn;
     if (wt) body.wigle_api_token = wt;
-    if (Object.keys(body).length === 0) { _wdUploadCfgMsg('Enter at least one key first.', false); return; }
+    if (Object.keys(body).length === 0) { if (ws) { ws.textContent = 'Enter name + token first'; ws.className = 'text-xs text-red-400'; } return; }
     try {
-        const r = await fetch('/api/wardriving/upload-config', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-        });
-        const d = await r.json();
-        if (r.ok) {
-            _wdUploadCfgMsg('Keys saved.', true);
-            ['wd-wdg-key', 'wd-wigle-name', 'wd-wigle-token'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
-            loadWardriveUploadConfig();
-        } else {
-            _wdUploadCfgMsg(d.error || 'Save failed.', false);
-        }
-    } catch (e) { _wdUploadCfgMsg('Save failed: ' + e.message, false); }
+        await _postUploadConfig(body);
+        ['wd-wigle-name', 'wd-wigle-token'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+        loadWardriveUploadConfig();
+    } catch (e) { if (ws) { ws.textContent = 'Save failed'; ws.className = 'text-xs text-red-400'; } }
 }
 
 async function uploadWardriveSession(sessionId, target) {

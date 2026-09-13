@@ -7488,31 +7488,38 @@
                                 <button onclick="importWigleCsv()" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-xs transition-colors">Import</button>
                             </div>
                             <div id="wd-import-result" class="text-xs mt-2 hidden"></div>
+                            <div class="border-t border-slate-700 mt-3 pt-3">
+                                <div class="text-xs text-gray-400 mb-2">WiGLE upload API <span class="text-gray-500">— optional, lets the <span class="text-cyan-400">↑ WiGLE</span> button on a session push it to <a href="https://wigle.net" target="_blank" rel="noopener" class="text-cyan-400 hover:text-cyan-300">wigle.net</a></span></div>
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
+                                    <input type="text" id="wd-wigle-name" placeholder="WiGLE API name" class="bg-slate-700 text-white text-xs rounded px-2 py-1.5 border border-slate-600">
+                                    <input type="password" id="wd-wigle-token" placeholder="WiGLE API token" class="bg-slate-700 text-white text-xs rounded px-2 py-1.5 border border-slate-600">
+                                </div>
+                                <div class="flex gap-2 items-center">
+                                    <button onclick="saveWigleUploadCreds()" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-xs transition-colors">Save WiGLE keys</button>
+                                    <span id="wd-wigle-cfg-status" class="text-xs text-gray-500">Not set</span>
+                                </div>
+                            </div>
                         </div>
 
-                        <!-- Upload to WDGWars / WiGLE Card -->
+                        <!-- Upload to WDGWars Card -->
                         <div class="glass rounded-lg p-4">
                             <div class="flex items-center justify-between mb-3">
                                 <h4 class="font-medium flex items-center gap-2">
                                     <a href="https://wdgwars.pl" target="_blank" rel="noopener noreferrer" title="WDGWars — wdgwars.pl">
                                         <img src="/web/images/wdgwars-logo.png" alt="WDGWars" class="inline h-6 w-auto align-middle" onerror="this.style.display='none'">
                                     </a>
-                                    Upload to WDGWars <span class="text-gray-500 font-normal text-xs">/ WiGLE</span>
+                                    Upload to WDGWars
                                 </h4>
-                                <span id="wd-upload-cfg-status" class="text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400">Keys not set</span>
+                                <span id="wd-upload-cfg-status" class="text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400">Key not set</span>
                             </div>
                             <div class="text-sm text-gray-400 mb-3">
-                                Push finished sessions straight to <a href="https://wdgwars.pl" target="_blank" rel="noopener" class="text-fuchsia-400 hover:text-fuchsia-300">WDGWars</a> and/or WiGLE. Keys are stored on this device only and never shown again.
-                            </div>
-                            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-2">
-                                <input type="password" id="wd-wdg-key" placeholder="WDGWars API key" class="bg-slate-700 text-white text-xs rounded px-2 py-1.5 border border-slate-600">
-                                <input type="text" id="wd-wigle-name" placeholder="WiGLE API name (optional)" class="bg-slate-700 text-white text-xs rounded px-2 py-1.5 border border-slate-600">
-                                <input type="password" id="wd-wigle-token" placeholder="WiGLE API token (optional)" class="bg-slate-700 text-white text-xs rounded px-2 py-1.5 border border-slate-600">
+                                Push finished sessions straight to <a href="https://wdgwars.pl" target="_blank" rel="noopener" class="text-fuchsia-400 hover:text-fuchsia-300">WDGWars</a>. Your key is stored on this device only and never shown again.
                             </div>
                             <div class="flex gap-2 items-center flex-wrap">
-                                <button onclick="saveWardriveUploadConfig()" class="bg-fuchsia-600 hover:bg-fuchsia-700 text-white px-3 py-1.5 rounded text-xs transition-colors">Save keys</button>
-                                <span class="text-xs text-gray-500">Then use the <span class="text-fuchsia-400">↑ WDGWars</span> / <span class="text-cyan-400">↑ WiGLE</span> links on each session below.</span>
+                                <input type="password" id="wd-wdg-key" placeholder="WDGWars API key" class="bg-slate-700 text-white text-xs rounded px-2 py-1.5 border border-slate-600 flex-1 min-w-0">
+                                <button onclick="saveWdgUploadKey()" class="bg-fuchsia-600 hover:bg-fuchsia-700 text-white px-3 py-1.5 rounded text-xs transition-colors whitespace-nowrap">Save key</button>
                             </div>
+                            <div class="text-xs text-gray-500 mt-2">Then use the <span class="text-fuchsia-400">↑ WDGWars</span> button on each session below.</div>
                             <div id="wd-upload-cfg-result" class="text-xs mt-2 hidden"></div>
                         </div>
 
