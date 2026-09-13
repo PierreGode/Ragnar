@@ -1325,7 +1325,7 @@ def run_live(args):
                       grace_high=args.grace_high,
                       track_grace=not args.no_grace_track)
 
-    bpf = args.bpf or " or ".join("tcp port %d" % p for p in sorted(ports))
+    bpf = args.bpf or _build_capture_bpf(ports)
 
     def handle(pkt):
         try:
@@ -1363,6 +1363,24 @@ def run_live(args):
 # ===========================================================================
 SSH_TCP_PORTS = (22,)
 
+# Admit IPv6 packets behind an extension header (HBH 0 / routing 43 / fragment 44 /
+# AH 51 / dstopts 60). libpcap's `tcp port` matches plain IPv4 AND plain IPv6, but not
+# an EH-bearing v6 flow — the next-header byte at ip6[6] is then the extension header,
+# not the transport, so the kernel filter drops it before _replay_pcap (which walks
+# the chain via scapy) ever sees it. Narrow next-header clause, NOT a blanket `or ip6`
+# that would copy the whole v6 stream to userspace to drop in Python (a needless load
+# on a Pi Zero 2W). Same shape the in-app vendor guards / tls_watch already use.
+_IPV6_EXTHDR_BPF = ("(ip6 and (ip6[6] = 0 or ip6[6] = 43 or ip6[6] = 44 "
+                    "or ip6[6] = 51 or ip6[6] = 60))")
+
+
+def _build_capture_bpf(tcp_ports):
+    """Capture filter: precise port scoping for IPv4 + plain IPv6, plus a narrow
+    clause admitting EH-bearing IPv6 (see _IPV6_EXTHDR_BPF). Pure/testable."""
+    parts = ["tcp port %d" % p for p in sorted(tcp_ports)]
+    parts.append(_IPV6_EXTHDR_BPF)
+    return " or ".join(parts)
+
 
 class _CollectEmitter:
     """Emitter stand-in that keeps events in a list instead of writing JSON-lines."""
@@ -1383,7 +1401,7 @@ def _capture_pcap(interface, seconds, tcp_ports):
     import os
     if not shutil.which("tcpdump"):
         return None
-    bpf = " or ".join("tcp port %d" % p for p in tcp_ports)
+    bpf = _build_capture_bpf(tcp_ports)
     fd, path = tempfile.mkstemp(suffix=".pcap", prefix="sshwatch_")
     os.close(fd)
     try:
@@ -1684,6 +1702,14 @@ def build_kexinit(kex=(), hostkey=(), enc=(), mac=(), comp=("none",)):
 
 
 def _run_selftest_checks(t):
+    # ---- capture BPF: IPv6 extension-header admission (new in v3) ----
+    _bpf = _build_capture_bpf(SSH_TCP_PORTS)
+    t.ok("tcp port 22" in _bpf, "bpf_tcp_port_scoped")
+    t.ok("ip6[6] = 0" in _bpf and "ip6[6] = 44" in _bpf and "ip6[6] = 60" in _bpf,
+         "bpf_ext_v6_admitted")
+    # A narrow next-header clause, NOT a blanket `or ip6` (which floods a Pi Zero 2W).
+    t.ok("(ip6 and (ip6[6]" in _bpf, "bpf_not_blanket_ip6")
+
     # ---- identification string parsing ----
     i = parse_ident(b"SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.18")
     t.ok(i is not None, "ident_parses")
