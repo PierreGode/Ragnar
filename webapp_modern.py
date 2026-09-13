@@ -9139,6 +9139,9 @@ def _apply_config_update(data):
 #     import when the operator opts in.
 CONFIG_EXPORT_EXCLUDE = {
     'openai_api_token',        # secret placeholder; real token lives in .env
+    'wdg_key',                 # WDGWars API key — per-operator secret, never share
+    'wigle_api_token',         # WiGLE API token — per-operator secret, never share
+    'wigle_api_name',          # WiGLE API name — per-operator credential
     'mac_scan_blacklist',      # per-device scan blacklist
     'rusense_node_positions',  # per-install physical node layout
     'rusense_node_names',      # per-install node naming
