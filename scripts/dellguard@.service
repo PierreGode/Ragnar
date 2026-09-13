@@ -1,0 +1,98 @@
+# Ragnar dellguard — passive Dell SmartFabric OS10 SSRF-egress sensor (CVE-2025-22474).
+# OPT-IN, one instance per monitored interface. RX-only: it never transmits and never
+# opens an IP socket (kernel-enforced below). Reads native L2 LLDP to attribute a Dell
+# OS10 device, then watches that device's egress against a LEARNED baseline; writes
+# JSON-lines findings that Watchtower folds into the unified feed + Pushover path.
+#
+#   # 1. install the units and a config (edit known_os10 / attribution_mode):
+#   sudo cp scripts/dellguard@.service scripts/dellguard-learn@.service /etc/systemd/system/
+#   sudo install -Dm640 -o ragnar -g ragnar python/dellguard.example.json /etc/ragnar/dellguard.conf
+#   # 2. take a baseline FIRST (emits nothing; enforce refuses to run against a
+#   #    baseline still being written — the two units Conflict):
+#   sudo systemctl start dellguard-learn@eth1.service
+#   # 3. then enable the sensor:
+#   sudo systemctl enable --now dellguard@eth1.service
+#   journalctl -u dellguard@eth1 -f     # or watch the Watchtower pane
+[Unit]
+Description=Ragnar dellguard passive OS10 SSRF-egress sensor on %I
+Documentation=file:///home/ragnar/Ragnar/docs/nettools.md
+After=network-pre.target
+Wants=network-pre.target
+# A baseline must never be taken during an alerting window, and an alerting window
+# must never run against a baseline that is still being written.
+Conflicts=dellguard-learn@%i.service
+
+[Service]
+Type=exec
+User=ragnar
+Group=ragnar
+
+# StateDirectory=ragnar creates/owns /var/lib/ragnar (the baseline) and LogsDirectory=
+# ragnar creates/owns /var/log/ragnar (the JSON-lines feed) under ProtectSystem=strict.
+StateDirectory=ragnar
+StateDirectoryMode=0750
+LogsDirectory=ragnar
+LogsDirectoryMode=0750
+
+Environment=DELLGUARD_CONFIG=/etc/ragnar/dellguard.conf
+Environment=DELLGUARD_BASELINE=/var/lib/ragnar/dellguard.baseline.json
+Environment=DELLGUARD_OUT=/var/log/ragnar/dellguard.jsonl
+
+# Every ${VAR} is QUOTED. An unquoted empty substitution word-splits away and silently
+# shifts every later argument by one position.
+ExecStart=/usr/bin/python3 /home/ragnar/Ragnar/python/dellguard.py --iface "%I" --config "${DELLGUARD_CONFIG}" --baseline "${DELLGUARD_BASELINE}" --out "${DELLGUARD_OUT}"
+
+Restart=on-failure
+RestartSec=5s
+
+# --- capabilities: CAP_NET_RAW opens AF_PACKET; CAP_NET_ADMIN is for RECEPTION on a
+# SPAN (promiscuous + join the LLDP 01:80:c2:00:00:0e group), not transmit.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+# --- passive invariant, kernel-enforced: dellguard never transmits and never opens an
+# IP socket. AF_INET / AF_INET6 are deliberately ABSENT (compared as a SET, not a
+# substring); adding either would widen the invariant.
+RestrictAddressFamilies=AF_PACKET AF_NETLINK AF_UNIX
+IPAddressDeny=any
+SocketBindDeny=any
+# RestrictNetworkInterfaces is deliberately ABSENT: `RestrictNetworkInterfaces=%I`
+# PARSES BUT DOES NOT APPLY (systemd validates the name before specifier expansion,
+# logs "Invalid interface name, ignoring: %I", drops the directive — yet
+# `systemd-analyze verify` still exits 0). To restrict a concrete instance use a
+# literal drop-in — see scripts/dellguard@eth1.service.d.iface.conf.example.
+
+# --- sandbox. ProtectHome=read-only (NOT =yes): the script lives under /home, so
+# hiding /home would make ExecStart unreadable.
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+UMask=0077
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# PrivateNetwork / PrivateUsers deliberately unset (they would hide the monitored
+# interface / break CAP_NET_RAW). MemoryDenyWriteExecute=no: a --bpf filter compiles
+# through libpcap via ctypes.CDLL, which needs an executable mapping.
+MemoryDenyWriteExecute=no
+# Raspberry Pi Zero 2W is the hardware floor for the suite.
+MemoryMax=192M
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target
