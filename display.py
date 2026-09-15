@@ -144,6 +144,26 @@ WARDRIVE_PAGE_COUNT = 6
 (WD_PAGE_STATS, WD_PAGE_MAP, WD_PAGE_GPS, WD_PAGE_SKY,
  WD_PAGE_SESSION, WD_PAGE_VIKING) = range(6)
 
+# Display types that manage their own driver in a dedicated _run_* method and
+# legitimately leave epd_helper as None. For every other type, a None helper
+# means EPD init failed and we must not call methods on it in the render loop.
+_SELF_MANAGED_DISPLAYS = ("gc9a01", "ssd1306", "lcd1602", "max7219_4panel", "max7219_8panel")
+
+
+class _NullEPDHelper:
+    """No-op stand-in for an EPD helper that failed to initialise.
+
+    When a real SPI/EPD panel can't be driven (for example the kernel fbtft
+    driver already owns it for a framebuffer kiosk), the render loop would
+    otherwise call methods on ``None`` and raise on every frame — freezing the
+    web ``screen.png`` mirror and pegging a CPU core. Returning a no-op for any
+    attribute access lets the loop keep running and updating screen.png.
+    """
+
+    def __getattr__(self, _name):
+        return lambda *args, **kwargs: None
+
+
 class Display:
     def __init__(self, shared_data):
         """Initialize the display and start the main image and shared data update threads."""
@@ -169,6 +189,14 @@ class Display:
 
         try:
             self.epd_helper = self.shared_data.epd_helper
+            # A configured EPD panel whose helper is None means init failed
+            # (e.g. the SPI panel is owned by the kernel fbtft driver). Fall back
+            # to a no-op helper so the render loop keeps writing screen.png
+            # headlessly instead of crash-looping on None. Self-managed display
+            # types legitimately use None and are handled by their _run_* method.
+            if self.epd_helper is None and self.config.get("epd_type") not in _SELF_MANAGED_DISPLAYS:
+                logger.warning(f"EPD helper for '{self.config.get('epd_type')}' unavailable; rendering headlessly (screen.png only).")
+                self.epd_helper = _NullEPDHelper()
             # MAX7219, LCD1602 and other non-EPD displays set epd_helper to None;
             # skip EPD-specific init — their _run_* method handles setup.
             if self.epd_helper is not None:
