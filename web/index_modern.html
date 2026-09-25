@@ -1315,6 +1315,44 @@
                     <div class="text-green-400">Loading activity log…</div>
                 </div>
             </div>
+
+            <!-- Device Console: READ-ONLY serial console of a switch/router/firewall -->
+            <div class="glass rounded-xl p-4 sm:p-6 mt-6" id="serial-console-card">
+                <h2 class="text-xl font-bold mb-1 flex flex-wrap items-center gap-2">
+                    <svg class="w-6 h-6 text-Ragnar-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2"></path></svg>
+                    Device Console
+                    <span class="text-xs font-semibold px-2 py-0.5 rounded bg-emerald-900/60 text-emerald-300 border border-emerald-800">READ-ONLY</span>
+                </h2>
+                <p class="text-xs text-gray-400 mb-3">Plug a USB console cable (FTDI / CP210x rollover) into a Ragnar and the RJ45 end into a switch, router or firewall console port to watch what the device prints: boot and POST output, ROMMON, crash dumps, and any syslog it sends to console. Ragnar <strong>never sends a byte</strong> to the device — the port is opened read-only and reserved so no other Ragnar component touches it. Pick another <strong>mesh unit</strong> to view a console cabled to a Ragnar elsewhere.</p>
+                <div class="flex flex-wrap items-center gap-2 mb-2">
+                    <select id="sc-unit" onchange="scUnitChanged()" title="Which Ragnar's console to view" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                        <option value="local">This unit</option>
+                    </select>
+                    <select id="sc-port" title="USB serial port wired to the device console" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                        <option value="">No USB serial adapter found</option>
+                    </select>
+                    <select id="sc-baud" title="Baud rate. Auto detects passively from what the device prints (it never sends anything)." class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                        <option value="auto">Auto baud</option>
+                        <option value="9600">9600 (Cisco / Arista / Juniper / HPE)</option>
+                        <option value="115200">115200 (MikroTik)</option>
+                        <option value="38400">38400</option>
+                        <option value="19200">19200</option>
+                        <option value="57600">57600</option>
+                    </select>
+                    <button onclick="scRefresh()" title="Rescan units and ports" class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-2 rounded text-sm">↻</button>
+                    <button id="sc-start" onclick="scStart()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Start</button>
+                    <button id="sc-stop" onclick="scStop(false)" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Stop</button>
+                </div>
+                <div id="sc-status" class="text-xs text-gray-400 mb-2 break-words">Idle.</div>
+                <div id="sc-output" style="height:24rem;white-space:pre" class="bg-black bg-opacity-75 rounded-lg p-3 overflow-y-auto overflow-x-auto font-mono text-xs sm:text-sm text-gray-200 scrollbar-thin"><span class="text-gray-500">No console output yet.</span></div>
+                <div class="flex flex-wrap items-center gap-3 mt-2 text-xs">
+                    <label class="flex items-center gap-1 text-gray-400"><input type="checkbox" id="sc-follow" checked> Follow output</label>
+                    <label class="flex items-center gap-1 text-gray-400"><input type="checkbox" id="sc-stamps"> Timestamps</label>
+                    <button onclick="scClearView()" class="text-gray-400 hover:text-white">Clear view</button>
+                    <button onclick="scDownload()" class="text-gray-400 hover:text-white">Download log</button>
+                    <button onclick="scStop(true)" title="Stop and un-reserve the port so other components may use it" class="text-gray-500 hover:text-red-300 sm:ml-auto">Release port</button>
+                </div>
+            </div>
         </div>
         
         <!-- Network Tab -->
@@ -8764,7 +8802,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260926-rpc-watch-v3"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260926-serial-console"></script>
 
 
 

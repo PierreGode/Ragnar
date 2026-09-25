@@ -21192,6 +21192,214 @@ function isLikelyNetworkError(error) {
         /failed to fetch|networkerror|load failed|network request failed/i.test(error?.message || '');
 }
 
+// ---- Device Console: READ-ONLY serial console viewer (this unit or a mesh peer) ----
+// Ragnar only ever reads the port; the backend opens it O_RDONLY. Viewing another
+// unit sends X-Ragnar-Target so this unit's mesh gateway relays the call there.
+const scState = { unit: 'local', last: 0, buf: [], timer: null, busy: false, gateway: false, units: [] };
+const SC_MAX_DOM_LINES = 5000;
+const SC_MAX_BUF = 20000;
+
+function scOpts(extra = {}) {
+    const headers = Object.assign({}, extra.headers || {});
+    if (scState.unit && scState.unit !== 'local') headers['X-Ragnar-Target'] = scState.unit;
+    return Object.assign({}, extra, { headers });
+}
+
+function scSetStatus(html) {
+    const el = document.getElementById('sc-status');
+    if (el) el.innerHTML = html;
+}
+
+function scDescribe(st) {
+    if (!st) return 'Idle.';
+    const ago = st.last_rx ? Math.max(0, Math.round(Date.now() / 1000 - st.last_rx)) : null;
+    const baud = st.baud_setting === 'auto'
+        ? `${st.baud} baud (auto${st.auto_settled ? ', locked' : ', detecting'})`
+        : `${st.baud} baud`;
+    if (!st.running) {
+        return st.reserved_port
+            ? `Stopped · port <span class="font-mono">${escapeHtml(st.reserved_port)}</span> stays reserved (read-only) — Start to view, or Release port.`
+            : 'Stopped. Pick the USB serial port wired to the device console and press Start.';
+    }
+    const colour = st.state === 'reading' ? 'text-emerald-300' : 'text-amber-300';
+    let line = `<span class="${colour}">● ${escapeHtml(st.state)}</span> · <span class="font-mono">${escapeHtml(st.port || '')}</span> · ${baud} · ${st.bytes || 0} bytes`;
+    line += ago === null ? ' · nothing received yet (a quiet console is normal — boot output and console logging appear here)' : ` · last data ${ago}s ago`;
+    if (st.error) line += ` · <span class="text-amber-300">${escapeHtml(st.error)}</span>`;
+    return line;
+}
+
+async function scRefresh() {
+    // Units (this unit + mesh peers with their console summary)
+    try {
+        const u = await fetchAPI('/api/serial-console/units');
+        scState.units = u.units || [];
+        scState.gateway = !!u.gateway_ready;
+        const sel = document.getElementById('sc-unit');
+        if (sel) {
+            const keep = scState.unit;
+            sel.innerHTML = scState.units.map(x => {
+                const tag = x.local ? 'This unit' : (x.name || x.id);
+                let note = '';
+                if (!x.local) {
+                    if (!x.online) note = ' — offline';
+                    else if (!x.reachable) note = ' — unreachable';
+                    else note = x.has_console ? (x.running ? ' — console live' : ' — console cabled') : ' — no console';
+                } else if (x.has_console) {
+                    note = x.running ? ' — console live' : ' — console cabled';
+                }
+                return `<option value="${escapeHtml(x.id)}">${escapeHtml(tag + note)}</option>`;
+            }).join('');
+            sel.value = scState.units.some(x => x.id === keep) ? keep : 'local';
+            scState.unit = sel.value;
+        }
+    } catch (e) { /* mesh off or unavailable: stay on this unit */ }
+
+    if (scState.unit !== 'local' && !scState.gateway) {
+        scSetStatus('<span class="text-amber-300">Viewing another unit\'s console needs the mesh secret (Mesh settings) — the mesh gateway that relays it is secret-gated.</span>');
+        return;
+    }
+    // Ports on the selected unit
+    try {
+        const d = await fetchAPI('/api/serial-console/ports', scOpts());
+        const sel = document.getElementById('sc-port');
+        const ports = d.ports || [];
+        const st = d.status || {};
+        if (sel) {
+            const reserved = st.reserved_port || '';
+            let opts = ports.map(p => {
+                const label = `${p.device} — ${p.description || 'USB serial'}${p.held_by ? ' (in use by ' + p.held_by + ')' : ''}`;
+                return `<option value="${escapeHtml(p.path)}" ${p.held_by ? 'disabled' : ''}>${escapeHtml(label)}</option>`;
+            });
+            if (reserved && !ports.some(p => p.path === reserved || p.device === reserved)) {
+                opts.unshift(`<option value="${escapeHtml(reserved)}">${escapeHtml(reserved)} (reserved, not plugged in)</option>`);
+            }
+            sel.innerHTML = opts.length ? opts.join('') : '<option value="">No USB serial adapter found</option>';
+            if (reserved) sel.value = reserved;
+        }
+        const b = document.getElementById('sc-baud');
+        if (b && st.baud_setting) b.value = String(st.baud_setting);
+        scSetStatus(scDescribe(st));
+    } catch (e) {
+        scSetStatus(`<span class="text-red-400">${escapeHtml(e.message)}</span>`);
+    }
+}
+
+function scUnitChanged() {
+    const sel = document.getElementById('sc-unit');
+    scState.unit = sel ? sel.value : 'local';
+    scState.last = 0;
+    scClearView(true);
+    scRefresh().then(() => scPoll());
+}
+
+async function scStart() {
+    const port = (document.getElementById('sc-port') || {}).value || '';
+    const baud = (document.getElementById('sc-baud') || {}).value || 'auto';
+    if (!port) { scSetStatus('<span class="text-amber-300">Plug in a USB console cable and press ↻ to find it.</span>'); return; }
+    try {
+        const r = await fetchAPI('/api/serial-console/start', scOpts({
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ port, baud }) }));
+        if (!r.success) { scSetStatus(`<span class="text-red-400">${escapeHtml(r.error || 'failed to start')}</span>`); return; }
+        scSetStatus(scDescribe(Object.assign({ reserved_port: port }, r.status)));
+        scPoll();
+    } catch (e) {
+        scSetStatus(`<span class="text-red-400">${escapeHtml(e.message)}</span>`);
+    }
+}
+
+async function scStop(release) {
+    if (release && !confirm('Stop the viewer and release the port? Other Ragnar components (GPS, CYD, RoomScan) may then open it — unplug the console cable first if it stays connected to the device.')) return;
+    try {
+        const r = await fetchAPI('/api/serial-console/stop', scOpts({
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ release: !!release }) }));
+        scSetStatus(scDescribe(Object.assign({ reserved_port: r.reserved }, r.status)));
+        if (release) scRefresh();
+    } catch (e) {
+        scSetStatus(`<span class="text-red-400">${escapeHtml(e.message)}</span>`);
+    }
+}
+
+function scFmt(l) {
+    if (!(document.getElementById('sc-stamps') || {}).checked) return l.text;
+    const d = new Date(l.t * 1000);
+    return `[${d.toLocaleTimeString([], { hour12: false })}] ${l.text}`;
+}
+
+function scAppend(lines) {
+    const out = document.getElementById('sc-output');
+    if (!out || !lines.length) return;
+    if (out.dataset.empty !== '0') { out.textContent = ''; out.dataset.empty = '0'; }
+    const frag = document.createDocumentFragment();
+    for (const l of lines) {
+        const div = document.createElement('div');
+        div.textContent = scFmt(l) || ' ';
+        frag.appendChild(div);
+    }
+    out.appendChild(frag);
+    while (out.childElementCount > SC_MAX_DOM_LINES) out.removeChild(out.firstChild);
+    if ((document.getElementById('sc-follow') || {}).checked) out.scrollTop = out.scrollHeight;
+}
+
+async function scPoll() {
+    if (scState.busy) return;
+    if (scState.unit !== 'local' && !scState.gateway) return;
+    scState.busy = true;
+    try {
+        const d = await fetchAPI(`/api/serial-console/output?since=${scState.last}`, scOpts());
+        const lines = d.lines || [];
+        if (d.last < scState.last) {            // viewer restarted remotely: resync
+            scState.last = 0;
+        } else if (lines.length) {
+            scState.last = lines[lines.length - 1].seq;
+            scState.buf.push(...lines);
+            if (scState.buf.length > SC_MAX_BUF) scState.buf.splice(0, scState.buf.length - SC_MAX_BUF);
+            scAppend(lines);
+        }
+        if (d.status) {
+            scSetStatus(scDescribe(Object.assign({ reserved_port: d.status.port }, d.status)));
+        }
+    } catch (e) {
+        scSetStatus(`<span class="text-red-400">${escapeHtml(e.message)}</span>`);
+    } finally {
+        scState.busy = false;
+    }
+}
+
+function scClearView(silent) {
+    const out = document.getElementById('sc-output');
+    if (out) {
+        out.innerHTML = '<span class="text-gray-500">No console output yet.</span>';
+        out.dataset.empty = '1';
+    }
+    scState.buf = [];
+}
+
+function scDownload() {
+    if (!scState.buf.length) return;
+    const unit = (scState.units.find(x => x.id === scState.unit) || {}).name || 'ragnar';
+    const text = scState.buf.map(l => `[${new Date(l.t * 1000).toISOString()}] ${l.text}`).join('\n') + '\n';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    a.download = `console-${unit}-${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+function scTick() {
+    if (document.hidden || currentTab !== 'dashboard') return;
+    if (!document.getElementById('sc-output')) return;
+    scPoll();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    if (!document.getElementById('serial-console-card')) return;
+    scRefresh().then(() => scPoll());
+    scState.timer = setInterval(scTick, 1000);
+});
+
 async function fetchAPI(endpoint, options = {}) {
     try {
         const response = await networkAwareFetch(endpoint, options);

@@ -75,6 +75,7 @@ Every feature below has a full guide in [`docs/`](docs). Short version here, det
 - **Home Assistant integration** — a HACS custom integration (in-repo under `custom_components/ragnar/`) surfacing RuSense presence/vitals, Watchtower alerts + incidents, connectivity, and mesh fleet health as native HA entities. Read-only local polling. See [Home Assistant](docs/homeassistant.md).
 
 ### Mesh & fleet
+- **Device Console (read-only)** — plug a USB console cable into a Ragnar and a switch, router or firewall console port, and the dashboard streams what the device prints: boot banners with the exact firmware version, ROMMON, crash dumps and console logging. Strictly read-only (the port is opened `O_RDONLY` and reserved from every other component), with passive auto-baud — and it works across the mesh, so you can watch a console cabled to a Ragnar in another rack. See [Device Console](docs/serial-console.md).
 - **Ragnar Mesh — a Viking army, not a box** — links units over [Tailscale](https://tailscale.com) with **no controller**: each unit is born with a Viking name, publishes its own report and reads its peers', and is reachable by a stable private address through any NAT. The Mesh tab shows per-unit health, undervoltage, worst alert and a "degraded" state; peer API calls are authenticated by WireGuard identity (no shared secret). Includes Fleet Config export/import and unit-to-unit **file transfer**. See the [Ragnar Mesh Guide](docs/mesh.md) and [Mesh Share & File Transfer](docs/mesh-share.md).
 
 ### Hardware, displays & interfaces
