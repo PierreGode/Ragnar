@@ -15,14 +15,7 @@ It is split into three sub-tabs: **Diagnostics**, **Switch & L2/L3**, and
 
 > **Co-authored by [Solarflere](https://www.instagram.com/solarflere).** The
 > Authority Verification suite was designed and built in collaboration with Solarflere.
-
-<img width="2160" height="4626" alt="image" src="https://github.com/user-attachments/assets/9b76a1a8-69dd-43f5-a330-47b1de3550e5" />
-
-
-
-
-
-
+<img width="2160" height="4626" alt="image" src="https://github.com/user-attachments/assets/5fa8244a-5118-4ea2-965a-76d253481a4a" />
 
 
 
