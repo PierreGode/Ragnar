@@ -252,6 +252,29 @@ link's own gateway. The choice resets to Auto when the mode is switched on.
 
 ---
 
+## E-paper detection & troubleshooting
+
+**Pick the exact display type in Settings.** SPI e‑paper panels are write‑only.
+They cannot report their size, so `epd_type: "auto"` just uses the first driver
+that initialises. A 2.7" panel answers to the 2.13" V4 driver, so auto shows a
+122×250 image on a 176×264 screen. Auto‑detect saves its guess only when the
+config says `"auto"`. A driver you chose yourself (e.g. `epd2in7_V2`) is never
+replaced by a guess. If that driver fails to load, Ragnar runs on the guess for
+that session only.
+
+**`GPIO busy` / e‑paper stays blank after using a 3.5" TFT.** The TFT overlay
+(`dtoverlay=tft35a` in `/boot/firmware/config.txt`) binds the `fb_ili9486`
+kernel driver to `spi0.0`. It also claims GPIO 17/24/25, which the e‑paper HAT
+uses as RST/DC/BUSY. Ragnar checks `/sys/bus/spi/devices/spi0.0/driver` at
+startup. If another driver owns the bus, it logs the owner and skips
+auto‑detect, which would fail for every driver. `wipe_epd.py` also skips the
+startup clear. To go back to e‑paper, run `sudo bash scripts/uninstall_tft35_kiosk.sh`
+(it removes the overlay, `kiosk-tft.service` and the `ragnar.service.d/tft.conf`
+drop‑in) and reboot. Check with `ls /dev/spidev0.0`; it only exists once the
+overlay is gone.
+
+---
+
 ## 3.5" SPI TFT (ILI9486 / ILI9488)
 
 A generic 3.5" SPI TFT (320×480) can show the standard Ragnar character

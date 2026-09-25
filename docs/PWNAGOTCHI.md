@@ -293,6 +293,10 @@ sudo bash scripts/install_tft35_kiosk.sh
 sudo reboot
 ```
 
+The TFT overlay takes over the SPI bus and pins an e‑paper HAT uses. To swap back
+to e‑paper, run `sudo bash scripts/uninstall_tft35_kiosk.sh` and reboot. See
+[E-paper detection & troubleshooting](DISPLAY_CONTROLS.md#e-paper-detection--troubleshooting).
+
 The kiosk is **mode-aware**. Because Ragnar and Pwnagotchi never run at the same
 time — switching to Pwnagotchi stops `ragnar.service` (and `:8000`) and serves the
 Pwnagotchi web UI on `:8080` — a fixed-URL kiosk would show a dead page for the

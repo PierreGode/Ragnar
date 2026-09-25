@@ -1,7 +1,9 @@
 # epd_helper.py
 
+import errno
 import importlib
 import logging
+import os
 import time
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,44 @@ KNOWN_EPD_TYPES = [
     "max7219_4panel",
     "max7219_8panel",
 ]
+
+# Kernel drivers that may legitimately own spi0.0 for an e-paper HAT.
+_SPIDEV_DRIVERS = {"spidev"}
+
+
+def spi_bus_conflict(bus_dev="spi0.0"):
+    """Describe a kernel driver that owns the e-paper SPI device, or None.
+
+    A TFT overlay (e.g. ``dtoverlay=tft35a`` for the MPI3501) binds fbtft to
+    spi0.0 and claims the RST/DC/BUSY GPIOs the e-paper HAT uses, so every EPD
+    driver fails with 'GPIO busy'. Returns None when the bus is free or the
+    board has no such SPI device (non-Pi hosts).
+    """
+    driver_link = f"/sys/bus/spi/devices/{bus_dev}/driver"
+    try:
+        driver = os.path.basename(os.readlink(driver_link))
+    except OSError:
+        return None
+    if driver in _SPIDEV_DRIVERS:
+        return None
+    return (
+        f"{bus_dev} is owned by kernel driver '{driver}' (a TFT/LCD overlay in "
+        "/boot/firmware/config.txt, e.g. dtoverlay=tft35a). Remove the overlay "
+        "(scripts/uninstall_tft35_kiosk.sh does this for the MPI3501) and reboot "
+        "to use an e-paper display."
+    )
+
+
+def is_resource_error(exc):
+    """True when an EPD load failed because the kernel reports the GPIO/SPI
+    lines as held by another driver (EBUSY). Probing other drivers cannot
+    succeed in that state. gpiozero's in-process "already in use" is not
+    counted: it can come from our own earlier probe."""
+    if isinstance(exc, OSError) and exc.errno == errno.EBUSY:
+        return True
+    text = str(exc).lower()
+    return "gpio busy" in text or "resource busy" in text
+
 
 class EPDHelper:
     def __init__(self, epd_type):
@@ -134,6 +174,11 @@ class EPDHelper:
         if known_types is None:
             known_types = KNOWN_EPD_TYPES
 
+        conflict = spi_bus_conflict()
+        if conflict:
+            logger.error(f"Auto-detect skipped: {conflict}")
+            return None
+
         for epd_type in known_types:
             try:
                 logger.info(f"Auto-detect: trying {epd_type}...")
@@ -153,6 +198,10 @@ class EPDHelper:
                     helper.epd.sleep()
                 except Exception:
                     pass
+                if is_resource_error(e):
+                    # Every other driver would hit the same held lines.
+                    logger.error(f"Auto-detect aborted: e-paper GPIO/SPI lines are in use ({e})")
+                    return None
                 time.sleep(0.3)
         logger.warning("Auto-detect: no e-paper display detected")
         return None

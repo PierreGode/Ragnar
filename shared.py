@@ -101,9 +101,15 @@ except ImportError:
 from logger import Logger
 
 try:
-    from epd_helper import EPDHelper
+    from epd_helper import EPDHelper, is_resource_error, spi_bus_conflict
 except ImportError:
     EPDHelper = None
+
+    def is_resource_error(exc):  # type: ignore[misc]
+        return False
+
+    def spi_bus_conflict(bus_dev="spi0.0"):  # type: ignore[misc]
+        return None
 
 try:
     from db_manager import get_db
@@ -999,6 +1005,8 @@ class SharedData:
         epd_key = epd_type or self.config.get('epd_type') or DEFAULT_EPD_TYPE
         profile = DISPLAY_PROFILES.get(epd_key)
         if not profile:
+            if epd_key == "auto":
+                return False  # resolved to a real driver once detection runs
             logger.warning(f"Unknown EPD profile '{epd_key}' – skipping display calibration")
             return False
 
@@ -1194,17 +1202,33 @@ class SharedData:
             )
             return
 
+        # Held SPI/GPIO lines (e.g. a TFT overlay) make every EPD driver fail
+        # the same way; auto-detect would only burn time and could never pick
+        # the right panel, so it is skipped in that state.
+        bus_blocked = False
         try:
             logger.info("Initializing EPD display...")
             epd_type = self.config.get("epd_type", DEFAULT_EPD_TYPE)
 
-            # Auto-detect if set to "auto" OR if still on factory default (user never ran installer with detection)
-            needs_detect = epd_type == "auto"
+            # SPI e-paper panels cannot report their size, so auto-detect only
+            # finds the first driver that initialises (a 2.7" panel answers to
+            # the 2.13" V4 driver). An explicitly configured driver is therefore
+            # never replaced in the config by a detection result.
+            user_chose_auto = epd_type == "auto"
+            needs_detect = user_chose_auto
             if not needs_detect:
                 # Also auto-detect if the configured driver doesn't exist or can't load
                 try:
                     EPDHelper(epd_type)
-                except Exception:
+                except Exception as load_err:
+                    conflict = spi_bus_conflict()
+                    if conflict or is_resource_error(load_err):
+                        bus_blocked = True
+                        logger.error(
+                            f"Configured EPD driver '{epd_type}' cannot open its GPIO/SPI lines "
+                            f"({load_err}). {conflict or 'Another driver or process holds them.'}"
+                        )
+                        raise
                     logger.warning(f"Configured EPD driver '{epd_type}' failed to load, switching to auto-detect")
                     needs_detect = True
 
@@ -1214,8 +1238,14 @@ class SharedData:
                 if result:
                     epd_type = result[0]
                     logger.info(f"Auto-detected EPD: {epd_type} ({result[1]}x{result[2]})")
-                    self.config['epd_type'] = epd_type
-                    self.save_config()
+                    logger.warning(
+                        "E-paper panels cannot report their size; auto-detect picked the first "
+                        "driver that answered. If the screen looks wrong, choose the exact "
+                        "display type in Settings."
+                    )
+                    if user_chose_auto:
+                        self.config['epd_type'] = epd_type
+                        self.save_config()
                 else:
                     logger.warning("Auto-detection found no display, using default")
                     epd_type = DEFAULT_EPD_TYPE
@@ -1243,21 +1273,31 @@ class SharedData:
             logger.info(f"EPD {self.config['epd_type']} initialized with size: {self.width}x{self.height}")
         except Exception as e:
             logger.error(f"Error initializing EPD display: {e}")
+            configured_type = self.config.get('epd_type')
+            if not bus_blocked and (is_resource_error(e) or spi_bus_conflict()):
+                bus_blocked = True
             # Try auto-detection as fallback before giving up
-            logger.info("Attempting auto-detection as fallback...")
             try:
-                result = EPDHelper.auto_detect()
+                if bus_blocked:
+                    logger.info("Skipping auto-detection fallback: e-paper GPIO/SPI lines are held")
+                    result = None
+                else:
+                    logger.info("Attempting auto-detection as fallback...")
+                    result = EPDHelper.auto_detect()
                 if result:
                     epd_type = result[0]
                     logger.info(f"Fallback auto-detected EPD: {epd_type} ({result[1]}x{result[2]})")
-                    self.config['epd_type'] = epd_type
                     self.apply_display_profile(epd_type)
                     self.epd_helper = EPDHelper(epd_type)
                     self.epd_helper.init_full_update()
                     self.width, self.height = self.epd_helper.epd.width, self.epd_helper.epd.height
                     self.screen_reversed = normalize_rotation(self.config.get("screen_reversed", 0))
                     self.web_screen_reversed = 0
-                    self.save_config()
+                    # Only an "auto" config adopts the guess; a chosen driver stays
+                    # in the config so it works again once the fault clears.
+                    if configured_type in (None, "", "auto"):
+                        self.config['epd_type'] = epd_type
+                        self.save_config()
                     logger.info(f"EPD {epd_type} initialized via fallback with size: {self.width}x{self.height}")
                     return
             except Exception as e2:

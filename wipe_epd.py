@@ -13,7 +13,7 @@ try:
 except Exception:
     DEFAULT_EPD_TYPE = "epd2in13_V4"
 
-from epd_helper import EPDHelper
+from epd_helper import EPDHelper, spi_bus_conflict
 
 REPO_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = REPO_ROOT / "config" / "shared_config.json"
@@ -58,6 +58,13 @@ def main() -> int:
     _NON_EPD_TYPES = ("max7219_4panel", "max7219_8panel", "ssd1306", "gc9a01")
     if epd_type in _NON_EPD_TYPES:
         print(f"wipe_epd: {epd_type} is not an e-paper display, skipping wipe")
+        return 0
+    if epd_type == "auto":
+        # Not a driver name; Ragnar resolves it by auto-detection at startup.
+        print("wipe_epd: epd_type is 'auto' (no driver chosen yet), skipping wipe")
+        return 0
+    if conflict := spi_bus_conflict():
+        print(f"wipe_epd: skipping wipe, {conflict}", file=sys.stderr)
         return 0
     try:
         wipe_display(epd_type)
