@@ -62,6 +62,30 @@ transmission is impossible physically as well as in software.
   ports they open, which on a console port would land on the device's console. Use
   **Release port** only after unplugging the cable (or if you re-purpose it).
 
+## Living with Ragnar's other USB-serial devices
+
+Ragnar auto-detects several USB-serial devices, and a console cable's USB-UART
+chip looks just like some of them. How each one coexists with a console port:
+
+| Component | What it looks for | With the console port assigned | Before you assign it |
+|---|---|---|---|
+| **Huginn / Piglet** (wardriving companions) | Espressif USB (VID `303a`) only | skipped | never matches a console cable |
+| **Zigbee sniff** (Huginn) | Espressif only | skipped | never matches |
+| **GPS** (direct + `gpsd` setup) | `by-id` GPS names, then an NMEA *read* probe of other ports | skipped — also in the separate `setup_gpsd.sh` process, which reads the reservation file | may open it briefly to listen for NMEA; a console never produces NMEA, so it is not adopted. `gpsd` hotplug is off (`USBAUTO="false"`) |
+| **CYD bridge** (when enabled, auto port) | CP210x / CH340 | skipped | opens it but **stays silent** until a genuine CYD frame arrives; a port that never answers is released within 30 s and ignored for 10 min |
+| **RoomScan** | Espressif, then first `ttyUSB` | skipped | could pick it as a fallback — assign the console port first |
+| **Meshtastic** (Wardrift link, auto port) | CP210x / CH340 / nRF / Espressif | skipped | could pick a CP210x/CH340 cable when the link starts — set the Meshtastic port explicitly, or assign the console port first |
+| **Power test** | lists ports | — | lists only, never opens |
+
+**Rule of thumb:** plug the console cable in and **assign it in the card straight
+away**. From then on it is reserved (even while stopped, and across reboots), and
+nothing else will open it. An FTDI-based cable (VID `0403`) is the safest choice: no
+auto-detecting component claims FTDI chips at all. The Alfa and other USB Wi-Fi
+adapters are network interfaces, not serial ports, and are unaffected.
+
+If the port shows *in use by cyd* in the picker, the CYD bridge is still inside
+its silent identify window; press ↻ after ~30 s and it will be free.
+
 ## Viewing a console on another mesh unit
 
 The unit picker lists this unit plus every Ragnar in the mesh, labelled
@@ -110,4 +134,5 @@ Any of the `/api/serial-console/*` calls can be sent to another unit with the
 `X-Ragnar-Target` header (mesh secret required). Self-test:
 `python3 serial_console.py --selftest` (a pseudo-terminal stands in for the
 USB-UART; it checks the termios flags, that a write is refused, ANSI stripping,
-prompt surfacing, passive auto-baud and the port reservation).
+prompt surfacing, passive auto-baud, the port reservation, and that the CYD bridge
+stays silent on — and releases — a port that never identifies as a CYD).

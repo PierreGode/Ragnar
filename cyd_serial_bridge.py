@@ -41,6 +41,19 @@ _CYD_BYID_HINTS = ('cp210', 'silicon_labs', 'uart_bridge', 'ch340', 'ch341', 'ch
 # Receivers that are never a CYD: GPS pucks (u-blox, BU-353 on Prolific).
 _NOT_CYD_HINTS = ('prolific', 'pl2303')
 
+# Identify-before-write. An AUTO-detected port is only a guess (CYDs ship with
+# generic CP210x / CH340 bridges, and so do many other things — including USB
+# console cables wired to a switch, where every newline-terminated frame we
+# sent would land on the device's login prompt). So on an auto-detected port
+# the bridge stays SILENT until the far end sends a genuine CYD frame; if none
+# arrives within IDENTIFY_S the port is handed back and ignored for
+# NOT_CYD_BACKOFF_S. A CYD pushes an ingest frame every sync cycle (at most
+# ~13 s: 2.5 s sync + 6 s sniff + BLE), so 30 s is over two cycles of margin.
+# An explicitly configured port is the operator's assertion and is trusted.
+IDENTIFY_S = 30.0
+NOT_CYD_BACKOFF_S = 600.0
+_CYD_FRAME_TYPES = frozenset(('in', 'ac', 'wr', 'mr', 'wsr', 'wc'))
+
 
 def _gps_keywords():
     try:
@@ -123,6 +136,8 @@ class CydSerialBridge:
         self._publish_port = publish_port        # (port_or_None) -> None
         self._mesh_on = False
         self._wifi_on = False
+        self._identified = False  # auto-detected port confirmed as a CYD (see IDENTIFY_S)
+        self._not_cyd = {}        # realpath -> ignore-until epoch (auto ports that never answered)
         self._mesh_kick = False   # push a mesh frame ASAP after an 'mr on' request
         self._wifi_kick = False   # push a wifi frame ASAP after a 'wsr on' request
         self._dbg = {'in': 0, 'ac': 0, 'wr': 0, 'mr': 0, 'wsr': 0, 'wc': 0,
@@ -202,9 +217,14 @@ class CydSerialBridge:
                 continue
             # A configured port (e.g. /dev/serial0 for the GPIO-UART wiring) wins;
             # otherwise auto-detect a USB device.
-            port = self._configured_port() or detect_port(exclude=_foreign_ports())
+            configured = self._configured_port()
+            now = time.time()
+            self._not_cyd = {k: v for k, v in self._not_cyd.items() if v > now}
+            port = configured or detect_port(exclude=_foreign_ports() | set(self._not_cyd))
             if not port:
-                self._teardown('no port (set one, or plug in a USB CYD)')
+                ignored = ', '.join(sorted(self._not_cyd))
+                self._teardown('no port (set one, or plug in a USB CYD)' + (
+                    '; ignoring %s - it never answered as a CYD' % ignored if ignored else ''))
                 time.sleep(2.0)
                 continue
             try:
@@ -215,6 +235,7 @@ class CydSerialBridge:
                 time.sleep(2.0)
                 continue
             self.port, self.connected, self.last_error = port, True, None
+            self._identified = bool(configured)   # explicit port: trusted; auto: prove it
             self._publish(port)          # let others (e.g. GPS probe) avoid this port
             try:
                 self._session(ser)
@@ -281,6 +302,7 @@ class CydSerialBridge:
         next_wifi = 0.0
         opened_on = self.port
         next_claim_check = 0.0
+        identify_deadline = time.time() + IDENTIFY_S
         while not self._stop.is_set() and self._safe_enabled():
             # If the operator points us at a different explicit port, drop this
             # session so _run reopens on the new one.
@@ -308,8 +330,20 @@ class CydSerialBridge:
                     line, _, rest = buf.partition(b'\n')
                     buf = bytearray(rest)
                     self._handle_line(line.decode('utf-8', 'replace').strip())
-            # ── outbound: push a status frame on the interval ─────────────────
+            # ── identify-before-write gate (auto-detected ports only) ──────────
             now = time.time()
+            if not self._identified:
+                if now >= identify_deadline:
+                    real = os.path.realpath(opened_on or '')
+                    self._not_cyd[real] = now + NOT_CYD_BACKOFF_S
+                    self.last_error = ('no CYD answered on %s within %ds - not a CYD? '
+                                       'Ignoring it for %d min (set the CYD port explicitly '
+                                       'to force it)' % (opened_on, int(IDENTIFY_S),
+                                                         int(NOT_CYD_BACKOFF_S // 60)))
+                    break
+                time.sleep(0.05)
+                continue                  # silent: nothing is written until identified
+            # ── outbound: push a status frame on the interval ─────────────────
             if now >= next_status:
                 next_status = now + self._status_interval
                 self._push_status(ser)
@@ -361,6 +395,8 @@ class CydSerialBridge:
             return
         self.last_rx = time.time()
         t = msg.get('t')
+        if t in _CYD_FRAME_TYPES:
+            self._identified = True
         if t in self._dbg:                 # count every known inbound frame type
             self._dbg[t] += 1
         if t == 'in':

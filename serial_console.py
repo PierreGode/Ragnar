@@ -546,6 +546,38 @@ def selftest():
         globals()['load_config'] = _load_config_impl
         _register_claim()
 
+    # 6. the CYD bridge never writes to an unidentified auto-detected port (a
+    #    console cable on a CP210x/CH340 chip looks exactly like a CYD).
+    try:
+        import select as _sel
+        import cyd_serial_bridge as cb
+        m3, s3 = pty.openpty()
+        p3 = os.ttyname(s3)
+        saved_detect, saved_id = cb.detect_port, cb.IDENTIFY_S
+        cb.detect_port = lambda exclude=None: None if _real(p3) in (exclude or set()) else p3
+        cb.IDENTIFY_S = 1.5
+        br = cb.CydSerialBridge(build_status=lambda: {'unit': 'selftest'},
+                                on_ingest=lambda msg: None, on_action=lambda n_, a_: None,
+                                enabled=lambda: True, status_interval=0.3)
+        try:
+            br.start()
+            got, end = b'', time.time() + 2.5
+            while time.time() < end:
+                r, _, _ = _sel.select([m3], [], [], 0.1)
+                if r:
+                    try:
+                        got += os.read(m3, 4096)
+                    except OSError:
+                        break
+            check('cyd: silent to an unidentified port (0 bytes)', got == b'', len(got))
+            check('cyd: releases a port that never answers', _real(p3) in br._not_cyd)
+        finally:
+            br.stop()
+            cb.detect_port, cb.IDENTIFY_S = saved_detect, saved_id
+            os.close(m3)
+    except Exception as e:
+        check('cyd: silent to an unidentified port (0 bytes)', False, e)
+
     return {'success': all(r['pass'] for r in results), 'scenarios': results}
 
 
