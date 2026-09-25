@@ -2072,10 +2072,15 @@ suited to deep passive detection because the protocol is **cleartext end to end*
 all option negotiation — so unlike [SSH Watch](#ssh-watch) and [TLS Watch](#tls-watch), which
 see only a prologue before the session encrypts, Telnet Watch sees the **whole session** and
 the exploit payload itself crosses the wire in the open. It monitors **tcp/23** and **2323**
-(Telnet-over-TLS **992** is observed but not dissected). `telnet_watch.py` is a standalone
-module imported by the toolbox; Scapy is imported lazily.
+(Telnet-over-TLS **992** is observed but not dissected) and, since v5, the **r-services**
+on **512 / 513 / 514**. `telnet_watch.py` is the vendored upstream module plus a thin in-app
+adapter that replays the capture through the module's own `run_capture(offline=…)`, so the
+in-app path uses exactly the live dispatcher, engines and BPF. Scapy is imported lazily.
+**Dual-stack:** the capture filter keeps a bare `ip6` term — the only libpcap form that
+admits IPv6 behind extension headers (`(ip6 and tcp port 23)` is a measured no-op) — and a
+software port gate rejects non-Telnet IPv6.
 
-It names two critical GNU inetutils `telnetd` CVEs:
+It names these `telnetd` CVEs:
 
 - **TELNET-24061-ARGINJECT** — **CVE-2026-24061** (CVSS **9.8**, **CISA KEV** 2026-01-26).
   telnetd expands the `USER` environment variable from the client's `NEW-ENVIRON IS`
@@ -2094,6 +2099,37 @@ It names two critical GNU inetutils `telnetd` CVEs:
   merely advertising LINEMODE is **posture only**, capped at `notice`/low confidence — the
   patch is wire-invisible, a patched telnetd negotiates LINEMODE identically. *(overflow /
   confirmed → compromised; flood / oversized → suspicious; posture → clean)*
+- **TELNET-4862-KEYID-OVERFLOW** — **CVE-2011-4862** (CVSS **9.8**, exploited in the wild
+  December 2011). libtelnet's `encrypt_keyid()` copied the key id from an `ENCRYPT
+  ENC_KEYID` / `DEC_KEYID` subnegotiation into a fixed 64-byte buffer; a key id longer than
+  that is an unauthenticated **root heap overflow** (FreeBSD, Heimdal and MIT telnetd).
+  *(compromised)*
+- **TELNET-39028-EC-EL-PREAUTH** / **-CRASH-LOOP** — **CVE-2022-39028**. A bare `IAC EC` or
+  `IAC EL` before login NULL-dereferences inetutils telnetd — a 2-byte DoS; repeated attempts
+  that each end in a torn-down session are the **crash loop** that makes inetd disable the
+  service. *(suspicious)*
+- The `USER=-f` rule also covers the Solaris `in.telnetd` twin, **CVE-2007-0882** (CVSS v2
+  10.0) — the same argument-injection shape.
+
+**r-services** (rlogin **513**, rsh **514**, rexec **512**) each get their own engine —
+rlogin has no IAC framing, so feeding it to the Telnet parser would be actively wrong:
+
+- **RSVC-RLOGIN-ARGINJECT** — **CVE-1999-0113** (CVSS v2 10.0). A local or remote user field
+  in the rlogin (or rsh) handshake that begins with `-`: `-froot` becomes `login -f root`,
+  the same auth bypass. *(compromised)*
+- **RSVC-FTPDATA-SRCPORT** — **CVE-1999-0185**. An r-services connection whose source port is
+  **20** (ftp-data): it passes the "privileged port means trusted client" check, so an FTP
+  bounce can forge trusted rsh/rlogin sessions. *(compromised)* **RSVC-UNPRIV-SRCPORT** flags
+  a client source port above 1023, which a genuine r-services client never uses.
+- **RSVC-RCP-7282-DOTNAME** / **-7283-UNREQUESTED** / **-7283-TRAVERSAL** — **CVE-2019-7282 /
+  CVE-2019-7283**. A malicious netkit `rcp` *server* sending a `.` or empty file name (which
+  overwrites the target directory's permissions) or a file the client never requested / a
+  path-traversal name — the rcp twin of the OpenSSH scp bug CVE-2019-6111.
+- **RSVC-REXEC-CLEARTEXT-CRED** (rexec sends the password in the clear), **RSVC-TRUST-AUTH**
+  (a `.rhosts` / `hosts.equiv` trust login), **RSVC-RSH-SESSION** and
+  **RSVC-RLOGIN-SESSION** (inventory). rsh's **stderr back-connection** — server to a port the
+  client advertised — is correlated too; the capture admits the privileged port range it
+  lands on, because `tcp port 514` alone sees none of it.
 
 Plus general cleartext exposure: **TELNET-CLEARTEXT-AUTH** — a server `Password:` prompt on a
 session that never reached RFC 2946 `ENCRYPT START` (a lone `WILL ENCRYPT`, which inetutils
@@ -2104,10 +2140,13 @@ signal, and the credential content never appears in any finding.
 
 Verdict is **clean → suspicious → compromised**. Capture is a short passive tcpdump snapshot
 dissected with Scapy; the parser/engine is pure Python and self-tests without root
-(`telnet_watch.py --selftest`, 92 checks; wire bytes are fabricated through the production
-engine). Hardening it drives: **disable Telnet** and use SSH; where it must remain, patch
+(`telnet_watch.py --selftest`, **411 checks** across 114 tests since v5; wire bytes are
+fabricated through the production engines, and an AST guard asserts the module contains no
+packet-transmit primitive). Hardening it drives: **disable Telnet** and use SSH; where it must remain, patch
 inetutils (**2.5 `3ubuntu4.1`** is the fixed build) and firewall tcp/23 off the management
 plane. **API:** `GET /api/net/telnet-watch`. **CLI:** `telnet-watch`, `telnet-selftest`.
+**HIGH/CRITICAL** findings (Telnet and r-services) stream to [Watchtower](watchtower.md) as
+`telnet_watch.jsonl`.
 
 > **Watchtower feed.** Each non-`info` finding is appended as a JSON-lines record to
 > `/var/log/ragnar/telnet_watch.jsonl` (time-window deduplicated per code + server), so

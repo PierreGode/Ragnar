@@ -119,7 +119,7 @@ DEFAULT_SOURCES = {
     # their non-info findings here so the unified pane tails them too.
     'ssh_watch':     {'label': 'SSH Watch (regreSSHion / Terrapin)',
                       'paths': ['/var/log/ragnar/ssh_watch.jsonl']},
-    'telnet_watch':  {'label': 'Telnet Watch (CVE-2026-24061 / 32746)',
+    'telnet_watch':  {'label': 'Telnet Watch (Telnet + r-services: CVE-2026-24061 / 32746 / 2011-4862, rlogin -froot)',
                       'paths': ['/var/log/ragnar/telnet_watch.jsonl']},
     # In-app L3 redirect/ARP-poison MITM (do_icmp_watch v2) + BGP Path Watch v2
     # convergence detection (do_path_convergence) stream their alerts here too.

@@ -14,15 +14,16 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **209 CVEs detected from the wire.** 248 distinct CVE IDs are named across Ragnar's
-  code; 209 of them a passive detector actually identifies. The rest are named, not detected:
+- **216 CVEs detected from the wire.** 256 distinct CVE IDs are named across Ragnar's
+  code; 216 of them a passive detector actually identifies. The rest are named, not detected:
   30 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, and the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
   cannot reconstruct on the wire), 3 in card prose as related context, and 6 **active** BLE
   checks in the BLE Pentest action. Every one is listed, with its detector and status, in the
   generated **[CVE Index](CVE.md)**.
-- **24 years of coverage** — from **CVE-2002-1623** to **CVE-2026-81736**.
+- **28 years of coverage** — from **CVE-1999-0113** (the rlogin `-froot` bypass) to
+  **CVE-2026-81736**.
 - **Two CISA KEV entries** join the corpus with SMTP Watch (CVE-2019-10149, CVE-2018-6789).
 - Weighted to the current threat wave (all named IDs): **36 CVEs from 2023, 47 from 2024, 33 from 2025, and
   34 from 2026.**
@@ -144,6 +145,15 @@ behind them is Solarflere's work.
   `b64decode` over-consume (**CVE-2018-6789**, CISA KEV). All three rules are ungated and
   near-zero false-positive by construction, and Exim's three- and four-component version
   numbers are compared in full so a patched 4.90.1 is never read as 4.90.
+
+- **Cleartext remote-login plane** — **Telnet Watch v5** extends the telnetd coverage to
+  the **encrypt key-id heap overflow** (CVE-2011-4862, exploited in the wild 2011), the
+  pre-auth **EC/EL NULL-dereference** and its inetd crash loop (CVE-2022-39028) and the
+  Solaris `in.telnetd -f` twin (CVE-2007-0882), and adds the **r-services** on their own
+  engines: the rlogin/rsh **`-froot`** injection (CVE-1999-0113), the **ftp-data
+  source-port trust bounce** (CVE-1999-0185) and netkit **rcp** abuse by a malicious server
+  (CVE-2019-7282 / CVE-2019-7283), plus rexec cleartext credentials and `.rhosts` trust —
+  the same `login -f` auth-bypass shape traced across twenty-seven years of Unix remote login.
 
 _(Counts reflect the detector code as of September 2026 and grow as new modules land.)_
 
