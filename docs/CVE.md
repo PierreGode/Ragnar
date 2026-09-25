@@ -10,30 +10,33 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **248** distinct CVE IDs
-- **209** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
-- **30** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
+- **256** distinct CVE IDs
+- **216** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **31** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
-- Range **CVE-2002-1623** → **CVE-2026-81736**
+- Range **CVE-1999-0113** → **CVE-2026-81736**
 
 | Year | CVEs |
 |---|---|
+| 1999 | 2 |
 | 2002 | 2 |
 | 2003 | 1 |
 | 2005 | 2 |
 | 2006 | 1 |
+| 2007 | 1 |
 | 2008 | 2 |
+| 2011 | 1 |
 | 2013 | 3 |
 | 2014 | 6 |
 | 2015 | 9 |
 | 2016 | 5 |
 | 2017 | 6 |
 | 2018 | 8 |
-| 2019 | 8 |
+| 2019 | 11 |
 | 2020 | 15 |
 | 2021 | 12 |
-| 2022 | 18 |
+| 2022 | 19 |
 | 2023 | 36 |
 | 2024 | 47 |
 | 2025 | 33 |
@@ -75,7 +78,7 @@ detector works is in [nettools.md](nettools.md).
 | SNMP Watch | 5 |
 | SR-MPLS Watch | 17 |
 | SSH Watch | 11 |
-| Telnet Watch | 2 |
+| Telnet Watch | 10 |
 | TLS Watch | 11 |
 | Trailing-data / Etherleak | 1 |
 
@@ -85,14 +88,18 @@ detector works is in [nettools.md](nettools.md).
 
 | CVE | Name | Status | Detector(s) | Also named as context by |
 |---|---|---|---|---|
+| [CVE-1999-0113](https://nvd.nist.gov/vuln/detail/CVE-1999-0113) | rlogin -froot auth bypass | detected | Telnet Watch | — |
+| [CVE-1999-0185](https://nvd.nist.gov/vuln/detail/CVE-1999-0185) | r-services ftp-data trust bounce | detected | Telnet Watch | — |
 | [CVE-2002-1623](https://nvd.nist.gov/vuln/detail/CVE-2002-1623) |  | detected | IPsec / IKE Watch | — |
 | [CVE-2002-20001](https://nvd.nist.gov/vuln/detail/CVE-2002-20001) | D(HE)at | detected | SSH Watch, TLS Watch | — |
 | [CVE-2003-0001](https://nvd.nist.gov/vuln/detail/CVE-2003-0001) | Etherleak | detected | Trailing-data / Etherleak | — |
 | [CVE-2005-4436](https://nvd.nist.gov/vuln/detail/CVE-2005-4436) | EIGRP K-value / Goodbye reset | detected | EIGRP Watch | — |
 | [CVE-2005-4437](https://nvd.nist.gov/vuln/detail/CVE-2005-4437) | EIGRP missing authentication | detected | EIGRP Watch | — |
 | [CVE-2006-5051](https://nvd.nist.gov/vuln/detail/CVE-2006-5051) | OpenSSH signal-handler race | detected | SSH Watch | — |
+| [CVE-2007-0882](https://nvd.nist.gov/vuln/detail/CVE-2007-0882) | Solaris in.telnetd -f auth bypass | detected | Telnet Watch | — |
 | [CVE-2008-0960](https://nvd.nist.gov/vuln/detail/CVE-2008-0960) | SNMPv3 USM HMAC truncation | detected | SNMP Watch | — |
 | [CVE-2008-4109](https://nvd.nist.gov/vuln/detail/CVE-2008-4109) |  | detected | SSH Watch | — |
+| [CVE-2011-4862](https://nvd.nist.gov/vuln/detail/CVE-2011-4862) | telnetd encrypt_keyid overflow | detected | Telnet Watch | — |
 | [CVE-2013-2566](https://nvd.nist.gov/vuln/detail/CVE-2013-2566) | RC4 biases | detected | TLS Watch | — |
 | [CVE-2013-4796](https://nvd.nist.gov/vuln/detail/CVE-2013-4796) |  | context only | BFD Watch | — |
 | [CVE-2013-5211](https://nvd.nist.gov/vuln/detail/CVE-2013-5211) | NTP monlist amplification | detected | NTP Watch | — |
@@ -134,6 +141,9 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2019-3977](https://nvd.nist.gov/vuln/detail/CVE-2019-3977) |  | detected | MikroTik Guard | — |
 | [CVE-2019-3979](https://nvd.nist.gov/vuln/detail/CVE-2019-3979) |  | detected | MikroTik Guard | — |
 | [CVE-2019-5608](https://nvd.nist.gov/vuln/detail/CVE-2019-5608) | Fragmented IGMP/MLD membership | detected | IGMP / MLD Watch | — |
+| [CVE-2019-6111](https://nvd.nist.gov/vuln/detail/CVE-2019-6111) | OpenSSH scp file overwrite | context only | Telnet Watch | — |
+| [CVE-2019-7282](https://nvd.nist.gov/vuln/detail/CVE-2019-7282) | netkit rcp dot-name | detected | Telnet Watch | — |
+| [CVE-2019-7283](https://nvd.nist.gov/vuln/detail/CVE-2019-7283) | netkit rcp unrequested file | detected | Telnet Watch | — |
 | [CVE-2019-10149](https://nvd.nist.gov/vuln/detail/CVE-2019-10149) | Exim ${...} expansion RCE | detected | SMTP Watch | — |
 | [CVE-2019-12815](https://nvd.nist.gov/vuln/detail/CVE-2019-12815) | ProFTPD mod_copy Limit bypass | detected | FTP Watch | — |
 | [CVE-2019-15846](https://nvd.nist.gov/vuln/detail/CVE-2019-15846) | Exim SNI/cert-DN RCE | detected | SMTP Watch | — |
@@ -179,6 +189,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2022-37887](https://nvd.nist.gov/vuln/detail/CVE-2022-37887) |  | detected | Aruba Guard | — |
 | [CVE-2022-37888](https://nvd.nist.gov/vuln/detail/CVE-2022-37888) |  | detected | Aruba Guard | — |
 | [CVE-2022-37889](https://nvd.nist.gov/vuln/detail/CVE-2022-37889) |  | detected | Aruba Guard | — |
+| [CVE-2022-39028](https://nvd.nist.gov/vuln/detail/CVE-2022-39028) | inetutils telnetd EC/EL crash | detected | Telnet Watch | — |
 | [CVE-2022-40302](https://nvd.nist.gov/vuln/detail/CVE-2022-40302) |  | context only | BGP Path Watch | — |
 | [CVE-2022-40735](https://nvd.nist.gov/vuln/detail/CVE-2022-40735) | D(HE)at | detected | IPsec / IKE Watch, SSH Watch, TLS Watch | — |
 | [CVE-2022-43681](https://nvd.nist.gov/vuln/detail/CVE-2022-43681) |  | context only | BGP Path Watch | — |

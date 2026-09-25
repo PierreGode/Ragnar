@@ -43,12 +43,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import time
-from datetime import datetime, timezone
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterator, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 SCHEMA = 1
 MODULE = "telnetwatch"
@@ -116,6 +117,17 @@ ENCRYPT_START = 3
 ENCRYPT_END = 4
 ENCRYPT_REQSTART = 5
 ENCRYPT_REQEND = 6
+ENCRYPT_ENC_KEYID = 7
+ENCRYPT_DEC_KEYID = 8
+
+# CVE-2011-4862: libtelnet/encrypt.c holds the key id in
+# `unsigned char keyid[MAXKEYLEN]` with MAXKEYLEN == 64. Both
+# encrypt_enc_keyid() (sub-command 7) and encrypt_dec_keyid() (sub-command 8)
+# funnel into encrypt_keyid(), which copied `len` bytes with no bound. The MIT
+# fix adds `if (len > MAXKEYLEN) len = MAXKEYLEN;`, so a key id LONGER than
+# MAXKEYLEN is exactly the vulnerable condition -- and it is countable on the
+# wire.
+MAXKEYLEN = 64
 
 # SLC constants (RFC 1184 s4). NSLC is the count of defined SLC functions; the
 # inetutils constant is 0x1e. change_slc()/process_slc() store a 3-byte reply
@@ -141,6 +153,104 @@ _MAX_SUBNEG = 4096          # a single subneg > telnet's 0x200 practical max; ha
 _MAX_STREAM_BUF = 65536     # per-direction reassembly cap before flush
 _MAX_FLOWS = 20000
 _SERVER_SCAN_TAIL = 512     # bytes of recent server->client data kept for prompt scan
+
+# --- serial-console posture (RFC 2217 + raw TCP) ----------------------------
+# In a carrier-neutral colo, console servers carry OTHER TENANTS' device
+# consoles. A console session is root-equivalent access to a carrier's gear and
+# usually sits outside whatever authentication the device itself enforces, so a
+# cleartext one crossing shared or tenant space is an exposure in its own right
+# -- posture, not a CVE.
+#
+# Two carriers, very different confidence:
+#   RFC 2217 (Telnet COM-PORT-OPTION 44) is NEGOTIATED ON THE WIRE. The option
+#     code is unambiguous, so this is a read-not-inferred, high-confidence
+#     identification of a serial console gateway.
+#   Raw TCP console has NO protocol framing at all. It can only ever be a
+#     heuristic on port plus terminal-shaped content, and is capped accordingly.
+OPT_COM_PORT = 0x2C          # 44, RFC 2217
+
+# RFC 2217 command codes. Client->server as listed; the access server's
+# responses are the SAME value + 100.
+CPO_SIGNATURE = 0
+CPO_SET_BAUDRATE = 1
+CPO_SET_DATASIZE = 2
+CPO_SET_PARITY = 3
+CPO_SET_STOPSIZE = 4
+CPO_SET_CONTROL = 5
+CPO_NOTIFY_LINESTATE = 6
+CPO_NOTIFY_MODEMSTATE = 7
+CPO_FLOWCONTROL_SUSPEND = 8
+CPO_FLOWCONTROL_RESUME = 9
+CPO_SET_LINESTATE_MASK = 10
+CPO_SET_MODEMSTATE_MASK = 11
+CPO_PURGE_DATA = 12
+CPO_SERVER_OFFSET = 100
+
+# SET-CONTROL value table (RFC 2217 s3). NOTE 4 is *Request* BREAK State --
+# only 5 actually asserts it. Getting this off by one would both miss the
+# attack and fire on a harmless query.
+CPO_CTRL_BREAK_REQUEST = 4
+CPO_CTRL_BREAK_ON = 5
+CPO_CTRL_BREAK_OFF = 6
+CPO_CTRL_DTR_ON = 8
+CPO_CTRL_RTS_ON = 11
+
+# NOTIFY-LINESTATE bit 4 = Break-detect Error: the access server reporting that
+# a BREAK was seen on the physical line.
+CPO_LINESTATE_BREAK_DETECT = 0x10
+
+# Console-server raw-TCP port ranges seen in the field (Lantronix, Opengear,
+# Digi, Cisco terminal servers). Wide and shared with plenty of unrelated
+# services, which is exactly why the raw-TCP finding is capped at notice/low.
+DEFAULT_CONSOLE_PORTS = tuple(range(2001, 2100)) + tuple(range(3001, 3100)) + \
+                        tuple(range(7001, 7100))
+
+# A raw-TCP session only counts as console-shaped with this much terminal-ish
+# evidence; the port alone is never enough.
+_CONSOLE_MIN_SIGNALS = 2
+
+# --- r-services (RFC 1282 rlogin) -------------------------------------------
+# Folded into telnetwatch rather than given its own module: same cleartext
+# remote-access threat model, same tap, same finding pipeline. It is a SEPARATE
+# parser path and never touches the Telnet IAC state machine -- rlogin has no
+# IAC framing and running its bytes through telrcv-style logic would be wrong.
+RLOGIN_PORT = 513
+RSH_PORT = 514
+REXEC_PORT = 512
+DEFAULT_RSERVICES_PORTS = (RLOGIN_PORT, RSH_PORT, REXEC_PORT)
+
+# rsh's stderr channel is a SEPARATE TCP connection in the REVERSE direction:
+# the client advertises a port in handshake field 0 and the SERVER connects
+# back to it from a privileged source port. Measured with the real rsh-redone
+# client: session  client:1023 -> server:514
+#                  stderr   server:1010 -> client:1022
+# Both ends of the back-connect are privileged, so admitting this range is what
+# makes the correlation capturable at all -- `tcp port 514` alone never sees it.
+PRIV_PORTRANGE = (512, 1023)
+
+# rcp wire records (BSD rcp protocol, run as a command over rsh)
+#   C<mode> <size> <name>\n   file      D<mode> <size> <name>\n   directory
+#   E\n                       dir end   T<mt> 0 <at> 0\n           times
+_RCP_MAX_LINE = 1024
+_RCP_MAX_RECORDS = 512
+NEWLINE = bytes([0x0A])
+RCP_ACK = bytes([0x00])
+
+# rlogin's trust model rests on the client binding a PRIVILEGED source port:
+# in.rlogind accepts .rhosts trust only from ports below 1024, because on a
+# classic multi-user host only root could bind one.
+PRIV_PORT_MAX = 1023
+FTP_DATA_PORT = 20           # CVE-1999-0185: an FTP data connection is
+                             # privileged-sourced and can be aimed at rlogind
+
+# Handshake field caps. Real fields are short; a hostile peer must not be able
+# to grow our state without bound.
+_RL_MAX_FIELD = 256
+_RL_MAX_HANDSHAKE = 1024
+
+# rlogin window-size control sequence (RFC 1282 s2): 0xFF 0xFF 's' 's' + 8 bytes
+_RL_WINDOW_MAGIC = b"\xff\xffss"
+_RL_WINDOW_LEN = len(_RL_WINDOW_MAGIC) + 8
 
 DEFAULT_SERVER_PORTS = (23, 2323)
 DEFAULT_TLS_PORTS = (992,)
@@ -176,6 +286,19 @@ FINDINGS: Dict[str, Tuple[str, str, str]] = {
         "server advertises LINEMODE -> potentially affected by CVE-2026-32746; "
         "patch state cannot be confirmed passively (patched telnetd negotiates "
         "identically)"),
+    "TELNET-4862-KEYID-OVERFLOW": (
+        "critical", "attack",
+        "Telnet ENCRYPT ENC_KEYID/DEC_KEYID sub-option carries a key id longer "
+        "than MAXKEYLEN(64) - encrypt_keyid() heap overflow attempt "
+        "(CVE-2011-4862)"),
+    "TELNET-39028-EC-EL-PREAUTH": (
+        "warning", "attack",
+        "IAC EC/EL received before any session data - telrcv() NULL pointer "
+        "dereference, the 2-byte telnetd DoS (CVE-2022-39028)"),
+    "TELNET-39028-CRASH-LOOP": (
+        "high", "attack",
+        "repeated pre-session IAC EC/EL to the same server - sustained "
+        "CVE-2022-39028 crash attempts; inetd disables a service that loops"),
     "TELNET-CLEARTEXT-AUTH": (
         "high", "exposure",
         "plaintext credential prompt on an unencrypted Telnet session - "
@@ -186,12 +309,85 @@ FINDINGS: Dict[str, Tuple[str, str, str]] = {
     "TELNET-ENCRYPT-NEGOTIATED": (
         "info", "posture",
         "Telnet ENCRYPT option negotiated - session payload is encrypted"),
+    "CONSOLE-RFC2217-SESSION": (
+        "warning", "posture",
+        "RFC 2217 COM-PORT-OPTION negotiated - this Telnet session is a serial "
+        "console gateway carrying device console traffic in cleartext"),
+    "CONSOLE-RFC2217-BREAK": (
+        "high", "attack",
+        "RFC 2217 SET-CONTROL asserted BREAK on the serial line - on Cisco, "
+        "Juniper and Arista consoles a BREAK during boot drops to "
+        "ROMmon/loader, the documented password-recovery path"),
+    "CONSOLE-RAW-TCP-SUSPECTED": (
+        "notice", "posture",
+        "cleartext terminal-shaped session on a console-server port with no "
+        "protocol framing - probable raw-TCP serial console; heuristic, port "
+        "alone is never sufficient"),
+    "RSVC-RSH-SESSION": (
+        "info", "posture",
+        "rsh session observed - cleartext remote command execution with "
+        "trust-based authentication; only the command's first token is recorded"),
+    "RSVC-REXEC-CLEARTEXT-CRED": (
+        "critical", "exposure",
+        "rexec handshake carries a PASSWORD in cleartext on the wire - the "
+        "credential is exposed to anyone on path; the value is never logged"),
+    "RSVC-RCP-7282-DOTNAME": (
+        "high", "attack",
+        "rcp server sent a file record whose name is '.' or empty - "
+        "CVE-2019-7282, netkit rcp accepts it and writes outside the intended "
+        "target"),
+    "RSVC-RCP-7283-UNREQUESTED": (
+        "high", "attack",
+        "rcp server sent a file the client never requested - CVE-2019-7283, "
+        "the rcp twin of CVE-2019-6111; a malicious server overwrites arbitrary "
+        "files in the client's target directory"),
+    "RSVC-RCP-7283-TRAVERSAL": (
+        "high", "attack",
+        "rcp server sent a file record whose name contains a path separator or "
+        "'..' - directory traversal out of the client's target directory "
+        "(corroborates CVE-2019-7283)"),
+    "RSVC-RLOGIN-SESSION": (
+        "info", "posture",
+        "rlogin session observed (RFC 1282) - cleartext, trust-based remote "
+        "access with no cryptographic authentication"),
+    "RSVC-RLOGIN-ARGINJECT": (
+        "critical", "attack",
+        "rlogin handshake user field begins with '-' - argument injection into "
+        "login (CVE-1999-0113); '-f' skips authentication entirely"),
+    "RSVC-TRUST-AUTH": (
+        "high", "exposure",
+        "rlogin session reached the data phase with no password prompt - "
+        ".rhosts/hosts.equiv trust authentication, defeated by source-address "
+        "spoofing or any privileged-port foothold"),
+    "RSVC-UNPRIV-SRCPORT": (
+        "warning", "recon",
+        "rlogin connection from an unprivileged source port (>=1024) - a "
+        "conformant rlogind rejects this; indicates a probe or a permissive "
+        "daemon"),
+    "RSVC-FTPDATA-SRCPORT": (
+        "critical", "attack",
+        "connection to rlogin from TCP source port 20 - an FTP data channel "
+        "aimed at the r-services trust port to borrow its privileged source "
+        "port (CVE-1999-0185)"),
     "TELNET-SESSION": (
         "info", "posture",
         "Telnet session observed (cleartext remote-access protocol)"),
 }
 
 _SEV_RANK = {"info": 0, "low": 1, "notice": 2, "warning": 3, "high": 4, "critical": 5}
+
+
+def fmt_endpoint(ip: str, port: int) -> str:
+    """Render an address:port pair unambiguously across both families.
+
+    IPv4 is `10.0.0.1:23`. IPv6 MUST use RFC 3986 bracket notation -- a bare
+    f"{ip}:{port}" on an IPv6 address yields `2001:db8::9:51000`, which is
+    ambiguous (that trailing group could be part of the address) and cannot be
+    split back into host and port by any consumer. Detection is unaffected, but
+    every emitted record, the mesh, the web UI and the PDF reporter all consume
+    these strings, so the wrong form corrupts the whole downstream chain.
+    """
+    return f"[{ip}]:{port}" if ":" in str(ip) else f"{ip}:{port}"
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +554,7 @@ class TelnetEvents:
 
     Events yielded:
       ("nego", cmd, opt)          - IAC DO/DONT/WILL/WONT opt
+      ("cmd", cmd)                - standalone IAC <cmd> (EC, EL, AYT, ...)
       ("subneg", opt, unescaped)  - IAC SB opt ... IAC SE  (data already unescaped)
       ("data", nbytes, tail)      - run of ordinary data bytes; tail is the last
                                     _SERVER_SCAN_TAIL bytes only (bounded), for the
@@ -410,7 +607,11 @@ class TelnetEvents:
                     self.sb_saw_iac = False
                     self.state = 3
                 elif c in _TWO_BYTE:
-                    self.state = 0  # standalone command, consumed
+                    # Standalone command. These were consumed silently before
+                    # CVE-2022-39028 was carried; EC (0xF7) and EL (0xF8) are
+                    # the 2-byte DoS trigger, so the engine must see them.
+                    self.state = 0
+                    yield ("cmd", c)
                 else:
                     self.state = 0  # unknown; swallow
                 i += 1
@@ -491,7 +692,9 @@ class Emitter:
             "schema": SCHEMA, "module": MODULE, "ts": round(now, 3),
             "code": code, "severity": sev, "class": dclass,
             "confidence": confidence, "desc": desc,
-            "client": f"{cip}:{cport}", "server": f"{sip}:{sport}",
+            "client": fmt_endpoint(cip, cport),
+            "server": fmt_endpoint(sip, sport),
+            "af": "ipv6" if ":" in str(cip) else "ipv4",
             "detail": detail,
         }
         line = json.dumps(rec, sort_keys=True, separators=(",", ":"))
@@ -524,6 +727,16 @@ class Flow:
     encrypt_started: bool = False  # RFC 2946 SB ENCRYPT START seen (data truly protected)
     session_noted: bool = False
     linemode_posture_noted: bool = False
+    # CVE-2022-39028: telrcv()'s EC/EL path dereferences a pointer that is NULL
+    # until the session has actually carried data. EC/EL are LEGITIMATE RFC 854
+    # commands (backspace / erase-line), so the exploit is distinguished by
+    # arriving BEFORE any ordinary data byte -- not by the bytes themselves.
+    client_data_seen: bool = False
+    ec_el_preauth: int = 0
+    keyid_overflow_noted: bool = False
+    # RFC 2217 serial-console posture
+    comport_noted: bool = False
+    comport_params: Dict[str, object] = field(default_factory=dict)
     cred_noted: bool = False
     last_client_slc: Optional[SLCStats] = None
     ev_srv: TelnetEvents = field(default=None)
@@ -533,9 +746,14 @@ class Flow:
 class Engine:
     def __init__(self, emitter: Emitter,
                  overflow_triplets: int = SLC_OVERFLOW_TRIPLETS,
-                 oversized_triplets: int = NSLC):
+                 oversized_triplets: int = NSLC,
+                 crash_loop_threshold: int = 5):
         self.em = emitter
         self.flows: Dict[Tuple, Flow] = {}
+        # CVE-2022-39028 crash attempts per SERVER, across flows: each attempt
+        # kills one telnetd, so the damage is cumulative rather than per-session.
+        self._ecel_hosts: Dict[str, int] = {}
+        self.crash_loop_threshold = crash_loop_threshold
         self.overflow_triplets = overflow_triplets
         self.oversized_triplets = oversized_triplets
 
@@ -571,8 +789,13 @@ class Engine:
         elif kind == "subneg":
             _, opt, data = ev
             self._on_subneg(f, from_server, opt, data, now)
+        elif kind == "cmd":
+            _, cmd = ev
+            self._on_cmd(f, from_server, cmd, now)
         elif kind == "data":
             _, nbytes, tail = ev
+            if (not from_server) and nbytes > 0:
+                f.client_data_seen = True
             if from_server and tail and not f.cred_noted:
                 self._scan_server_prompt(f, tail, now)
 
@@ -580,6 +803,8 @@ class Engine:
                  now: Optional[float]):
         if opt == OPT_ENCRYPT:
             self._on_encrypt_nego(f, from_server, cmd, now)
+        if opt == OPT_COM_PORT and cmd in (DO, WILL):
+            self._note_comport(f, now)
         if opt == OPT_LINEMODE:
             # The server offering LINEMODE (DO) or agreeing (WILL) is the
             # posture signal: this telnetd has the vulnerable code path.
@@ -589,6 +814,101 @@ class Engine:
                              {"dedup": "linemode",
                               "note": "cannot confirm patch state passively"},
                              "low", now)
+
+    def _on_cmd(self, f: Flow, from_server: bool, cmd: int,
+                now: Optional[float]):
+        """CVE-2022-39028: telrcv()'s EC/EL path dereferences a NULL pointer
+        when the session has not yet carried data, crashing telnetd in two
+        bytes (GNU Inetutils <=2.3, MIT krb5-appl <=1.0.3, netkit/freebsd/
+        netbsd telnetd).
+
+        EC and EL are ordinary RFC 854 commands -- a real client emits them on
+        backspace and Ctrl-U -- so matching the bytes alone would fire on every
+        interactive session. The exploit is distinguished by arriving BEFORE
+        any client data, which is exactly the state in which the pointer is
+        still NULL.
+        """
+        if from_server or cmd not in (EC, EL):
+            return
+        if f.client_data_seen:
+            return                      # ordinary erase during a live session
+        f.ec_el_preauth += 1
+        self.em.emit("TELNET-39028-EC-EL-PREAUTH", f.key,
+                     {"cmd": "EC" if cmd == EC else "EL",
+                      "cmd_byte": cmd,
+                      "preauth_count": f.ec_el_preauth,
+                      "dedup": "ecel"}, "high", now)
+        # inetd disables a service that crashes repeatedly ("server failing
+        # (looping), service terminated"), so sustained attempts against one
+        # server are the finding that actually matters operationally.
+        server_ip = f.key[2]
+        self._ecel_hosts[server_ip] = self._ecel_hosts.get(server_ip, 0) + 1
+        n = self._ecel_hosts[server_ip]
+        if n >= self.crash_loop_threshold:
+            self.em.emit("TELNET-39028-CRASH-LOOP", f.key,
+                         {"server": server_ip, "attempts": n,
+                          "threshold": self.crash_loop_threshold,
+                          "dedup": f"loop:{server_ip}:{n // self.crash_loop_threshold}"},
+                         "high", now)
+
+    def _note_comport(self, f: Flow, now: Optional[float]):
+        """RFC 2217 option 44 seen -> this Telnet session is a serial console
+        gateway. Read-not-inferred: the option code is on the wire."""
+        if f.comport_noted:
+            return
+        f.comport_noted = True
+        self.em.emit("CONSOLE-RFC2217-SESSION", f.key,
+                     {"option": OPT_COM_PORT, "dedup": "comport"}, "high", now)
+
+    def _on_comport_subneg(self, f: Flow, from_server: bool, data: bytes,
+                           now: Optional[float]):
+        """Parse RFC 2217 sub-options.
+
+        A subnegotiation implies the option is in use even if the WILL/DO was
+        missed (a mid-session tap joins after negotiation), so this also raises
+        the session finding.
+
+        The one that matters operationally is SET-CONTROL = 5, Set BREAK State
+        ON. A BREAK during boot drops Cisco to ROMmon and Juniper/Arista to
+        their loaders -- the documented password-recovery path, i.e. full device
+        takeover from a console session. Value 4 is only a REQUEST for the
+        current break state and must NOT fire; 6 clears it.
+        """
+        if not data:
+            return
+        self._note_comport(f, now)
+        cmd = data[0]
+        body = data[1:]
+        # normalise the access server's echo (client code + 100) to one space
+        base = cmd - CPO_SERVER_OFFSET if cmd >= CPO_SERVER_OFFSET else cmd
+
+        if base == CPO_SET_BAUDRATE and len(body) >= 4:
+            baud = int.from_bytes(body[:4], "big")
+            if baud:
+                f.comport_params["baud"] = baud
+        elif base == CPO_SET_DATASIZE and body:
+            f.comport_params["datasize"] = body[0]
+        elif base == CPO_SET_PARITY and body:
+            f.comport_params["parity"] = body[0]
+        elif base == CPO_SET_STOPSIZE and body:
+            f.comport_params["stopsize"] = body[0]
+        elif base == CPO_SET_CONTROL and body:
+            if body[0] == CPO_CTRL_BREAK_ON:
+                self.em.emit("CONSOLE-RFC2217-BREAK", f.key,
+                             {"set_control": body[0],
+                              "direction": "server->client" if from_server
+                                           else "client->server",
+                              "params": dict(f.comport_params),
+                              "dedup": "break"}, "high", now)
+        elif base == CPO_NOTIFY_LINESTATE and body:
+            if body[0] & CPO_LINESTATE_BREAK_DETECT:
+                # the access server reporting a BREAK observed on the line
+                self.em.emit("CONSOLE-RFC2217-BREAK", f.key,
+                             {"linestate": body[0],
+                              "signal": "break-detect",
+                              "direction": "server->client",
+                              "params": dict(f.comport_params),
+                              "dedup": "break"}, "high", now)
 
     def _on_encrypt_nego(self, f: Flow, from_server: bool, cmd: int,
                          now: Optional[float]):
@@ -634,15 +954,36 @@ class Engine:
                           "started": f.encrypt_started},
                          "high", now)
 
-    def _on_encrypt_subneg(self, f: Flow, data: bytes, now: Optional[float]):
-        """RFC 2946: the stream is only genuinely protected between
-        SB ENCRYPT START and SB ENCRYPT END."""
+    def _on_encrypt_subneg(self, f: Flow, data: bytes, now: Optional[float],
+                           from_server: bool = False):
+        """RFC 2946 ENCRYPT sub-options.
+
+        START/END gate the cleartext-credential finding. ENC_KEYID/DEC_KEYID
+        carry CVE-2011-4862: libtelnet's encrypt_keyid() copied the supplied key
+        id into a fixed 64-byte buffer with no bound, so a key id longer than
+        MAXKEYLEN is the vulnerable condition, countable directly on the wire.
+        """
         if not data:
             return
-        if data[0] == ENCRYPT_START:
+        sub = data[0]
+        if sub == ENCRYPT_START:
             f.encrypt_started = True
-        elif data[0] == ENCRYPT_END:
+            return
+        if sub == ENCRYPT_END:
             f.encrypt_started = False
+            return
+        if sub in (ENCRYPT_ENC_KEYID, ENCRYPT_DEC_KEYID):
+            keyid = data[1:]
+            if len(keyid) > MAXKEYLEN and not f.keyid_overflow_noted:
+                f.keyid_overflow_noted = True
+                self.em.emit("TELNET-4862-KEYID-OVERFLOW", f.key,
+                             {"subcmd": ("ENC_KEYID" if sub == ENCRYPT_ENC_KEYID
+                                         else "DEC_KEYID"),
+                              "keyid_len": len(keyid),
+                              "maxkeylen": MAXKEYLEN,
+                              "overflow_bytes": len(keyid) - MAXKEYLEN,
+                              "from_server": from_server,
+                              "dedup": "keyid"}, "high", now)
 
     def _on_subneg(self, f: Flow, from_server: bool, opt: int, data: bytes,
                    now: Optional[float]):
@@ -651,7 +992,9 @@ class Engine:
         elif opt == OPT_LINEMODE:
             self._on_linemode(f, from_server, data, now)
         elif opt == OPT_ENCRYPT:
-            self._on_encrypt_subneg(f, data, now)
+            self._on_encrypt_subneg(f, data, now, from_server=from_server)
+        elif opt == OPT_COM_PORT:
+            self._on_comport_subneg(f, from_server, data, now)
 
     def _on_environ(self, f: Flow, from_server: bool, opt: int, data: bytes,
                     now: Optional[float]):
@@ -744,21 +1087,741 @@ class Engine:
             f.cred_noted = True
 
 
+
+# ---------------------------------------------------------------------------
+# rlogin (RFC 1282) -- a SEPARATE parser path
+# ---------------------------------------------------------------------------
+# rlogin has no IAC framing. Its handshake is four NUL-terminated fields sent
+# by the client in one burst:
+#
+#     <NUL> client-user <NUL> server-user <NUL> term/speed <NUL>
+#
+# the server answers with a single 0x00 byte, and the session becomes a raw
+# byte stream. The ONLY in-band framing after that is the window-size control
+# sequence 0xFF 0xFF 's' 's' + 8 bytes, which must be skipped rather than read
+# as data.
+#
+# in.rlogind hands the SERVER-USER field to login(1). If it begins with '-' the
+# shell expands it as an option, and `-f` tells login to skip authentication --
+# CVE-1999-0113, the same argument-injection shape as CVE-2007-0882 and
+# CVE-2026-24061, a quarter-century apart.
+
+@dataclass
+class RloginHandshake:
+    complete: bool = False
+    truncated: bool = False
+    client_user: bytes = b""
+    server_user: bytes = b""
+    term: bytes = b""
+
+
+def parse_rlogin_handshake(data: bytes) -> RloginHandshake:
+    """Parse the client's opening burst. Never raises on malformed input.
+
+    RFC 1282 puts a leading NUL before the first field. Some clients omit it,
+    so a missing leading NUL is tolerated rather than treated as a parse
+    failure -- refusing to parse would silently drop the exploit case.
+    """
+    hs = RloginHandshake()
+    if not data:
+        return hs
+    buf = data[:_RL_MAX_HANDSHAKE]
+    if len(data) > _RL_MAX_HANDSHAKE:
+        hs.truncated = True
+    i = 1 if buf[:1] == b"\x00" else 0
+    fields: List[bytes] = []
+    cur = bytearray()
+    while i < len(buf) and len(fields) < 3:
+        b = buf[i]
+        if b == 0:
+            fields.append(bytes(cur[:_RL_MAX_FIELD]))
+            cur = bytearray()
+        else:
+            if len(cur) < _RL_MAX_FIELD:
+                cur.append(b)
+            else:
+                hs.truncated = True
+        i += 1
+    if len(fields) >= 1:
+        hs.client_user = fields[0]
+    if len(fields) >= 2:
+        hs.server_user = fields[1]
+    if len(fields) >= 3:
+        hs.term = fields[2]
+        hs.complete = True
+    return hs
+
+
+def strip_rlogin_window(data: bytes) -> bytes:
+    """Remove RFC 1282 window-size control sequences from a byte run.
+
+    RFC 1282 s2 defines this sequence as CLIENT->SERVER: the client announces a
+    terminal resize as 0xFF 0xFF 's' 's' followed by four 16-bit values. It is
+    in-band control, not session data.
+
+    Two places it matters, both real:
+      * the client handshake buffer -- a resize arriving in the same segment as
+        the opening burst would otherwise be parsed as handshake field bytes and
+        corrupt the user fields the CVE-1999-0113 check reads;
+      * any byte COUNT -- 12 control bytes must never be mistaken for session
+        data, or a server that only ever sends control traffic would satisfy a
+        data threshold it never actually met.
+    """
+    if _RL_WINDOW_MAGIC not in data:
+        return data
+    out = bytearray()
+    i = 0
+    n = len(data)
+    while i < n:
+        if data[i:i + 4] == _RL_WINDOW_MAGIC:
+            i += _RL_WINDOW_LEN
+            continue
+        out.append(data[i])
+        i += 1
+    return bytes(out)
+
+
+@dataclass
+class RloginFlow:
+    key: Tuple
+    session_noted: bool = False
+    handshake_done: bool = False
+    hs_buf: bytearray = field(default_factory=bytearray)
+    server_bytes: int = 0
+    password_prompted: bool = False
+    trust_noted: bool = False
+    srcport_noted: bool = False
+    cred_noted: bool = False
+
+
+class RloginEngine:
+    """Per-flow rlogin observer. Deliberately independent of the Telnet
+    Engine: shared emitter, shared flow-key shape, separate state."""
+
+    def __init__(self, emitter: Emitter, trust_data_threshold: int = 16):
+        self.em = emitter
+        self.flows: Dict[Tuple, RloginFlow] = {}
+        # Bytes of server->client data, after the handshake ack and with no
+        # password prompt, that make "this session authenticated without a
+        # password" a safe call rather than a guess. Its only job is to
+        # distinguish real shell/MOTD output from the single 0x00 ack, so it is
+        # deliberately low -- a short banner like "Last login: ...\n$ " must
+        # still count, or trust auth goes unreported on terse hosts.
+        self.trust_data_threshold = trust_data_threshold
+
+    def _flow(self, key: Tuple) -> RloginFlow:
+        f = self.flows.get(key)
+        if f is None:
+            if len(self.flows) >= _MAX_FLOWS:
+                self.flows.pop(next(iter(self.flows)))
+            f = RloginFlow(key=key)
+            self.flows[key] = f
+        return f
+
+    def on_payload(self, key: Tuple, from_server: bool, payload: bytes,
+                   now: Optional[float] = None):
+        f = self._flow(key)
+        if not f.session_noted:
+            f.session_noted = True
+            self.em.emit("RSVC-RLOGIN-SESSION", key, {"dedup": "session"},
+                         "high", now)
+            self._check_source_port(f, now)
+        if from_server:
+            self._on_server(f, payload, now)
+        else:
+            self._on_client(f, payload, now)
+
+    # -- source-port trust checks (CVE-1999-0185 and the unprivileged case) --
+    def _check_source_port(self, f: RloginFlow, now: Optional[float]):
+        if f.srcport_noted:
+            return
+        f.srcport_noted = True
+        sport = f.key[1]
+        if sport == FTP_DATA_PORT:
+            # An FTP server's data channel originates from port 20, which is
+            # privileged. Pointing one at rlogind borrows that privilege and
+            # satisfies the .rhosts source-port test without ever holding root
+            # on the client.
+            self.em.emit("RSVC-FTPDATA-SRCPORT", f.key,
+                         {"src_port": sport, "dedup": "ftpdata"}, "high", now)
+        elif sport > PRIV_PORT_MAX:
+            self.em.emit("RSVC-UNPRIV-SRCPORT", f.key,
+                         {"src_port": sport, "priv_max": PRIV_PORT_MAX,
+                          "dedup": "unpriv"}, "high", now)
+
+    # -- client side: the handshake carries the injection ---------------------
+    def _on_client(self, f: RloginFlow, payload: bytes, now: Optional[float]):
+        if f.handshake_done:
+            return                      # session data is never inspected
+        # strip resize control BEFORE parsing: a resize sharing a segment with
+        # the opening burst would otherwise corrupt the user fields.
+        clean = strip_rlogin_window(payload)
+        if len(f.hs_buf) < _RL_MAX_HANDSHAKE:
+            f.hs_buf.extend(clean[:_RL_MAX_HANDSHAKE - len(f.hs_buf)])
+        hs = parse_rlogin_handshake(bytes(f.hs_buf))
+        if not hs.complete:
+            return                      # wait for more segments
+        f.handshake_done = True
+        for label, value in (("client_user", hs.client_user),
+                             ("server_user", hs.server_user)):
+            if value[:1] == b"-":
+                bypass = value[:2] == b"-f"
+                self.em.emit("RSVC-RLOGIN-ARGINJECT", f.key,
+                             {"field": label,
+                              "value_len": len(value),
+                              "value_prefix": value[:2].decode("latin-1", "replace"),
+                              "bypass_flag": bool(bypass),
+                              "dedup": label}, "high", now)
+
+    # -- server side: absence of a password prompt is the trust signal --------
+    def _on_server(self, f: RloginFlow, payload: bytes, now: Optional[float]):
+        # Defensive on this side too: the sequence is client->server per RFC
+        # 1282, but stripping keeps the byte COUNT below honest -- control
+        # bytes must never be counted as the shell output that proves a
+        # password-free login.
+        data = strip_rlogin_window(payload)
+        low = data.lower()
+        if b"password" in low or b"passwd" in low:
+            f.password_prompted = True
+            if not f.cred_noted:
+                f.cred_noted = True
+                self.em.emit("TELNET-CLEARTEXT-AUTH", f.key,
+                             {"signal": "rlogin server password prompt",
+                              "protocol": "rlogin",
+                              "note": "client secret is never inspected",
+                              "dedup": "cleartextauth"}, "heuristic", now)
+            return
+        # the handshake ack is a single 0x00 and is not session data
+        f.server_bytes += len(data.lstrip(b"\x00"))
+        if (f.handshake_done and not f.password_prompted
+                and not f.trust_noted
+                and f.server_bytes >= self.trust_data_threshold):
+            f.trust_noted = True
+            self.em.emit("RSVC-TRUST-AUTH", f.key,
+                         {"server_bytes": f.server_bytes,
+                          "threshold": self.trust_data_threshold,
+                          "dedup": "trust"}, "high", now)
+
+
+
+
+# ---------------------------------------------------------------------------
+# rsh (514) / rexec (512) and the rcp records that ride over rsh
+# ---------------------------------------------------------------------------
+# Both handshakes are four NUL-terminated fields sent by the client in one
+# burst, but field 2 means something VERY different in each:
+#
+#   rsh   : <stderr-port> \0 <local-user>  \0 <remote-user> \0 <command> \0
+#   rexec : <stderr-port> \0 <username>    \0 <PASSWORD>    \0 <command> \0
+#
+# rexec therefore puts a password on the wire in cleartext. Its LENGTH is
+# recorded; the value never is.
+#
+# rcp is not a protocol of its own -- it is the COMMAND rsh runs. When the
+# command's first token is `rcp` in source mode (-f), the SERVER streams file
+# records back and the client writes them. netkit's rcp trusts those records,
+# which is CVE-2019-7282 and CVE-2019-7283.
+
+@dataclass
+class RcpState:
+    """Record-stream position for an rcp -f transfer (server -> client)."""
+    requested: bytes = b""          # the path the client asked for
+    glob: bool = False              # request contained a wildcard
+    recursive: bool = False         # request had -r, so D records are legal
+    buf: bytearray = field(default_factory=bytearray)
+    skip: int = 0                   # bytes of file payload still to skip
+    files_seen: int = 0
+    records: int = 0
+
+
+@dataclass
+class RshFlow:
+    key: Tuple
+    is_rexec: bool = False
+    session_noted: bool = False
+    session_emitted: bool = False
+    handshake_done: bool = False
+    hs_buf: bytearray = field(default_factory=bytearray)
+    stderr_port: int = 0
+    srcport_noted: bool = False
+    password_prompted: bool = False
+    trust_noted: bool = False
+    server_bytes: int = 0
+    rcp: Optional[RcpState] = None
+    backconnect_seen: bool = False
+
+
+def parse_rsh_handshake(data: bytes) -> Optional[List[bytes]]:
+    """Return the four NUL-terminated fields, or None until all four arrive.
+    Never raises; fields are capped."""
+    if not data:
+        return None
+    buf = data[:_RL_MAX_HANDSHAKE]
+    fields: List[bytes] = []
+    cur = bytearray()
+    for b in buf:
+        if b == 0:
+            fields.append(bytes(cur[:_RL_MAX_FIELD]))
+            cur = bytearray()
+            if len(fields) == 4:
+                return fields
+        elif len(cur) < _RL_MAX_FIELD:
+            cur.append(b)
+    return None
+
+
+def rcp_request_info(command: bytes) -> Optional[Tuple[bytes, bool, bool]]:
+    """If `command` is an rcp SOURCE-mode invocation, return
+    (requested_path, has_glob, recursive); otherwise None.
+
+    Only source mode (-f) matters: that is the direction in which the SERVER
+    chooses what to send, which is exactly what CVE-2019-7283 abuses.
+    """
+    toks = command.split()
+    if not toks:
+        return None
+    prog = toks[0].rsplit(b"/", 1)[-1]
+    if prog != b"rcp":
+        return None
+    flags = [t for t in toks[1:] if t.startswith(b"-")]
+    if not any(b"f" in f for f in flags):
+        return None               # sink mode (-t) or something else
+    recursive = any(b"r" in f for f in flags)
+    paths = [t for t in toks[1:] if not t.startswith(b"-")]
+    if not paths:
+        return None
+    path = paths[-1]
+    glob = any(c in path for c in (b"*", b"?", b"["))
+    return path, glob, recursive
+
+
+class RshEngine:
+    """rsh / rexec observer, plus the rcp record stream carried over rsh.
+
+    Independent of the Telnet and rlogin parsers; shares only the emitter and
+    the flow-key shape.
+    """
+
+    def __init__(self, emitter: Emitter, trust_data_threshold: int = 16):
+        self.em = emitter
+        self.flows: Dict[Tuple, RshFlow] = {}
+        self.trust_data_threshold = trust_data_threshold
+        # Advertised stderr ports awaiting a back-connect, keyed exactly as the
+        # preflight settled: (family, canonical client address, port). A
+        # port-only key collides -- rsh draws from the same small privileged
+        # range, so two clients routinely advertise the same number.
+        self.pending_stderr: Dict[Tuple[str, str, int], Tuple] = {}
+
+    # -- helpers ----------------------------------------------------------
+    @staticmethod
+    def _famkey(addr: str, port: int) -> Tuple[str, str, int]:
+        fam = "ipv6" if ":" in str(addr) else "ipv4"
+        try:
+            import ipaddress
+            canon = ipaddress.ip_address(addr).compressed
+        except Exception:
+            canon = str(addr)
+        return (fam, canon, port)
+
+    def _flow(self, key: Tuple, is_rexec: bool) -> RshFlow:
+        f = self.flows.get(key)
+        if f is None:
+            if len(self.flows) >= _MAX_FLOWS:
+                self.flows.pop(next(iter(self.flows)))
+            f = RshFlow(key=key, is_rexec=is_rexec)
+            self.flows[key] = f
+        return f
+
+    # -- entry points -----------------------------------------------------
+    def on_payload(self, key: Tuple, from_server: bool, payload: bytes,
+                   now: Optional[float] = None, is_rexec: bool = False):
+        f = self._flow(key, is_rexec)
+        if not f.session_noted:
+            # Source-port checks are flow-level and fire immediately. The
+            # SESSION finding is deliberately NOT emitted here: it is worth
+            # more once the handshake has been parsed, and emitting in both
+            # places produced a duplicate that only the 60s dedup window
+            # happened to hide in production.
+            f.session_noted = True
+            self._check_source_port(f, now)
+        if from_server:
+            self._on_server(f, payload, now)
+        else:
+            self._on_client(f, payload, now)
+
+    def on_backconnect(self, client_addr: str, port: int,
+                       now: Optional[float] = None) -> bool:
+        """A reverse-direction flow arrived at an advertised stderr port.
+        Returns True if it correlated to a known session."""
+        k = self._famkey(client_addr, port)
+        sess = self.pending_stderr.get(k)
+        if sess is None:
+            return False
+        f = self.flows.get(sess)
+        if f is not None:
+            f.backconnect_seen = True
+        return True
+
+    # -- source-port trust checks -----------------------------------------
+    def _check_source_port(self, f: RshFlow, now: Optional[float]):
+        if f.srcport_noted:
+            return
+        f.srcport_noted = True
+        sport = f.key[1]
+        if sport == FTP_DATA_PORT:
+            self.em.emit("RSVC-FTPDATA-SRCPORT", f.key,
+                         {"src_port": sport, "dst_port": f.key[3],
+                          "dedup": "ftpdata"}, "high", now)
+        elif sport > PRIV_PORT_MAX:
+            self.em.emit("RSVC-UNPRIV-SRCPORT", f.key,
+                         {"src_port": sport, "priv_max": PRIV_PORT_MAX,
+                          "dst_port": f.key[3], "dedup": "unpriv"}, "high", now)
+
+    # -- client side -------------------------------------------------------
+    def _on_client(self, f: RshFlow, payload: bytes, now: Optional[float]):
+        if f.handshake_done:
+            return                      # command output / keystrokes: not read
+        if len(f.hs_buf) < _RL_MAX_HANDSHAKE:
+            f.hs_buf.extend(payload[:_RL_MAX_HANDSHAKE - len(f.hs_buf)])
+        fields = parse_rsh_handshake(bytes(f.hs_buf))
+        if fields is None:
+            return
+        f.handshake_done = True
+        port_s, user_a, user_b, command = fields
+
+        try:
+            f.stderr_port = int(port_s or b"0")
+        except ValueError:
+            f.stderr_port = 0
+        if f.stderr_port:
+            self.pending_stderr[self._famkey(f.key[0], f.stderr_port)] = f.key
+
+        if f.is_rexec:
+            # field 2 is the PASSWORD. Length only, never the value.
+            self.em.emit("RSVC-REXEC-CLEARTEXT-CRED", f.key,
+                         {"username_len": len(user_a),
+                          "password_len": len(user_b),
+                          "stderr_port": f.stderr_port,
+                          "note": "credential value is never inspected or "
+                                  "logged",
+                          "dedup": "rexeccred"}, "high", now)
+
+        # argument injection reuses the rlogin shape: a user field starting '-'
+        for label, value in (("local_user", user_a), ("remote_user", user_b)):
+            if (not f.is_rexec) and value[:1] == b"-":
+                self.em.emit("RSVC-RLOGIN-ARGINJECT", f.key,
+                             {"field": label, "value_len": len(value),
+                              "value_prefix": value[:2].decode("latin-1",
+                                                               "replace"),
+                              "bypass_flag": value[:2] == b"-f",
+                              "protocol": "rsh", "dedup": label}, "high", now)
+
+        # record ONLY the command's first token plus its length: the full
+        # command line routinely carries paths and secrets.
+        first = command.split()[0] if command.split() else b""
+        if not f.is_rexec and not f.session_emitted:
+            f.session_emitted = True
+            self.em.emit("RSVC-RSH-SESSION", f.key,
+                         {"cmd_first_token": first.decode("latin-1", "replace"),
+                          "cmd_len": len(command),
+                          "stderr_port": f.stderr_port,
+                          "dedup": "session"}, "high", now)
+
+        info = rcp_request_info(command)
+        if info is not None:
+            path, glob, recursive = info
+            f.rcp = RcpState(requested=path, glob=glob, recursive=recursive)
+
+    # -- server side -------------------------------------------------------
+    def _on_server(self, f: RshFlow, payload: bytes, now: Optional[float]):
+        # Mid-session tap: we joined after the handshake, so it will never
+        # parse. Still report the session, with nothing claimed about it.
+        if (not f.is_rexec) and not f.session_emitted and not f.handshake_done:
+            f.session_emitted = True
+            self.em.emit("RSVC-RSH-SESSION", f.key,
+                         {"note": "handshake not observed (mid-session tap)",
+                          "dedup": "session"}, "high", now)
+        low = payload.lower()
+        if b"password" in low or b"passwd" in low:
+            f.password_prompted = True
+        if f.rcp is not None:
+            self._on_rcp(f, payload, now)
+            return
+        f.server_bytes += len(payload.lstrip(b"\x00"))
+        if (f.handshake_done and not f.password_prompted and not f.trust_noted
+                and f.server_bytes >= self.trust_data_threshold):
+            f.trust_noted = True
+            self.em.emit("RSVC-TRUST-AUTH", f.key,
+                         {"server_bytes": f.server_bytes,
+                          "protocol": "rexec" if f.is_rexec else "rsh",
+                          "dedup": "trust"}, "high", now)
+
+    # -- rcp record stream -------------------------------------------------
+    def _on_rcp(self, f: RshFlow, payload: bytes, now: Optional[float]):
+        """Walk the server's rcp records.
+
+        File PAYLOAD is skipped by its declared size. That is load-bearing: a
+        transferred file whose CONTENT contains a line like `C0644 0 evil` would
+        otherwise be parsed as a record and fabricate findings from data.
+        """
+        st = f.rcp
+        data = payload
+        while data:
+            if st.skip:
+                n = min(st.skip, len(data))
+                st.skip -= n
+                data = data[n:]
+                continue
+            # rcp separates records with a bare 0x00 ACK byte, which is NOT
+            # newline-terminated. Glueing it onto the next record makes that
+            # record's tag 0x00 instead of C/D, so EVERY record is silently
+            # dropped -- a failure that reads as a clean transfer rather than
+            # as a parse error, and which made an earlier "legit transfer is
+            # quiet" check pass vacuously.
+            if not st.buf and data[:1] == RCP_ACK:
+                data = data[1:]
+                continue
+            nl = data.find(NEWLINE)
+            if nl < 0:
+                if len(st.buf) < _RCP_MAX_LINE:
+                    st.buf.extend(data[:_RCP_MAX_LINE - len(st.buf)])
+                return
+            line = (bytes(st.buf) + data[:nl]).lstrip(RCP_ACK)
+            st.buf = bytearray()
+            data = data[nl + 1:]
+            if st.records >= _RCP_MAX_RECORDS:
+                return
+            st.records += 1
+            self._rcp_record(f, st, line, now)
+
+    def _rcp_record(self, f: RshFlow, st: RcpState, line: bytes,
+                    now: Optional[float]):
+        if not line:
+            return
+        tag = line[:1]
+        if tag not in (b"C", b"D"):
+            return                       # T times, E end, \0 ack, \x01 warning
+        parts = line[1:].split(b" ", 2)
+        if len(parts) < 3:
+            return
+        _mode, size_s, name = parts
+        try:
+            size = int(size_s)
+        except ValueError:
+            size = 0
+        if tag == b"C":
+            st.files_seen += 1
+            st.skip = max(0, size)       # skip the file body, never parse it
+
+        detail_base = {"name_len": len(name),
+                       "requested": st.requested.decode("latin-1", "replace"),
+                       "record": tag.decode()}
+
+        # CVE-2019-7282: '.' or an empty name
+        if name in (b".", b"", b".."):
+            self.em.emit("RSVC-RCP-7282-DOTNAME", f.key,
+                         {**detail_base,
+                          "name": name.decode("latin-1", "replace"),
+                          "dedup": "dotname"}, "high", now)
+
+        # traversal: a separator or a .. component
+        if b"/" in name or b".." in name.split(b"/"):
+            self.em.emit("RSVC-RCP-7283-TRAVERSAL", f.key,
+                         {**detail_base,
+                          "name_prefix": name[:24].decode("latin-1", "replace"),
+                          "dedup": "traversal"}, "high", now)
+
+        # CVE-2019-7283: the server sent something that was not asked for.
+        # A globbed request legitimately returns many differently-named files,
+        # so it is reported at reduced confidence rather than suppressed.
+        want = st.requested.rsplit(b"/", 1)[-1]
+        unrequested = False
+        reason = ""
+        if tag == b"D" and not st.recursive:
+            unrequested, reason = True, "directory record without -r"
+        elif not st.glob:
+            if name != want:
+                unrequested, reason = True, "name does not match the request"
+            elif st.files_seen > 1:
+                unrequested, reason = True, "more files than requested"
+        elif st.files_seen > 1 and tag == b"C":
+            pass                        # glob: multiple files are expected
+        if unrequested:
+            self.em.emit("RSVC-RCP-7283-UNREQUESTED", f.key,
+                         {**detail_base, "reason": reason,
+                          "files_seen": st.files_seen,
+                          "glob_request": st.glob,
+                          "name_prefix": name[:24].decode("latin-1", "replace"),
+                          "dedup": "unrequested"},
+                         "heuristic" if st.glob else "high", now)
+
+
+# ---------------------------------------------------------------------------
+# Raw-TCP serial console (no protocol framing) -- heuristic posture only
+# ---------------------------------------------------------------------------
+# A raw console server just pipes bytes between a TCP socket and a UART. There
+# is NOTHING to parse: no option negotiation, no handshake, no version string.
+# So this can only ever be inference, and it is capped at notice/low.
+#
+# The failure mode to avoid is obvious: 2001-2099, 3001-3099 and 7001-7099 also
+# carry Java RMI, app servers, media streams and plenty else. Port alone is
+# therefore NEVER sufficient -- a session must also LOOK like a terminal, and
+# must not be a protocol we already recognise.
+
+@dataclass
+class ConsoleFlow:
+    key: Tuple
+    noted: bool = False
+    signals: Set[str] = field(default_factory=set)
+    server_bytes: int = 0
+    disqualified: bool = False
+
+
+def console_signals(data: bytes) -> Set[str]:
+    """Terminal-shaped evidence in a server->client byte run.
+
+    Each signal is something a serial console emits and a binary protocol does
+    not. Requiring several independent ones is what keeps the port ranges from
+    turning into a false-positive generator.
+    """
+    sig: Set[str] = set()
+    if not data:
+        return sig
+    if b"\x1b[" in data:
+        sig.add("ansi-csi")                       # ANSI cursor/colour control
+    if b"\r\n" in data:
+        sig.add("crlf")                           # UART line discipline
+    low = data.lower()
+    for pat, name in ((b"login:", "login-prompt"),
+                      (b"username:", "login-prompt"),
+                      (b"password", "password-prompt"),
+                      (b"press return to get started", "vendor-banner"),
+                      (b"press enter to activate", "vendor-banner"),
+                      (b"rommon", "vendor-banner"),
+                      (b"loader>", "vendor-banner"),
+                      (b"u-boot", "vendor-banner"),
+                      (b"would you like to enter the initial configuration",
+                       "vendor-banner")):
+        if pat in low:
+            sig.add(name)
+    # a bare shell/enable prompt at the end of a run
+    tail = data.rstrip()[-2:]
+    if tail[-1:] in (b"#", b"$", b">", b"%") and b"\n" in data:
+        sig.add("shell-prompt")
+    # printable-heavy content: a UART stream is text, a binary protocol is not
+    if len(data) >= 16:
+        printable = sum(1 for b in data if 32 <= b < 127 or b in (9, 10, 13))
+        if printable / len(data) >= 0.9:
+            sig.add("printable")
+    return sig
+
+
+class ConsoleEngine:
+    """Raw-TCP console posture. Shares the emitter and flow-key shape; keeps
+    its own state and never touches the Telnet or rlogin parsers."""
+
+    def __init__(self, emitter: Emitter, min_signals: int = _CONSOLE_MIN_SIGNALS):
+        self.em = emitter
+        self.flows: Dict[Tuple, ConsoleFlow] = {}
+        self.min_signals = min_signals
+
+    def _flow(self, key: Tuple) -> ConsoleFlow:
+        f = self.flows.get(key)
+        if f is None:
+            if len(self.flows) >= _MAX_FLOWS:
+                self.flows.pop(next(iter(self.flows)))
+            f = ConsoleFlow(key=key)
+            self.flows[key] = f
+        return f
+
+    def on_payload(self, key: Tuple, from_server: bool, payload: bytes,
+                   now: Optional[float] = None):
+        f = self._flow(key)
+        if f.noted or f.disqualified:
+            return
+        # If this is actually Telnet or rlogin wearing an odd port, the
+        # dedicated parsers own it -- do not also call it a raw console.
+        if payload[:1] == bytes([IAC]) or payload[:2] == bytes([IAC, IAC]):
+            f.disqualified = True
+            return
+        if not from_server:
+            return                      # client keystrokes are never inspected
+        f.server_bytes += len(payload)
+        f.signals |= console_signals(payload)
+        if len(f.signals) >= self.min_signals:
+            f.noted = True
+            self.em.emit("CONSOLE-RAW-TCP-SUSPECTED", f.key,
+                         {"signals": sorted(f.signals),
+                          "signal_count": len(f.signals),
+                          "server_bytes": f.server_bytes,
+                          "note": "heuristic: no protocol framing exists on a "
+                                  "raw console; port alone is not sufficient",
+                          "dedup": "console"}, "low", now)
+
+
 # ---------------------------------------------------------------------------
 # Live capture (the ONE scapy-importing path; never executed offline)
 # ---------------------------------------------------------------------------
-def _build_bpf(server_ports, tls_ports) -> str:
-    ports = list(server_ports) + list(tls_ports)
+def _build_bpf(server_ports, tls_ports, rservices_ports=(),
+                console_ports=()) -> str:
+    """Dual-stack capture filter.
+
+    IPv4 keeps precise `port N` terms -- IPv4 options are skippable via the IHL
+    field, so that primitive has no blind spot.
+
+    IPv6 is admitted BROADLY with a bare `ip6`, because libpcap's `port N`
+    primitive assumes a fixed-offset path to the L4 header and cannot walk an
+    IPv6 extension-header chain. MEASURED in this repo against real libpcap
+    (see the conformance tier's bpf_matrix check):
+
+        filter                                   plain HBH Rtg Frag Dest IPv4
+        tcp and (port 23)                          1    0   0    0    0    1
+        (tcp port 23) or (ip6 and tcp port 23)     1    0   0    0    0    1
+        (tcp port 23) or ip6                       1    1   1    1    1    1
+        ip6                                        1    1   1    1    1    0
+
+    Note the second row: adding an `(ip6 and tcp port N)` clause is a MEASURED
+    NO-OP -- it still relies on the same `port` primitive that cannot chase the
+    chain, so it captures 0/4 extension-header types. Only a bare `ip6` works.
+
+    The cost is that ALL IPv6 traffic reaches Python; run_capture's handler
+    re-applies the real port gate in software. Telnet is a low-volume
+    management-plane protocol, so that over-admission is cheap here.
+    """
+    ports = list(server_ports) + list(tls_ports) + list(rservices_ports) \
+            + list(console_ports)
     terms = " or ".join(f"port {p}" for p in ports)
-    return f"tcp and ({terms})"
+    if rservices_ports:
+        # rsh's stderr channel lands on a port in no configured set. Both ends
+        # of that back-connect are privileged, so admitting the range is what
+        # makes the correlation capturable at all. MEASURED: `tcp port 514`
+        # alone sees 0 of it; adding portrange 512-1023 sees it on both
+        # families while still excluding ordinary ephemeral traffic.
+        lo, hi = PRIV_PORTRANGE
+        terms += f" or portrange {lo}-{hi}"
+    ipv4 = f"tcp and ({terms})"
+    return f"({ipv4}) or ip6"
 
 
 def run_capture(iface: str, engine: Engine, server_ports, tls_ports,
-                timeout: Optional[int] = None):  # pragma: no cover
+                timeout: Optional[int] = None,
+                offline: Optional[str] = None,
+                rservices_ports=(),
+                rlogin_engine: "Optional[RloginEngine]" = None,
+                console_ports=(),
+                console_engine: "Optional[ConsoleEngine]" = None,
+                rsh_engine: "Optional[RshEngine]" = None):  # pragma: no cover
+    """Passive capture. With `offline`, read frames from a pcap instead of a
+    live interface -- scapy still compiles and applies the SAME BPF through
+    real libpcap, so offline replay is a genuine test of the capture path
+    (measured: a filter that drops IPv6 extension headers drops them offline
+    too). Used by the dual-stack replay tier on hosts without an IPv6 stack."""
     from scapy.all import sniff, TCP, IP, IPv6, Raw  # lazy import
 
     server_set = set(server_ports)
     tls_set = set(tls_ports)
+    rsvc_set = set(rservices_ports)
+    console_set = set(console_ports)
 
     def handle(pkt):
         if TCP not in pkt:
@@ -775,6 +1838,43 @@ def run_capture(iface: str, engine: Engine, server_ports, tls_ports,
         if dport in tls_set or sport in tls_set:
             # observed but not dissected (encrypted)
             return
+        # r-services first: a separate protocol on its own ports, dispatched
+        # by port and handed to its own parser. rlogin has no IAC framing, so
+        # feeding it to the Telnet state machine would be actively wrong.
+        # rsh / rexec, and the stderr back-connect they spawn
+        if rsh_engine is not None and (dport in (RSH_PORT, REXEC_PORT)
+                                       or sport in (RSH_PORT, REXEC_PORT)):
+            if dport in (RSH_PORT, REXEC_PORT):
+                r_from_server, r_key = False, (src, sport, dst, dport)
+                is_rexec = dport == REXEC_PORT
+            else:
+                r_from_server, r_key = True, (dst, dport, src, sport)
+                is_rexec = sport == REXEC_PORT
+            if payload:
+                rsh_engine.on_payload(r_key, r_from_server, payload,
+                                      is_rexec=is_rexec)
+            return
+        if rsh_engine is not None and PRIV_PORTRANGE[0] <= dport <= PRIV_PORTRANGE[1]:
+            # possible stderr back-connect: server -> client's advertised port
+            if rsh_engine.on_backconnect(dst, dport):
+                return
+        if rlogin_engine is not None and (dport in rsvc_set or sport in rsvc_set):
+            if dport in rsvc_set:
+                rl_from_server, rl_key = False, (src, sport, dst, dport)
+            else:
+                rl_from_server, rl_key = True, (dst, dport, src, sport)
+            if payload:
+                rlogin_engine.on_payload(rl_key, rl_from_server, payload)
+            return
+        if console_engine is not None and (dport in console_set
+                                           or sport in console_set):
+            if dport in console_set:
+                c_from_server, c_key = False, (src, sport, dst, dport)
+            else:
+                c_from_server, c_key = True, (dst, dport, src, sport)
+            if payload:
+                console_engine.on_payload(c_key, c_from_server, payload)
+            return
         if dport in server_set:
             from_server = False
             key = (src, sport, dst, dport)
@@ -782,19 +1882,30 @@ def run_capture(iface: str, engine: Engine, server_ports, tls_ports,
             from_server = True
             key = (dst, dport, src, sport)
         else:
+            # LOAD-BEARING under the dual-stack BPF: the filter admits ALL IPv6
+            # traffic (it must -- see _build_bpf), so this software gate is the
+            # only thing rejecting non-telnet IPv6. Removing it would flood the
+            # engine with every IPv6 packet on the tap.
             return
         if payload:
             engine.on_payload(key, from_server, payload)
 
-    bpf = _build_bpf(server_ports, tls_ports)
-    sniff(iface=iface, filter=bpf, prn=handle, store=False, timeout=timeout)
+    bpf = _build_bpf(server_ports, tls_ports, rservices_ports,
+                     console_ports)
+    if offline:
+        sniff(offline=offline, filter=bpf, prn=handle, store=False)
+    else:
+        sniff(iface=iface, filter=bpf, prn=handle, store=False, timeout=timeout)
 
 
 # ---------------------------------------------------------------------------
 # In-app adapter. Ragnar wires telnetwatch into the Network Tools UI the same way
 # it wires tls_watch / ssh_watch: a bounded tcpdump capture into a temp pcap,
-# replayed through the SAME passive Engine used by run_capture(), returning one
-# verdict dict for the card. No detection logic lives here.
+# replayed through run_capture(offline=...) — the SAME dispatcher, engines and BPF
+# the live path uses (Telnet, rlogin, rsh/rexec + the stderr back-connect), so
+# the in-app path can never drift from upstream detection. No detection logic
+# lives here. (The passive-invariant AST guard in the self-test bans packet
+# transmit primitives; tcpdump via subprocess is capture, not transmit.)
 # ---------------------------------------------------------------------------
 class _CollectEmitter(Emitter):
     """Emitter that keeps the emitted records in a list instead of printing JSON."""
@@ -811,20 +1922,22 @@ class _CollectEmitter(Emitter):
         return rec
 
 
-def _capture_pcap(interface, seconds, ports):
+def _capture_pcap(interface, seconds, server_ports, tls_ports, rservices_ports):
     """Run tcpdump for `seconds` into a temp pcap and return its path. Passive: -w
-    only, no probes. Returns None if tcpdump is unavailable."""
+    only, no probes. Uses the module's own dual-stack BPF (bare `ip6` for extension-
+    header chains, plus the privileged portrange the rsh stderr back-connect lands
+    on). Returns None if tcpdump is unavailable."""
     import shutil
     import subprocess
     import tempfile
     if not shutil.which("tcpdump"):
         return None
-    bpf = "tcp and (" + " or ".join("port %d" % p for p in ports) + ")"
+    bpf = _build_bpf(server_ports, tls_ports, rservices_ports)
     fd, path = tempfile.mkstemp(suffix=".pcap", prefix="telnetwatch_")
     os.close(fd)
     try:
         subprocess.run(["tcpdump", "-i", interface, "-w", path, "-s", "0", "-U",
-                        "-q", bpf], timeout=seconds, capture_output=True)
+                        "-q", "-c", "20000", bpf], timeout=seconds, capture_output=True)
     except subprocess.TimeoutExpired:
         pass                                       # expected: we run for the window
     except Exception:
@@ -832,55 +1945,24 @@ def _capture_pcap(interface, seconds, ports):
     return path
 
 
-def _replay_pcap(path, engine, server_set):
-    """Feed a captured pcap through the Engine exactly as run_capture() does, keying
-    each flow client->server and marking direction by the well-known server port."""
-    from scapy.all import PcapReader
-    from scapy.layers.inet import IP, TCP
-    try:
-        from scapy.layers.inet6 import IPv6
-    except Exception:
-        IPv6 = None
-    from scapy.packet import Raw
-    n = 0
-    with PcapReader(path) as pr:
-        for pkt in pr:
-            try:
-                if TCP not in pkt:
-                    continue
-                if IP in pkt:
-                    src, dst = pkt[IP].src, pkt[IP].dst
-                elif IPv6 is not None and IPv6 in pkt:
-                    src, dst = pkt[IPv6].src, pkt[IPv6].dst
-                else:
-                    continue
-                t = pkt[TCP]
-                sport, dport = int(t.sport), int(t.dport)
-                if dport in server_set:
-                    from_server, key = False, (src, sport, dst, dport)
-                elif sport in server_set:
-                    from_server, key = True, (dst, dport, src, sport)
-                else:
-                    continue
-                payload = bytes(t[Raw].load) if Raw in t else b""
-                if payload:
-                    engine.on_payload(key, from_server, payload, now=float(pkt.time))
-                    n += 1
-            except Exception:
-                continue
-    return n
+def _telnet_verdict(findings):
+    """compromised: a critical ATTACK-class finding (the payload is the evidence —
+    argument injection, SLC/key-id overflow, rlogin -f injection, ftp-data bounce)
+    or a server proven vulnerable; suspicious: any critical/high/warning finding
+    (cleartext credentials, trust auth, recon/flood probes); else clean."""
+    if any((f["severity"] == "critical" and f["class"] == "attack")
+           or f["code"] == "TELNET-32746-VULN-CONFIRMED" for f in findings):
+        return "compromised"
+    if any(f["severity"] in ("critical", "high", "warning") for f in findings):
+        return "suspicious"
+    return "clean"
 
 
-_TELNET_CRITICAL = frozenset(("TELNET-24061-ARGINJECT", "TELNET-32746-SLC-OVERFLOW",
-                              "TELNET-32746-VULN-CONFIRMED"))
+_CVE_RE = re.compile(r"CVE-\d{4}-\d{4,}")
 
 
 def _telnet_summarize(records, interface, seconds):
-    """Group emitted records per flow and roll up one verdict. Telnet payload is
-    cleartext end to end, so an attack signature is the payload itself: a confirmed
-    argument-injection, a live overflow attempt, or a server proven vulnerable are
-    'compromised'; a cleartext-credential exposure or an oversize/flood probe is
-    'suspicious'; posture-only observation is 'clean'."""
+    """Group emitted records per flow and roll up one verdict."""
     flows = {}
     order = []
     for r in records:
@@ -892,17 +1974,11 @@ def _telnet_summarize(records, interface, seconds):
         flows[fk]["findings"].append({
             "code": r["code"], "severity": r["severity"], "class": r["class"],
             "confidence": r["confidence"], "desc": r["desc"],
+            "cves": sorted(set(_CVE_RE.findall(r.get("desc") or ""))),
             "detail": r.get("detail", {})})
     rows = [flows[k] for k in order]
     all_f = [f for row in rows for f in row["findings"]]
-    codes = {f["code"] for f in all_f}
-    if codes & _TELNET_CRITICAL:
-        verdict = "compromised"
-    elif any(f["severity"] in ("high", "warning") for f in all_f):
-        verdict = "suspicious"
-    else:
-        verdict = "clean"
-    return {"success": True, "verdict": verdict, "sessions": rows,
+    return {"success": True, "verdict": _telnet_verdict(all_f), "sessions": rows,
             "count": len(rows), "findings_total": len(all_f),
             "interface": interface, "seconds": seconds}
 
@@ -910,17 +1986,17 @@ def _telnet_summarize(records, interface, seconds):
 # --- Watchtower feed: append findings as JSON-lines so the unified alert pane tails them ---
 _WT_LOG_DIR = os.environ.get("RAGNAR_WATCH_LOG_DIR", "/var/log/ragnar")
 _WT_DEDUP_S = 300.0                    # don't re-log the same standing finding within 5 min
-_WT_SKIP_SEV = frozenset(("info",))   # pure posture/inventory stays off the alert pane
+_WT_EMIT_SEV = frozenset(("critical", "high"))   # posture/recon stay off the alert pane
 _wt_lock = threading.Lock()
 _wt_seen = {}                         # (code, server) -> last-emitted epoch
 
 
 def _emit_watchtower(result):
-    """Append each non-info Telnet finding to <log-dir>/telnet_watch.jsonl in the shape
-    Watchtower.normalize() reads, so the unified alert pane and its single Pushover path
-    fold in the in-app Telnet observer alongside the standalone watchers. Time-window
-    deduplicated per (code, server) so the background rotation can't spam a standing
-    condition. Best-effort: the scan never fails because logging did."""
+    """Append each HIGH/CRITICAL Telnet / r-services finding to
+    <log-dir>/telnet_watch.jsonl in the shape Watchtower.normalize() reads, so the
+    unified alert pane and its single Pushover path fold them in. Time-window
+    deduplicated per (code, server). Best-effort: the scan never fails because
+    logging did."""
     if not result.get("success"):
         return
     verdict = result.get("verdict", "clean")
@@ -933,7 +2009,7 @@ def _emit_watchtower(result):
             server, client = row.get("server"), row.get("client")
             for f in row.get("findings", []):
                 sev = f.get("severity")
-                if sev in _WT_SKIP_SEV:
+                if sev not in _WT_EMIT_SEV:
                     continue
                 code = f.get("code")
                 key = (code, server)
@@ -941,14 +2017,11 @@ def _emit_watchtower(result):
                 if last is not None and now - last < _WT_DEDUP_S:
                     continue
                 _wt_seen[key] = now
-                detail = f.get("detail") or {}
-                cves = detail.get("cves") if isinstance(detail, dict) else None
                 lines.append(json.dumps({
                     "module": "telnet_watch", "ts": now, "iso": iso, "iface": iface,
                     "severity": sev, "code": code, "codes": [code],
                     "class": f.get("class"), "confidence": f.get("confidence"),
-                    "src": server, "target": client,
-                    "cves": cves if isinstance(cves, list) else [],
+                    "src": server, "target": client, "cves": f.get("cves") or [],
                     "summary": f.get("desc"), "verdict": verdict}))
         if len(_wt_seen) > 4096:
             cutoff = now - _WT_DEDUP_S
@@ -964,12 +2037,16 @@ def _emit_watchtower(result):
         pass
 
 
-def do_telnet_watch(interface=None, seconds=12, server_ports=DEFAULT_SERVER_PORTS):
-    """Passive Telnet observation on `interface` for `seconds`. Telnet is cleartext
-    end to end, so the whole session — option negotiation and payload — is readable
-    from a tap. Detects CVE-2026-24061 (login argument injection) and CVE-2026-32746
-    (LINEMODE SLC overflow), plus cleartext-credential exposure. Never transmits.
-    Requires root (raw capture) and tcpdump; scapy for pcap dissection."""
+def do_telnet_watch(interface=None, seconds=12, server_ports=DEFAULT_SERVER_PORTS,
+                    rservices_ports=DEFAULT_RSERVICES_PORTS, quick=False):
+    """Passive Telnet + r-services observation on `interface` for `seconds`. Both are
+    cleartext end to end, so the whole session is readable from a tap. Telnet:
+    CVE-2026-24061 (login -f argument injection), CVE-2026-32746 (LINEMODE SLC
+    overflow), CVE-2011-4862 (encrypt key-id overflow), CVE-2022-39028 (EC/EL
+    pre-auth crash). r-services: rlogin -froot injection (CVE-1999-0113), rsh
+    ftp-data trust bounce (CVE-1999-0185), rcp dot-name / unrequested / traversal
+    (CVE-2019-7282 / CVE-2019-7283), rexec cleartext credentials and .rhosts trust.
+    Never transmits. Requires tcpdump; scapy for pcap dissection."""
     seconds = max(4, min(int(seconds or 12), 60))
     if not interface:
         return {"success": False, "error": "no interface specified"}
@@ -979,14 +2056,19 @@ def do_telnet_watch(interface=None, seconds=12, server_ports=DEFAULT_SERVER_PORT
         return {"success": False, "missing_tool": "scapy",
                 "error": 'the Python "scapy" package is required for pcap dissection'}
     ports = tuple(int(p) for p in server_ports)
-    pcap = _capture_pcap(interface, seconds, ports)
+    tls = tuple(DEFAULT_TLS_PORTS)
+    rsvc = tuple(int(p) for p in (rservices_ports or ()))
+    pcap = _capture_pcap(interface, seconds, ports, tls, rsvc)
     if not pcap:
         return {"success": False, "missing_tool": "tcpdump",
                 "error": "tcpdump is required for capture"}
     em = _CollectEmitter(min_sev="info", dedup_secs=60.0)
     eng = Engine(em)
     try:
-        _replay_pcap(pcap, eng, set(ports))
+        run_capture(None, eng, ports, tls, offline=pcap,
+                    rservices_ports=rsvc,
+                    rlogin_engine=RloginEngine(em) if rsvc else None,
+                    rsh_engine=RshEngine(em) if rsvc else None)
     except Exception as e:
         return {"success": False, "error": "pcap parse failed: {}".format(e)}
     finally:
@@ -994,7 +2076,10 @@ def do_telnet_watch(interface=None, seconds=12, server_ports=DEFAULT_SERVER_PORT
             os.unlink(pcap)
         except OSError:
             pass
-    return _telnet_summarize(em.records, interface, seconds)
+    result = _telnet_summarize(em.records, interface, seconds)
+    if not quick:
+        _emit_watchtower(result)
+    return result
 
 
 def selftest() -> dict:
@@ -1032,6 +2117,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="cleartext telnet server ports (comma-separated)")
     p.add_argument("--tls-ports", default=",".join(map(str, DEFAULT_TLS_PORTS)),
                    help="telnet-over-TLS ports, observed not dissected")
+    p.add_argument("--console-ports", default="",
+                   help="raw-TCP console-server ports (e.g. 2001-2099); "
+                        "empty disables. Heuristic posture only")
+    p.add_argument("--rservices-ports",
+                   default=",".join(map(str, DEFAULT_RSERVICES_PORTS)),
+                   help="r-services ports (rlogin); empty string disables")
     p.add_argument("--min-severity", default="info",
                    choices=list(_SEV_RANK.keys()))
     p.add_argument("--timeout", type=int, default=None,
@@ -1039,11 +2130,37 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--dedup-secs", type=float, default=60.0)
     p.add_argument("--pushover-token", default=os.environ.get("PUSHOVER_TOKEN"))
     p.add_argument("--pushover-user", default=os.environ.get("PUSHOVER_USER"))
+    p.add_argument("--offline", default=None,
+                   help="replay a pcap instead of live capture (same BPF)")
     p.add_argument("--print-codes", action="store_true",
                    help="print the finding catalog and exit")
     p.add_argument("--selftest", action="store_true",
                    help="run the built-in self-test and exit")
     return p
+
+
+def _port_ranges(s: str) -> Tuple[int, ...]:
+    """Parse a comma list that may contain `a-b` ranges (console port blocks
+    are naturally ranges, unlike the single service ports elsewhere)."""
+    out: List[int] = []
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, _, b = part.partition("-")
+            try:
+                lo, hi = int(a), int(b)
+            except ValueError:
+                continue
+            if lo <= hi and hi - lo <= 4096:
+                out.extend(range(lo, hi + 1))
+        else:
+            try:
+                out.append(int(part))
+            except ValueError:
+                continue
+    return tuple(out)
 
 
 def _ports(s: str) -> Tuple[int, ...]:
@@ -1066,12 +2183,20 @@ def main(argv=None) -> int:
     em = Emitter(min_sev=args.min_severity, pushover=push,
                  dedup_secs=args.dedup_secs)
     eng = Engine(em)
-    if not args.iface:
-        print("error: --iface required for capture (or use --selftest / "
+    if not args.iface and not args.offline:
+        print("error: --iface or --offline required (or use --selftest / "
               "--print-codes)", file=sys.stderr)
         return 2
+    rsvc = _ports(args.rservices_ports)
+    rl_eng = RloginEngine(em) if rsvc else None
+    rsh_eng = RshEngine(em) if rsvc else None
+    cons = _port_ranges(args.console_ports)
+    cons_eng = ConsoleEngine(em) if cons else None
     run_capture(args.iface, eng, _ports(args.server_ports),
-                _ports(args.tls_ports), timeout=args.timeout)
+                _ports(args.tls_ports), timeout=args.timeout,
+                offline=args.offline, rservices_ports=rsvc,
+                rlogin_engine=rl_eng, console_ports=cons,
+                console_engine=cons_eng, rsh_engine=rsh_eng)
     return 0
 
 

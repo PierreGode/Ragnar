@@ -28,8 +28,9 @@ whenever **Extended Monitoring** is on.
 
 The in-app **L5–L7 observers** [`ssh_watch`](nettools.md#ssh-watch) and
 [`telnet_watch`](nettools.md#telnet-watch) feed the pane the same way, appending
-their **non-`info`** findings to `/var/log/ragnar/ssh_watch.jsonl` and
-`/var/log/ragnar/telnet_watch.jsonl` (deduplicated per code + server). Pure
+their findings to `/var/log/ragnar/ssh_watch.jsonl` (**non-`info`**) and
+`/var/log/ragnar/telnet_watch.jsonl` (**HIGH/CRITICAL**, Telnet and r-services alike),
+deduplicated per code + server. Pure
 inventory/posture stays off the pane; a Terrapin exposure lands as **high** and a
 confirmed Telnet argument injection as **critical**. Both also run in the Network
 Integrity Monitor rotation, so their verdicts surface there as chips as well.

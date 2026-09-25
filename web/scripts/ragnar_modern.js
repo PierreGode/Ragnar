@@ -7882,9 +7882,9 @@ async function runSshWatch() {
 
 // ---- Telnet Watch (passive CVE-2026-24061 / 32746 observer) ----------------
 const _TELNET_VERDICT_STYLE = {
-    clean:       ['bg-green-950/40 border-green-900 text-green-400', '✓ No Telnet attack signatures or cleartext-credential exposure'],
-    suspicious:  ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Telnet exposure — cleartext credentials or an SLC probe; review the findings'],
-    compromised: ['bg-red-950/60 border-red-800 text-red-300', '🛑 Telnet attack on the wire — argument injection, SLC overflow, or a confirmed-vulnerable server'],
+    clean:       ['bg-green-950/40 border-green-900 text-green-400', '✓ No Telnet / r-services attack signatures or cleartext-credential exposure'],
+    suspicious:  ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Telnet / r-services exposure — cleartext credentials, .rhosts trust, an SLC probe or an EC/EL crash attempt; review the findings'],
+    compromised: ['bg-red-950/60 border-red-800 text-red-300', '🛑 Remote-login attack on the wire — login -f argument injection (Telnet or rlogin/rsh), SLC or key-id overflow, an ftp-data trust bounce, or a confirmed-vulnerable server'],
     unknown:     ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
 const _TELNET_SEV_COLOR = { critical: 'text-red-300', high: 'text-red-300', warning: 'text-amber-300', notice: 'text-gray-300', low: 'text-gray-400', info: 'text-gray-500' };
