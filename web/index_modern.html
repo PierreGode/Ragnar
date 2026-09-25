@@ -417,6 +417,29 @@
         .pw-table th { text-align: left; font-weight: 500; color: #94a3b8; font-size: 12px; padding: 4px 6px; }
         .pw-table td { padding: 4px 6px; border-top: 1px solid #1e293b; font-family: ui-monospace, monospace; }
         .pw-table td:first-child { font-family: inherit; color: #cbd5e1; }
+        .sys-panel { padding: 16px; }
+        .sys-traffic { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+        @media (max-width: 639px) {
+            .sys-stats { gap: 8px; }
+            .sys-stat { padding: 10px 12px; }
+            .sys-stat-value { font-size: 1.2rem; }
+            .sys-stat-wide { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
+            .sys-stat-wide .sys-stat-label { width: 100%; }
+            .sys-panel { padding: 12px; }
+            .sys-traffic { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+            .pw-tiles { grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 6px; }
+            .pw-tile { padding: 6px 8px; }
+            .pw-tile-value { font-size: .95rem; }
+            .pw-row { font-size: 12.5px; }
+            .pw-fix .pw-btn { width: 100%; }
+            .pw-hide-phone { display: none; }
+            .pw-loads { flex-direction: column; gap: 10px; width: 100%; }
+            .pw-loads label { font-size: 14px; min-height: 28px; }
+            .pw-test-run { width: 100%; }
+            .pw-test-run .pw-btn { flex: 1; }
+            .pw-table { font-size: 12px; }
+            .pw-table th, .pw-table td { padding: 4px 4px; }
+        }
         .wifi-hm-btn {
             display: inline-flex;
             align-items: center;
@@ -5469,10 +5492,10 @@
 
         <!-- System Tab -->
         <div id="system-tab" class="tab-content hidden">
-            <div class="glass rounded-xl p-6">
-                <div class="flex items-center justify-between mb-6">
-                    <h2 class="text-2xl font-bold">System</h2>
-                    <button onclick="refreshSystemStatus()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
+            <div class="glass rounded-xl p-4 sm:p-6">
+                <div class="flex items-center justify-between mb-4 sm:mb-6">
+                    <h2 class="text-xl sm:text-2xl font-bold">System</h2>
+                    <button onclick="refreshSystemStatus()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 sm:px-4 py-2 rounded-lg transition-colors">
                         <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
                         </svg>
@@ -5481,7 +5504,12 @@
                 </div>
 
                 <!-- Overview: one compact stat per card -->
-                <div class="sys-stats mb-6">
+                <div class="sys-stats mb-4 sm:mb-6">
+                    <div id="power-card" class="glass-card sys-stat sys-stat-wide hidden">
+                        <div class="sys-stat-label">Power</div>
+                        <div class="sys-stat-value" id="power-card-status">--</div>
+                        <div class="sys-stat-sub" id="power-card-details">&nbsp;</div>
+                    </div>
                     <div class="glass-card sys-stat">
                         <div class="sys-stat-label">CPU</div>
                         <div class="sys-stat-value" id="cpu-usage">--</div>
@@ -5516,11 +5544,6 @@
                         <div class="sys-stat-value" id="uptime-display">--</div>
                         <div class="sys-stat-sub" id="uptime-details">&nbsp;</div>
                     </div>
-                    <div id="power-card" class="glass-card sys-stat hidden">
-                        <div class="sys-stat-label">Power</div>
-                        <div class="sys-stat-value" id="power-card-status">--</div>
-                        <div class="sys-stat-sub" id="power-card-details">&nbsp;</div>
-                    </div>
                     <!-- PiSugar (only when detected) -->
                     <div id="battery-card" class="glass-card sys-stat hidden">
                         <div class="sys-stat-label">Battery</div>
@@ -5546,16 +5569,16 @@
                 </div>
 
                 <!-- Power & Supply -->
-                <div id="power-detail-panel" class="glass-card p-4 mb-6 hidden">
+                <div id="power-detail-panel" class="glass-card sys-panel mb-4 sm:mb-6 hidden">
                     <h3 class="font-semibold mb-3">Power &amp; Supply</h3>
                     <div id="power-detail-body" class="text-sm text-gray-300">Loading…</div>
                 </div>
 
                 <!-- Power test -->
-                <div id="power-test-panel" class="glass-card p-4 mb-6 hidden">
+                <div id="power-test-panel" class="glass-card sys-panel mb-4 sm:mb-6 hidden">
                     <div class="flex items-center justify-between gap-3 mb-3">
                         <h3 class="font-semibold">Power test</h3>
-                        <span class="pw-muted">idle phase, then load phase</span>
+                        <span class="pw-muted pw-hide-phone">idle phase, then load phase</span>
                     </div>
                     <div class="pw-test-controls">
                         <div id="power-test-loads" class="pw-loads"></div>
@@ -5573,8 +5596,8 @@
                 </div>
 
                 <!-- Processes + interfaces -->
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <div class="glass-card p-4">
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+                    <div class="glass-card sys-panel">
                         <div class="flex items-center justify-between mb-4">
                             <h3 class="font-semibold">Top processes</h3>
                             <div class="flex gap-2">
@@ -5586,7 +5609,7 @@
                             <p class="text-gray-400 text-center py-4">Loading…</p>
                         </div>
                     </div>
-                    <div class="glass-card p-4">
+                    <div class="glass-card sys-panel">
                         <h3 class="font-semibold mb-4">Network interfaces</h3>
                         <div id="network-interfaces" class="space-y-3 max-h-64 overflow-y-auto scrollbar-thin">
                             <p class="text-gray-400 text-center py-4">Loading…</p>
@@ -5594,9 +5617,9 @@
                     </div>
                 </div>
 
-                <div class="glass-card p-4 mt-6">
+                <div class="glass-card sys-panel mt-4 sm:mt-6">
                     <h3 class="font-semibold mb-4">Network traffic</h3>
-                    <div id="network-stats" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div id="network-stats" class="sys-traffic">
                         <p class="text-gray-400 col-span-full text-center py-4">Loading…</p>
                     </div>
                 </div>
@@ -8763,7 +8786,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260925-power-test-gps"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260925-system-mobile"></script>
 
 
 
