@@ -1,0 +1,51 @@
+[Unit]
+# Ragnar arp_guard — dedicated passive layered ARP-poisoning monitor.
+# OPT-IN. Runs arp_guard.py on the segment interface, RX-only — it never sends a
+# corrective ARP or any packet. Granted CAP_NET_RAW + CAP_NET_ADMIN (raw capture
+# + promiscuous) and nothing else.
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin arpmon
+#   sudo mkdir -p /var/log/arp-guard && sudo chown arpmon:arpmon /var/log/arp-guard
+#   sudo install -Dm644 python/arp_guard.example.json /etc/ragnar/arp_guard.json
+#   sudo cp scripts/arp-guard.service /etc/systemd/system/
+#   sudoedit /etc/systemd/system/arp-guard.service   # set RAGNAR_ARP_IFACE
+#   sudo systemctl enable --now arp-guard
+#   journalctl -u arp-guard -f
+Description=Ragnar arp_guard passive ARP-poisoning monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=arpmon
+Group=arpmon
+WorkingDirectory=/home/ragnar/Ragnar/python
+Environment=RAGNAR_ARP_IFACE=eth0
+ExecStartPre=/bin/mkdir -p /var/log/arp-guard
+ExecStart=/usr/bin/python3 /home/ragnar/Ragnar/python/arp_guard.py \
+    -i ${RAGNAR_ARP_IFACE} -c /etc/ragnar/arp_guard.json \
+    --jsonl /var/log/arp-guard/alerts.jsonl
+Restart=on-failure
+RestartSec=5
+
+# --- least privilege: sniff only ------------------------------------------
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_PACKET AF_UNIX
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log/arp-guard
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

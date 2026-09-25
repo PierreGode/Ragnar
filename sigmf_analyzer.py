@@ -1,0 +1,3363 @@
+#!/usr/bin/env python3
+"""sigmf_analyzer.py — on-box analysis of the RF Waterfall's SigMF IQ captures.
+
+The RF Waterfall's ``⤓ SigMF`` button ([[rtl_sdr]] IqCapture) writes raw IQ
+recordings (``data/iq_captures/<name>.sigmf-data`` + ``.sigmf-meta``). Desktop
+tools (inspectrum / URH / GNU Radio) analyse those on a laptop; this module does
+it **on the Pi** so the "Open in Analyzer" page works straight from a phone.
+
+Everything heavy runs here in numpy/scipy and the page is just a viewer that
+requests windows:
+
+  * :func:`summary`     — center/rate/duration, measured noise floor, peak
+    offset, occupied bandwidth, burst count.
+  * :func:`spectrogram` — a zoomable time x frequency power grid for any
+    [t0,t1] x [f0,f1] window, returned as a compact base64 uint8 image the page
+    colours with the waterfall palette.
+  * :func:`psd`         — averaged power spectrum over a time range.
+  * :func:`envelope`    — amplitude-over-time (for AM/OOK + burst spotting).
+  * :func:`bursts`      — automatic on/off packet detection (start/end/BW/level).
+  * :func:`demod`       — shift/filter/demodulate a chosen signal (AM-OOK or
+    FM-FSK), estimate the symbol rate and recover a bitstream.
+
+SigMF datatype ``cu8`` (interleaved unsigned-8 I/Q — the RTL-SDR's native form)
+is the primary format; ``cs8`` is also accepted. Pure DSP helpers are
+selftested against a synthesised capture (a tone + an OOK burst), no hardware.
+"""
+
+import base64
+import json
+import math
+import os
+import struct
+import time
+
+
+def _cap_dir():
+    # Mirror rtl_sdr._iq_cap_dir() without a hard import dependency.
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "iq_captures")
+
+
+def _safe(name):
+    import re
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(name or ""))[:80]
+
+
+# --------------------------------------------------------------------------
+# Loading (cached by name + mtime so repeated window requests are cheap)
+# --------------------------------------------------------------------------
+
+_CACHE = {}          # name -> (mtime, iq(complex64), fs, fc, meta)
+_CACHE_MAX = 3       # keep only a few captures resident (they can be tens of MB)
+
+
+def _paths(name):
+    base = os.path.join(_cap_dir(), _safe(name))
+    return base + ".sigmf-data", base + ".sigmf-meta"
+
+
+def load(name):
+    """Return (iq complex64, fs Hz, fc Hz, meta) for a capture, or raise ValueError."""
+    import numpy as np
+    data_p, meta_p = _paths(name)
+    if not os.path.exists(data_p) or not os.path.exists(meta_p):
+        raise ValueError("capture not found")
+    mtime = os.path.getmtime(data_p)
+    hit = _CACHE.get(name)
+    if hit and hit[0] == mtime:
+        return hit[1], hit[2], hit[3], hit[4]
+    with open(meta_p) as fh:
+        meta = json.load(fh)
+    g = meta.get("global", {})
+    cap0 = (meta.get("captures") or [{}])[0]
+    fs = float(g.get("core:sample_rate") or 0) or 1.0
+    fc = float(cap0.get("core:frequency") or 0)
+    dtype = (g.get("core:datatype") or "cu8").lower()
+    # Decode the common SigMF/SDR interleaved-IQ datatypes to normalised complex64.
+    if dtype.startswith("cf64"):                      # complex float64
+        a = np.fromfile(data_p, dtype="<f8"); a = a[: (a.size // 2) * 2].astype(np.float32)
+        iq = a[0::2] + 1j * a[1::2]
+    elif dtype.startswith("cf32"):                    # complex float32 (GNU Radio, IQEngine)
+        a = np.fromfile(data_p, dtype="<f4"); a = a[: (a.size // 2) * 2]
+        iq = a[0::2] + 1j * a[1::2]
+    elif dtype.startswith("ci16") or dtype.startswith("cs16"):   # signed 16-bit
+        a = np.fromfile(data_p, dtype="<i2").astype(np.float32); a = a[: (a.size // 2) * 2]
+        iq = (a[0::2] + 1j * a[1::2]) / 32768.0
+    elif dtype.startswith("cu16"):                    # unsigned 16-bit
+        a = np.fromfile(data_p, dtype="<u2").astype(np.float32) - 32768.0; a = a[: (a.size // 2) * 2]
+        iq = (a[0::2] + 1j * a[1::2]) / 32768.0
+    elif dtype.startswith("cs8") or dtype.startswith("ci8"):     # signed 8-bit
+        raw = np.fromfile(data_p, dtype=np.uint8); raw = raw[: (raw.size // 2) * 2]
+        s = raw.astype(np.int8).astype(np.float32)
+        iq = (s[0::2] + 1j * s[1::2]) / 128.0
+    else:                                             # cu8 (default): unsigned 8-bit
+        raw = np.fromfile(data_p, dtype=np.uint8); raw = raw[: (raw.size // 2) * 2]
+        f = raw.astype(np.float32) - 127.5
+        iq = (f[0::2] + 1j * f[1::2]) / 127.5
+    iq = iq.astype(np.complex64)
+    if len(_CACHE) >= _CACHE_MAX:
+        _CACHE.pop(next(iter(_CACHE)))
+    _CACHE[name] = (mtime, iq, fs, fc, meta)
+    return iq, fs, fc, meta
+
+
+def list_captures():
+    """Every capture in the dir with both sidecars, **newest first** (by mtime)."""
+    import glob
+    rows = []
+    for meta_p in glob.glob(os.path.join(_cap_dir(), "*.sigmf-meta")):
+        base = os.path.basename(meta_p)[:-len(".sigmf-meta")]
+        data_p = meta_p[:-len(".sigmf-meta")] + ".sigmf-data"
+        if not os.path.exists(data_p):
+            continue
+        try:
+            m = json.load(open(meta_p))
+            g, c = m.get("global", {}), (m.get("captures") or [{}])[0]
+            fs = float(g.get("core:sample_rate") or 0)
+            nbytes = os.path.getsize(data_p)
+            mtime = os.path.getmtime(data_p)
+            rows.append((mtime, {"name": base, "sr_hz": fs,
+                                 "center_hz": c.get("core:frequency"),
+                                 "datetime": c.get("core:datetime"),
+                                 "bytes": nbytes, "mtime": mtime,
+                                 "duration_s": round(nbytes / 2 / fs, 3) if fs else None}))
+        except (OSError, ValueError):
+            continue
+    rows.sort(key=lambda r: r[0], reverse=True)      # newest capture first
+    return {"captures": [r[1] for r in rows]}
+
+
+# --------------------------------------------------------------------------
+# Pure DSP helpers (numpy) — selftested on synthetic signals
+# --------------------------------------------------------------------------
+
+def _noise_floor_db(psd_db):
+    import numpy as np
+    return float(np.percentile(psd_db, 30))
+
+
+def welch_psd(iq, fs, nfft=4096, reduce="mean"):
+    """Power spectrum (fftshifted), returns (freqs_hz, db). ``reduce`` is
+    ``"mean"`` (averaged / Welch) or ``"max"`` (max-hold across time — reveals
+    intermittent carriers a mean would bury). Pure-ish."""
+    import numpy as np
+    n = len(iq)
+    if n < nfft:
+        nfft = 1 << max(6, int(np.log2(max(2, n))))
+    win = np.hanning(nfft).astype(np.float32)
+    ncol = max(1, (n - nfft) // (nfft // 2) + 1)
+    ncol = min(ncol, 400)
+    starts = np.linspace(0, max(0, n - nfft), ncol).astype(int)
+    acc = None
+    for s in starts:
+        seg = iq[s:s + nfft] * win
+        S = np.fft.fftshift(np.fft.fft(seg))
+        p = (S.real ** 2 + S.imag ** 2)
+        if acc is None:
+            acc = p.astype(np.float64)
+        elif reduce == "max":
+            np.maximum(acc, p, out=acc)
+        else:
+            acc += p
+    if reduce != "max":
+        acc /= len(starts)
+    db = 10.0 * np.log10(acc / (nfft * float(np.sum(win ** 2))) + 1e-12)
+    freqs = np.fft.fftshift(np.fft.fftfreq(nfft, 1.0 / fs))
+    return freqs, db
+
+
+def occupied_bw(freqs, db, frac=0.99):
+    """99%-power occupied bandwidth around the strongest bin (Hz). Pure."""
+    import numpy as np
+    lin = 10.0 ** (db / 10.0)
+    pk = int(np.argmax(lin))
+    tot = float(lin.sum())
+    if tot <= 0:
+        return 0.0
+    acc, lo = 0.0, pk
+    for i in range(pk, -1, -1):
+        acc += lin[i]
+        lo = i
+        if acc >= tot * (1 - frac) / 2:
+            break
+    acc, hi = 0.0, pk
+    for i in range(pk, len(lin)):
+        acc += lin[i]
+        hi = i
+        if acc >= tot * (1 - frac) / 2:
+            break
+    return abs(float(freqs[hi] - freqs[lo]))
+
+
+def _pool_max(a, out):
+    """Downsample a 1-D array to length ``out`` by block-max (keeps thin peaks)."""
+    import numpy as np
+    n = len(a)
+    if out >= n:
+        idx = np.clip((np.arange(out) * n / out).astype(int), 0, n - 1)
+        return a[idx]
+    edges = (np.arange(out + 1) * n / out).astype(int)
+    return np.array([a[edges[i]:max(edges[i] + 1, edges[i + 1])].max() for i in range(out)])
+
+
+def stft_grid(iq, fs, fc, t0, t1, f0, f1, w=900, h=360, nfft=1024):
+    """A time x frequency power grid over [t0,t1] s x [f0,f1] Hz.
+
+    Returns (grid uint8 [h,w], floor_db, ceil_db, actual t0,t1,f0,f1). Rows are
+    frequency (top = high), cols are time. Values are dB clipped to
+    [floor,ceil] and mapped 0..255 for the page's palette LUT. Pure numpy.
+    """
+    import numpy as np
+    n = len(iq)
+    i0 = max(0, int(t0 * fs)); i1 = min(n, int(t1 * fs))
+    if i1 - i0 < nfft:
+        i1 = min(n, i0 + nfft)
+        i0 = max(0, i1 - nfft)
+    seg = iq[i0:i1]
+    win = np.hanning(nfft).astype(np.float32)
+    ncol = max(1, (len(seg) - nfft) // nfft + 1)          # non-overlapping frames
+    ncol = min(ncol, 4000)
+    starts = np.linspace(0, max(0, len(seg) - nfft), ncol).astype(int)
+    frames = np.stack([seg[s:s + nfft] for s in starts]) * win           # (T, nfft)
+    S = np.fft.fftshift(np.fft.fft(frames, axis=1), axes=1)
+    P = (S.real ** 2 + S.imag ** 2) / (nfft * float(np.sum(win ** 2)))
+    db = (10.0 * np.log10(P + 1e-12)).T                                  # (freq, time)
+    fbins = np.fft.fftshift(np.fft.fftfreq(nfft, 1.0 / fs)) + fc         # absolute Hz
+    # crop to [f0,f1]
+    lo = np.searchsorted(fbins, f0); hi = np.searchsorted(fbins, f1)
+    lo = max(0, min(lo, nfft - 1)); hi = max(lo + 1, min(hi, nfft))
+    db = db[lo:hi, :]
+    fmin, fmax = float(fbins[lo]), float(fbins[hi - 1])
+    # resize: freq rows -> h (max-pool), time cols -> w
+    if db.shape[0] != h:
+        db = np.stack([_pool_max(db[:, c], h) for c in range(db.shape[1])], axis=1) \
+            if db.shape[1] <= h * 4 else \
+            np.apply_along_axis(lambda col: _pool_max(col, h), 0, db)
+    if db.shape[1] != w:
+        db = np.apply_along_axis(lambda row: _pool_max(row, w), 1, db)
+    db = db[::-1, :]                                        # top row = high freq
+    floor = float(np.percentile(db, 25)) - 4.0
+    ceil = float(np.percentile(db, 99.9)) + 2.0
+    if ceil - floor < 12:
+        ceil = floor + 12
+    g = np.clip((db - floor) / (ceil - floor), 0, 1)
+    grid = (g * 255).astype(np.uint8)
+    tt0 = i0 / fs + starts[0] / fs
+    tt1 = i0 / fs + (starts[-1] + nfft) / fs
+    return grid, floor, ceil, tt0, tt1, fmin, fmax
+
+
+# --------------------------------------------------------------------------
+# Public API (dicts for the web layer)
+# --------------------------------------------------------------------------
+
+def summary(name):
+    import numpy as np
+    iq, fs, fc, meta = load(name)
+    n = len(iq)
+    freqs, db = welch_psd(iq, fs)
+    nf = _noise_floor_db(db)
+    pk = int(np.argmax(db))
+    obw = occupied_bw(freqs, db)
+    b = bursts(name).get("bursts", [])
+    return {"ok": True, "name": name, "samples": n, "duration_s": round(n / fs, 4),
+            "sr_hz": fs, "center_hz": fc, "span_hz": fs,
+            "noise_db": round(nf, 1), "peak_db": round(float(db[pk]), 1),
+            "peak_offset_hz": round(float(freqs[pk]), 1),
+            "peak_hz": round(fc + float(freqs[pk]), 1),
+            "snr_db": round(float(db[pk]) - nf, 1),
+            "occupied_bw_hz": round(obw, 1), "bursts": len(b),
+            "datetime": (meta.get("captures") or [{}])[0].get("core:datetime")}
+
+
+def spectrogram(name, t0=None, t1=None, f0=None, f1=None, w=900, h=360, nfft=1024):
+    iq, fs, fc, _ = load(name)
+    dur = len(iq) / fs
+    t0 = 0.0 if t0 is None else max(0.0, float(t0))
+    t1 = dur if t1 is None else min(dur, float(t1))
+    f0 = fc - fs / 2 if f0 is None else float(f0)
+    f1 = fc + fs / 2 if f1 is None else float(f1)
+    w = int(max(64, min(1600, w))); h = int(max(64, min(720, h)))
+    nfft = int(max(128, min(8192, nfft)))
+    grid, floor, ceil, tt0, tt1, fmin, fmax = stft_grid(iq, fs, fc, t0, t1, f0, f1, w, h, nfft)
+    return {"ok": True, "w": grid.shape[1], "h": grid.shape[0],
+            "t0": tt0, "t1": tt1, "f0": fmin, "f1": fmax,
+            "floor_db": round(floor, 1), "ceil_db": round(ceil, 1),
+            "data": base64.b64encode(grid.tobytes()).decode("ascii")}
+
+
+def psd(name, t0=None, t1=None, n=900, mode="avg"):
+    """Power spectrum over [t0,t1]. ``mode`` = "avg" (Welch) or "max" (max-hold)."""
+    import numpy as np
+    iq, fs, fc, _ = load(name)
+    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
+    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
+    reduce = "max" if str(mode).lower().startswith("max") else "mean"
+    freqs, db = welch_psd(iq[i0:i1] if i1 > i0 else iq, fs, reduce=reduce)
+    n = int(max(64, min(1600, n)))
+    fr = (freqs + fc) / 1e6
+    if len(db) > n:
+        db = _pool_max(db, n)
+        fr = fr[np.linspace(0, len(fr) - 1, n).astype(int)]
+    return {"ok": True, "mode": reduce, "freqs_mhz": [round(x, 4) for x in fr.tolist()],
+            "db": [round(x, 1) for x in db.tolist()],
+            "noise_db": round(_noise_floor_db(db), 1)}
+
+
+def measure(name, t0, t1, f0, f1):
+    """Measure a time×frequency box: channel power, peak (freq+level), mean, span.
+
+    Integrates the Welch PSD of the [t0,t1] slice over [f0,f1] (absolute Hz).
+    Relative dB (consistent, not absolute dBm), matching the rest of the tool.
+    """
+    import numpy as np
+    iq, fs, fc, _ = load(name)
+    dur = len(iq) / fs
+    t0 = max(0.0, float(t0)); t1 = min(dur, float(t1))
+    i0, i1 = int(t0 * fs), int(t1 * fs)
+    if i1 - i0 < 16:
+        return {"ok": False, "error": "time selection too short"}
+    freqs, db = welch_psd(iq[i0:i1], fs)
+    absf = freqs + fc
+    f0, f1 = float(min(f0, f1)), float(max(f0, f1))
+    mask = (absf >= f0) & (absf <= f1)
+    if not mask.any():
+        return {"ok": False, "error": "frequency selection outside the capture"}
+    lin = 10.0 ** (db[mask] / 10.0)
+    sub = db[mask]; subf = absf[mask]
+    pk = int(np.argmax(sub))
+    return {"ok": True, "t0": round(t0, 5), "t1": round(t1, 5),
+            "f0": round(f0, 1), "f1": round(f1, 1),
+            "dt_ms": round((t1 - t0) * 1000, 3), "span_khz": round((f1 - f0) / 1e3, 2),
+            "channel_power_db": round(float(10.0 * np.log10(lin.sum() + 1e-12)), 1),
+            "peak_db": round(float(sub[pk]), 1),
+            "peak_hz": round(float(subf[pk]), 1),
+            "mean_db": round(float(10.0 * np.log10(lin.mean() + 1e-12)), 1),
+            "bins": int(mask.sum())}
+
+
+def envelope(name, t0=None, t1=None, n=1200):
+    """Amplitude (dB) over time — the AM/OOK view + what bursts() thresholds."""
+    import numpy as np
+    iq, fs, fc, _ = load(name)
+    dur = len(iq) / fs
+    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
+    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
+    seg = iq[i0:i1] if i1 > i0 else iq
+    mag = np.abs(seg)
+    n = int(max(64, min(4000, n)))
+    if len(mag) > n:                                   # block-mean then to dB
+        edges = (np.arange(n + 1) * len(mag) / n).astype(int)
+        mag = np.array([mag[edges[i]:max(edges[i] + 1, edges[i + 1])].mean() for i in range(n)])
+    db = 20.0 * np.log10(mag + 1e-6)
+    t = (i0 / fs) + np.linspace(0, (len(seg)) / fs, len(db))
+    return {"ok": True, "t": [round(x, 5) for x in t.tolist()],
+            "db": [round(x, 1) for x in db.tolist()]}
+
+
+def _merge_runs(on, gap, min_len):
+    """Boolean 'on' -> list of (start,end) sample runs, bridging gaps < ``gap``
+    samples and dropping runs shorter than ``min_len``. Pure (numpy).
+
+    Gap-bridging is what turns a *pulse train* (an OOK/FSK packet is many short
+    pulses) into one burst per transmission, and a held/continuous carrier into a
+    single long burst — instead of hundreds of per-pulse fragments or nothing.
+    """
+    import numpy as np
+    if not on.any():
+        return []
+    d = np.diff(on.astype(np.int8))
+    starts = list(np.where(d == 1)[0] + 1)
+    ends = list(np.where(d == -1)[0] + 1)
+    if on[0]:
+        starts = [0] + starts
+    if on[-1]:
+        ends = ends + [len(on)]
+    runs = list(zip(starts, ends))
+    merged = []
+    for s, e in runs:
+        if merged and s - merged[-1][1] < gap:
+            merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+    return [(s, e) for s, e in merged if e - s >= min_len]
+
+
+def bursts(name, thresh_db=8.0, min_ms=1.0, gap_ms=25.0):
+    """Detect transmissions (bursts/packets) from the amplitude envelope.
+
+    A press of an OOK/FSK remote is a *train* of short pulses; ``gap_ms`` bridges
+    the inter-pulse gaps so each transmission is one burst (not one per pulse),
+    while ``min_ms`` rejects lone noise spikes. A near-100%-duty carrier collapses
+    to a single long burst. The noise floor is a low percentile so a busy band
+    still yields a sane threshold.
+    """
+    import numpy as np
+    iq, fs, fc, _ = load(name)
+    mag = np.abs(iq)
+    step = max(1, len(mag) // 200000)          # coarse envelope; cheap on long files
+    env = mag[::step]
+    env_fs = fs / step
+    edb = 20.0 * np.log10(env + 1e-6)
+    nf = float(np.percentile(edb, 20))
+    on = edb > (nf + thresh_db)
+    gap = int(gap_ms / 1000.0 * env_fs)
+    min_len = max(1, int(min_ms / 1000.0 * env_fs))
+    out = []
+    for s, e in _merge_runs(on, gap, min_len):
+        seg = iq[s * step: e * step]
+        if len(seg) < 8:
+            continue
+        fr, db = welch_psd(seg, fs, nfft=min(2048, 1 << int(np.log2(max(2, len(seg))))))
+        pk = int(np.argmax(db))
+        # duty: fraction of the merged span actually above threshold (packet vs CW)
+        duty = float(on[s:e].mean()) if e > s else 1.0
+        out.append({"t0": round(s / env_fs, 5), "t1": round(e / env_fs, 5),
+                    "dur_ms": round((e - s) / env_fs * 1000, 2),
+                    "f_mhz": round((fc + float(fr[pk])) / 1e6, 4),
+                    "bw_khz": round(occupied_bw(fr, db) / 1e3, 1),
+                    "duty": round(duty, 2),
+                    "peak_db": round(float(db[pk]), 1)})
+    return {"ok": True, "bursts": out[:200], "count": len(out)}
+
+
+def _slice_bits(level, fs, max_bits=512):
+    """Turn a boolean decision stream into (baud, bit-string) via run lengths. Pure."""
+    import numpy as np
+    lvl = level.astype(np.int8)
+    if lvl.size < 4:
+        return 0.0, ""
+    chg = np.where(np.diff(lvl) != 0)[0] + 1
+    bounds = np.concatenate([[0], chg, [len(lvl)]])
+    runs = np.diff(bounds)
+    real = runs[runs >= 2]
+    if real.size == 0:
+        return 0.0, ""
+    ui = float(np.percentile(real, 10))               # shortest symbol ~ unit interval
+    if ui < 1:
+        return 0.0, ""
+    baud = fs / ui
+    nb = min(max_bits, int(len(lvl) / ui))
+    centers = (np.arange(nb) + 0.5) * ui
+    idx = np.clip(centers.astype(int), 0, len(lvl) - 1)
+    bits = lvl[idx]
+    return baud, "".join("1" if b else "0" for b in bits)
+
+
+def demod(name, mode="ook", f_offset_hz=0.0, bw_hz=None, t0=None, t1=None):
+    """Shift to f_offset, low-pass to bw, demodulate (ook/am or fsk/fm), recover bits.
+
+    Returns the estimated symbol rate, a recovered bitstream, and a downsampled
+    waveform (dB envelope for OOK/AM, instantaneous frequency for FSK/FM) to plot.
+    """
+    import numpy as np
+    from scipy import signal as sig
+    iq, fs, fc, _ = load(name)
+    dur = len(iq) / fs
+    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
+    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
+    x = iq[i0:i1] if i1 > i0 else iq
+    if len(x) < 16:
+        return {"ok": False, "error": "selection too short"}
+    foff = float(f_offset_hz or 0.0)
+    bw = float(bw_hz) if bw_hz else min(fs / 4, 200e3)
+    bw = max(1e3, min(bw, fs / 2))
+    n = np.arange(len(x))
+    x = x * np.exp(-2j * np.pi * (foff / fs) * n)     # mix the signal down to DC
+    dec = int(max(1, fs // (bw * 2)))                  # decimate to ~2*bw
+    if dec > 1:
+        x = sig.decimate(x, dec, ftype="fir")
+    nfs = fs / dec
+    mode = (mode or "ook").lower()
+    if mode in ("fsk", "fm"):
+        inst = np.angle(x[1:] * np.conj(x[:-1])) * nfs / (2 * np.pi)   # Hz
+        wave = inst
+        level = inst > np.median(inst)
+        ylabel = "inst. freq (Hz)"
+    else:                                              # ook / am
+        env = np.abs(x)
+        env = env / (env.max() + 1e-9)
+        wave = 20.0 * np.log10(env + 1e-4)
+        thr = 0.5 * (float(np.percentile(env, 90)) + float(np.percentile(env, 10)))
+        level = env > thr
+        ylabel = "envelope (dB)"
+    baud, bits = _slice_bits(level, nfs)
+    # downsample the waveform for transport/plot
+    m = 1600
+    if len(wave) > m:
+        edges = (np.arange(m + 1) * len(wave) / m).astype(int)
+        wave = np.array([wave[edges[i]:max(edges[i] + 1, edges[i + 1])].mean() for i in range(m)])
+    return {"ok": True, "mode": mode, "sample_rate_hz": round(nfs, 1),
+            "baud": round(baud, 1), "n_bits": len(bits), "bits": bits,
+            "ylabel": ylabel,
+            "wave": [round(float(v), 3) for v in wave.tolist()],
+            "t0": i0 / fs, "t1": i1 / fs, "bw_hz": bw, "f_offset_hz": foff}
+
+
+# --------------------------------------------------------------------------
+# Pulse (PWM / PPM) symbol decoder — many sub-GHz OOK remotes (PT2262 / EV1527
+# / HT12E / Princeton, and Flipper .sub RAW captures) encode a bit as a *pulse
+# width* (short/long high) or a *pulse position* (short/long gap after a fixed
+# pulse), not as raw NRZ levels. The demod() slicer samples the level on a fixed
+# grid, so one such symbol becomes several raw bits and the frame length is
+# wrong. This decodes the true symbol stream from the on/off run lengths, so the
+# recovered bits — and the device fingerprint's frame length — line up. Pure
+# core (_decode_pulses) selftested on synthetic PWM + PPM.
+# --------------------------------------------------------------------------
+
+def _two_class(vals):
+    """1-D two-means split of positive durations -> (lo_center, hi_center, threshold).
+
+    Equal centers are returned when the values aren't clearly bimodal (pure)."""
+    import numpy as np
+    v = np.sort(np.asarray(vals, dtype=float))
+    if v.size < 2 or v[-1] <= v[0] * 1.05:
+        m = float(v.mean()) if v.size else 0.0
+        return m, m, m
+    c0, c1 = float(v[0]), float(v[-1])
+    for _ in range(25):
+        thr = 0.5 * (c0 + c1)
+        lo, hi = v[v <= thr], v[v > thr]
+        if lo.size == 0 or hi.size == 0:
+            break
+        n0, n1 = float(lo.mean()), float(hi.mean())
+        if abs(n0 - c0) < 1e-9 and abs(n1 - c1) < 1e-9:
+            c0, c1 = n0, n1
+            break
+        c0, c1 = n0, n1
+    return c0, c1, 0.5 * (c0 + c1)
+
+
+def _runs_from_level(level):
+    """Run-length encode a boolean level stream -> [(state_bool, length_int), ...] (pure)."""
+    import numpy as np
+    lvl = np.asarray(level).astype(bool)
+    if lvl.size == 0:
+        return []
+    chg = np.where(np.diff(lvl.astype(np.int8)) != 0)[0] + 1
+    bounds = np.concatenate(([0], chg, [lvl.size]))
+    return [(bool(lvl[bounds[i]]), int(bounds[i + 1] - bounds[i])) for i in range(len(bounds) - 1)]
+
+
+def _decode_pulses(level, nfs, coding="auto"):
+    """Decode an OOK on/off level stream carrying PWM or PPM symbols into bits (pure).
+
+    ``pwm`` — the bit is set by the HIGH width (wide high = 1): PT2262 / EV1527 /
+    Princeton. ``ppm`` (pulse-position / pulse-distance) — a near-constant pulse,
+    the bit set by the GAP after it (wide gap = 1). A low far longer than the
+    symbol gaps is an inter-frame separator: frames split there. ``auto`` picks
+    whichever dimension (high width or gap) is the more clearly bimodal.
+    """
+    import numpy as np
+    runs = _runs_from_level(level)
+    if len(runs) < 4:
+        return {"ok": False, "error": "no pulse structure — not an on/off (OOK) signal?"}
+    highs = [d for s, d in runs if s]
+    lows = [d for s, d in runs if not s]
+    if len(highs) < 3 or len(lows) < 2:
+        return {"ok": False, "error": "too few pulses to decode"}
+    med_low = float(np.median(lows))
+    gap_thr = 4.0 * med_low if med_low > 0 else float(max(lows)) + 1
+    sym_lows = [d for d in lows if d <= gap_thr] or lows
+    hi_lo, hi_hi, hi_thr = _two_class(highs)
+    lo_lo, lo_hi, lo_thr = _two_class(sym_lows)
+    r_hi = (hi_hi / hi_lo) if hi_lo > 0 else 1.0
+    r_lo = (lo_hi / lo_lo) if lo_lo > 0 else 1.0
+    if coding == "auto":
+        coding = "pwm" if (r_hi >= 1.7 and r_hi >= r_lo) else ("ppm" if r_lo >= 1.7 else "pwm")
+    # ordered (high, following-low) pairs
+    hl, pending = [], None
+    for s, d in runs:
+        if s:
+            pending = d
+        elif pending is not None:
+            hl.append((pending, d)); pending = None
+    if pending is not None:
+        hl.append((pending, 0))                    # signal ended high
+    frames_bits, cur = [], []
+    for h, lo in hl:
+        sep = lo > gap_thr
+        if coding == "pwm":
+            cur.append("1" if h > hi_thr else "0")
+            if sep:
+                frames_bits.append("".join(cur)); cur = []
+        else:                                      # ppm / pdm
+            if sep:
+                if cur:
+                    frames_bits.append("".join(cur)); cur = []
+            else:
+                cur.append("1" if lo > lo_thr else "0")
+    if cur:
+        frames_bits.append("".join(cur))
+    frames_bits = [f for f in frames_bits if f]
+    if not frames_bits:
+        return {"ok": False, "error": "no symbols recovered"}
+    bits = "".join(frames_bits)
+    te = min(hi_lo, lo_lo) or max(hi_lo, lo_lo)
+    tot = float(sum(h + lo for h, lo in hl))
+    return {"ok": True, "coding": coding, "te_us": round(te / nfs * 1e6, 1) if nfs else 0.0,
+            "n_symbols": len(bits), "n_frames": len(frames_bits), "bits": bits,
+            "baud": round(len(bits) / (tot / nfs), 1) if (tot > 0 and nfs) else 0.0,
+            "frames": [{"bits": f, "hex": _to_hex(f), "n": len(f)} for f in frames_bits[:12]],
+            "ratio_high": round(r_hi, 2), "ratio_low": round(r_lo, 2)}
+
+
+def pulse_decode(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None, coding="auto"):
+    """Shift/decimate/envelope an OOK selection, then decode PWM/PPM symbols.
+
+    Returns a demod-shaped result (``bits`` / ``baud`` / ``wave``) so the recovered
+    symbols flow straight into Frames / Fingerprint / Field-diff, plus the coding,
+    the estimated base pulse width Te, and the per-frame symbol bits.
+    """
+    import numpy as np
+    from scipy import signal as sig
+    iq, fs, fc, _ = load(name)
+    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
+    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
+    x = iq[i0:i1] if i1 > i0 else iq
+    if len(x) < 32:
+        return {"ok": False, "error": "selection too short"}
+    foff = float(f_offset_hz or 0.0)
+    bw = float(bw_hz) if bw_hz else min(fs / 4, 200e3)
+    bw = max(1e3, min(bw, fs / 2))
+    n = np.arange(len(x))
+    x = x * np.exp(-2j * np.pi * (foff / fs) * n)
+    dec = int(max(1, fs // (bw * 2)))
+    if dec > 1:
+        x = sig.decimate(x, dec, ftype="fir")
+    nfs = fs / dec
+    env = np.abs(x)
+    env = env / (env.max() + 1e-9)
+    thr = 0.5 * (float(np.percentile(env, 90)) + float(np.percentile(env, 10)))
+    level = env > thr
+    r = _decode_pulses(level, nfs, coding=coding)
+    wave = 20.0 * np.log10(env + 1e-4)
+    m = 1600
+    if len(wave) > m:
+        edges = (np.arange(m + 1) * len(wave) / m).astype(int)
+        wave = np.array([wave[edges[i]:max(edges[i] + 1, edges[i + 1])].mean() for i in range(m)])
+    r.update({"mode": "pulse", "sample_rate_hz": round(nfs, 1), "ylabel": "envelope (dB)",
+              "wave": [round(float(v), 3) for v in wave.tolist()],
+              "t0": i0 / fs, "t1": i1 / fs, "bw_hz": bw, "f_offset_hz": foff})
+    if r.get("ok"):
+        r["n_bits"] = r["n_symbols"]
+    return r
+
+
+def _parse_rtl433_lines(text):
+    """Parse rtl_433 -F json output into deduped device records (pure)."""
+    _meta = ("time", "mod", "freq", "freq1", "freq2", "rssi", "snr", "noise",
+             "model", "id", "channel")
+    agg = {}
+    events = 0
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line[0] != "{":
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict) or "model" not in obj:
+            continue
+        events += 1
+        key = "%s/%s/%s" % (obj.get("model"), obj.get("id"), obj.get("channel"))
+        fields = {k: v for k, v in obj.items() if k not in _meta}
+        rec = agg.get(key)
+        if rec:
+            rec["count"] += 1; rec["fields"] = fields
+            if obj.get("rssi") is not None:
+                rec["rssi"] = obj.get("rssi")
+        else:
+            agg[key] = {"model": str(obj.get("model")), "id": obj.get("id"),
+                        "channel": obj.get("channel"), "rssi": obj.get("rssi"),
+                        "fields": fields, "count": 1}
+    return list(agg.values()), events
+
+
+def decode433(name):
+    """Offline-decode a capture with rtl_433 to *name* known ISM devices.
+
+    rtl_433 reads the raw file directly (``-r`` + ``-s`` sample rate), so this
+    names TPMS / weather / remotes / doorbells straight from a recording. The
+    ``.sigmf-data`` is symlinked to a ``.cu8`` name so rtl_433 detects the format.
+    """
+    import subprocess
+    import tempfile
+    data_p, meta_p = _paths(name)
+    if not os.path.exists(data_p):
+        raise ValueError("capture not found")
+    meta = {}
+    if os.path.exists(meta_p):
+        try:
+            meta = json.load(open(meta_p))
+        except ValueError:
+            meta = {}
+    g = meta.get("global", {}); c = (meta.get("captures") or [{}])[0]
+    sr = int(g.get("core:sample_rate") or 0)
+    fc = int(c.get("core:frequency") or 0)
+    rtl433 = "/usr/bin/rtl_433" if os.path.exists("/usr/bin/rtl_433") else "rtl_433"
+    dur = (os.path.getsize(data_p) / 2 / sr) if sr else 2.0
+    tmpd = tempfile.mkdtemp(prefix="rtl433-")
+    link = os.path.join(tmpd, "capture.cu8")
+    try:
+        os.symlink(os.path.abspath(data_p), link)
+        cmd = [rtl433, "-r", link, "-F", "json", "-M", "level"]
+        if sr:
+            cmd += ["-s", str(sr)]
+        if fc:
+            cmd += ["-f", str(fc)]
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=max(30, int(dur * 15)))
+        devices, events = _parse_rtl433_lines(p.stdout)
+        return {"ok": True, "tool": "rtl_433", "devices": devices, "events": events,
+                "sr_hz": sr, "center_hz": fc}
+    except FileNotFoundError:
+        return {"ok": False, "error": "rtl_433 not installed (apt install rtl-433)"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "rtl_433 timed out on this capture"}
+    finally:
+        import shutil
+        shutil.rmtree(tmpd, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# Segment 3 — modulation analysis: IQ constellation, instantaneous
+# amplitude/frequency/phase, and automatic modulation classification.
+# --------------------------------------------------------------------------
+
+def _prep_selection(name, f_offset_hz, bw_hz, t0, t1):
+    """Load, mix the chosen signal to DC and decimate to ~2*bw. Returns (x, nfs)."""
+    import numpy as np
+    from scipy import signal as sig
+    iq, fs, fc, _ = load(name)
+    dur = len(iq) / fs
+    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
+    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
+    x = iq[i0:i1] if i1 > i0 else iq
+    if len(x) < 16:
+        return np.zeros(0, dtype=np.complex64), fs
+    foff = float(f_offset_hz or 0.0)
+    bw = float(bw_hz) if bw_hz else min(fs / 4, 200e3)
+    bw = max(1e3, min(bw, fs / 2))
+    n = np.arange(len(x))
+    x = x * np.exp(-2j * np.pi * (foff / fs) * n)
+    dec = int(max(1, fs // (bw * 2)))
+    if dec > 1:
+        x = sig.decimate(x, dec, ftype="fir")
+    return x.astype(np.complex64), fs / dec
+
+
+def _classify_signal(x, nfs):
+    """Heuristic automatic modulation classification from DSP features (pure).
+
+    Returns {label, confidence, symbol_rate_hz, features}. Not ML — a feature
+    decision tree over envelope variance, instantaneous-frequency spread &
+    bimodality, spectral occupancy and phase jumps. Honest, explainable, good
+    enough to guess the common ISM cases (CW / OOK-ASK / FSK / FM / chirp-spread).
+    """
+    import numpy as np
+    out = {"label": "unknown", "confidence": 0.0, "symbol_rate_hz": 0.0, "features": {}}
+    if x is None or len(x) < 64:
+        out["label"] = "too short"; return out
+    a = np.abs(x)
+    amean = float(a.mean())
+    if amean < 1e-4:
+        out["label"] = "no signal / noise"; return out
+    an = a / amean
+    env_var = float(np.var(an))                                   # amplitude modulation
+    ifr = np.angle(x[1:] * np.conj(x[:-1])) * nfs / (2 * np.pi)    # inst freq (Hz)
+    ifr_n = ifr / (nfs / 2.0)
+    ifr_std = float(np.std(ifr_n))
+    # spectral occupancy: fraction of bins within 10 dB of the peak (wideband-ness).
+    # Max-hold over the whole selection so a swept chirp shows its full band.
+    _fr, ps = welch_psd(x, nfs, nfft=min(2048, 1 << int(np.log2(max(2, len(x))))), reduce="max")
+    occ = float((ps > ps.max() - 10).mean())
+    # FSK bimodality: split inst-freq at its median, compare inter-cluster gap to spread
+    med = np.median(ifr)
+    lo, hi = ifr[ifr <= med], ifr[ifr > med]
+    bimod = 0.0
+    if len(lo) > 8 and len(hi) > 8:
+        sep = abs(float(hi.mean()) - float(lo.mean()))
+        spread = float(lo.std() + hi.std()) + 1e-9
+        bimod = sep / spread
+    # phase jumps (PSK tell): count large sample-to-sample phase steps
+    dphi = np.abs(np.angle(x[1:] * np.conj(x[:-1])))
+    phase_jumps = float((dphi > 1.2).mean())
+    f = {"env_var": round(env_var, 4), "ifr_std": round(ifr_std, 4),
+         "occupancy": round(occ, 3), "bimodality": round(bimod, 2),
+         "phase_jumps": round(phase_jumps, 4)}
+    out["features"] = f
+    # symbol rate via run-length of the thresholded feature (robust for random
+    # data, where autocorrelation has no clear peak) — reuse the demod's slicer.
+    if env_var > 0.05:
+        lvl = an > 0.5 * (float(np.percentile(an, 90)) + float(np.percentile(an, 10)))
+    else:
+        lvl = ifr_n > float(np.median(ifr_n))
+    _baud, _ = _slice_bits(lvl, nfs)
+    out["symbol_rate_hz"] = round(_baud, 1)
+    # --- decision tree ---
+    if occ > 0.55 and ifr_std > 0.15 and env_var < 0.25:
+        out["label"] = "chirp / spread (LoRa-like or wideband)"; out["confidence"] = round(min(1.0, occ), 2)
+    elif env_var > 0.3 and bimod < 2.0:
+        out["label"] = "OOK / ASK (on-off / amplitude)"; out["confidence"] = round(min(1.0, env_var), 2)
+    elif bimod > 3.0 and ifr_std > 0.02:
+        out["label"] = "FSK (frequency-shift keying)"; out["confidence"] = round(min(1.0, bimod / 6.0), 2)
+    elif ifr_std > 0.08:
+        out["label"] = "FM (frequency modulation)"; out["confidence"] = round(min(1.0, ifr_std * 3), 2)
+    elif phase_jumps > 0.02 and env_var < 0.2:
+        out["label"] = "PSK (phase-shift keying)"; out["confidence"] = round(min(1.0, phase_jumps * 8), 2)
+    else:
+        out["label"] = "CW carrier (unmodulated)"; out["confidence"] = round(max(0.4, 1.0 - ifr_std * 5 - env_var), 2)
+    return out
+
+
+def constellation(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None, n=2000):
+    """IQ scatter (normalised) for the selected signal — PSK/QAM structure."""
+    import numpy as np
+    x, nfs = _prep_selection(name, f_offset_hz, bw_hz, t0, t1)
+    if len(x) < 16:
+        return {"ok": False, "error": "selection too short"}
+    rms = float(np.sqrt(np.mean(np.abs(x) ** 2))) or 1.0
+    x = x / rms
+    n = int(max(200, min(4000, n)))
+    if len(x) > n:
+        x = x[np.linspace(0, len(x) - 1, n).astype(int)]
+    return {"ok": True, "sample_rate_hz": round(nfs, 1),
+            "i": [round(float(v), 3) for v in x.real.tolist()],
+            "q": [round(float(v), 3) for v in x.imag.tolist()]}
+
+
+def instantaneous(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None, n=1500):
+    """Derived-plot data for a selection: the raw I/Q samples plus instantaneous
+    amplitude (dB), frequency (Hz) and phase (deg) over time — inspectrum's
+    sample / amplitude / frequency / phase plots."""
+    import numpy as np
+    x, nfs = _prep_selection(name, f_offset_hz, bw_hz, t0, t1)
+    if len(x) < 16:
+        return {"ok": False, "error": "selection too short"}
+    peak = float(np.max(np.abs(x))) + 1e-9
+    amp = np.abs(x) / peak
+    ampdb = 20 * np.log10(amp + 1e-4)
+    freq = np.concatenate([[0.0], np.angle(x[1:] * np.conj(x[:-1])) * nfs / (2 * np.pi)])
+    phase = np.degrees(np.unwrap(np.angle(x)))
+    inphase = x.real / peak                       # normalised I and Q (the "sample plot")
+    quad = x.imag / peak
+    n = int(max(200, min(4000, n)))
+    def ds(v):
+        return v[np.linspace(0, len(v) - 1, n).astype(int)] if len(v) > n else v
+    ampdb, freq, phase, inphase, quad = ds(ampdb), ds(freq), ds(phase), ds(inphase), ds(quad)
+    t = np.linspace(0, len(x) / nfs, len(ampdb))
+    return {"ok": True, "sample_rate_hz": round(nfs, 1),
+            "t": [round(float(v), 6) for v in t.tolist()],
+            "amp_db": [round(float(v), 2) for v in ampdb.tolist()],
+            "freq_hz": [round(float(v), 1) for v in freq.tolist()],
+            "phase_deg": [round(float(v), 1) for v in phase.tolist()],
+            "i": [round(float(v), 3) for v in inphase.tolist()],
+            "q": [round(float(v), 3) for v in quad.tolist()]}
+
+
+# --------------------------------------------------------------------------
+# Subaudible squelch signalling: CTCSS tones and DCS codes.
+#
+# An FM repeater channel usually carries a tag under the audio saying which
+# group the transmission belongs to: a continuous tone (CTCSS, 67-254 Hz) or a
+# continuously repeating 23-bit word (DCS, 134.4 bit/s). It is the difference
+# between "someone is on 145.500" and "this is that group's transmission" — and
+# it is decodable straight from the frequency discriminator.
+# --------------------------------------------------------------------------
+
+# The standard CTCSS tones (EIA/TIA-603). Deliberately the full set, including
+# the non-standard extras in common use, because a radio that uses one of them
+# is exactly the case worth identifying.
+CTCSS_TONES = (
+    67.0, 69.3, 71.9, 74.4, 77.0, 79.7, 82.5, 85.4, 88.5, 91.5, 94.8, 97.4,
+    100.0, 103.5, 107.2, 110.9, 114.8, 118.8, 123.0, 127.3, 131.8, 136.5,
+    141.3, 146.2, 151.4, 156.7, 159.8, 162.2, 165.5, 167.9, 171.3, 173.8,
+    177.3, 179.9, 183.5, 186.2, 189.9, 192.8, 196.6, 199.5, 203.5, 206.5,
+    210.7, 213.8, 218.1, 221.3, 225.7, 229.1, 233.6, 237.1, 241.8, 245.5,
+    250.3, 254.1,
+)
+
+# The 83 standard DCS codes, written the way radios display them (octal).
+DCS_CODES = (
+    "023", "025", "026", "031", "032", "043", "047", "051", "054", "065",
+    "071", "072", "073", "074", "114", "115", "116", "125", "131", "132",
+    "134", "143", "152", "155", "156", "162", "165", "172", "174", "205",
+    "223", "226", "243", "244", "245", "251", "261", "263", "265", "271",
+    "306", "311", "315", "331", "343", "346", "351", "364", "365", "371",
+    "411", "412", "413", "423", "431", "432", "445", "464", "465", "466",
+    "503", "506", "516", "532", "546", "565", "606", "612", "624", "627",
+    "631", "632", "654", "662", "664", "703", "712", "723", "731", "732",
+    "734", "743", "754",
+)
+DCS_BITRATE = 134.4          # bit/s, fixed by the standard
+_DCS_GOLAY_POLY = 0xC75      # Golay(23,12) generator
+
+
+def _golay23(data12):
+    """Golay(23,12) codeword for 12 data bits (pure).
+
+    DCS sends a 23-bit word: 12 data bits (the 9-bit octal code plus three fixed
+    bits) followed by 11 parity bits from this generator.
+    """
+    reg = (int(data12) & 0xFFF) << 11
+    out = reg
+    for i in range(22, 10, -1):
+        if reg & (1 << i):
+            reg ^= _DCS_GOLAY_POLY << (i - 11)
+    return (out & ~0x7FF) | (reg & 0x7FF)
+
+
+def dcs_word(code_octal):
+    """The 23-bit on-air word for a DCS code like "023" (pure), LSB first.
+
+    The transmitted order is least-significant bit first, which is why a naive
+    decoder sees every code reversed.
+    """
+    try:
+        c = int(str(code_octal), 8) & 0x1FF
+    except (TypeError, ValueError):
+        return None
+    data = c | (0x4 << 9)                     # the three fixed bits: 100
+    w = _golay23(data)
+    return [(w >> i) & 1 for i in range(23)]
+
+
+def _dcs_table():
+    tab = {}
+    for c in DCS_CODES:
+        w = dcs_word(c)
+        if w:
+            tab[tuple(w)] = c
+    return tab
+
+
+_DCS_TABLE = None
+
+
+def _goertzel(x, fs, f):
+    """Power of frequency ``f`` in samples ``x`` (pure-ish; numpy for speed)."""
+    import numpy as np
+    n = len(x)
+    if n < 8 or fs <= 0:
+        return 0.0
+    k = 2.0 * math.cos(2.0 * math.pi * f / fs)
+    s1 = s2 = 0.0
+    arr = np.asarray(x, dtype=np.float64)
+    # vectorised second-order section is not worth it at these lengths; the loop
+    # runs on a decimated stream (a few thousand samples)
+    for v in arr:
+        s0 = v + k * s1 - s2
+        s2, s1 = s1, s0
+    return float(s1 * s1 + s2 * s2 - k * s1 * s2)
+
+
+def ctcss_detect(disc, fs, tones=CTCSS_TONES):
+    """Find a CTCSS tone in a frequency-discriminator stream (pure-ish).
+
+    Returns the best tone with how far it stands above the next-best candidate,
+    which is the figure that actually says whether it is there: a real CTCSS
+    tone is many dB clear of every other tone in the table, while noise scores
+    all of them about equally.
+    """
+    import numpy as np
+    x = np.asarray(disc, dtype=np.float64)
+    if x.size < int(fs * 0.2) or fs <= 0:
+        return None
+    x = x - x.mean()                      # drop the carrier offset
+    scores = [(t, _goertzel(x, fs, t)) for t in tones]
+    scores.sort(key=lambda p: p[1], reverse=True)
+    best, second = scores[0], scores[1]
+    if best[1] <= 0:
+        return None
+    margin = 10.0 * math.log10(best[1] / (second[1] + 1e-30))
+    return {"tone_hz": best[0], "margin_db": round(margin, 1),
+            "present": bool(margin >= 6.0),
+            "runner_up_hz": second[0]}
+
+
+def dcs_detect(disc, fs, bitrate=DCS_BITRATE):
+    """Recover a DCS code from a frequency-discriminator stream (pure-ish).
+
+    Slices the stream at the standard 134.4 bit/s, tries every sample phase,
+    and looks for the 23-bit word repeating — then matches it against the
+    standard code table at any rotation, because a receiver has no idea where
+    the word starts.
+    """
+    import numpy as np
+    global _DCS_TABLE
+    if _DCS_TABLE is None:
+        _DCS_TABLE = _dcs_table()
+    x = np.asarray(disc, dtype=np.float64)
+    spb = fs / float(bitrate)
+    if x.size < spb * 46 or spb < 2:
+        return None
+    x = x - np.mean(x)
+    nbits = int(x.size / spb) - 1
+    best = None
+    for phase in range(max(1, int(spb))):
+        idx = (np.arange(nbits) * spb + phase).astype(int)
+        idx = idx[idx < x.size]
+        if idx.size < 46:
+            continue
+        # integrate each bit rather than point-sampling it: the waveform is
+        # heavily filtered, so a single sample is mostly noise
+        w = max(1, int(spb / 2))
+        sums = np.array([x[max(0, i - w):i + w + 1].sum() for i in idx])
+        bits = (sums > 0).astype(int)
+        # score how well the stream repeats with period 23
+        rep = bits[:-23] == bits[23:]
+        score = float(np.mean(rep)) if rep.size else 0.0
+        if best is None or score > best[0]:
+            best = (score, bits)
+    if not best or best[0] < 0.9:
+        return {"present": False, "repeat_score": round(best[0], 3) if best else 0.0}
+    bits = best[1]
+    word = tuple(int(b) for b in bits[:23])
+    for rot in range(23):
+        rolled = tuple(word[(i + rot) % 23] for i in range(23))
+        code = _DCS_TABLE.get(rolled)
+        if code:
+            return {"present": True, "code": code, "inverted": False,
+                    "repeat_score": round(best[0], 3)}
+        inv = tuple(1 - b for b in rolled)
+        code = _DCS_TABLE.get(inv)
+        if code:
+            # an inverted-polarity DCS transmission ("DCS-N" vs "DCS-I")
+            return {"present": True, "code": code, "inverted": True,
+                    "repeat_score": round(best[0], 3)}
+    return {"present": True, "code": None, "repeat_score": round(best[0], 3),
+            "note": "a 23-bit word repeats, but it is not a standard DCS code"}
+
+
+def subaudible(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None):
+    """CTCSS tone / DCS code under an FM transmission.
+
+    Both are read from the frequency discriminator, low-passed to the
+    subaudible band. A transmission carries one or the other, never both, so
+    whichever answers is the one to believe.
+    """
+    import numpy as np
+    from scipy import signal as sig
+    x, nfs = _prep_selection(name, f_offset_hz, bw_hz or 12_500, t0, t1)
+    if len(x) < 512:
+        return {"ok": False, "error": "selection too short"}
+    amp = np.abs(x)
+    peak = float(np.max(amp)) + 1e-12
+    d = x[1:] * np.conj(x[:-1])
+    disc = np.angle(d) * nfs / (2 * np.pi)
+    disc = np.where(amp[1:] > peak * 0.1, disc, 0.0)
+    # decimate to a few kHz: everything of interest is below 260 Hz
+    dec = int(max(1, nfs // 2400))
+    if dec > 1:
+        disc = sig.decimate(disc, dec, ftype="fir")
+    fs2 = nfs / dec
+    # low-pass away the voice so the tone search is not fighting speech
+    try:
+        b, a = sig.butter(4, min(0.95, 300.0 / (fs2 / 2)), btype="low")
+        sub = sig.filtfilt(b, a, disc)
+    except Exception:
+        sub = disc
+    ct = ctcss_detect(sub, fs2)
+    dc = dcs_detect(sub, fs2)
+    return {"ok": True, "sample_rate_hz": round(fs2, 1),
+            "ctcss": ct, "dcs": dc,
+            "note": "CTCSS is a continuous tone, DCS a repeating 23-bit word at "
+                    "134.4 bit/s; a transmission carries one or the other. "
+                    "Nothing found usually means the channel is carrier-squelch."}
+
+
+def fm_deviation(inst_freq_hz, pct=99.5):
+    """Peak and RMS frequency deviation from an instantaneous-frequency trace (pure).
+
+    Peak deviation is taken at a high percentile rather than the true maximum: a
+    single sample at a zero crossing of the envelope produces a wild frequency
+    estimate, and one such sample must not become the answer. The carrier offset
+    (the trace's median) is removed first, because deviation is deviation *from
+    the carrier*, not from zero.
+    """
+    v = [float(x) for x in (inst_freq_hz or ()) if x == x]      # drop NaN
+    if len(v) < 4:
+        return None
+    sv = sorted(v)
+    centre = sv[len(sv) // 2]
+    d = sorted(abs(x - centre) for x in v)
+    k = min(len(d) - 1, int(len(d) * min(99.99, max(50.0, pct)) / 100.0))
+    peak = d[k]
+    rms = (sum((x - centre) ** 2 for x in v) / len(v)) ** 0.5
+    return {"carrier_offset_hz": round(centre, 1), "peak_dev_hz": round(peak, 1),
+            "rms_dev_hz": round(rms, 1),
+            # Carson: the bandwidth an FM signal of this deviation needs
+            "carson_bw_hz": round(2 * (peak + rms), 1)}
+
+
+def am_depth(envelope, pct=99.0):
+    """AM modulation depth from an amplitude envelope (pure).
+
+    m = (max - min) / (max + min), the standard definition, but taken at
+    percentiles so one noise sample cannot claim 100% modulation. Returned as a
+    fraction and as a percentage; 0 means an unmodulated carrier and 1.0 means
+    the envelope reaches zero (100% modulation).
+    """
+    v = sorted(float(x) for x in (envelope or ()) if x == x and x >= 0)
+    if len(v) < 4:
+        return None
+    hi = v[min(len(v) - 1, int(len(v) * min(99.99, max(50.0, pct)) / 100.0))]
+    lo = v[max(0, len(v) - 1 - int(len(v) * min(99.99, max(50.0, pct)) / 100.0))]
+    if hi + lo <= 0:
+        return None
+    m = (hi - lo) / (hi + lo)
+    return {"depth": round(m, 4), "depth_pct": round(m * 100.0, 1),
+            "env_max": round(hi, 5), "env_min": round(lo, 5)}
+
+
+def modulation_quality(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None):
+    """Service-monitor measurements on a selection: FM deviation and AM depth.
+
+    Both are computed for every selection, because the interesting answer is
+    often the one you did not ask for (an "FM" signal with 40% AM depth is
+    telling you something about the transmitter). The classifier's verdict is
+    included so the caller knows which figure to read; EVM for digital
+    modulations comes from :func:`constellation_demod`.
+    """
+    import numpy as np
+    x, nfs = _prep_selection(name, f_offset_hz, bw_hz, t0, t1)
+    if len(x) < 64:
+        return {"ok": False, "error": "selection too short"}
+    amp = np.abs(x)
+    peak = float(np.max(amp)) + 1e-12
+    # Frequency discriminator. Samples where the envelope collapses carry no
+    # phase information, so they are left out rather than allowed to dominate.
+    d = x[1:] * np.conj(x[:-1])
+    good = amp[1:] > peak * 0.10
+    inst = np.angle(d) * nfs / (2 * np.pi)
+    used = inst[good] if int(np.count_nonzero(good)) > 16 else inst
+    fm = fm_deviation(used.tolist())
+    am = am_depth((amp / peak).tolist())
+    cls = _classify_signal(x, nfs)
+    return {"ok": True, "sample_rate_hz": round(nfs, 1),
+            "samples": int(len(x)), "gated_frac": round(float(np.mean(good)), 3),
+            "fm": fm, "am": am,
+            "modulation": cls.get("label") or cls.get("modulation"),
+            "confidence": cls.get("confidence"),
+            "note": "FM figures assume the selection is one signal: filter to it "
+                    "with bw_hz first. AM depth of a digital burst is keying, not "
+                    "modulation depth."}
+
+
+def classify(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None):
+    """Automatic modulation classification for the selected signal."""
+    x, nfs = _prep_selection(name, f_offset_hz, bw_hz, t0, t1)
+    r = _classify_signal(x, nfs)
+    r["ok"] = True
+    r["sample_rate_hz"] = round(nfs, 1)
+    return r
+
+
+# --------------------------------------------------------------------------
+# Segment 9 — deeper demod: PSK constellation recovery. Take one clean burst,
+# recover symbol timing (grid-search over the sample phase), the carrier
+# (residual CFO + constant phase via the M-power method), classify the
+# constellation order M ∈ {2,4,8} = BPSK/QPSK/8PSK (the SMALLEST order whose
+# M-power tone locks, so QPSK is never mislabelled 8PSK), slice symbols to bits
+# (Gray, plus a rotation-invariant differential decode) and report EVM + an
+# EVM-derived SNR. Pure core, selftested on synthetic PSK (no hardware).
+# HONEST: PSK only (no QAM), rectangular symbol sampling (no matched filter),
+# absolute-phase ambiguity resolved only by the differential decode.
+# --------------------------------------------------------------------------
+_PSK_NAME = {2: "BPSK", 4: "QPSK", 8: "8PSK"}
+
+
+def _gray_bits(k, nbits):
+    """MSB-first Gray-coded bit string for symbol index k over nbits bits (pure)."""
+    g = int(k) ^ (int(k) >> 1)
+    return format(g & ((1 << nbits) - 1), "0{}b".format(nbits))
+
+
+def _psk_symbol_demod(x, nfs, baud, order=None):
+    """Recover PSK symbols + bits from a baseband selection (pure).
+
+    Returns {ok, order, mod, sps, n_symbols, symbols, bits_gray, bits_diff,
+    evm_pct, snr_db, points_i/points_q, centers_i/centers_q, lock}. ``order``
+    forces M; otherwise M is the smallest of {2,4,8} whose M-power tone locks.
+    """
+    import numpy as np
+    out = {"ok": False}
+    if x is None or len(x) < 64 or not baud or baud <= 0:
+        out["error"] = "selection too short or symbol rate unknown"; return out
+    sps = nfs / float(baud)
+    if sps < 2.0:
+        out["error"] = "sample rate too low for this symbol rate"; return out
+    nsym = int((len(x) - 1) / sps)
+    if nsym < 16:
+        out["error"] = "too few symbols in the selection"; return out
+    x = np.asarray(x, dtype=np.complex128)
+    phases = np.linspace(0, sps, 12, endpoint=False)
+
+    def sample_at(phase):
+        idx = np.round(np.arange(nsym) * sps + phase).astype(int)
+        idx = idx[(idx >= 0) & (idx < len(x))]
+        s = x[idx]
+        rms = float(np.sqrt(np.mean(np.abs(s) ** 2))) + 1e-12
+        return s / rms
+
+    def eval_M(M):
+        # best sampling phase = the one whose M-power tone locks hardest, after
+        # removing a linear phase ramp (residual carrier offset) in s**M.
+        best = None
+        for p in phases:
+            s = sample_at(p)
+            sm = s ** M
+            ph = np.unwrap(np.angle(sm + 1e-12))
+            slope = float(np.polyfit(np.arange(len(sm)), ph, 1)[0])
+            s2 = s * np.exp(-1j * (slope / M) * np.arange(len(s)))
+            lock = float(np.abs(np.mean(np.exp(1j * M * np.angle(s2)))))
+            if best is None or lock > best[0]:
+                best = (lock, p, s2)
+        lock, p, s2 = best
+        phi0 = float(np.angle(np.mean(s2 ** M) + 1e-12)) / M   # constant-phase de-rotation
+        s2 = s2 * np.exp(-1j * phi0)
+        k = np.mod(np.round(np.angle(s2) / (2 * np.pi / M)), M).astype(int)
+        ideal = np.exp(1j * (2 * np.pi / M) * k)
+        s2n = s2 / (float(np.mean(np.abs(s2))) + 1e-12)
+        evm = float(np.sqrt(np.mean(np.abs(s2n - ideal) ** 2)))
+        return {"M": M, "lock": lock, "evm": evm, "phase": float(p), "s": s2n, "k": k}
+
+    cand = {M: eval_M(M) for M in (2, 4, 8)}
+    if order in (2, 4, 8):
+        chosen = int(order)
+    else:
+        LOCK = 0.55
+        locked = [M for M in (2, 4, 8) if cand[M]["lock"] >= LOCK]
+        chosen = min(locked) if locked else min((2, 4, 8), key=lambda M: cand[M]["evm"])
+    r = cand[chosen]
+    M, k, s2n = r["M"], r["k"], r["s"]
+    # guard: a single tone / CW locks trivially at every M — one cluster is not PSK
+    counts = np.bincount(k, minlength=M)
+    top_frac = float(counts.max()) / max(1, int(counts.sum()))
+    nbits = int(np.log2(M))
+    bits_gray = "".join(_gray_bits(int(v), nbits) for v in k)
+    dk = np.mod(np.diff(np.concatenate([[0], k])), M)         # differential symbols
+    bits_diff = "".join(_gray_bits(int(v), nbits) for v in dk)
+    centers = np.exp(1j * (2 * np.pi / M) * np.arange(M))
+    snr = round(-20.0 * np.log10(r["evm"] + 1e-6), 1)
+    NP = min(2000, len(s2n))
+    sub = s2n[np.linspace(0, len(s2n) - 1, NP).astype(int)] if len(s2n) > NP else s2n
+    return {"ok": True, "order": M, "mod": _PSK_NAME[M],
+            "sps": round(sps, 3), "n_symbols": int(len(k)),
+            "lock": round(r["lock"], 3), "evm_pct": round(r["evm"] * 100.0, 2),
+            "snr_db": snr, "single_cluster": bool(top_frac > 0.85),
+            "symbols": [int(v) for v in k.tolist()],
+            "bits_gray": bits_gray, "bits_diff": bits_diff,
+            "points_i": [round(float(v), 3) for v in sub.real.tolist()],
+            "points_q": [round(float(v), 3) for v in sub.imag.tolist()],
+            "centers_i": [round(float(v), 3) for v in centers.real.tolist()],
+            "centers_q": [round(float(v), 3) for v in centers.imag.tolist()],
+            "lock_by_order": {str(m): round(cand[m]["lock"], 3) for m in (2, 4, 8)}}
+
+
+def constellation_demod(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None,
+                        baud_hz=None, order=None):
+    """PSK symbol/bit recovery for a selection. Estimates the symbol rate with
+    the cyclostationary detector when ``baud_hz`` isn't given."""
+    import numpy as np
+    x, nfs = _prep_selection(name, f_offset_hz, bw_hz, t0, t1)
+    if len(x) < 64:
+        return {"ok": False, "error": "selection too short"}
+    baud = float(baud_hz) if baud_hz else 0.0
+    if baud <= 0:                       # estimate via the cyclic transition-energy profile
+        f, prof = _cyclic_profile(x, nfs, min(nfs / 4.0, 100000.0))
+        baud = _fundamental_rate(_cyclic_peaks(f, prof)) or 0.0
+    r = _psk_symbol_demod(x, nfs, baud, order=order)
+    r["sample_rate_hz"] = round(nfs, 1)
+    r["baud_hz"] = round(float(baud), 1)
+    r["baud_estimated"] = not bool(baud_hz)
+    return r
+
+
+# --------------------------------------------------------------------------
+# Segment 10 — multi-signal survey: find EVERY simultaneous carrier in a window
+# and track each over time, so a busy band's signals are individually
+# selectable. An STFT → per-frame peak detection above a per-frame noise floor
+# → link detections across frames into tracks (a carrier persists while its
+# frequency stays within a tolerance, bridging short gaps). Returns each track's
+# frequency extent, time extent, peak power and occupancy. Pure core, selftested
+# on a synthetic multi-carrier scene (no hardware).
+# --------------------------------------------------------------------------
+
+def _detect_signals(iq, fs, fc, nfft=512, snr_db=12.0, min_frames=3, max_signals=40):
+    """Find + track carriers in an IQ block (pure). Returns a list of tracks with
+    absolute-Hz frequency edges and times in seconds from the block start."""
+    import numpy as np
+    n = len(iq)
+    if n < nfft * 2:
+        return [], 0.0
+    win = np.hanning(nfft).astype(np.float32)
+    ncol = max(2, min(1500, (n - nfft) // nfft + 1))          # non-overlapping frames, bounded
+    starts = np.linspace(0, max(0, n - nfft), ncol).astype(int)
+    frames = np.stack([iq[s:s + nfft] for s in starts]) * win
+    S = np.fft.fftshift(np.fft.fft(frames, axis=1), axes=1)
+    P = (S.real ** 2 + S.imag ** 2) / (nfft * float(np.sum(win ** 2)))
+    db = 10.0 * np.log10(P + 1e-12)                            # (frames, bins)
+    fbins = np.fft.fftshift(np.fft.fftfreq(nfft, 1.0 / fs)) + fc
+    bin_hz = fs / nfft
+    frame_dt = (starts[-1] - starts[0]) / max(1, ncol - 1) / fs if ncol > 1 else nfft / fs
+    active, closed = [], []                                   # tracks: dict(fc,flo,fhi,pk,t0i,t1i,frames,miss)
+    ftol = max(2.5 * bin_hz, 4000.0)                          # freq tolerance to continue a track
+    gap = 3                                                   # frames a track may miss before it closes
+    for ti in range(ncol):
+        row = db[ti]
+        floor = float(np.percentile(row, 40.0))
+        thr = floor + snr_db
+        hot = row > thr
+        # group consecutive hot bins into per-frame detections
+        dets = []
+        b = 0
+        while b < nfft:
+            if hot[b]:
+                e = b
+                while e + 1 < nfft and hot[e + 1]:
+                    e += 1
+                seg = row[b:e + 1]
+                pk = int(b + np.argmax(seg))
+                dets.append((float(fbins[pk]), float(fbins[b]), float(fbins[e]), float(row[pk])))
+                b = e + 1
+            else:
+                b += 1
+        prev = active                                          # tracks entering this frame
+        used = [False] * len(prev)
+        fresh = []
+        for (fcn, flo, fhi, pk) in dets:
+            best, bd = -1, ftol
+            for j, tr in enumerate(prev):
+                if used[j]:
+                    continue
+                d = abs(tr["fc"] - fcn)
+                if d < bd:
+                    bd, best = d, j
+            if best >= 0:
+                tr = prev[best]; used[best] = True
+                tr["fc"] = 0.7 * tr["fc"] + 0.3 * fcn          # track the drift
+                tr["flo"] = min(tr["flo"], flo); tr["fhi"] = max(tr["fhi"], fhi)
+                tr["pk"] = max(tr["pk"], pk); tr["t1i"] = ti
+                tr["frames"] += 1; tr["miss"] = 0
+            else:
+                fresh.append({"fc": fcn, "flo": flo, "fhi": fhi, "pk": pk,
+                              "t0i": ti, "t1i": ti, "frames": 1, "miss": 0})
+        # age unmatched tracks; close ones that have missed too long
+        still = []
+        for j, tr in enumerate(prev):
+            if not used[j]:
+                tr["miss"] += 1
+            if tr["miss"] > gap:
+                closed.append(tr)
+            else:
+                still.append(tr)
+        active = still + fresh
+    closed.extend(active)
+    out = []
+    for tr in closed:
+        if tr["frames"] < min_frames:
+            continue
+        span = tr["t1i"] - tr["t0i"] + 1
+        out.append({
+            "f_center_hz": round((tr["flo"] + tr["fhi"]) / 2.0, 1),
+            "f_lo_hz": round(tr["flo"] - bin_hz / 2, 1), "f_hi_hz": round(tr["fhi"] + bin_hz / 2, 1),
+            "bw_hz": round((tr["fhi"] - tr["flo"]) + bin_hz, 1),
+            "t0_s": round(tr["t0i"] * frame_dt, 4), "t1_s": round((tr["t1i"] + 1) * frame_dt, 4),
+            "peak_db": round(tr["pk"], 1), "frames": tr["frames"],
+            "occupancy": round(tr["frames"] / span, 2) if span else 1.0})
+    # merge tracks that overlap heavily in both freq and time (one carrier split)
+    out.sort(key=lambda s: s["peak_db"], reverse=True)
+    merged = []
+    for s in out:
+        hit = None
+        for m in merged:
+            if not (s["f_hi_hz"] < m["f_lo_hz"] or s["f_lo_hz"] > m["f_hi_hz"]) \
+               and not (s["t1_s"] < m["t0_s"] or s["t0_s"] > m["t1_s"]):
+                hit = m; break
+        if hit:
+            hit["f_lo_hz"] = min(hit["f_lo_hz"], s["f_lo_hz"]); hit["f_hi_hz"] = max(hit["f_hi_hz"], s["f_hi_hz"])
+            hit["f_center_hz"] = round((hit["f_lo_hz"] + hit["f_hi_hz"]) / 2.0, 1)
+            hit["bw_hz"] = round(hit["f_hi_hz"] - hit["f_lo_hz"], 1)
+            hit["t0_s"] = min(hit["t0_s"], s["t0_s"]); hit["t1_s"] = max(hit["t1_s"], s["t1_s"])
+            hit["frames"] += s["frames"]
+        else:
+            merged.append(dict(s))
+    merged.sort(key=lambda s: (s["t1_s"] - s["t0_s"]) * (s["peak_db"] + 140), reverse=True)
+    return merged[:max_signals], float(np.percentile(db, 40.0))
+
+
+def signals(name, t0=None, t1=None, snr_db=12.0, nfft=512, max_signals=40):
+    """Survey a window and return every detected carrier as a selectable track."""
+    iq, fs, fc, _ = load(name)
+    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
+    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
+    x = iq[i0:i1] if i1 > i0 else iq
+    base_t = i0 / fs
+    tracks, floor = _detect_signals(x, fs, fc, nfft=int(nfft), snr_db=float(snr_db),
+                                    max_signals=int(max_signals))
+    for s in tracks:                                          # times are absolute in the capture
+        s["t0_s"] = round(s["t0_s"] + base_t, 4); s["t1_s"] = round(s["t1_s"] + base_t, 4)
+        s["snr_db"] = round(s["peak_db"] - floor, 1)
+    return {"ok": True, "sample_rate_hz": round(fs, 1), "center_hz": fc,
+            "nfft": int(nfft), "noise_db": round(floor, 1),
+            "n_signals": len(tracks), "signals": tracks}
+
+
+# --------------------------------------------------------------------------
+# Segment 7 — advanced DSP: apply a band-pass / notch filter to a selection and
+# show the spectrum before vs after (isolate one signal, or reject an
+# interferer). An FFT-domain band mask over absolute frequency — simple, exact
+# and pure, so the selftest can prove a tone survives a band-pass and vanishes
+# under a notch.
+# --------------------------------------------------------------------------
+
+def _fft_bandmask(x, fs, fc, f0_hz, f1_hz, kind):
+    """Zero the FFT bins outside (band-pass) or inside (notch) [f0,f1] Hz (pure)."""
+    import numpy as np
+    n = len(x)
+    X = np.fft.fftshift(np.fft.fft(x))
+    freqs = np.fft.fftshift(np.fft.fftfreq(n, 1.0 / fs)) + fc
+    lo, hi = (f0_hz, f1_hz) if f0_hz <= f1_hz else (f1_hz, f0_hz)
+    inband = (freqs >= lo) & (freqs <= hi)
+    mask = inband if str(kind).lower().startswith("band") else ~inband
+    xf = np.fft.ifft(np.fft.ifftshift(X * mask))
+    return xf.astype(np.complex64)
+
+
+def filter_preview(name, kind="bandpass", f0_hz=None, f1_hz=None, t0=None, t1=None, n=900):
+    """Band-pass/notch the [t0,t1] selection over [f0,f1] Hz; return the spectrum
+    before and after plus the fraction of power kept.  Absolute-frequency
+    filtering (bins mapped through the capture centre), not the mixed-to-DC path."""
+    import numpy as np
+    iq, fs, fc, _ = load(name)
+    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
+    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
+    x = iq[i0:i1] if i1 > i0 else iq
+    if len(x) < 32:
+        return {"ok": False, "error": "selection too short to filter"}
+    if f0_hz is None or f1_hz is None:
+        return {"ok": False, "error": "give a frequency band (f0_hz, f1_hz)"}
+    f0_hz, f1_hz = float(f0_hz), float(f1_hz)
+    xf = _fft_bandmask(x, fs, fc, f0_hz, f1_hz, kind)
+    fb, db_b = welch_psd(x, fs)
+    fa, db_a = welch_psd(xf, fs)
+    p_in = float(np.mean(np.abs(x) ** 2)); p_out = float(np.mean(np.abs(xf) ** 2))
+    n = int(max(64, min(1600, n)))
+    fr = (fb + fc) / 1e6
+    if len(db_b) > n:
+        idx = np.linspace(0, len(db_b) - 1, n).astype(int)
+        db_b = _pool_max(db_b, n); db_a = _pool_max(db_a, n); fr = fr[idx]
+    return {"ok": True, "kind": ("bandpass" if str(kind).lower().startswith("band") else "notch"),
+            "f0_mhz": round(min(f0_hz, f1_hz) / 1e6, 4), "f1_mhz": round(max(f0_hz, f1_hz) / 1e6, 4),
+            "freqs_mhz": [round(v, 4) for v in fr.tolist()],
+            "db_before": [round(v, 1) for v in db_b.tolist()],
+            "db_after": [round(v, 1) for v in db_a.tolist()],
+            "power_kept_pct": round(100.0 * p_out / (p_in + 1e-12), 1)}
+
+
+# --------------------------------------------------------------------------
+# Segment 7 — LoRa de-chirp view. LoRa is chirp spread-spectrum: each symbol is
+# a base up-chirp cyclically shifted by the symbol value. Multiplying by a
+# reference DOWN-chirp collapses each chirp to a constant tone whose FFT-bin IS
+# the symbol — so diagonal sweeps become horizontal lines and the symbol
+# sequence falls out. This is a de-chirp VIEW + rough symbol readout, NOT a full
+# LoRa decoder (no sync-word/Gray/interleave/FEC/CRC/header — that needs
+# gr-lora_sdr); but it's how you confirm a signal is LoRa and read its SF/BW.
+# The core is pure (selftested on a synthesised LoRa signal, no hardware).
+# --------------------------------------------------------------------------
+
+_LORA_BW = {"7.8k": 7800, "10.4k": 10400, "15.6k": 15600, "20.8k": 20800,
+            "31.25k": 31250, "41.7k": 41700, "62.5k": 62500,
+            "125k": 125000, "250k": 250000, "500k": 500000}
+
+
+def _lora_base_upchirp(M, os):
+    """One LoRa base up-chirp: L=M*os samples sweeping -BW/2..+BW/2 (pure)."""
+    import numpy as np
+    L = M * os
+    k = np.arange(L)
+    f = -M / 2.0 + M * (k / float(L))
+    return np.exp(2j * np.pi * np.cumsum(f) / (os * M)).astype(np.complex64)
+
+
+def _lora_dechirp(iq, sf, os):
+    """De-chirp IQ already sampled at os*BW; return per-symbol values, a quality
+    (peak/mean lock metric) and an M×nsym magnitude grid (pure numpy)."""
+    import numpy as np
+    M = 1 << int(sf)
+    L = M * os
+    down = np.conj(_lora_base_upchirp(M, os))
+    nsym = len(iq) // L
+    if nsym < 1:
+        return [], 0.0, None
+    nsym = min(nsym, 500)
+    syms, quals = [], []
+    grid = np.zeros((M, nsym), dtype=np.float32)
+    binsym = np.arange(L)
+    binsym = np.where(binsym < L // 2, binsym, binsym - (L - M)) % M   # bin -> symbol
+    for i in range(nsym):
+        S = np.abs(np.fft.fft(iq[i * L:(i + 1) * L] * down, L))
+        pk = int(np.argmax(S))
+        syms.append(int(binsym[pk]))
+        quals.append(float(S.max() / (S.mean() + 1e-9)))
+        col = np.zeros(M, dtype=np.float32)          # fold L bins onto M symbol rows (max)
+        np.maximum.at(col, binsym, S.astype(np.float32))
+        grid[:, i] = col
+    return syms, float(np.mean(quals)), grid
+
+
+def dechirp(name, bw_hz=125000, sf=7, f_offset_hz=0.0, t0=None, t1=None, os=2, h=256):
+    """LoRa de-chirp a selection: resample the chosen channel to os*BW, de-chirp
+    at the given spreading factor, and return the symbol sequence, a lock quality,
+    and a de-chirped magnitude grid (symbol value × time) for display."""
+    import numpy as np
+    from scipy.signal import resample_poly
+    from fractions import Fraction
+    iq, fs, fc, _ = load(name)
+    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
+    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
+    x = iq[i0:i1] if i1 > i0 else iq
+    try:
+        bw = float(bw_hz); sf = int(sf); os = int(max(1, min(4, os)))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad bw/sf"}
+    if not (6 <= sf <= 12):
+        return {"ok": False, "error": "spreading factor must be 7..12"}
+    if bw <= 0 or bw > fs:
+        return {"ok": False, "error": "bandwidth must be >0 and <= sample rate"}
+    if len(x) < 256:
+        return {"ok": False, "error": "selection too short"}
+    n = np.arange(len(x))
+    x = x * np.exp(-2j * np.pi * (float(f_offset_hz) / fs) * n)      # channel -> DC
+    fs2 = os * bw
+    frac = Fraction(fs2 / fs).limit_denominator(2000)
+    up, down = frac.numerator, frac.denominator
+    if up < 1 or down < 1:
+        return {"ok": False, "error": "cannot resample to that bandwidth"}
+    xr = resample_poly(x, up, down).astype(np.complex64)
+    syms, quality, grid = _lora_dechirp(xr, sf, os)
+    if grid is None:
+        return {"ok": False, "error": "selection shorter than one LoRa symbol at SF%d/BW%g" % (sf, bw)}
+    # pack the grid (symbol-value rows × time cols) to a base64 uint8 image
+    M = grid.shape[0]
+    g = grid[::-1, :]                                # row 0 (top) = highest symbol value
+    if M > h:
+        g = np.stack([_pool_max(g[:, c], h) for c in range(g.shape[1])], axis=1)
+    db = 10.0 * np.log10(g ** 2 + 1e-9)
+    floor = float(np.percentile(db, 40)); ceil = float(np.percentile(db, 99.8))
+    if ceil - floor < 12:
+        ceil = floor + 12
+    u8 = np.clip((db - floor) / (ceil - floor), 0, 1)
+    u8 = (u8 * 255).astype(np.uint8)
+    return {"ok": True, "sf": sf, "bw_hz": bw, "os": os, "sym_rate_hz": round(bw / M, 2),
+            "n_symbols": len(syms), "symbols": syms[:256],
+            "quality": round(quality, 1), "locked": quality >= 12.0,
+            "w": u8.shape[1], "h": u8.shape[0], "chips": M,
+            "data": base64.b64encode(u8.tobytes()).decode("ascii"),
+            "bw_presets": {k: v for k, v in _LORA_BW.items()}}
+
+
+# --------------------------------------------------------------------------
+# Segment 7 — cyclostationary symbol-rate detector. Digitally-modulated signals
+# are cyclostationary: their statistics repeat at the symbol rate even when the
+# *data* is random (so the symbol rate is NOT an ordinary spectral line). The
+# transition energy |x[n]-x[n-1]|^2 spikes at every symbol edge (amplitude or
+# phase change), so its spectrum shows a discrete line at the symbol rate and
+# its harmonics — a 2nd-order cyclic feature. This finds the baud when the
+# demodulator's run-length estimate is unsure. Targets amplitude/phase-transition
+# mods (OOK/ASK/PSK) well; FSK/very-weak signals may not show a clear line (the
+# strength readout says so). Pure core, selftested on synthetic signals.
+# --------------------------------------------------------------------------
+
+def _cyclic_profile(x, fs, amax_hz, n=700):
+    """Transition-energy spectrum over cycle frequency; returns (freqs_hz, prof)
+    normalised to its median. Pure numpy."""
+    import numpy as np
+    x = np.asarray(x)
+    if len(x) < 64:
+        return np.array([]), np.array([])
+    d = np.abs(np.diff(x)) ** 2
+    # high-pass: subtract a slow moving-average so the random-data low-frequency
+    # bulk doesn't swamp the (relatively sharp) symbol-rate transition line.
+    k = max(3, int(len(d) * 0.02))
+    d = d - np.convolve(d, np.ones(k) / k, mode="same")
+    w = np.hanning(len(d)).astype(np.float32)
+    F = np.abs(np.fft.rfft(d * w))
+    f = np.fft.rfftfreq(len(d), 1.0 / fs)
+    sel = (f > 0) & (f <= amax_hz)
+    F = F[sel]; f = f[sel]
+    if not len(F):
+        return np.array([]), np.array([])
+    prof = F / (np.median(F) + 1e-9)
+    if len(prof) > n:
+        idx = (np.arange(n + 1) * len(prof) / n).astype(int)
+        prof = np.array([prof[idx[i]:max(idx[i] + 1, idx[i + 1])].max() for i in range(n)])
+        f = f[np.linspace(0, len(f) - 1, n).astype(int)]
+    return f, prof
+
+
+def _cyclic_peaks(f, prof, kmin=6.0, top=6):
+    """Local maxima of the cyclic profile above ``kmin`` (candidate symbol rates)."""
+    out = []
+    for i in range(2, len(prof) - 1):
+        if prof[i] > prof[i - 1] and prof[i] >= prof[i + 1] and prof[i] > kmin:
+            out.append((float(prof[i]), float(f[i])))
+    out.sort(reverse=True)
+    return out[:top]
+
+
+def _fundamental_rate(peaks):
+    """Symbol rate = the fundamental of the cyclic peaks (their harmonics sit at
+    k·f0). Score each peak freq by how many strong peaks are ~integer multiples;
+    prefer more multiples, then the smaller frequency. Pure."""
+    if not peaks:
+        return None
+    top = peaks[0][0]
+    strong = [fr for st, fr in peaks if st >= 0.5 * top]
+    best = None
+    for _, f0 in peaks:
+        if f0 <= 0:
+            continue
+        score = sum(1 for fr in strong
+                    if round(fr / f0) >= 1 and abs(fr / f0 - round(fr / f0)) < 0.06)
+        key = (score, -f0)
+        if best is None or key > best[0]:
+            best = (key, f0)
+    return best[1] if best else peaks[0][1]
+
+
+def cyclic(name, f_offset_hz=0.0, t0=None, t1=None, amax_hz=None):
+    """Cyclostationary symbol-rate profile over a selection. Peaks at the symbol
+    rate (and harmonics). Returns the profile curve + candidate symbol rates with
+    a strength; ``locked`` when the top peak is confident."""
+    import numpy as np
+    iq, fs, fc, _ = load(name)
+    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
+    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
+    x = iq[i0:i1] if i1 > i0 else iq
+    if len(x) < 256:
+        return {"ok": False, "error": "selection too short"}
+    foff = float(f_offset_hz or 0.0)
+    if foff:
+        x = x * np.exp(-2j * np.pi * (foff / fs) * np.arange(len(x)))
+    amax = float(amax_hz) if amax_hz else min(fs / 4.0, 100000.0)
+    amax = max(1000.0, min(amax, fs / 2.0))
+    f, prof = _cyclic_profile(x, fs, amax)
+    if not len(f):
+        return {"ok": False, "error": "could not compute cyclic profile"}
+    peaks = _cyclic_peaks(f, prof)
+    fund = _fundamental_rate(peaks)
+    # strength credited to the fundamental = the strongest peak near it or a harmonic
+    fstr = 0.0
+    for st, fr in peaks:
+        if fund and abs(fr / fund - round(fr / fund)) < 0.06:
+            fstr = max(fstr, st)
+    return {"ok": True, "amax_hz": round(amax, 1),
+            "freqs_hz": [round(v, 1) for v in f.tolist()],
+            "profile": [round(v, 2) for v in prof.tolist()],
+            "peaks": [{"symbol_rate_hz": round(fr, 1), "strength": round(st, 1)} for st, fr in peaks],
+            "top_symbol_rate_hz": round(fund, 1) if fund else None,
+            "top_strength": round(fstr, 1),
+            "locked": bool(fund and fstr >= 8.0)}
+
+
+# --------------------------------------------------------------------------
+# Segment 4 — protocol framework: line coding, preamble/sync detection,
+# repeated-frame alignment (fixed code vs rolling bits) and a CRC/checksum
+# scanner. All pure string/int math — the demodulator recovers the bits, this
+# gives them structure. Selftested on synthetic bitstreams, no hardware.
+# --------------------------------------------------------------------------
+
+def line_decode(bits, scheme):
+    """Decode a raw bitstream by its line coding (pure).
+
+    ``manchester``  — 01->1, 10->0 (IEEE; the common ISM convention);
+    ``manchester_ieee`` alias. ``diff_manchester`` — a transition at the start of
+    a bit period = 0, none = 1. ``nrzi`` — a transition = 1, none = 0.
+    Unknown/``raw`` returns the bits unchanged. Returns the decoded bit string.
+    """
+    b = bits or ""
+    s = (scheme or "raw").lower()
+    if s in ("manchester", "manchester_ieee"):
+        out = []
+        for i in range(0, len(b) - 1, 2):
+            p = b[i:i + 2]
+            out.append("1" if p == "01" else ("0" if p == "10" else "?"))
+        return "".join(out)
+    if s in ("nrzi", "diff_manchester"):
+        out = []
+        prev = b[0] if b else "0"
+        for i in range(1, len(b)):
+            trans = b[i] != prev
+            out.append("1" if trans else "0")
+            prev = b[i]
+        return "".join(out)
+    return b
+
+
+def _preamble(bits):
+    """Length of a leading alternating (0101…/1010…) run — the classic preamble."""
+    n = 1
+    while n < len(bits) and bits[n] != bits[n - 1]:
+        n += 1
+    return n if n >= 4 else 0
+
+
+def _repeat_period(bits, min_p=8):
+    """Best repeated-frame period in a bitstream, or 0 (pure, numpy).
+
+    A remote/sensor usually sends the same frame back-to-back; the period is the
+    lag (>= min_p) at which the ±1-mapped bit sequence best autocorrelates. Only
+    accepts a period with a strong, clear peak so noise-like data returns 0.
+    """
+    import numpy as np
+    n = len(bits)
+    if n < min_p * 2:
+        return 0
+    s = np.frombuffer(bits.encode(), dtype=np.uint8).astype(np.float32)
+    s = np.where(s == ord("1"), 1.0, -1.0)
+    s -= s.mean()
+    if s.std() < 1e-6:
+        return 0
+    energy = float(np.dot(s, s)) / n + 1e-9
+    hi = n // 2
+    corr = {}
+    best = 0.0
+    for lag in range(min_p, hi + 1):
+        a, b = s[:-lag], s[lag:]
+        c = float(np.dot(a, b) / len(a)) / energy       # normalised [~ -1..1]
+        corr[lag] = c
+        if c > best:
+            best = c
+    if best <= 0.5:
+        return 0
+    # Autocorrelation also peaks at multiples of the true period; take the
+    # SMALLEST lag whose correlation is within 90% of the best (the fundamental).
+    for lag in range(min_p, hi + 1):
+        if corr[lag] >= 0.9 * best:
+            return lag
+    return 0
+
+
+def _period_candidates(bits, min_p=8, topk=6, floor=0.2):
+    """Ranked candidate frame periods from autocorrelation (pure, numpy).
+
+    Unlike :func:`_repeat_period` (which gates hard and returns one fundamental),
+    this returns *several* plausible periods even when the top peak is weak — so
+    a jittery real bitstream still offers frame lengths to try. Harmonics of an
+    already-listed candidate are collapsed to the fundamental.
+    """
+    import numpy as np
+    n = len(bits)
+    if n < min_p * 2:
+        return []
+    s = np.frombuffer(bits.encode(), dtype=np.uint8).astype(np.float32)
+    s = np.where(s == ord("1"), 1.0, -1.0)
+    s -= s.mean()
+    if s.std() < 1e-6:
+        return []
+    energy = float(np.dot(s, s)) / n + 1e-9
+    hi = n // 2
+    scored = []
+    for lag in range(min_p, hi + 1):
+        a, b = s[:-lag], s[lag:]
+        scored.append((float(np.dot(a, b) / len(a)) / energy, lag))
+    scored = [x for x in scored if x[0] >= floor]
+    scored.sort(reverse=True)                       # strongest correlation first
+    out = []
+    for c, lag in scored:
+        # collapse harmonics: skip a lag that's ~an integer multiple of one kept
+        if any(abs(lag - k * p) <= 1 for p in out for k in range(1, lag // p + 1)):
+            continue
+        out.append(lag)
+        if len(out) >= topk:
+            break
+    return out
+
+
+def _eval_period(bits, period, skip=0):
+    """Align a bitstream into frames of ``period`` (optionally after a ``skip``
+    preamble), build a consensus + stability map, and CRC-scan it (pure)."""
+    import numpy as np
+    body = bits[skip:]
+    nrep = len(body) // period
+    if period < 8 or nrep < 2:
+        return None
+    frames = [body[i * period:(i + 1) * period] for i in range(nrep)]
+    arr = np.array([[1 if ch == "1" else 0 for ch in f] for f in frames])
+    agree = arr.mean(axis=0)
+    consensus = "".join("1" if a >= 0.5 else "0" for a in agree)
+    stable = np.array([1.0 - 2 * min(a, 1 - a) for a in agree])
+    varying = [i for i, st in enumerate(stable) if st < 0.85]
+    crc = crc_scan(consensus)
+    return {"period_bits": period, "skip_bits": skip, "repeats": nrep,
+            "consensus_bits": consensus, "consensus_hex": _to_hex(consensus),
+            "varying_positions": varying[:200],
+            "stable_fraction": round(float((stable >= 0.85).mean()), 3),
+            "identical": len(varying) == 0,
+            "crc_matches": crc["matches"]}
+
+
+def _to_hex(bits):
+    """Group a bit string into hex bytes (MSB first); trailing <8 bits appended."""
+    out = []
+    for i in range(0, len(bits) - 7, 8):
+        out.append("%02x" % int(bits[i:i + 8], 2))
+    rem = len(bits) % 8
+    s = " ".join(out)
+    if rem:
+        s += (" " if s else "") + "+" + bits[len(bits) - rem:]
+    return s
+
+
+def frame_analysis(bits, period=None):
+    """Structure a recovered bitstream: preamble, repeated-frame period(s), a
+    per-bit stability map (fixed code vs rolling bits), and CRC per candidate.
+
+    Aligning the repeated frames a remote transmits is *the* reverse-engineering
+    move. Beyond the single best autocorrelation period, this returns a ranked
+    list of **candidate frame lengths** — each aligned (optionally after the
+    preamble), consensus-built and **CRC-scanned** — so a jittery real bitstream
+    still offers frame boundaries to try, and a length whose trailer validates a
+    CRC rises to the top. Pass ``period`` to force a specific frame length.
+    """
+    bits = "".join(c for c in (bits or "") if c in "01")
+    if len(bits) < 8:
+        return {"ok": False, "error": "need at least 8 bits"}
+    pre = _preamble(bits)
+
+    # Build ranked candidate periods: the explicit one, the autocorr peaks, and
+    # a few common byte-aligned lengths — each evaluated aligned from 0 AND after
+    # the preamble, keeping whichever alignment reads better.
+    cand_periods = []
+    if period:
+        try:
+            cand_periods.append(int(period))
+        except (TypeError, ValueError):
+            pass
+    cand_periods += _period_candidates(bits)
+    for p in (24, 32, 40, 48, 64):                     # common ISM frame lengths
+        if 8 <= p <= len(bits) // 2:
+            cand_periods.append(p)
+    seen, evals = set(), []
+    for p in cand_periods:
+        if p in seen or p < 8:
+            continue
+        seen.add(p)
+        best_e = None
+        for skip in (0, pre if pre >= 4 else 0):
+            e = _eval_period(bits, p, skip)
+            if e and (best_e is None
+                      or (len(e["crc_matches"]), e["stable_fraction"])
+                      > (len(best_e["crc_matches"]), best_e["stable_fraction"])):
+                best_e = e
+        if best_e:
+            evals.append(best_e)
+    # rank: CRC match first, then most-stable, then most repeats
+    evals.sort(key=lambda e: (len(e["crc_matches"]) > 0, e["stable_fraction"], e["repeats"]),
+               reverse=True)
+    candidates = evals[:6]
+
+    result = {"ok": True, "n_bits": len(bits), "preamble_bits": pre,
+              "candidates": candidates}
+    # Headline pick: an explicit period, else a CRC-validated candidate, else the
+    # gated autocorr fundamental, else the whole blob (unchanged default).
+    forced = _eval_period(bits, int(period), 0) if period else None
+    crc_winner = next((e for e in candidates if e["crc_matches"]), None)
+    auto = _repeat_period(bits)
+    head = forced or crc_winner
+    if head is None and auto >= 8:
+        head = _eval_period(bits, auto, 0)
+    if head:
+        result["period_bits"] = head["period_bits"]
+        for k in ("repeats", "consensus_bits", "consensus_hex",
+                  "varying_positions", "stable_fraction", "identical"):
+            result[k] = head[k]
+        result["crc"] = {"checked": True, "matches": head["crc_matches"]}
+    else:
+        result["period_bits"] = 0
+        result.update({"repeats": 1, "consensus_bits": bits,
+                       "consensus_hex": _to_hex(bits), "varying_positions": [],
+                       "stable_fraction": 1.0, "identical": True})
+        result["crc"] = crc_scan(bits)
+    return result
+
+
+# --- CRC / checksum library (common ISM/embedded polynomials) ---
+
+# Shared algorithm tables (used by both crc_scan and crc_brute).
+_CRC8_ALGOS = [("CRC-8", 0x07, 0x00, 0x00),
+               ("CRC-8/MAXIM-DOW", 0x31, 0x00, 0x00),
+               ("CRC-8/SAE-J1850", 0x1D, 0xFF, 0xFF),
+               ("CRC-8/ROHC", 0x07, 0xFF, 0x00)]
+_CRC16_ALGOS = [("CRC-16/CCITT-FALSE", 0x1021, 0xFFFF, 0x0000, False, False),
+                ("CRC-16/XMODEM", 0x1021, 0x0000, 0x0000, False, False),
+                ("CRC-16/ARC (IBM)", 0x8005, 0x0000, 0x0000, True, True),
+                ("CRC-16/MODBUS", 0x8005, 0xFFFF, 0x0000, True, True),
+                ("CRC-16/KERMIT", 0x1021, 0x0000, 0x0000, True, True)]
+
+
+def _crc8(data, poly, init=0, xorout=0):
+    c = init
+    for b in data:
+        c ^= b
+        for _ in range(8):
+            c = ((c << 1) ^ poly) & 0xFF if (c & 0x80) else (c << 1) & 0xFF
+    return c ^ xorout
+
+
+def _crc16(data, poly, init, xorout=0, refin=False, refout=False):
+    def rev(x, n):
+        r = 0
+        for _ in range(n):
+            r = (r << 1) | (x & 1); x >>= 1
+        return r
+    c = init
+    for b in data:
+        if refin:
+            b = rev(b, 8)
+        c ^= b << 8
+        for _ in range(8):
+            c = ((c << 1) ^ poly) & 0xFFFF if (c & 0x8000) else (c << 1) & 0xFFFF
+    if refout:
+        c = rev(c, 16)
+    return c ^ xorout
+
+
+def crc_scan(bits):
+    """Try common CRC/checksum algorithms over a frame's bytes; report matches.
+
+    Assumes the trailing 1 (8-bit) or 2 (16-bit) bytes are the check value over
+    the bytes before them — the usual ISM/embedded layout — and reports any
+    algorithm whose computed value matches. Pure; the selftest appends a known
+    CRC-8 and asserts it's found.
+    """
+    bits = "".join(c for c in (bits or "") if c in "01")
+    nbytes = len(bits) // 8
+    if nbytes < 2:
+        return {"checked": True, "matches": []}
+    data = [int(bits[i * 8:i * 8 + 8], 2) for i in range(nbytes)]
+    matches = []
+    # 8-bit check over all preceding bytes
+    payload8, chk8 = data[:-1], data[-1]
+    for name, poly, init, xor in _CRC8_ALGOS:
+        if _crc8(payload8, poly, init, xor) == chk8:
+            matches.append({"algo": name, "width": 8, "over_bytes": len(payload8)})
+    if _sum8(payload8) == chk8:
+        matches.append({"algo": "checksum-8 (sum)", "width": 8, "over_bytes": len(payload8)})
+    if _xor8(payload8) == chk8:
+        matches.append({"algo": "XOR-8", "width": 8, "over_bytes": len(payload8)})
+    # 16-bit check over all preceding bytes (big-endian trailer)
+    if nbytes >= 3:
+        payload16 = data[:-2]
+        chk16 = (data[-2] << 8) | data[-1]
+        for name, poly, init, xor, ri, ro in _CRC16_ALGOS:
+            if _crc16(payload16, poly, init, xor, ri, ro) == chk16:
+                matches.append({"algo": name, "width": 16, "over_bytes": len(payload16)})
+    return {"checked": True, "matches": matches}
+
+
+def _sum8(data):
+    return sum(data) & 0xFF
+
+
+def _xor8(data):
+    x = 0
+    for b in data:
+        x ^= b
+    return x
+
+
+def crc_brute(bits, max_skip=3):
+    """Search for a CRC/checksum trailer that validates, allowing leading bytes
+    to be skipped and 0–1 trailing bytes after the check (pure).
+
+    A generalisation of :func:`crc_scan`: a real frame often carries a length or
+    type byte the CRC does *not* cover, or a trailing status byte after it, so
+    this tries payloads that skip up to ``max_skip`` leading bytes and end 0 or 1
+    bytes before the tail, in both 16-bit byte orders. Matches are ranked by
+    coverage (widest payload first) and capped so a chance hit on a tiny payload
+    doesn't bury a real one. Payloads shorter than 2 bytes aren't reported.
+    """
+    bits = "".join(c for c in (bits or "") if c in "01")
+    nbytes = len(bits) // 8
+    if nbytes < 3:
+        return {"checked": True, "matches": []}
+    data = [int(bits[i * 8:i * 8 + 8], 2) for i in range(nbytes)]
+    hits, seen = [], set()
+    for skip in range(0, min(max_skip, nbytes - 3) + 1):
+        for tail in (0, 1):
+            ci = nbytes - 1 - tail                     # 8-bit check position
+            payload = data[skip:ci]
+            if len(payload) >= 2:
+                chk = data[ci]
+                for name, poly, init, xor in _CRC8_ALGOS:
+                    if _crc8(payload, poly, init, xor) == chk:
+                        hits.append((len(payload), {"algo": name, "width": 8,
+                            "skip_bytes": skip, "over_bytes": len(payload), "check_byte": ci}))
+                if _sum8(payload) == chk:
+                    hits.append((len(payload), {"algo": "checksum-8 (sum)", "width": 8,
+                        "skip_bytes": skip, "over_bytes": len(payload), "check_byte": ci}))
+                if _xor8(payload) == chk:
+                    hits.append((len(payload), {"algo": "XOR-8", "width": 8,
+                        "skip_bytes": skip, "over_bytes": len(payload), "check_byte": ci}))
+            ci = nbytes - 2 - tail                     # 16-bit check position
+            payload = data[skip:ci]
+            if len(payload) >= 2:
+                be = (data[ci] << 8) | data[ci + 1]
+                le = (data[ci + 1] << 8) | data[ci]
+                for name, poly, init, xor, ri, ro in _CRC16_ALGOS:
+                    v = _crc16(payload, poly, init, xor, ri, ro)
+                    endian = "big" if v == be else ("little" if v == le else None)
+                    if endian:
+                        hits.append((len(payload), {"algo": name, "width": 16, "endian": endian,
+                            "skip_bytes": skip, "over_bytes": len(payload), "check_byte": ci}))
+    out = []
+    for _, m in sorted(hits, key=lambda x: x[0], reverse=True):
+        key = (m["algo"], m["width"], m["skip_bytes"], m["over_bytes"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(m)
+    return {"checked": True, "matches": out[:12]}
+
+
+def bit_transform(bits, invert=False, reflect=False, offset=0, take=0):
+    """Reshape a raw bitstream before framing (pure).
+
+    ``offset`` drops that many leading bits (slide the byte grid / skip a
+    preamble); ``take`` keeps only that many bits after the offset (0 = all);
+    ``invert`` complements every bit; ``reflect`` reverses bit order within each
+    whole byte (MSB-first ↔ LSB-first — the usual UART/SPI ambiguity). Applied in
+    that order. Non-01 characters are dropped.
+    """
+    b = "".join(c for c in (bits or "") if c in "01")
+    try:
+        offset = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    if offset:
+        b = b[offset:]
+    try:
+        take = int(take or 0)
+    except (TypeError, ValueError):
+        take = 0
+    if take > 0:
+        b = b[:take]
+    if invert:
+        b = b.translate({48: 49, 49: 48})              # '0'<->'1'
+    if reflect:
+        out = [b[i:i + 8][::-1] for i in range(0, len(b) - 7, 8)]
+        rem = len(b) % 8
+        if rem:
+            out.append(b[len(b) - rem:])               # trailing partial byte as-is
+        b = "".join(out)
+    return b
+
+
+def _to_hex_mask(bits):
+    """Hex of a mask string of '0'/'1'/'x'; any byte containing 'x' -> '··'."""
+    out = []
+    for i in range(0, len(bits) - 7, 8):
+        chunk = bits[i:i + 8]
+        out.append("··" if "x" in chunk else "%02x" % int(chunk, 2))
+    rem = len(bits) % 8
+    s = " ".join(out)
+    if rem:
+        s += (" " if s else "") + "+" + bits[len(bits) - rem:]
+    return s
+
+
+def _consensus_frame(bits):
+    """Reduce one recovered bitstream to a single best frame (pure).
+
+    Uses the confident repeated-frame period if there is one (aligned from 0 or
+    after a preamble), else returns the whole stream. Returns (frame, period,
+    repeats)."""
+    bits = "".join(c for c in (bits or "") if c in "01")
+    if len(bits) < 8:
+        return bits, len(bits), 1
+    p = _repeat_period(bits)
+    if p >= 8:
+        e = _eval_period(bits, p, 0)
+        if e:
+            return e["consensus_bits"], p, e["repeats"]
+    pre = _preamble(bits)
+    if pre >= 4:
+        p2 = _repeat_period(bits[pre:])
+        if p2 >= 8:
+            e = _eval_period(bits, p2, pre)
+            if e:
+                return e["consensus_bits"], p2, e["repeats"]
+    return bits, len(bits), 1
+
+
+def _classify_field(vals, width):
+    """Heuristic class for a varying field's values across ordered captures."""
+    if len(set(vals)) == 1:
+        return "fixed"
+    inc = all(vals[i + 1] > vals[i] for i in range(len(vals) - 1))
+    dec = all(vals[i + 1] < vals[i] for i in range(len(vals) - 1))
+    if (inc or dec) and len(vals) >= 2:
+        steps = {abs(vals[i + 1] - vals[i]) for i in range(len(vals) - 1)}
+        if len(steps) == 1 or max(steps) <= 4:
+            return "counter"
+    if len(set(vals)) == len(vals) and width >= 8 and (max(vals) - min(vals)) > (1 << (width - 2)):
+        return "rolling"
+    return "varying"
+
+
+def field_diff(streams, labels=None):
+    """Diff repeated captures of the *same* emitter: separate FIXED bits (device
+    ID / type) from VARYING bits (rolling code / counter / payload) — pure.
+
+    Each entry in ``streams`` is a recovered bitstream from one capture. Each is
+    reduced to its consensus frame, frames are aligned to the most common length
+    (odd ones out are dropped and reported), and every bit position is classed
+    fixed/varying across the set. Contiguous varying runs are grouped into fields
+    and classed as a monotonic *counter*, a high-entropy *rolling* code, or plain
+    *varying*. This is the "press the button twice, see what changes" move that
+    cracks a remote whose protocol no library knows.
+    """
+    import numpy as np
+    from collections import Counter
+    labels = labels or []
+    frs, lbls = [], []
+    for i, s in enumerate(streams or []):
+        fbits, _per, _rep = _consensus_frame(s)
+        fbits = "".join(c for c in (fbits or "") if c in "01")
+        if len(fbits) >= 8:
+            frs.append(fbits)
+            lbls.append(str(labels[i]) if i < len(labels) else ("cap %d" % (i + 1)))
+    if len(frs) < 2:
+        return {"ok": False, "error": "need at least 2 captures with a recoverable frame"}
+    lens = Counter(len(f) for f in frs)
+    L = lens.most_common(1)[0][0]
+    keep = [(lbls[j], frs[j]) for j in range(len(frs)) if len(frs[j]) == L]
+    dropped = [lbls[j] for j in range(len(frs)) if len(frs[j]) != L]
+    if len(keep) < 2:
+        return {"ok": False, "error": "frames differ in length (%s bits) — align a common frame length first"
+                % ", ".join(str(k) for k in sorted(lens))}
+    names = [k[0] for k in keep]
+    arr = np.array([[1 if c == "1" else 0 for c in k[1]] for k in keep])
+    n = arr.shape[0]
+    ones = arr.sum(axis=0)
+    cls = ["fixed1" if c == n else ("fixed0" if c == 0 else "vary") for c in ones]
+    consensus = "".join("1" if c == n else ("0" if c == 0 else "x") for c in ones)
+    fields, i = [], 0
+    while i < L:
+        if cls[i] == "vary":
+            j = i
+            while j < L and cls[j] == "vary":
+                j += 1
+            width = j - i
+            vals = [int("".join(str(x) for x in row), 2) for row in arr[:, i:j]]
+            fields.append({"start": i, "len": width, "kind": _classify_field(vals, width),
+                           "values": ["{:0{}b}".format(v, width) for v in vals],
+                           "values_hex": ["%x" % v for v in vals]})
+            i = j
+        else:
+            i += 1
+    return {"ok": True, "n_captures": n, "frame_bits": L, "labels": names, "dropped": dropped,
+            "consensus": consensus, "consensus_hex": _to_hex_mask(consensus),
+            "bit_class": cls, "fields": fields,
+            "n_fixed": int(((ones == 0) | (ones == n)).sum()),
+            "n_varying": int(((ones > 0) & (ones < n)).sum()),
+            "frames": [{"label": names[k], "bits": keep[k][1], "hex": _to_hex(keep[k][1])}
+                       for k in range(n)]}
+
+
+# --------------------------------------------------------------------------
+# Device fingerprinting — match measured signal features (modulation, frame
+# length, CRC, centre frequency) to known ISM device *families*. Heuristic and
+# honestly scored: it returns ranked candidate families with a per-feature
+# rationale, never a single certainty. rtl_433 remains the heavyweight decoder
+# for supported devices; this classifies the ones it can't, and the unknowns.
+# --------------------------------------------------------------------------
+
+_DEVICE_SIGNATURES = [
+    {"name": "EV1527 / PT2262 fixed-code remote", "mod": ["ook", "ask"],
+     "bands": [315, 433, 868], "frame": (20, 28), "crc": "none",
+     "klass": "OOK PWM remote — gate/garage/doorbell, fixed address",
+     "confirm": "~24-bit frame (≈20-bit address + 4-bit data), no CRC; decode PWM symbols."},
+    {"name": "KeeLoq rolling-code remote", "mod": ["ook", "ask", "fsk"],
+     "bands": [315, 433, 868], "frame": (64, 68), "crc": "none",
+     "klass": "rolling-code remote — car/gate (32-bit hopping + 28-bit serial)",
+     "confirm": "~66-bit frame, half a fixed serial + half changing every press (use Field diff)."},
+    {"name": "TPMS tyre-pressure sensor", "mod": ["fsk"],
+     "bands": [315, 433], "frame": (64, 96), "crc": "any",
+     "klass": "vehicle TPMS sensor — FSK, Manchester, CRC-checked",
+     "confirm": "FSK + Manchester line-coding, 8–12-byte frame with a CRC; rtl_433 has decoders."},
+    {"name": "Weather / environmental sensor", "mod": ["ook", "ask", "fsk"],
+     "bands": [433, 868, 915], "frame": (36, 96), "crc": "any",
+     "klass": "weather / temp-humidity sensor — Acurite / LaCrosse / Oregon class",
+     "confirm": "repeated 5–12-byte frame with a checksum or CRC-8; try the rtl_433 decoder."},
+    {"name": "Security sensor (door / window / PIR)", "mod": ["ook", "ask", "fsk"],
+     "bands": [315, 345, 433, 868], "frame": (40, 80), "crc": "any",
+     "klass": "alarm / security sensor — Honeywell 345 / DSC / 2GIG class",
+     "confirm": "framed serial + status bits; Honeywell is 345 MHz FSK, DSC 433/868."},
+    {"name": "LoRa (CSS chirp)", "mod": ["chirp", "lora", "spread"],
+     "bands": [433, 868, 915], "frame": None, "crc": "any",
+     "klass": "LoRa / chirp-spread-spectrum node",
+     "confirm": "wideband up/down chirps — use the LoRa de-chirp tool, not OOK/FSK demod."},
+]
+
+
+def _freq_band_mhz(freq_hz):
+    """Nearest common ISM band tag (MHz) for a centre frequency, or a rounded MHz."""
+    try:
+        f = float(freq_hz) / 1e6
+    except (TypeError, ValueError):
+        return None
+    for lo, hi, tag in [(300, 322, 315), (335, 355, 345), (386, 470, 433),
+                        (860, 872, 868), (900, 930, 915), (2400, 2500, 2450)]:
+        if lo <= f <= hi:
+            return tag
+    return round(f) if f > 0 else None
+
+
+def fingerprint(mod=None, baud=None, frame_bits=None, preamble_bits=None,
+                crc=None, freq_hz=None, bw_hz=None):
+    """Score measured signal features against known ISM device families.
+
+    Heuristic family identification: returns ranked *candidates* each with a
+    confidence (0–100) and a per-feature rationale — never a single certainty.
+    Feed it the modulation (from classify/demod), the frame length and whether a
+    CRC matched (from Frames), and the centre frequency.
+    """
+    mod = (mod or "").lower()
+    band = _freq_band_mhz(freq_hz)
+    has_crc = bool(crc)
+    try:
+        fb = int(frame_bits) if frame_bits else 0
+    except (TypeError, ValueError):
+        fb = 0
+    cands = []
+    for sig in _DEVICE_SIGNATURES:
+        score = total = 0.0
+        why = []
+        modmatch = False
+        total += 3
+        if mod and any(m in mod or mod in m for m in sig["mod"]):
+            score += 3
+            modmatch = True
+            why.append("%s ✓" % mod.upper())
+        elif mod:
+            why.append("%s ✗ (want %s)" % (mod.upper(), "/".join(sig["mod"])))
+        if band and sig["bands"]:
+            total += 2
+            if band in sig["bands"]:
+                score += 2
+                why.append("%s MHz ✓" % band)
+            else:
+                why.append("%s MHz ✗ (want %s)" % (band, "/".join(str(b) for b in sig["bands"])))
+        if sig["frame"] and fb:
+            total += 2
+            lo, hi = sig["frame"]
+            if lo <= fb <= hi:
+                score += 2
+                why.append("%d-bit frame ✓" % fb)
+            else:
+                why.append("%d-bit frame ✗ (want %d–%d)" % (fb, lo, hi))
+        if sig["crc"] == "none":
+            total += 1
+            if not has_crc:
+                score += 1
+                why.append("no CRC ✓")
+            else:
+                why.append("CRC present ✗ (family is un-CRC'd)")
+        elif sig["crc"] == "any" and has_crc:
+            total += 1
+            score += 1
+            why.append("CRC present ✓")
+        conf = int(round(100 * score / total)) if total else 0
+        if (conf > 0 and modmatch) or conf >= 55:
+            cands.append({"name": sig["name"], "class": sig["klass"], "confidence": conf,
+                          "why": why, "confirm": sig["confirm"]})
+    cands.sort(key=lambda c: c["confidence"], reverse=True)
+    generic = None
+    if not cands or cands[0]["confidence"] < 45:
+        generic = "%s%s%s%s — no strong family match; reverse it with Field diff + CRC brute." % (
+            (mod.upper() if mod else "unknown modulation"),
+            (" @ %s MHz" % band if band else ""),
+            (", %d-bit frame" % fb if fb else ""),
+            (", CRC-checked" if has_crc else ""))
+    return {"ok": True, "candidates": cands[:5], "band_mhz": band, "generic": generic}
+
+
+def crc_check(name=None, bits=None, line=None, invert=False, reflect=False,
+              offset=0, take=0, max_skip=3):
+    """Test CRC / checksum algorithms over exactly the bits shown (web entry).
+
+    Unlike :func:`frames`, this does no frame-repetition detection: it takes the
+    current workbench bitstream — after ``offset`` / ``invert`` / ``reflect`` /
+    line-decode, the same reshaping the demod panel shows — and runs both the
+    trailing-check scan and the leading-header brute force straight over those
+    bytes. It is the tool for a frame you have already aligned yourself, where
+    you just want to know whether the last byte(s) validate the rest.
+    """
+    if not bits:
+        return {"ok": False, "error": "no bits — demodulate a signal first"}
+    raw = bit_transform(bits, invert=invert, reflect=reflect, offset=offset, take=take)
+    b = line_decode(raw, line) if line and line != "raw" else raw
+    clean = "".join(c for c in b if c in "01")
+    nbytes = len(clean) // 8
+    scan = crc_scan(clean)
+    brute = crc_brute(clean, max_skip=max_skip)
+    # De-duplicate: a plain-trailer match found by the scan will also appear in
+    # the brute results (skip 0, tail 0), so the UI can show "extra" separately.
+    known = set((m["algo"], m.get("over_bytes")) for m in scan.get("matches", []))
+    extra = [m for m in brute.get("matches", [])
+             if (m["algo"], m.get("over_bytes")) not in known]
+    return {"ok": True, "n_bits": len(clean), "n_bytes": nbytes,
+            "line": (line or "raw"),
+            "transform": {"invert": bool(invert), "reflect": bool(reflect),
+                          "offset": int(offset or 0), "take": int(take or 0)},
+            "matches": scan.get("matches", []), "brute_extra": extra,
+            "decoded_bits": b,
+            "note": ("need at least 2 bytes to test a check value"
+                     if nbytes < 2 else None)}
+
+
+def frames(name=None, bits=None, line=None, period=None,
+           invert=False, reflect=False, offset=0, take=0):
+    """Web entry: analyse a bitstream (raw or line-decoded) into frame structure.
+
+    Pass ``bits`` directly (the demod output the page holds); ``invert`` /
+    ``reflect`` / ``offset`` / ``take`` reshape the raw bits first (bit workbench);
+    ``line`` optionally line-decodes (manchester / nrzi / diff_manchester);
+    ``period`` forces a specific frame length (from clicking a candidate). Adds a
+    ``crc_brute`` search that tolerates leading header bytes and either endianness.
+    """
+    if not bits:
+        return {"ok": False, "error": "no bits — demodulate a signal first"}
+    raw = bit_transform(bits, invert=invert, reflect=reflect, offset=offset, take=take)
+    b = line_decode(raw, line) if line and line != "raw" else raw
+    try:
+        period = int(period) if period else None
+    except (TypeError, ValueError):
+        period = None
+    r = frame_analysis(b, period=period)
+    r["line"] = (line or "raw")
+    r["transform"] = {"invert": bool(invert), "reflect": bool(reflect),
+                      "offset": int(offset or 0), "take": int(take or 0)}
+    r["decoded_bits"] = b
+    if r.get("ok"):
+        r["crc_brute"] = crc_brute(r.get("consensus_bits") or b)
+    return r
+
+
+# --------------------------------------------------------------------------
+# SigMF annotations — draw/label a signal box on the spectrogram and save it
+# into the capture's .sigmf-meta as standard SigMF annotations (sample range +
+# freq edges + label). They round-trip through the file, so a capture annotated
+# here opens with its labels in IQEngine / inspectrum / any SigMF-aware tool,
+# and vice-versa. Pure box<->annotation helpers are selftested; add/list/delete
+# do the file read-modify-write.
+# --------------------------------------------------------------------------
+
+def _box_to_annotation(t0, t1, f0_hz, f1_hz, label, fs, fc=None):
+    """(time,freq) box -> a SigMF v1.0.0 annotation dict (pure)."""
+    a, b = sorted((float(t0), float(t1)))
+    s0 = max(0, int(round(a * fs)))
+    cnt = max(1, int(round((b - a) * fs)))
+    ann = {"core:sample_start": s0, "core:sample_count": cnt}
+    if f0_hz is not None and f1_hz is not None:
+        lo, hi = sorted((float(f0_hz), float(f1_hz)))
+        ann["core:freq_lower_edge"] = lo
+        ann["core:freq_upper_edge"] = hi
+    if label:
+        ann["core:label"] = str(label)[:200]
+    ann["core:generator"] = "Ragnar Signal Analyzer"
+    return ann
+
+
+def _annotation_to_box(ann, fs, fc=None):
+    """A SigMF annotation dict -> a UI-friendly box (pure)."""
+    s0 = int(ann.get("core:sample_start", 0) or 0)
+    cnt = int(ann.get("core:sample_count", 0) or 0)
+    t0 = s0 / fs if fs else 0.0
+    t1 = (s0 + cnt) / fs if (fs and cnt) else t0
+    fl = ann.get("core:freq_lower_edge")
+    fu = ann.get("core:freq_upper_edge")
+    return {"t0": round(t0, 6), "t1": round(t1, 6),
+            "f0_mhz": (round(float(fl) / 1e6, 6) if fl is not None else None),
+            "f1_mhz": (round(float(fu) / 1e6, 6) if fu is not None else None),
+            "label": ann.get("core:label") or ann.get("core:description") or "",
+            "sample_start": s0, "sample_count": cnt}
+
+
+def _read_meta(name):
+    _, meta_p = _paths(name)
+    if not os.path.exists(meta_p):
+        raise ValueError("capture not found")
+    with open(meta_p) as fh:
+        return json.load(fh), meta_p
+
+
+def _capture_fs_fc(meta):
+    g = meta.get("global", {}); c = (meta.get("captures") or [{}])[0]
+    return float(g.get("core:sample_rate") or 0) or 1.0, float(c.get("core:frequency") or 0)
+
+
+def list_annotations(name):
+    """Annotations stored in the capture's .sigmf-meta, as UI boxes."""
+    meta, _ = _read_meta(name)
+    fs, fc = _capture_fs_fc(meta)
+    anns = meta.get("annotations") or []
+    return {"ok": True, "annotations": [dict(_annotation_to_box(a, fs, fc), index=i)
+                                        for i, a in enumerate(anns)]}
+
+
+def add_annotation(name, t0, t1, f0_hz=None, f1_hz=None, label=None):
+    """Append a SigMF annotation to the capture's .sigmf-meta (read-modify-write).
+
+    Clamps the box to the capture's extent; keeps annotations sorted by
+    sample_start (the SigMF convention)."""
+    meta, meta_p = _read_meta(name)
+    fs, fc = _capture_fs_fc(meta)
+    _, meta_p2 = _paths(name)
+    data_p = meta_p[:-len(".sigmf-meta")] + ".sigmf-data"
+    nsamp = (os.path.getsize(data_p) // 2) if os.path.exists(data_p) else None
+    try:
+        t0 = float(t0); t1 = float(t1)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "t0/t1 must be numeric"}
+    dur = (nsamp / fs) if nsamp else max(t0, t1)
+    t0 = max(0.0, min(dur, t0)); t1 = max(0.0, min(dur, t1))
+    if abs(t1 - t0) < 1e-9:
+        return {"ok": False, "error": "annotation has zero time span"}
+    ann = _box_to_annotation(t0, t1, f0_hz, f1_hz, label, fs, fc)
+    anns = meta.get("annotations") or []
+    anns.append(ann)
+    anns.sort(key=lambda a: a.get("core:sample_start", 0))
+    meta["annotations"] = anns
+    try:
+        with open(meta_p, "w") as fh:
+            json.dump(meta, fh, indent=2)
+    except OSError as exc:
+        return {"ok": False, "error": "cannot write meta: %s" % exc}
+    return dict(list_annotations(name), added=_annotation_to_box(ann, fs, fc))
+
+
+def delete_annotation(name, index):
+    """Remove the annotation at ``index`` from the .sigmf-meta."""
+    meta, meta_p = _read_meta(name)
+    anns = meta.get("annotations") or []
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "index must be an integer"}
+    if not (0 <= index < len(anns)):
+        return {"ok": False, "error": "annotation index out of range"}
+    anns.pop(index)
+    meta["annotations"] = anns
+    try:
+        with open(meta_p, "w") as fh:
+            json.dump(meta, fh, indent=2)
+    except OSError as exc:
+        return {"ok": False, "error": "cannot write meta: %s" % exc}
+    return list_annotations(name)
+
+
+# --------------------------------------------------------------------------
+# AI agent actions — the assistant may propose analyzer actions (tune, demod,
+# classify, …) as a JSON block; this parses/validates them into a safe,
+# allowlisted list the page executes against its existing controls. All actions
+# are read-only DSP on the local capture (no transmit, nothing destructive).
+# Pure; selftested.
+# --------------------------------------------------------------------------
+
+# name -> {param: (caster, allowed-set-or-None)} ; params absent are dropped.
+_AI_ACTION_SCHEMA = {
+    "tune":      {"f_mhz": (float, None), "bw_khz": (float, None),
+                  "mode": (str, {"ook", "fsk"})},
+    "zoom":      {"t0": (float, None), "t1": (float, None),
+                  "f0_mhz": (float, None), "f1_mhz": (float, None)},
+    "demod":     {"mode": (str, {"ook", "fsk"}), "bw_khz": (float, None)},
+    "classify":  {},
+    "frames":    {"line": (str, {"raw", "manchester", "nrzi"}), "period_bits": (int, None)},
+    "decode433": {},
+    "reset":     {},
+}
+_AI_ACTION_MAX = 8
+
+
+def _coerce_action(a):
+    """Validate one action dict against the schema; return a clean dict or None."""
+    if not isinstance(a, dict):
+        return None
+    name = str(a.get("action") or a.get("type") or "").strip().lower()
+    schema = _AI_ACTION_SCHEMA.get(name)
+    if schema is None:
+        return None
+    out = {"action": name}
+    for key, (caster, allowed) in schema.items():
+        if key not in a or a[key] is None:
+            continue
+        try:
+            v = caster(a[key])
+        except (TypeError, ValueError):
+            continue
+        if caster is str:
+            v = v.strip().lower()
+            if allowed and v not in allowed:
+                continue
+        out[key] = v
+    return out
+
+
+def parse_ai_actions(text):
+    """Split an AI reply into (clean_text, actions[]) (pure).
+
+    The assistant may append a fenced ```json {"actions":[…]} ``` block (or a bare
+    trailing object containing "actions"). We extract + validate it against
+    :data:`_AI_ACTION_SCHEMA`, strip it from the visible text, and return the
+    allowlisted actions. Malformed / unknown actions are dropped, not executed.
+    """
+    import re
+    if not text:
+        return {"text": "", "actions": []}
+    raw = None
+    m = None
+    for mm in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S):
+        m = mm                                          # keep the last fenced block
+    if m:
+        raw = m.group(1)
+        clean = (text[:m.start()] + text[m.end():]).strip()
+    else:
+        # bare trailing object that mentions "actions"
+        m2 = re.search(r"(\{[^{}]*\"actions\"[^{}]*\[.*?\][^{}]*\})\s*$", text, re.S)
+        if m2:
+            raw = m2.group(1)
+            clean = text[:m2.start()].strip()
+        else:
+            return {"text": text.strip(), "actions": []}
+    try:
+        obj = json.loads(raw)
+        items = obj.get("actions") if isinstance(obj, dict) else None
+    except (ValueError, TypeError):
+        return {"text": text.strip(), "actions": []}
+    if not isinstance(items, list):
+        return {"text": clean, "actions": []}
+    actions = []
+    for a in items:
+        c = _coerce_action(a)
+        if c:
+            actions.append(c)
+        if len(actions) >= _AI_ACTION_MAX:
+            break
+    return {"text": clean, "actions": actions}
+
+
+# --------------------------------------------------------------------------
+# Upload / import — bring recordings from OTHER tools into the capture list so
+# every analyzer tool works on them. Three kinds:
+#   * SigMF (.sigmf-meta + .sigmf-data)  -> stored as-is (any datatype load()
+#     understands).
+#   * Raw IQ (.cu8/.cs8/.cs16/.cf32/…)   -> a .sigmf-meta wrapper is written from
+#     the sample-rate / centre-freq / datatype the user supplies.
+#   * Flipper Zero .sub RAW              -> it isn't IQ, it's an OOK pulse-timing
+#     list, so a baseband IQ waveform is SYNTHESISED from it (carrier on/off) and
+#     it opens as a real burst (spectrogram + demod + frames/CRC all work).
+# Untrusted input: names are sanitised, size is capped by the caller, and the
+# bytes are only ever read as data (numpy), never executed. Pure parse/synth
+# helpers are selftested.
+# --------------------------------------------------------------------------
+
+# datatypes load() can decode (so an uploaded raw file / SigMF actually opens)
+_IMPORT_DTYPES = ("cu8", "cs8", "ci8", "cs16", "ci16", "ci16_le", "cu16",
+                  "cu16_le", "cf32", "cf32_le", "cf64", "cf64_le")
+
+
+def _unique_name(stem):
+    """A capture name (sanitised) that doesn't clash with an existing capture."""
+    base = _safe(stem) or "upload"
+    d = _cap_dir()
+    name, i = base, 1
+    while os.path.exists(os.path.join(d, name + ".sigmf-meta")):
+        name = base + "-" + str(i); i += 1
+    return name
+
+
+def _write_capture(name, data_bytes, fs, fc, datatype, description=None):
+    """Write a .sigmf-data + .sigmf-meta pair into the capture dir. Returns name."""
+    from datetime import datetime, timezone
+    os.makedirs(_cap_dir(), exist_ok=True)
+    data_p, meta_p = _paths(name)
+    with open(data_p, "wb") as fh:
+        fh.write(data_bytes)
+    g = {"core:datatype": datatype, "core:sample_rate": float(fs), "core:version": "1.0.0"}
+    if description:
+        g["core:description"] = description
+    meta = {"global": g,
+            "captures": [{"core:sample_start": 0, "core:frequency": float(fc or 0),
+                          "core:datetime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}],
+            "annotations": []}
+    with open(meta_p, "w") as fh:
+        json.dump(meta, fh)
+    return name
+
+
+def parse_flipper_sub(text):
+    """Parse a Flipper Zero Sub-GHz .sub file (pure).
+
+    RAW captures carry ``RAW_Data:`` lines of signed µs durations (+ = carrier
+    on, − = off). Returns {ok, kind:'raw', freq_hz, preset, modulation, pulses,
+    n_pulses, total_us}. Decoded (protocol) .sub files have no RAW_Data — those
+    return {ok:False, kind:'protocol', …} with a helpful message.
+    """
+    freq = None; preset = None; proto = None; pulses = []; kv = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        k, v = line.split(":", 1); k = k.strip(); v = v.strip()
+        if k == "Frequency":
+            try: freq = int(float(v))
+            except ValueError: pass
+        elif k == "Preset":
+            preset = v
+        elif k == "Protocol":
+            proto = v
+        elif k == "RAW_Data":
+            for tok in v.split():
+                try: pulses.append(int(tok))
+                except ValueError: pass
+        else:
+            kv[k] = v
+    mod = "OOK" if (preset and "ook" in preset.lower()) else \
+          ("FSK" if (preset and "fsk" in preset.lower()) else "OOK")
+    if pulses:
+        return {"ok": True, "kind": "raw", "freq_hz": freq, "preset": preset,
+                "protocol": proto, "modulation": mod, "pulses": pulses,
+                "n_pulses": len(pulses), "total_us": sum(abs(p) for p in pulses)}
+    return {"ok": False, "kind": "protocol", "freq_hz": freq, "preset": preset,
+            "protocol": proto, "fields": kv,
+            "error": "This is a decoded (protocol) .sub, not a RAW capture. On the "
+                     "Flipper use Read RAW (or Sub-GHz → Read RAW) and import that .sub."}
+
+
+def flipper_raw_to_cu8(pulses, fs=250000.0, off_hz=40000.0, amp=0.6, noise=0.02,
+                       max_samples=12_000_000):
+    """Synthesise a baseband cu8 IQ waveform from Flipper RAW pulses (pure).
+
+    OOK: +duration → carrier on, −duration → off. The carrier sits at +off_hz so
+    it isn't glued to DC. Returns (interleaved-cu8 bytes, actual fs) — fs is
+    reduced if the run would exceed max_samples so a small board can't OOM.
+    """
+    import numpy as np
+    total_us = sum(abs(int(p)) for p in pulses)
+    if total_us <= 0:
+        return b"", fs
+    n = int(total_us * 1e-6 * fs)
+    if n > max_samples:                    # keep it Pi-safe: stretch the sample period to fit
+        fs = fs * max_samples / n; n = max_samples
+    env = np.zeros(n, dtype=np.float32); idx = 0
+    for p in pulses:
+        ns = int(round(abs(int(p)) * 1e-6 * fs))
+        if ns <= 0:
+            continue
+        end = idx + ns
+        if end > n: end = n
+        if int(p) > 0:
+            env[idx:end] = 1.0
+        idx = end
+        if idx >= n:
+            break
+    t = np.arange(n)
+    iq = (env * amp) * np.exp(2j * np.pi * (off_hz / fs) * t)
+    iq = iq + (np.random.randn(n) + 1j * np.random.randn(n)).astype(np.complex64) * noise
+    I = np.clip(np.round(iq.real * 127.5 + 127.5), 0, 255).astype(np.uint8)
+    Q = np.clip(np.round(iq.imag * 127.5 + 127.5), 0, 255).astype(np.uint8)
+    inter = np.empty(2 * n, dtype=np.uint8); inter[0::2] = I; inter[1::2] = Q
+    return inter.tobytes(), fs
+
+
+def import_flipper_sub(text, filename="flipper.sub"):
+    """Import a Flipper .sub RAW capture: synthesise IQ, write it, return {ok,name,…}."""
+    p = parse_flipper_sub(text)
+    if not p.get("ok"):
+        return p
+    freq = p.get("freq_hz") or 433_920_000
+    off = 40000.0
+    data, fs = flipper_raw_to_cu8(p["pulses"], off_hz=off)
+    if not data:
+        return {"ok": False, "error": "no usable pulses in the .sub RAW data"}
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    name = _unique_name("flipper-" + stem)
+    desc = ("Imported from Flipper .sub RAW"
+            + (" (" + p["preset"] + ")" if p.get("preset") else "")
+            + " — " + (p.get("modulation") or "OOK") + " envelope synthesised at +"
+            + str(int(off / 1000)) + " kHz")
+    _write_capture(name, data, fs, freq - off, "cu8", desc)   # centre offset so the signal sits at the .sub frequency
+    return {"ok": True, "name": name, "kind": "flipper", "freq_hz": freq,
+            "preset": p.get("preset"), "modulation": p.get("modulation"),
+            "n_pulses": p["n_pulses"], "sample_rate_hz": round(fs, 1),
+            "samples": len(data) // 2}
+
+
+def import_raw_iq(data_bytes, filename, datatype="cu8", sample_rate=0, frequency=0):
+    """Import a raw interleaved-IQ file by writing a SigMF meta wrapper for it."""
+    dt = (datatype or "cu8").lower()
+    if dt not in _IMPORT_DTYPES:
+        return {"ok": False, "error": "unsupported datatype '" + dt + "'"}
+    try:
+        fs = float(sample_rate or 0)
+    except (TypeError, ValueError):
+        fs = 0.0
+    if fs <= 0:
+        return {"ok": False, "error": "a sample rate is required for raw IQ"}
+    if not data_bytes:
+        return {"ok": False, "error": "empty file"}
+    stem = os.path.splitext(os.path.basename(filename or "rawiq"))[0]
+    name = _unique_name(stem)
+    _write_capture(name, data_bytes, fs, frequency or 0, dt, "Imported raw IQ (" + dt + ")")
+    return {"ok": True, "name": name, "kind": "raw_iq", "datatype": dt,
+            "sample_rate_hz": fs, "bytes": len(data_bytes)}
+
+
+def import_sigmf(meta_text, data_bytes, filename="capture"):
+    """Import a SigMF pair (meta JSON text + data bytes), stored as-is."""
+    try:
+        meta = json.loads(meta_text)
+    except (ValueError, TypeError):
+        return {"ok": False, "error": "invalid .sigmf-meta JSON"}
+    g = meta.get("global", {}) if isinstance(meta, dict) else {}
+    dt = (g.get("core:datatype") or "").lower()
+    if not dt:
+        return {"ok": False, "error": ".sigmf-meta is missing core:datatype"}
+    if not any(dt.startswith(x) for x in ("cu8", "cs8", "ci8", "cs16", "ci16",
+                                          "cu16", "cf32", "cf64")):
+        return {"ok": False, "error": "unsupported SigMF datatype '" + dt + "'"}
+    if not data_bytes:
+        return {"ok": False, "error": "empty .sigmf-data"}
+    stem = os.path.basename(filename or "capture")
+    for suf in (".sigmf-data", ".sigmf-meta", ".sigmf"):
+        if stem.endswith(suf):
+            stem = stem[:-len(suf)]; break
+    stem = os.path.splitext(stem)[0]
+    name = _unique_name(stem or "sigmf")
+    os.makedirs(_cap_dir(), exist_ok=True)
+    data_p, meta_p = _paths(name)
+    with open(data_p, "wb") as fh:
+        fh.write(data_bytes)
+    with open(meta_p, "w") as fh:
+        json.dump(meta, fh)
+    return {"ok": True, "name": name, "kind": "sigmf", "datatype": dt}
+
+
+# --------------------------------------------------------------------------
+# Self-test — synthesise a cu8 capture (tone + OOK burst) and check the DSP
+# --------------------------------------------------------------------------
+
+def _write_synth(path_base, fs=1_000_000.0, fc=433_900_000.0):
+    """Write a synthetic cu8 SigMF capture: a CW tone at +150 kHz for the whole
+    record, plus an OOK burst at +150 kHz (on/off keyed) in the middle."""
+    import numpy as np
+    dur = 0.2
+    n = int(fs * dur)
+    t = np.arange(n) / fs
+    tone = 0.25 * np.exp(2j * np.pi * 150_000 * t)          # CW carrier at +150 kHz
+    # OOK: 2000 baud square keying gating a +150 kHz carrier, only mid-record
+    baud = 2000.0
+    key = ((t * baud).astype(int) % 2).astype(np.float32)   # 1010...
+    gate = ((t > 0.08) & (t < 0.12)).astype(np.float32)
+    ook = 0.5 * key * gate * np.exp(2j * np.pi * 150_000 * t)
+    noise = (np.random.randn(n) + 1j * np.random.randn(n)) * 0.02
+    x = tone + ook + noise
+    i = np.clip(np.round(x.real * 127.5 + 127.5), 0, 255).astype(np.uint8)
+    q = np.clip(np.round(x.imag * 127.5 + 127.5), 0, 255).astype(np.uint8)
+    inter = np.empty(2 * n, dtype=np.uint8); inter[0::2] = i; inter[1::2] = q
+    inter.tofile(path_base + ".sigmf-data")
+    meta = {"global": {"core:datatype": "cu8", "core:sample_rate": fs,
+                       "core:version": "1.0.0"},
+            "captures": [{"core:sample_start": 0, "core:frequency": fc,
+                          "core:datetime": "2026-01-01T00:00:00Z"}],
+            "annotations": []}
+    json.dump(meta, open(path_base + ".sigmf-meta", "w"))
+
+
+def selftest():
+    import tempfile
+    results = []
+
+    def check(name, ok, detail=""):
+        results.append({"name": name, "pass": bool(ok), "detail": detail})
+
+    try:
+        import numpy  # noqa
+        import scipy  # noqa
+    except Exception as exc:
+        return {"pass": False, "passed": 0, "total": 1,
+                "results": [{"name": "deps: numpy+scipy import", "pass": False, "detail": str(exc)}]}
+
+    tmp = tempfile.mkdtemp(prefix="sigmf-st-")
+    saved = globals()["_cap_dir"]
+    globals()["_cap_dir"] = lambda: tmp
+    try:
+        _write_synth(os.path.join(tmp, "synth"))
+        s = summary("synth")
+        check("summary: peak near +150 kHz of a 433.9 MHz capture",
+              abs(s["peak_offset_hz"] - 150_000) < 8000, str(s.get("peak_offset_hz")))
+        check("summary: duration ~0.2 s @ 1 MS/s", abs(s["duration_s"] - 0.2) < 0.01, str(s["duration_s"]))
+        check("summary: SNR positive (tone over noise)", s["snr_db"] > 15, str(s["snr_db"]))
+        sp = spectrogram("synth", w=200, h=120)
+        raw = base64.b64decode(sp["data"])
+        check("spectrogram: grid is h*w uint8 bytes",
+              len(raw) == sp["w"] * sp["h"] and sp["w"] == 200 and sp["h"] == 120, str((sp["w"], sp["h"], len(raw))))
+        check("spectrogram: dynamic range present (floor<ceil)", sp["ceil_db"] > sp["floor_db"])
+        b = bursts("synth")
+        check("bursts: the OOK train merges into one burst (not per-pulse)",
+              1 <= b["count"] <= 3 and any(0.07 < x["t0"] < 0.12 for x in b["bursts"]), str(b["count"]))
+        check("bursts: burst carries a duty-cycle", b["bursts"] and "duty" in b["bursts"][0])
+        # _merge_runs: bridge small gaps into one run, drop short spikes
+        import numpy as np
+        onarr = np.array([1,1,0,1,1,0,0,0,0,0,0,0,0,0,0,1] + [0]*20, dtype=bool)
+        mr = _merge_runs(onarr, gap=3, min_len=2)     # first two runs merge (gap 1), lone tail spike dropped
+        check("merge: bridges small gaps, drops short spikes",
+              len(mr) == 1 and mr[0][0] == 0 and mr[0][1] == 5, str(mr))
+        d = demod("synth", mode="ook", f_offset_hz=150_000, bw_hz=60_000, t0=0.08, t1=0.12)
+        check("demod: OOK recovers ~2000 baud",
+              d["ok"] and abs(d["baud"] - 2000) < 400, str(d.get("baud")))
+        check("demod: recovers a bitstream", d["ok"] and d["n_bits"] > 8 and set(d["bits"]) <= {"0", "1"},
+              str(d.get("n_bits")))
+        e = envelope("synth", n=300)
+        check("envelope: returns matched t/db arrays", len(e["t"]) == len(e["db"]) > 0)
+        # --- modulation classification on synthetic baseband signals ---
+        import numpy as np
+        _nfs = 100000.0; _N = 40000; _t = np.arange(_N) / _nfs
+        noise = lambda: (np.random.randn(_N) + 1j * np.random.randn(_N)) * 0.01
+        cw = np.exp(2j * np.pi * 2000 * _t) + noise()
+        _sym = (np.random.rand((_t * 1000).astype(int).max() + 1) > 0.5).astype(float)
+        keyc = _sym[(_t * 1000).astype(int)]           # random 0/1 symbols @ 1000 baud
+        ook = keyc * np.exp(2j * np.pi * 2000 * _t) + noise()
+        ftone = np.where((_t * 1000).astype(int) % 2 == 0, 4000.0, -4000.0)
+        fsk = np.exp(2j * np.pi * np.cumsum(ftone) / _nfs) + noise()
+        sweep = np.linspace(-45000, 45000, _N)
+        chirp = np.exp(2j * np.pi * np.cumsum(sweep) / _nfs) + noise()
+        cl = lambda x: _classify_signal(x.astype(np.complex64), _nfs)["label"]
+        rcw, rook, rfsk, rch = cl(cw), cl(ook), cl(fsk), cl(chirp)
+        check("classify: CW carrier", "CW" in rcw, rcw)
+        check("classify: OOK/ASK", "OOK" in rook or "ASK" in rook, rook)
+        check("classify: FSK", "FSK" in rfsk, rfsk)
+        check("classify: chirp/spread", "chirp" in rch or "spread" in rch, rch)
+        check("classify: OOK symbol rate ~1000 baud",
+              abs(_classify_signal(ook.astype(np.complex64), _nfs)["symbol_rate_hz"] - 1000) < 200,
+              str(_classify_signal(ook.astype(np.complex64), _nfs)["symbol_rate_hz"]))
+        # --- Segment 4: line coding, frame analysis, CRC scan (pure) ---
+        check("line: Manchester 01/10 -> 1/0",
+              line_decode("0110", "manchester") == "10")
+        check("line: NRZI transition=1",
+              line_decode("0" + "0110", "nrzi") == "0101")
+        # a fixed frame repeated 5x with a preamble, plus a rolling last byte
+        fixed = "10101010" + "11000011" + "01011010"   # preamble + code
+        _roll = ["00000001", "01000010", "10000011", "11000100", "00100101"]
+        fr_frames = "".join(fixed + _roll[i] for i in range(5))
+        fa = frame_analysis(fr_frames)
+        check("frame: repeated-frame period detected (=frame length)",
+              fa["ok"] and fa["period_bits"] == len(fixed) + 8, str(fa.get("period_bits")))
+        check("frame: fixed bits stable, rolling byte flagged varying",
+              fa["repeats"] == 5 and any(p >= len(fixed) for p in fa["varying_positions"])
+              and fa["stable_fraction"] < 1.0, str(fa.get("varying_positions"))[:60])
+        # candidate periods offered (incl. the true 32) + explicit period forcing
+        check("frame: candidate list offered incl. the true period",
+              any(c["period_bits"] == len(fixed) + 8 for c in fa["candidates"]),
+              str([c["period_bits"] for c in fa["candidates"]]))
+        check("frame: explicit period is honoured",
+              frame_analysis(fr_frames, period=len(fixed) + 8)["period_bits"] == len(fixed) + 8)
+        # a repeated 4-byte frame with a per-frame CRC-8 -> that length ranks first
+        # (its trailer validates a CRC) and is CRC-flagged in the candidate list.
+        one = [0x12, 0x34, 0x56]
+        one = one + [_crc8(one, 0x07)]
+        fbits = "".join(format(b, "08b") for b in one) * 6      # 32-bit frame ×6
+        fc2 = frame_analysis(fbits)
+        check("frame: CRC-validated frame length wins the headline",
+              fc2["period_bits"] == 32 and fc2["crc"]["matches"], str(fc2.get("period_bits")))
+        check("frame: a candidate carries its own CRC match",
+              any(c["period_bits"] == 32 and c["crc_matches"] for c in fc2["candidates"]))
+        # CRC-8 appended over a known payload is recovered
+        payload = [0xDE, 0xAD, 0xBE, 0xEF]
+        crcv = _crc8(payload, 0x07)
+        pbits = "".join(format(b, "08b") for b in payload + [crcv])
+        cs = crc_scan(pbits)
+        check("crc: appended CRC-8 is detected",
+              any(m["algo"] == "CRC-8" and m["width"] == 8 for m in cs["matches"]), str(cs))
+        # a checksum-8 (sum) trailer is recovered too
+        pay2 = [0x10, 0x20, 0x33]
+        cbits = "".join(format(b, "08b") for b in pay2 + [_sum8(pay2)])
+        check("crc: checksum-8 (sum) detected",
+              any("sum" in m["algo"] for m in crc_scan(cbits)["matches"]))
+        check("frames: web wrapper line-decodes + analyses",
+              frames(bits="0110" * 8, line="manchester").get("ok") is True)
+        # --- AI agent action parsing (allowlist + coerce + strip) ---
+        pa = parse_ai_actions('Set it to OOK.\n```json\n{"actions":[{"action":"tune","f_mhz":"433.92","bw_khz":60},'
+                              '{"action":"demod","mode":"OOK"},{"action":"nuke","f_mhz":1}]}\n```')
+        acts = pa["actions"]
+        check("ai-act: fenced block stripped from visible text",
+              "```" not in pa["text"] and pa["text"].startswith("Set it to OOK"))
+        check("ai-act: tune coerced (f_mhz float, bw kept)",
+              acts and acts[0]["action"] == "tune" and abs(acts[0]["f_mhz"] - 433.92) < 1e-6
+              and acts[0]["bw_khz"] == 60.0, str(acts))
+        check("ai-act: demod mode lowercased + validated",
+              any(a["action"] == "demod" and a.get("mode") == "ook" for a in acts))
+        check("ai-act: unknown action dropped",
+              not any(a["action"] == "nuke" for a in acts))
+        check("ai-act: no block -> empty actions, text intact",
+              parse_ai_actions("just prose")["actions"] == []
+              and parse_ai_actions("just prose")["text"] == "just prose")
+        check("ai-act: bad mode value rejected",
+              "mode" not in (parse_ai_actions('```json\n{"actions":[{"action":"demod","mode":"psk"}]}\n```')["actions"][0]))
+        p = psd("synth", n=256)
+        check("psd: freqs+db aligned, noise below peak",
+              len(p["freqs_mhz"]) == len(p["db"]) and max(p["db"]) - p["noise_db"] > 15)
+        pm = psd("synth", n=256, mode="max")
+        check("psd: max-hold >= average at the peak and is labelled",
+              pm["mode"] == "max" and max(pm["db"]) >= max(p["db"]) - 0.5)
+        # measure a box around the +150 kHz tone
+        mb = measure("synth", 0.0, 0.2, 433_900_000 + 130_000, 433_900_000 + 170_000)
+        check("measure: box power + peak near +150 kHz tone",
+              mb["ok"] and abs(mb["peak_hz"] - (433_900_000 + 150_000)) < 8000
+              and mb["channel_power_db"] > mb["mean_db"], str(mb.get("peak_hz")))
+        check("list: the synth capture is listed",
+              any(c["name"] == "synth" for c in list_captures()["captures"]))
+        # --- Segment 7: band-pass / notch filter before-vs-after ---
+        _pk = 433_900_000 + 150_000                      # the synth CW tone
+        bp = filter_preview("synth", "bandpass", _pk - 40_000, _pk + 40_000, 0, 0.2)
+        bpk = bp["freqs_mhz"].index(min(bp["freqs_mhz"], key=lambda f: abs(f - _pk / 1e6)))
+        check("filter: band-pass keeps the in-band tone",
+              bp["ok"] and bp["db_after"][bpk] > bp["db_before"][bpk] - 3
+              and bp["power_kept_pct"] > 5, str(bp.get("power_kept_pct")))
+        nt = filter_preview("synth", "notch", _pk - 40_000, _pk + 40_000, 0, 0.2)
+        ntk = nt["freqs_mhz"].index(min(nt["freqs_mhz"], key=lambda f: abs(f - _pk / 1e6)))
+        check("filter: notch removes the in-band tone (>=20 dB drop)",
+              nt["db_before"][ntk] - nt["db_after"][ntk] >= 20, str(nt["db_before"][ntk] - nt["db_after"][ntk]))
+        check("filter: complementary masks' kept power sums to ~100%",
+              abs(bp["power_kept_pct"] + nt["power_kept_pct"] - 100.0) < 5.0,
+              str(bp["power_kept_pct"]) + "+" + str(nt["power_kept_pct"]))
+        check("filter: needs a band", filter_preview("synth", "bandpass").get("ok") is False)
+        # --- Segment 7: LoRa de-chirp (synth signal, no hardware) ---
+        _sf, _os, _M = 7, 4, 128
+        _base = _lora_base_upchirp(_M, _os)
+        _true = [11, 60, 127, 3, 96, 40, 8, 75]
+        _lsig = np.concatenate([np.roll(_base, -int(round(s * _os))) for s in _true])
+        _lsig = _lsig + (np.random.randn(len(_lsig)) + 1j * np.random.randn(len(_lsig))).astype(np.complex64) * 0.08
+        _rs, _q, _grid = _lora_dechirp(_lsig, _sf, _os)
+        check("lora: de-chirp recovers the symbol sequence",
+              _rs == _true, str(_rs))
+        check("lora: lock quality high at the right SF", _q > 20, str(round(_q, 1)))
+        _rw, _qw, _ = _lora_dechirp(_lsig, _sf + 2, _os)      # wrong SF -> no lock
+        check("lora: wrong SF does not lock (quality drops)", _qw < _q / 3, str(round(_qw, 1)))
+        check("lora: grid is chips×symbols", _grid is not None and _grid.shape == (_M, len(_true)))
+        check("lora: bw/sf validation", dechirp("synth", bw_hz=125000, sf=99).get("ok") is False)
+        # --- Segment 7: cyclostationary symbol-rate detector (pure core) ---
+        from scipy import signal as _sg
+        _fs = 1_000_000.0
+        def _ook(baud):
+            sps = int(_fs / baud); nbb = 300; bits = np.random.randint(0, 2, nbb).astype(float)
+            k = max(2, sps // 8)
+            env = _sg.lfilter(np.ones(k) / k, 1, np.repeat(bits, sps))
+            return env + (np.random.randn(nbb * sps) + 1j * np.random.randn(nbb * sps)) * 0.03
+        # high baud: confident lock; mid baud: found (strength scales with baud/SNR)
+        _f, _p = _cyclic_profile(_ook(20000), _fs, 70000)
+        _pk = _cyclic_peaks(_f, _p)
+        check("cyclo: OOK 20000 baud found + confident",
+              bool(_pk) and abs(_pk[0][1] - 20000) < 1000 and _pk[0][0] >= 8, str(_pk[0] if _pk else None))
+        _f, _p = _cyclic_profile(_ook(5000), _fs, 17500)
+        _fund = _fundamental_rate(_cyclic_peaks(_f, _p, kmin=4.0))
+        check("cyclo: OOK 5000 baud found via fundamental (harmonics rejected)",
+              _fund is not None and abs(_fund - 5000) < 400, str(_fund))
+        _sps = 200; _nb = 300; _sy = (np.random.randint(0, 2, _nb) * 2 - 1).astype(float)
+        _xb = _sg.lfilter(np.ones(_sps // 8) / (_sps // 8), 1, np.repeat(_sy, _sps)) \
+            * np.exp(2j * np.pi * 1500 * np.arange(_nb * _sps) / _fs) \
+            + (np.random.randn(_nb * _sps) + 1j * np.random.randn(_nb * _sps)) * 0.03
+        _f, _p = _cyclic_profile(_xb, _fs, 20000); _fb = _fundamental_rate(_cyclic_peaks(_f, _p))
+        check("cyclo: BPSK 5000 baud found via fundamental", _fb is not None and abs(_fb - 5000) < 300, str(_fb))
+        _xc = np.exp(2j * np.pi * 1000 * np.arange(80000) / _fs) \
+            + (np.random.randn(80000) + 1j * np.random.randn(80000)) * 0.03
+        _f, _p = _cyclic_profile(_xc, _fs, 20000)
+        check("cyclo: CW shows no confident symbol rate", not _cyclic_peaks(_f, _p, kmin=8.0), str(_p.max()))
+        # --- Segment 9: PSK constellation demod (synthetic BPSK/QPSK/8PSK) ---
+        check("psk: Gray mapping (0->00, 2->11, 3->10)",
+              _gray_bits(0, 2) == "00" and _gray_bits(2, 2) == "11" and _gray_bits(3, 2) == "10")
+        _pfs = 1_000_000.0
+
+        def _mkpsk(M, baud, nsym=500, amp=0.05, cfo=0.0):
+            sps = int(_pfs / baud)
+            syms = np.random.randint(0, M, nsym)
+            x = np.repeat(np.exp(1j * (2 * np.pi / M) * syms), sps)
+            x = x * np.exp(2j * np.pi * cfo * np.arange(len(x)) / _pfs)
+            x = x + (np.random.randn(len(x)) + 1j * np.random.randn(len(x))) * amp
+            return x.astype(np.complex64), syms
+
+        _pbaud = 25000.0
+        _xb, _sb = _mkpsk(2, _pbaud, cfo=500.0)
+        _rb = _psk_symbol_demod(_xb, _pfs, _pbaud)
+        check("psk: BPSK order detected + low EVM",
+              _rb["ok"] and _rb["order"] == 2 and _rb["evm_pct"] < 25,
+              str(_rb.get("order")) + " evm=" + str(_rb.get("evm_pct")))
+        _xq, _sq = _mkpsk(4, _pbaud, cfo=-800.0)
+        _rq = _psk_symbol_demod(_xq, _pfs, _pbaud)
+        check("psk: QPSK order detected (not mislabelled 8PSK)",
+              _rq["order"] == 4, str(_rq.get("order")) + " locks=" + str(_rq.get("lock_by_order")))
+        _kq = np.array(_rq["symbols"]); _m = min(len(_kq), len(_sq))
+        _match = float(np.mean(np.mod(np.diff(_sq[:_m]), 4) == np.mod(np.diff(_kq[:_m]), 4)))
+        check("psk: QPSK differential symbols recovered (rotation-invariant)",
+              _match > 0.95, str(round(_match, 3)))
+        _xe, _se = _mkpsk(8, _pbaud, amp=0.03)
+        _re = _psk_symbol_demod(_xe, _pfs, _pbaud)
+        check("psk: 8PSK order detected", _re["order"] == 8, str(_re.get("order")))
+        _fq, _pq = _cyclic_profile(_xq, _pfs, 100000.0)
+        _bq = _fundamental_rate(_cyclic_peaks(_fq, _pq))
+        check("psk: symbol-rate auto-estimate near truth (feeds constellation_demod)",
+              _bq is not None and abs(_bq - _pbaud) < 2500, str(_bq))
+        _cwx = (np.exp(2j * np.pi * 1000 * np.arange(60000) / _pfs)
+                + (np.random.randn(60000) + 1j * np.random.randn(60000)) * 0.02).astype(np.complex64)
+        _rcw = _psk_symbol_demod(_cwx, _pfs, _pbaud)
+        check("psk: single tone / CW flagged (single cluster, not real PSK)",
+              _rcw["ok"] and _rcw["single_cluster"], str(_rcw.get("single_cluster")))
+        # --- SigMF annotations round-trip ---
+        _b = _box_to_annotation(0.08, 0.12, 434_040_000, 434_060_000, "OOK burst", 1_000_000.0)
+        check("annot: box -> SigMF annotation (samples + freq edges + label)",
+              _b["core:sample_start"] == 80000 and _b["core:sample_count"] == 40000
+              and _b["core:freq_lower_edge"] == 434_040_000.0
+              and _b["core:label"] == "OOK burst", str(_b))
+        _rb = _annotation_to_box(_b, 1_000_000.0)
+        check("annot: annotation -> box round-trips t/f/label",
+              abs(_rb["t0"] - 0.08) < 1e-6 and abs(_rb["t1"] - 0.12) < 1e-6
+              and abs(_rb["f0_mhz"] - 434.04) < 1e-6 and _rb["label"] == "OOK burst")
+        r1 = add_annotation("synth", 0.08, 0.12, 434_040_000, 434_060_000, "burst A")
+        check("annot: add writes it to the .sigmf-meta + lists back",
+              r1["ok"] and any(a["label"] == "burst A" for a in r1["annotations"]))
+        # persisted on disk (reload the meta fresh)?
+        _m2, _ = _read_meta("synth")
+        check("annot: persisted in the SigMF file (interop-visible)",
+              any(a.get("core:label") == "burst A" for a in _m2.get("annotations", [])))
+        _idx = next(a["index"] for a in list_annotations("synth")["annotations"] if a["label"] == "burst A")
+        r2 = delete_annotation("synth", _idx)
+        check("annot: delete removes it",
+              r2["ok"] and not any(a["label"] == "burst A" for a in r2["annotations"]))
+        check("annot: clamped + zero-span rejected",
+              add_annotation("synth", 0.1, 0.1).get("ok") is False)
+        # pure bit slicer on a clean square wave
+        import numpy as np
+        sq = (np.arange(1000) // 10) % 2
+        baud, bits = _slice_bits(sq.astype(bool), 10000.0)
+        check("bits: clean 10-sample square -> ~1000 baud", abs(baud - 1000) < 120, str(baud))
+        # rtl_433 JSON parser: dedupe by model/id, keep fields + count
+        devs, ev = _parse_rtl433_lines(
+            '{"time":"..","model":"Acurite-Tower","id":42,"temperature_C":21.5,"rssi":-8}\n'
+            'noise line\n'
+            '{"time":"..","model":"Acurite-Tower","id":42,"temperature_C":21.7,"rssi":-7}\n'
+            '{"model":"Nexus-TH","id":9,"channel":1,"humidity":55}')
+        check("rtl433: parses + dedupes device events",
+              ev == 3 and len(devs) == 2
+              and any(d["model"] == "Acurite-Tower" and d["count"] == 2
+                      and d["fields"].get("temperature_C") == 21.7 for d in devs)
+              and any(d["model"] == "Nexus-TH" and d["channel"] == 1 for d in devs), str(devs))
+        d433 = decode433("synth")     # a tone+OOK synth won't match a real protocol
+        check("rtl433: runs on a capture, returns a clean (empty) device list",
+              d433.get("ok") is True and isinstance(d433.get("devices"), list), str(d433)[:120])
+        # --- Upload / import: Flipper .sub RAW, raw IQ, SigMF, extended datatypes ---
+        import numpy as np
+        # a Flipper RAW .sub: repeated OOK bursts (500us on / 500us off) at 433.92 MHz
+        _pulses = " ".join((["500 -500"] * 20 + ["-4000"]) * 3)
+        _sub = ("Filetype: Flipper SubGhz RAW File\nVersion: 1\nFrequency: 433920000\n"
+                "Preset: FuriHalSubGhzPresetOok650Async\nProtocol: RAW\nRAW_Data: " + _pulses + "\n")
+        _pf = parse_flipper_sub(_sub)
+        check("import: Flipper .sub RAW parsed (freq + pulses)",
+              _pf["ok"] and _pf["freq_hz"] == 433_920_000 and _pf["n_pulses"] > 100
+              and _pf["modulation"] == "OOK", str({k: _pf.get(k) for k in ("ok", "freq_hz", "n_pulses")}))
+        _fr = import_flipper_sub(_sub, "garage.sub")
+        check("import: Flipper .sub -> a loadable OOK capture at the right freq",
+              _fr["ok"] and abs(load(_fr["name"])[2] - (433_920_000 - 40000)) < 1, str(_fr)[:120])
+        _fb = bursts(_fr["name"])
+        check("import: synthesised Flipper capture shows OOK bursts",
+              _fb["ok"] and _fb["count"] >= 1, str(_fb.get("count")))
+        _fp = parse_flipper_sub("Filetype: Flipper SubGhz RAW File\nFrequency: 433920000\n"
+                                "Protocol: Princeton\nKey: 00 00 00 00 12 34 56\nBit: 24\nTE: 400\n")
+        check("import: decoded (protocol) .sub is rejected with guidance",
+              _fp["ok"] is False and _fp["kind"] == "protocol" and "RAW" in _fp["error"])
+        # raw IQ (cf32) round-trips: write a tone, import, load it back
+        _n = 20000; _tt = np.arange(_n) / 1_000_000.0
+        _tone = np.exp(2j * np.pi * 120000 * _tt).astype(np.complex64)
+        _cf32 = np.empty(_n * 2, dtype=np.float32); _cf32[0::2] = _tone.real; _cf32[1::2] = _tone.imag
+        _ri = import_raw_iq(_cf32.tobytes(), "tone.cf32", "cf32", 1_000_000, 433_000_000)
+        check("import: raw cf32 IQ imported + wrapped as SigMF", _ri["ok"], str(_ri)[:120])
+        _sm = summary(_ri["name"])
+        check("import: cf32 capture loads + peak near +120 kHz",
+              _sm["ok"] and abs(_sm["peak_offset_hz"] - 120000) < 6000, str(_sm.get("peak_offset_hz")))
+        check("import: raw IQ needs a sample rate",
+              import_raw_iq(b"\x00\x01", "x.cu8", "cu8", 0, 0).get("ok") is False)
+        check("import: unknown datatype rejected",
+              import_raw_iq(b"\x00", "x.zzz", "zzz", 1e6, 0).get("ok") is False)
+        # cs16 datatype decodes through the extended load()
+        _i16 = np.empty(_n * 2, dtype="<i2")
+        _i16[0::2] = (_tone.real * 20000).astype("<i2"); _i16[1::2] = (_tone.imag * 20000).astype("<i2")
+        _r16 = import_raw_iq(_i16.tobytes(), "tone16.cs16", "cs16", 1_000_000, 433_000_000)
+        check("import: cs16 raw IQ loads (extended datatypes)",
+              _r16["ok"] and summary(_r16["name"])["ok"], str(_r16)[:80])
+        # SigMF pair passthrough
+        _sd = (np.random.randint(0, 256, 4000, dtype=np.uint8)).tobytes()
+        _meta = json.dumps({"global": {"core:datatype": "cu8", "core:sample_rate": 1_000_000, "core:version": "1.0.0"},
+                            "captures": [{"core:sample_start": 0, "core:frequency": 868_000_000}], "annotations": []})
+        _si = import_sigmf(_meta, _sd, "elsewhere.sigmf-meta")
+        check("import: SigMF pair stored + listed",
+              _si["ok"] and any(c["name"] == _si["name"] for c in list_captures()["captures"]), str(_si)[:80])
+        check("import: SigMF meta without datatype rejected",
+              import_sigmf('{"global":{}}', b"\x00", "x").get("ok") is False)
+        # --- Segment 10: multi-signal detection & tracking ---
+        import numpy as np
+        _sfs = 1_000_000.0; _sfc = 433_900_000.0; _sn = 100000; _st = np.arange(_sn) / _sfs
+        _scene = 0.25 * np.exp(2j * np.pi * 100000 * _st)          # continuous +100 kHz
+        _scene = _scene + 0.25 * np.exp(2j * np.pi * 250000 * _st)  # continuous +250 kHz
+        _bmask = ((_st > 0.033) & (_st < 0.066)).astype(np.float32)
+        _scene = _scene + 0.25 * _bmask * np.exp(2j * np.pi * -150000 * _st)  # -150 kHz burst, middle third
+        # amplitudes kept low so the summed scene doesn't clip in cu8 (clipping = spurs)
+        _scene = _scene + (np.random.randn(_sn) + 1j * np.random.randn(_sn)) * 0.02
+        _I = np.clip(np.round(_scene.real * 127.5 + 127.5), 0, 255).astype(np.uint8)
+        _Q = np.clip(np.round(_scene.imag * 127.5 + 127.5), 0, 255).astype(np.uint8)
+        _iv = np.empty(2 * _sn, dtype=np.uint8); _iv[0::2] = _I; _iv[1::2] = _Q
+        _write_capture("scene", _iv.tobytes(), _sfs, _sfc, "cu8")
+        _sg = signals("scene")
+        _fk = sorted(round((s["f_center_hz"] - _sfc) / 1000) for s in _sg["signals"])
+        check("signals: finds the 3 simultaneous carriers (+100 / +250 / -150 kHz)",
+              _sg["ok"] and _sg["n_signals"] >= 3
+              and any(abs(f - 100) < 20 for f in _fk) and any(abs(f - 250) < 20 for f in _fk)
+              and any(abs(f + 150) < 20 for f in _fk), str(_fk))
+        _burst = [s for s in _sg["signals"] if abs((s["f_center_hz"] - _sfc) / 1000 + 150) < 20]
+        check("signals: the -150 kHz carrier is time-bounded (a mid-capture burst)",
+              bool(_burst) and _burst[0]["t0_s"] > 0.02 and _burst[0]["t1_s"] < 0.08, str(_burst[:1]))
+        check("signals: each track carries freq extent + power + time",
+              all(all(k in s for k in ("f_lo_hz", "f_hi_hz", "bw_hz", "t0_s", "t1_s", "peak_db", "snr_db"))
+                  for s in _sg["signals"]) and _sg["n_signals"] <= 15, str(_sg["n_signals"]))
+        # --- Bit workbench: transforms, CRC brute-force, cross-capture diff ---
+        check("bitxf: invert flips every bit", bit_transform("0011", invert=True) == "1100")
+        check("bitxf: reflect reverses bits within each byte",
+              bit_transform("00000001", reflect=True) == "10000000")
+        check("bitxf: offset drops leading bits, take truncates",
+              bit_transform("1111000011", offset=4, take=4) == "0000")
+        _ft = frames(bits="11110000", invert=True)
+        check("frames: bit transform (invert) applied + reported",
+              _ft.get("ok") and _ft["transform"]["invert"] is True
+              and _ft["decoded_bits"] == "00001111", str(_ft.get("decoded_bits")))
+        # a CRC-8 after a length byte the CRC doesn't cover -> found by skipping it
+        _pl = [0xA1, 0xB2, 0xC3]
+        _fr8 = [0x03] + _pl + [_crc8(_pl, 0x07)]
+        cb = crc_brute("".join(format(x, "08b") for x in _fr8))
+        check("crc-brute: CRC-8 after a skipped length byte is found",
+              any(m["algo"] == "CRC-8" and m["skip_bytes"] == 1 and m["over_bytes"] == 3
+                  for m in cb["matches"]), str(cb["matches"])[:120])
+        # field diff: 4 captures of one emitter — fixed ID, a counter, a rolling byte
+        _id = format(0xABCD, "016b")
+        _ctr, _rolls = [0x10, 0x11, 0x12, 0x13], [0x5A, 0xC1, 0x37, 0x9E]
+        _caps = [(_id + format(_ctr[k], "08b") + "00000000" + format(_rolls[k], "08b")) * 3
+                 for k in range(4)]
+        fd = field_diff(_caps, labels=["A", "B", "C", "D"])
+        check("diff: repeated captures align to one 40-bit frame",
+              fd["ok"] and fd["frame_bits"] == 40 and fd["n_captures"] == 4, str(fd.get("frame_bits")))
+        check("diff: fixed 16-bit ID preserved at the front, varying bits marked",
+              fd["consensus"].startswith(_id) and "x" in fd["consensus"], str(fd.get("consensus")))
+        # 0x10..0x13 only change their low 2 bits, so the counter field is those 2
+        # bits; the high-entropy trailing byte is classed rolling.
+        check("diff: incrementing bits -> counter, high-entropy byte -> rolling (@32)",
+              any(f["kind"] == "counter" for f in fd["fields"])
+              and any(f["kind"] == "rolling" and f["start"] == 32 for f in fd["fields"]),
+              str([(f["start"], f["len"], f["kind"]) for f in fd["fields"]]))
+        check("diff: needs >=2 recoverable captures",
+              field_diff(["010101"]).get("ok") is False)
+        # --- Device fingerprinting: feature -> ISM device family (heuristic) ---
+        fp1 = fingerprint(mod="ook", baud=2500, frame_bits=24, crc=[], freq_hz=433_920_000)
+        check("fp: OOK 24-bit no-CRC @433 -> EV1527/PT2262 family on top",
+              fp1["candidates"] and "EV1527" in fp1["candidates"][0]["name"],
+              str(fp1["candidates"][0]["name"] if fp1["candidates"] else None))
+        fp2 = fingerprint(mod="fsk", frame_bits=72, crc=["CRC-8"], freq_hz=433_920_000)
+        check("fp: FSK CRC'd 72-bit @433 lists TPMS as a candidate",
+              any("TPMS" in c["name"] for c in fp2["candidates"]),
+              str([c["name"] for c in fp2["candidates"]]))
+        fp3 = fingerprint(mod="chirp", freq_hz=868_000_000, bw_hz=125000)
+        check("fp: chirp @868 -> LoRa family",
+              any("LoRa" in c["name"] for c in fp3["candidates"]),
+              str([c["name"] for c in fp3["candidates"]]))
+        check("fp: nothing measured -> generic fallback, no false certainty",
+              fingerprint().get("generic") is not None)
+        # --- Pulse (PWM / PPM) symbol decoder ---
+        import numpy as np
+        _te = 12
+        _truth = "10110100"
+
+        def _pwm_level(bits):                # EV1527/PT2262 OOK: 1=wide high, 0=narrow high
+            seq = []
+            for c in bits:
+                seq += ([1] * (3 * _te) + [0] * _te) if c == "1" else ([1] * _te + [0] * (3 * _te))
+            return seq + [0] * (31 * _te)    # inter-frame gap
+
+        def _ppm_level(bits):                # pulse-distance: fixed pulse, gap sets the bit
+            seq = []
+            for c in bits:
+                seq += [1] * _te + [0] * (3 * _te if c == "1" else _te)
+            return seq + [1] * _te + [0] * (31 * _te)   # terminator pulse + frame gap
+        _lp = np.array(_pwm_level(_truth) * 3, dtype=bool)
+        _rp = _decode_pulses(_lp, 30000.0)
+        check("pulse: PWM auto-detected + high-width bits recovered",
+              _rp["ok"] and _rp["coding"] == "pwm" and _rp["frames"][0]["bits"] == _truth
+              and _rp["n_frames"] >= 2, str(_rp.get("coding")) + " " + str(_rp.get("frames", [{}])[0].get("bits")))
+        _lq = np.array(_ppm_level(_truth) * 3, dtype=bool)
+        _rq = _decode_pulses(_lq, 30000.0)
+        check("pulse: PPM auto-detected + gap bits recovered",
+              _rq["ok"] and _rq["coding"] == "ppm" and _rq["frames"][0]["bits"] == _truth,
+              str(_rq.get("coding")) + " " + str(_rq.get("frames", [{}])[0].get("bits")))
+        check("pulse: forcing the wrong coding is honoured (not auto)",
+              _decode_pulses(_lp, 30000.0, coding="ppm").get("coding") == "ppm")
+        check("pulse: run-length encode round-trips a level stream",
+              _runs_from_level(np.array([1, 1, 0, 1], dtype=bool)) == [(True, 2), (False, 1), (True, 1)])
+        check("pulse: two-class split separates short/long durations",
+              round(_two_class([10, 11, 9, 30, 31, 29])[2]) == 20)
+        # end-to-end: synthesise a PWM-OOK cu8 capture, decode it back to symbols
+        _fspd = 1_000_000.0
+        _lvl = np.array(_pwm_level(_truth) * 4, dtype=float)
+        _car = _lvl * np.exp(2j * np.pi * 100_000 * np.arange(len(_lvl)) / _fspd)
+        _car = _car + (np.random.randn(len(_lvl)) + 1j * np.random.randn(len(_lvl))) * 0.01
+        _cf = np.empty(len(_lvl) * 2, dtype=np.float32)
+        _cf[0::2], _cf[1::2] = _car.real.astype(np.float32), _car.imag.astype(np.float32)
+        _ip = import_raw_iq(_cf.tobytes(), "pwm.cf32", "cf32", int(_fspd), 433_920_000)
+        _pd = pulse_decode(_ip["name"], f_offset_hz=100_000, bw_hz=80_000)
+        check("pulse: end-to-end PWM capture -> symbols (fingerprint frame length lines up)",
+              _pd["ok"] and _pd["coding"] == "pwm" and _truth in _pd["bits"], str(_pd.get("bits"))[:60])
+    finally:
+        globals()["_cap_dir"] = saved
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+        _CACHE.clear()
+
+    # --- standalone CRC check over the shown bits ----------------------------
+    _pl = [0x12, 0x34, 0x56]
+    _c8 = _crc8(_pl, *[a[1:4] for a in _CRC8_ALGOS if a[0].startswith("CRC-8")][0])
+    _framebits = "".join("{:08b}".format(x) for x in _pl + [_c8])
+    _cc = crc_check(bits=_framebits)
+    check("crc_check: finds a valid CRC-8 trailer over the shown bytes",
+          _cc["ok"] and any(m["width"] == 8 for m in _cc["matches"]),
+          str(_cc["matches"]))
+    check("crc_check: reports byte count and needs >=2 bytes",
+          crc_check(bits="0" * 8)["note"] is not None
+          and crc_check(bits=_framebits)["n_bytes"] == 4)
+    check("crc_check: applies the workbench transforms before testing",
+          crc_check(bits="1111" + _framebits, offset=4)["matches"]
+          == _cc["matches"])
+    check("crc_check: an inverted frame validates only after Invert",
+          not crc_check(bits="".join("1" if c == "0" else "0" for c in _framebits))["matches"]
+          and crc_check(bits="".join("1" if c == "0" else "0" for c in _framebits),
+                        invert=True)["matches"])
+    check("crc_check: no bits is a clean error, not a crash",
+          crc_check(bits="")["ok"] is False)
+
+    # --- subaudible squelch: CTCSS tones and DCS codes ------------------------
+    import numpy as _np
+    from scipy import signal as _sg
+    _sfs = 2400.0
+    _st = _np.arange(int(_sfs * 2)) / _sfs
+    # a 100 Hz CTCSS tone buried under much louder "speech" at 900 Hz
+    _disc = (600 * _np.sin(2 * _np.pi * 100.0 * _st)
+             + 2500 * _np.sin(2 * _np.pi * 900.0 * _st)
+             + _np.random.RandomState(1).normal(0, 300, _st.size))
+    _ct = ctcss_detect(_disc, _sfs)
+    check("ctcss: finds the tone under louder voice",
+          _ct["present"] and _ct["tone_hz"] == 100.0 and _ct["margin_db"] > 15,
+          str(_ct))
+    check("ctcss: noise alone is not a tone",
+          ctcss_detect(_np.random.RandomState(2).normal(0, 300, int(_sfs * 2)),
+                       _sfs)["present"] is False)
+    check("ctcss: too little data returns nothing", ctcss_detect([0.0] * 10, _sfs) is None)
+    check("ctcss: every standard tone is in the table",
+          67.0 in CTCSS_TONES and 254.1 in CTCSS_TONES and len(CTCSS_TONES) == 54)
+
+    check("dcs: the code table holds all 83 standard codes", len(_dcs_table()) == 83)
+    check("dcs: the on-air word is 23 bits", len(dcs_word("023")) == 23)
+    check("dcs: every code has a distinct word", len(set(_dcs_table().keys())) == 83)
+    check("dcs: a bad code returns nothing", dcs_word("zz9") is None)
+    _code = "251"
+    _w = dcs_word(_code)
+    _spb = _sfs / DCS_BITRATE
+    _n = int(_sfs * 3)
+    _bits = _np.array([_w[int(i / _spb) % 23] for i in range(_n)])
+    _b, _a = _sg.butter(3, 260.0 / (_sfs / 2), "low")
+    _dsig = _sg.filtfilt(_b, _a, (_bits * 2 - 1) * 800.0)
+    _dsig = _dsig + _np.random.RandomState(3).normal(0, 120, _n)
+    _dd = dcs_detect(_dsig, _sfs)
+    check("dcs: recovers the transmitted code at any word alignment",
+          _dd["present"] and _dd["code"] == _code, str(_dd))
+    _di = dcs_detect(-_dsig, _sfs)
+    check("dcs: an inverted transmission is decoded and flagged",
+          _di["code"] == _code and _di["inverted"] is True, str(_di))
+    check("dcs: noise is not a code",
+          dcs_detect(_np.random.RandomState(4).normal(0, 300, int(_sfs * 2)),
+                     _sfs)["present"] is False)
+    check("dcs: too little data returns nothing", dcs_detect([0.0] * 50, _sfs) is None)
+
+    # --- modulation quality: FM deviation + AM depth --------------------------
+    import math as _m
+    _fs = 48000.0
+    _tt = [i / _fs for i in range(4800)]
+    # a 1 kHz tone deviating +-3 kHz: the discriminator output IS that tone
+    _inst = [3000.0 * _m.sin(2 * _m.pi * 1000.0 * t) for t in _tt]
+    _fmd = fm_deviation(_inst)
+    check("fm: peak deviation of a +-3 kHz tone reads ~3 kHz",
+          abs(_fmd["peak_dev_hz"] - 3000.0) < 60, str(_fmd["peak_dev_hz"]))
+    check("fm: rms deviation of a sine is peak/sqrt(2)",
+          abs(_fmd["rms_dev_hz"] - 3000.0 / _m.sqrt(2)) < 60, str(_fmd["rms_dev_hz"]))
+    _off = fm_deviation([o + 12000.0 for o in _inst])
+    check("fm: a carrier offset is reported, not counted as deviation",
+          abs(_off["peak_dev_hz"] - _fmd["peak_dev_hz"]) < 60
+          and abs(_off["carrier_offset_hz"] - 12000.0) < 120,
+          str(_off))
+    check("fm: one wild sample does not become the peak deviation",
+          abs(fm_deviation(_inst + [900000.0])["peak_dev_hz"] - 3000.0) < 120)
+    check("fm: too little data returns nothing rather than a number",
+          fm_deviation([1.0, 2.0]) is None and fm_deviation(None) is None)
+    check("fm: Carson bandwidth is wider than twice the deviation",
+          _fmd["carson_bw_hz"] > 2 * _fmd["peak_dev_hz"] * 0.9)
+
+    _am = am_depth([1.0 + 0.5 * _m.sin(2 * _m.pi * 1000.0 * t) for t in _tt])
+    check("am: 50% modulation reads ~50%", abs(_am["depth_pct"] - 50.0) < 3.0,
+          str(_am["depth_pct"]))
+    check("am: an unmodulated carrier reads ~0%",
+          am_depth([1.0] * 500)["depth_pct"] < 1.0)
+    check("am: full modulation approaches 100%",
+          am_depth([1.0 + 0.99 * _m.sin(2 * _m.pi * 1000.0 * t) for t in _tt])["depth_pct"] > 90.0)
+    check("am: a single spike does not claim 100% modulation",
+          am_depth([1.0] * 500 + [9.0])["depth_pct"] < 5.0)
+    check("am: bad input returns nothing", am_depth([]) is None and am_depth(None) is None)
+
+    passed = sum(1 for r in results if r["pass"])
+    return {"pass": passed == len(results), "passed": passed,
+            "total": len(results), "results": results}
+
+
+def _main(argv):
+    import argparse
+    ap = argparse.ArgumentParser(description="On-box SigMF IQ analyzer")
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("selftest")
+    sub.add_parser("list")
+    ps = sub.add_parser("summary"); ps.add_argument("name")
+    args = ap.parse_args(argv)
+    if args.cmd == "selftest":
+        r = selftest()
+        for it in r["results"]:
+            print("  [%s] %s%s" % ("PASS" if it["pass"] else "FAIL", it["name"],
+                                   "" if it["pass"] else "  (%s)" % it["detail"]))
+        print("\n%d/%d checks pass — %s" % (r["passed"], r["total"], "OK" if r["pass"] else "FAIL"))
+        return 0 if r["pass"] else 1
+    if args.cmd == "list":
+        print(json.dumps(list_captures(), indent=2)); return 0
+    if args.cmd == "summary":
+        print(json.dumps(summary(args.name), indent=2)); return 0
+    ap.print_help(); return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(_main(sys.argv[1:]))

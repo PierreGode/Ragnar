@@ -1,0 +1,975 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ADS-B Radar</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/web/vendor/leaflet/leaflet.css"/>
+<script src="/web/vendor/leaflet/leaflet.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ground:#0a0e14; --panel:#111722; --panel-2:#0d1420; --line:#1e2836; --line-soft:#161d29;
+    --ink:#e8eef6; --ink-dim:#c2ccd8; --muted:#7c8aa0; --cyan:#38bdc9; --accent:#f5b942;
+    --live:#3fb56b; --idle:#546074; --radar:#2ea096;
+    --disp:'Chakra Petch',system-ui,sans-serif; --mono:'IBM Plex Mono',ui-monospace,monospace;
+    --head:'Chakra Petch',system-ui,sans-serif; --radius:12px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{background:var(--ground);color:var(--ink);font-family:var(--disp);line-height:1.5;
+    padding:20px;min-height:100vh;
+    background-image:radial-gradient(120% 80% at 50% -10%, rgba(46,160,150,.06), transparent 60%), linear-gradient(var(--ground),var(--ground));}
+  .wrap{max-width:none;margin:0 auto}
+  header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:16px}
+  .eyebrow{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted)}
+  .eyebrow .dot{width:7px;height:7px;border-radius:50%;background:var(--radar);box-shadow:0 0 10px var(--radar)}
+  h1{font-family:var(--head);font-weight:700;font-size:34px;margin:2px 0 0;letter-spacing:.01em}
+  .sub{color:var(--ink-dim);font-size:13px;max-width:460px}
+  .tag{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;padding:2px 7px;border-radius:5px;border:1px solid}
+  .tag.live{color:var(--live);border-color:rgba(63,181,107,.45);background:rgba(63,181,107,.10)}
+  .tag.synth{color:var(--accent);border-color:rgba(245,185,66,.4);background:rgba(245,185,66,.08)}
+  .tag.net{color:var(--cyan);border-color:rgba(56,189,201,.45);background:rgba(56,189,201,.10)}
+  .tag.idle{color:var(--idle);border-color:rgba(84,96,116,.4);background:rgba(84,96,116,.10)}
+  .bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:12px 14px;background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);margin-bottom:16px}
+  .grp{display:flex;align-items:center;gap:7px}
+  .lbl{font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  button.ctl,a.ctl{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:var(--panel);border:1px solid var(--line);padding:7px 13px;border-radius:7px;cursor:pointer;text-decoration:none;transition:border-color .15s,color .15s,background .15s}
+  button.ctl:hover,a.ctl:hover{border-color:var(--radar);color:#fff}
+  a.back{border-color:rgba(56,189,201,.4);color:var(--cyan)}
+  button.go[aria-pressed="true"]{background:rgba(63,181,107,.14);border-color:rgba(63,181,107,.5);color:var(--live)}
+  input.tin{width:92px;font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+  input.tin.small{width:58px}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+  .seg button{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:transparent;border:0;padding:6px 11px;cursor:pointer}
+  .seg button[aria-pressed="true"]{background:rgba(46,160,150,.16);color:var(--radar)}
+  /* Radar column hugs the (now ~20% smaller) radar square so Contacts takes all
+     the remaining width. min(66vh,46vw) keeps the radar from ever dominating. */
+  .layout{display:grid;grid-template-columns:min(66vh,46vw) minmax(340px,1fr);gap:16px;align-items:start}
+  @media (max-width:880px){.layout{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+  .scopewrap{position:relative;background:#05080d;aspect-ratio:1/1;width:100%;max-height:66vh}
+  canvas#radar{display:block;width:100%;height:100%}
+  .veil{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:6px;background:rgba(5,8,13,.78);text-align:center;padding:20px}
+  .veil.show{display:flex}
+  .veil .vt{font-family:var(--head);font-size:18px;color:var(--ink)}
+  .veil .vs{font-family:var(--mono);font-size:12px;color:var(--muted);max-width:460px}
+  .tablecard{display:flex;flex-direction:column;min-height:0}
+  .tcap{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
+  .tcap .t{font-family:var(--head);font-weight:600;font-size:14px}
+  .tcap .c{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .tbl{overflow:auto;max-height:640px}
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px}
+  th{position:sticky;top:0;background:var(--panel-2);color:var(--muted);font-weight:500;text-align:left;padding:7px 10px;letter-spacing:.06em;text-transform:uppercase;font-size:9.5px;border-bottom:1px solid var(--line)}
+  td{padding:6px 10px;border-bottom:1px solid var(--line-soft);color:var(--ink-dim);white-space:nowrap}
+  tr:hover td{background:rgba(46,160,150,.06)}
+  tr.prow{cursor:pointer}
+  tr.prow.sel td{background:rgba(245,185,66,.12);box-shadow:inset 3px 0 0 var(--accent)}
+  td.cs{color:var(--ink);font-weight:500}
+  .empty{padding:26px 14px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:12px}
+  .acarscard{margin-top:16px}
+  .acars-list{max-height:none;padding:4px 0}
+  .acars-msg{padding:9px 14px;border-bottom:1px solid var(--line-soft);display:grid;grid-template-columns:130px 78px 1fr auto;gap:12px;align-items:start}
+  @media (max-width:720px){.acars-msg{grid-template-columns:1fr;gap:2px}}
+  .acars-msg .who{font-family:var(--mono);font-size:12px}
+  .acars-msg .who .tail{color:var(--cyan);font-weight:600} .acars-msg .who .flt{color:var(--ink-dim)}
+  .acars-msg .lbl{font-family:var(--mono);font-size:10px} .acars-msg .lbl .code{color:var(--accent)} .acars-msg .lbl .mean{color:var(--muted);display:block;font-size:9px}
+  .acars-msg .body{font-family:var(--mono);font-size:12px;color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere}
+  .acars-msg .meta{font-family:var(--mono);font-size:10px;color:var(--muted);text-align:right;white-space:nowrap}
+  .acars-msg.match{background:rgba(46,160,150,.05)} .acars-msg .who .onradar{color:var(--live);font-size:9px}
+  /* VDL Mode 2 / ATN — same layout as ACARS but a message-type column */
+  .vdl2card{margin-top:16px}
+  .vdl2-list{max-height:none;padding:4px 0}
+  .vdl2-msg{padding:9px 14px;border-bottom:1px solid var(--line-soft);display:grid;grid-template-columns:130px 92px 1fr auto;gap:12px;align-items:start}
+  @media (max-width:720px){.vdl2-msg{grid-template-columns:1fr;gap:2px}}
+  .vdl2-msg .who{font-family:var(--mono);font-size:12px}
+  .vdl2-msg .who .tail{color:var(--cyan);font-weight:600} .vdl2-msg .who .flt{color:var(--ink-dim)} .vdl2-msg .who .icao{color:var(--muted);font-size:10px}
+  .vdl2-msg .who .onradar{color:var(--live);font-size:9px}
+  .vdl2-msg .body{font-family:var(--mono);font-size:12px;color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere}
+  .vdl2-msg .meta{font-family:var(--mono);font-size:10px;color:var(--muted);text-align:right;white-space:nowrap}
+  .vdl2-msg.match{background:rgba(46,160,150,.05)}
+  .vtype{font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.03em;padding:1px 5px;border-radius:4px;display:inline-block}
+  .vtype.cpdlc{color:#f2b155;background:rgba(242,177,85,.13)}        /* ATC controller link */
+  .vtype.adsc{color:#b98bff;background:rgba(185,139,255,.13)}       /* surveillance contract */
+  .vtype.acars{color:var(--cyan);background:rgba(46,160,150,.13)}
+  .vtype.avlc,.vtype.x25{color:var(--muted);background:rgba(150,150,150,.12)}
+  .vdl2-msg .dir{font-size:10px;color:var(--muted);display:block;margin-top:2px}
+  .vdl2-msg .dir.up{color:#f2b155}  /* uplink: ground → aircraft */
+  .vdl2-msg .dir.down{color:#7fd1c4} /* downlink: aircraft → ground */
+  .stat{display:flex;flex-direction:column;gap:1px}
+  .stat .k{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+  .stat .v{font-family:var(--mono);font-size:14px;color:var(--radar)}
+  footer{margin-top:16px;font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.6}
+  /* ---- route / world-map overlay ---- */
+  .rmask{position:fixed;inset:0;z-index:40;display:none;align-items:center;justify-content:center;
+    background:rgba(3,6,11,.72);backdrop-filter:blur(3px);padding:20px}
+  .rmask.show{display:flex}
+  @media (max-width:520px){.rmask{padding:10px}}
+  .rmodal{width:min(1040px,100%);max-height:92vh;display:flex;flex-direction:column;overflow:hidden;
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.55)}
+  .rhead{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 16px;border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
+  .rhead .rt{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;min-width:0}
+  .rhead .cs{font-family:var(--head);font-weight:700;font-size:19px;color:var(--ink)}
+  .rhead .fi{font-family:var(--mono);font-size:13px;color:var(--cyan)}
+  .rhead .al{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .rclose{font-family:var(--mono);font-size:18px;line-height:1;color:var(--ink-dim);background:var(--panel);border:1px solid var(--line);border-radius:8px;width:34px;height:34px;cursor:pointer;flex:0 0 auto}
+  .rclose:hover{border-color:var(--radar);color:#fff}
+  .rbody{display:grid;grid-template-columns:1.55fr 1fr;gap:0;min-height:0}
+  @media (max-width:760px){.rbody{grid-template-columns:1fr}}
+  .rmapwrap{position:relative;background:#0b1119;aspect-ratio:16/10;min-height:240px}
+  #worldmap{position:absolute;inset:0;width:100%;height:100%;background:#0b1119}
+  .leaflet-container{background:#0b1119;font-family:var(--mono)}
+  .leaflet-bar a,.leaflet-control-layers{background:var(--panel)!important;color:var(--ink)!important;border-color:var(--line)!important}
+  .aptip{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);border-radius:5px;
+    font-family:var(--mono);font-size:10px;font-weight:600;padding:1px 5px;box-shadow:none}
+  .aptip::before{display:none}
+  .rinfo{padding:16px;display:flex;flex-direction:column;gap:14px;border-left:1px solid var(--line-soft);min-width:0}
+  @media (max-width:760px){.rinfo{border-left:0;border-top:1px solid var(--line-soft)}}
+  .rroute{display:flex;align-items:center;gap:10px}
+  .rap{display:flex;flex-direction:column;gap:1px;min-width:0}
+  .rap .code{font-family:var(--head);font-weight:700;font-size:22px;color:var(--ink);line-height:1}
+  .rap .cty{font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px}
+  .rarrow{flex:1;position:relative;height:2px;background:linear-gradient(90deg,var(--radar),var(--line));min-width:26px}
+  .rarrow::after{content:"\25B8";position:absolute;right:-3px;top:-9px;color:var(--radar);font-size:14px}
+  .rprog{display:flex;flex-direction:column;gap:6px}
+  .rprog .bar{height:8px;border-radius:5px;background:var(--line);overflow:hidden;position:relative}
+  .rprog .fill{height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--radar));transition:width .5s ease}
+  .rprog .pct{font-family:var(--mono);font-size:11px;color:var(--ink-dim);display:flex;justify-content:space-between}
+  .rgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px}
+  .rmet{display:flex;flex-direction:column;gap:1px}
+  .rmet .k{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+  .rmet .v{font-family:var(--mono);font-size:14px;color:var(--ink)}
+  .rnote{font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.5}
+  .rnote b{color:var(--accent);font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <div class="eyebrow"><span class="dot"></span> Ragnar · Signal Intelligence</div>
+      <h1>ADS-B Radar</h1>
+      <div class="sub">Live aircraft at 1090 MHz via dump1090. Planes broadcast their own position in the clear — receive-only, no decode tricks needed.</div>
+    </div>
+    <div style="display:flex;gap:16px;align-items:flex-end">
+      <div class="stat"><span class="k">Aircraft</span><span class="v" id="s-count">—</span></div>
+      <div class="stat"><span class="k">Messages</span><span class="v" id="s-msgs">—</span></div>
+      <div class="stat"><span class="k">Mode</span><span class="v"><span class="tag idle" id="s-mode">idle</span></span></div>
+    </div>
+  </header>
+
+  <div class="bar">
+    <div class="grp"><a href="/#network/wifi" class="ctl back" title="Return to the Ragnar dashboard">&#8592;&nbsp;Ragnar</a></div>
+    <div class="grp"><a href="/vor-radial" class="ctl" title="VOR Radial — decode a VOR nav beacon's bearing (108–118 MHz)">&#127760;&nbsp;VOR Radial</a></div>
+    <div class="grp"><button class="ctl go" id="startbtn" aria-pressed="false" title="Start / stop dump1090 (uses the RTL-SDR — stops the sub-GHz sweep)">&#9654;&nbsp;Start</button></div>
+    <div class="grp"><span class="lbl">My&nbsp;lat</span><input class="tin" id="rx-lat" type="number" step="0.0001" placeholder="51.5074"></div>
+    <div class="grp"><span class="lbl">My&nbsp;lon</span><input class="tin" id="rx-lon" type="number" step="0.0001" placeholder="-0.1278"></div>
+    <div class="grp"><button class="ctl" id="geobtn" title="Set receiver location: GPS fix → browser location → approximate IP location">◎ My location</button>
+      <span class="lbl" id="loc-note" style="color:var(--cyan)"></span></div>
+    <div class="grp"><span class="lbl">Range</span>
+      <div class="seg" id="rangeseg">
+        <button data-km="50">50</button><button data-km="100" aria-pressed="true">100</button>
+        <button data-km="250">250</button><button data-km="400">400</button>
+      </div>
+      <div class="seg" id="unitseg"><button data-u="km" aria-pressed="true">km</button><button data-u="nm">nm</button></div>
+    </div>
+  </div>
+
+  <div class="layout">
+    <div class="card">
+      <div class="scopewrap">
+        <canvas id="radar"></canvas>
+        <div class="veil" id="veil"><div class="vt"></div><div class="vs"></div>
+          <button class="ctl" id="veil-install" style="display:none;margin-top:8px;border-color:rgba(46,160,150,.5);color:var(--radar)">⬇ Install dump1090</button>
+        </div>
+      </div>
+    </div>
+    <div class="card tablecard">
+      <div class="tcap"><span class="t">Contacts</span><span class="c" id="tblcount"></span></div>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>Flight</th><th>Type</th><th>Airline</th><th>Reg</th><th>ICAO</th><th>Alt</th><th>Spd</th><th>Dist</th></tr></thead>
+          <tbody id="tbody"><tr><td colspan="8" class="empty">No contacts yet…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Route / world-map overlay: opens when a contact is clicked -->
+  <div class="rmask" id="rmask">
+    <div class="rmodal" role="dialog" aria-modal="true" aria-label="Flight route">
+      <div class="rhead">
+        <div class="rt">
+          <span class="cs" id="r-cs">—</span>
+          <span class="fi" id="r-fi"></span>
+          <span class="al" id="r-al"></span>
+          <span class="al" id="r-type" style="color:var(--ink-dim)"></span>
+        </div>
+        <button class="rclose" id="r-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="rbody">
+        <div class="rmapwrap">
+          <div id="worldmap"></div>
+        </div>
+        <div class="rinfo">
+          <div class="rroute" id="r-routerow" style="display:none">
+            <div class="rap"><span class="code" id="r-o-code">—</span><span class="cty" id="r-o-cty"></span></div>
+            <div class="rarrow"></div>
+            <div class="rap" style="text-align:right;align-items:flex-end"><span class="code" id="r-d-code">—</span><span class="cty" id="r-d-cty"></span></div>
+          </div>
+          <div class="rprog" id="r-progwrap" style="display:none">
+            <div class="bar"><div class="fill" id="r-fill"></div></div>
+            <div class="pct"><span id="r-pct">—</span><span id="r-eta"></span></div>
+          </div>
+          <div class="rgrid">
+            <div class="rmet"><span class="k">Altitude</span><span class="v" id="r-alt">—</span></div>
+            <div class="rmet"><span class="k">Ground speed</span><span class="v" id="r-gs">—</span></div>
+            <div class="rmet"><span class="k">Distance flown</span><span class="v" id="r-flown">—</span></div>
+            <div class="rmet"><span class="k">Remaining</span><span class="v" id="r-remain">—</span></div>
+          </div>
+          <div class="rnote" id="r-note"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card acarscard">
+    <div class="tcap">
+      <span class="t">✉ ACARS datalink <span class="c" id="acars-count"></span></span>
+      <span style="display:flex;gap:8px;align-items:center">
+        <span class="tag idle" id="acars-mode">off</span>
+        <button class="ctl" id="acars-btn" style="padding:5px 11px" title="ACARS uses the RTL-SDR at ~131 MHz — starting it stops the 1090 MHz radar (one dongle)">&#9654;&nbsp;Start ACARS</button>
+      </span>
+    </div>
+    <div class="acars-list" id="acars-list"><div class="empty" id="acars-empty">ACARS off — start it to read aircraft datalink messages (VHF ~131 MHz). One dongle, so this pauses the radar.</div></div>
+  </div>
+
+  <div class="card vdl2card">
+    <div class="tcap">
+      <span class="t">📡 VDL Mode 2 / ATN <span class="c" id="vdl2-count"></span></span>
+      <span style="display:flex;gap:8px;align-items:center">
+        <span class="tag idle" id="vdl2-mode">off</span>
+        <button class="ctl" id="vdl2-btn" style="padding:5px 11px" title="VDL Mode 2 uses the RTL-SDR at ~136 MHz — starting it stops the 1090 MHz radar (one dongle)">&#9654;&nbsp;Start VDL2</button>
+      </span>
+    </div>
+    <div class="vdl2-list" id="vdl2-list"><div class="empty" id="vdl2-empty">VDL Mode 2 off — the modern datalink (~136 MHz): ACARS-over-VDL2, <b>CPDLC</b> controller↔pilot clearances and <b>ADS-C</b> position contracts, decoded via dumpvdl2 + libacars. One dongle, so this pauses the radar.</div></div>
+  </div>
+
+  <footer>
+    <div><b>How it works:</b> dump1090 decodes 1090 MHz ADS-B; each aircraft is placed by its own broadcast lat/lon relative to your receiver location. Set <b>My lat/lon</b> (or use the browser location) so the range rings and bearings are correct. Blip colour = altitude. Range rings label in the selected unit.</div>
+    <div style="margin-top:6px"><b>✉ ACARS:</b> aircraft VHF datalink (~131 MHz) — position reports, OOOI times, weather, load sheets and free-text crew↔ops messages, in the clear via acarsdec. Matched to the contacts above by tail/flight. One dongle means ACARS and the 1090 MHz radar can't run at once.</div>
+    <div style="margin-top:6px"><b>📡 VDL Mode 2 / ATN:</b> the modern successor to VHF ACARS — a D8PSK datalink on ~136 MHz decoded by <b>dumpvdl2 + libacars</b>. Carries ACARS-over-VDL2, <b>CPDLC</b> (controller↔pilot clearances: climb/descend, "CONTACT &lt;freq&gt;", "MONITOR &lt;unit&gt;", WILCO) and <b>ADS-C</b> (contracted position/intent reports). ↑ uplink = ground→aircraft, ↓ downlink = aircraft→ground. All in the clear, receive-only.</div>
+    <div style="margin-top:6px"><b>One dongle:</b> starting the radar takes the RTL-SDR from the sub-GHz sweep/decoder (and vice-versa). Receive-only — Ragnar never transmits.</div>
+  </footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var running=false, DEMO_ON=false, mode='idle', maxKm=100, unit='km';
+  var planes=[], msgs=0, sweepAng=0, rx={lat:null,lon:null}, selectedIcao=null;
+  var reduce=window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // Click a contact row to highlight that aircraft on the radar (toggle off by
+  // re-clicking). Delegated so it survives table re-renders.
+  document.getElementById('tbody').addEventListener('click',function(e){
+    var tr=e.target.closest('tr[data-icao]'); if(!tr) return;
+    var id=tr.getAttribute('data-icao');
+    selectedIcao=id; renderTable(); openRoute(id);   // highlight on scope + open route map
+  });
+
+  var cv=document.getElementById('radar'), ctx=cv.getContext('2d');
+  var veil=document.getElementById('veil'), veilT=veil.querySelector('.vt'), veilS=veil.querySelector('.vs');
+
+  // ---- helpers ----
+  function toRad(d){return d*Math.PI/180;}
+  function haversineKm(a,b,c,d){var R=6371,p1=toRad(a),p2=toRad(c),dp=toRad(c-a),dl=toRad(d-b);
+    var x=Math.sin(dp/2)*Math.sin(dp/2)+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)*Math.sin(dl/2);
+    return 2*R*Math.asin(Math.min(1,Math.sqrt(x)));}
+  function bearing(a,b,c,d){var p1=toRad(a),p2=toRad(c),dl=toRad(d-b);
+    var y=Math.sin(dl)*Math.cos(p2),x=Math.cos(p1)*Math.sin(p2)-Math.sin(p1)*Math.cos(p2)*Math.cos(dl);
+    return (Math.atan2(y,x)*180/Math.PI+360)%360;}
+  function altColor(ft){ if(ft==null)return '#7c8aa0';
+    if(ft<5000)return '#3fb56b'; if(ft<15000)return '#38bdc9'; if(ft<25000)return '#7b8cd2';
+    if(ft<35000)return '#f0a35e'; return '#e6dcf0';}
+  function kmToUnit(km){return unit==='nm'?km/1.852:km;}
+  function fmtDist(km){return km==null?'—':(kmToUnit(km).toFixed(km<10?1:0)+' '+unit);}
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+
+  // ---- receiver location (persisted) ----
+  function loadRx(){ try{var s=localStorage.getItem('ragnar_adsb_rx'); if(s){var o=JSON.parse(s); rx.lat=o.lat; rx.lon=o.lon;}}catch(e){}
+    if(rx.lat!=null){document.getElementById('rx-lat').value=rx.lat; document.getElementById('rx-lon').value=rx.lon;} }
+  function saveRx(){ try{localStorage.setItem('ragnar_adsb_rx',JSON.stringify(rx));}catch(e){} }
+  function readRxInputs(){ var la=parseFloat(document.getElementById('rx-lat').value), lo=parseFloat(document.getElementById('rx-lon').value);
+    if(isFinite(la)&&isFinite(lo)){rx.lat=la;rx.lon=lo;saveRx(); onLocated();} else {rx.lat=null;rx.lon=null;} }
+  document.getElementById('rx-lat').addEventListener('change',readRxInputs);
+  document.getElementById('rx-lon').addEventListener('change',readRxInputs);
+  // Receiver location: the box's own GPS is the only trusted auto-source (it's
+  // exactly where the antenna is). No IP geolocation — it can be hundreds of km
+  // off depending on the ISP, which silently plots aircraft at the wrong place.
+  // With no GPS (and no manual entry) the scope self-centers on the aircraft it
+  // actually receives — see activeCenter(); we just show whatever we see.
+  var locNoteEl=document.getElementById('loc-note');
+  function locNote(t,hold){ if(!locNoteEl) return; locNoteEl.textContent=t||'';
+    clearTimeout(locNote._t); if(t&&!hold){ locNote._t=setTimeout(function(){ locNoteEl.textContent=''; },6000); } }
+  function setRx(la,lo){ rx.lat=+(+la).toFixed(5); rx.lon=+(+lo).toFixed(5); saveRx();
+    document.getElementById('rx-lat').value=rx.lat; document.getElementById('rx-lon').value=rx.lon; }
+  function onLocated(){ if(DEMO_ON && !running) synthMode(); }   // (re)start the real nearby feed in demo (never during real SDR)
+  function browserLocate(cb){
+    if(!navigator.geolocation || !window.isSecureContext){ if(cb)cb(false,'insecure'); return; }
+    navigator.geolocation.getCurrentPosition(
+      function(p){ setRx(p.coords.latitude,p.coords.longitude); locNote('📍 location from browser'); onLocated(); if(cb)cb(true); },
+      function(err){ if(cb)cb(false, (err&&err.code===1)?'denied':'error'); },
+      {enableHighAccuracy:false,timeout:8000,maximumAge:600000});
+  }
+  // Best source first: the box's own GPS (exact — it's where the antenna is),
+  // reusing the shared wardriving GPS so we don't open a second serial reader.
+  function gpsLocate(cb){
+    fetch('/api/wardriving/gps').then(function(r){return r.json();}).then(function(d){
+      var la=null, lo=null;
+      if(d){ if(d.has_fix && d.latitude!=null){ la=d.latitude; lo=d.longitude; }
+             else if(d.last_known && d.last_known.lat!=null){ la=d.last_known.lat; lo=d.last_known.lon; } }
+      if(la!=null && lo!=null){ setRx(la,lo); locNote('📍 GPS fix'); onLocated(); if(cb)cb(true); }
+      else if(cb) cb(false);
+    }).catch(function(){ if(cb)cb(false); });
+  }
+  // When there is no GPS/manual location, self-center the scope on the average
+  // position of the aircraft we're actually receiving — they are all within radio
+  // range, so their centroid is a good stand-in for the receiver. No IP guessing.
+  var derived={lat:null,lon:null};
+  function computeDerivedCenter(){ var la=0,lo=0,n=0;
+    for(var i=0;i<planes.length;i++){ var p=planes[i]; if(p.lat!=null&&p.lon!=null){ la+=p.lat; lo+=p.lon; n++; } }
+    if(n>0){ derived.lat=la/n; derived.lon=lo/n; } else { derived.lat=null; derived.lon=null; } }
+  // The location the scope is actually drawn around: real fix if we have one,
+  // otherwise the centroid of received traffic, otherwise nothing (empty scope).
+  function activeCenter(){ return rx.lat!=null ? rx : (derived.lat!=null ? derived : null); }
+  // Priority: box GPS → browser geolocation. No IP. If neither, the scope
+  // self-centers on received aircraft (activeCenter), so we still show what we see.
+  function ensureLocation(cb){ if(rx.lat!=null){ if(cb)cb(true); return; }
+    gpsLocate(function(g){ if(g){ if(cb)cb(true); return; }
+      browserLocate(function(ok){ if(cb)cb(!!ok); }); }); }
+  document.getElementById('geobtn').addEventListener('click',function(){
+    locNote('locating…',true);
+    gpsLocate(function(g){ if(g) return;
+      browserLocate(function(ok){ if(!ok){ locNote('no GPS/geolocation — centering on received traffic; or type your lat/lon'); } }); });
+  });
+
+  // ---- controls ----
+  document.getElementById('rangeseg').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;
+    maxKm=parseFloat(b.getAttribute('data-km')); segpress('rangeseg',b);});
+  document.getElementById('unitseg').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;
+    unit=b.getAttribute('data-u'); segpress('unitseg',b);});
+  function segpress(id,btn){Array.prototype.forEach.call(document.getElementById(id).querySelectorAll('button'),function(x){x.setAttribute('aria-pressed','false');}); btn.setAttribute('aria-pressed','true');}
+  var startBtn=document.getElementById('startbtn');
+  startBtn.addEventListener('click',function(){ running?stopRun():startRun(); });
+
+  // ---- radar draw ----
+  // Size the backing store to the (aspect-ratio-driven) client box. Called every
+  // frame so it self-corrects if layout wasn't ready at boot (canvas was 0x0).
+  function ensureSize(){ var d=Math.min(window.devicePixelRatio||1,2), w=cv.clientWidth, h=cv.clientHeight;
+    if(!w||!h) return false;
+    if(cv.width!==Math.round(w*d)||cv.height!==Math.round(h*d)){ cv.width=Math.round(w*d); cv.height=Math.round(h*d); ctx.setTransform(d,0,0,d,0,0); }
+    return true; }
+  function resize(){ ensureSize(); }
+  function wrapText(text,x,y,maxW,lh){ var words=String(text).split(' '),line='',yy=y;
+    for(var i=0;i<words.length;i++){ var t=line+words[i]+' ';
+      if(ctx.measureText(t).width>maxW && line){ ctx.fillText(line.trim(),x,yy); line=words[i]+' '; yy+=lh; } else { line=t; } }
+    ctx.fillText(line.trim(),x,yy); return yy; }   // returns y of the last line drawn
+  function draw(){
+    var W=cv.clientWidth||600, H=cv.clientHeight||600, cx=W/2, cy=H/2, R=Math.min(W,H)/2-24;
+    ctx.clearRect(0,0,W,H);
+    // rings
+    ctx.strokeStyle='rgba(46,160,150,.28)'; ctx.fillStyle='rgba(46,160,150,.55)';
+    ctx.font='10px "IBM Plex Mono",monospace'; ctx.textAlign='left';
+    var rings=4;
+    for(var i=1;i<=rings;i++){var rr=R*i/rings; ctx.beginPath(); ctx.arc(cx,cy,rr,0,2*Math.PI); ctx.stroke();
+      var lbl=(kmToUnit(maxKm*i/rings)).toFixed(0)+(i===rings?' '+unit:'');
+      ctx.fillText(lbl, cx+4, cy-rr+12);}
+    // crosshairs + compass
+    ctx.strokeStyle='rgba(46,160,150,.18)'; ctx.beginPath();
+    ctx.moveTo(cx-R,cy); ctx.lineTo(cx+R,cy); ctx.moveTo(cx,cy-R); ctx.lineTo(cx,cy+R); ctx.stroke();
+    ctx.fillStyle='rgba(124,138,160,.9)'; ctx.textAlign='center';
+    ctx.fillText('N',cx,cy-R-8); ctx.fillText('S',cx,cy+R+14); ctx.fillText('E',cx+R+10,cy+4); ctx.fillText('W',cx-R-10,cy+4);
+    // sweep
+    if(!reduce){ var g=ctx.createConicGradient?null:null;
+      ctx.save(); ctx.translate(cx,cy); ctx.rotate(toRad(sweepAng));
+      var grd=ctx.createLinearGradient(0,0,0,-R);
+      grd.addColorStop(0,'rgba(46,160,150,.0)'); grd.addColorStop(1,'rgba(46,160,150,.35)');
+      ctx.strokeStyle=grd; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0,-R); ctx.stroke();
+      ctx.restore(); }
+    // receiver dot: cyan = real fix (GPS/manual), amber = self-centered on the
+    // aircraft we're receiving (no GPS), grey = nothing to center on yet.
+    var ctr=activeCenter();
+    ctx.fillStyle=(rx.lat!=null)?'#38bdc9':(ctr?'#f5b942':'#546074');
+    ctx.beginPath(); ctx.arc(cx,cy,3.5,0,2*Math.PI); ctx.fill();
+    // planes
+    var shown=0;
+    planes.forEach(function(p){
+      if(p._dist==null||p._brg==null) return;
+      var frac=p._dist/maxKm; if(frac>1.02) return; if(frac>1) frac=1;
+      var r=frac*R, ang=toRad(p._brg), x=cx+r*Math.sin(ang), y=cy-r*Math.cos(ang);
+      var col=altColor(p.alt), fresh=p.seen==null||p.seen<8;
+      var sel=(selectedIcao && p.icao===selectedIcao);
+      ctx.globalAlpha=fresh?1:0.45;
+      // selection highlight: leader line from centre + pulsing ring
+      if(sel){ ctx.globalAlpha=1;
+        ctx.strokeStyle='rgba(245,185,66,.5)'; ctx.lineWidth=1; ctx.setLineDash([4,4]);
+        ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(x,y); ctx.stroke(); ctx.setLineDash([]);
+        var pr=8+2.5*Math.sin(sweepAng/12);
+        ctx.strokeStyle='var(--accent)'; ctx.strokeStyle='#f5b942'; ctx.lineWidth=2;
+        ctx.beginPath(); ctx.arc(x,y,pr,0,2*Math.PI); ctx.stroke(); }
+      // heading vector
+      if(p.track!=null){var ta=toRad(p.track); ctx.strokeStyle=col; ctx.lineWidth=1.5;
+        ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+12*Math.sin(ta),y-12*Math.cos(ta)); ctx.stroke();}
+      ctx.fillStyle=sel?'#f5b942':col; ctx.beginPath(); ctx.arc(x,y,sel?4.2:3.2,0,2*Math.PI); ctx.fill();
+      // label
+      ctx.fillStyle=sel?'#f5b942':'rgba(232,238,246,.92)'; ctx.textAlign='left';
+      ctx.font=(sel?'600 11px':'10px')+' "IBM Plex Mono",monospace';
+      var lab=(p.callsign||p.icao); ctx.fillText(lab, x+7, y-2);
+      if(p.alt!=null){ ctx.fillStyle=sel?'rgba(245,185,66,.8)':'rgba(124,138,160,.9)'; ctx.fillText('FL'+Math.round(p.alt/100), x+7, y+9); }
+      ctx.globalAlpha=1; shown++;
+    });
+    // self-centered footer: no real fix, but we're showing received traffic
+    // centered on its own centroid — say so, quietly, so ranges read as relative.
+    if(rx.lat==null && ctr && mode==='live'){ ctx.textAlign='center';
+      ctx.fillStyle='rgba(124,138,160,.9)'; ctx.font='10px "IBM Plex Mono",monospace';
+      ctx.fillText('no GPS — centered on received traffic (type your lat/lon for true range)', cx, cy+R+30);
+    }
+    // honest empty: SDR running but nothing decoded (and not in demo). Almost
+    // always the antenna — say so plainly instead of showing anything fake.
+    if(running && mode==='live' && (!planes||!planes.length)){
+      ctx.textAlign='center';
+      ctx.fillStyle='rgba(245,185,66,.95)'; ctx.font='600 14px "Chakra Petch",system-ui,sans-serif';
+      ctx.fillText('No aircraft in range', cx, cy-14);
+      ctx.fillStyle='rgba(194,204,216,.85)'; ctx.font='11px "IBM Plex Mono",monospace';
+      wrapText('Nothing decoded yet — needs a 1090 MHz / ADS-B antenna with sky view '
+        +'(by/outside a window, away from the Pi). dump1090 is running — '+lastSbs+' msgs seen.',
+        cx, cy+6, Math.min(R*1.6,420), 15);
+    }
+  }
+
+  function anim(){ if(ensureSize()){ sweepAng=(sweepAng+1.6)%360; draw(); } requestAnimationFrame(anim); }
+
+  // ---- data: enrich planes with dist/brg from the active center ----
+  function enrich(){ computeDerivedCenter(); var c=activeCenter(); planes.forEach(function(p){
+    if(c && p.lat!=null && p.lon!=null){ p._dist=haversineKm(c.lat,c.lon,p.lat,p.lon); p._brg=bearing(c.lat,c.lon,p.lat,p.lon); }
+    else { p._dist=null; p._brg=null; }
+  }); }
+
+  function renderTable(){
+    var tb=document.getElementById('tbody');
+    var list=planes.slice().sort(function(a,b){ var da=a._dist==null?1e9:a._dist, db=b._dist==null?1e9:b._dist; return da-db; });
+    document.getElementById('tblcount').textContent=list.length+' contacts';
+    document.getElementById('s-count').textContent=list.length;
+    document.getElementById('s-msgs').textContent=msgs;
+    if(!list.length){ var em=(mode==='synth')?'Listening…':(running?(lastHint||('Listening'+(lastSbs?' · '+lastSbs+' msgs seen':'')+'…')):'Not started'); tb.innerHTML='<tr><td colspan="8" class="empty">'+esc(em)+'</td></tr>'; return; }
+    tb.innerHTML=list.map(function(p){
+      var flight = p.callsign||'—';
+      // ICAO callsign, with the IATA flight prominently beside it (cyan) when known
+      var fl2 = (p.flight_iata && p.flight_iata!==p.callsign)
+        ? ' <span style="color:var(--cyan);font-weight:600">'+esc(p.flight_iata)+'</span>' : '';
+      // Airline shows BOTH codes: ICAO designator (muted) + IATA (cyan) + name.
+      var opicao = p.op_icao || ((p.airline && p.callsign) ? p.callsign.slice(0,3) : '');
+      var air = p.airline
+        ? '<span style="color:var(--muted)" title="ICAO airline code">'+esc(opicao)+'</span> '
+          +'<span style="color:var(--cyan)" title="IATA airline code">'+esc(p.iata||'')+'</span> '+esc(p.airline)
+        : '<span style="color:#546074">—</span>';
+      var reg = p.tail ? esc(p.tail) : '<span style="color:#546074">—</span>';
+      var cc = p.country_code ? '<span style="color:var(--muted)" title="'+esc(p.country||'')+'"> '+esc(p.country_code)+'</span>' : '';
+      var selc = (selectedIcao && p.icao===selectedIcao) ? ' sel' : '';
+      var typ = p.type ? '<span style="color:var(--ink-dim)">'+esc(p.type)+'</span>' : '<span style="color:#546074">—</span>';
+      return '<tr class="prow'+selc+'" data-icao="'+esc(p.icao)+'">'
+      +'<td class="cs">'+esc(flight)+fl2+'</td>'
+      +'<td>'+typ+'</td>'
+      +'<td>'+air+'</td>'
+      +'<td class="cs">'+reg+'</td>'
+      +'<td>'+esc(p.icao)+cc+'</td>'
+      +'<td>'+(p.alt!=null?('FL'+Math.round(p.alt/100)):'—')+'</td>'
+      +'<td>'+(p.gs!=null?Math.round(p.gs):'—')+'</td>'
+      +'<td>'+fmtDist(p._dist)+'</td>'
+      +'</tr>'; }).join('');
+  }
+
+  function setMode(m){ mode=m; var el=document.getElementById('s-mode');
+    el.className='tag '+(m==='live'?'live':(m==='net'?'net':(m==='synth'?'synth':'idle')));
+    el.textContent=(m==='live'?'live':(m==='net'?'internet':(m==='synth'?'synthetic':'idle'))); }
+  var veilInstall=document.getElementById('veil-install');
+  function showVeil(t,s,canInstall){veilT.textContent=t;veilS.textContent=s||'';veil.classList.add('show');
+    veilInstall.style.display=canInstall?'inline-block':'none';}
+  function hideVeil(){veil.classList.remove('show');}
+  veilInstall.addEventListener('click',function(){
+    veilInstall.textContent='Installing… (builds from source, ~1-3 min — don\'t close)'; veilInstall.disabled=true;
+    fetch('/api/net/adsb/install',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
+      veilInstall.textContent='⬇ Install dump1090'; veilInstall.disabled=false;
+      if(res&&res.ok){ hideVeil(); checkStatus(); }
+      else { showVeil('Install did not complete', (res&&res.error)||'apt failed — you can also: sudo apt install dump1090-fa', true); }
+    }).catch(function(){ veilInstall.textContent='⬇ Install dump1090'; veilInstall.disabled=false; });
+  });
+
+  // ---- live ----
+  var poll=null;
+  function startRun(){
+    running=true; stopNearby(); stopSynthSky();   // real SDR takes over from the demo feeds
+    if(rx.lat==null){ ensureLocation(); }         // try GPS/browser once; else self-center on traffic
+    startBtn.setAttribute('aria-pressed','true'); startBtn.innerHTML='&#10074;&#10074;&nbsp;Stop';
+    fetch('/api/net/adsb/start',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
+      if(res&&res.error){ /* fall through to synth if demo, else veil */ if(DEMO_ON){synthMode();} else {showVeil('Could not start dump1090',res.error);} }
+    }).catch(function(){});
+    if(poll) clearInterval(poll); poll=setInterval(pollLive,1000); pollLive();
+  }
+  function stopRun(){
+    running=false; startBtn.setAttribute('aria-pressed','false'); startBtn.innerHTML='&#9654;&nbsp;Start';
+    if(poll){clearInterval(poll);poll=null;}
+    fetch('/api/net/adsb/stop',{method:'POST'}).catch(function(){});
+    if(DEMO_ON){ synthMode(); } else { setMode('idle'); planes=[]; enrich(); renderTable(); }
+  }
+  var lastHint='', lastSbs=0;
+  function pollLive(){
+    fetch('/api/net/adsb/aircraft').then(function(r){return r.json();}).then(function(d){
+      if(!d){return;}
+      // Real-SDR mode: show ONLY what the receiver decodes. No demo/internet
+      // substitution — an empty scope means we genuinely hear nothing (draw()
+      // says so). The scope centers on GPS/manual, else on the received traffic.
+      if(d.running){ hideVeil(); lastHint=d.hint||''; lastSbs=d.sbs_lines||0;
+        stopNearby(); stopSynthSky();
+        setMode('live'); planes=d.aircraft||[]; msgs=d.messages||0; enrich(); renderTable(); routeTick(); }
+      else if(d.error){ if(DEMO_ON){synthMode();} else {showVeil('dump1090 not running',d.error);} }
+    }).catch(function(){});
+  }
+
+  // ---- synthetic sky (no hardware / demo) ----
+  var synthTimer=null;
+  // "Demo" = no SDR. Prefer the REAL aircraft near you (adsb.lol) so the radar
+  // and route maps match reality; fall back to a synthetic sky only when there
+  // is no location yet or no internet.
+  var nearbyTimer=null, usingNearby=false;
+  function synthMode(){
+    if(running) return;                            // real SDR is active — never run the demo feeds
+    hideVeil();
+    if(rx.lat==null){ ensureLocation(); }          // async → onLocated() re-enters when ready
+    if(rx.lat!=null){ startNearby(); } else { startSynthSky(); }
+  }
+  function startNearby(){
+    stopSynthSky();
+    if(nearbyTimer) return;
+    function pull(){ if(running){ stopNearby(); return; } if(rx.lat==null) return;
+      var dnm=Math.max(20,Math.round(maxKm/1.852*1.3));
+      fetch('/api/net/adsb/nearby?lat='+rx.lat+'&lon='+rx.lon+'&dist='+dnm)
+        .then(function(r){return r.json();}).then(function(d){
+          if(d&&d.aircraft&&d.aircraft.length){ usingNearby=true; stopSynthSky();
+            setMode('net'); planes=d.aircraft; msgs=d.count||d.aircraft.length; enrich(); renderTable(); routeTick(); }
+          else if(!usingNearby && DEMO_ON){ startSynthSky(); }   // no real traffic/offline → demo sky (demo only)
+        }).catch(function(){ if(!usingNearby && DEMO_ON) startSynthSky(); });
+    }
+    pull(); nearbyTimer=setInterval(pull,5000);
+  }
+  function stopNearby(){ if(nearbyTimer){clearInterval(nearbyTimer);nearbyTimer=null;} usingNearby=false; }
+  function startSynthSky(){
+    if(usingNearby || running) return;   // demo sky never runs during a real SDR
+    setMode('synth');
+    if(rx.lat==null){ setRx(51.5074,-0.1278); }
+    if(!planes.length || planes._synth!==true){ planes=makeSynth(); planes._synth=true; }
+    if(synthTimer) return;
+    synthTimer=setInterval(function(){ stepSynth(); enrich(); renderTable(); routeTick(); }, 1000);
+    enrich(); renderTable();
+  }
+  function stopSynthSky(){ if(synthTimer){clearInterval(synthTimer);synthTimer=null;} }
+  // [ICAO prefix, IATA, name] for a believable synthetic sky (with both codes).
+  var synthAir=[['RYR','FR','Ryanair'],['EZY','U2','easyJet'],['BAW','BA','British Airways'],
+    ['DLH','LH','Lufthansa'],['AFR','AF','Air France'],['KLM','KL','KLM'],['UAL','UA','United Airlines'],
+    ['AAL','AA','American Airlines'],['THY','TK','Turkish Airlines'],['SAS','SK','SAS'],
+    ['TAP','TP','TAP Air Portugal'],['UAE','EK','Emirates'],['DAL','DL','Delta Air Lines']];
+  // [country, code, tail-prefix] samples for a believable synthetic registry.
+  var synthReg=[['United States','US','N'],['United Kingdom','GB','G-'],['Germany','DE','D-'],
+    ['France','FR','F-'],['Netherlands','NL','PH-'],['Ireland','IE','EI-'],['Spain','ES','EC-']];
+  function synthTail(pfx){ var s=''; for(var i=0;i<(pfx==='N'?4:4);i++){ s+='ABCDEFGHJKLMNPQRSTUVWXYZ0123456789'[(Math.random()*34)|0]; } return pfx+s; }
+  var synthTypes=['A320','A321','A20N','B738','B38M','A319','B77W','A333','E190','B788','AT76'];
+  function makeSynth(){ var n=9,out=[];
+    for(var i=0;i<n;i++){ var brg=Math.random()*360, dist=8+Math.random()*maxKm*1.1;
+      var d=destPoint(rx.lat,rx.lon,brg,dist), a=synthAir[(Math.random()*synthAir.length)|0], num=(100+((Math.random()*899)|0));
+      var reg=synthReg[(Math.random()*synthReg.length)|0];
+      out.push({icao:(0x400000+((Math.random()*0xBFFFFF)|0)).toString(16).toUpperCase(),
+        callsign:a[0]+num, op_icao:a[0], iata:a[1], airline:a[2], flight_iata:a[1]+num,
+        tail:synthTail(reg[2]), country:reg[0], country_code:reg[1], type:synthTypes[(Math.random()*synthTypes.length)|0],
+        lat:d.lat,lon:d.lon,alt:2000+((Math.random()*38000)|0),gs:180+((Math.random()*320)|0),
+        track:Math.random()*360,vert:((Math.random()*2000)|0)-1000,seen:0}); }
+    return out;
+  }
+  function stepSynth(){ msgs+=planes.length*(2+((Math.random()*4)|0));
+    planes.forEach(function(p){ var d=destPoint(p.lat,p.lon,p.track,(p.gs||300)/3600*8); p.lat=d.lat; p.lon=d.lon;
+      p.track=(p.track+(Math.random()-0.5)*4+360)%360; if(p.alt!=null)p.alt=Math.max(1000,p.alt+(p.vert||0)/60);
+      // occasionally respawn a plane that drifts far out
+      if(rx.lat!=null && haversineKm(rx.lat,rx.lon,p.lat,p.lon)>maxKm*1.3){ var b=Math.random()*360, dd=destPoint(rx.lat,rx.lon,b,10+Math.random()*30); p.lat=dd.lat;p.lon=dd.lon;p.track=(b+180)%360; }
+    });
+  }
+  function destPoint(lat,lon,brgDeg,distKm){ var R=6371,br=toRad(brgDeg),p1=toRad(lat),l1=toRad(lon),dr=distKm/R;
+    var p2=Math.asin(Math.sin(p1)*Math.cos(dr)+Math.cos(p1)*Math.sin(dr)*Math.cos(br));
+    var l2=l1+Math.atan2(Math.sin(br)*Math.sin(dr)*Math.cos(p1),Math.cos(dr)-Math.sin(p1)*Math.sin(p2));
+    return {lat:p2*180/Math.PI, lon:((l2*180/Math.PI+540)%360)-180};
+  }
+  function stopSynth(){ if(synthTimer){clearInterval(synthTimer);synthTimer=null;} }
+
+  // ---- ACARS datalink ----
+  var acarsRunning=false, acarsMode='off', acarsMsgs=[], acarsSeq=0, acarsPoll=null, acarsSynthTimer=null;
+  var acarsBtn=document.getElementById('acars-btn');
+  function setAcarsMode(m){ acarsMode=m; var el=document.getElementById('acars-mode');
+    el.className='tag '+(m==='live'?'live':(m==='synth'?'synth':'idle')); el.textContent=(m==='live'?'live':(m==='synth'?'synthetic':'off')); }
+  function tailsOnRadar(){ var set={}; planes.forEach(function(p){ if(p.tail)set[p.tail.toUpperCase()]=1; if(p.callsign)set[p.callsign.toUpperCase()]=1; if(p.flight_iata)set[p.flight_iata.toUpperCase()]=1; }); return set; }
+  function renderAcars(){
+    var el=document.getElementById('acars-list'); document.getElementById('acars-count').textContent=acarsMsgs.length?('· '+acarsMsgs.length):'';
+    if(!acarsMsgs.length){ el.innerHTML='<div class="empty" id="acars-empty">'+(acarsRunning||acarsMode==='synth'?'Listening for ACARS… (VHF ~131 MHz)':'ACARS off — start it to read aircraft datalink messages. One dongle, so this pauses the radar.')+'</div>'; return; }
+    var onradar=tailsOnRadar();
+    el.innerHTML=acarsMsgs.slice().reverse().slice(0,80).map(function(m){
+      var match=(m.tail&&onradar[m.tail.toUpperCase()])||(m.flight&&onradar[m.flight.toUpperCase()]);
+      var who='<span class="tail">'+esc(m.tail||'—')+'</span>'+(m.flight?' <span class="flt">'+esc(m.flight)+'</span>':'')
+        +(match?' <span class="onradar">● on radar</span>':'');
+      var lbl='<span class="code">'+esc(m.label||'—')+'</span>'+(m.label_meaning?'<span class="mean">'+esc(m.label_meaning)+'</span>':'');
+      var body=m.text?esc(m.text):'<span style="color:var(--muted)">(no text — '+(m.label_meaning||'link')+')</span>';
+      var meta=(m.freq_mhz?esc(m.freq_mhz)+' MHz':'')+(m.level!=null?' · '+m.level+'dB':'')+(m.msgno?' · '+esc(m.msgno):'');
+      return '<div class="acars-msg'+(match?' match':'')+'"><div class="who">'+who+'</div><div class="lbl">'+lbl+'</div>'
+        +'<div class="body">'+body+'</div><div class="meta">'+meta+'</div></div>';
+    }).join('');
+  }
+  acarsBtn.addEventListener('click',function(){ acarsRunning?stopAcars():startAcars(); });
+  function startAcars(){
+    // one dongle: ACARS at 131 MHz can't coexist with the 1090 MHz radar
+    if(running){ stopRun(); }
+    acarsRunning=true; acarsBtn.setAttribute('aria-pressed','true'); acarsBtn.innerHTML='&#10074;&#10074;&nbsp;Stop ACARS';
+    acarsSeq=0; acarsMsgs=[]; renderAcars();
+    fetch('/api/net/acars/start',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
+      if(res&&res.error){ if(DEMO_ON) acarsSynth(); else { document.getElementById('acars-list').innerHTML='<div class="empty">Could not start ACARS: '+esc(res.error)+(res.error&&res.error.indexOf('not installed')>=0?' — <button class="ctl" id="acars-install" style="margin-left:6px;padding:3px 8px">⬇ Install acarsdec</button>':'')+'</div>'; wireAcarsInstall(); } }
+    }).catch(function(){});
+    if(acarsPoll)clearInterval(acarsPoll); acarsPoll=setInterval(pollAcars,2000); pollAcars();
+  }
+  function stopAcars(){
+    acarsRunning=false; acarsBtn.setAttribute('aria-pressed','false'); acarsBtn.innerHTML='&#9654;&nbsp;Start ACARS';
+    if(acarsPoll){clearInterval(acarsPoll);acarsPoll=null;}
+    fetch('/api/net/acars/stop',{method:'POST'}).catch(function(){});
+    if(DEMO_ON) acarsSynth(); else { setAcarsMode('off'); renderAcars(); }
+  }
+  function wireAcarsInstall(){ var b=document.getElementById('acars-install'); if(!b)return;
+    b.addEventListener('click',function(){ b.textContent='Building… (~2-4 min)'; b.disabled=true;
+      fetch('/api/net/acars/install',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
+        if(res&&res.ok){ startAcars(); } else { b.textContent='⬇ Install acarsdec'; b.disabled=false; }
+      }).catch(function(){ b.textContent='⬇ Install acarsdec'; b.disabled=false; }); }); }
+  function pollAcars(){
+    fetch('/api/net/acars/messages?since='+acarsSeq).then(function(r){return r.json();}).then(function(d){
+      if(!d)return;
+      if(d.running){ setAcarsMode('live'); if(d.messages&&d.messages.length){ d.messages.forEach(function(m){acarsMsgs.push(m);}); acarsSeq=d.seq; if(acarsMsgs.length>500)acarsMsgs=acarsMsgs.slice(-500); renderAcars(); } }
+      else if(d.error && DEMO_ON){ acarsSynth(); }
+    }).catch(function(){});
+  }
+  // synthetic ACARS — rich, all fields, tied to synthetic aircraft
+  var ACSAMPLES=[
+    {label:'15',mean:'Position report',text:'POS N51.482 W000.451 FL360 M0.79 OAT-54 WIND 270/48'},
+    {label:'22',mean:'Departure/arrival (OOOI)',text:'OUT 1412 OFF 1428 GATE A22 RWY 27R'},
+    {label:'5U',mean:'Weather request',text:'REQ METAR EGLL EHAM LFPG'},
+    {label:'12',mean:'Weather / ATIS',text:'ATIS EGLL INFO K 1420Z 25008KT 9999 SCT035 18/09 Q1018'},
+    {label:'83',mean:'Load sheet',text:'ZFW 61.2 TOW 74.8 FUEL 13.6 PAX 174 CG 24.3%'},
+    {label:'H1',mean:'Free text',text:'OPS: SLOT CTOT 1455 EXPECT HOLDING BIG'},
+    {label:'B9',mean:'Request oceanic clearance',text:'RCL NAT A 56N020W 340 M082'},
+    {label:'44',mean:'Flight plan',text:'FPL EGLL-KJFK STEP 340/360/380 ETA 1735'},
+    {label:'10',mean:'Airline-defined',text:'ENG2 N1 92.4 EGT 610 OIL 45 VIB 0.8 - NORMAL'},
+    {label:'2Z',mean:'OOOI times',text:'ON 1731 IN 1738 GATE T4-411'}
+  ];
+  function acarsSynth(){
+    setAcarsMode('synth');
+    if(!acarsMsgs._synth){ acarsMsgs=[]; acarsMsgs._synth=true; }
+    if(acarsSynthTimer) { renderAcars(); return; }
+    // seed a few immediately so the panel isn't empty
+    for(var i=0;i<6;i++) pushSynthAcars();
+    renderAcars();
+    acarsSynthTimer=setInterval(function(){ if(Math.random()<0.8){ pushSynthAcars(); renderAcars(); } },2600);
+  }
+  function pushSynthAcars(){
+    var p=(planes&&planes.length)?planes[(Math.random()*planes.length)|0]:null;
+    var s=ACSAMPLES[(Math.random()*ACSAMPLES.length)|0];
+    var ch=[131.550,131.725,130.025,131.475][(Math.random()*4)|0];
+    acarsMsgs.push({tail:p?p.tail:'G-'+('ABCDEFGHJKLMNPQRSTUVWXYZ'[(Math.random()*24)|0]+'ZZZ'),
+      flight:p?p.callsign:'BAW'+(100+((Math.random()*899)|0)), label:s.label, label_meaning:s.mean,
+      text:s.text, freq_mhz:ch, level:-(10+((Math.random()*20)|0)), mode:'2',
+      msgno:'M'+(10+((Math.random()*89)|0))+'A', block_id:''+((Math.random()*9)|0), ts:Date.now()/1000});
+    if(acarsMsgs.length>500)acarsMsgs=acarsMsgs.slice(-500);
+  }
+  function acarsCheckStatus(){
+    fetch('/api/net/acars/status').then(function(r){return r.json();}).then(function(st){
+      if(st&&st.running){ acarsRunning=true; acarsBtn.setAttribute('aria-pressed','true'); acarsBtn.innerHTML='&#10074;&#10074;&nbsp;Stop ACARS'; if(!acarsPoll){acarsPoll=setInterval(pollAcars,2000);pollAcars();} return; }
+      var det=(st&&st.detect)||{};
+      // enable button label with install hint if acarsdec missing
+      if(det.tools_installed===false && !acarsRunning && acarsMode!=='synth' && !DEMO_ON){ acarsBtn.title='acarsdec not installed — click to install & start'; }
+      if(DEMO_ON && acarsMode==='off'){ acarsSynth(); }
+    }).catch(function(){});
+  }
+
+  // ---- VDL Mode 2 / ATN datalink ----
+  // Modern successor to VHF ACARS: dumpvdl2 + libacars decode ACARS-over-VDL2,
+  // CPDLC (controller<->pilot) and ADS-C (position contracts) on ~136 MHz.
+  var vdl2Running=false, vdl2Mode='off', vdl2Msgs=[], vdl2Seq=0, vdl2Poll=null, vdl2SynthTimer=null;
+  var vdl2Btn=document.getElementById('vdl2-btn');
+  function setVdl2Mode(m){ vdl2Mode=m; var el=document.getElementById('vdl2-mode');
+    el.className='tag '+(m==='live'?'live':(m==='synth'?'synth':'idle')); el.textContent=(m==='live'?'live':(m==='synth'?'synthetic':'off')); }
+  function icaosOnRadar(){ var set={}; planes.forEach(function(p){ if(p.icao)set[String(p.icao).toUpperCase()]=1; }); return set; }
+  function vtypeClass(t){ t=(t||'').toLowerCase(); return t==='cpdlc'?'cpdlc':(t==='ads-c'?'adsc':(t==='acars'?'acars':(t==='x.25'?'x25':'avlc'))); }
+  function renderVdl2(){
+    var el=document.getElementById('vdl2-list'); document.getElementById('vdl2-count').textContent=vdl2Msgs.length?('· '+vdl2Msgs.length):'';
+    if(!vdl2Msgs.length){ el.innerHTML='<div class="empty" id="vdl2-empty">'+(vdl2Running||vdl2Mode==='synth'?'Listening for VDL Mode 2… (~136 MHz)':'VDL Mode 2 off — CPDLC / ADS-C / ACARS-over-VDL2. One dongle, so this pauses the radar.')+'</div>'; return; }
+    var onradar=tailsOnRadar(), onicao=icaosOnRadar();
+    el.innerHTML=vdl2Msgs.slice().reverse().slice(0,80).map(function(m){
+      var match=(m.reg&&onradar[m.reg.toUpperCase()])||(m.flight&&onradar[m.flight.toUpperCase()])||(m.icao&&onicao[String(m.icao).toUpperCase()]);
+      var id=m.reg?('<span class="tail">'+esc(m.reg)+'</span>'):(m.icao?'<span class="icao">'+esc(m.icao)+'</span>':'<span class="tail">—</span>');
+      var who=id+(m.flight?' <span class="flt">'+esc(m.flight)+'</span>':'')+(m.reg&&m.icao?' <span class="icao">'+esc(m.icao)+'</span>':'')
+        +(match?' <span class="onradar">● on radar</span>':'');
+      var dir=m.direction==='uplink'?'<span class="dir up">↑ uplink (ATC→ac)</span>':(m.direction==='downlink'?'<span class="dir down">↓ downlink (ac→ATC)</span>':'');
+      var tlabel=m.type==='ADS-C'?'ADS-C':(m.type||'AVLC');
+      var typ='<span class="vtype '+vtypeClass(m.type)+'">'+esc(tlabel)+'</span>'+dir;
+      var body=m.text?esc(m.text):'<span style="color:var(--muted)">('+esc(tlabel)+' frame)</span>';
+      if(m.type==='ACARS'&&m.label_meaning) body+='<span style="color:var(--muted);font-size:10px;display:block">'+esc(m.label+' · '+m.label_meaning)+'</span>';
+      var meta=(m.freq_mhz?esc(m.freq_mhz)+' MHz':'')+(m.level!=null?' · '+m.level+'dB':'');
+      return '<div class="vdl2-msg'+(match?' match':'')+'"><div class="who">'+who+'</div><div>'+typ+'</div>'
+        +'<div class="body">'+body+'</div><div class="meta">'+meta+'</div></div>';
+    }).join('');
+  }
+  vdl2Btn.addEventListener('click',function(){ vdl2Running?stopVdl2():startVdl2(); });
+  function startVdl2(){
+    // one dongle: VDL2 at 136 MHz can't coexist with the 1090 MHz radar (or ACARS)
+    if(running){ stopRun(); }
+    if(acarsRunning){ stopAcars(); }
+    vdl2Running=true; vdl2Btn.setAttribute('aria-pressed','true'); vdl2Btn.innerHTML='&#10074;&#10074;&nbsp;Stop VDL2';
+    vdl2Seq=0; vdl2Msgs=[]; renderVdl2();
+    fetch('/api/net/vdl2/start',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
+      if(res&&res.error){ if(DEMO_ON) vdl2Synth(); else { document.getElementById('vdl2-list').innerHTML='<div class="empty">Could not start VDL2: '+esc(res.error)+(res.error&&res.error.indexOf('not installed')>=0?' — <button class="ctl" id="vdl2-install" style="margin-left:6px;padding:3px 8px">⬇ Install dumpvdl2</button>':'')+'</div>'; wireVdl2Install(); } }
+    }).catch(function(){});
+    if(vdl2Poll)clearInterval(vdl2Poll); vdl2Poll=setInterval(pollVdl2,2000); pollVdl2();
+  }
+  function stopVdl2(){
+    vdl2Running=false; vdl2Btn.setAttribute('aria-pressed','false'); vdl2Btn.innerHTML='&#9654;&nbsp;Start VDL2';
+    if(vdl2Poll){clearInterval(vdl2Poll);vdl2Poll=null;}
+    fetch('/api/net/vdl2/stop',{method:'POST'}).catch(function(){});
+    if(DEMO_ON) vdl2Synth(); else { setVdl2Mode('off'); renderVdl2(); }
+  }
+  function wireVdl2Install(){ var b=document.getElementById('vdl2-install'); if(!b)return;
+    b.addEventListener('click',function(){ b.textContent='Building… (~4-8 min, libacars+dumpvdl2)'; b.disabled=true;
+      fetch('/api/net/vdl2/install',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
+        if(res&&res.ok){ startVdl2(); } else { b.textContent='⬇ Install dumpvdl2'; b.disabled=false; }
+      }).catch(function(){ b.textContent='⬇ Install dumpvdl2'; b.disabled=false; }); }); }
+  function pollVdl2(){
+    fetch('/api/net/vdl2/messages?since='+vdl2Seq).then(function(r){return r.json();}).then(function(d){
+      if(!d)return;
+      if(d.running){ setVdl2Mode('live'); if(d.messages&&d.messages.length){ d.messages.forEach(function(m){vdl2Msgs.push(m);}); vdl2Seq=d.seq; if(vdl2Msgs.length>500)vdl2Msgs=vdl2Msgs.slice(-500); renderVdl2(); } }
+      else if(d.error && DEMO_ON){ vdl2Synth(); }
+    }).catch(function(){});
+  }
+  // synthetic VDL2 — mix of CPDLC, ADS-C and ACARS-over-VDL2, tied to synthetic aircraft
+  var VDSAMPLES=[
+    {type:'CPDLC',direction:'uplink',text:'[#12] CONTACT LONDON CONTROL 128.075'},
+    {type:'CPDLC',direction:'uplink',text:'[#14] CLIMB TO AND MAINTAIN FL380'},
+    {type:'CPDLC',direction:'downlink',text:'[#4] WILCO'},
+    {type:'CPDLC',direction:'downlink',text:'[#6] REQUEST DIRECT TO SURAT'},
+    {type:'CPDLC',direction:'uplink',text:'[#20] MONITOR SHANWICK 127.650'},
+    {type:'ADS-C',direction:'downlink',text:'POS 51.4820 -0.4510 / 38000 ft'},
+    {type:'ADS-C',direction:'downlink',text:'POS 55.9120 -12.3400 / 36000 ft'},
+    {type:'ACARS',direction:'downlink',label:'15',label_meaning:'Position report',text:'POS N54.1 W030.2 FL360 M0.80 OAT-56'},
+    {type:'ACARS',direction:'uplink',label:'22',label_meaning:'Departure/arrival (OOOI)',text:'OUT 1412 OFF 1428 GATE A22'},
+    {type:'ACARS',direction:'downlink',label:'H1',label_meaning:'Free text',text:'OPS: EXPECT HOLDING BIG, CTOT 1455'}
+  ];
+  function vdl2Synth(){
+    setVdl2Mode('synth');
+    if(!vdl2Msgs._synth){ vdl2Msgs=[]; vdl2Msgs._synth=true; }
+    if(vdl2SynthTimer) { renderVdl2(); return; }
+    for(var i=0;i<6;i++) pushSynthVdl2();
+    renderVdl2();
+    vdl2SynthTimer=setInterval(function(){ if(Math.random()<0.75){ pushSynthVdl2(); renderVdl2(); } },2800);
+  }
+  function pushSynthVdl2(){
+    var p=(planes&&planes.length)?planes[(Math.random()*planes.length)|0]:null;
+    var s=VDSAMPLES[(Math.random()*VDSAMPLES.length)|0];
+    var ch=[136.725,136.775,136.800,136.825,136.975][(Math.random()*5)|0];
+    var icao=p?p.icao:('3C'+('0123456789ABCDEF'[(Math.random()*16)|0])+('0123456789ABCDEF'[(Math.random()*16)|0])+('0123456789ABCDEF'[(Math.random()*16)|0])+'A');
+    vdl2Msgs.push({type:s.type,direction:s.direction,icao:icao,
+      reg:s.type==='ACARS'?(p?p.tail:'D-A'+('IBCM'[(Math.random()*4)|0]+'A')):null,
+      flight:p?p.callsign:'DLH'+(100+((Math.random()*899)|0)), label:s.label||null, label_meaning:s.label_meaning||null,
+      text:s.text, freq_mhz:ch, level:-(12+((Math.random()*22)|0)), ts:Date.now()/1000});
+    if(vdl2Msgs.length>500)vdl2Msgs=vdl2Msgs.slice(-500);
+  }
+  function vdl2CheckStatus(){
+    fetch('/api/net/vdl2/status').then(function(r){return r.json();}).then(function(st){
+      if(st&&st.running){ vdl2Running=true; vdl2Btn.setAttribute('aria-pressed','true'); vdl2Btn.innerHTML='&#10074;&#10074;&nbsp;Stop VDL2'; if(!vdl2Poll){vdl2Poll=setInterval(pollVdl2,2000);pollVdl2();} return; }
+      var det=(st&&st.detect)||{};
+      if(det.tools_installed===false && !vdl2Running && vdl2Mode!=='synth' && !DEMO_ON){ vdl2Btn.title='dumpvdl2 not installed — click to install & start'; }
+      if(DEMO_ON && vdl2Mode==='off'){ vdl2Synth(); }
+    }).catch(function(){});
+  }
+
+  // ---- route / world map ----
+  // Click a contact -> fetch its filed route (origin/destination airports) from
+  // the backend (cache-first, adsbdb on a miss) and draw a world map: the great-
+  // circle it flies, its live position, and % progress. The live position is
+  // always local; only the filed route needs the one-time network look-up.
+  var rmask=document.getElementById('rmask'), curRoute=null;
+  var rmap=null, routeLayer=null, mapReady=false;
+
+  function planeById(icao){ for(var i=0;i<planes.length;i++){ if(planes[i].icao===icao) return planes[i]; } return null; }
+
+  // Leaflet map — same vendored lib + Esri dark tiles as the Mesh Map.
+  function ensureMap(){
+    if(rmap||typeof L==='undefined') return;
+    rmap=L.map('worldmap',{zoomControl:true, attributionControl:false, worldCopyJump:true, minZoom:1}).setView([25,0],2);
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,maxNativeZoom:16}).addTo(rmap);
+    routeLayer=L.layerGroup().addTo(rmap); mapReady=true;
+  }
+  function planeIcon(track){ return L.divIcon({className:'', iconSize:[26,26], iconAnchor:[13,13],
+    html:'<div style="width:26px;height:26px;display:flex;align-items:center;justify-content:center;transform:rotate('+(track||0)+'deg)">'
+      +'<svg width="20" height="20" viewBox="-9 -9 18 18"><path d="M0,-8 L5.5,6 L0,3 L-5.5,6 Z" fill="#f5b942" stroke="#05080d" stroke-width="1.2"/></svg></div>'}); }
+  function airportDot(o,color){ return L.circleMarker([o.lat,o.lon],{radius:5,color:'#05080d',weight:1.5,fillColor:color,fillOpacity:1})
+    .bindTooltip(o.iata||o.icao||'',{permanent:true,direction:'top',className:'aptip',offset:[0,-3]}); }
+  function gcSample(la1,lo1,la2,lo2,n){ var p1=toRad(la1),l1=toRad(lo1),p2=toRad(la2),l2=toRad(lo2);
+    var dl=2*Math.asin(Math.min(1,Math.sqrt(Math.pow(Math.sin((p2-p1)/2),2)+Math.cos(p1)*Math.cos(p2)*Math.pow(Math.sin((l2-l1)/2),2))));
+    if(dl===0) return [[la1,lo1],[la2,lo2]];
+    var out=[]; for(var i=0;i<n;i++){ var f=i/(n-1), a=Math.sin((1-f)*dl)/Math.sin(dl), b=Math.sin(f*dl)/Math.sin(dl);
+      var x=a*Math.cos(p1)*Math.cos(l1)+b*Math.cos(p2)*Math.cos(l2), y=a*Math.cos(p1)*Math.sin(l1)+b*Math.cos(p2)*Math.sin(l2), z=a*Math.sin(p1)+b*Math.sin(p2);
+      out.push([Math.atan2(z,Math.sqrt(x*x+y*y))*180/Math.PI, Math.atan2(y,x)*180/Math.PI]); }
+    return out; }
+  function unwrap(pts){ for(var i=1;i<pts.length;i++){ var d=pts[i][1]-pts[i-1][1]; if(d>180) pts[i][1]-=360; else if(d<-180) pts[i][1]+=360; } return pts; }
+
+  function livePlane(){   // best-known position for the open flight: adsb.lol live > our own contact
+    if(curRoute&&curRoute.live&&curRoute.live.lat!=null) return curRoute.live;
+    return curRoute?planeById(curRoute.icao):null;
+  }
+  function openRoute(icao){
+    var p=planeById(icao); if(!p) return;
+    curRoute={icao:icao, cs:(p.callsign||icao), route:null, live:null, acType:(p.type||null), loading:true};
+    rmask.classList.add('show');
+    document.getElementById('r-cs').textContent=p.callsign||p.icao;
+    document.getElementById('r-fi').textContent=(p.flight_iata&&p.flight_iata!==p.callsign)?p.flight_iata:'';
+    document.getElementById('r-al').textContent=p.airline?('· '+p.airline):'';
+    document.getElementById('r-type').textContent=p.type?('· '+p.type):'';
+    document.getElementById('r-note').innerHTML='Looking up route…';
+    document.getElementById('r-routerow').style.display='none';
+    document.getElementById('r-progwrap').style.display='none';
+    ensureMap();
+    // the map div was hidden until now — let Leaflet recompute its size, then draw
+    setTimeout(function(){ if(!curRoute||curRoute.icao!==icao) return; if(rmap) rmap.invalidateSize(); drawRoute(true); renderRouteInfo(); }, 90);
+    // /flight = filed route (adsbdb) + REAL live position/type (adsb.lol), keyed on hex.
+    var cs=(p.callsign||'').trim();
+    var q='/api/net/adsb/flight?hex='+encodeURIComponent(icao)
+      +(cs?'&callsign='+encodeURIComponent(cs):'')
+      +(p.lat!=null?'&lat='+p.lat+'&lon='+p.lon:'')+(p.gs!=null?'&gs='+p.gs:'');
+    fetch(q).then(function(r){return r.json();}).then(function(d){
+      if(!curRoute||curRoute.icao!==icao) return;
+      curRoute.route=(d&&d.route)||null; curRoute.live=(d&&d.live)||null; curRoute.match=(d&&d.route_match)||null;
+      curRoute.acType=(d&&((d.aircraft&&d.aircraft.type)||(d.live&&d.live.type)))||curRoute.acType;
+      curRoute.loading=false; drawRoute(true); renderRouteInfo();
+    }).catch(function(){ if(curRoute&&curRoute.icao===icao){ curRoute.loading=false;
+      document.getElementById('r-note').innerHTML='Route look-up failed (offline?). Live position is still tracked.';
+      drawRoute(true); renderRouteInfo(); } });
+  }
+  function closeRoute(){ rmask.classList.remove('show'); curRoute=null; }
+  document.getElementById('r-close').addEventListener('click',closeRoute);
+  rmask.addEventListener('click',function(e){ if(e.target===rmask) closeRoute(); });
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&rmask.classList.contains('show')) closeRoute(); });
+  function routeTick(){ if(rmask.classList.contains('show')){ drawRoute(false); renderRouteInfo(); } }
+
+  function fmtKmU(km){ return km==null?'—':(Math.round(kmToUnit(km))+' '+unit); }
+  function routeGeo(){   // live progress from the current plane position + filed route
+    if(!curRoute||!curRoute.route) return null;
+    var r=curRoute.route, o=r.origin, d=r.destination; if(!(o&&d)) return null;
+    var p=livePlane(), out={o:o,d:d,total:haversineKm(o.lat,o.lon,d.lat,d.lon)};
+    if(p&&p.lat!=null){ out.plane=p; out.flown=haversineKm(o.lat,o.lon,p.lat,p.lon); out.remaining=haversineKm(p.lat,p.lon,d.lat,d.lon);
+      var den=out.flown+out.remaining; out.frac=den>0?out.flown/den:0;
+      if(p.gs>20) out.eta=Math.round(out.remaining/(p.gs*1.852)*60); }
+    return out;
+  }
+  function renderRouteInfo(){
+    if(!curRoute) return;
+    var g=routeGeo(), p=livePlane();
+    document.getElementById('r-type').textContent=curRoute.acType?('· '+curRoute.acType):'';
+    document.getElementById('r-alt').textContent=(p&&p.alt!=null)?('FL'+Math.round(p.alt/100)):'—';
+    document.getElementById('r-gs').textContent=(p&&p.gs!=null)?(Math.round(p.gs)+' kt'):'—';
+    var rr=document.getElementById('r-routerow'), pw=document.getElementById('r-progwrap');
+    if(g){
+      rr.style.display='flex';
+      document.getElementById('r-o-code').textContent=g.o.iata||g.o.icao||'???';
+      document.getElementById('r-o-cty').textContent=g.o.municipality||g.o.name||g.o.country||'';
+      document.getElementById('r-d-code').textContent=g.d.iata||g.d.icao||'???';
+      document.getElementById('r-d-cty').textContent=g.d.municipality||g.d.name||g.d.country||'';
+      var stale=!!(curRoute.match&&curRoute.match.ok===false);
+      document.getElementById('r-flown').textContent=stale?'—':fmtKmU(g.flown);
+      document.getElementById('r-remain').textContent=stale?'—':fmtKmU(g.remaining);
+      if(g.frac!=null&&!stale){ pw.style.display='flex';
+        document.getElementById('r-fill').style.width=Math.round(g.frac*100)+'%';
+        document.getElementById('r-pct').textContent=Math.round(g.frac*100)+'% · '+fmtKmU(g.total)+' total';
+        document.getElementById('r-eta').textContent=(g.eta!=null&&g.eta>0)?('~'+g.eta+' min left'):'';
+      } else { pw.style.display='none'; }
+      var cached=(curRoute.route.source==='cache');
+      var m=curRoute.match;
+      if(m&&m.ok===false){
+        document.getElementById('r-note').innerHTML='⚠ <b>Filed route may be stale.</b> This aircraft is heading '
+          +m.delta+'° away from '+(g.d.iata||g.d.icao||'the filed destination')
+          +' — the callsign was likely reused for another leg. Live position is accurate; the route is not.';
+      } else if(cached){
+        // Live clicks force a fresh adsbdb fetch, so 'cache' now means the
+        // network was unreachable and we fell back to a stored (older) route.
+        document.getElementById('r-note').innerHTML='Filed route from <b>local cache</b> (adsbdb unreachable — this copy may be out of date). Great-circle path; live position from adsb.lol.';
+      } else {
+        document.getElementById('r-note').innerHTML='Filed route via <b>adsbdb</b> (fresh). Great-circle path; live position from adsb.lol.';
+      }
+    } else {
+      rr.style.display='none'; pw.style.display='none';
+      document.getElementById('r-flown').textContent='—'; document.getElementById('r-remain').textContent='—';
+      if(!curRoute.loading){ document.getElementById('r-note').innerHTML='No filed route found for <b>'+esc(curRoute.cs)+'</b> (adsbdb has no match, or offline). The live position is shown on the map.'; }
+    }
+  }
+
+  function drawRoute(fit){
+    if(!mapReady||!curRoute) return;
+    routeLayer.clearLayers();
+    var g=routeGeo(), p=livePlane();
+    if(!g){ // no filed route yet: show the live plane alone if we have a position
+      if(p&&p.lat!=null){ L.marker([p.lat,p.lon],{icon:planeIcon(p.track)}).addTo(routeLayer);
+        if(fit) rmap.setView([p.lat,p.lon],5); }
+      return;
+    }
+    var samp=unwrap(gcSample(g.o.lat,g.o.lon,g.d.lat,g.d.lon,96)), splitK=samp.length-1;
+    if(g.plane){ var best=1e9; for(var k=0;k<samp.length;k++){ var lo=((samp[k][1]+540)%360)-180,
+      dd=haversineKm(g.plane.lat,g.plane.lon,samp[k][0],lo); if(dd<best){best=dd;splitK=k;} } }
+    var stale=!!(curRoute.match&&curRoute.match.ok===false);
+    if(stale){ // filed route disagrees with the live heading — draw it all as low-confidence amber
+      L.polyline(samp,{color:'#f5b942',weight:1.6,opacity:.5,dashArray:'3,8'}).addTo(routeLayer);
+    } else {
+      L.polyline(samp.slice(splitK),{color:'#7c8aa0',weight:1.6,opacity:.6,dashArray:'5,7'}).addTo(routeLayer);   // remaining
+      L.polyline(samp.slice(0,splitK+1),{color:'#38bdc9',weight:2.8,opacity:.95}).addTo(routeLayer);              // flown
+    }
+    airportDot(g.o,'#3fb56b').addTo(routeLayer);
+    airportDot(g.d,'#f5b942').addTo(routeLayer);
+    if(g.plane) L.marker([g.plane.lat,g.plane.lon],{icon:planeIcon(g.plane.track)}).addTo(routeLayer);
+    if(fit){ var b=L.latLngBounds(samp); if(p&&p.lat!=null) b.extend([p.lat,p.lon]); rmap.fitBounds(b.pad(0.18)); }
+  }
+
+  // ---- boot ----
+  function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){}); }
+  function checkStatus(){
+    fetch('/api/net/adsb/status').then(function(r){return r.json();}).then(function(st){
+      var det=(st&&st.detect)||{};
+      if(st&&st.running){ running=true; startBtn.setAttribute('aria-pressed','true'); startBtn.innerHTML='&#10074;&#10074;&nbsp;Stop'; if(!poll){poll=setInterval(pollLive,1000);pollLive();} return; }
+      if(det.available){ hideVeil(); if(mode==='idle'&&!DEMO_ON){ setMode('idle'); } if(DEMO_ON&&mode==='idle'){ synthMode(); } }
+      else if(DEMO_ON){ synthMode(); }
+      else { setMode('idle');
+        var needsInstall=det.tools_installed===false;   // dump1090 missing
+        showVeil('ADS-B unavailable',
+          det.error||'Connect an RTL-SDR and install dump1090, or enable the RF Waterfall demo for a synthetic sky.',
+          needsInstall); }
+    }).catch(function(){ if(DEMO_ON) synthMode(); });
+  }
+
+  loadRx();
+  if(rx.lat==null){ ensureLocation(); }   // no saved location → auto-locate so the radar can place aircraft
+  resize();
+  window.addEventListener('resize',function(){resize(); routeTick();});
+  requestAnimationFrame(anim);
+  refreshConfig().then(function(){ checkStatus(); acarsCheckStatus(); vdl2CheckStatus();
+    setInterval(function(){ if(!running) refreshConfig().then(function(){ checkStatus(); acarsCheckStatus(); vdl2CheckStatus(); }); },5000); });
+})();
+</script>
+</body>
+</html>

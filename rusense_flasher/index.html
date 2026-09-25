@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RuSense — CSI Node Flasher (ESP32-S3 / C6)</title>
+    <meta name="description" content="Forge the RuSense WiFi-CSI sensor-node firmware onto your ESP32-S3 or ESP32-C6 directly from your browser. Captures 2.4 GHz Channel State Information and reports to a RuSense / RuView server for presence, motion and people-counting." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Russo+One&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="css/style.css?v=rusense2" />
+    <style>
+      .prov-fields { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; margin: .5rem 0 1rem; }
+      .prov-fields #prov-port { max-width: 8rem; }
+      .prov-fields #prov-node { max-width: 8rem; }
+      .prov-ext-ant { grid-column: 1 / -1; display: flex; align-items: flex-start; gap: .5rem; color: #cdd8e3; font-size: .92rem; line-height: 1.35; cursor: pointer; }
+      /* Specific enough to beat ".prov-fields input { width:100% }" (which
+         otherwise stretches the checkbox full-width and shoves the label off
+         the card on mobile). Keep the checkbox its natural size; let the text
+         take the rest and wrap. */
+      .prov-fields .prov-ext-ant input { width: auto; flex: 0 0 auto; margin-top: .15rem; }
+      .prov-ext-ant-text { flex: 1 1 auto; min-width: 0; }
+      .prov-ext-ant .panel-sub { white-space: normal; }
+      .prov-fields input {
+        width: 100%; box-sizing: border-box; padding: .6rem .7rem; border-radius: 8px;
+        border: 1px solid rgba(255,255,255,.18); background: rgba(0,0,0,.25);
+        color: #e8eef3; font-size: .95rem;
+      }
+      .prov-fields input::placeholder { color: #7f8ea3; }
+      .prov-fields .prov-hint { grid-column: 1 / -1; margin: -.15rem 0 0; font-size: .8rem; line-height: 1.35; color: #9fb0c3; }
+      @media (max-width: 560px) { .prov-fields { grid-template-columns: 1fr; } }
+      .s3-board-row { display: flex; align-items: center; gap: .6rem; margin: .35rem 0 .85rem; }
+      .s3-board-row label { color: #9fb0c3; font-size: .9rem; }
+      .s3-board-row select {
+        flex: 1; min-width: 0; padding: .55rem .7rem; border-radius: 8px;
+        border: 1px solid rgba(255,255,255,.18); background: rgba(0,0,0,.25);
+        color: #e8eef3; font-size: .95rem;
+      }
+      .s3-board-row select option { background: #101823; color: #e8eef3; }
+    </style>
+  </head>
+  <body>
+    <div class="rune-strip" aria-hidden="true">
+      ᚱ ᚨ ᚷ ᚾ ᚨ ᚱ &nbsp;·&nbsp; ᚱ ᚢ ᛋ ᛖ ᚾ ᛋ ᛖ &nbsp;·&nbsp; ᚲ ᛋ ᛁ
+    </div>
+
+    <div class="page">
+
+      <!-- Header -->
+      <header class="site-header">
+        <div class="logo-mark" aria-hidden="true">📡</div>
+        <span class="brand">RAGNAR &mdash; <span>RuSense CSI Node</span></span>
+      </header>
+
+      <!-- Hero -->
+      <div class="hero-title">
+        <div class="rune-divider" aria-hidden="true">ᚦ &nbsp; ✦ &nbsp; ᚦ</div>
+        <h1>Forge a <span>Sensor Node</span></h1>
+        <p class="tagline">WiFi CSI &nbsp;⚔&nbsp; 2.4&nbsp;GHz mesh &nbsp;⚔&nbsp; presence · motion · people-count</p>
+        <p class="desc">
+          A whole fleet to choose from. Every board listens to 2.4&nbsp;GHz WiFi
+          Channel&nbsp;State&nbsp;Information &mdash; up to 114 subcarriers at ~100&nbsp;Hz &mdash;
+          and reports back to your RuSense server, where it surfaces under the
+          <strong>Nodes</strong> tab once provisioned. Pick a board, plug it in, raise the sails.
+        </p>
+      </div>
+
+      <!-- ───────── Legal / ethical use ───────── -->
+      <div style="max-width:720px;margin:0 auto 1.25rem;padding:.85rem 1.1rem;border:1px solid #c0453f;border-radius:.6rem;background:rgba(192,69,63,.12);color:#f4b8b3;font-size:.95rem;line-height:1.5">
+        ⚖️ <strong>Legal &amp; ethical use.</strong> RuSense senses presence and motion inside a
+        space through WiFi. Only deploy it in spaces you <strong>own or have explicit permission
+        to monitor</strong>. Monitoring a space without consent is <strong>illegal in most
+        jurisdictions</strong> — treat it exactly like installing cameras: you need permission, and
+        many countries also require <strong>visible signage that the space is monitored</strong>.
+        We <strong>condemn any unlawful monitoring</strong>; you alone are responsible for complying
+        with the laws where you deploy.
+      </div>
+
+      <!-- WiFi / server provisioning (top — but run it AFTER forging) -->
+      <section class="flash-panel" id="provision">
+        <h2>🛰️ Provision WiFi <span class="panel-sub">(do this after forging)</span></h2>
+        <p>
+          Forging <strong>erases</strong> the node's saved config, so it falls back to the wrong
+          defaults and won't connect. Enter your <strong>2.4&nbsp;GHz</strong> WiFi and the
+          <strong>RuSense server IP</strong> (your Ragnar box), then write it to the node. Works for
+          both S3 and C6.
+        </p>
+        <div class="prov-fields">
+          <input id="prov-ssid" type="text" placeholder="WiFi SSID (2.4 GHz)" autocomplete="off" />
+          <input id="prov-pass" type="password" placeholder="WiFi password" autocomplete="off" />
+          <input id="prov-ip" type="text" placeholder="Server IP — e.g. 192.168.1.20" autocomplete="off" />
+          <input id="prov-port" type="number" value="5005" min="1" max="65535" placeholder="Port" />
+          <input id="prov-node" type="number" value="1" min="0" max="255" placeholder="Node ID (0-255, unique per node)" title="Give each node in the mesh a different ID, e.g. 1, 2, 3. Nodes with the same ID collide and only one shows up." />
+          <input id="prov-channel" type="number" min="1" max="14" placeholder="Channel (1-14, blank = auto)" title="Fix every node to the SAME 2.4 GHz channel as your AP. Leave blank to auto-detect from the AP the node associates with. Overrides auto-detect when set." />
+          <label class="prov-ext-ant" title="Seeed XIAO ESP32-C6 only: drives the on-board RF switch to the external u.FL/IPEX socket at boot. Ignored on other boards. Only helps with an antenna actually attached.">
+            <input id="prov-ext-ant" type="checkbox" />
+            <span class="prov-ext-ant-text">Use external u.FL antenna <span class="panel-sub">(Seeed XIAO ESP32-C6 only)</span></span>
+          </label>
+          <p class="prov-hint">⚠️ Give <strong>each node a unique Node ID</strong> (1, 2, 3…). Two nodes sharing an ID collide, so only one shows up in RuSense.</p>
+          <p class="prov-hint">📶 <strong>Channel:</strong> set the <strong>same fixed 2.4 GHz channel</strong> on every node — match your AP's channel (1, 6 and 11 are the non-overlapping ones). Leave it <strong>blank</strong> to auto-detect from the AP, but a fixed channel keeps the fleet's clocks in sync and stops fusion dropping offline.</p>
+          <p class="prov-hint">📡 Point <strong>every node at the same WiFi access point on one fixed 2.4 GHz channel</strong>. If several routers or a mesh/extenders share one SSID, nodes latch onto different APs, their clocks can't sync, and sensing drops offline. Use a single AP (a dedicated 2.4 GHz SSID served by one router is ideal) and disable auto-channel.</p>
+        </div>
+        <div class="flash-buttons">
+          <button class="btn-flash" onclick="provisionDevice()">🛰️ Write WiFi config</button>
+        </div>
+      </section>
+
+      <!-- ───────── One chip type per mesh ───────── -->
+      <div style="max-width:720px;margin:0 auto 1.25rem;padding:.85rem 1.1rem;border:1px solid #b4791e;border-radius:.6rem;background:rgba(180,121,30,.12);color:#f4d9a6;font-size:.95rem;line-height:1.5">
+        ⚠️ <strong>Don't mix S3 and C6 in one mesh.</strong> Pick a single chip type and flash
+        <em>every</em> node the same — the two capture different CSI widths, and the server's
+        multistatic fusion needs them identical. A mixed fleet breaks fusion (you lose
+        accurate people-count, positioning, pose &amp; vital-signs). <strong>All-S3 is
+        recommended</strong>; choose C6 only if you want Wi-Fi&nbsp;6 — and then make them all C6.
+      </div>
+
+      <!-- ───────── ESP32-S3 (all boards — pick from dropdown) ───────── -->
+      <section class="flash-panel" id="csi-s3">
+        <h2>📡 ESP32-S3 CSI Node <span class="panel-sub">(pick your board)</span></h2>
+
+        <div class="s3-board-row">
+          <label for="s3-board">Board:</label>
+          <select id="s3-board">
+            <option value="s3-devkit" selected>ESP32-S3-DevKitC-1 (N16R8) — headless · recommended</option>
+            <option value="s3-xiao">Seeed XIAO ESP32S3 — 8 MB · headless</option>
+            <option value="s3-xiao-plus">Seeed XIAO ESP32S3 Plus — 16 MB · headless</option>
+            <option value="s3-amoled">AMOLED display board — self-ping sensing</option>
+          </select>
+        </div>
+
+        <p id="s3-board-desc"></p>
+
+        <div class="prereq">
+          <div class="prereq-title">Before the forge fires</div>
+          <ol>
+            <li>Close Arduino IDE, Serial Monitor, or any other app holding the port</li>
+            <li>Use a <strong>data-capable</strong> USB-C cable (charge-only cables are runes that do nothing)</li>
+            <li>Click Forge and pick <code>USB JTAG/serial debug unit</code> from the port list</li>
+            <li id="s3-boot-hint">If the board isn&rsquo;t spotted, hold <strong>BOOT</strong> while tapping <strong>RST</strong></li>
+          </ol>
+        </div>
+
+        <div class="chip-badges">
+          <span class="chip-badge"><span class="dot"></span><span id="s3-board-badge"></span></span>
+        </div>
+
+        <div class="flash-buttons">
+          <button id="s3-forge-btn" class="btn-flash" onclick="flashS3()">
+            🔨 Forge S3 CSI Node
+          </button>
+        </div>
+      </section>
+
+      <script>
+        const S3_BOARDS = {
+          "s3-devkit": {
+            manifest: "manifest-csi-s3-devkit.json",
+            badge: "ESP32-S3 · 16 MB flash · no display",
+            button: "🔨 Forge S3 DevKitC Sensor",
+            bootHint: "If the board isn’t spotted, hold <strong>BOOT</strong> while tapping <strong>RST</strong>",
+            desc: "Plain dual-core LX7 @240 MHz, 16 MB flash, <strong>no display</strong>. With no " +
+                  "AMOLED panel to protect, it captures the full <strong>MGMT+DATA</strong> WiFi traffic — " +
+                  "the rich multipath a moving person actually shows up in. This is the " +
+                  "<strong>recommended sensor</strong> for presence / motion / people-count.",
+          },
+          "s3-xiao": {
+            manifest: "manifest-csi-s3-xiao.json",
+            badge: "ESP32-S3 · 8 MB flash · U.FL antenna · no display",
+            button: "🔨 Forge XIAO S3 Sensor",
+            bootHint: "If the board isn’t spotted, hold the tiny <strong>B</strong> (BOOT) button while tapping <strong>R</strong> (RESET) — or while plugging in the cable",
+            desc: "Seeed Studio XIAO ESP32S3 — thumbnail-sized (21 × 17.8 mm) dual-core LX7 " +
+                  "@240 MHz with 8 MB flash and <strong>no display</strong>, so it runs the same full " +
+                  "<strong>MGMT+DATA</strong> headless capture as the DevKitC. " +
+                  "<strong>Snap the bundled U.FL antenna on first</strong> — without it the radio hears nothing.",
+          },
+          "s3-xiao-plus": {
+            manifest: "manifest-csi-s3-xiao-plus.json",
+            badge: "ESP32-S3 · 16 MB flash · U.FL antenna · no display",
+            button: "🔨 Forge XIAO S3 Plus Sensor",
+            bootHint: "If the board isn’t spotted, hold the tiny <strong>B</strong> (BOOT) button while tapping <strong>R</strong> (RESET) — or while plugging in the cable",
+            desc: "Seeed Studio XIAO ESP32S3 <strong>Plus</strong> — same thumbnail footprint, upgraded to " +
+                  "16 MB flash. Headless like the DevKitC, so it captures the full " +
+                  "<strong>MGMT+DATA</strong> WiFi traffic. " +
+                  "<strong>Snap the bundled U.FL antenna on first</strong> — without it the radio hears nothing.",
+          },
+          "s3-amoled": {
+            manifest: "manifest-csi-s3.json",
+            badge: "ESP32-S3 · 8 MB flash · AMOLED display",
+            button: "🔨 Forge S3 AMOLED Node",
+            bootHint: "If the board isn’t spotted, hold <strong>BOOT</strong> while tapping <strong>RST</strong>",
+            desc: "AMOLED display board — dual-core LX7 @240 MHz, 8 MB flash, with the RM67162 " +
+                  "screen showing live status. The display limits it to single self-ping-link sensing, " +
+                  "which struggles to separate empty from occupied — pick a headless board if this node’s " +
+                  "job is sensing rather than showing.",
+          },
+        };
+        function s3BoardChanged() {
+          const b = S3_BOARDS[document.getElementById("s3-board").value];
+          document.getElementById("s3-board-desc").innerHTML = b.desc;
+          document.getElementById("s3-board-badge").textContent = b.badge;
+          document.getElementById("s3-boot-hint").innerHTML = b.bootHint;
+          document.getElementById("s3-forge-btn").textContent = b.button;
+        }
+        function flashS3() {
+          flashDevice(S3_BOARDS[document.getElementById("s3-board").value].manifest);
+        }
+        document.getElementById("s3-board").addEventListener("change", s3BoardChanged);
+        s3BoardChanged();
+      </script>
+
+      <!-- ───────── ESP32-C6 (Wi-Fi 6 research) ───────── -->
+      <section class="flash-panel" id="csi-c6">
+        <h2>🛰️ ESP32-C6 CSI Node <span class="panel-sub">(Wi-Fi 6 · the scout)</span></h2>
+        <p>
+          RISC-V @160&nbsp;MHz, 4&nbsp;MB flash, dual-band Wi-Fi&nbsp;6 (802.11ax) and 802.15.4.
+          The research target &mdash; HE-LTF subcarrier tagging and a wider channel view for
+          experiments. Same CSI-node firmware, tuned for the C6 radio.
+        </p>
+
+        <div class="prereq">
+          <div class="prereq-title">Before the forge fires</div>
+          <ol>
+            <li>Close Arduino IDE, Serial Monitor, or any other app holding the port</li>
+            <li>Use a <strong>data-capable</strong> USB-C cable (charge-only cables are runes that do nothing)</li>
+            <li>Click Forge and pick <code>USB JTAG/serial debug unit</code> from the port list</li>
+            <li>If the board isn&rsquo;t spotted, hold <strong>BOOT</strong> while tapping <strong>RST</strong></li>
+          </ol>
+        </div>
+
+        <div class="chip-badges">
+          <span class="chip-badge"><span class="dot"></span>ESP32-C6 &middot; 4&nbsp;MB flash &middot; Wi-Fi&nbsp;6</span>
+        </div>
+
+        <div class="flash-buttons">
+          <button class="btn-flash" onclick="flashDevice('manifest-csi-c6.json')">
+            🔨 Forge C6 CSI Node
+          </button>
+        </div>
+      </section>
+
+      <section class="flash-panel" id="roomscan">
+        <h2>📐 RoomScan Floor-Plan Tracer <span class="panel-sub">(Waveshare ESP32-S3-Touch-LCD-4B · 480×480 touch)</span></h2>
+        <p>
+          A handheld <strong>touchscreen floor-plan tracer</strong> for the Ragnar Coverage Heatmap.
+          Sketch a room by tapping its corners on the 4″ panel, then place the access points Ragnar
+          scanned — pushed to the device over USB — exactly where they sit. Sync the finished map
+          (outline + AP positions) straight back into <strong>Signal Intelligence → Coverage Heatmap</strong>
+          over the same USB cable. No blueprint required.
+        </p>
+
+        <div class="prereq">
+          <div class="prereq-title">Before the forge fires</div>
+          <ol>
+            <li>Close Arduino IDE, Serial Monitor, or any other app holding the port</li>
+            <li>Use a <strong>data-capable</strong> USB-C cable (charge-only cables are runes that do nothing)</li>
+            <li>Click Forge and pick <code>USB JTAG/serial debug unit</code> from the port list</li>
+            <li>If the board isn&rsquo;t spotted, hold <strong>BOOT</strong> while tapping <strong>RST</strong></li>
+          </ol>
+        </div>
+
+        <div class="chip-badges">
+          <span class="chip-badge"><span class="dot"></span>ESP32-S3 &middot; 16&nbsp;MB flash &middot; 8&nbsp;MB PSRAM &middot; 480×480 touch</span>
+        </div>
+
+        <div class="flash-buttons">
+          <button class="btn-flash" onclick="flashDevice('manifest-roomscan-s3-lcd.json')">
+            🔨 Forge RoomScan
+          </button>
+        </div>
+      </section>
+
+      <section class="flash-panel" id="cyd">
+        <h2>📟 CYD Hybrid Node <span class="panel-sub">(ESP32-2432S028R · 2.8″ Cheap-Yellow-Display touch)</span></h2>
+        <p>
+          A cheap <strong>2.4&nbsp;GHz sensor with a touch dashboard</strong> that rides along with a Ragnar Pi.
+          It shows Ragnar&rsquo;s live status on-screen, triggers a few allowlisted actions, and sniffs
+          WiFi + BLE with its own radio — reporting the counts home. The default build is
+          <strong>USB-cabled</strong>: flash it, plug it into the Pi, and flip on the
+          <em>USB-serial bridge</em> under <strong>Ragnar Mesh → CYD Nodes</strong>. No WiFi, no token.
+        </p>
+
+        <div class="chip-badges">
+          <span class="chip-badge"><span class="dot"></span>ESP32-WROOM-32 &middot; 2.8″ ILI9341 240×320 &middot; resistive touch</span>
+        </div>
+
+        <div class="flash-buttons">
+          <a class="btn-flash" href="cyd/" style="text-decoration:none;display:inline-block">📟 Open CYD flasher</a>
+        </div>
+      </section>
+
+      <!-- Shared serial monitor button -->
+      <section class="flash-panel" id="serial-tools">
+        <h2>📡 Skald&rsquo;s Ear <span class="panel-sub"><strong>(serial monitor)</strong></span></h2>
+        <p>
+          Open a browser-based serial monitor for any forged CSI node. Default baud is
+          <code>115200</code>. On boot the node announces itself, then emits CSI capture
+          rate and status lines &mdash; handy for confirming packets-per-second before you
+          provision the node to your RuSense server.
+        </p>
+        <div class="flash-buttons">
+          <button class="btn-logs" onclick="openLogs()">📡 Open Skald&rsquo;s Ear</button>
+        </div>
+      </section>
+
+      <!-- ───────── Hidden easter egg: Piglet Coordinator forge ─────────
+           Revealed by clicking the "Skál 📡" rune in the footer. The old
+           Ragnar coordinator flasher (C5 / S3-LCD) used to live on its own
+           Pages site; this brings it back as a secret rune on the CSI page.
+           flashDevice() is board-agnostic, so the same forge flow drives it. -->
+      <section class="flash-panel" id="coordinator-egg" hidden>
+        <h2>🐗 Piglet Coordinator <span class="panel-sub">(secret rune · ESP-Now mesh core)</span></h2>
+        <p>
+          You found the hidden longship. This is the <strong>Ragnar Piglet Coordinator</strong> &mdash;
+          it pairs with the Piglet wardriving mesh on channel&nbsp;6 and herds WiGLE / BLE records
+          back to Ragnar over USB serial as one-object-per-line JSON. Not a CSI sensor node &mdash;
+          a different beast entirely. Pick a board, plug it in, raise the sails.
+        </p>
+
+        <div class="s3-board-row">
+          <label for="coord-board">Board:</label>
+          <select id="coord-board">
+            <option value="coord-c5" selected>Waveshare ESP32-C5-WIFI6-KIT — headless · the scout</option>
+            <option value="coord-s3-lcd">Waveshare ESP32-S3-Touch-LCD-4B — 480×480 display · the jarl</option>
+          </select>
+        </div>
+
+        <p id="coord-board-desc"></p>
+
+        <div class="prereq">
+          <div class="prereq-title">Before the forge fires</div>
+          <ol>
+            <li>Close Arduino IDE, Serial Monitor, or any other app holding the port</li>
+            <li>Use a <strong>data-capable</strong> USB-C cable (charge-only cables are runes that do nothing)</li>
+            <li>Click Forge and pick <code>USB JTAG/serial debug unit</code> from the port list</li>
+            <li>If the board isn&rsquo;t spotted, hold <strong>BOOT</strong> while tapping <strong>RST</strong></li>
+          </ol>
+        </div>
+
+        <div class="chip-badges">
+          <span class="chip-badge"><span class="dot"></span><span id="coord-board-badge"></span></span>
+        </div>
+
+        <div class="flash-buttons">
+          <button id="coord-forge-btn" class="btn-flash" onclick="flashCoordinator()">
+            🔨 Forge Coordinator
+          </button>
+        </div>
+        <p style="margin-top:.6rem;font-size:.85rem;color:#9fb0c3">
+          Coordinator serial runs at <code>460800</code> baud &mdash; set that in Skald&rsquo;s Ear if you monitor it.
+        </p>
+      </section>
+
+      <script>
+        const COORD_BOARDS = {
+          "coord-c5": {
+            manifest: "manifest-coordinator-c5.json",
+            badge: "Waveshare ESP32-C5-WIFI6-KIT · 16 MB · headless",
+            button: "🔨 Forge C5 Coordinator",
+            desc: "<strong>Waveshare ESP32-C5-WIFI6-KIT</strong> — single-core RISC-V @240 MHz, " +
+                  "16 MB flash, 4 MB PSRAM, dual-band Wi-Fi 6, BLE 5. No display, no fuss — the " +
+                  "smallest, lightest pig in the sty. Plug it into Ragnar's USB and it starts oinking immediately.",
+          },
+          "coord-s3-lcd": {
+            manifest: "manifest-coordinator-s3-lcd.json",
+            badge: "Waveshare ESP32-S3-Touch-LCD-4B · 16 MB · 480×480 display",
+            button: "🔨 Forge S3-LCD Coordinator",
+            desc: "<strong>Waveshare ESP32-S3-Touch-LCD-4B</strong> — dual-core LX7 @240 MHz, 16 MB flash, " +
+                  "8 MB OPI PSRAM, 4″ 480×480 RGB IPS touch panel. Same coordinator firmware, plus a glowing " +
+                  "rune-board on the built-in display (mesh nodes, networks heard, uptime, last RX).",
+          },
+        };
+        function coordBoardChanged() {
+          const b = COORD_BOARDS[document.getElementById("coord-board").value];
+          document.getElementById("coord-board-desc").innerHTML = b.desc;
+          document.getElementById("coord-board-badge").textContent = b.badge;
+          document.getElementById("coord-forge-btn").textContent = b.button;
+        }
+        function flashCoordinator() {
+          flashDevice(COORD_BOARDS[document.getElementById("coord-board").value].manifest);
+        }
+        document.getElementById("coord-board").addEventListener("change", coordBoardChanged);
+        coordBoardChanged();
+
+        /* Skál rune → reveal the hidden coordinator forge, then scroll to it.
+           The footer is parsed after this script, so wire it once the DOM is ready. */
+        document.addEventListener("DOMContentLoaded", () => {
+          const skal = document.querySelector(".footer .skal");
+          const egg  = document.getElementById("coordinator-egg");
+          if (!skal || !egg) return;
+          skal.style.cursor = "pointer";
+          skal.addEventListener("click", () => {
+            const revealing = egg.hidden;
+            egg.hidden = false;
+            if (revealing) {
+              egg.classList.add("egg-reveal");
+              egg.scrollIntoView({ behavior: "smooth", block: "center" });
+            }
+          });
+        });
+      </script>
+
+      <!-- Browser warning -->
+      <div id="browserWarn" class="browser-warn">
+        Web Serial only sails in Chromium-based browsers (Chrome, Edge, Opera) on
+        desktop. Firefox and Safari are unworthy ships for this voyage.
+      </div>
+
+      <!-- Footer -->
+      <footer class="footer">
+        <div>Band: <code>2.4&nbsp;GHz</code> &middot; Subcarriers: <code>up to 114</code> &middot; Rate: <code>~100&nbsp;Hz</code></div>
+        <div>Firmware: <code id="build">&mdash;</code></div>
+        <div>
+          <a href="https://github.com/PierreGode/Ragnar" target="_blank" rel="noopener">Ragnar</a>
+          &nbsp;⚔&nbsp;
+          <a href="https://github.com/ruvnet/ruview" target="_blank" rel="noopener">RuView by ruvnet</a>
+        </div>
+        <div class="skal">Skál&nbsp;📡</div>
+      </footer>
+
+    </div>
+
+    <!-- Serial monitor overlay -->
+    <div id="serial-overlay" class="flash-overlay" hidden>
+      <div class="flash-dialog serial-dialog">
+        <h3>📡 Skald&rsquo;s Ear</h3>
+        <div class="serial-baud">
+          <label for="serial-baud-select">Baud:</label>
+          <select id="serial-baud-select">
+            <option value="9600">9600</option>
+            <option value="38400">38400</option>
+            <option value="57600">57600</option>
+            <option value="115200" selected>115200</option>
+            <option value="230400">230400</option>
+            <option value="460800">460800</option>
+            <option value="921600">921600</option>
+          </select>
+        </div>
+        <pre id="serial-log" class="flash-log serial-log-area"></pre>
+        <div class="serial-input-row">
+          <input id="serial-input" type="text" placeholder="Whisper a command…" autocomplete="off" />
+          <button id="serial-send" class="btn-flash btn-small">Send</button>
+        </div>
+        <div class="serial-actions">
+          <button id="serial-clear" class="btn-logs btn-small">Clear</button>
+          <button id="serial-close" class="btn-logs btn-small">Disconnect</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Flash overlay -->
+    <div id="flash-overlay" class="flash-overlay" hidden>
+      <div class="flash-dialog">
+        <h3>🔨 Forging CSI Node</h3>
+        <div class="flash-progress-track">
+          <div id="flash-bar" class="flash-progress-fill"></div>
+        </div>
+        <p id="flash-pct" class="flash-pct"></p>
+        <p id="flash-status" class="flash-status">Stoking the forge…</p>
+        <pre id="flash-log" class="flash-log"></pre>
+        <div id="flash-confirm-row" class="flash-confirm-row" hidden>
+          <button id="flash-confirm-yes" class="btn-flash">🔨 Strike Now</button>
+          <button id="flash-confirm-no" class="btn-logs btn-small">Cancel</button>
+        </div>
+        <button id="flash-close" class="btn-flash" hidden>Close</button>
+      </div>
+    </div>
+
+    <script src="js/nvs_gen.js?v=20260823-channel"></script>
+    <script type="module" src="js/flasher.js?v=20260823-channel"></script>
+  </body>
+</html>

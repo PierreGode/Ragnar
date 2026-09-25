@@ -1,0 +1,16 @@
+{
+  "name": "RuSense CSI Node — ESP32-C6",
+  "version": "0.6.7",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-C6",
+      "parts": [
+        { "path": "firmware/c6/bootloader.bin",       "offset": 0 },
+        { "path": "firmware/c6/partition-table.bin",  "offset": 32768 },
+        { "path": "firmware/c6/ota_data_initial.bin", "offset": 61440 },
+        { "path": "firmware/c6/esp32-csi-node.bin",   "offset": 131072 }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+[Unit]
+# Ragnar certwatch — dedicated passive TLS certificate-triage monitor.
+# OPT-IN. Runs certwatch.py live on a mirror/SPAN interface, streaming one JSON
+# record per line to journald (the web UI + a forwarder can tail it). PASSIVE
+# ONLY: granted CAP_NET_RAW to sniff and nothing else — it cannot transmit.
+#   sudo useradd -r -s /usr/sbin/nologin certwatch
+#   sudo cp scripts/certwatch.service /etc/systemd/system/
+#   sudoedit /etc/ragnar/certwatch.env         # set CERTWATCH_IFACE=mon0 etc.
+#   sudo systemctl enable --now certwatch
+#   journalctl -u certwatch -f
+Description=Ragnar certwatch passive TLS certificate triage
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=certwatch
+Group=certwatch
+WorkingDirectory=/home/ragnar/Ragnar
+# Edit CERTWATCH_IFACE (and optionally ports/warn-days) here. '-' = missing-file ok.
+EnvironmentFile=-/etc/ragnar/certwatch.env
+Environment=CERTWATCH_IFACE=eth0
+Environment=CERTWATCH_PORTS=443,465,636,853,993,995,8443,9443,10250
+Environment=CERTWATCH_WARN_DAYS=30
+ExecStart=/usr/bin/python3 /home/ragnar/Ragnar/python/certwatch.py \
+    -i ${CERTWATCH_IFACE} --ports ${CERTWATCH_PORTS} \
+    --warn-days ${CERTWATCH_WARN_DAYS} --json
+Restart=on-failure
+RestartSec=5
+
+# --- least privilege: sniff only, drop everything else ---------------------
+# CAP_NET_RAW is the single capability a passive libpcap/AF_PACKET sniffer needs.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+# It never originates traffic, so deny socket families beyond packet sockets.
+RestrictAddressFamilies=AF_PACKET AF_UNIX
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+# Bounded resident set — MAX_FLOWS * MAX_FLOW_BYTES plus interpreter overhead.
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

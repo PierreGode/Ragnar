@@ -1,0 +1,45 @@
+[Unit]
+# Ragnar igmpwatch — dedicated passive IGMP-snooping security monitor.
+# OPT-IN. Runs the igmpwatch package live on a SPAN/tap interface. PASSIVE ONLY:
+# granted CAP_NET_RAW/CAP_NET_ADMIN to sniff (BPF ip proto 2) and nothing else —
+# it never transmits IGMP or joins a group.
+#   sudo install -Dm644 igmpwatch.yaml /etc/igmpwatch/igmpwatch.yaml
+#   sudoedit /etc/igmpwatch/igmpwatch.yaml     # set iface: eth0
+#   sudo cp scripts/igmpwatch.service /etc/systemd/system/
+#   sudo systemctl enable --now igmpwatch
+#   journalctl -u igmpwatch -f
+Description=Ragnar igmpwatch passive IGMP security monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ragnar/Ragnar
+ExecStartPre=/bin/mkdir -p /var/lib/igmpwatch
+ExecStart=/usr/bin/python3 -m igmpwatch -c /etc/igmpwatch/igmpwatch.yaml
+Restart=on-failure
+RestartSec=5
+
+# --- least privilege: sniff only, drop everything else ---------------------
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=yes
+# It never originates traffic. AF_INET is kept only so the (opt-in, off by
+# default) SNMP poller can reach a switch's management address out-of-band.
+RestrictAddressFamilies=AF_PACKET AF_UNIX AF_INET
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/igmpwatch
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+LockPersonality=yes
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

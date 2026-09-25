@@ -1,0 +1,908 @@
+/**
+ * HudController — Extracted HUD update, settings dialog, and scenario UI
+ *
+ * Manages all DOM-based HUD elements:
+ * - Vital sign display with smooth lerp transitions and color coding
+ * - Signal metrics, sparkline, and presence indicator
+ * - Scenario description and edge module badges
+ * - Mini person-count dot visualization
+ * - Settings dialog (tabs, ranges, presets, data source)
+ * - Quick-select scenario dropdown
+ */
+
+// ---- Constants ----
+
+export const SCENARIO_NAMES = [
+  'EMPTY ROOM','VITAL SIGNS','MULTI-PERSON','FALL DETECT',
+  'SLEEP MONITOR','INTRUSION','GESTURE CTRL','CROWD OCCUPANCY',
+  'SEARCH RESCUE','ELDERLY CARE','FITNESS','SECURITY PATROL',
+];
+
+export const DEFAULTS = {
+  bloom: 0.08, bloomRadius: 0.2, bloomThresh: 0.6,
+  exposure: 1.3, vignette: 0.25, grain: 0.01, chromatic: 0.0005,
+  boneThick: 0.018, jointSize: 0.035, glow: 0.3, trail: 0.35,
+  wireColor: '#00d878', jointColor: '#ff4060', aura: 0.02,
+  field: 0.45, waves: 0.4, ambient: 0.7, reflect: 0.2,
+  fov: 50, orbitSpeed: 0.15, grid: true, room: true,
+  scenario: 'auto', cycle: 30, dataSource: 'ws', wsUrl: '',
+  // Room dimensions in metres
+  roomX: 4, roomY: 5,
+  // Nodes are fully dynamic — discovered from the live feed by node_id. We know
+  // nothing about hardware type. These two maps hold OPTIONAL user overrides,
+  // keyed by node_id:
+  //   nodeLabels[id]    = "Friendly name"          (else "Node <id>")
+  //   nodePositions[id] = { x, y, z } in metres    (else auto-layout)
+  nodeLabels: {},
+  nodePositions: {},
+};
+
+export const SETTINGS_VERSION = '9';
+
+// ── Server-side persistence (shared across browsers / devices) ───────────────
+// The visual/scene settings historically lived only in localStorage, so a save
+// was per-browser and never reached anyone else. To match Ragnar's main
+// settings ("persistent for everyone") we ALSO mirror the whole blob into the
+// server config under this key, versioned so a future SETTINGS_VERSION bump
+// cleanly invalidates a stale server copy. localStorage stays the fast local
+// cache; the server is the shared source of truth seeded on load.
+export const OBS_CONFIG_KEY = 'rusense_observatory_settings';
+const OBS_LS_KEY = 'ruview-observatory-settings';
+const OBS_LS_VER_KEY = 'ruview-settings-version';
+
+// Seed localStorage from the server config so the existing localStorage read
+// paths (the Observatory constructor + the Settings tab) transparently pick up
+// the shared values. Server wins on load — that's what makes a save by one
+// device visible to every other. Returns true if it actually seeded.
+export function seedObsFromServerConfig(cfg) {
+  try {
+    const blob = cfg && cfg[OBS_CONFIG_KEY];
+    if (blob && typeof blob === 'object' && blob.version === SETTINGS_VERSION
+        && blob.settings && typeof blob.settings === 'object') {
+      localStorage.setItem(OBS_LS_VER_KEY, SETTINGS_VERSION);
+      localStorage.setItem(OBS_LS_KEY, JSON.stringify(blob.settings));
+      return true;
+    }
+  } catch { /* storage/parse trouble — fall back to whatever is already local */ }
+  return false;
+}
+
+// Debounced push of the whole settings blob to the server config. Coalesces the
+// rapid-fire saves from slider drags into a single request; each call snapshots
+// the latest state, so the request that fires carries the newest values.
+let _obsPushTimer = null;
+export function pushObsSettingsToServer(settings) {
+  clearTimeout(_obsPushTimer);
+  let snapshot;
+  try { snapshot = JSON.parse(JSON.stringify(settings || {})); } catch { return; }
+  _obsPushTimer = setTimeout(() => {
+    fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [OBS_CONFIG_KEY]: { version: SETTINGS_VERSION, settings: snapshot } }),
+    }).catch(() => { /* offline — localStorage still holds the change locally */ });
+  }, 800);
+}
+
+export const PRESETS = {
+  foundation: {},
+  cinematic: {
+    bloom: 1.2, bloomRadius: 0.5, bloomThresh: 0.2,
+    exposure: 0.8, vignette: 0.7, grain: 0.04, chromatic: 0.002,
+    glow: 0.6, trail: 0.8, aura: 0.06, field: 0.4,
+    waves: 0.7, ambient: 0.25, reflect: 0.5, fov: 40, orbitSpeed: 0.08,
+  },
+  minimal: {
+    bloom: 0.3, bloomRadius: 0.2, bloomThresh: 0.5,
+    exposure: 1.1, vignette: 0.2, grain: 0, chromatic: 0,
+    glow: 0.3, trail: 0.2, aura: 0.02, field: 0.7,
+    waves: 0.3, ambient: 0.6, reflect: 0.1, wireColor: '#40ff90', jointColor: '#4080ff',
+  },
+  neon: {
+    bloom: 2.5, bloomRadius: 0.8, bloomThresh: 0.1,
+    exposure: 0.6, vignette: 0.6, grain: 0.02, chromatic: 0.004,
+    glow: 2.0, trail: 1.0, aura: 0.15, field: 0.6,
+    waves: 1.0, ambient: 0.15, reflect: 0.7, wireColor: '#00ffaa', jointColor: '#ff00ff',
+  },
+  tactical: {
+    bloom: 0.5, bloomRadius: 0.3, bloomThresh: 0.4,
+    exposure: 0.85, vignette: 0.4, grain: 0.04, chromatic: 0.001,
+    glow: 0.5, trail: 0.4, aura: 0.03, field: 0.8,
+    waves: 0.4, ambient: 0.3, reflect: 0.15, wireColor: '#30ff60', jointColor: '#ff8800',
+  },
+  medical: {
+    bloom: 0.6, bloomRadius: 0.4, bloomThresh: 0.35,
+    exposure: 1.0, vignette: 0.3, grain: 0.01, chromatic: 0.0005,
+    glow: 0.6, trail: 0.3, aura: 0.04, field: 0.5,
+    waves: 0.3, ambient: 0.5, reflect: 0.2, wireColor: '#00ccff', jointColor: '#ff3355',
+  },
+};
+
+// Scenario descriptions shown below the dropdown
+const SCENARIO_DESCRIPTIONS = {
+  auto:              'Auto-cycling through all sensing scenarios.',
+  empty_room:        'Baseline calibration with no human presence in the monitored zone.',
+  single_breathing:  'Detecting vital signs through WiFi signal micro-variations.',
+  two_walking:       'Tracking multiple people simultaneously via CSI multiplex separation.',
+  fall_event:        'Sudden posture-change detection using acceleration feature analysis.',
+  sleep_monitoring:  'Monitoring breathing patterns and apnea events during sleep.',
+  intrusion_detect:  'Passive perimeter monitoring -- no cameras, pure RF sensing.',
+  gesture_control:   'DTW-based gesture recognition from hand/arm motion signatures.',
+  crowd_occupancy:   'Estimating room occupancy count from aggregate CSI variance.',
+  search_rescue:     'Through-wall survivor detection using WiFi-MAT multistatic mode.',
+  elderly_care:      'Continuous gait analysis for early mobility-decline detection.',
+  fitness_tracking:  'Rep counting and exercise classification from body kinematics.',
+  security_patrol:   'Multi-zone presence patrol with camera-free motion heatmaps.',
+};
+
+// Edge modules active per scenario
+const SCENARIO_EDGE_MODULES = {
+  auto:              [],
+  empty_room:        [],
+  single_breathing:  ['VITALS'],
+  two_walking:       ['GAIT', 'TRACKING'],
+  fall_event:        ['FALL', 'VITALS'],
+  sleep_monitoring:  ['VITALS', 'APNEA'],
+  intrusion_detect:  ['PRESENCE', 'ALERT'],
+  gesture_control:   ['GESTURE', 'DTW'],
+  crowd_occupancy:   ['OCCUPANCY'],
+  search_rescue:     ['MAT', 'VITALS', 'PRESENCE'],
+  elderly_care:      ['GAIT', 'VITALS', 'FALL'],
+  fitness_tracking:  ['GESTURE', 'GAIT'],
+  security_patrol:   ['PRESENCE', 'ALERT', 'TRACKING'],
+};
+
+// Edge-module badge colors
+const MODULE_COLORS = {
+  VITALS:    'var(--red-heart)',
+  GAIT:      'var(--green-glow)',
+  FALL:      'var(--red-alert)',
+  GESTURE:   'var(--amber)',
+  PRESENCE:  'var(--blue-signal)',
+  TRACKING:  'var(--green-bright)',
+  OCCUPANCY: 'var(--amber)',
+  ALERT:     'var(--red-alert)',
+  DTW:       'var(--amber)',
+  APNEA:     'var(--red-heart)',
+  MAT:       'var(--blue-signal)',
+};
+
+// Vital-sign color-coding thresholds
+function vitalColor(type, value) {
+  if (value <= 0) return 'var(--text-secondary)';
+  if (type === 'hr') {
+    if (value < 50 || value > 130) return 'var(--red-alert)';
+    if (value < 60 || value > 100) return 'var(--amber)';
+    return 'var(--green-glow)';
+  }
+  if (type === 'br') {
+    if (value < 8 || value > 28) return 'var(--red-alert)';
+    if (value < 12 || value > 20) return 'var(--amber)';
+    return 'var(--green-glow)';
+  }
+  if (type === 'conf') {
+    if (value < 40) return 'var(--red-alert)';
+    if (value < 70) return 'var(--amber)';
+    return 'var(--green-glow)';
+  }
+  return 'var(--text-primary)';
+}
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+// ---- HudController class ----
+
+export class HudController {
+  constructor(observatory) {
+    this._obs = observatory;
+    this._settingsOpen = false;
+    this._rssiHistory = [];
+    this._sparklineCtx = document.getElementById('rssi-sparkline')?.getContext('2d');
+
+    // Lerp state for smooth vital-sign transitions
+    this._lerpHr = 0;
+    this._lerpBr = 0;
+    this._lerpConf = 0;
+
+    // Track current scenario for description/edge updates
+    this._currentScenarioKey = null;
+  }
+
+  // ============================================================
+  // Settings dialog
+  // ============================================================
+
+  initSettings() {
+    // Fullscreen toggle — wired FIRST, independently of the settings dialog.
+    // The dialog now lives in the RuSense Settings tab and is absent from this
+    // page, so the guard below returns early; keep this above it or the
+    // fullscreen button never gets a click handler (dead button on all devices).
+    const fsBtn = document.getElementById('fullscreen-btn');
+    if (fsBtn) fsBtn.addEventListener('click', () => this.toggleFullscreen());
+
+    const overlay = document.getElementById('settings-overlay');
+    const btn = document.getElementById('settings-btn');
+    const closeBtn = document.getElementById('settings-close');
+    // The settings dialog now lives in the RuSense Settings tab. If its
+    // markup has been removed from this page there is nothing else to wire.
+    if (!overlay || !btn || !closeBtn) return;
+    btn.addEventListener('click', () => this.toggleSettings());
+    closeBtn.addEventListener('click', () => this.toggleSettings());
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) this.toggleSettings(); });
+
+    // Tab switching
+    document.querySelectorAll('.stab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.stab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.stab-content').forEach(c => c.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(`stab-${tab.dataset.stab}`).classList.add('active');
+      });
+    });
+
+    const obs = this._obs;
+    const s = obs.settings;
+
+    // Bind ranges
+    this._bindRange('opt-bloom', 'bloom', v => { obs._postProcessing._bloomPass.strength = v; });
+    this._bindRange('opt-bloom-radius', 'bloomRadius', v => { obs._postProcessing._bloomPass.radius = v; });
+    this._bindRange('opt-bloom-thresh', 'bloomThresh', v => { obs._postProcessing._bloomPass.threshold = v; });
+    this._bindRange('opt-exposure', 'exposure', v => { obs._renderer.toneMappingExposure = v; });
+    this._bindRange('opt-vignette', 'vignette', v => { obs._postProcessing._vignettePass.uniforms.uVignetteStrength.value = v; });
+    this._bindRange('opt-grain', 'grain', v => { obs._postProcessing._vignettePass.uniforms.uGrainStrength.value = v; });
+    this._bindRange('opt-chromatic', 'chromatic', v => { obs._postProcessing._vignettePass.uniforms.uChromaticStrength.value = v; });
+    this._bindRange('opt-bone-thick', 'boneThick');
+    this._bindRange('opt-joint-size', 'jointSize');
+    this._bindRange('opt-glow', 'glow');
+    this._bindRange('opt-trail', 'trail');
+    this._bindRange('opt-aura', 'aura');
+    this._bindRange('opt-field', 'field', v => { obs._fieldMat.opacity = v; });
+    this._bindRange('opt-waves', 'waves');
+    this._bindRange('opt-ambient', 'ambient', v => { obs._ambient.intensity = v * 5.0; });
+    this._bindRange('opt-reflect', 'reflect', v => {
+      obs._floorMat.roughness = 1.0 - v * 0.7;
+      obs._floorMat.metalness = v * 0.5;
+    });
+    this._bindRange('opt-fov', 'fov', v => {
+      obs._camera.fov = v;
+      obs._camera.updateProjectionMatrix();
+    });
+    this._bindRange('opt-orbit-speed', 'orbitSpeed');
+    this._bindRange('opt-cycle', 'cycle', v => { obs._demoData.setCycleDuration(v); });
+
+    // Color pickers
+    document.getElementById('opt-wire-color').value = s.wireColor;
+    document.getElementById('opt-wire-color').addEventListener('input', (e) => {
+      s.wireColor = e.target.value; obs._applyColors(); this.saveSettings();
+    });
+    document.getElementById('opt-joint-color').value = s.jointColor;
+    document.getElementById('opt-joint-color').addEventListener('input', (e) => {
+      s.jointColor = e.target.value; obs._applyColors(); this.saveSettings();
+    });
+
+    // Checkboxes
+    document.getElementById('opt-grid').checked = s.grid;
+    document.getElementById('opt-grid').addEventListener('change', (e) => {
+      s.grid = e.target.checked; obs._grid.visible = e.target.checked; this.saveSettings();
+    });
+    document.getElementById('opt-room').checked = s.room;
+    document.getElementById('opt-room').addEventListener('change', (e) => {
+      s.room = e.target.checked; obs._roomWire.visible = e.target.checked; this.saveSettings();
+    });
+
+    // Scenario select
+    const scenarioSel = document.getElementById('opt-scenario');
+    scenarioSel.value = s.scenario;
+    scenarioSel.addEventListener('change', (e) => {
+      s.scenario = e.target.value;
+      obs._demoData.setScenario(e.target.value);
+      this.saveSettings();
+    });
+
+    // Data source
+    const dsSel = document.getElementById('opt-data-source');
+    dsSel.value = s.dataSource;
+    dsSel.addEventListener('change', (e) => {
+      s.dataSource = e.target.value;
+      document.getElementById('ws-url-row').style.display = e.target.value === 'ws' ? 'flex' : 'none';
+      if (e.target.value === 'ws' && s.wsUrl) obs._connectWS(s.wsUrl);
+      else obs._disconnectWS();
+      this.updateSourceBadge(s.dataSource, obs._ws);
+      this.saveSettings();
+    });
+    document.getElementById('ws-url-row').style.display = s.dataSource === 'ws' ? 'flex' : 'none';
+
+    const wsInput = document.getElementById('opt-ws-url');
+    wsInput.value = s.wsUrl;
+    wsInput.addEventListener('change', (e) => {
+      s.wsUrl = e.target.value;
+      if (s.dataSource === 'ws') obs._connectWS(e.target.value);
+      this.saveSettings();
+    });
+
+    // Buttons
+    document.getElementById('btn-reset-camera').addEventListener('click', () => {
+      obs._camera.position.set(6, 5, 8);
+      obs._controls.target.set(0, 1.2, 0);
+      obs._controls.update();
+    });
+    document.getElementById('btn-export-settings').addEventListener('click', () => {
+      const blob = new Blob([JSON.stringify(s, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'ruview-observatory-settings.json';
+      a.click();
+    });
+    document.getElementById('btn-reset-settings').addEventListener('click', () => {
+      this.applyPreset(DEFAULTS);
+    });
+
+    const presetSel = document.getElementById('opt-preset');
+    presetSel.addEventListener('change', (e) => {
+      const p = PRESETS[e.target.value];
+      if (p) this.applyPreset({ ...DEFAULTS, ...p });
+    });
+
+    // Room & Nodes section
+    this._bindRoomNodes();
+
+    obs._grid.visible = s.grid;
+    obs._roomWire.visible = s.room;
+  }
+
+  // ============================================================
+  // Room & Nodes binding
+  // ============================================================
+
+  _bindRoomNodes() {
+    const obs = this._obs;
+    const s = obs.settings;
+
+    // Ensure defensive defaults
+    if (!Number.isFinite(s.roomX) || s.roomX <= 0) s.roomX = DEFAULTS.roomX;
+    if (!Number.isFinite(s.roomY) || s.roomY <= 0) s.roomY = DEFAULTS.roomY;
+    if (!s.nodeLabels || typeof s.nodeLabels !== 'object') s.nodeLabels = {};
+    if (!s.nodePositions || typeof s.nodePositions !== 'object') s.nodePositions = {};
+
+    const bindNum = (id, getRef, setRef) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.value = getRef();
+      el.addEventListener('input', (e) => {
+        const v = parseFloat(e.target.value);
+        if (Number.isFinite(v)) {
+          setRef(v);
+          if (obs._rebuildRoomAndNodes) obs._rebuildRoomAndNodes();
+          this.saveSettings();
+        }
+      });
+    };
+
+    bindNum('opt-room-x', () => s.roomX, (v) => { s.roomX = v; });
+    bindNum('opt-room-y', () => s.roomY, (v) => { s.roomY = v; });
+
+    // Build the dynamic per-node list now and keep it in sync with the live
+    // reporting set on a low-frequency timer (never per-frame — avoids thrash).
+    this._nodeListIdsKey = null;
+    this.refreshNodeList();
+    if (this._nodeListTimer) clearInterval(this._nodeListTimer);
+    this._nodeListTimer = setInterval(() => {
+      try { this.refreshNodeList(); } catch {}
+    }, 1000);
+  }
+
+  // Currently-reporting node ids (sorted, numeric where possible). Source of
+  // truth = the latest live data frame's `nodes[]`. Empty when no live nodes.
+  _reportingNodeIds() {
+    const data = this._obs._currentData;
+    if (!data || !Array.isArray(data.nodes)) return [];
+    const ids = [];
+    for (const n of data.nodes) {
+      if (n && n.node_id != null) ids.push(n.node_id);
+    }
+    // Stable, de-duplicated order
+    const uniq = [...new Set(ids)];
+    uniq.sort((a, b) => {
+      const na = Number(a), nb = Number(b);
+      if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+      return String(a).localeCompare(String(b));
+    });
+    return uniq;
+  }
+
+  // Rebuild the settings node-list DOM only when the reporting id set changes.
+  // Each row: friendly-name text input + x/y/z metre number inputs, persisted
+  // to settings.nodeLabels / settings.nodePositions keyed by node_id.
+  refreshNodeList() {
+    const container = document.getElementById('node-list-container');
+    const hint = document.getElementById('node-list-hint');
+    if (!container) return;
+
+    const obs = this._obs;
+    const s = obs.settings;
+    if (!s.nodeLabels || typeof s.nodeLabels !== 'object') s.nodeLabels = {};
+    if (!s.nodePositions || typeof s.nodePositions !== 'object') s.nodePositions = {};
+
+    const ids = this._reportingNodeIds();
+    const key = ids.join(',');
+    if (key === this._nodeListIdsKey) return; // no change — skip rebuild
+    this._nodeListIdsKey = key;
+
+    if (hint) hint.style.display = ids.length === 0 ? 'block' : 'none';
+    container.innerHTML = '';
+
+    ids.forEach((id, i) => {
+      const auto = obs._autoLayoutPos ? obs._autoLayoutPos(i, ids.length) : { x: 0, y: 0, z: 1 };
+      const pos = (s.nodePositions[id] && typeof s.nodePositions[id] === 'object')
+        ? s.nodePositions[id] : null;
+      const px = pos && Number.isFinite(pos.x) ? pos.x : auto.x;
+      const py = pos && Number.isFinite(pos.y) ? pos.y : auto.y;
+      const pz = pos && Number.isFinite(pos.z) ? pos.z : auto.z;
+      const label = (s.nodeLabels[id] != null && String(s.nodeLabels[id]).length)
+        ? s.nodeLabels[id] : `Node ${id}`;
+
+      const subtitle = document.createElement('div');
+      subtitle.className = 'setting-subtitle';
+      subtitle.textContent = `Node ${id}`;
+      container.appendChild(subtitle);
+
+      // Name row
+      const nameRow = document.createElement('label');
+      nameRow.className = 'setting-row';
+      const nameSpan = document.createElement('span');
+      nameSpan.textContent = 'Name';
+      const nameInput = document.createElement('input');
+      nameInput.type = 'text';
+      nameInput.value = label;
+      nameInput.placeholder = `Node ${id}`;
+      nameInput.addEventListener('input', (e) => {
+        const v = e.target.value;
+        if (v && v.length) s.nodeLabels[id] = v; else delete s.nodeLabels[id];
+        if (obs._rebuildRoomAndNodes) obs._rebuildRoomAndNodes();
+        this.saveSettings();
+      });
+      nameRow.appendChild(nameSpan);
+      nameRow.appendChild(nameInput);
+      container.appendChild(nameRow);
+
+      // X / Y / Z row
+      const xyzRow = document.createElement('label');
+      xyzRow.className = 'setting-row';
+      const xyzSpan = document.createElement('span');
+      xyzSpan.textContent = 'X / Y / Z (m)';
+      const xyzWrap = document.createElement('span');
+      xyzWrap.className = 'node-xyz';
+
+      const mkNum = (axis, val) => {
+        const inp = document.createElement('input');
+        inp.type = 'number';
+        inp.step = '0.1';
+        inp.value = val;
+        inp.addEventListener('input', (e) => {
+          const v = parseFloat(e.target.value);
+          if (!Number.isFinite(v)) return;
+          if (!s.nodePositions[id] || typeof s.nodePositions[id] !== 'object') {
+            // Seed from auto-layout so the other axes stay sensible
+            s.nodePositions[id] = { x: px, y: py, z: pz };
+          }
+          s.nodePositions[id][axis] = v;
+          if (obs._rebuildRoomAndNodes) obs._rebuildRoomAndNodes();
+          this.saveSettings();
+        });
+        return inp;
+      };
+      xyzWrap.appendChild(mkNum('x', px));
+      xyzWrap.appendChild(mkNum('y', py));
+      xyzWrap.appendChild(mkNum('z', pz));
+      xyzRow.appendChild(xyzSpan);
+      xyzRow.appendChild(xyzWrap);
+      container.appendChild(xyzRow);
+    });
+  }
+
+  // ============================================================
+  // Quick-select (top bar scenario dropdown)
+  // ============================================================
+
+  initQuickSelect() {
+    const sel = document.getElementById('scenario-quick-select');
+    if (!sel) return;
+    sel.addEventListener('change', (e) => {
+      this._obs._demoData.setScenario(e.target.value);
+      const settingsSel = document.getElementById('opt-scenario');
+      if (settingsSel) settingsSel.value = e.target.value;
+      this._obs.settings.scenario = e.target.value;
+      this.saveSettings();
+    });
+  }
+
+  // ============================================================
+  // Toggle / save / preset
+  // ============================================================
+
+  toggleSettings() {
+    const overlay = document.getElementById('settings-overlay');
+    if (!overlay) return;
+    this._settingsOpen = !this._settingsOpen;
+    overlay.style.display = this._settingsOpen ? 'flex' : 'none';
+  }
+
+  toggleFullscreen() {
+    // When embedded in the dashboard the observatory lives inside a boxed
+    // iframe, so it cannot escape its container on its own. Ask the parent
+    // page to expand the iframe to fill the viewport (and go OS-fullscreen).
+    if (window.parent && window.parent !== window) {
+      try {
+        window.parent.postMessage({ type: 'observatory-fullscreen' }, '*');
+        return;
+      } catch (err) {
+        console.warn('[observatory] could not message parent for fullscreen:', err);
+      }
+    }
+    // Standalone (opened directly): use the Fullscreen API on this document.
+    const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+    if (!fsEl) {
+      const el = document.documentElement;
+      const req = el.requestFullscreen || el.webkitRequestFullscreen;
+      if (req) {
+        Promise.resolve(req.call(el)).catch(err => {
+          console.warn('[observatory] fullscreen request failed:', err);
+        });
+      }
+    } else {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if (exit) Promise.resolve(exit.call(document)).catch(() => {});
+    }
+  }
+
+  get settingsOpen() {
+    return this._settingsOpen;
+  }
+
+  saveSettings() {
+    try {
+      localStorage.setItem('ruview-observatory-settings', JSON.stringify(this._obs.settings));
+    } catch {}
+    // Mirror to the server so edits made in this dialog persist for everyone,
+    // not just this browser (debounced; see pushObsSettingsToServer).
+    pushObsSettingsToServer(this._obs.settings);
+  }
+
+  applyPreset(preset) {
+    const obs = this._obs;
+    Object.assign(obs.settings, preset);
+    // Deep-copy the node override maps so we never alias DEFAULTS objects
+    if (preset.nodeLabels && typeof preset.nodeLabels === 'object') {
+      obs.settings.nodeLabels = { ...preset.nodeLabels };
+    }
+    if (preset.nodePositions && typeof preset.nodePositions === 'object') {
+      obs.settings.nodePositions = { ...preset.nodePositions };
+    }
+    this.saveSettings();
+    const rangeMap = {
+      'opt-bloom': 'bloom', 'opt-bloom-radius': 'bloomRadius', 'opt-bloom-thresh': 'bloomThresh',
+      'opt-exposure': 'exposure', 'opt-vignette': 'vignette', 'opt-grain': 'grain', 'opt-chromatic': 'chromatic',
+      'opt-bone-thick': 'boneThick', 'opt-joint-size': 'jointSize', 'opt-glow': 'glow', 'opt-trail': 'trail', 'opt-aura': 'aura',
+      'opt-field': 'field', 'opt-waves': 'waves', 'opt-ambient': 'ambient', 'opt-reflect': 'reflect',
+      'opt-fov': 'fov', 'opt-orbit-speed': 'orbitSpeed', 'opt-cycle': 'cycle',
+    };
+    for (const [id, key] of Object.entries(rangeMap)) {
+      const el = document.getElementById(id);
+      const valEl = document.getElementById(`${id}-val`);
+      if (el) el.value = obs.settings[key];
+      if (valEl) valEl.textContent = obs.settings[key];
+    }
+    const gridEl = document.getElementById('opt-grid');
+    if (gridEl) { gridEl.checked = obs.settings.grid; obs._grid.visible = obs.settings.grid; }
+    const roomEl = document.getElementById('opt-room');
+    if (roomEl) { roomEl.checked = obs.settings.room; obs._roomWire.visible = obs.settings.room; }
+    document.getElementById('opt-wire-color').value = obs.settings.wireColor;
+    document.getElementById('opt-joint-color').value = obs.settings.jointColor;
+    obs._applyPostSettings();
+    obs._renderer.toneMappingExposure = obs.settings.exposure;
+    obs._fieldMat.opacity = obs.settings.field;
+    obs._ambient.intensity = obs.settings.ambient * 5.0;
+    obs._floorMat.roughness = 1.0 - obs.settings.reflect * 0.7;
+    obs._floorMat.metalness = obs.settings.reflect * 0.5;
+    obs._camera.fov = obs.settings.fov;
+    obs._camera.updateProjectionMatrix();
+    obs._demoData.setCycleDuration(obs.settings.cycle);
+    obs._applyColors();
+
+    // Refresh Room inputs and rebuild markers if room/node keys changed.
+    if (preset.roomX !== undefined || preset.roomY !== undefined ||
+        preset.nodeLabels || preset.nodePositions) {
+      const setVal = (id, v) => { const el = document.getElementById(id); if (el && Number.isFinite(v)) el.value = v; };
+      setVal('opt-room-x', obs.settings.roomX);
+      setVal('opt-room-y', obs.settings.roomY);
+      // Force the dynamic node list to rebuild against current values.
+      this._nodeListIdsKey = null;
+      this.refreshNodeList();
+      if (obs._rebuildRoomAndNodes) obs._rebuildRoomAndNodes();
+    }
+  }
+
+  // ============================================================
+  // Source badge
+  // ============================================================
+
+  updateSourceBadge(dataSource, ws) {
+    const dot = document.querySelector('#data-source-badge .dot');
+    const label = document.getElementById('data-source-label');
+    if (!dot && !label) return;
+    if (dataSource === 'ws' && ws?.readyState === WebSocket.OPEN) {
+      if (dot) dot.className = 'dot dot--live';
+      if (label) label.textContent = 'LIVE';
+    } else {
+      if (dot) dot.className = 'dot dot--demo';
+      if (label) label.textContent = 'DEMO';
+    }
+  }
+
+  // ============================================================
+  // HUD update (called every frame)
+  // ============================================================
+
+  updateHUD(data, demoData) {
+    if (!data) return;
+    const vs = data.vital_signs || {};
+    const feat = data.features || {};
+    const cls = data.classification || {};
+
+    // Sync scenario dropdown
+    const quickSel = document.getElementById('scenario-quick-select');
+    const cur = demoData._autoMode ? 'auto' : demoData.currentScenario;
+    if (quickSel && quickSel.value !== cur) quickSel.value = cur;
+    const autoIcon = document.getElementById('autoplay-icon');
+    if (autoIcon) autoIcon.className = demoData._autoMode ? '' : 'hidden';
+
+    // Hold the last CONFIDENT vital reading through brief gaps (a frame that
+    // carries bpm 0 / low confidence between the sensing-server's multi-second
+    // recomputes) instead of snapping the lerp to 0 and flickering to "--".
+    // Clear only after HOLD_MS of no confident reading. updateHUD runs every
+    // frame, so this staleness check re-evaluates continuously — no extra timer.
+    const HOLD_MS = 30000, MIN_CONF = 0.3;
+    const nowMs = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    // Presence toggles 0↔1 at frame rate even in an empty room (~20% duty) at
+    // high confidence, so read a duty-cycle over a sliding window with
+    // hysteresis (biased toward PRESENT) instead of the raw boolean. Sample
+    // only new frames (by timestamp) so a stalled live stream can't latch.
+    const PRES_WIN = 2000, PRES_ON = 0.18, PRES_OFF = 0.08, PRES_LINGER = 4000, PRES_MIN = 10;
+    this._presSamples = this._presSamples || [];
+    const pts = data.timestamp;
+    if (pts == null || pts !== this._presLastTs) {
+      this._presLastTs = pts;
+      const ml0 = String(cls.motion_level || '');
+      const occ = !!cls.presence || ml0.startsWith('present') || ml0 === 'active';
+      this._presSamples.push({ t: nowMs, occ });
+      while (this._presSamples.length && this._presSamples[0].t < nowMs - PRES_WIN) this._presSamples.shift();
+      let hits = 0; for (const s of this._presSamples) if (s.occ) hits++;
+      const duty = this._presSamples.length ? hits / this._presSamples.length : 0;
+      if (!this._smPresent) { if (this._presSamples.length >= PRES_MIN && duty >= PRES_ON) { this._smPresent = true; this._presLastOccAt = nowMs; } }
+      else if (duty >= PRES_OFF) { this._presLastOccAt = nowMs; }
+      else if (nowMs - (this._presLastOccAt || 0) >= PRES_LINGER) { this._smPresent = false; }
+    }
+    // Backend-authoritative presence override: poll the same smoothed, model-aware
+    // decision that gates alerts (~1.3s; presence needs no frame-rate). Keeps the
+    // 3D HUD in lock-step with the dashboard/alerts. Falls back to the local duty
+    // estimate only if the backend is unreachable/stale.
+    if (!this._bkPresAt || nowMs - this._bkPresAt >= 1300) {
+      this._bkPresAt = nowMs;
+      fetch('/api/rusense/presence').then((r) => (r.ok ? r.json() : null)).then((p) => {
+        this._bkPres = (p && p.success !== false && (p.age_s == null || p.age_s <= 12))
+          ? { present: p.present === true, people: p.people || 0 } : null;
+      }).catch(() => {});
+    }
+    const present = this._bkPres ? this._bkPres.present : (this._smPresent === true);
+    const mlNow = String(cls.motion_level || '');
+    if (present && (mlNow.startsWith('present') || mlNow === 'active')) this._presLastMotion = mlNow;
+    // Live sensing-server sends heartbeat_confidence; demo data uses heart_rate_confidence.
+    const hrConf = vs.heartbeat_confidence != null ? vs.heartbeat_confidence : vs.heart_rate_confidence;
+    const brConf = vs.breathing_confidence;
+    // Capture a reading only when present, positive, and not below the gate
+    // (missing confidence is treated as acceptable, not a block).
+    if (present && vs.heart_rate_bpm > 0 && !(Number(hrConf) < MIN_CONF)) {
+      this._hrHoldVal = vs.heart_rate_bpm; this._hrHoldAt = nowMs;
+    }
+    if (present && vs.breathing_rate_bpm > 0 && !(Number(brConf) < MIN_CONF)) {
+      this._brHoldVal = vs.breathing_rate_bpm; this._brHoldAt = nowMs;
+    }
+    const hrFresh = this._hrHoldVal > 0 && (nowMs - (this._hrHoldAt || 0)) <= HOLD_MS;
+    const brFresh = this._brHoldVal > 0 && (nowMs - (this._brHoldAt || 0)) <= HOLD_MS;
+    const targetHr = hrFresh ? this._hrHoldVal : 0;
+    const targetBr = brFresh ? this._brHoldVal : 0;
+    // Confidence strobes at the frame rate (0.85 → 0.52 → 0.85…) and snaps to
+    // "--" on any zero frame — the same fast-update flicker we smoothed for
+    // presence and vitals. Feed a time-gated EMA over *new* frames only and
+    // hold through the occasional zero, instead of jittering the % every frame.
+    const cts = data.timestamp;
+    if (cts == null || cts !== this._confLastTs) {
+      this._confLastTs = cts;
+      const c = Math.round((cls.confidence || 0) * 100);
+      if (c > 0) this._confEma = (this._confEma == null) ? c : this._confEma + 0.05 * (c - this._confEma);
+    }
+
+    // Smooth lerp transitions (blend 4% per frame toward target — very stable)
+    const lerpFactor = 0.04;
+    this._lerpHr = targetHr > 0 ? lerp(this._lerpHr, targetHr, lerpFactor) : 0;
+    this._lerpBr = targetBr > 0 ? lerp(this._lerpBr, targetBr, lerpFactor) : 0;
+    this._lerpConf = this._confEma || 0;   // already smoothed via the EMA above
+
+    const dispHr = this._lerpHr > 1 ? Math.round(this._lerpHr) : '--';
+    const dispBr = this._lerpBr > 1 ? Math.round(this._lerpBr) : '--';
+    const dispConf = this._confEma != null ? Math.round(this._confEma) : '--';
+
+    this._setText('hr-value', dispHr);
+    this._setText('br-value', dispBr);
+    this._setText('conf-value', dispConf);
+    this._setWidth('hr-bar', Math.min(100, this._lerpHr / 120 * 100));
+    this._setWidth('br-bar', Math.min(100, this._lerpBr / 30 * 100));
+    this._setWidth('conf-bar', this._lerpConf);
+
+    // Color-code vital values
+    this._setColor('hr-value', vitalColor('hr', this._lerpHr));
+    this._setColor('br-value', vitalColor('br', this._lerpBr));
+    this._setColor('conf-value', vitalColor('conf', this._lerpConf));
+
+    // Color-code bar fills to match
+    this._setBarColor('hr-bar', vitalColor('hr', this._lerpHr));
+    this._setBarColor('br-bar', vitalColor('br', this._lerpBr));
+    this._setBarColor('conf-bar', vitalColor('conf', this._lerpConf));
+
+    this._setText('rssi-value', `${Math.round(feat.mean_rssi || 0)} dBm`);
+    this._setText('var-value', (feat.variance || 0).toFixed(2));
+    this._setText('motion-value', (feat.motion_band_power || 0).toFixed(3));
+
+    // Mini person-count dots — gate on the smoothed presence and hold the last
+    // positive count so the dots don't strobe with the raw boolean.
+    // People: prefer the backend's corroborated count (median across nodes —
+    // rejects a single node hallucinating 1 through a wall). Fall back to the raw
+    // engine estimate only when the backend is unavailable.
+    if (data.estimated_persons > 0) this._presLastPeople = data.estimated_persons;
+    const personCount = this._bkPres
+      ? this._bkPres.people
+      : (present ? (this._presLastPeople || 1) : 0);
+    this._updatePersonDots(personCount);
+
+    const presEl = document.getElementById('presence-indicator');
+    const presLabel = document.getElementById('presence-label');
+    if (presEl) {
+      const ml = present ? (this._presLastMotion || 'present_still') : 'absent';
+      presEl.className = 'presence-state';
+      if (present && ml === 'active') { presEl.classList.add('presence--active'); presLabel.textContent = 'ACTIVE'; }
+      else if (present) { presEl.classList.add('presence--present'); presLabel.textContent = 'PRESENT'; }
+      else { presEl.classList.add('presence--absent'); presLabel.textContent = 'ABSENT'; }
+    }
+
+    const fallEl = document.getElementById('fall-alert');
+    if (fallEl) fallEl.style.display = cls.fall_detected ? 'block' : 'none';
+
+    // Scenario description and edge modules
+    const scenarioKey = demoData._autoMode ? (demoData.currentScenario || 'auto') : (demoData.currentScenario || 'auto');
+    if (scenarioKey !== this._currentScenarioKey) {
+      this._currentScenarioKey = scenarioKey;
+      this._updateScenarioDescription(scenarioKey);
+      this._updateEdgeModules(scenarioKey);
+    }
+  }
+
+  // ============================================================
+  // Sparkline
+  // ============================================================
+
+  updateSparkline(data) {
+    const rssi = data?.features?.mean_rssi;
+    if (rssi == null || !this._sparklineCtx) return;
+    this._rssiHistory.push(rssi);
+    if (this._rssiHistory.length > 60) this._rssiHistory.shift();
+
+    const ctx = this._sparklineCtx;
+    const w = ctx.canvas.width, h = ctx.canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    if (this._rssiHistory.length < 2) return;
+
+    ctx.beginPath();
+    ctx.strokeStyle = '#2090ff';
+    ctx.lineWidth = 1.5;
+    ctx.shadowColor = '#2090ff';
+    ctx.shadowBlur = 4;
+    for (let i = 0; i < this._rssiHistory.length; i++) {
+      const x = (i / (this._rssiHistory.length - 1)) * w;
+      const norm = Math.max(0, Math.min(1, (this._rssiHistory[i] + 80) / 60));
+      const y = h - norm * h;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.lineTo(w, h);
+    ctx.lineTo(0, h);
+    ctx.closePath();
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, 'rgba(32,144,255,0.15)');
+    grad.addColorStop(1, 'rgba(32,144,255,0)');
+    ctx.fillStyle = grad;
+    ctx.fill();
+  }
+
+  // ============================================================
+  // Private helpers
+  // ============================================================
+
+  _setText(id, val) {
+    const e = document.getElementById(id);
+    if (e) e.textContent = val;
+  }
+
+  _setWidth(id, pct) {
+    const e = document.getElementById(id);
+    if (e) e.style.width = `${pct}%`;
+  }
+
+  _setColor(id, color) {
+    const e = document.getElementById(id);
+    if (e) e.style.color = color;
+  }
+
+  _setBarColor(id, color) {
+    const e = document.getElementById(id);
+    if (e) e.style.background = color;
+  }
+
+  _bindRange(id, key, applyFn) {
+    const el = document.getElementById(id);
+    const valEl = document.getElementById(`${id}-val`);
+    if (!el) return;
+    el.value = this._obs.settings[key];
+    if (valEl) valEl.textContent = this._obs.settings[key];
+    el.addEventListener('input', (e) => {
+      const v = parseFloat(e.target.value);
+      this._obs.settings[key] = v;
+      if (valEl) valEl.textContent = v;
+      if (applyFn) applyFn(v);
+      this.saveSettings();
+    });
+  }
+
+  _updatePersonDots(count) {
+    const container = document.getElementById('persons-dots');
+    if (!container) {
+      // Fall back to text-only display
+      this._setText('persons-value', count);
+      return;
+    }
+    // Build dot icons: filled for detected persons, dim for empty slots (max 8)
+    const maxDots = 8;
+    const clamped = Math.min(count, maxDots);
+    let html = '';
+    for (let i = 0; i < maxDots; i++) {
+      const active = i < clamped;
+      html += `<span class="person-dot${active ? ' person-dot--active' : ''}"></span>`;
+    }
+    container.innerHTML = html;
+    this._setText('persons-value', count);
+  }
+
+  _updateScenarioDescription(scenarioKey) {
+    const el = document.getElementById('scenario-description');
+    if (!el) return;
+    el.textContent = SCENARIO_DESCRIPTIONS[scenarioKey] || '';
+  }
+
+  _updateEdgeModules(scenarioKey) {
+    const bar = document.getElementById('edge-modules-bar');
+    if (!bar) return;
+    const modules = SCENARIO_EDGE_MODULES[scenarioKey] || [];
+    if (modules.length === 0) {
+      bar.innerHTML = '';
+      bar.style.display = 'none';
+      return;
+    }
+    bar.style.display = 'flex';
+    bar.innerHTML = modules.map(m => {
+      const color = MODULE_COLORS[m] || 'var(--text-secondary)';
+      return `<span class="edge-badge" style="--badge-color:${color}">${m}</span>`;
+    }).join('');
+  }
+}

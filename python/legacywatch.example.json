@@ -1,0 +1,22 @@
+{
+  "iface": null,
+  "bssid": null,
+  "ssid": null,
+  "airtime_report_s": 60,
+  "airtime_disproportion": 4.0,
+  "airtime_min_share": 0.05,
+  "retry_ratio_warn": 0.25,
+  "retry_min_frames": 200,
+  "legacy_rate_stuck_ratio": 0.8,
+  "legacy_rate_min_frames": 100,
+  "min_frames_for_client_finding": 5,
+  "suppress_s": 900,
+  "suppress_max": 8192,
+  "probation_max": 4096,
+  "protected_max": 2048,
+  "pinned_max": 512,
+  "pinned_clients": [],
+  "baseline_legacy": [],
+  "oui_csv": null,
+  "inventory_csv": null
+}

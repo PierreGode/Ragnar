@@ -1,0 +1,53 @@
+[Unit]
+# Ragnar isiswatch — dedicated passive IS-IS security monitor.
+# OPT-IN. Runs isiswatch.py live on a SPAN/tap-facing interface and writes a
+# snapshot to /run/ragnar/isiswatch.json for the web UI to poll. PASSIVE ONLY:
+# granted CAP_NET_RAW/CAP_NET_ADMIN to sniff in promiscuous mode and nothing
+# else — it never transmits IS-IS.
+#   sudo cp scripts/isiswatch.service /etc/systemd/system/
+#   sudo install -Dm644 baseline.example.json /etc/ragnar/isis-baseline.json
+#   sudoedit /etc/ragnar/isiswatch.env         # set ISISWATCH_IFACE=eth0 etc.
+#   sudo systemctl enable --now isiswatch
+#   journalctl -u isiswatch -f
+Description=Ragnar isiswatch passive IS-IS security monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ragnar/Ragnar
+# Edit ISISWATCH_IFACE (and optionally baseline) here. '-' = missing-file ok.
+EnvironmentFile=-/etc/ragnar/isiswatch.env
+Environment=ISISWATCH_IFACE=eth0
+Environment=ISISWATCH_BASELINE=/etc/ragnar/isis-baseline.json
+ExecStartPre=/bin/mkdir -p /run/ragnar
+ExecStart=/usr/bin/python3 /home/ragnar/Ragnar/python/isiswatch.py \
+    -i ${ISISWATCH_IFACE} -b ${ISISWATCH_BASELINE} \
+    --web-json /run/ragnar/isiswatch.json
+Restart=on-failure
+RestartSec=5
+
+# --- least privilege: sniff only, drop everything else ---------------------
+# IS-IS rides on L2; promiscuous capture needs CAP_NET_RAW (+ NET_ADMIN to set
+# promisc on some setups). No other capability is granted.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_PACKET AF_UNIX
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/ragnar
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

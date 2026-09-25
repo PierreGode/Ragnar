@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RuView Observatory — WiFi DensePose</title>
+  <link rel="stylesheet" href="observatory/css/observatory.css?v=20260815-leftstack">
+</head>
+<body>
+  <canvas id="observatory-canvas"></canvas>
+
+  <!-- ======= HUD Overlay ======= -->
+  <div id="hud">
+
+    <!-- Left stack: DEMO flag on top, the auto-cycle scenario picker below it.
+         Both are laid out in normal flow, so when the DEMO flag hides (a real
+         node connects) the auto-cycle picker rises into its place automatically. -->
+    <div id="left-stack">
+      <!-- Demo flag: shown whenever the view is running on simulated demo data,
+           i.e. until a real sensing node connects and streams a live frame. -->
+      <div id="demo-flag" class="demo-flag--hidden"
+           title="No sensing node connected — showing simulated demo data. Connect an ESP32 node (or set Data Source to Live WebSocket) to see real readings.">
+        <span class="demo-flag__dot"></span><span class="demo-flag__text">DEMO — no node connected</span>
+      </div>
+      <div id="scenario-area">
+        <select id="scenario-quick-select" title="Change scenario">
+          <option value="auto">Auto-Cycle</option>
+          <option value="empty_room">Empty Room</option>
+          <option value="single_breathing">Vital Signs</option>
+          <option value="two_walking">Multi-Person</option>
+          <option value="fall_event">Fall Detect</option>
+          <option value="sleep_monitoring">Sleep Monitor</option>
+          <option value="intrusion_detect">Intrusion</option>
+          <option value="gesture_control">Gesture Ctrl</option>
+          <option value="crowd_occupancy">Crowd (4 ppl)</option>
+          <option value="search_rescue">Search Rescue</option>
+          <option value="elderly_care">Elderly Care</option>
+          <option value="fitness_tracking">Fitness</option>
+          <option value="security_patrol">Security Patrol</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Top-right: status + fullscreen -->
+    <div id="status-bar">
+      <div id="scenario-description"></div>
+      <div id="fps-counter" style="display:none">60 FPS</div>
+      <button id="fullscreen-btn" title="Toggle Fullscreen">&#9974;</button>
+    </div>
+
+    <!-- Left panel: Vital Signs -->
+    <div id="panel-vitals" class="data-panel">
+      <div class="panel-header">Vital Signs</div>
+      <div class="vital-row">
+        <div class="vital-icon">&#9825;</div>
+        <div class="vital-data">
+          <div class="vital-label">Heart Rate</div>
+          <div class="vital-value"><span id="hr-value">--</span> <span class="vital-unit">BPM</span></div>
+          <div class="vital-bar"><div id="hr-bar" class="vital-bar-fill vital-bar--hr"></div></div>
+        </div>
+      </div>
+      <div class="vital-row">
+        <div class="vital-icon">&#9788;</div>
+        <div class="vital-data">
+          <div class="vital-label">Respiration</div>
+          <div class="vital-value"><span id="br-value">--</span> <span class="vital-unit">RPM</span></div>
+          <div class="vital-bar"><div id="br-bar" class="vital-bar-fill vital-bar--br"></div></div>
+        </div>
+      </div>
+      <div class="vital-row">
+        <div class="vital-icon">&#9878;</div>
+        <div class="vital-data">
+          <div class="vital-label">Confidence</div>
+          <div class="vital-value"><span id="conf-value">--</span><span class="vital-unit">%</span></div>
+          <div class="vital-bar"><div id="conf-bar" class="vital-bar-fill vital-bar--conf"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right panel: Signal & Presence -->
+    <div id="panel-signal" class="data-panel">
+      <div class="panel-header">WiFi Signal</div>
+      <div class="signal-row">
+        <span class="signal-label">RSSI</span>
+        <span class="signal-value" id="rssi-value">-- dBm</span>
+      </div>
+      <div class="signal-row">
+        <span class="signal-label">Variance</span>
+        <span class="signal-value" id="var-value">--</span>
+      </div>
+      <div class="signal-row">
+        <span class="signal-label">Motion</span>
+        <span class="signal-value" id="motion-value">--</span>
+      </div>
+      <div class="signal-row">
+        <span class="signal-label">Persons</span>
+        <span class="signal-value" id="persons-value">0</span>
+        <span id="persons-dots" class="persons-dots"></span>
+      </div>
+      <canvas id="rssi-sparkline" width="200" height="48"></canvas>
+
+      <div class="panel-header" style="margin-top:12px">Presence</div>
+      <div id="presence-indicator" class="presence-state presence--absent">
+        <span id="presence-label">ABSENT</span>
+      </div>
+      <div id="fall-alert" class="fall-alert" style="display:none">FALL DETECTED</div>
+    </div>
+
+    <!-- Edge module badges (populated dynamically by HudController) -->
+    <div id="edge-modules-bar"></div>
+
+    <!-- Bottom bar: capabilities -->
+    <div id="capabilities-bar">
+      <div class="cap-item"><span class="cap-icon">&#9898;</span><span>Human Pose Estimation</span></div>
+      <div class="cap-divider"></div>
+      <div class="cap-item"><span class="cap-icon">&#9829;</span><span>Vital Sign Monitoring</span></div>
+      <div class="cap-divider"></div>
+      <div class="cap-item"><span class="cap-icon">&#9784;</span><span>Presence Detection</span></div>
+    </div>
+
+    <!-- Bottom-right: keyboard hints -->
+    <div id="key-hints">
+      <span class="key-hint">[A] Orbit</span>
+      <span class="key-hint">[D] Scenario</span>
+      <span class="key-hint">[F] FPS</span>
+      <span class="key-hint">[Space] Pause</span>
+    </div>
+  </div>
+
+  <!-- Three.js r160 + addons, vendored locally under web/vendor/three/ so the
+       Observatory loads under the same-origin CSP (script-src 'self') and with
+       no internet access in the field. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "/web/vendor/three/three.module.js",
+      "three/addons/": "/web/vendor/three/examples/jsm/"
+    }
+  }
+  </script>
+
+  <script type="module" src="observatory/js/main.js?v=20260819-fpsync"></script>
+</body>
+</html>

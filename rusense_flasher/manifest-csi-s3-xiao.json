@@ -1,0 +1,16 @@
+{
+  "name": "RuSense CSI Node — Seeed XIAO ESP32S3 (8MB, headless sensor)",
+  "version": "0.7.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "firmware/s3-xiao/bootloader.bin",       "offset": 0 },
+        { "path": "firmware/s3-xiao/partition-table.bin",  "offset": 32768 },
+        { "path": "firmware/s3-xiao/ota_data_initial.bin", "offset": 61440 },
+        { "path": "firmware/s3-xiao/esp32-csi-node.bin",   "offset": 131072 }
+      ]
+    }
+  ]
+}

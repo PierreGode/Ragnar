@@ -1,0 +1,48 @@
+[Unit]
+# Ragnar snmpwatch — dedicated passive SNMP community-exposure monitor.
+# OPT-IN. Runs snmpwatch.py live on a SPAN/tap interface and writes a JSON
+# report to /var/lib/ragnar/snmpwatch.json. PASSIVE ONLY: granted CAP_NET_RAW to
+# sniff (BPF udp 161/162) and nothing else — it never emits an SNMP packet.
+#   sudo cp scripts/snmpwatch.service /etc/systemd/system/
+#   sudoedit /etc/systemd/system/snmpwatch.service   # set RAGNAR_IFACE=eth0 (br0 for inline)
+#   sudo mkdir -p /var/lib/ragnar
+#   sudo systemctl enable --now snmpwatch
+#   journalctl -u snmpwatch -f
+Description=Ragnar snmpwatch passive SNMP exposure monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ragnar/Ragnar
+Environment=RAGNAR_IFACE=eth0
+ExecStartPre=/bin/mkdir -p /var/lib/ragnar
+# --json writes the report at exit; the process runs until stopped, so the
+# report is refreshed on restart. For a live-updating snapshot use a wrapper.
+ExecStart=/usr/bin/python3 /home/ragnar/Ragnar/python/snmpwatch.py -i ${RAGNAR_IFACE} \
+    --json /var/lib/ragnar/snmpwatch.json
+Restart=on-failure
+RestartSec=5
+
+# --- least privilege: sniff only ------------------------------------------
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_PACKET AF_UNIX
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/ragnar
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

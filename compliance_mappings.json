@@ -1,0 +1,76 @@
+{
+  "_meta": {
+    "description": "Curated, informal control mappings for Ragnar compliance reporting. NOT a certified CIS-CAT assessment or PCI ASV scan. Lynis test IDs map to CIS hardening areas; scan/host findings map to PCI DSS v4.0 technical requirements. Edit freely to extend coverage.",
+    "cis_source": "Lynis test IDs (authenticated SSH audit) -> CIS Benchmark areas",
+    "pci_source": "scan_findings + hosts + discovered credentials -> PCI DSS v4.0 requirements"
+  },
+  "cis": {
+    "framework": "CIS Benchmarks (hardening-aligned, informal)",
+    "lynis_to_cis": {
+      "SSH-7408": {"title": "SSH daemon configuration", "controls": ["CIS 5.2 - SSH Server Configuration"]},
+      "AUTH-9262": {"title": "Password strength tools (PAM)", "controls": ["CIS 5.4 - Password Creation Requirements"]},
+      "AUTH-9286": {"title": "Password aging / account policy", "controls": ["CIS 5.5 - User Accounts & Environment"]},
+      "AUTH-9328": {"title": "Default umask", "controls": ["CIS 5.5.4 - Default umask"]},
+      "BOOT-5122": {"title": "GRUB bootloader password", "controls": ["CIS 1.4 - Secure Boot Settings"]},
+      "KRNL-6000": {"title": "Kernel sysctl hardening", "controls": ["CIS 3.2 - Network Kernel Parameters"]},
+      "FILE-6310": {"title": "Separate partitions (/tmp, /var)", "controls": ["CIS 1.1 - Filesystem Configuration"]},
+      "FIRE-4513": {"title": "Host-based firewall active", "controls": ["CIS 3.5 - Firewall Configuration"]},
+      "LOGG-2154": {"title": "Logging / auditd configured", "controls": ["CIS 4.1 - Configure System Accounting (auditd)"]},
+      "TIME-3104": {"title": "Time synchronization (NTP)", "controls": ["CIS 2.1 - Time Synchronization"]},
+      "PKGS-7370": {"title": "Package patch management", "controls": ["CIS 1.9 - Patch Management"]},
+      "PKGS-7392": {"title": "Vulnerable packages present", "controls": ["CIS 1.9 - Patch Management"]},
+      "HRDN-7222": {"title": "Compilers restricted", "controls": ["CIS 1.5 - Additional Process Hardening"]},
+      "BANN-7126": {"title": "Login warning banner", "controls": ["CIS 1.7 - Command Line Warning Banners"]},
+      "USB-1000": {"title": "USB storage restricted", "controls": ["CIS 1.1.10 - Disable USB Storage"]}
+    },
+    "prefix_to_cis": {
+      "SSH":  {"title": "SSH configuration", "controls": ["CIS 5.2 - SSH Server Configuration"]},
+      "AUTH": {"title": "Authentication & accounts", "controls": ["CIS 5 - Access, Authentication & Authorization"]},
+      "ACCT": {"title": "Accounting / auditd", "controls": ["CIS 4.1 - System Accounting"]},
+      "BOOT": {"title": "Boot & init services", "controls": ["CIS 1.4 - Secure Boot Settings"]},
+      "KRNL": {"title": "Kernel hardening", "controls": ["CIS 3.2 - Kernel/Network Parameters"]},
+      "FILE": {"title": "Filesystem configuration", "controls": ["CIS 1.1 - Filesystem Configuration"]},
+      "STRG": {"title": "Storage / removable media", "controls": ["CIS 1.1.1 - Removable Media"]},
+      "USB":  {"title": "USB devices", "controls": ["CIS 1.1.10 - USB Storage"]},
+      "FIRE": {"title": "Host firewall", "controls": ["CIS 3.5 - Firewall Configuration"]},
+      "NETW": {"title": "Network configuration", "controls": ["CIS 3 - Network Configuration"]},
+      "NAME": {"title": "Name services / DNS", "controls": ["CIS 2 - Services"]},
+      "LOGG": {"title": "Logging & auditing", "controls": ["CIS 4 - Logging and Auditing"]},
+      "TIME": {"title": "Time synchronization", "controls": ["CIS 2.1 - Time Synchronization"]},
+      "PKGS": {"title": "Package & patch management", "controls": ["CIS 1.9 - Patch Management"]},
+      "HRDN": {"title": "Process hardening", "controls": ["CIS 1.5 - Additional Process Hardening"]},
+      "MALW": {"title": "Malware / antivirus", "controls": ["CIS 1.6 - Malware Defenses"]},
+      "BANN": {"title": "Warning banners", "controls": ["CIS 1.7 - Warning Banners"]},
+      "CONT": {"title": "Containers", "controls": ["CIS 5 - Container Hardening"]},
+      "PHP":  {"title": "PHP hardening", "controls": ["CIS App - PHP"]},
+      "HTTP": {"title": "Web server hardening", "controls": ["CIS App - Web Server"]},
+      "DBS":  {"title": "Database hardening", "controls": ["CIS App - Database"]},
+      "MAIL": {"title": "Mail services", "controls": ["CIS App - Mail Transfer Agent"]},
+      "PROC": {"title": "Process / proc settings", "controls": ["CIS 1.5 - Process Hardening"]},
+      "TOOL": {"title": "Security tooling present", "controls": ["CIS 4 - Auditing Tools"]}
+    }
+  },
+  "pci": {
+    "framework": "PCI DSS v4.0 (technical scanning slice, informal)",
+    "requirements": [
+      {"id": "PCI 1.4", "rule": "firewall_config", "title": "Network security controls / host firewall",
+       "guidance": "Host-based firewall present and active on in-scope systems."},
+      {"id": "PCI 2.2.1", "rule": "secure_config", "title": "Secure configuration standards applied",
+       "guidance": "Systems hardened to a known configuration standard; no insecure-default findings."},
+      {"id": "PCI 2.2.2", "rule": "default_credentials", "title": "Vendor defaults / weak credentials removed",
+       "guidance": "No default or weak credentials recoverable on in-scope systems."},
+      {"id": "PCI 4.2.1", "rule": "strong_crypto_transit", "title": "Strong cryptography for data in transit",
+       "guidance": "No cleartext administrative or data services (telnet, ftp, http, pop3, imap) exposed."},
+      {"id": "PCI 5.2", "rule": "anti_malware", "title": "Anti-malware protection",
+       "guidance": "Malware defenses present on systems commonly affected by malware."},
+      {"id": "PCI 6.3.3", "rule": "patch_vulns", "title": "Patch known vulnerabilities",
+       "guidance": "No known-exploitable/critical-high CVEs outstanding on in-scope systems."},
+      {"id": "PCI 8.3", "rule": "default_credentials", "title": "Strong authentication for accounts",
+       "guidance": "Accounts not protected by guessable/recovered passwords."},
+      {"id": "PCI 10.2", "rule": "audit_logging", "title": "Audit logs / accountability",
+       "guidance": "System logging and audit trails are configured."},
+      {"id": "PCI 11.3.1", "rule": "vuln_scanning_process", "title": "Internal vulnerability scanning performed",
+       "guidance": "Evidence that internal vulnerability scanning is being conducted."}
+    ]
+  }
+}

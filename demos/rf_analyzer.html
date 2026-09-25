@@ -1,0 +1,1369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signal Analyzer — Ragnar</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root{--ground:#0a0e14;--panel:#111722;--panel-2:#0d1420;--ink:#cdd6e4;--ink-dim:#8b98ab;
+    --muted:#6b7a8f;--line:#1e2836;--line-soft:#161f2c;--accent:#f5b942;--cyan:#38bdc9;--live:#3fb56b;--rose:#fb7185;
+    --mono:"IBM Plex Mono",ui-monospace,monospace;--disp:"IBM Plex Sans",system-ui,sans-serif;--head:"Chakra Petch",var(--disp);}
+  *{box-sizing:border-box}html,body{margin:0}
+  body{background:var(--ground);color:var(--ink);font-family:var(--disp);line-height:1.5;padding:clamp(12px,2.5vw,28px);
+    -webkit-font-smoothing:antialiased;min-height:100vh}
+  .wrap{max-width:1500px;margin:0 auto;overflow-x:hidden}
+  header{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px 20px;border-bottom:1px solid var(--line);padding-bottom:14px;margin-bottom:16px}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.28em;text-transform:uppercase;color:var(--cyan);margin:0 0 6px}
+  h1{font-family:var(--head);font-weight:700;font-size:clamp(24px,4vw,36px);margin:0}
+  .spacer{flex:1 1 auto}
+  a.back{font-family:var(--head);font-weight:600;font-size:13px;color:var(--cyan);text-decoration:none;border:1px solid rgba(56,189,201,.4);
+    padding:8px 13px;border-radius:7px}
+  a.back:hover{background:rgba(56,189,201,.1);color:#fff}
+  .bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin-bottom:16px;padding:10px 14px;background:var(--panel-2);border:1px solid var(--line);border-radius:10px}
+  .lbl{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+  select,button,input{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:8px 11px}
+  button{cursor:pointer;transition:border-color .15s,color .15s,background .15s}
+  button:hover{border-color:var(--cyan);color:#fff}
+  button[aria-pressed="true"]{border-color:var(--cyan);color:var(--cyan);background:rgba(56,189,201,.12)}
+  button.go{background:var(--cyan);color:var(--ground);border-color:var(--cyan);font-weight:600}
+  .seg{display:inline-flex;flex-wrap:wrap;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+  .seg button{border:0;border-radius:0;background:transparent}
+  .seg button[aria-pressed="true"]{background:rgba(56,189,201,.14);color:var(--cyan)}
+  .stats{display:flex;flex-wrap:wrap;gap:14px 20px;margin-bottom:16px}
+  .stat{display:flex;flex-direction:column;gap:1px;min-width:70px}
+  .stat .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted)}
+  .stat .v{font-family:var(--mono);font-size:15px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+  .stat .v.cy{color:var(--cyan)} .stat .v.pk{color:var(--accent)}
+  .grid{display:grid;grid-template-columns:2fr 1fr;gap:16px;align-items:start}
+  @media (max-width:900px){.grid{grid-template-columns:1fr}}
+  /* three advanced-DSP cards side by side, full width; wraps to 2/1 when narrow */
+  .dsprow{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-top:16px;align-items:start}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .card h3{font-family:var(--head);font-weight:600;font-size:13px;margin:0;padding:10px 14px;border-bottom:1px solid var(--line-soft);
+    background:var(--panel-2);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .card h3 .hint{font-family:var(--mono);font-size:10.5px;color:var(--muted);font-weight:400}
+  .specwrap{position:relative;background:#05080d}
+  canvas.spec{display:block;width:100%;height:auto;cursor:crosshair}
+  .selbox{position:absolute;border:1px solid var(--accent);background:rgba(245,185,66,.12);pointer-events:none;display:none}
+  .specspin{position:absolute;inset:0;display:none;align-items:center;justify-content:center;gap:10px;flex-direction:column;
+    background:rgba(5,8,13,.45);pointer-events:none;font-family:var(--mono);font-size:11px;color:var(--ink-dim);z-index:5}
+  .specspin.show{display:flex}
+  .specspin .ring{width:34px;height:34px;border-radius:50%;border:3px solid rgba(56,189,201,.25);border-top-color:var(--cyan);animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion:reduce){.specspin .ring{animation:none}}
+  .rowcanvas{display:block;width:100%;height:120px;background:var(--panel-2)}
+  .legend{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10px;color:var(--muted);margin-left:auto}
+  .legend .grad{width:110px;height:9px;border-radius:3px}
+  .btable{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px}
+  .btable th{text-align:left;color:var(--muted);font-weight:500;font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;padding:8px 10px;border-bottom:1px solid var(--line-soft)}
+  .btable td{padding:7px 10px;border-bottom:1px solid var(--line-soft);color:var(--ink)}
+  .btable tr{cursor:pointer} .btable tr:hover td{background:rgba(56,189,201,.07)}
+  .btable .empty{color:var(--muted);padding:14px 10px}
+  .demodbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:10px 14px;border-bottom:1px solid var(--line-soft)}
+  .demodbar input{width:86px}
+  .demodbar input.mini{width:56px}
+  .cnt{background:rgba(56,189,201,.18);color:var(--cyan);border-radius:8px;padding:0 6px;margin-left:3px}
+  /* device fingerprint */
+  .fp{font-family:var(--mono);font-size:12px;padding:10px 14px;border-top:1px solid var(--line-soft);background:var(--panel-2)}
+  .fp .fh{color:var(--muted);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px}
+  .fp .cand{display:flex;flex-wrap:wrap;align-items:baseline;gap:5px 10px;margin:6px 0;padding-bottom:6px;border-bottom:1px dashed var(--line-soft)}
+  .fp .cand:last-child{border-bottom:0}
+  .fp .nm{color:var(--cyan);font-weight:600}
+  .fp .conf{color:var(--accent);font-variant-numeric:tabular-nums}
+  .fp .cls{color:var(--ink-dim);flex-basis:100%;font-size:11px}
+  .fp .why{color:var(--muted);font-size:11px;flex-basis:100%}
+  .fp .why b{color:var(--live);font-weight:500}
+  .fp .gen{color:var(--ink-dim)}
+  /* field diff compare-set + result */
+  .cmpset{display:flex;flex-wrap:wrap;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line-soft)}
+  .chip{display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:11px;color:var(--ink);
+    background:var(--panel-2);border:1px solid var(--line);border-radius:20px;padding:4px 6px 4px 11px}
+  .chip button{border:0;background:transparent;color:var(--muted);padding:0 3px;font-size:14px;line-height:1}
+  .chip button:hover{color:var(--rose);border-color:transparent}
+  .diffbits{font-family:var(--mono);font-size:13px;word-break:break-all;line-height:1.9;padding:6px 0}
+  .diffbits .fx{color:var(--muted)} .diffbits .vy{color:var(--accent);background:rgba(245,185,66,.14);border-radius:2px}
+  .tag{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;padding:1px 6px;border-radius:4px}
+  .tag.counter{color:var(--cyan);background:rgba(56,189,201,.16)}
+  .tag.rolling{color:var(--accent);background:rgba(245,185,66,.16)}
+  .tag.varying{color:var(--ink-dim);background:rgba(139,152,171,.16)}
+  .bits{font-family:var(--mono);font-size:12px;color:var(--live);word-break:break-all;line-height:1.7;padding:10px 14px;background:var(--panel-2);
+    border-top:1px solid var(--line-soft);max-height:150px;overflow:auto;white-space:pre-wrap}
+  .msg{font-family:var(--mono);font-size:12px;color:var(--muted);padding:12px 14px}
+  .kbdpop{margin:-8px 0 16px;padding:10px 14px;background:var(--panel);border:1px solid var(--line);border-radius:8px;font-family:var(--mono);font-size:12px;color:var(--ink-dim)}
+  .kbdpop b{color:var(--ink)} .kbdpop kbd{background:var(--panel-2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:var(--cyan);font-size:11px}
+  #stackplots{display:flex;flex-direction:column;gap:6px}
+  .dplot{position:relative}
+  .dplot .dpl{position:absolute;top:3px;left:6px;z-index:2;font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);pointer-events:none}
+  .symbar{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;margin-top:6px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .symbar input{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel-2);border:1px solid var(--line);border-radius:6px;padding:4px 6px}
+  .symbar .symout{color:var(--cyan)}
+  .annbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 14px;border-top:1px solid var(--line-soft);font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .annbar .ann{display:inline-flex;align-items:center;gap:6px;background:rgba(63,181,107,.12);border:1px solid rgba(63,181,107,.4);border-radius:14px;padding:3px 6px 3px 10px;color:var(--live)}
+  .annbar .ann b{color:var(--ink);font-weight:600}
+  .annbar .ann button{background:none;border:0;color:var(--muted);cursor:pointer;font-size:13px;padding:0 2px}
+  .annbar .ann button:hover{color:var(--rose)}
+  .fcands{display:inline-flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+  .fcand{font-family:var(--mono);font-size:11px;color:var(--ink-dim);background:var(--panel-2);border:1px solid var(--line);border-radius:6px;padding:4px 9px;cursor:pointer}
+  .fcand:hover{border-color:var(--cyan);color:var(--cyan)}
+  .fcand.hit{border-color:var(--live);color:var(--live)}
+  .fcand.cur{background:rgba(56,189,201,.14);color:var(--cyan);border-color:var(--cyan)}
+  .aichips{display:flex;flex-wrap:wrap;gap:8px;padding:10px 14px 4px}
+  .aichips button{font-family:var(--mono);font-size:11.5px;color:var(--ink-dim);background:var(--panel-2);border:1px solid var(--line);border-radius:16px;padding:6px 12px;cursor:pointer}
+  .aichips button:hover{border-color:var(--cyan);color:var(--cyan)}
+  .airow{display:flex;gap:8px;padding:6px 14px 10px;align-items:stretch}
+  .airow textarea{flex:1 1 auto;font-family:var(--mono);font-size:12.5px;color:var(--ink);background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:9px 11px;resize:vertical;min-height:40px}
+  .airow button{flex:0 0 auto;align-self:stretch;padding:0 18px}
+  .aiout{white-space:pre-wrap;line-height:1.65;color:var(--ink);max-height:520px;overflow:auto;border-top:1px solid var(--line-soft)}
+  .aiout h4{color:var(--cyan);font-family:var(--head);font-size:13px;margin:12px 0 4px} .aiout code{color:var(--accent)} .aiout b{color:#fff}
+  .aiacts{display:flex;flex-wrap:wrap;gap:8px;padding:4px 14px 12px;align-items:center}
+  .aiacts .albl{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  .aiacts button{font-family:var(--mono);font-size:12px;color:var(--ground);background:var(--accent);border:1px solid var(--accent);border-radius:7px;padding:6px 12px;cursor:pointer;font-weight:600}
+  .aiacts button.runall{background:var(--cyan);border-color:var(--cyan)}
+  .aiacts button.done{opacity:.5}
+  .axinfo{font-family:var(--mono);font-size:10.5px;color:var(--ink-dim);padding:6px 14px;border-top:1px solid var(--line-soft)}
+  .axinfo b{color:var(--accent)}
+  footer{margin-top:20px;padding-top:14px;border-top:1px solid var(--line);font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.7}
+  .aihr{border:none;border-top:1px solid var(--line);margin:9px 0}
+  .aifollow{margin-top:2px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <p class="eyebrow">Ragnar · Signal Intelligence</p>
+      <h1>Signal Analyzer</h1>
+    </div>
+    <div class="spacer"></div>
+    <a class="back" id="backlink" href="/#network/wifi">&#8592;&nbsp;Signal Intelligence</a>
+  </header>
+  <script>
+    // Back-link returns to wherever you came from: the RF Waterfall page
+    // (a capture's "Open in Analyzer") or Signal Intelligence (the RF-tools
+    // hub). document.referrer drops the #hash, so SI arrives as the site root.
+    (function(){ try{
+      var b=document.getElementById('backlink'); if(!b) return;
+      var p=''; try{ p=new URL(document.referrer||'').pathname; }catch(e){}
+      if(p==='/rf-waterfall'){ b.href='/rf-waterfall'; b.innerHTML='← RF Waterfall'; }
+      else { b.href='/#network/wifi'; b.innerHTML='← Signal Intelligence'; }
+    }catch(e){} })();
+  </script>
+
+  <div class="bar">
+    <span class="lbl">Capture</span>
+    <select id="cap"><option value="">— loading… —</option></select>
+    <button id="reload" title="Refresh the capture list">&#8635;</button>
+    <button id="uploadbtn" title="Import a recording — Flipper .sub, raw IQ, or a SigMF pair">⤴ Upload</button>
+    <span class="lbl">Palette</span>
+    <div class="seg" id="palette"></div>
+    <span class="spacer"></span>
+    <button id="copylink" title="Copy a shareable link to this exact view (capture · zoom · marker · palette)">🔗 Copy link</button>
+    <button id="kbdhelp" title="Keyboard shortcuts">⌨</button>
+    <button id="reset" title="Reset zoom to the whole capture (R)">Reset zoom</button>
+  </div>
+  <div id="kbdpop" class="kbdpop" hidden>
+    <b>Keyboard shortcuts</b>
+    <div><kbd>R</kbd> reset zoom · <kbd>B</kbd> back · <kbd>[</kbd>/<kbd>]</kbd> palette · <kbd>Z</kbd>/<kbd>X</kbd>/<kbd>C</kbd> zoom/measure/annotate · <kbd>D</kbd> demodulate · <kbd>L</kbd> copy link · <kbd>?</kbd> this help</div>
+  </div>
+  <div id="uploadpop" class="kbdpop" hidden>
+    <b>Import a recording</b>
+    <div style="margin-top:6px"><input type="file" id="upfile" multiple></div>
+    <div id="uprawopts" class="symbar" style="margin-top:8px" hidden>
+      <span class="lbl">Raw IQ</span>
+      <span class="lbl">datatype</span>
+      <select id="updtype"><option>cu8</option><option>cs8</option><option>cs16</option><option>cf32</option></select>
+      <span class="lbl">sample rate</span><input id="uprate" size="9" placeholder="Hz e.g. 2000000">
+      <span class="lbl">centre</span><input id="upfreq" size="7" placeholder="MHz">
+    </div>
+    <div style="margin-top:8px"><button id="updo" class="go">Import</button> <span id="upstat" class="symout"></span></div>
+    <div style="margin-top:6px;color:var(--muted)"><b>Flipper .sub</b> (RAW → synthesised OOK) · <b>SigMF</b> (select both the .sigmf-meta and .sigmf-data) · <b>raw IQ</b> (.cu8/.cs8/.cs16/.cf32 — set datatype + sample rate + centre). Keep files under ~50&nbsp;MB on a 512&nbsp;MB Pi.</div>
+  </div>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h3>Spectrogram
+          <div class="seg" id="dragmode"><button data-dm="zoom" aria-pressed="true">Zoom</button><button data-dm="measure">Measure</button><button data-dm="annotate">Annotate</button></div>
+          <button id="back" title="Back to the previous zoom">&#8592;&nbsp;Back</button>
+          <button id="clrcur" title="Clear the A/B cursors">Clear cursors</button>
+          <span class="hint">drag = zoom/measure · click = cursor A, then B (Δ)</span>
+          <span class="legend"><span id="lfloor">—</span><span class="grad" id="grad"></span><span id="lceil">—</span></span>
+        </h3>
+        <div class="specwrap">
+          <canvas class="spec" id="spec"></canvas>
+          <div class="selbox" id="selbox"></div>
+          <div class="specspin" id="specspin"><div class="ring"></div><span>computing spectrogram…</span></div>
+        </div>
+        <div class="axinfo" id="axinfo">—</div>
+        <div id="annbar" class="annbar" hidden></div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Time envelope <span class="hint">amplitude over the shown window (AM/OOK view)</span></h3>
+        <canvas class="rowcanvas" id="env"></canvas>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Modulation <span class="hint">classify + constellation + instantaneous — uses the marker &amp; BW</span>
+          <button class="go" id="runmod" style="margin-left:auto">Analyze</button></h3>
+        <div id="modout" class="msg">Mark a signal (or click a burst), set the demod BW, then Analyze.</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;padding:0 10px 10px">
+          <div style="flex:1 1 190px;min-width:160px">
+            <div class="lbl" style="padding:4px 4px">IQ constellation</div>
+            <canvas class="rowcanvas" id="constell" style="height:190px"></canvas>
+          </div>
+          <div style="flex:2 1 320px;min-width:220px">
+            <div class="seg" id="instview" style="margin:2px 0 6px" title="Show/hide derived plots (stacked)">
+              <button data-iv="iq" aria-pressed="true">I/Q</button><button data-iv="freq" aria-pressed="true">Freq</button><button data-iv="amp">Amp</button><button data-iv="phase">Phase</button></div>
+            <div id="stackplots">
+              <div class="dplot" data-p="iq"><span class="dpl">I/Q sample</span><canvas class="rowcanvas dpc" id="p-iq" style="height:120px;cursor:col-resize"></canvas></div>
+              <div class="dplot" data-p="freq"><span class="dpl">Frequency</span><canvas class="rowcanvas dpc" id="p-freq" style="height:120px;cursor:col-resize"></canvas></div>
+              <div class="dplot" data-p="amp" hidden><span class="dpl">Amplitude</span><canvas class="rowcanvas dpc" id="p-amp" style="height:120px;cursor:col-resize"></canvas></div>
+              <div class="dplot" data-p="phase" hidden><span class="dpl">Phase</span><canvas class="rowcanvas dpc" id="p-phase" style="height:120px;cursor:col-resize"></canvas></div>
+            </div>
+            <div class="symbar">
+              <button id="symtog" aria-pressed="false" title="Overlay symbol-period boundaries on every plot; sample dots mark each symbol centre">⌗ Symbols</button>
+              <button id="symauto" title="Estimate the symbol rate from the signal in the shown window">Auto</button>
+              <button id="symfrom" title="Use the demodulator's estimated symbol rate">⟳ demod</button>
+              <span class="lbl">baud</span><input id="symbaud" type="number" step="any" style="width:74px" title="Symbol rate (Hz). Drag one symbol width on a plot, type it, Auto, or pull from the demod.">
+              <span class="lbl">bits/sym</span>
+              <select id="symbits" title="Bits per symbol for read-off"><option value="1" selected>1 (OOK/BPSK)</option><option value="2">2 (4-ary)</option></select>
+              <button id="symread" title="Read symbol values at the grid centres">Read</button>
+              <span id="symout" class="symout"></span>
+            </div>
+            <div id="symseq" class="msg" style="font-size:11px;padding:2px 0"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h3>Spectrum <span class="hint">power over the window</span>
+          <div class="seg" id="psdmode" style="margin-left:auto"><button data-pm="avg" aria-pressed="true">Avg</button><button data-pm="max">Max-hold</button></div>
+        </h3>
+        <canvas class="rowcanvas" id="psd"></canvas>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Decoded devices <span class="hint">rtl_433 — names known ISM devices in the capture</span>
+          <button class="go" id="rundec" style="margin-left:auto">Decode</button></h3>
+        <div id="decout" class="msg">Hit Decode to run rtl_433 over the whole capture (TPMS · weather · remotes · doorbells…).</div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Bursts / packets <span class="hint" id="bcount"></span>
+          <span class="lbl" style="margin-left:auto">merge gap</span>
+          <input id="gapms" type="number" value="25" min="1" step="1" style="width:58px" title="Bridge pulses closer than this (ms) into one burst — lower it to split repeated frames">
+          <span class="lbl">ms</span>
+        </h3>
+        <div style="max-height:220px;overflow:auto">
+          <table class="btable"><thead><tr><th>t (s)</th><th>dur</th><th>freq</th><th>BW</th><th>duty</th><th>dB</th></tr></thead>
+            <tbody id="btbody"><tr><td class="empty" colspan="6">—</td></tr></tbody></table>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Signals survey <span class="hint">every simultaneous carrier in the window — click one to jump to it</span>
+          <span class="lbl" style="margin-left:auto">min SNR</span>
+          <input id="sigsnr" type="number" value="12" min="3" step="1" style="width:52px" title="Detection threshold over the noise floor (dB) — lower it to catch weaker carriers">
+          <span class="lbl">dB</span>
+          <button class="go" id="runsig">Survey</button></h3>
+        <div id="sigout" class="msg">Survey finds and lists every carrier in the current view — click a row to zoom + mark it.</div>
+        <div style="max-height:220px;overflow:auto">
+          <table class="btable"><thead><tr><th>freq</th><th>BW</th><th>t start</th><th>span</th><th>SNR</th></tr></thead>
+            <tbody id="sigtbody"></tbody></table>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Demodulate <span class="hint">recover bits from the marked signal</span></h3>
+        <div class="demodbar">
+          <div class="seg" id="mode">
+            <button data-m="ook" aria-pressed="true">OOK/AM</button>
+            <button data-m="fsk">FSK/FM</button>
+            <button data-m="pulse" title="Decode PWM / PPM pulse symbols (PT2262 / EV1527 / Princeton remotes, Flipper .sub)">Pulse</button>
+          </div>
+          <span class="lbl">BW kHz</span><input id="bw" type="number" value="60" step="any">
+          <select id="pcoding" title="Pulse coding: auto-detect, pulse-width (PWM) or pulse-distance/position (PPM)" hidden>
+            <option value="auto">auto</option><option value="pwm">PWM</option><option value="ppm">PPM</option>
+          </select>
+          <button class="go" id="run">Demodulate</button>
+          <span class="spacer"></span>
+          <div class="seg" id="bitview">
+            <button data-v="bin" aria-pressed="true">Bin</button>
+            <button data-v="hex">Hex</button>
+          </div>
+          <button id="manch" aria-pressed="false" title="Manchester decode (01→1, 10→0)">Manchester</button>
+          <button id="binv" aria-pressed="false" title="Invert every bit (complement)">Invert</button>
+          <button id="brefl" aria-pressed="false" title="Reflect bits within each byte (MSB-first ↔ LSB-first)">Reflect</button>
+          <span class="lbl">offset</span><input id="boff" class="mini" type="number" value="0" min="0" step="1" title="Drop this many leading bits — slide the byte grid to align a frame">
+          <button id="copybits" title="Copy the bits to the clipboard">Copy</button>
+          <button id="frames" title="Find preamble, repeated frames (fixed vs rolling bits) and scan for a CRC/checksum">⌗ Frames</button>
+          <button id="crcbtn" title="Test CRC / checksum algorithms over exactly the bits shown — for a frame you have already aligned with offset / Invert / Reflect">✓ CRC</button>
+          <button id="addcmp" title="Add these bits to the Field-diff compare set — capture the same emitter again to see which bits change">＋ Compare <span id="cmpn" class="cnt">0</span></button>
+        </div>
+        <canvas class="rowcanvas" id="wave" style="height:90px"></canvas>
+        <div class="bits" id="bits">Place a marker on a signal (or click a burst), then Demodulate.</div>
+        <div id="framesout" class="msg" hidden></div>
+        <div id="crcout" class="msg" hidden></div>
+        <div id="fpout" class="fp" hidden></div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Field diff <span class="hint">separate the fixed device ID from rolling / counter bits — add ≥2 captures of the same emitter</span>
+          <button class="go" id="rundiff" style="margin-left:auto">Diff</button></h3>
+        <div class="cmpset" id="cmpset"><span class="msg" style="padding:0">No captures added. Demodulate a signal and press <b>＋ Compare</b>; do it again for the same remote (press its button again / re-capture) — then <b>Diff</b> shows which bits are the fixed ID and which are a rolling code or counter.</span></div>
+        <div id="diffout" class="msg" hidden></div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Constellation demod <span class="hint">recover PSK symbols &amp; bits — centre on one clean burst (marker), set BW</span>
+          <button class="go" id="runpsk" style="margin-left:auto">Demod</button></h3>
+        <div class="symbar" style="padding:6px 14px 8px">
+          <span class="lbl">Order</span>
+          <select id="pskorder"><option value="">Auto</option><option value="2">BPSK</option><option value="4">QPSK</option><option value="8">8PSK</option></select>
+          <span class="lbl">Baud</span>
+          <input id="pskbaud" size="8" placeholder="auto" title="Symbol rate in Bd — leave blank to auto-estimate (or click a Cyclostationary candidate to fill it)">
+          <span id="pskout" class="symout"></span>
+        </div>
+        <div style="padding:0 14px 6px"><canvas class="rowcanvas" id="pskcanvas" style="height:190px"></canvas></div>
+        <div id="pskbits" class="bits" hidden></div>
+        <div class="msg" style="font-size:11px;padding:2px 14px 12px">PSK only (BPSK / QPSK / 8PSK). Bits are shown <b>differentially</b> (rotation-invariant): PSK has an absolute-phase ambiguity, so the absolute bits may be rotated by a constant. Not a full frame decoder — pair with the Frames / CRC tools.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- advanced DSP: three cards side by side, full width -->
+  <div class="dsprow">
+      <div class="card">
+        <h3>Cyclostationary <span class="hint">finds the symbol rate even in random data — a cyclic feature the PSD can't show</span>
+          <button class="go" id="runcyc" style="margin-left:auto">Detect</button></h3>
+        <div id="cycout" class="msg">Centre on a signal (marker), then Detect — peaks mark candidate symbol rates.</div>
+        <div style="padding:0 14px 6px"><canvas class="rowcanvas" id="cyccanvas" style="height:140px"></canvas></div>
+        <div id="cycpeaks" class="symbar" style="padding:0 14px 10px"></div>
+      </div>
+      <div class="card">
+        <h3>LoRa de-chirp <span class="hint">collapse chirps to symbol tones — centre on the signal (marker), pick BW+SF</span>
+          <button class="go" id="rundechirp" style="margin-left:auto">De-chirp</button></h3>
+        <div class="symbar" style="padding:6px 14px 8px">
+          <span class="lbl">BW</span>
+          <select id="lorabw"><option value="125000">125k</option><option value="250000" selected>250k</option><option value="500000">500k</option><option value="62500">62.5k</option></select>
+          <span class="lbl">SF</span>
+          <select id="lorasf"><option>7</option><option>8</option><option>9</option><option>10</option><option selected>11</option><option>12</option></select>
+          <span id="loraout" class="symout"></span>
+        </div>
+        <div style="padding:0 14px 12px"><canvas class="rowcanvas" id="loracanvas" style="height:170px"></canvas></div>
+        <div id="lorasyms" class="msg" style="font-size:11px"></div>
+      </div>
+      <div class="card">
+        <h3>Filter <span class="hint">band-pass isolates a signal · notch rejects an interferer — band from the A/B cursors or marker±BW</span>
+          <div class="seg" id="fkind" style="margin-left:auto"><button data-fk="bandpass" aria-pressed="true">Band-pass</button><button data-fk="notch">Notch</button></div>
+          <button class="go" id="runfilt">Apply</button></h3>
+        <div id="filtout" class="msg">Set a band (drop A &amp; B cursors, or a marker + BW), then Apply to see the spectrum before vs after.</div>
+        <canvas class="rowcanvas" id="filtcanvas" style="height:150px"></canvas>
+      </div>
+  </div>
+
+  <div class="card aicard" id="aicard" style="margin-top:16px" hidden>
+    <h3>🤖 Ask the RF analyst <span class="hint">grounded in this capture's measurements</span></h3>
+    <div class="aichips" id="aichips">
+      <button data-q="What is this signal, which band/service is it, and how would a professional decode it?">What is this signal?</button>
+      <button data-q="Based on the measurements shown, what demod settings (OOK vs FSK, centre offset, bandwidth) should I use, and why?">How do I demodulate it?</button>
+      <button data-q="Explain the recovered bits and frame structure — preamble, fixed vs rolling fields, and whether the CRC makes sense.">Explain the bits / frame</button>
+      <button data-q="What device or protocol is this most likely to be, and what's my single best next step in this analyzer?">What device is this?</button>
+    </div>
+    <div class="airow">
+      <textarea id="aiq" rows="2" placeholder="Ask anything about this capture — decoding, modulation, what to try next…"></textarea>
+      <button class="go" id="aiask">Ask</button>
+    </div>
+    <div id="aiout" class="aiout msg">The assistant sees this capture's measured summary plus whatever you've run (classification, bursts, demod bits, frame analysis). Run those first for a sharper answer. It can also propose actions it'll drive for you.</div>
+    <div id="aiacts" class="aiacts" hidden></div>
+  </div>
+
+  <footer>
+    On-box analysis of the RF Waterfall's SigMF captures (<code>data/iq_captures/</code>). DSP runs in numpy/scipy on the
+    device; this page is a viewer, so it works from a phone. For deep work, download the <code>.sigmf-data</code> and open it in
+    GNU Radio / inspectrum / URH.
+  </footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  // ---- palettes (shared look with the waterfall) ----
+  var PALETTES={
+    aurora:{name:'Aurora',stops:[[0,[7,26,44]],[.28,[22,90,130]],[.52,[46,160,150]],[.78,[123,140,210]],[1,[206,196,230]]]},
+    inferno:{name:'Inferno',stops:[[0,[4,3,18]],[.25,[87,16,110]],[.5,[188,55,84]],[.75,[249,142,9]],[1,[252,255,164]]]},
+    viridis:{name:'Viridis',stops:[[0,[68,1,84]],[.25,[59,82,139]],[.5,[33,145,140]],[.75,[94,201,98]],[1,[253,231,37]]]},
+    classic:{name:'Classic',stops:[[0,[0,0,12]],[.2,[0,40,150]],[.4,[0,180,200]],[.6,[40,200,70]],[.8,[240,220,40]],[1,[230,40,30]]]},
+    mono:{name:'Mono',stops:[[0,[6,8,12]],[.5,[120,124,132]],[1,[240,242,246]]]}
+  };
+  var ORDER=['aurora','inferno','viridis','classic','mono'];
+  function buildLUT(stops){var lut=new Uint8Array(256*3);
+    for(var i=0;i<256;i++){var t=i/255,a=stops[0],b=stops[stops.length-1];
+      for(var s=0;s<stops.length-1;s++){if(t>=stops[s][0]&&t<=stops[s+1][0]){a=stops[s];b=stops[s+1];break;}}
+      var f=(t-a[0])/((b[0]-a[0])||1);
+      lut[i*3]=a[1][0]+(b[1][0]-a[1][0])*f;lut[i*3+1]=a[1][1]+(b[1][1]-a[1][1])*f;lut[i*3+2]=a[1][2]+(b[1][2]-a[1][2])*f;}
+    return lut;}
+  function gradCss(stops){return "linear-gradient(90deg,"+stops.map(function(s){return "rgb("+s[1].join(",")+") "+Math.round(s[0]*100)+"%";}).join(",")+")";}
+  var pal='aurora'; try{var sp=localStorage.getItem('ragnar_rf_palette'); if(sp&&PALETTES[sp])pal=sp;}catch(e){}
+  // ---- shareable deep-link: parse ?name=…&t0=…&t1=…&f0=…&f1=…&mf=…&pal=… once on load
+  var DEEP=null;
+  (function(){ var q=new URLSearchParams(location.search); if(!q.get('name')) return;
+    function num(k){ var v=q.get(k); if(v==null||v==='')return null; var n=parseFloat(v); return isFinite(n)?n:null; }
+    DEEP={ name:q.get('name'), t0:num('t0'), t1:num('t1'), f0:num('f0'), f1:num('f1'), mf:num('mf') };
+    var p=q.get('pal'); if(p&&PALETTES[p]) pal=p;   // URL palette wins over localStorage
+  })();
+  var LUT=buildLUT(PALETTES[pal].stops);
+
+  var $=function(id){return document.getElementById(id);};
+  var S={name:null, view:null, spec:null, marker:null, markerB:null, hist:[],
+         dragMode:'zoom', psdMode:'avg', dur:0, fs:0, fc:0, cmp:[]};
+
+  function api(path,params){var q=Object.keys(params||{}).filter(function(k){return params[k]!=null;})
+      .map(function(k){return k+'='+encodeURIComponent(params[k]);}).join('&');
+    return fetch(path+(q?'?'+q:'')).then(function(r){return r.json();});}
+  function api2(path,body){return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body||{})}).then(function(r){return r.json();});}
+  function fmtHz(hz){var a=Math.abs(hz); if(a>=1e6)return (hz/1e6).toFixed(3)+' MHz'; if(a>=1e3)return (hz/1e3).toFixed(1)+' kHz'; return Math.round(hz)+' Hz';}
+
+  // ---- palette selector ----
+  (function(){var seg=$('palette');
+    seg.innerHTML=ORDER.map(function(id){return '<button data-p="'+id+'" aria-pressed="'+(id===pal?'true':'false')+'">'+PALETTES[id].name+'</button>';}).join('');
+    seg.addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;
+      pal=b.getAttribute('data-p'); LUT=buildLUT(PALETTES[pal].stops);
+      try{localStorage.setItem('ragnar_rf_palette',pal);}catch(x){}
+      Array.prototype.forEach.call(seg.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-p')===pal?'true':'false');});
+      $('grad').style.background=gradCss(PALETTES[pal].stops); if(S.spec)drawSpec(S.spec); updateURL();});
+    $('grad').style.background=gradCss(PALETTES[pal].stops);
+  })();
+
+  // ---- capture list ----
+  function loadList(sel){return api('/api/net/rtl/analyze/list',{}).then(function(d){
+    var caps=(d&&d.captures)||[], el=$('cap');
+    if(!caps.length){ el.innerHTML='<option value="">— no captures yet — grab one with ⤓ SigMF —</option>'; return; }
+    el.innerHTML=caps.map(function(c){var mb=(c.bytes/1e6).toFixed(1), du=c.duration_s?c.duration_s+'s':'';
+      return '<option value="'+encodeURIComponent(c.name)+'">'+c.name+'  ('+mb+' MB '+du+')</option>';}).join('');
+    var want=sel||caps[0].name; el.value=encodeURIComponent(want); loadCapture(want);
+  });}
+
+  function loadCapture(name){
+    S.name=name; S.view=null; S.marker=null; S.markerB=null; S.hist=[];
+    S.summaryData=null; S.classifyData=null; S.framesData=null; S.demod=null; S.bursts=null; S.annotations=[];
+    S.modQuality=null; S.subaudible=null; S.decoded=null;
+    api('/api/net/rtl/analyze/summary',{name:name}).then(function(s){
+      if(!s||!s.ok){ $('stats').innerHTML='<span class="msg">⚠ '+((s&&s.error)||'load failed')+'</span>'; return; }
+      S.dur=s.duration_s; S.fs=s.sr_hz; S.fc=s.center_hz; S.summaryData=s;
+      $('stats').innerHTML=[
+        ['Center',(s.center_hz/1e6).toFixed(3)+' MHz','cy'],
+        ['Sample rate',(s.sr_hz/1e6).toFixed(3)+' MS/s',''],
+        ['Duration',s.duration_s+' s',''],
+        ['Peak',(s.peak_hz/1e6).toFixed(4)+' MHz','pk'],
+        ['SNR',Math.round(s.snr_db)+' dB','cy'],
+        ['Noise',Math.round(s.noise_db)+' dB',''],
+        ['Occupied BW',fmtHz(s.occupied_bw_hz),''],
+        ['Bursts',s.bursts,'']
+      ].map(function(x){return '<div class="stat"><span class="k">'+x[0]+'</span><span class="v '+x[2]+'">'+x[1]+'</span></div>';}).join('');
+      S.view={t0:0,t1:S.dur,f0:S.fc-S.fs/2,f1:S.fc+S.fs/2};
+      // restore a shared deep-link view/marker (once, for this capture)
+      if(DEEP && DEEP.name===name){
+        if(DEEP.t0!=null&&DEEP.t1!=null&&DEEP.f0!=null&&DEEP.f1!=null)
+          S.view={t0:Math.max(0,DEEP.t0),t1:Math.min(S.dur,DEEP.t1),f0:DEEP.f0*1e6,f1:DEEP.f1*1e6};
+        if(DEEP.mf!=null) S.marker={t:(S.view.t0+S.view.t1)/2, f:DEEP.mf*1e6};
+        DEEP=null;
+      }
+      refreshWindow(); loadBursts(); loadAnnotations(); updateURL();
+    });
+  }
+  // ---- shareable deep-link: encode capture · zoom · marker · palette in the URL
+  function updateURL(){
+    if(!S.name) return;
+    var v=S.view||{}, q=['name='+encodeURIComponent(S.name)];
+    if(v.t0!=null){ q.push('t0='+v.t0.toFixed(5),'t1='+v.t1.toFixed(5),
+      'f0='+(v.f0/1e6).toFixed(5),'f1='+(v.f1/1e6).toFixed(5)); }
+    if(S.marker) q.push('mf='+(S.marker.f/1e6).toFixed(5));
+    q.push('pal='+pal);
+    try{ history.replaceState(null,'','?'+q.join('&')); }catch(e){}
+  }
+
+  // ---- spectrogram ----
+  var _specReq=0;
+  function refreshWindow(){
+    var v=S.view, c=$('spec'), W=Math.max(320,Math.round(c.clientWidth||900));
+    var sp=$('specspin'); if(sp) sp.classList.add('show');
+    var req=++_specReq;                       // guard against out-of-order responses
+    api('/api/net/rtl/analyze/spectrogram',{name:S.name,t0:v.t0,t1:v.t1,f0:v.f0,f1:v.f1,w:W,h:360}).then(function(d){
+      if(req!==_specReq) return;              // a newer window was requested; ignore
+      if(sp) sp.classList.remove('show');
+      if(!d||!d.ok)return; S.spec=d; drawSpec(d);
+    }).catch(function(){ if(req===_specReq && sp) sp.classList.remove('show'); });
+    api('/api/net/rtl/analyze/psd',{name:S.name,t0:v.t0,t1:v.t1,mode:S.psdMode||'avg'}).then(drawPsd);
+    api('/api/net/rtl/analyze/envelope',{name:S.name,t0:v.t0,t1:v.t1}).then(drawEnv);
+    updateURL();
+  }
+  var PAD={l:52,r:10,t:8,b:20};
+  function drawSpec(d){
+    var c=$('spec'),dpr=Math.min(window.devicePixelRatio||1,2);
+    var Wc=Math.max(320,Math.round(c.clientWidth||900)), Hc=420;
+    c.width=Wc*dpr; c.height=Hc*dpr; c.style.height=Hc+'px';
+    var g=c.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,Wc,Hc);
+    var plotW=Wc-PAD.l-PAD.r, plotH=Hc-PAD.t-PAD.b;
+    // decode base64 grid -> offscreen image, then scale into the plot
+    var bin=atob(d.data), n=bin.length, buf=new Uint8Array(n); for(var i=0;i<n;i++)buf[i]=bin.charCodeAt(i);
+    var off=document.createElement('canvas'); off.width=d.w; off.height=d.h;
+    var octx=off.getContext('2d'), img=octx.createImageData(d.w,d.h), px=img.data;
+    for(var k=0;k<d.w*d.h;k++){var val=buf[k];px[k*4]=LUT[val*3];px[k*4+1]=LUT[val*3+1];px[k*4+2]=LUT[val*3+2];px[k*4+3]=255;}
+    octx.putImageData(img,0,0);
+    g.imageSmoothingEnabled=false;
+    g.drawImage(off,0,0,d.w,d.h,PAD.l,PAD.t,plotW,plotH);
+    // axes
+    g.fillStyle='#64748b';g.font='9px monospace';
+    g.textAlign='right';g.textBaseline='middle';
+    for(var yf=0;yf<=4;yf++){var fy=PAD.t+plotH*yf/4, fv=d.f1-(d.f1-d.f0)*yf/4;
+      g.fillText((fv/1e6).toFixed(3),PAD.l-4,fy);
+      g.strokeStyle='rgba(255,255,255,0.05)';g.beginPath();g.moveTo(PAD.l,fy);g.lineTo(PAD.l+plotW,fy);g.stroke();}
+    g.textAlign='center';g.textBaseline='top';
+    for(var xt=0;xt<=5;xt++){var tx=PAD.l+plotW*xt/5, tv=d.t0+(d.t1-d.t0)*xt/5;
+      g.fillText(tv.toFixed(3)+'s',tx,PAD.t+plotH+4);}
+    S._geom={plotW:plotW,plotH:plotH};
+    // A/B cursors (crosshairs); A=accent, B=cyan
+    function cross(m,color,label){ if(!m)return;
+      var mx=PAD.l+(m.t-d.t0)/(d.t1-d.t0)*plotW, my=PAD.t+(d.f1-m.f)/(d.f1-d.f0)*plotH;
+      if(mx<PAD.l-1||mx>PAD.l+plotW+1)mx=Math.max(PAD.l,Math.min(PAD.l+plotW,mx));
+      g.strokeStyle=color;g.lineWidth=1;g.beginPath();g.moveTo(mx,PAD.t);g.lineTo(mx,PAD.t+plotH);g.moveTo(PAD.l,my);g.lineTo(PAD.l+plotW,my);g.stroke();
+      g.fillStyle=color;g.font='bold 10px monospace';g.textAlign='left';g.textBaseline='top';g.fillText(label,mx+3,PAD.t+2);}
+    cross(S.marker,getComputedStyle(document.documentElement).getPropertyValue('--accent')||'#f5b942','A');
+    cross(S.markerB,getComputedStyle(document.documentElement).getPropertyValue('--cyan')||'#38bdc9','B');
+    // saved SigMF annotations: boxes + labels (freq-less ones span the band)
+    (S.annotations||[]).forEach(function(an){
+      var t0=Math.max(d.t0,an.t0), t1=Math.min(d.t1,an.t1); if(t1<=t0) return;
+      var f0=an.f0_mhz!=null?an.f0_mhz*1e6:d.f0, f1=an.f1_mhz!=null?an.f1_mhz*1e6:d.f1;
+      var x0=PAD.l+(t0-d.t0)/(d.t1-d.t0)*plotW, x1=PAD.l+(t1-d.t0)/(d.t1-d.t0)*plotW;
+      var ya=PAD.t+(d.f1-Math.min(f1,d.f1))/(d.f1-d.f0)*plotH, yb=PAD.t+(d.f1-Math.max(f0,d.f0))/(d.f1-d.f0)*plotH;
+      g.strokeStyle='rgba(63,181,107,0.9)';g.lineWidth=1;g.setLineDash([4,3]);
+      g.strokeRect(x0,Math.min(ya,yb),Math.max(2,x1-x0),Math.max(2,Math.abs(yb-ya)));g.setLineDash([]);
+      if(an.label){ g.fillStyle='rgba(63,181,107,0.95)';g.font='bold 10px monospace';g.textAlign='left';g.textBaseline='bottom';
+        g.fillText(an.label, x0+2, Math.min(ya,yb)-1); }
+    });
+    $('grad').style.background=gradCss(PALETTES[pal].stops);
+    $('lfloor').textContent=Math.round(d.floor_db)+' dB'; $('lceil').textContent=Math.round(d.ceil_db)+' dB';
+    setAx();
+  }
+  function setAx(){var a=S.marker,b=S.markerB;
+    if(a&&b){ var dt=Math.abs(b.t-a.t), df=Math.abs(b.f-a.f);
+      $('axinfo').innerHTML='Δ  <b>Δt='+(dt*1000).toFixed(3)+' ms</b>  ·  <b>Δf='+fmtHz(df)+'</b>'
+        +(dt>0?'  ·  1/Δt=<b>'+(1/dt>=1000?(1/dt/1000).toFixed(2)+' kHz':(1/dt).toFixed(0)+' Hz')+'</b> (symbol rate)':'')
+        +'   ·   A '+(a.f/1e6).toFixed(4)+' MHz · B '+(b.f/1e6).toFixed(4)+' MHz'; return; }
+    if(a){ $('axinfo').innerHTML='Cursor A: <b>'+(a.f/1e6).toFixed(4)+' MHz</b> ('+fmtHz(a.f-S.fc)+' offset) · t=<b>'+a.t.toFixed(4)+' s</b>  ·  click again for B (Δ)'; return; }
+    $('axinfo').innerHTML='Window: '+S.view.t0.toFixed(3)+'–'+S.view.t1.toFixed(3)+' s · '+(S.view.f0/1e6).toFixed(3)+'–'+(S.view.f1/1e6).toFixed(3)+' MHz';
+  }
+  // ---- line plots (psd + envelope + demod wave) ----
+  function plot(id,xs,ys,color,fill){
+    var c=$(id),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(200,c.clientWidth||300),H=c.clientHeight||120;
+    c.width=W*dpr;c.height=H*dpr;var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+    if(!ys||!ys.length)return; var lo=Math.min.apply(null,ys),hi=Math.max.apply(null,ys); if(hi-lo<1){hi+=1;lo-=1;}
+    var px=function(i){return 6+i/(ys.length-1)*(W-12);}, py=function(v){return H-4-(v-lo)/(hi-lo)*(H-10);};
+    g.strokeStyle=color;g.lineWidth=1.2;g.beginPath();
+    for(var i=0;i<ys.length;i++){var x=px(i),y=py(ys[i]);i?g.lineTo(x,y):g.moveTo(x,y);}
+    g.stroke();
+    if(fill){g.lineTo(px(ys.length-1),H);g.lineTo(px(0),H);g.closePath();g.fillStyle=color.replace('rgb','rgba').replace(')',',0.12)');g.fill();}
+  }
+  function drawPsd(d){ if(d&&d.ok) plot('psd',d.freqs_mhz,d.db,'rgb(56,189,201)',true); }
+  function drawEnv(d){ if(d&&d.ok) plot('env',d.t,d.db,'rgb(63,181,107)',true); }
+
+  // ---- drag-to-zoom + click marker ----
+  (function(){var c=$('spec'),box=$('selbox'),drag=null;
+    function toData(ev){var r=c.getBoundingClientRect(),gx=(S._geom||{}),
+        x=(ev.clientX-r.left-PAD.l)/(gx.plotW||1), y=(ev.clientY-r.top-PAD.t)/(gx.plotH||1);
+      x=Math.max(0,Math.min(1,x));y=Math.max(0,Math.min(1,y));
+      var d=S.spec; return {t:d.t0+(d.t1-d.t0)*x, f:d.f1-(d.f1-d.f0)*y, px:ev.clientX-r.left, py:ev.clientY-r.top};}
+    c.addEventListener('mousedown',function(e){ if(!S.spec)return; drag={a:toData(e),startX:e.clientX,startY:e.clientY}; });
+    window.addEventListener('mousemove',function(e){ if(!drag)return;
+      var r=c.getBoundingClientRect(); box.style.display='block';
+      var x0=Math.min(drag.startX,e.clientX)-r.left, y0=Math.min(drag.startY,e.clientY)-r.top;
+      box.style.left=x0+'px';box.style.top=y0+'px';box.style.width=Math.abs(e.clientX-drag.startX)+'px';box.style.height=Math.abs(e.clientY-drag.startY)+'px';});
+    window.addEventListener('mouseup',function(e){ if(!drag)return; box.style.display='none';
+      var moved=Math.abs(e.clientX-drag.startX)+Math.abs(e.clientY-drag.startY);
+      var b=toData(e), sp=S.spec;
+      if(moved<6){ // click -> place/move A/B cursors
+        var p={t:b.t,f:b.f};
+        if(!S.marker){ S.marker=p; }
+        else if(!S.markerB){ S.markerB=p; }
+        else { var da=Math.hypot((S.marker.t-b.t)/(sp.t1-sp.t0),(S.marker.f-b.f)/(sp.f1-sp.f0));
+               var dbb=Math.hypot((S.markerB.t-b.t)/(sp.t1-sp.t0),(S.markerB.f-b.f)/(sp.f1-sp.f0));
+               if(da<=dbb) S.marker=p; else S.markerB=p; }
+        drawSpec(sp); setAx(); updateURL(); drag=null; return; }
+      var t0=Math.min(drag.a.t,b.t),t1=Math.max(drag.a.t,b.t),f0=Math.min(drag.a.f,b.f),f1=Math.max(drag.a.f,b.f);
+      if(S.dragMode==='measure'){   // measure the boxed time×freq region, don't zoom
+        if(t1-t0>1e-5 && f1-f0>10){ $('axinfo').innerHTML='measuring…';
+          api('/api/net/rtl/analyze/measure',{name:S.name,t0:t0,t1:t1,f0:f0,f1:f1}).then(function(m){
+            if(!m||!m.ok){ $('axinfo').innerHTML='⚠ '+((m&&m.error)||'measure failed'); return; }
+            $('axinfo').innerHTML='Box '+(m.f0/1e6).toFixed(4)+'–'+(m.f1/1e6).toFixed(4)+' MHz · '+m.dt_ms+' ms  →  '
+              +'ch.power <b>'+m.channel_power_db+' dB</b> · peak <b>'+m.peak_db+' dB</b> @ '+(m.peak_hz/1e6).toFixed(4)+' MHz · mean '+m.mean_db+' dB'; }); }
+        drag=null; return; }
+      if(S.dragMode==='annotate'){   // draw a labelled box + save it into the .sigmf-meta
+        if(t1-t0>1e-5 && f1-f0>10){ var lab=(window.prompt('Label this signal (saved into the SigMF file):','')||'').trim();
+          if(lab!==null){ api2('/api/net/rtl/analyze/annotate',{name:S.name,t0:t0,t1:t1,f0:f0,f1:f1,label:lab}).then(function(r){
+            if(r&&r.ok){ S.annotations=r.annotations; renderAnnBar(); if(S.spec)drawSpec(S.spec); } }); } }
+        drag=null; return; }
+      if(t1-t0>1e-4 && f1-f0>100){ S.hist.push(S.view); S.view={t0:t0,t1:t1,f0:f0,f1:f1}; refreshWindow(); }
+      drag=null;});
+  })();
+  $('reset').addEventListener('click',function(){ if(!S.name)return; S.hist=[]; S.view={t0:0,t1:S.dur,f0:S.fc-S.fs/2,f1:S.fc+S.fs/2}; S.marker=null; S.markerB=null; refreshWindow(); });
+  $('back').addEventListener('click',function(){ if(S.hist.length){ S.view=S.hist.pop(); refreshWindow(); } });
+  $('clrcur').addEventListener('click',function(){ S.marker=null; S.markerB=null; if(S.spec){drawSpec(S.spec);} setAx(); updateURL(); });
+  $('dragmode').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; S.dragMode=b.getAttribute('data-dm');
+    Array.prototype.forEach.call($('dragmode').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-dm')===S.dragMode?'true':'false');});
+    if(S.dragMode==='annotate'){ $('axinfo').innerHTML='<span style="color:var(--live)">Annotate mode: drag a box around a signal to label + save it into the SigMF file.</span>'; }});
+  function loadAnnotations(){ if(!S.name){return;} api('/api/net/rtl/analyze/annotations',{name:S.name}).then(function(r){
+    S.annotations=(r&&r.annotations)||[]; renderAnnBar(); if(S.spec)drawSpec(S.spec); }).catch(function(){}); }
+  function renderAnnBar(){ var el=$('annbar'), a=S.annotations||[];
+    if(!a.length){ el.hidden=true; el.innerHTML=''; return; }
+    el.hidden=false;
+    el.innerHTML='<span>annotations:</span>'+a.map(function(x){
+      var fr=(x.f0_mhz!=null?x.f0_mhz.toFixed(3)+'–'+x.f1_mhz.toFixed(3)+' MHz':'full band');
+      return '<span class="ann"><b>'+esc(x.label||'(unlabelled)')+'</b> '+x.t0.toFixed(3)+'–'+x.t1.toFixed(3)+'s · '+fr
+        +' <button data-i="'+x.index+'" title="Delete">✕</button></span>';}).join('');
+    el.querySelectorAll('button[data-i]').forEach(function(b){ b.addEventListener('click',function(){
+      api2('/api/net/rtl/analyze/annotation/delete',{name:S.name,index:+b.getAttribute('data-i')}).then(function(r){
+        if(r&&r.ok){ S.annotations=r.annotations; renderAnnBar(); if(S.spec)drawSpec(S.spec); } }); }); });
+  }
+  $('psdmode').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; S.psdMode=b.getAttribute('data-pm');
+    Array.prototype.forEach.call($('psdmode').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-pm')===S.psdMode?'true':'false');});
+    if(S.name){var v=S.view; api('/api/net/rtl/analyze/psd',{name:S.name,t0:v.t0,t1:v.t1,mode:S.psdMode}).then(drawPsd);}});
+  $('gapms').addEventListener('change',function(){ if(S.name) loadBursts(); });
+
+  // ---- bursts ----
+  function loadBursts(){ var gap=parseFloat($('gapms').value)||25;
+    api('/api/net/rtl/analyze/bursts',{name:S.name,gap_ms:gap}).then(function(d){
+    S.bursts=d;
+    var tb=$('btbody'), b=(d&&d.bursts)||[]; $('bcount').textContent=b.length?b.length+' detected':'';
+    if(!b.length){ tb.innerHTML='<tr><td class="empty" colspan="6">No bursts above the noise floor.</td></tr>'; return; }
+    tb.innerHTML=b.map(function(x,i){return '<tr data-i="'+i+'"><td>'+x.t0.toFixed(4)+'</td><td>'+x.dur_ms+' ms</td><td>'+x.f_mhz.toFixed(4)+'</td><td>'+x.bw_khz+' kHz</td><td>'+(x.duty!=null?Math.round(x.duty*100)+'%':'—')+'</td><td>'+Math.round(x.peak_db)+'</td></tr>';}).join('');
+    tb.querySelectorAll('tr').forEach(function(tr){tr.addEventListener('click',function(){var x=b[+tr.getAttribute('data-i')];
+      var pad=(x.t1-x.t0)*0.5+0.002; S.view={t0:Math.max(0,x.t0-pad),t1:Math.min(S.dur,x.t1+pad),
+        f0:x.f_mhz*1e6-Math.max(x.bw_khz*1e3*3,30e3), f1:x.f_mhz*1e6+Math.max(x.bw_khz*1e3*3,30e3)};
+      S.marker={t:(x.t0+x.t1)/2, f:x.f_mhz*1e6}; if(x.bw_khz)$('bw').value=Math.max(10,Math.round(x.bw_khz*1.5)); refreshWindow(); setAx();});});
+  });}
+
+  // ---- Signals survey: every carrier in the window, click a row to jump to it ----
+  $('runsig').addEventListener('click',function(){
+    if(!S.name)return; var v=S.view||{}, snr=parseFloat($('sigsnr').value)||12;
+    $('sigout').textContent='surveying…'; $('sigtbody').innerHTML='';
+    api('/api/net/rtl/analyze/signals',{name:S.name,t0:v.t0,t1:v.t1,snr_db:snr}).then(function(d){
+      if(!d||!d.ok){ $('sigout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((d&&d.error)||'survey failed')+'</span>'; return; }
+      var sg=d.signals||[]; S.signals=sg;
+      $('sigout').innerHTML=sg.length? '<b>'+sg.length+'</b> carrier'+(sg.length>1?'s':'')+' found · noise floor '+d.noise_db+' dB'
+        : '<span style="color:var(--muted)">no carriers above +'+snr+' dB — lower the threshold for weaker signals</span>';
+      var fc=S.fc||d.center_hz;
+      $('sigtbody').innerHTML=sg.map(function(s,i){
+        var off=(s.f_center_hz-fc)/1e6, span=(s.t1_s-s.t0_s);
+        return '<tr data-i="'+i+'"><td>'+(s.f_center_hz/1e6).toFixed(4)+'<span style="color:var(--muted)"> ('+(off>=0?'+':'')+off.toFixed(3)+')</span></td><td>'+
+          (s.bw_hz>=1e3?(s.bw_hz/1e3).toFixed(1)+' kHz':Math.round(s.bw_hz)+' Hz')+'</td><td>'+s.t0_s.toFixed(3)+'</td><td>'+
+          (span>=1?span.toFixed(2)+' s':Math.round(span*1e3)+' ms')+'</td><td>'+Math.round(s.snr_db)+' dB</td></tr>';}).join('');
+      $('sigtbody').querySelectorAll('tr').forEach(function(tr){ tr.addEventListener('click',function(){
+        var s=sg[+tr.getAttribute('data-i')], padf=Math.max((s.f_hi_hz-s.f_lo_hz)*1.5,30e3), padt=(s.t1_s-s.t0_s)*0.4+0.002;
+        S.hist.push(S.view); S.view={t0:Math.max(0,s.t0_s-padt),t1:Math.min(S.dur,s.t1_s+padt),
+          f0:s.f_lo_hz-padf, f1:s.f_hi_hz+padf};
+        S.marker={t:(s.t0_s+s.t1_s)/2, f:s.f_center_hz}; $('bw').value=Math.max(10,Math.round(s.bw_hz/1e3*1.5)||30);
+        refreshWindow(); setAx(); }); });
+    }).catch(function(){ $('sigout').textContent='survey request failed'; });
+  });
+
+  // ---- decode (rtl_433 over the whole capture) ----
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  $('rundec').addEventListener('click',function(){
+    if(!S.name)return; $('decout').innerHTML='running rtl_433 over the capture…';
+    api('/api/net/rtl/analyze/decode433',{name:S.name}).then(function(d){
+      if(!d||!d.ok){ $('decout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((d&&d.error)||'decode failed')+'</span>'; return; }
+      S.decoded=d;
+      var dv=d.devices||[];
+      if(!dv.length){ $('decout').innerHTML='<span style="color:var(--muted)">No known devices decoded ('+(d.events||0)+' candidate events). This capture may be a plain carrier or a protocol rtl_433 doesn\'t know — try the demodulator below.</span>'; return; }
+      $('decout').innerHTML='<table class="btable"><thead><tr><th>Model</th><th>ID</th><th>×</th><th>Fields</th></tr></thead><tbody>'
+        +dv.map(function(x){var f=Object.keys(x.fields||{}).map(function(k){return esc(k)+'='+esc(String(x.fields[k]));}).join(', ');
+          var id=(x.id!=null)?x.id:(x.channel!=null?('ch'+x.channel):'—');
+          return '<tr><td style="color:var(--cyan)">'+esc(x.model)+'</td><td>'+esc(String(id))+'</td><td>'+(x.count||1)+'</td><td class="meta" style="color:var(--ink-dim);font-size:11px">'+f+'</td></tr>';}).join('')
+        +'</tbody></table>';
+    }).catch(function(){ $('decout').textContent='decode request failed'; });
+  });
+
+  // ---- demod + bit views ----
+  var mode='ook', bitview='bin', manch=false, binv=false, brefl=false;
+  $('mode').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; mode=b.getAttribute('data-m');
+    Array.prototype.forEach.call($('mode').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-m')===mode?'true':'false');});
+    $('pcoding').hidden=(mode!=='pulse');});
+  $('bitview').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; bitview=b.getAttribute('data-v');
+    Array.prototype.forEach.call($('bitview').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-v')===bitview?'true':'false');}); renderBits();});
+  $('manch').addEventListener('click',function(){ manch=!manch; $('manch').setAttribute('aria-pressed',manch?'true':'false'); renderBits();});
+  $('binv').addEventListener('click',function(){ binv=!binv; $('binv').setAttribute('aria-pressed',binv?'true':'false'); renderBits();});
+  $('brefl').addEventListener('click',function(){ brefl=!brefl; $('brefl').setAttribute('aria-pressed',brefl?'true':'false'); renderBits();});
+  $('boff').addEventListener('change',renderBits); $('boff').addEventListener('input',renderBits);
+  $('copybits').addEventListener('click',function(){ var t=S._bitsShown||''; if(navigator.clipboard)navigator.clipboard.writeText(t).catch(function(){}); });
+  // bit-workbench transforms — mirror the server's bit_transform (offset→invert→reflect), then line-decode
+  function xfRaw(b){ b=(b||'').replace(/[^01]/g,'');
+    var off=parseInt($('boff').value,10)||0; if(off>0) b=b.slice(off);
+    if(binv) b=b.replace(/[01]/g,function(c){return c==='0'?'1':'0';});
+    if(brefl){ var o='',i; for(i=0;i+8<=b.length;i+=8) o+=b.substr(i,8).split('').reverse().join('');
+      o+=b.slice(Math.floor(b.length/8)*8); b=o; }
+    return b; }
+  function curBits(){ var d=S.demod; if(!d) return ''; var b=xfRaw(d.bits||''); return manch?manchester(b):b; }
+  function xfLabel(){ var p=[]; var off=parseInt($('boff').value,10)||0;
+    if(off>0)p.push('offset '+off); if(binv)p.push('inverted'); if(brefl)p.push('reflected'); if(manch)p.push('Manchester');
+    return p.length?' ('+p.join(', ')+')':''; }
+  function runFrames(period){
+    var d=S.demod; if(!d||!d.bits){ return; }
+    var fo=$('framesout'); fo.hidden=false; fo.textContent='analysing frames…';
+    var off=parseInt($('boff').value,10)||0;
+    var q={bits:d.bits, line:(manch?'manchester':'raw'), invert:(binv?1:0), reflect:(brefl?1:0), offset:off};
+    if(period) q.period=period;
+    api('/api/net/rtl/analyze/frames',q).then(function(r){
+      if(!r||!r.ok){ fo.innerHTML='<span style="color:var(--rose)">⚠ '+esc((r&&r.error)||'no structure')+'</span>'; $('fpout').hidden=true; return; }
+      S.framesData=r;
+      var crcHtml=function(cm){return (cm&&cm.length)
+        ? '<span style="color:var(--live)">✓ CRC: '+cm.map(function(m){return esc(m.algo)+' ('+m.width+'b/'+m.over_bytes+'B)';}).join(', ')+'</span>'
+        : '<span style="color:var(--muted)">no CRC match</span>';};
+      var lines=[];
+      lines.push('preamble '+r.preamble_bits+' bits · '
+        +(r.period_bits?('frame length <b>'+r.period_bits+' bits</b> · '+r.repeats+' repeats · '
+          +Math.round(r.stable_fraction*100)+'% stable'+(r.identical?' (identical)':'')):'<span style="color:var(--muted)">no confident single period — try a candidate below</span>'));
+      lines.push('consensus: <span style="color:var(--live)">'+esc(r.consensus_hex)+'</span>');
+      if(r.period_bits && r.varying_positions && r.varying_positions.length)
+        lines.push('<span style="color:var(--accent)">rolling/varying bit positions:</span> '+r.varying_positions.join(', '));
+      lines.push((r.crc&&r.crc.matches)?crcHtml(r.crc.matches):'');
+      // candidate frame lengths — clickable, each with its own CRC verdict
+      var cand=(r.candidates||[]);
+      if(cand.length){
+        var chips=cand.map(function(c){var hit=c.crc_matches&&c.crc_matches.length;
+          var cur=(c.period_bits===r.period_bits);
+          return '<button class="fcand'+(hit?' hit':'')+(cur?' cur':'')+'" data-p="'+c.period_bits+'" '
+            +'title="'+c.repeats+' repeats · '+Math.round(c.stable_fraction*100)+'% stable'+(hit?' · CRC '+esc(c.crc_matches[0].algo):'')+'">'
+            +c.period_bits+'b'+(hit?' ✓CRC':'')+'</button>';}).join('');
+        lines.push('<span style="color:var(--muted)">candidate frame lengths (click to align):</span><div class="fcands">'+chips+'</div>');
+      }
+      // CRC brute-force: matches that tolerate a leading header byte / either endianness
+      var cb=(r.crc_brute&&r.crc_brute.matches)||[];
+      var known=((r.crc&&r.crc.matches)||[]).map(function(m){return m.algo+'/'+m.over_bytes;});
+      var extra=cb.filter(function(m){return known.indexOf(m.algo+'/'+m.over_bytes)<0;});
+      if(extra.length)
+        lines.push('<span style="color:var(--live)">✓ CRC-brute:</span> '+extra.slice(0,4).map(function(m){
+          return esc(m.algo)+' ('+m.width+'b over '+m.over_bytes+'B'+(m.skip_bytes?', skip '+m.skip_bytes:'')+(m.endian?', '+m.endian:'')+')';}).join('; '));
+      fo.innerHTML=lines.filter(Boolean).join('<br>');
+      fo.querySelectorAll('.fcand').forEach(function(b){ b.addEventListener('click',function(){ runFrames(+b.getAttribute('data-p')); }); });
+      runFingerprint(r);
+    }).catch(function(){ fo.textContent='frame request failed'; });
+  }
+  // device fingerprint: match measured features to ISM device families
+  function runFingerprint(fr){
+    var d=S.demod, fo=$('fpout'); if(!d){ fo.hidden=true; return; }
+    var crc=((fr&&fr.crc&&fr.crc.matches)||[]).map(function(m){return m.algo;});
+    var mod=(d.mode==='pulse')?'ook':(d.mode||'');   // a decoded pulse train is an OOK signal
+    api('/api/net/rtl/analyze/fingerprint',{mod:mod, baud:Math.round(d.baud||0),
+        frame_bits:(fr&&fr.period_bits)||0, preamble:(fr&&fr.preamble_bits)||0, crc:crc.join(','),
+        freq:(S.marker?S.marker.f:S.fc)||0, bw:d.bw_hz||0})
+      .then(renderFingerprint).catch(function(){ fo.hidden=true; });
+  }
+  function renderFingerprint(r){
+    var fo=$('fpout'); if(!r||!r.ok){ fo.hidden=true; return; }
+    var cs=r.candidates||[]; if(!cs.length && !r.generic){ fo.hidden=true; return; }
+    fo.hidden=false;
+    var h=['<div class="fh">likely device family'+(r.band_mhz?' · '+r.band_mhz+' MHz band':'')+'</div>'];
+    cs.forEach(function(c){
+      h.push('<div class="cand"><span class="nm">'+esc(c.name)+'</span>'
+        +'<span class="conf">'+c.confidence+'%</span>'
+        +'<span class="cls">'+esc(c.class)+'</span>'
+        +'<span class="why">'+(c.why||[]).map(esc).join('  ·  ')+'</span></div>');
+    });
+    if(r.generic) h.push('<div class="gen">'+esc(r.generic)+'</div>');
+    else if(cs.length && cs[0].confirm) h.push('<div class="gen">to confirm: '+esc(cs[0].confirm)+'</div>');
+    fo.innerHTML=h.join('');
+  }
+  // field diff: compare set + cross-capture diff
+  function renderCmp(){
+    var cs=$('cmpset'); $('cmpn').textContent=S.cmp.length;
+    if(!S.cmp.length){ cs.innerHTML='<span class="msg" style="padding:0">No captures added. Demodulate a signal and press <b>＋ Compare</b>; do it again for the same remote (press its button again / re-capture) — then <b>Diff</b> shows which bits are the fixed ID and which are a rolling code or counter.</span>'; return; }
+    cs.innerHTML=S.cmp.map(function(c,i){return '<span class="chip">'+esc(c.label)+' <button data-i="'+i+'" title="remove">✕</button></span>';}).join('');
+    Array.prototype.forEach.call(cs.querySelectorAll('.chip button'),function(b){
+      b.addEventListener('click',function(){ S.cmp.splice(+b.getAttribute('data-i'),1); renderCmp(); }); });
+  }
+  $('addcmp').addEventListener('click',function(){
+    var d=S.demod; if(!d||!d.bits){ return; }
+    var b=curBits(); if(b.replace(/[^01]/g,'').length<8){ return; }
+    var mhz=(((S.marker?S.marker.f:S.fc)||0)/1e6).toFixed(3);
+    S.cmp.push({label:mhz+' MHz #'+(S.cmp.length+1), bits:b}); renderCmp();
+  });
+  $('rundiff').addEventListener('click',function(){
+    var out=$('diffout');
+    if(S.cmp.length<2){ out.hidden=false; out.innerHTML='<span style="color:var(--muted)">add at least 2 captures of the same emitter (＋ Compare) first</span>'; return; }
+    out.hidden=false; out.textContent='diffing '+S.cmp.length+' captures…';
+    api2('/api/net/rtl/analyze/diff',{streams:S.cmp.map(function(c){return c.bits;}), labels:S.cmp.map(function(c){return c.label;})})
+      .then(renderDiff).catch(function(){ out.textContent='diff request failed'; });
+  });
+  function renderDiff(r){
+    var out=$('diffout');
+    if(!r||!r.ok){ out.innerHTML='<span style="color:var(--rose)">⚠ '+esc((r&&r.error)||'diff failed')+'</span>'; return; }
+    var h=[];
+    h.push(r.n_captures+' captures aligned · frame <b>'+r.frame_bits+' bits</b> · '
+      +'<span style="color:var(--muted)">'+r.n_fixed+' fixed, </span><span style="color:var(--accent)">'+r.n_varying+' varying</span>'
+      +(r.dropped&&r.dropped.length?' <span style="color:var(--rose)">(dropped, different length: '+r.dropped.map(esc).join(', ')+')</span>':''));
+    // consensus with fixed dim / varying highlighted, grouped in bytes
+    var cons=r.consensus||'', vis='';
+    for(var i=0;i<cons.length;i++){ var ch=cons[i];
+      vis+=(ch==='x')?'<span class="vy">·</span>':'<span class="fx">'+ch+'</span>';
+      if((i+1)%8===0) vis+=' '; }
+    h.push('<div class="diffbits">'+vis+'</div>');
+    h.push('fixed skeleton (hex): <span style="color:var(--live)">'+esc(r.consensus_hex)+'</span>');
+    // per-field table
+    if(r.fields&&r.fields.length){
+      var rows=r.fields.map(function(f){
+        return '<tr><td>'+f.start+'–'+(f.start+f.len-1)+'</td><td>'+f.len+'</td>'
+          +'<td><span class="tag '+f.kind+'">'+f.kind+'</span></td>'
+          +'<td style="color:var(--ink-dim)">'+f.values_hex.map(esc).join(' → ')+'</td></tr>';}).join('');
+      h.push('<table class="btable" style="margin-top:8px"><thead><tr><th>bits</th><th>len</th><th>kind</th><th>values (per capture, hex)</th></tr></thead><tbody>'+rows+'</tbody></table>');
+    } else {
+      h.push('<span style="color:var(--muted)">no varying bits — every capture is identical (a fixed-code emitter, or the same frame twice)</span>');
+    }
+    out.innerHTML=h.join('<br>');
+  }
+  renderCmp();
+  $('frames').addEventListener('click',function(){ runFrames(); });
+  // Standalone CRC over the exact bits shown (offset / Invert / Reflect / Manchester
+  // applied), no frame-repetition detection — for a single frame you have aligned.
+  function runCRC(){
+    var d=S.demod; if(!d||!d.bits){ var c0=$('crcout'); c0.hidden=false;
+      c0.innerHTML='<span style="color:var(--rose)">Demodulate a signal first.</span>'; return; }
+    var co=$('crcout'); co.hidden=false; co.textContent='testing CRC / checksums…';
+    var off=parseInt($('boff').value,10)||0;
+    api('/api/net/rtl/analyze/crc',{bits:d.bits, line:(manch?'manchester':'raw'),
+        invert:(binv?1:0), reflect:(brefl?1:0), offset:off}).then(function(r){
+      if(!r||!r.ok){ co.innerHTML='<span style="color:var(--rose)">⚠ '+esc((r&&r.error)||'failed')+'</span>'; return; }
+      var fmt=function(m){ return esc(m.algo)+' <span style="color:var(--muted)">('+m.width+'-bit over '+m.over_bytes+' B'
+        +(m.skip_bytes?', skip '+m.skip_bytes:'')+(m.endian?', '+m.endian+'-endian':'')+')</span>'; };
+      var lines=['<span style="color:var(--muted)">'+r.n_bytes+' bytes'+xfLabel()+'</span>'];
+      if(r.note) lines.push('<span style="color:var(--muted)">'+esc(r.note)+'</span>');
+      if(r.matches&&r.matches.length)
+        lines.push('<span style="color:var(--live)">✓ trailing check:</span> '+r.matches.map(fmt).join(', '));
+      if(r.brute_extra&&r.brute_extra.length)
+        lines.push('<span style="color:var(--live)">✓ with a header/tail:</span> '+r.brute_extra.slice(0,6).map(fmt).join(', '));
+      if(!(r.matches&&r.matches.length)&&!(r.brute_extra&&r.brute_extra.length)&&!r.note)
+        lines.push('<span style="color:var(--muted)">no CRC or checksum validates these bytes. Try <b>offset</b> to align the frame, or <b>Invert</b> / <b>Reflect</b>.</span>');
+      co.innerHTML=lines.join('<br>');
+    }).catch(function(){ co.innerHTML='<span style="color:var(--rose)">CRC request failed</span>'; });
+  }
+  $('crcbtn').addEventListener('click',runCRC);
+  function toHex(b){var h=[];for(var i=0;i+8<=b.length;i+=8)h.push(('0'+parseInt(b.substr(i,8),2).toString(16)).slice(-2));
+    var r=b.length%8; var s=h.join(' '); if(r)s+=' +'+b.substr(b.length-r); return s;}
+  function manchester(b){var o='';for(var i=0;i+2<=b.length;i+=2){var p=b.substr(i,2);o+=(p==='01'?'1':(p==='10'?'0':'?'));}return o;}
+  function renderBits(){
+    var d=S.demod; if(!d){ return; }
+    var bits=curBits();
+    var body=(bitview==='hex')?toHex(bits):(bits.replace(/(.{8})/g,'$1 ').trim());
+    S._bitsShown=body;
+    var head=(d.mode==='pulse')
+      ? (d.coding||'pulse').toUpperCase()+' · Te ≈ '+d.te_us+' µs · '+(d.n_frames||1)+' frames · '+bits.length+' symbols'+xfLabel()
+      : 'baud ≈ '+d.baud+'  ·  '+bits.length+' bits'+xfLabel();
+    $('bits').textContent=head+'  @ '+(d.f_offset_hz/1e3).toFixed(1)+' kHz, BW '+(d.bw_hz/1e3).toFixed(0)+' kHz\n'+(body||'(no bits recovered)');
+  }
+  $('run').addEventListener('click',function(){
+    if(!S.name){return;}
+    var v=S.view, foff=(S.marker?S.marker.f:S.fc)-S.fc, bw=(parseFloat($('bw').value)||60)*1e3;
+    $('bits').textContent=(mode==='pulse'?'decoding pulses…':'demodulating…');
+    var path=(mode==='pulse')?'/api/net/rtl/analyze/pulse':'/api/net/rtl/analyze/demod';
+    var q={name:S.name,f_offset:foff,bw:bw,t0:v.t0,t1:v.t1};
+    if(mode==='pulse') q.coding=$('pcoding').value; else q.mode=mode;
+    api(path,q).then(function(d){
+      if(!d||!d.ok){ S.demod=null; $('bits').textContent='⚠ '+((d&&d.error)||'demod failed'); $('fpout').hidden=true; return; }
+      S.demod=d; plot('wave',d.wave,d.wave,'rgb(245,185,66)',false); renderBits();
+    }).catch(function(){ $('bits').textContent='demod request failed'; });
+  });
+
+  // ---- modulation analysis: classify + constellation + instantaneous ----
+  var PLOT_ORDER=['iq','freq','amp','phase'];
+  var plotsOn={iq:true, freq:true, amp:false, phase:false};   // stacked, multi-select
+  function drawScatter(id,ix,qx){
+    var c=$(id),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(120,c.clientWidth||190),H=c.clientHeight||190;
+    c.width=W*dpr;c.height=H*dpr;var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+    // axes
+    g.strokeStyle='rgba(255,255,255,0.08)';g.beginPath();g.moveTo(W/2,0);g.lineTo(W/2,H);g.moveTo(0,H/2);g.lineTo(W,H/2);g.stroke();
+    if(!ix||!ix.length)return; var m=1.6, sx=W/2/m, sy=H/2/m;
+    g.fillStyle='rgba(56,189,201,0.5)';
+    for(var i=0;i<ix.length;i++){var x=W/2+ix[i]*sx, y=H/2-qx[i]*sy; g.fillRect(x-0.6,y-0.6,1.4,1.4);}
+  }
+  function drawOne(key,d){
+    var id='p-'+key;
+    if(key==='iq') plot2(id,d.i,d.q,'rgb(245,185,66)','rgb(56,189,201)');       // sample plot
+    else if(key==='amp') plot(id,d.t,d.amp_db,'rgb(63,181,107)',true);
+    else if(key==='phase') plot(id,d.t,d.phase_deg,'rgb(129,140,248)',false);
+    else plot(id,d.t,d.freq_hz,'rgb(245,185,66)',false);
+    drawSymbolsOn(id,d);
+  }
+  function drawInst(d){
+    S._inst=d;
+    PLOT_ORDER.forEach(function(key){
+      var blk=document.querySelector('.dplot[data-p="'+key+'"]');
+      if(blk) blk.hidden=!plotsOn[key];
+      if(plotsOn[key] && d && d.ok) drawOne(key,d);
+    });
+  }
+  // ---- symbol-period cursor (inspectrum-style): overlay symbol boundaries on
+  // EVERY visible stacked plot; set the rate by dragging one symbol width, typing
+  // baud, or pulling the demod estimate. A click shifts the grid phase.
+  var symState={on:false, baud:0, off:0};
+  function drawSymbolsOn(id,d){
+    if(!symState.on || !(symState.baud>0) || !d||!d.t||!d.t.length) return;
+    var c=$(id),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(200,c.clientWidth||300),H=c.clientHeight||120;
+    var g=c.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0);
+    var tL=d.t[d.t.length-1]||0; if(tL<=0) return;
+    var per=1/symState.baud; if(per>=tL) return;         // <2 symbols: nothing useful
+    var off=symState.off-Math.floor(symState.off/per)*per;
+    g.strokeStyle='rgba(245,185,66,0.55)'; g.lineWidth=1; g.setLineDash([2,3]);
+    var cnt=0; for(var t=off;t<=tL+1e-12 && cnt<500;t+=per,cnt++){var x=6+(t/tL)*(W-12);g.beginPath();g.moveTo(x,0);g.lineTo(x,H);g.stroke();}
+    g.setLineDash([]);
+    // symbol-centre markers (where Read samples the value)
+    g.fillStyle='rgba(245,185,66,0.85)'; var c2=0;
+    for(var tc=off+per/2;tc<=tL+1e-12 && c2<500;tc+=per,c2++){var xc=6+(tc/tL)*(W-12);g.fillRect(xc-1,H-6,2,4);}
+  }
+  function redrawSym(){ if(S._inst) drawInst(S._inst); }
+  function updateSymOut(){ var o=$('symout'),d=S._inst; if(!o)return;
+    if(!symState.on||!(symState.baud>0)){ o.textContent=''; return; }
+    var tL=(d&&d.t&&d.t.length)?d.t[d.t.length-1]:0, nsym=tL>0?Math.floor(tL*symState.baud):0;
+    o.textContent='period '+(1e3/symState.baud).toFixed(3)+' ms · '+nsym+' symbols'; }
+  function setBaud(b){ symState.baud=(b>0?b:0); if($('symbaud')) $('symbaud').value=(b>0?Math.round(b):''); updateSymOut(); redrawSym(); }
+  $('symtog').addEventListener('click',function(){ symState.on=!symState.on; $('symtog').setAttribute('aria-pressed',symState.on?'true':'false'); updateSymOut(); redrawSym(); });
+  $('symbaud').addEventListener('change',function(){ if(!symState.on){symState.on=true;$('symtog').setAttribute('aria-pressed','true');} setBaud(parseFloat($('symbaud').value)||0); });
+  $('symfrom').addEventListener('click',function(){ var b=(S.demod&&S.demod.baud)||(S.classifyData&&S.classifyData.symbol_rate_hz)||0;
+    if(b>0){ symState.on=true; $('symtog').setAttribute('aria-pressed','true'); symState.off=0; setBaud(b); }
+    else { $('symout').textContent='run Demodulate first'; } });
+  // estimate baud from the shown signal (amplitude run-lengths, like the demod slicer)
+  function estimateBaud(d){
+    if(!d||!d.amp_db||!d.t||d.t.length<8) return 0;
+    var tL=d.t[d.t.length-1]||0; if(tL<=0) return 0;
+    var a=d.amp_db,lo=Math.min.apply(null,a),hi=Math.max.apply(null,a),mid=(lo+hi)/2;
+    var runs=[],cur=1,prev=a[0]>mid;
+    for(var i=1;i<a.length;i++){var b=a[i]>mid; if(b===prev)cur++; else{runs.push(cur);cur=1;prev=b;}} runs.push(cur);
+    runs=runs.filter(function(r){return r>=2;}); if(!runs.length) return 0;
+    runs.sort(function(x,y){return x-y;}); var ui=runs[Math.floor(runs.length*0.1)];
+    var fsp=(a.length-1)/tL; return ui>0?fsp/ui:0;
+  }
+  $('symauto').addEventListener('click',function(){ var b=estimateBaud(S._inst);
+    if(b>0){ symState.on=true; $('symtog').setAttribute('aria-pressed','true'); symState.off=0; setBaud(b); }
+    else { $('symout').textContent='could not estimate — set baud manually'; } });
+  // read symbol values at the grid centres (OOK 1/0, or 2-bit I/Q quadrant)
+  $('symread').addEventListener('click',function(){
+    var d=S._inst; if(!d||!(symState.baud>0)){ $('symseq').textContent='enable Symbols + set a baud first'; return; }
+    var tL=d.t[d.t.length-1]||0, per=1/symState.baud;
+    if(per>=tL){ $('symseq').textContent='window shorter than one symbol'; return; }
+    var off=symState.off-Math.floor(symState.off/per)*per, bits=parseInt($('symbits').value,10)||1;
+    var idxAt=function(t){ return Math.max(0,Math.min(d.t.length-1, Math.round(t/tL*(d.t.length-1)))); };
+    var a=d.amp_db,lo=Math.min.apply(null,a),hi=Math.max.apply(null,a),mid=(lo+hi)/2, seq=[],cnt=0;
+    for(var t=off+per/2;t<=tL && cnt<512;t+=per,cnt++){ var j=idxAt(t);
+      if(bits>=2) seq.push(((d.i[j]>=0)?0:1)*2 + ((d.q[j]>=0)?0:1));
+      else seq.push(a[j]>mid?1:0); }
+    var body;
+    if(bits>=2){ body=seq.join(' '); }
+    else { var s=seq.join(''),hex=''; for(var i=0;i+8<=s.length;i+=8)hex+=('0'+parseInt(s.substr(i,8),2).toString(16)).slice(-2)+' ';
+      body=s.replace(/(.{8})/g,'$1 ').trim()+(hex?('\nhex: '+hex.trim()):''); }
+    $('symseq').textContent=seq.length+' symbols @ '+Math.round(symState.baud)+' baud:\n'+body;
+  });
+  // drag/click to set the symbol rate on any stacked derived-plot canvas
+  (function(){var down=null;
+    function tAt(ev){var t=ev.target; if(!t||!t.classList||!t.classList.contains('dpc'))return null;
+      var r=t.getBoundingClientRect(),W=r.width,d=S._inst; if(!d||!d.t||!d.t.length)return null;
+      var tL=d.t[d.t.length-1]||0, x=(ev.clientX-r.left-6)/(W-12); x=Math.max(0,Math.min(1,x)); return x*tL;}
+    $('stackplots').addEventListener('mousedown',function(e){ var t=tAt(e); if(t!=null) down={t:t}; });
+    window.addEventListener('mouseup',function(e){ if(!down)return; var d0=down; down=null; var t=tAt(e); if(t==null||!S._inst)return;
+      var tL=S._inst.t[S._inst.t.length-1]||1, dt=Math.abs(t-d0.t);
+      symState.on=true; $('symtog').setAttribute('aria-pressed','true');
+      if(dt>tL/500){ symState.off=Math.min(t,d0.t); setBaud(1/dt); }   // drag = one symbol width -> baud
+      else { symState.off=d0.t; updateSymOut(); redrawSym(); }         // click = shift the grid
+    });
+  })();
+  // two overlaid traces (raw I and Q), symmetric about 0 — the "sample plot".
+  function plot2(id,a,b,ca,cb){
+    var c=$(id),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(200,c.clientWidth||300),H=c.clientHeight||120;
+    c.width=W*dpr;c.height=H*dpr;var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+    if(!a||!a.length)return;
+    var m=1.05, py=function(v){return H/2-(v/m)*(H/2-3);}, px=function(i,n){return 6+i/(n-1)*(W-12);};
+    g.strokeStyle='rgba(255,255,255,0.08)';g.beginPath();g.moveTo(0,H/2);g.lineTo(W,H/2);g.stroke();
+    [[a,ca],[b,cb]].forEach(function(pair){var ys=pair[0];g.strokeStyle=pair[1];g.lineWidth=1;g.beginPath();
+      for(var i=0;i<ys.length;i++){var x=px(i,ys.length),y=py(ys[i]);i?g.lineTo(x,y):g.moveTo(x,y);}g.stroke();});
+    g.fillStyle=ca;g.font='9px monospace';g.textAlign='left';g.fillText('I',6,11);
+    g.fillStyle=cb;g.fillText('Q',16,11);
+  }
+  $('instview').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;
+    var k=b.getAttribute('data-iv'), on=(b.getAttribute('aria-pressed')==='true');
+    if(on && PLOT_ORDER.filter(function(x){return plotsOn[x];}).length<=1) return;  // keep >=1 visible
+    plotsOn[k]=!on; b.setAttribute('aria-pressed',plotsOn[k]?'true':'false');
+    if(S._inst) drawInst(S._inst);});
+  $('runmod').addEventListener('click',function(){
+    if(!S.name)return; var v=S.view, foff=(S.marker?S.marker.f:S.fc)-S.fc, bw=(parseFloat($('bw').value)||60)*1e3;
+    var q={name:S.name,f_offset:foff,bw:bw,t0:v.t0,t1:v.t1};
+    $('modout').textContent='analyzing…';
+    api('/api/net/rtl/analyze/classify',q).then(function(c){
+      if(!c||!c.ok){ $('modout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((c&&c.error)||'failed')+'</span>'; return; }
+      S.classifyData=c;
+      var f=c.features||{};
+      $('modout').innerHTML='<b style="color:var(--cyan);font-size:14px">'+esc(c.label)+'</b>  ·  confidence '+Math.round(c.confidence*100)+'%'
+        +(c.symbol_rate_hz?'  ·  symbol rate ≈ <b>'+(c.symbol_rate_hz>=1000?(c.symbol_rate_hz/1000).toFixed(2)+' kBd':c.symbol_rate_hz+' Bd')+'</b>':'')
+        +'<br><span style="color:var(--muted);font-size:11px">env-var '+f.env_var+' · freq-spread '+f.ifr_std+' · occupancy '+Math.round((f.occupancy||0)*100)+'% · bimodality '+f.bimodality+'</span>';
+    }).catch(function(){ $('modout').textContent='classify request failed'; });
+    api('/api/net/rtl/analyze/constellation',q).then(function(cn){ if(cn&&cn.ok) drawScatter('constell',cn.i,cn.q); });
+    api('/api/net/rtl/analyze/instantaneous',q).then(function(ins){ S._inst=ins; drawInst(ins); });
+    // Subaudible squelch signalling: which group a transmission belongs to.
+    api('/api/net/rtl/analyze/subaudible',q).then(function(sa){
+      if(!sa||!sa.ok) return; S.subaudible=sa;
+      var c=sa.ctcss||{}, d=sa.dcs||{}, out=[];
+      if(c.present) out.push('<b>CTCSS '+c.tone_hz.toFixed(1)+' Hz</b> <span style="color:var(--muted)">('+c.margin_db+' dB clear of the next tone)</span>');
+      if(d.present&&d.code) out.push('<b>DCS '+esc(d.code)+(d.inverted?' inverted':'')+'</b>');
+      else if(d.present) out.push('a 23-bit word repeats but is not a standard DCS code');
+      var el=document.getElementById('modout');
+      el.innerHTML+='<div style="margin-top:6px;font-size:12px"><b>Squelch tag</b> '
+        +(out.length?out.join(' · '):'<span style="color:var(--muted)">none — carrier squelch</span>')+'</div>';
+    });
+    // Service-monitor figures. Both are always shown: an "FM" signal carrying
+    // 40% AM depth is telling you something about the transmitter.
+    api('/api/net/rtl/analyze/modulation_quality',q).then(function(mq){
+      if(!mq||!mq.ok) return; S.modQuality=mq;
+      var fm=mq.fm||{}, am=mq.am||{}, hz=function(v){ return v==null?'—':(Math.abs(v)>=1000?(v/1000).toFixed(2)+' kHz':Math.round(v)+' Hz'); };
+      var el=document.getElementById('modout');
+      el.innerHTML+='<div style="margin-top:8px;font-size:12px">'
+        +'<b>FM</b> peak deviation <b>'+hz(fm.peak_dev_hz)+'</b> · RMS '+hz(fm.rms_dev_hz)
+        +' · carrier offset '+hz(fm.carrier_offset_hz)+' · Carson BW '+hz(fm.carson_bw_hz)
+        +' &nbsp;·&nbsp; <b>AM</b> depth <b>'+(am.depth_pct==null?'—':am.depth_pct+'%')+'</b>'
+        +'<div style="color:var(--muted);font-size:11px;margin-top:2px">'+esc(mq.note||'')+'</div></div>';
+    });
+  });
+
+  // ---- filter: band-pass / notch, spectrum before vs after ----
+  var fkind='bandpass';
+  $('fkind').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; fkind=b.getAttribute('data-fk');
+    Array.prototype.forEach.call($('fkind').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-fk')===fkind?'true':'false');});});
+  function filterBand(){   // A/B cursors if both set, else marker ± demod BW
+    if(S.marker&&S.markerB) return [Math.min(S.marker.f,S.markerB.f), Math.max(S.marker.f,S.markerB.f)];
+    if(S.marker){ var bw=(parseFloat($('bw').value)||60)*1e3; return [S.marker.f-bw/2, S.marker.f+bw/2]; }
+    return null;
+  }
+  function drawFilt(d){
+    var c=$('filtcanvas'),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(200,c.clientWidth||300),H=c.clientHeight||150;
+    c.width=W*dpr;c.height=H*dpr;var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+    if(!d||!d.ok)return; var ys=d.db_before.concat(d.db_after),lo=Math.min.apply(null,ys),hi=Math.max.apply(null,ys); if(hi-lo<1){hi+=1;lo-=1;}
+    var n=d.freqs_mhz.length, px=function(i){return 6+i/(n-1)*(W-12);}, py=function(v){return H-4-(v-lo)/(hi-lo)*(H-10);};
+    // shade the filtered band
+    var fx=function(mhz){return px((mhz-d.freqs_mhz[0])/((d.freqs_mhz[n-1]-d.freqs_mhz[0])||1)*(n-1));};
+    g.fillStyle='rgba(245,185,66,0.10)';g.fillRect(fx(d.f0_mhz),0,Math.max(1,fx(d.f1_mhz)-fx(d.f0_mhz)),H);
+    var line=function(arr,col){g.strokeStyle=col;g.lineWidth=1;g.beginPath();for(var i=0;i<arr.length;i++){var x=px(i),y=py(arr[i]);i?g.lineTo(x,y):g.moveTo(x,y);}g.stroke();};
+    line(d.db_before,'rgba(139,152,171,0.7)'); line(d.db_after,'rgb(56,189,201)');
+    g.fillStyle='rgba(139,152,171,0.9)';g.font='9px monospace';g.textAlign='left';g.fillText('before',6,11);
+    g.fillStyle='rgb(56,189,201)';g.fillText('after',44,11);
+  }
+  $('runfilt').addEventListener('click',function(){
+    if(!S.name)return; var band=filterBand();
+    if(!band){ $('filtout').innerHTML='<span style="color:var(--accent)">Drop A &amp; B cursors around a band (or a marker), then Apply.</span>'; return; }
+    var v=S.view; $('filtout').textContent='filtering…';
+    api('/api/net/rtl/analyze/filter',{name:S.name,kind:fkind,f0:band[0],f1:band[1],t0:v.t0,t1:v.t1}).then(function(d){
+      if(!d||!d.ok){ $('filtout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((d&&d.error)||'filter failed')+'</span>'; return; }
+      $('filtout').innerHTML=(d.kind==='bandpass'?'Band-pass':'Notch')+' '+d.f0_mhz.toFixed(4)+'–'+d.f1_mhz.toFixed(4)+' MHz  ·  '
+        +'<b>'+d.power_kept_pct+'%</b> of power kept';
+      drawFilt(d);
+    }).catch(function(){ $('filtout').textContent='filter request failed'; });
+  });
+
+  // ---- LoRa de-chirp: draw the de-chirped symbol-tone map (reuses palette LUT) ----
+  function drawGrid(id,d){
+    var c=$(id),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(200,c.clientWidth||300),H=c.clientHeight||170;
+    c.width=W*dpr;c.height=H*dpr;var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+    if(!d||!d.ok||!d.data){ return; }
+    var bin=atob(d.data),n=bin.length,buf=new Uint8Array(n);for(var i=0;i<n;i++)buf[i]=bin.charCodeAt(i);
+    var off=document.createElement('canvas');off.width=d.w;off.height=d.h;
+    var oc=off.getContext('2d'),img=oc.createImageData(d.w,d.h),px=img.data;
+    for(var k=0;k<d.w*d.h;k++){var v=buf[k];px[k*4]=LUT[v*3];px[k*4+1]=LUT[v*3+1];px[k*4+2]=LUT[v*3+2];px[k*4+3]=255;}
+    oc.putImageData(img,0,0); g.imageSmoothingEnabled=false; g.drawImage(off,0,0,d.w,d.h,0,0,W,H);
+    g.fillStyle='rgba(205,214,228,.6)';g.font='9px monospace';g.textAlign='left';g.fillText('symbol value ↑ · time →',6,12);
+  }
+  $('rundechirp').addEventListener('click',function(){
+    if(!S.name)return; var v=S.view, foff=(S.marker?S.marker.f:S.fc)-S.fc;
+    var bw=parseFloat($('lorabw').value)||250000, sf=parseInt($('lorasf').value,10)||11;
+    $('loraout').textContent='de-chirping…'; $('lorasyms').textContent='';
+    api('/api/net/rtl/analyze/dechirp',{name:S.name,bw:bw,sf:sf,f_offset:foff,t0:v.t0,t1:v.t1}).then(function(d){
+      if(!d||!d.ok){ $('loraout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((d&&d.error)||'failed')+'</span>'; drawGrid('loracanvas',null); return; }
+      $('loraout').innerHTML='SF'+d.sf+' BW'+(d.bw_hz/1e3)+'k · '+d.n_symbols+' symbols · lock '
+        +'<b style="color:'+(d.locked?'var(--live)':'var(--muted)')+'">'+d.quality+(d.locked?' ✓':' (weak — sweep SF/BW/marker)')+'</b>';
+      drawGrid('loracanvas',d);
+      $('lorasyms').textContent=d.locked?('symbols: '+d.symbols.slice(0,64).join(' ')):'';
+    }).catch(function(){ $('loraout').textContent='de-chirp request failed'; });
+  });
+
+  // ---- cyclostationary symbol-rate detector ----
+  function drawProfile(id,fx,py,peaks){
+    var c=$(id),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(200,c.clientWidth||300),H=c.clientHeight||140;
+    c.width=W*dpr;c.height=H*dpr;var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+    if(!py||!py.length)return; var hi=Math.max.apply(null,py)||1, n=py.length;
+    var X=function(i){return 6+i/(n-1)*(W-12);}, Y=function(v){return H-16-v/hi*(H-24);};
+    g.strokeStyle='rgb(56,189,201)';g.lineWidth=1;g.beginPath();
+    for(var i=0;i<n;i++){var x=X(i),y=Y(py[i]);i?g.lineTo(x,y):g.moveTo(x,y);} g.stroke();
+    // mark peaks + freq labels
+    (peaks||[]).forEach(function(p){ var idx=Math.round((p.symbol_rate_hz-fx[0])/((fx[n-1]-fx[0])||1)*(n-1));
+      idx=Math.max(0,Math.min(n-1,idx)); var x=X(idx);
+      g.strokeStyle='rgba(245,185,66,0.7)';g.setLineDash([2,3]);g.beginPath();g.moveTo(x,0);g.lineTo(x,H-14);g.stroke();g.setLineDash([]);
+      g.fillStyle='var(--accent)';g.fillStyle='#f5b942';g.font='9px monospace';g.textAlign='center';
+      g.fillText((p.symbol_rate_hz>=1000?(p.symbol_rate_hz/1000).toFixed(1)+'k':Math.round(p.symbol_rate_hz)),x,H-3); });
+    g.fillStyle='rgba(205,214,228,.55)';g.font='9px monospace';g.textAlign='left';g.fillText('cycle freq (symbol rate) →',6,11);
+  }
+  $('runcyc').addEventListener('click',function(){
+    if(!S.name)return; var v=S.view, foff=(S.marker?S.marker.f:S.fc)-S.fc;
+    $('cycout').textContent='detecting…'; $('cycpeaks').innerHTML='';
+    api('/api/net/rtl/analyze/cyclic',{name:S.name,f_offset:foff,t0:v.t0,t1:v.t1}).then(function(d){
+      if(!d||!d.ok){ $('cycout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((d&&d.error)||'failed')+'</span>'; drawProfile('cyccanvas',[],[],[]); return; }
+      var fmt=function(hz){return hz>=1000?(hz/1000).toFixed(2)+' kBd':Math.round(hz)+' Bd';};
+      $('cycout').innerHTML=d.top_symbol_rate_hz
+        ? 'symbol rate ≈ <b style="color:'+(d.locked?'var(--live)':'var(--accent)')+'">'+fmt(d.top_symbol_rate_hz)+'</b> · strength '+d.top_strength+(d.locked?' ✓':' (weak/uncertain)')
+        : '<span style="color:var(--muted)">no clear cyclostationary feature — try a cleaner burst / different marker</span>';
+      drawProfile('cyccanvas',d.freqs_hz,d.profile,d.peaks);
+      // clickable candidate rates -> feed the symbol tool + LoRa nothing
+      $('cycpeaks').innerHTML=(d.peaks||[]).length?'<span class="lbl">candidates:</span>'+d.peaks.map(function(p){
+        return '<button class="fcand" data-b="'+p.symbol_rate_hz+'">'+fmt(p.symbol_rate_hz)+' ('+p.strength+')</button>';}).join(''):'';
+      $('cycpeaks').querySelectorAll('button[data-b]').forEach(function(b){ b.addEventListener('click',function(){
+        var bd=parseFloat(b.getAttribute('data-b'))||0; if(bd>0){ symState.on=true; $('symtog').setAttribute('aria-pressed','true'); symState.off=0; setBaud(bd);
+          $('pskbaud').value=Math.round(bd); } }); });   // also feed the constellation-demod baud field
+    }).catch(function(){ $('cycout').textContent='cyclic request failed'; });
+  });
+
+  // ---- Constellation demod (PSK): scatter with cluster centres + recovered bits ----
+  function drawConstDemod(pi,pq,ci,cq){
+    var c=$('pskcanvas'),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(120,c.clientWidth||190),H=c.clientHeight||190;
+    c.width=W*dpr;c.height=H*dpr;var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+    g.strokeStyle='rgba(255,255,255,0.08)';g.beginPath();g.moveTo(W/2,0);g.lineTo(W/2,H);g.moveTo(0,H/2);g.lineTo(W,H/2);g.stroke();
+    var m=1.6, sx=W/2/m, sy=H/2/m, px=function(v){return W/2+v*sx;}, py=function(v){return H/2-v*sy;};
+    if(pi&&pi.length){ g.fillStyle='rgba(56,189,201,0.5)';
+      for(var i=0;i<pi.length;i++){ g.fillRect(px(pi[i])-0.6,py(pq[i])-0.6,1.4,1.4); } }
+    if(ci&&ci.length){ g.strokeStyle='rgb(245,185,66)';g.lineWidth=1.5;
+      for(var j=0;j<ci.length;j++){ g.beginPath();g.arc(px(ci[j]),py(cq[j]),4,0,2*Math.PI);g.stroke(); } }
+  }
+  function groupBits(s){ return (s||'').replace(/(.{8})/g,'$1 ').trim(); }
+  $('runpsk').addEventListener('click',function(){
+    if(!S.name)return; var v=S.view, foff=(S.marker?S.marker.f:S.fc)-S.fc, bw=(parseFloat($('bw').value)||60)*1e3;
+    var q={name:S.name,f_offset:foff,bw:bw,t0:v.t0,t1:v.t1};
+    var bd=parseFloat($('pskbaud').value); if(bd>0)q.baud=bd;
+    var ord=$('pskorder').value; if(ord)q.order=ord;
+    $('pskout').textContent='demodulating…'; $('pskbits').hidden=true;
+    api('/api/net/rtl/analyze/constellation_demod',q).then(function(d){
+      if(!d||!d.ok){ $('pskout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((d&&d.error)||'failed')+'</span>'; drawConstDemod([],[],[],[]); return; }
+      var fmt=function(hz){return hz>=1000?(hz/1000).toFixed(2)+' kBd':Math.round(hz)+' Bd';};
+      $('pskout').innerHTML='<b style="color:var(--cyan)">'+esc(d.mod)+'</b>'
+        +(d.single_cluster?' <span style="color:var(--accent)">· single tone — not a real PSK constellation</span>':'')
+        +' · EVM <b>'+d.evm_pct+'%</b> · SNR '+d.snr_db+' dB · '+d.n_symbols+' sym @ '+fmt(d.baud_hz)
+        +(d.baud_estimated?' <span style="color:var(--muted)">(baud auto)</span>':'');
+      drawConstDemod(d.points_i,d.points_q,d.centers_i,d.centers_q);
+      $('pskbits').hidden=false;
+      $('pskbits').innerHTML='<b>differential bits</b> ('+(d.bits_diff||'').length+')  ·  '
+        +Math.log2(d.order)+' bit/sym\n'+groupBits(d.bits_diff);
+    }).catch(function(){ $('pskout').textContent='constellation-demod request failed'; });
+  });
+
+  $('cap').addEventListener('change',function(){ var n=decodeURIComponent($('cap').value||''); if(n)loadCapture(n); });
+  $('reload').addEventListener('click',function(){ loadList(S.name); });
+  window.addEventListener('resize',function(){ if(S.spec)drawSpec(S.spec); });
+
+  // ---- AI assistant (reuses Ragnar's existing AI service via /api/ai/signal) ----
+  // very small markdown -> HTML (headings, bold, code, bullets) for the answer
+  function mdLite(t){
+    var h=esc(t||'');
+    h=h.replace(/^###?\s*(.+)$/gm,'<h4>$1</h4>');
+    h=h.replace(/\*\*(.+?)\*\*/g,'<b>$1</b>');
+    h=h.replace(/`([^`]+)`/g,'<code>$1</code>');
+    h=h.replace(/^\s*[-*]\s+(.+)$/gm,'• $1');
+    return h;
+  }
+  function aiContext(){
+    // Send only compact, relevant slices (the demod bitstream can be long).
+    var d=S.demod, c={capture:S.name, summary:S.summaryData||null,
+      marker:(S.marker?{freq_hz:S.marker.f, t_s:S.marker.t}:null),
+      view:S.view, classification:S.classifyData||null,
+      bursts:(S.bursts?{count:S.bursts.count, list:(S.bursts.bursts||[]).slice(0,12)}:null),
+      frame_analysis:S.framesData||null,
+      demod:(d?{mode:d.mode,baud:d.baud,n_bits:d.n_bits,bits:(d.bits||'').slice(0,256),
+                f_offset_hz:d.f_offset_hz,bw_hz:d.bw_hz}:null),
+      modulation_quality:(S.modQuality?{fm:S.modQuality.fm,am:S.modQuality.am,
+                modulation:S.modQuality.modulation}:null),
+      subaudible:(S.subaudible?{ctcss:S.subaudible.ctcss,dcs:S.subaudible.dcs}:null),
+      decoded:(S.decoded?{events:S.decoded.events,
+                devices:(S.decoded.devices||[]).slice(0,6)}:null)};
+    return c;
+  }
+  function aiAsk(q){
+    if(!S.name){ $('aiout').textContent='Load a capture first.'; return; }
+    $('aiout').textContent='thinking…';
+    fetch('/api/ai/signal',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:S.name, question:q, context:aiContext()})})
+      .then(function(r){return r.json();}).then(function(res){
+        if(res && res.enabled===false){ $('aiout').innerHTML='<span style="color:var(--accent)">'+esc(res.message||'AI is not enabled — add an API token in Settings › AI.')+'</span>'; return; }
+        if(!res || res.error || !res.answer){ $('aiout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((res&&res.error)||'no answer')+'</span>'; return; }
+        $('aiout').innerHTML=mdLite(res.answer);
+        renderAiActions(res.actions||[]);
+      }).catch(function(){ $('aiout').textContent='request failed'; });
+  }
+  // ---- AI-proposed actions -> one-click drivers of the real analyzer ----
+  function setDemodMode(m){ var b=$('mode').querySelector('[data-m="'+m+'"]'); if(b) b.click(); }
+  function aiActionLabel(a){
+    if(a.action==='tune') return 'Tune '+(a.f_mhz!=null?a.f_mhz.toFixed(4)+' MHz':'')+(a.bw_khz!=null?' · BW '+a.bw_khz+' kHz':'')+(a.mode?' · '+a.mode.toUpperCase():'');
+    if(a.action==='demod') return 'Demod '+(a.mode?a.mode.toUpperCase():'')+(a.bw_khz!=null?' @ '+a.bw_khz+' kHz':'');
+    if(a.action==='classify') return 'Classify';
+    if(a.action==='frames') return 'Frames'+(a.line&&a.line!=='raw'?' ('+a.line+')':'');
+    if(a.action==='decode433') return 'Decode (rtl_433)';
+    if(a.action==='zoom') return 'Zoom';
+    if(a.action==='reset') return 'Reset zoom';
+    return a.action;
+  }
+  function runAiAction(a){
+    if(a.action==='reset'){ $('reset').click(); return; }
+    // Every action except reset needs a loaded capture with a view.
+    if(!S.name || !S.view){ var an=$('aiacts'); if(an) an.insertAdjacentHTML('beforeend',
+      '<span class="albl" style="color:var(--rose)">open a capture first</span>'); return; }
+    if(a.action==='tune'){
+      // Tune = point AT the signal AND investigate it. Repositioning alone looked
+      // like "nothing happened" when the view was already near the frequency.
+      if(a.f_mhz!=null){ var f=a.f_mhz*1e6, span=(a.bw_khz?a.bw_khz*1e3*4:Math.max(60e3,(S.view.f1-S.view.f0)));
+        S.marker={f:f,t:(S.view.t0+S.view.t1)/2}; S.hist.push(S.view);
+        S.view={t0:S.view.t0,t1:S.view.t1,f0:f-span/2,f1:f+span/2}; }
+      if(a.bw_khz!=null) $('bw').value=a.bw_khz;
+      if(a.mode) setDemodMode(a.mode);
+      refreshWindow(); setAx();
+      // now actually look at it: demodulate + classify the tuned signal, so the
+      // analysis panels fill with the new data rather than just re-centring...
+      $('run').click(); $('runmod').click();
+      // ...then let the AI read those fresh measurements and interpret them.
+      aiFollowUp(aiActionLabel(a), ['demod','classifyData']);
+      return;
+    }
+    if(a.action==='zoom'){ S.hist.push(S.view);
+      S.view={t0:(a.t0!=null?a.t0:S.view.t0),t1:(a.t1!=null?a.t1:S.view.t1),
+              f0:(a.f0_mhz!=null?a.f0_mhz*1e6:S.view.f0),f1:(a.f1_mhz!=null?a.f1_mhz*1e6:S.view.f1)};
+      refreshWindow(); return; }
+    if(a.action==='demod'){ if(a.mode) setDemodMode(a.mode); if(a.bw_khz!=null)$('bw').value=a.bw_khz; $('run').click();
+      aiFollowUp(aiActionLabel(a), ['demod']); return; }
+    if(a.action==='classify'){ $('runmod').click();
+      aiFollowUp('classify the signal', ['classifyData']); return; }
+    if(a.action==='frames'){ if(a.line==='manchester'&&!manch) $('manch').click();
+      else if((!a.line||a.line==='raw')&&manch) $('manch').click(); runFrames(a.period_bits||undefined);
+      aiFollowUp('analyse the frame structure', ['framesData']); return; }
+    if(a.action==='decode433'){ $('rundec').click();
+      aiFollowUp('decode with rtl_433', ['decoded']); return; }
+  }
+  // After an AI action's tools have run, let the AI read the fresh measurements
+  // and interpret them — proposal -> measure -> interpret. Waits for the specific
+  // results that action produces (or a timeout), then asks ONCE. New actions it
+  // proposes are rendered but never auto-run, so there is no runaway loop.
+  function aiFollowUp(actionText, watch){
+    if(!S.name) return;
+    var keys=watch||[], snap={}; keys.forEach(function(k){ snap[k]=S[k]; });
+    var t0=Date.now();
+    (function poll(){
+      var settled = !keys.length || keys.some(function(k){ return S[k]!==snap[k] && S[k]!=null; });
+      if(settled){ setTimeout(ask,250); return; }           // a beat for sibling panels
+      if(Date.now()-t0>6000){ ask(); return; }              // don't wait forever
+      setTimeout(poll,150);
+    })();
+    function ask(){
+      var out=$('aiout'), div=document.createElement('div'); div.className='aifollow';
+      div.innerHTML='<hr class="aihr"><span style="color:var(--muted)">investigating '+esc(actionText)+'…</span>';
+      out.appendChild(div);
+      fetch('/api/ai/signal',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({name:S.name,
+          question:'You proposed to '+actionText+'. The analyzer has now run it and the measurements in the context are updated. In 1-3 sentences say what the signal is and what it means; propose a further action only if it would reveal something genuinely new.',
+          context:aiContext()})})
+        .then(function(r){return r.json();}).then(function(res){
+          if(!res||res.enabled===false||res.error||!res.answer){ div.remove(); return; }
+          div.innerHTML='<hr class="aihr">'+mdLite(res.answer);
+          if(res.actions&&res.actions.length) renderAiActions(res.actions);
+        }).catch(function(){ div.remove(); });
+    }
+  }
+  function renderAiActions(actions){
+    var el=$('aiacts'); if(!actions.length){ el.hidden=true; el.innerHTML=''; return; }
+    el.hidden=false;
+    var html='<span class="albl">AI actions:</span>';
+    actions.forEach(function(a,i){ html+='<button data-i="'+i+'">▶ '+esc(aiActionLabel(a))+'</button>'; });
+    if(actions.length>1) html+='<button class="runall">▶▶ Run all</button>';
+    el.innerHTML=html;
+    el.querySelectorAll('button[data-i]').forEach(function(b){ b.addEventListener('click',function(){ runAiAction(actions[+b.getAttribute('data-i')]); b.classList.add('done'); }); });
+    var ra=el.querySelector('.runall');
+    if(ra) ra.addEventListener('click',function(){ actions.forEach(function(a,i){ setTimeout(function(){ runAiAction(a); },i*1100); });
+      el.querySelectorAll('button[data-i]').forEach(function(b){b.classList.add('done');}); });
+  }
+  $('aiask').addEventListener('click',function(){ aiAsk(($('aiq').value||'').trim()); });
+  $('aiq').addEventListener('keydown',function(e){ if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){ e.preventDefault(); aiAsk(($('aiq').value||'').trim()); } });
+  $('aichips').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; var q=b.getAttribute('data-q'); $('aiq').value=q; aiAsk(q); });
+  // Only show the card when the AI service is actually enabled.
+  fetch('/api/ai/status').then(function(r){return r.json();}).then(function(st){
+    if(st && st.enabled){ $('aicard').hidden=false; }
+  }).catch(function(){});
+
+  // ---- copy shareable link + keyboard-shortcut help ----
+  $('copylink').addEventListener('click',function(){
+    updateURL(); var url=location.href, b=$('copylink'), old=b.textContent;
+    function done(ok){ b.textContent=ok?'✓ Copied':'⚠ Copy failed'; setTimeout(function(){b.textContent=old;},1400); }
+    if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(url).then(function(){done(true);},function(){done(false);}); }
+    else { try{ var ta=document.createElement('textarea'); ta.value=url; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); done(true); }catch(e){ done(false); } }
+  });
+  $('kbdhelp').addEventListener('click',function(){ $('kbdpop').hidden=!$('kbdpop').hidden; });
+
+  // ---- upload / import (Flipper .sub · raw IQ · SigMF pair) ----
+  $('uploadbtn').addEventListener('click',function(){ $('uploadpop').hidden=!$('uploadpop').hidden; });
+  $('upfile').addEventListener('change',function(){
+    var fs=Array.prototype.slice.call($('upfile').files||[]);
+    // raw-IQ params only matter when a file isn't a .sub or SigMF sidecar
+    var needsRaw=fs.some(function(f){ return !/\.(sub|sigmf-meta|sigmf-data)$/i.test(f.name); });
+    $('uprawopts').hidden=!needsRaw;
+  });
+  $('updo').addEventListener('click',function(){
+    var fs=Array.prototype.slice.call($('upfile').files||[]);
+    if(!fs.length){ $('upstat').textContent='pick a file first'; return; }
+    var subs=fs.filter(function(f){return /\.sub$/i.test(f.name);});
+    var metas=fs.filter(function(f){return /\.sigmf-meta$/i.test(f.name);});
+    var datas=fs.filter(function(f){return /\.sigmf-data$/i.test(f.name);});
+    var others=fs.filter(function(f){return !/\.(sub|sigmf-meta|sigmf-data)$/i.test(f.name);});
+    var jobs=[];
+    subs.forEach(function(f){ var fd=new FormData(); fd.append('file',f); jobs.push(fd); });
+    if(metas.length&&datas.length){ var fd=new FormData(); fd.append('file',datas[0]); fd.append('meta',metas[0]); jobs.push(fd); }
+    else if(metas.length||datas.length){ $('upstat').textContent='SigMF needs BOTH the .sigmf-meta and .sigmf-data'; return; }
+    others.forEach(function(f){ var fd=new FormData(); fd.append('file',f);
+      fd.append('datatype',$('updtype').value); fd.append('sample_rate',($('uprate').value||'').trim());
+      fd.append('frequency',String((parseFloat($('upfreq').value)||0)*1e6)); jobs.push(fd); });
+    if(!jobs.length){ $('upstat').textContent='nothing to import'; return; }
+    $('upstat').textContent='importing…';
+    var last=null, msgs=[];
+    jobs.reduce(function(p,fd){ return p.then(function(){
+      return fetch('/api/net/rtl/analyze/upload',{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(r){
+        if(r&&r.ok){ last=r.name; msgs.push('✓ '+esc(r.name)); } else { msgs.push('⚠ '+esc((r&&r.error)||'failed')); } });
+    }); }, Promise.resolve()).then(function(){
+      $('upstat').innerHTML=msgs.join(' · ');
+      if(last){ loadList(last); setTimeout(function(){ $('uploadpop').hidden=true; $('upfile').value=''; },1200); }
+    }).catch(function(){ $('upstat').textContent='upload request failed'; });
+  });
+
+  // ---- keyboard shortcuts (ignored while typing in a field) ----
+  function palStep(dir){ var i=ORDER.indexOf(pal); if(i<0)i=0; var next=ORDER[(i+dir+ORDER.length)%ORDER.length];
+    var b=$('palette').querySelector('button[data-p="'+next+'"]'); if(b)b.click(); }
+  function setMode(m){ var b=$('dragmode').querySelector('button[data-dm="'+m+'"]'); if(b)b.click(); }
+  document.addEventListener('keydown',function(e){
+    var t=e.target, tag=t&&t.tagName; if(e.ctrlKey||e.metaKey||e.altKey) return;
+    if(tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA'||(t&&t.isContentEditable)) return;
+    switch(e.key){
+      case 'r': case 'R': $('reset').click(); break;
+      case 'b': case 'B': $('back').click(); break;
+      case '[': palStep(-1); break;
+      case ']': palStep(1); break;
+      case 'z': case 'Z': setMode('zoom'); break;
+      case 'x': case 'X': setMode('measure'); break;
+      case 'c': case 'C': setMode('annotate'); break;
+      case 'd': case 'D': if(S.name) $('run').click(); break;
+      case 'l': case 'L': $('copylink').click(); break;
+      case '?': $('kbdpop').hidden=!$('kbdpop').hidden; break;
+      default: return;
+    }
+    e.preventDefault();
+  });
+
+  // preselect a capture from a shared deep-link (?name=…); loadCapture applies the rest
+  loadList(DEEP?DEEP.name:null);
+})();
+</script>
+</body>
+</html>

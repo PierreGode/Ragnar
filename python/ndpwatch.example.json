@@ -1,0 +1,11 @@
+{
+  "trusted_routers": ["fe80::1", "02:00:00:00:00:01"],
+  "trusted_prefixes": ["2001:db8:0:1::/64"],
+  "ra_flood_window_s": 10.0, "ra_flood_count": 10,
+  "rs_flood_window_s": 10.0, "rs_flood_count": 20,
+  "ns_sweep_window_s": 10.0, "ns_sweep_count": 20,
+  "na_override_window_s": 10.0, "na_override_count": 8,
+  "dad_defend_window_s": 10.0, "dad_defend_count": 3,
+  "flap_window_s": 30.0, "flap_count": 3,
+  "low_mtu": 1280, "neigh_max": 20000, "table_window_s": 30.0
+}

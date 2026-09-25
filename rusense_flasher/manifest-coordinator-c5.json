@@ -1,0 +1,13 @@
+{
+  "name": "Ragnar ESP32-C5 Coordinator (headless)",
+  "version": "1.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-C5",
+      "parts": [
+        { "path": "firmware/coordinator-c5.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

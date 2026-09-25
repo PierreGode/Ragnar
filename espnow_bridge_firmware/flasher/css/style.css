@@ -1,0 +1,500 @@
+/* ===== Ragnar — Piglet Coordinator Forge · matches Ragnar web palette ===== */
+/* Brand color is Tailwind sky-500 / sky-400 / sky-600 (see tailwind.config.js
+   in the main repo); background mirrors the slate-900→slate-800 gradient used
+   by index_modern.html. Glass cards mirror the .glass utility (rgba slate-900
+   with backdrop-blur). The Viking trim (boar logo, "Forge" copy, rune strip)
+   is recoloured in Ragnar blue rather than gold. */
+:root {
+  color-scheme: dark;
+  --bg:          #0f172a;   /* slate-900 */
+  --bg-dark:     #020617;   /* slate-950 */
+  --surface:     rgba(15, 23, 42, 0.7);    /* matches .glass on Ragnar web */
+  --surface-solid: #1e293b; /* slate-800 — for solid panels */
+  --border:      rgba(255, 255, 255, 0.10);
+  --border-accent: rgba(56, 189, 248, 0.30);
+  --accent:      #0ea5e9;   /* sky-500 — Ragnar primary */
+  --accent-light:#38bdf8;   /* sky-400 */
+  --accent-dim:  #0284c7;   /* sky-600 */
+  --accent-glow: rgba(14, 165, 233, 0.25);
+  --green:       #22c55e;   /* green-500 */
+  --green-dim:   #16a34a;
+  --purple:      #a855f7;
+  --yellow:      #eab308;
+  --red:         #ef4444;
+  --white:       #f8fafc;   /* slate-50 */
+  --grey:        #94a3b8;   /* slate-400 */
+  --grey-dim:    #1e293b;   /* slate-800 */
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+
+body {
+  min-height: 100vh;
+  /* Same gradient as Ragnar's index_modern.html body */
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+  color: var(--white);
+  font-family: "Inter", system-ui, sans-serif;
+  font-weight: 300;
+  line-height: 1.6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow-x: hidden;
+}
+
+/* Subtle accent glow at top, fades to nothing */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at center top,
+      rgba(14, 165, 233, 0.08) 0%,
+      transparent 55%);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Top rune strip — thin band of futhark across the top, in Ragnar blue */
+.rune-strip {
+  position: relative;
+  z-index: 3;
+  width: 100%;
+  text-align: center;
+  font-family: "Russo One", system-ui, sans-serif;
+  letter-spacing: 0.35em;
+  color: var(--accent-dim);
+  font-size: 0.75rem;
+  padding: 0.45rem 0;
+  background: linear-gradient(180deg,
+    rgba(14, 165, 233, 0.10) 0%,
+    transparent 100%);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+
+/* ── layout ── */
+.page {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 0 1.25rem 4rem;
+}
+
+/* ── header ── */
+.site-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1.5rem 0 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2.5rem;
+  padding-bottom: 1rem;
+}
+.site-header .logo-mark {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at 30% 30%,
+      rgba(125, 211, 252, 0.45) 0%,
+      transparent 60%),
+    linear-gradient(135deg, var(--accent-light) 0%, var(--accent-dim) 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.3rem;
+  flex-shrink: 0;
+  box-shadow: 0 0 18px var(--accent-glow),
+              inset 0 0 6px rgba(0,0,0,0.3);
+  border: 1px solid rgba(0, 0, 0, 0.25);
+}
+.site-header .brand {
+  font-family: "Russo One", system-ui, sans-serif;
+  font-size: 1.2rem;
+  /* Match Ragnar's gradient brand text (from-Ragnar-400 to-Ragnar-600) */
+  background: linear-gradient(90deg, var(--accent-light), var(--accent-dim));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.site-header .brand span {
+  color: var(--accent-light);
+  -webkit-text-fill-color: var(--accent-light);
+}
+
+/* ── hero title ── */
+.hero-title {
+  text-align: center;
+  margin-bottom: 2.5rem;
+}
+.hero-title .rune-divider {
+  font-family: "Russo One", system-ui, sans-serif;
+  color: var(--accent-dim);
+  letter-spacing: 0.4em;
+  font-size: 0.9rem;
+  margin-bottom: 0.6rem;
+  user-select: none;
+}
+.hero-title h1 {
+  font-family: "Russo One", system-ui, sans-serif;
+  font-weight: 400;
+  font-size: clamp(1.8rem, 6vw, 2.8rem);
+  margin: 0 0 0.4rem;
+  color: var(--white);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-shadow: 0 0 24px rgba(14, 165, 233, 0.25);
+}
+.hero-title h1 span { color: var(--accent-light); }
+.hero-title .tagline {
+  font-size: 0.9rem;
+  color: var(--accent-light);
+  margin: 0 0 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+.hero-title .desc {
+  font-size: 0.95rem;
+  color: rgba(248, 250, 252, 0.7);
+  max-width: 540px;
+  margin: 0 auto;
+}
+
+/* ── flash panel (glass card, matches Ragnar's .glass) ── */
+.flash-panel {
+  background: var(--surface);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1.75rem;
+  margin-bottom: 1.5rem;
+  box-shadow:
+    0 4px 24px rgba(0,0,0,0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.flash-panel h2 {
+  margin: 0 0 0.6rem;
+  font-size: 1.2rem;
+  color: var(--accent-light);
+  font-weight: 500;
+  font-family: "Russo One", system-ui, sans-serif;
+  letter-spacing: 0.03em;
+}
+.flash-panel h2 .panel-sub {
+  display: inline;
+  font-family: "Inter", system-ui, sans-serif;
+  font-size: 0.78rem;
+  font-weight: 400;
+  color: var(--grey);
+  letter-spacing: 0.04em;
+  margin-left: 0.4rem;
+  text-transform: none;
+}
+.flash-panel p {
+  margin: 0 0 1rem;
+  font-size: 0.92rem;
+  color: rgba(248, 250, 252, 0.78);
+}
+
+/* ── prerequisites ── */
+.prereq {
+  background: rgba(14, 165, 233, 0.08);
+  border: 1px solid rgba(14, 165, 233, 0.25);
+  border-radius: 8px;
+  padding: 0.9rem 1rem;
+  margin-bottom: 1.25rem;
+}
+.prereq-title {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent-light);
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+.prereq ol {
+  margin: 0;
+  padding-left: 1.4rem;
+  font-size: 0.88rem;
+  color: rgba(248, 250, 252, 0.85);
+}
+.prereq ol li { margin-bottom: 0.25rem; }
+.prereq ol li:last-child { margin-bottom: 0; }
+.prereq code {
+  background: rgba(14, 165, 233, 0.15);
+  border-radius: 3px;
+  padding: 0 4px;
+  font-size: 0.82rem;
+  color: var(--green);
+}
+
+/* ── chip badge ── */
+.chip-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1.25rem;
+}
+.chip-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(34, 197, 94, 0.10);
+  border: 1px solid rgba(34, 197, 94, 0.30);
+  border-radius: 20px;
+  padding: 0.2rem 0.75rem;
+  font-size: 0.8rem;
+  color: var(--green);
+  font-weight: 500;
+}
+.chip-badge .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: pulse 2s ease-in-out infinite;
+  box-shadow: 0 0 6px var(--green);
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* ── buttons ── */
+.flash-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.btn-flash {
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-dim) 100%);
+  color: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+  padding: 0.7rem 1.4rem;
+  font-size: 0.92rem;
+  font-weight: 700;
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  transition: filter 0.15s, box-shadow 0.15s, transform 0.1s;
+  box-shadow:
+    0 2px 12px var(--accent-glow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.20);
+  font-family: "Russo One", system-ui, sans-serif;
+}
+.btn-flash:hover {
+  filter: brightness(1.10);
+  box-shadow:
+    0 4px 22px var(--accent-glow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  transform: translateY(-1px);
+}
+.btn-flash:active { transform: translateY(0); filter: brightness(1); }
+.btn-flash.btn-small {
+  padding: 0.45rem 0.95rem;
+  font-size: 0.82rem;
+  font-family: "Inter", system-ui, sans-serif;
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+
+.btn-logs {
+  background: transparent;
+  color: var(--accent-light);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.65rem 1.2rem;
+  font-size: 0.88rem;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.btn-logs:hover {
+  color: var(--white);
+  border-color: var(--accent);
+  background: rgba(14, 165, 233, 0.08);
+}
+.btn-logs.btn-small { padding: 0.4rem 0.9rem; font-size: 0.82rem; }
+
+.hint {
+  margin-top: 0.75rem !important;
+  font-size: 0.82rem !important;
+  color: var(--grey) !important;
+}
+
+/* ── divider ── */
+.divider {
+  text-align: center;
+  color: var(--grey);
+  margin: 0.75rem 0;
+  font-size: 0.75rem;
+  letter-spacing: 0.1em;
+}
+
+/* ── browser warning ── */
+.browser-warn {
+  display: none;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 8px;
+  padding: 0.9rem 1.1rem;
+  font-size: 0.85rem;
+  color: var(--red);
+  margin-bottom: 1.5rem;
+  text-align: center;
+}
+
+/* ── footer ── */
+.footer {
+  text-align: center;
+  font-size: 0.82rem;
+  color: var(--grey);
+  padding-top: 2rem;
+  border-top: 1px solid var(--border);
+  line-height: 2;
+}
+.footer a { color: var(--accent-light); text-decoration: none; }
+.footer a:hover { text-decoration: underline; }
+.footer code {
+  background: var(--grey-dim);
+  border-radius: 3px;
+  padding: 0 4px;
+  font-size: 0.75rem;
+  color: var(--accent-light);
+}
+.footer .skal {
+  font-family: "Russo One", system-ui, sans-serif;
+  letter-spacing: 0.2em;
+  color: var(--accent-light);
+  margin-top: 0.4rem;
+  font-size: 0.95rem;
+}
+
+/* ── overlay / dialog ── */
+.flash-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.85);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 1rem;
+}
+.flash-overlay[hidden] { display: none; }
+
+.flash-dialog {
+  background: var(--surface-solid);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1.75rem;
+  width: 100%;
+  max-width: 520px;
+  box-shadow:
+    0 16px 60px rgba(0,0,0,0.7),
+    0 0 40px var(--accent-glow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.flash-dialog h3 {
+  margin: 0 0 1rem;
+  font-size: 1.1rem;
+  color: var(--accent-light);
+  font-family: "Russo One", system-ui, sans-serif;
+  letter-spacing: 0.04em;
+}
+
+.flash-progress-track {
+  background: var(--grey-dim);
+  border-radius: 4px;
+  height: 6px;
+  margin-bottom: 0.5rem;
+  overflow: hidden;
+}
+.flash-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-dim) 0%, var(--accent) 50%, var(--green) 100%);
+  border-radius: 4px;
+  width: 0%;
+  transition: width 0.3s ease;
+  box-shadow: 0 0 10px var(--accent-glow);
+}
+.flash-pct {
+  font-size: 0.82rem;
+  color: var(--grey);
+  margin: 0 0 0.4rem;
+  text-align: right;
+}
+.flash-status {
+  font-size: 0.9rem;
+  color: var(--white);
+  margin: 0 0 0.75rem;
+}
+.flash-log {
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  font-size: 0.75rem;
+  color: var(--green);
+  font-family: "Fira Code", "Courier New", monospace;
+  height: 160px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  margin-bottom: 1rem;
+}
+
+.flash-confirm-row {
+  display: flex;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+/* ── serial dialog extras ── */
+.serial-dialog { max-width: 620px; }
+.serial-baud {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--grey);
+}
+.serial-baud select {
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--white);
+  padding: 0.2rem 0.5rem;
+  font-size: 0.82rem;
+}
+.serial-log-area {
+  height: 260px;
+  color: var(--green);
+}
+.serial-input-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+.serial-input-row input {
+  flex: 1;
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--white);
+  padding: 0.45rem 0.75rem;
+  font-size: 0.85rem;
+  outline: none;
+}
+.serial-input-row input:focus { border-color: var(--accent); }
+.serial-actions { display: flex; gap: 0.5rem; }

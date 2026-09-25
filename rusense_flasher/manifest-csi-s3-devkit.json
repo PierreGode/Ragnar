@@ -1,0 +1,16 @@
+{
+  "name": "RuSense CSI Node — ESP32-S3-DevKitC-1 (N16R8, headless sensor)",
+  "version": "0.7.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "firmware/s3-devkit/bootloader.bin",       "offset": 0 },
+        { "path": "firmware/s3-devkit/partition-table.bin",  "offset": 32768 },
+        { "path": "firmware/s3-devkit/ota_data_initial.bin", "offset": 61440 },
+        { "path": "firmware/s3-devkit/esp32-csi-node.bin",   "offset": 131072 }
+      ]
+    }
+  ]
+}

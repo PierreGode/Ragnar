@@ -1,0 +1,38 @@
+# igmpwatch configuration. All keys optional; unset keys use built-in defaults.
+iface: eth0
+mode: learn                 # learn | enforce
+dedup_window: 60            # seconds to collapse repeat alerts
+db: /var/lib/igmpwatch/igmpwatch.db
+
+detectors:
+  window_s: 10
+  multicast_storm_count: 100
+  report_storm_count: 40
+  query_storm_count: 10
+  leave_storm_count: 30
+  flap_count: 6
+  group_scan_count: 20
+  querier_contention_sources: 3
+  learn_window_s: 180
+  sensitive_groups: []      # e.g. ['239.10.0.0', '232.1.1.1'] — any unlisted join alerts
+  allowlist: {}             # e.g. {'aa:bb:cc:dd:ee:ff': ['239.1.1.1']}
+  ssm_allowed: {}           # e.g. {'232.1.1.1': ['10.0.0.1']}
+
+dataplane:
+  interval: 5
+  mcast_storm_pps: 1000
+  mcast_ratio: 0.6
+  mcast_ratio_floor_pps: 100
+  flood_no_members_pps: 50
+
+snmp:
+  enable: false             # OFF by default (credentialed, out-of-band)
+  host: null                # switch management IP
+  community: public
+  interval: 30
+  iface_mcast_storm_pps: 1000
+  monitor_ifaces: []        # ifIndex whitelist ([] = all)
+  census_not_forwarded: false
+  cache_capabilities: true
+  capability_strikes: 3
+  capability_ttl: 3600

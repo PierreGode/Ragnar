@@ -1,0 +1,49 @@
+[Unit]
+# Ragnar wifiwatch — dedicated passive 802.11 attack monitor.
+# OPT-IN. Runs wifiwatch.py on a monitor-mode interface (RX-only). PASSIVE ONLY:
+# granted CAP_NET_RAW + CAP_NET_ADMIN (raw capture + set channel/monitor) and
+# nothing else — it never transmits a frame.
+#   sudo /opt/ragnar/wifiwatch/wifiwatch-setup-mon.sh wlan1   (or ExecStartPre below)
+#   sudo install -Dm644 wifiwatch.example.json /etc/ragnar/wifiwatch.json
+#   sudo cp scripts/wifiwatch.service /etc/systemd/system/
+#   sudoedit /etc/systemd/system/wifiwatch.service   # set RAGNAR_WIFI_IFACE
+#   sudo systemctl enable --now wifiwatch
+#   journalctl -u wifiwatch -f
+Description=Ragnar wifiwatch passive 802.11 attack monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=ragnar/wifiwatch
+WorkingDirectory=/home/ragnar/Ragnar
+Environment=RAGNAR_WIFI_IFACE=wlan1
+# Put the NIC in monitor mode first (needs the setup script installed).
+ExecStartPre=+/home/ragnar/Ragnar/wifiwatch-setup-mon.sh ${RAGNAR_WIFI_IFACE}
+ExecStart=/usr/bin/python3 /home/ragnar/Ragnar/python/wifiwatch.py \
+    -i ${RAGNAR_WIFI_IFACE} -c /etc/ragnar/wifiwatch.json \
+    --jsonl /var/lib/ragnar/wifiwatch/events.jsonl
+Restart=on-failure
+RestartSec=5
+
+# --- least privilege: RX capture + set channel, nothing else ---------------
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_PACKET AF_NETLINK AF_INET AF_UNIX
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+LockPersonality=yes
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

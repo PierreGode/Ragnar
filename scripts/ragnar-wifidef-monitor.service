@@ -1,0 +1,25 @@
+[Unit]
+# Ragnar WiFi Defense — dedicated boot-time passive monitor.
+# OPT-IN: install + enable this only on a box whose USB WiFi adapter you want
+# to dedicate 100% to sniffing (it goes off the network while monitoring).
+#   sudo cp scripts/ragnar-wifidef-monitor.service /etc/systemd/system/
+#   sudoedit /etc/ragnar/wifidef-monitor.env      # set WIFIDEF_IFACE=wlan1 etc.
+#   sudo systemctl enable --now ragnar-wifidef-monitor
+Description=Ragnar WiFi Defense dedicated monitor claim
+After=network-pre.target
+Wants=network-pre.target
+# Re-claim the adapter before the main app starts capturing.
+Before=ragnar.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Edit WIFIDEF_IFACE (and optionally WIFIDEF_REGDOMAIN / WIFIDEF_INIT_FREQ /
+# WIFIDEF_SIX_GHZ) in this file. The '-' makes a missing file non-fatal.
+EnvironmentFile=-/etc/ragnar/wifidef-monitor.env
+ExecStart=/home/ragnar/Ragnar/scripts/wifidef_dedicate.sh
+# On stop, hand the adapter back to NetworkManager (best-effort).
+ExecStop=-/bin/bash -c 'python3 /home/ragnar/Ragnar/wifi_defense.py monitor --interface "${WIFIDEF_IFACE:-wlan1}" --disable || true'
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,23 @@
+{
+  "iface": null,
+  "bssid": null,
+  "ssid": null,
+  "inventory_csv": null,
+  "report_s": 300,
+  "brute_force_attempts": 20,
+  "brute_force_window_s": 60,
+  "nack_flood_threshold": 30,
+  "nack_flood_window_s": 60,
+  "nonce_harvest_cycles": 3,
+  "auth_failure_burst": 5,
+  "suppress_s": 900,
+  "suppress_max": 8192,
+  "probation_max": 2048,
+  "protected_max": 1024,
+  "pinned_max": 256,
+  "pinned_stations": [],
+  "known_enrollees": [],
+  "baseline_wps_aps": [],
+  "vuln_families": [],
+  "report_good_posture": true
+}

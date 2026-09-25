@@ -1,0 +1,48 @@
+[Unit]
+# Ragnar LDAP Watch — dedicated passive Active-Directory / LDAP monitor.
+# OPT-IN. Runs ldap_watch.py in continuous daemon mode, streaming one JSON finding
+# object per line to a log the web UI + Pushover bridge tail. PASSIVE ONLY: the
+# unit is granted CAP_NET_RAW (to sniff) and nothing else — it cannot transmit.
+#   sudo cp scripts/ragnar-ldapwatch.service /etc/systemd/system/
+#   sudoedit /etc/ragnar/ldapwatch.env         # set LDAPWATCH_IFACE=eth0 etc.
+#   sudo systemctl enable --now ragnar-ldapwatch
+Description=Ragnar LDAP Watch passive Active-Directory monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Edit LDAPWATCH_IFACE (and optionally LDAPWATCH_OUT) here. '-' = missing-file ok.
+EnvironmentFile=-/etc/ragnar/ldapwatch.env
+Environment=LDAPWATCH_IFACE=eth0
+Environment=LDAPWATCH_OUT=/var/log/ragnar/ldapwatch.jsonl
+ExecStartPre=/bin/mkdir -p /var/log/ragnar
+ExecStart=/usr/bin/python3 /home/ragnar/Ragnar/ldap_watch.py --daemon \
+    --iface ${LDAPWATCH_IFACE} --out ${LDAPWATCH_OUT}
+Restart=on-failure
+RestartSec=5
+
+# --- least privilege: sniff only, drop everything else ---------------------
+# CAP_NET_RAW is the single capability a passive libpcap/AF_PACKET sniffer needs.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+# It never needs to originate traffic, so deny socket creation beyond packet
+# sockets and lock the process down hard.
+RestrictAddressFamilies=AF_PACKET AF_UNIX
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log/ragnar
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

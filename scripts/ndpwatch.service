@@ -1,0 +1,50 @@
+[Unit]
+# Ragnar ndpwatch — dedicated passive IPv6 Neighbor Discovery attack monitor.
+# OPT-IN. RX-only: it never sends an ND packet. Granted CAP_NET_RAW + CAP_NET_ADMIN
+# (raw capture + promiscuous) and nothing else — the IPv6 counterpart to arp_guard.
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin ndpmon
+#   sudo mkdir -p /var/log/ndpwatch && sudo chown ndpmon:ndpmon /var/log/ndpwatch
+#   sudo install -Dm644 python/ndpwatch.example.json /etc/ragnar/ndpwatch.json
+#   sudo cp scripts/ndpwatch.service /etc/systemd/system/
+#   sudoedit /etc/systemd/system/ndpwatch.service   # set RAGNAR_NDP_IFACE
+#   sudo systemctl enable --now ndpwatch
+#   journalctl -u ndpwatch -f
+Description=Ragnar ndpwatch passive IPv6 ND attack monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ndpmon
+Group=ndpmon
+WorkingDirectory=/home/ragnar/Ragnar/python
+Environment=RAGNAR_NDP_IFACE=eth0
+ExecStartPre=/bin/mkdir -p /var/log/ndpwatch
+ExecStart=/usr/bin/python3 /home/ragnar/Ragnar/python/ndpwatch.py \
+    -i ${RAGNAR_NDP_IFACE} -c /etc/ragnar/ndpwatch.json \
+    --jsonl /var/log/ndpwatch/alerts.jsonl
+Restart=on-failure
+RestartSec=5
+
+# --- least privilege: sniff only ------------------------------------------
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_PACKET AF_UNIX
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log/ndpwatch
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

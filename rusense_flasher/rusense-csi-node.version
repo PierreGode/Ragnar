@@ -1,0 +1,47 @@
+# RuSense CSI-node firmware — vendored prebuilt binaries
+#
+# The bins under firmware/s3/ and firmware/c6/ are copied bit-identically from
+# the upstream RuView repo at the pinned commit below. They are NOT built here.
+# To refresh: re-download release_bins from a newer RuView commit, re-verify
+# against the upstream SHA256SUMS.txt, update the fields here, and bump `version`
+# in manifest-csi-s3.json / manifest-csi-c6.json.
+#
+# Verify locally:  (cd firmware && sha256sum -c <(grep -h . s3/SHA256SUMS.txt c6/SHA256SUMS.txt | sed 's#.*/##'))
+
+source_repo=https://github.com/PierreGode/RuView.git
+source_commit=59b15f520afebd6e9b58ca45a26c8374a0a83e14
+version=0.6.7
+note=RuView#893 — display-less boards capture DATA frames (CSI yield 0pps fix); hardware-verified on ESP32-C6 (0->27 pps)
+
+# s3/ <- release_bins/ (top-level, 8MB partition table)
+# c6/ <- release_bins/c6-adr110/ (4MB partition table)
+#
+# sha256 (see firmware/{s3,c6}/SHA256SUMS.txt for upstream-signed list):
+s3_bootloader=b973d7eda65affb746adcfa63ceb18f779f206d240b76f01b8c9ae7485455660
+s3_partition_table=67222c257c0477501fd4002275638dc4262b34eb68235b8289fb1337054d322b
+s3_ota_data_initial=7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f
+s3_app=e21ef94aba779d534dc048c1b9da731c81e5dbe09d0645cfd70a05ad3642d3e9
+c6_bootloader=b0fb1f217a39c80bc95b5eb8208a0b8572ae64efa0f6d580b76caff4affe0f4d
+c6_partition_table=4c2cc4ffd52641e23b779bd57b3908014083ac3c1aab395756478c89e70d81f0
+c6_ota_data_initial=7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f
+c6_app=4764c5b20a353895f70122816adc98f861ec20e9a8ea9b344dc0648b6341073c
+
+# ── Locally built headless S3 variants ──
+# s3-devkit/ and s3-xiao/ are NOT from upstream release_bins — they were built
+# from the local RuView checkout with ESP-IDF v5.4 on this box:
+#   idf.py -B <dir> -D SDKCONFIG=<dir>/sdkconfig \
+#     -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.<variant>" \
+#     set-target esp32s3 build
+#
+# s3-devkit/ — ESP32-S3-DevKitC-1 N16R8, 16MB flash, CONFIG_DISPLAY_ENABLE=n
+#   (sdkconfig.defaults.s3-devkitc, RuView commit 23ad5c95). Also flashed onto
+#   the Seeed XIAO ESP32S3 Plus (16MB flash, headless, PSRAM unused) via
+#   manifest-csi-s3-xiao-plus.json — same chip, same flash size, no board pins used.
+# s3-xiao/ — Seeed XIAO ESP32S3, 8MB flash, CONFIG_DISPLAY_ENABLE=n
+#   (sdkconfig.defaults.s3-xiao, RuView commit 4d5622c7, version 0.7.0).
+#
+# sha256 (see firmware/s3-xiao/SHA256SUMS.txt):
+s3_xiao_bootloader=c5a404152f951f94cbe7681e59cbf23985917818818271ee2ce10dea87861d7e
+s3_xiao_partition_table=67222c257c0477501fd4002275638dc4262b34eb68235b8289fb1337054d322b
+s3_xiao_ota_data_initial=7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f
+s3_xiao_app=a38b632f0d00c4996a50261664aec8ad4e41b2b5b93ed7b47c98ee28c274b261

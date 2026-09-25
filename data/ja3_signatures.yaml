@@ -1,0 +1,55 @@
+# Ragnar JA3 signature database
+#
+# Format:
+#   - ja3: <md5 hex>
+#     label: "Human-readable name"
+#     confidence: high|medium|low
+#     source: <where this fingerprint came from>
+#     category: malware|tool|browser|iot|library
+#
+# Seed entries below are well-known public fingerprints. Extend by pulling
+# from abuse.ch SSLBL (https://sslbl.abuse.ch/ja3-fingerprints/) or by
+# collecting your own with `tshark -Y tls.handshake.type==1 -T fields
+# -e tls.handshake.ja3` against known clients.
+
+- ja3: 72a589da586844d7f0818ce684948eea
+  label: "Trickbot (historical)"
+  confidence: high
+  source: abuse.ch-SSLBL
+  category: malware
+
+- ja3: 6734f37431670b3ab4292b8f60f29984
+  label: "Tofsee"
+  confidence: high
+  source: abuse.ch-SSLBL
+  category: malware
+
+- ja3: a0e9f5d64349fb13191bc781f81f42e1
+  label: "Cobalt Strike (Java default)"
+  confidence: high
+  source: abuse.ch-SSLBL
+  category: tool
+
+- ja3: 51c64c77e60f3980eea90869b68c58a8
+  label: "Tor client"
+  confidence: medium
+  source: community
+  category: tool
+
+- ja3: e7d705a3286e19ea42f587b344ee6865
+  label: "Generic Java (incl. malware loaders)"
+  confidence: low
+  source: community
+  category: library
+
+- ja3: 1aa7bf8b97e540ca5edd75f7b8384bfb
+  label: "ESPHome / mbedTLS (ESP32 firmware)"
+  confidence: medium
+  source: ragnar-builtin
+  category: iot
+
+- ja3: 9e10692d62b2128ab966bcae67f4f54b
+  label: "Tuya IoT cloud client"
+  confidence: medium
+  source: ragnar-builtin
+  category: iot

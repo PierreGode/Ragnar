@@ -1,0 +1,291 @@
+# Node.js / npm
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+package-lock.json*
+
+# TypeScript / TSX
+dist/
+*.tsbuildinfo
+
+# Poetry
+poetry.lock
+
+# Environment variables
+.env
+.env.*.local
+
+# Logs
+logs
+*.log
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependency directories
+jspm_packages/
+
+# Optional npm cache directory
+.npm
+
+# Output of 'npm pack'
+*.tgz
+
+# Lockfiles
+yarn.lock
+.pnpm-lock.yaml
+
+# Optional eslint cache
+.eslintcache
+
+# Optional stylelint cache
+.stylelintcache
+
+# Optional REPL history
+.node_repl_history
+
+# Coverage directory used by tools like
+instanbul/
+istanbul/jest
+jest/
+coverage/
+
+# Output of 'tsc' command
+out/
+build/
+tmp/
+temp/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+pip-wheel-metadata/
+*.pyo
+*.pyd
+*.whl
+*.pytest_cache/
+.tox/
+env/
+venv
+venv/
+ENV/
+env.bak/
+.venv/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# Coverage reports
+htmlcov/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Django stuff:
+staticfiles/
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# VS Code settings
+.vscode/
+.idea/
+
+# macOS files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux system files
+*.swp
+*~
+
+# IDE specific
+*.iml
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+*/certs/
+
+# Bjorn-specific files and directories
+# Runtime data directories
+data/rf_settings.json    # per-box RF settings; the shipped defaults live in rtl_sdr.py
+data/logs/
+data/output/
+backup/backups/
+backup/uploads/
+
+# Encrypted Safe vault — user data, must never be committed
+data/safe/
+# sensing-server browser-session secret (generated at runtime; never track)
+data/session-secret
+
+# Mesh file-transfer inbox — received files, must never be committed
+data/mesh_inbox/
+
+# Mesh Share — files this unit publishes to the mesh, must never be committed
+data/mesh_share/
+
+# Configuration files (contains sensitive data)
+config/shared_config.json
+
+# Actions configuration (auto-generated but preserve for runtime)
+# config/actions.json
+
+# Installation and runtime logs
+install_*.log
+/var/log/bjorn_install/
+
+# Network and scan results
+data/output/scan_results/
+data/output/crackedpwd/
+data/output/data_stolen/
+data/output/vulnerabilities/
+data/output/zombies/
+
+# Runtime data files (generated during execution)
+data/ragnar.db
+data/livestatus.csv
+data/vpn_ip_ranges.txt
+data/netkb.csv
+# Every top-level data/*.json is runtime state written by the service (watch
+# baselines, detector status, ...) — enumerating them one by one meant every
+# new watch feature left a fresh untracked file that kept the tree dirty and
+# forced web updates through the stash path. Tracked data ships as *.template.
+data/*.json
+data/logs/temp_log.txt
+data/networks/*/db/*.db
+data/networks/*/intelligence/*.json
+data/networks/*/threat_intelligence/*.json
+data/networks/*/loot/data_stolen/
+data/networks/*/loot/credentials/
+
+# Intelligence and threat data (runtime - templates are tracked)
+data/intelligence/active_findings.json
+data/intelligence/network_profiles.json
+data/intelligence/resolved_findings.json
+data/threat_intelligence/enriched_findings.json
+data/threat_intelligence/sources_config.json
+data/threat_intelligence/threat_cache.json
+data/networks/*/threat_intelligence/enriched_findings.json
+data/networks/*/threat_intelligence/sources_config.json
+data/networks/*/threat_intelligence/threat_cache.json
+data/network_data/network_unknown_network.csv
+
+# User dictionaries (may contain custom wordlists)
+data/input/dictionary/passwords.txt
+data/input/dictionary/users.txt
+
+# System service files (installed by script)
+/etc/systemd/system/bjorn.service
+/etc/systemd/system/usb-gadget.service
+/usr/local/bin/usb-gadget.sh
+
+# Web interface uploads
+web/uploads/
+
+# Comments data (may contain sensitive analysis)
+resources/comments/comments.json
+
+# Runtime process files
+*.pid
+*.lock
+
+# Backup files
+*.backup
+*.bak
+*.orig
+web/screen.png
+
+# Claude Code
+.claude/
+# Secrets & runtime state (never commit)
+data/.zap_api_key
+data/ragnar_auth.db
+data/gamification.json
+data/rusense_sightings.json
+data/rusense_vitals_history.json
+data/lynis_pentest_timestamps.json
+data/netkb.csv.migrated_backup
+data/network_data/network_skynet_5G.csv
+data/networks/skynet_5g/
+data/networks/default/output/
+data/networks/default/ssid.txt
+data/wardriving/
+
+# Local backups & vendored tools (not part of the repo)
+*.bak-rusense
+*.original
+tools/
+
+# Live captures recorded by the PCAP Analyzer's "Capture live" button — runtime
+# artifacts, can be large, never commit.
+data/pcaps/
+
+# ── RuSense (WiFi-CSI) user data — captured/trained per install, never commit ──
+# raw CSI recordings (can be tens of MB+)
+data/recordings/
+data/rf_recordings/
+data/iq_captures/
+# locally-trained adaptive sensing model
+data/adaptive_model.json
+# locally-trained / downloaded sensing models
+data/models/
+
+# Vulnerability scanner templates (downloaded per install by the installer)
+nuclei-templates/
+
+# Per-install runtime state that must not be shared between users
+# last-selected network (UI state)
+data/networks/.last_ssid
+# runtime logs (nmap.log etc.)
+var/log/
+
+# HA integration bytecode
+custom_components/**/__pycache__/
+
+
+# Python temporary bytecode files from UPS 1.2 lite
+__pycache__/
+*.pyc
+
+# Local runtime telemetry and config selection files
+battery.json
+ups_config.json
+
+# Environment or system logs
+*.log
+
+# Self-signed TLS material (generated at runtime — never commit private keys)
+certs/
+*.key
+*.crt
+*.pem

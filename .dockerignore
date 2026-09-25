@@ -1,0 +1,54 @@
+# Keep the build context small and free of secrets / dev-box runtime state.
+# NOTE: data/**/*.template files are NOT ignored — they seed a fresh install.
+
+# VCS & tooling
+.git
+.gitignore
+.github
+*.md.orig
+
+# Python caches
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / web build tooling
+node_modules/
+npm-debug.log*
+*.tgz
+
+# Secrets & TLS — never bake these into an image
+.env
+.env.*
+certs/
+config/shared_config.json
+data/session-secret
+data/.zap_api_key
+data/ragnar_auth.db
+data/*.db
+data/*.db-*
+
+# Sensitive / heavy runtime state (recreated at runtime; not for images)
+data/safe/
+data/mesh_inbox/
+data/mesh_share/
+data/output/
+data/logs/
+data/pcaps/
+data/recordings/
+data/rf_recordings/
+data/wardriving/
+data/networks/
+data/models/
+*.log
+*.pcap
+
+# Editor / OS cruft
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,12 @@
+{
+  "deauth_broadcast_burst": 6,   "deauth_broadcast_window": 5.0,
+  "deauth_per_bssid_burst": 25,  "deauth_per_bssid_window": 5.0,
+  "deauth_per_target_burst": 12, "deauth_per_target_window": 5.0,
+  "beacon_new_bssid_burst": 18,  "beacon_window": 8.0,
+  "beacon_warmup_sec": 30.0,     "beacon_la_ratio": 0.5,
+  "karma_ssid_min": 5,
+  "refractory_sec": 5.0,
+  "allowlist": {
+    "HomeNet": ["aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"]
+  }
+}
