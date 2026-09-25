@@ -75,3 +75,24 @@ def claimed(exclude_owner=None):
 
 def is_claimed(port, exclude_owner=None):
     return bool(port) and _real(port) in claimed(exclude_owner)
+
+
+def _serial_console_reservation():
+    """The read-only serial console's assigned port (data/serial_console.json).
+
+    Registered here, at import, rather than only when serial_console starts, so
+    the reservation holds in every process and regardless of startup order: a
+    port wired to a switch's console must never be opened — let alone written
+    to — by GPS / CYD / RoomScan auto-detection."""
+    try:
+        import json
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'data', 'serial_console.json')
+        with open(path) as fh:
+            port = (json.load(fh) or {}).get('port')
+        return port if isinstance(port, str) else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+register('serial-console', _serial_console_reservation)

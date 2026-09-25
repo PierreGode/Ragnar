@@ -14175,6 +14175,134 @@ def api_power_usb_current():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+# ---------------------------------------------------------------------------
+# Serial Console — READ-ONLY viewer for a switch/router/firewall console port
+# reached through a USB console cable (see serial_console.py). Nothing is ever
+# sent to the device: the tty is opened O_RDONLY and the port stays reserved in
+# serial_claims so GPS/CYD/RoomScan auto-detection never touches it.
+# ---------------------------------------------------------------------------
+@app.route('/api/serial-console/ports')
+def api_serial_console_ports():
+    try:
+        import serial_console
+        return jsonify({'ports': serial_console.list_ports(),
+                        'status': serial_console.status()})
+    except Exception as e:
+        logger.error(f"Serial console ports error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/serial-console/status')
+def api_serial_console_status():
+    import serial_console
+    return jsonify(serial_console.status())
+
+
+@app.route('/api/serial-console/start', methods=['POST'])
+def api_serial_console_start():
+    import serial_console
+    data = request.get_json(silent=True) or {}
+    return jsonify(serial_console.start(data.get('port'), data.get('baud', 'auto')))
+
+
+@app.route('/api/serial-console/stop', methods=['POST'])
+def api_serial_console_stop():
+    import serial_console
+    data = request.get_json(silent=True) or {}
+    return jsonify(serial_console.stop(release=bool(data.get('release'))))
+
+
+@app.route('/api/serial-console/output')
+def api_serial_console_output():
+    import serial_console
+    try:
+        since = int(request.args.get('since', 0))
+    except (TypeError, ValueError):
+        since = 0
+    return jsonify(serial_console.output(since=max(0, since)))
+
+
+def _serial_console_summary():
+    """Content-free summary of this unit's console (safe for mesh peers to read):
+    whether a port is assigned and the viewer's state — never any output."""
+    import serial_console
+    st = serial_console.status()
+    label = None
+    port = st.get('reserved_port')
+    if port:
+        for p in serial_console.list_ports():
+            if port in (p.get('path'), p.get('device')):
+                label = p.get('description') or p.get('device')
+                break
+    return {'has_console': bool(port), 'running': bool(st.get('running')),
+            'state': st.get('state'), 'baud': st.get('baud'),
+            'port_label': label or (os.path.basename(port) if port else None),
+            'read_only': True}
+
+
+@app.route('/api/mesh/serial-console/status', methods=['GET'])
+def api_mesh_serial_console_status():
+    """Peer-readable (GET under /api/mesh/): lets a hub discover which mesh units
+    have a console cable attached. Status only — console OUTPUT is never exposed
+    here; viewing it goes through the secret-gated mesh gateway."""
+    try:
+        out = _serial_console_summary()
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+    out.update({'success': True, 'name': _mesh_viking_name() or socket.gethostname()})
+    return jsonify(out)
+
+
+@app.route('/api/serial-console/units')
+def api_serial_console_units():
+    """This unit plus every mesh peer, each with its console summary, so the
+    dashboard can view the console of any Ragnar wired to a switch. Viewing a
+    peer relays through the mesh gateway, which needs the mesh secret."""
+    units = []
+    try:
+        local = _serial_console_summary()
+    except Exception as e:
+        local = {'has_console': False, 'error': str(e)}
+    local.update({'id': 'local', 'name': (_mesh_viking_name() if mesh_available else None)
+                  or socket.gethostname(), 'local': True, 'reachable': True})
+    units.append(local)
+    gateway_ready = False
+    if mesh_available and _mesh_enabled():
+        gateway_ready = bool(_mesh_secret())
+        peers = _mesh_tagged_peers()
+        results = {}
+
+        def _poll(node):
+            results[node.get('id')] = mesh_manager.poll_peer(
+                node, port=_mesh_node_port(), timeout=4,
+                path='/api/mesh/serial-console/status')
+
+        threads = [threading.Thread(target=_poll, args=(p,), daemon=True)
+                   for p in peers if p.get('online') and p.get('id')]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=6)
+        for p in peers:
+            r = results.get(p.get('id')) or {}
+            units.append({'id': p.get('id'), 'local': False,
+                          'name': r.get('name') or p.get('hostname') or p.get('dns_name'),
+                          'online': bool(p.get('online')),
+                          'reachable': bool(r.get('reachable')) and bool(r.get('success')),
+                          'has_console': bool(r.get('has_console')),
+                          'running': bool(r.get('running')), 'state': r.get('state'),
+                          'baud': r.get('baud'), 'port_label': r.get('port_label'),
+                          'error': r.get('error') if not r.get('reachable') else None})
+    return jsonify({'units': units, 'gateway_ready': gateway_ready,
+                    'mesh_enabled': bool(mesh_available and _mesh_enabled())})
+
+
+@app.route('/api/serial-console/clear', methods=['POST'])
+def api_serial_console_clear():
+    import serial_console
+    return jsonify(serial_console.clear())
+
+
 @app.route('/api/power/test', methods=['GET', 'POST'])
 def api_power_test():
     """Idle-vs-load power test. POST {duration, loads:[cpu,sdr,wifi]} starts
@@ -28901,6 +29029,15 @@ def run_server(host='0.0.0.0', port=8000, ssl_cert=None, ssl_key=None, https_por
 
         if use_https:
             logger.info("⚠️  Using self-signed certificate - browser will show security warning")
+
+        # Serial console: reserve the assigned port in serial_claims straight away
+        # (before GPS/CYD auto-detection can open it) and resume the read-only
+        # viewer if it was left running. Never fatal.
+        try:
+            import serial_console
+            serial_console.init()
+        except Exception as e:
+            logger.warning(f"Serial console init skipped: {e}")
 
         # Synchronize counts in the background so the web server binds
         # immediately instead of waiting for a full DB scan first.

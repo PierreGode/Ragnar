@@ -204,6 +204,14 @@ def detect_gps_device(exclude_ports=None):
                        claimed by the companion serial listener).
     """
     exclude = set(exclude_ports or [])
+    # Never probe a port another Ragnar component holds or has reserved (see
+    # serial_claims.py) — notably the read-only serial console, where opening
+    # the port and probing it would reach a switch's console.
+    try:
+        import serial_claims
+        exclude |= serial_claims.claimed(exclude_owner='gps')
+    except Exception:
+        pass
     by_id = '/dev/serial/by-id'
 
     def _resolve(entry):

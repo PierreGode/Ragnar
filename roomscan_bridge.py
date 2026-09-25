@@ -43,14 +43,26 @@ def detect_port():
     Prefers the stable /dev/serial/by-id path (survives ttyACM renumbering);
     falls back to a plain ttyACM*/ttyUSB* glob.
     """
+    # Skip ports other Ragnar components hold or have reserved (serial_claims) —
+    # the fallback below would otherwise pick, and later write to, whatever
+    # ttyUSB comes first, including a switch's read-only serial console.
+    try:
+        import serial_claims
+        held = serial_claims.claimed(exclude_owner='roomscan')
+    except Exception:
+        held = set()
     for link in sorted(glob.glob('/dev/serial/by-id/*')):
         low = link.lower()
         if 'espressif' in low or 'jtag' in low or '303a' in low:
             try:
-                return os.path.realpath(link)
+                real = os.path.realpath(link)
             except Exception:
-                return link
+                real = link
+            if real in held:
+                continue
+            return real
     cands = sorted(glob.glob('/dev/ttyACM*')) + sorted(glob.glob('/dev/ttyUSB*'))
+    cands = [c for c in cands if os.path.realpath(c) not in held]
     return cands[0] if cands else None
 
 
