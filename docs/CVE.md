@@ -10,8 +10,8 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **256** distinct CVE IDs
-- **216** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **258** distinct CVE IDs
+- **218** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
 - **31** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
@@ -35,7 +35,7 @@ detector works is in [nettools.md](nettools.md).
 | 2018 | 8 |
 | 2019 | 11 |
 | 2020 | 15 |
-| 2021 | 12 |
+| 2021 | 14 |
 | 2022 | 19 |
 | 2023 | 36 |
 | 2024 | 47 |
@@ -72,7 +72,8 @@ detector works is in [nettools.md](nettools.md).
 | NTP Watch | 12 |
 | OSPF Watch | 9 |
 | PTP Watch | 4 |
-| RPC / NetLogon Watch | 8 |
+| Relay / Coercion Watch | 2 |
+| RPC / NetLogon Watch | 10 |
 | SMB / Kerberos Watch | 5 |
 | SMTP Watch | 4 |
 | SNMP Watch | 5 |
@@ -168,12 +169,14 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2021-0292](https://nvd.nist.gov/vuln/detail/CVE-2021-0292) |  | context only | ARP Watch | — |
 | [CVE-2021-1587](https://nvd.nist.gov/vuln/detail/CVE-2021-1587) | NX-OS NGOAM DoS | detected | Cisco Guard | — |
 | [CVE-2021-1675](https://nvd.nist.gov/vuln/detail/CVE-2021-1675) | PrintNightmare | detected | RPC / NetLogon Watch | — |
+| [CVE-2021-1678](https://nvd.nist.gov/vuln/detail/CVE-2021-1678) | Print spooler RPC relay (IRemoteWinSpool) | detected | RPC / NetLogon Watch | — |
 | [CVE-2021-3570](https://nvd.nist.gov/vuln/detail/CVE-2021-3570) |  | detected | PTP Watch | — |
 | [CVE-2021-3571](https://nvd.nist.gov/vuln/detail/CVE-2021-3571) |  | detected | PTP Watch | — |
 | [CVE-2021-25220](https://nvd.nist.gov/vuln/detail/CVE-2021-25220) | MaginotDNS | detected | DNS Watch | — |
 | [CVE-2021-28510](https://nvd.nist.gov/vuln/detail/CVE-2021-28510) |  | detected | PTP Watch | — |
 | [CVE-2021-31166](https://nvd.nist.gov/vuln/detail/CVE-2021-31166) | HTTP.sys Accept-Encoding | detected | RPC / NetLogon Watch | — |
 | [CVE-2021-34527](https://nvd.nist.gov/vuln/detail/CVE-2021-34527) | PrintNightmare | detected | RPC / NetLogon Watch | — |
+| [CVE-2021-36942](https://nvd.nist.gov/vuln/detail/CVE-2021-36942) | PetitPotam | detected | RPC / NetLogon Watch, Relay / Coercion Watch | — |
 | [CVE-2021-41987](https://nvd.nist.gov/vuln/detail/CVE-2021-41987) |  | detected | MikroTik Guard | — |
 | [CVE-2022-21907](https://nvd.nist.gov/vuln/detail/CVE-2022-21907) | HTTP.sys Accept-Encoding | detected | RPC / NetLogon Watch | — |
 | [CVE-2022-24805](https://nvd.nist.gov/vuln/detail/CVE-2022-24805) |  | detected | SNMP Watch | — |
@@ -181,7 +184,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2022-26125](https://nvd.nist.gov/vuln/detail/CVE-2022-26125) |  | context only | SR-MPLS Watch | — |
 | [CVE-2022-26126](https://nvd.nist.gov/vuln/detail/CVE-2022-26126) |  | context only | SR-MPLS Watch | — |
 | [CVE-2022-26809](https://nvd.nist.gov/vuln/detail/CVE-2022-26809) | RPC runtime bind_ack underflow | detected | RPC / NetLogon Watch | — |
-| [CVE-2022-26925](https://nvd.nist.gov/vuln/detail/CVE-2022-26925) | PetitPotam-class LSA coercion | detected | RPC / NetLogon Watch | — |
+| [CVE-2022-26925](https://nvd.nist.gov/vuln/detail/CVE-2022-26925) | PetitPotam-class LSA coercion | detected | RPC / NetLogon Watch, Relay / Coercion Watch | — |
 | [CVE-2022-33647](https://nvd.nist.gov/vuln/detail/CVE-2022-33647) | Kerberos RC4-MD4 downgrade | detected | SMB / Kerberos Watch | — |
 | [CVE-2022-33679](https://nvd.nist.gov/vuln/detail/CVE-2022-33679) | Kerberos RC4-MD4 downgrade | detected | SMB / Kerberos Watch | — |
 | [CVE-2022-37885](https://nvd.nist.gov/vuln/detail/CVE-2022-37885) |  | detected | Aruba Guard | — |

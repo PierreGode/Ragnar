@@ -1815,7 +1815,11 @@ it to another service and act as the victim (`ntlmrelayx`). **Detection-only**
 
 - **coercion-attempt** — an MSRPC call over 445/135 that forces a host to
   authenticate, identified by the interface UUID in the RPC bind (matched by its
-  DCE/RPC little-endian wire encoding): **PetitPotam** (MS-EFSRPC), **PrinterBug /
+  DCE/RPC little-endian wire encoding): **PetitPotam** (MS-EFSRPC — attributed to
+  **CVE-2021-36942** when the stream also carries an `EfsRpcOpenFileRaw` request, EFSR
+  opnum 0: the August 2021 patch fixed *only* that method, which is why the downlevel
+  variants stayed exploitable and CVE-2022-26925 followed; an EFSR bind with no opnum 0 is
+  still coercion, just unattributed), **PrinterBug /
   SpoolSample** (MS-RPRN, plus the coercion opnum 65/66 to avoid flagging legit
   printing), **DFSCoerce** (MS-DFSNM), **ShadowCoerce** (MS-FSRVP).
 - **relay-suspected** — the *same* NTLMSSP server challenge seen from **two different
@@ -1869,7 +1873,16 @@ rides `\pipe\lsarpc`, DFSCoerce `\pipe\netdfs` and Zerologon works fine over
   `Authorization` headers and (opt-in) SMB2 session setup. *(v2:)* the **RemoteRegistry
   NTLM-relay fallback** (`RPC-WINREG-RELAY-FALLBACK`, **CVE-2024-43532**) — WinReg binding
   over direct `ncacn_ip_tcp` (not `\pipe\winreg`) at `RPC_C_AUTHN_LEVEL_CONNECT`, the
-  unsigned condition an NTLM relay to AD CS needs.
+  unsigned condition an NTLM relay to AD CS needs. *(v3:)* the **IRemoteWinSpool relay
+  level** (`RPC-WINSPOOL-RELAY-LEVEL`, **CVE-2021-1678**) — MS-PAR bound below
+  `RPC_C_AUTHN_LEVEL_PKT_PRIVACY`, the level Microsoft's fix requires (enforced by default
+  since June 2021). At the bind it is **high** posture — an unpatched host or a live relay,
+  *not* proof of exploitation; a call to `RpcAsyncInstallPrinterDriverFromPackage`
+  (opnum 62) on that association escalates to **critical**, the exploit step. A driver
+  install at packet privacy, and MS-RPRN at the same level, stay quiet. The engine also
+  attributes an EFSR `EfsRpcOpenFileRaw` coercion call to **CVE-2021-36942**; like all
+  coercion codes that is surfaced by Relay/Coercion Watch (below), not double-reported
+  here.
 - **interface** — **DCSync** (DRSUAPI `DRSGetNCChanges`, opnum 3), remote-exec
   primitives (svcctl / atsvc / winreg), DPAPI domain **backup-key** access (MS-BKRP),
   and endpoint-mapper **sweeps** at an enumeration rate. *(v2:)* **PrintNightmare**

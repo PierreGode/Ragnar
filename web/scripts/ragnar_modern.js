@@ -9200,7 +9200,7 @@ async function runRelayWatch() {
                 '<tr class="text-left text-gray-500"><th class="px-2 py-1">Technique</th><th class="px-2 py-1">Interface</th><th class="px-2 py-1">Attacker</th><th class="px-2 py-1">Victim</th></tr>' +
                 '</thead><tbody>' +
                 d.coercion.map(c => `<tr class="border-t border-slate-800">
-                    <td class="px-2 py-1 text-red-300">${escapeHtml(c.technique)}</td>
+                    <td class="px-2 py-1 text-red-300">${escapeHtml(c.technique)}${c.cve ? `<div class="font-mono text-[11px] text-red-400/80">${escapeHtml(c.cve)}${c.call ? ' · ' + escapeHtml(c.call) : ''}</div>` : ''}</td>
                     <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(c.interface)}</td>
                     <td class="px-2 py-1 font-mono">${escapeHtml(c.attacker)}</td>
                     <td class="px-2 py-1 font-mono">${escapeHtml(c.victim)}</td>

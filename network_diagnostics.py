@@ -11049,6 +11049,13 @@ _RELAY_COERCION = {
 # (spoolss) is also used for legit printing, so it additionally needs the coercion opnum.
 _RELAY_STRONG_IFACE = {'MS-EFSRPC', 'MS-EFSR', 'MS-DFSNM', 'MS-FSRVP'}
 _RELAY_RPRN_OPNUMS = {65, 66}   # RpcRemoteFindFirstPrinterChangeNotification[Ex]
+# PetitPotam CVE attribution (mirrors rpcwatch COERCION_CVES): EfsRpcOpenFileRaw is
+# EFSR opnum 0, and the August 2021 patch for CVE-2021-36942 fixed ONLY that method —
+# which is why the downlevel EFSR variants stayed exploitable and CVE-2022-26925 had to
+# follow. So an opnum-0 request on a stream that bound EFSR is attributed to
+# CVE-2021-36942; an EFSR bind with no opnum 0 is still coercion, just unattributed.
+_RELAY_EFSR_OPEN_FILE_RAW = 0
+_RELAY_PETITPOTAM_CVE = 'CVE-2021-36942'
 
 
 def _relay_scan_payload(raw):
@@ -11121,8 +11128,13 @@ def _parse_relay_packets(packets):
             elif iface == 'MS-RPRN' and (st['opnums'] & _RELAY_RPRN_OPNUMS):
                 seen.add((tech, iface))
         for (tech, iface) in sorted(seen):
-            coercion.append({'attacker': src, 'victim': dst, 'technique': tech,
-                             'interface': iface})
+            ev = {'attacker': src, 'victim': dst, 'technique': tech,
+                  'interface': iface}
+            if (tech == 'PetitPotam'
+                    and _RELAY_EFSR_OPEN_FILE_RAW in st['opnums']):
+                ev['cve'] = _RELAY_PETITPOTAM_CVE
+                ev['call'] = 'EfsRpcOpenFileRaw'
+            coercion.append(ev)
     return coercion, challenges, signing
 
 
@@ -11190,7 +11202,9 @@ def _relay_analyze(coercion, challenges, signing, seconds, baseline, learn=True)
         bump('coercion-attempt')
         reasons.append(
             f"COERCION: {c['attacker']} is coercing {c['victim']} to authenticate via "
-            f"{c['technique']} ({c['interface']}) — the forced NTLM auth can be relayed "
+            f"{c['technique']} ({c['interface']}"
+            f"{', %s %s' % (c['call'], c['cve']) if c.get('cve') else ''}"
+            f") — the forced NTLM auth can be relayed "
             f"to a DC/host. Patch the vector, block the RPC interface, and require SMB/"
             f"LDAP signing + channel binding (EPA)")
 
@@ -11381,6 +11395,27 @@ def _relay_selftest():
     run('coercion-petitpotam',
         [pkt('10.0.0.66', '10.0.0.5', rpc_bind('88d481c650d8d0118c5200c04fd90f7e'))],
         base, 'coercion-attempt')
+    # 2b. PetitPotam attribution: EFSR bind + EfsRpcOpenFileRaw (opnum 0) request
+    #     carries CVE-2021-36942; a bind with a different EFSR opnum does not.
+    with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as tf:
+        path = tf.name
+    wrpcap(path, [pkt('10.0.0.66', '10.0.0.5',
+                      rpc_bind('88d481c650d8d0118c5200c04fd90f7e')),
+                  pkt('10.0.0.66', '10.0.0.5', rpc_request(0)),
+                  pkt('10.0.0.67', '10.0.0.6',
+                      rpc_bind('88d481c650d8d0118c5200c04fd90f7e')),
+                  pkt('10.0.0.67', '10.0.0.6', rpc_request(4))])
+    co_a, _, _ = _parse_relay_packets(rdpcap(path))
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    by_att = {c['attacker']: c.get('cve') for c in co_a}
+    scenarios.append({'name': 'petitpotam-opnum0-cve-2021-36942',
+                      'expect': 'opnum0->CVE-2021-36942, opnum4->none',
+                      'got': str(by_att),
+                      'pass': by_att.get('10.0.0.66') == 'CVE-2021-36942'
+                      and '10.0.0.67' in by_att and by_att['10.0.0.67'] is None})
     # 3. coercion (DFSCoerce): DFSNM interface bind.
     run('coercion-dfscoerce',
         [pkt('10.0.0.66', '10.0.0.5', rpc_bind('e042c74f104acf11827300aa004ae673'))],

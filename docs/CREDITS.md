@@ -14,8 +14,8 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **216 CVEs detected from the wire.** 256 distinct CVE IDs are named across Ragnar's
-  code; 216 of them a passive detector actually identifies. The rest are named, not detected:
+- **218 CVEs detected from the wire.** 258 distinct CVE IDs are named across Ragnar's
+  code; 218 of them a passive detector actually identifies. The rest are named, not detected:
   30 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, and the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
@@ -75,8 +75,12 @@ behind them is Solarflere's work.
   vendored **RPC / NetLogon Watch** adds **PrintNightmare** (CVE-2021-1675 / CVE-2021-34527,
   spoolss RpcAddPrinterDriver over `\pipe\spoolss`), the **HTTP.sys** Accept-Encoding bug
   (CVE-2021-31166 / CVE-2022-21907), the **RPC-runtime bind_ack underflow** (CVE-2022-26809),
-  **PetitPotam-class LSA anonymous coercion** (CVE-2022-26925) and the **RemoteRegistry
-  NTLM-relay fallback** (CVE-2024-43532); and **ARP Watch** gains a passive ARP-frame capture
+  **PetitPotam-class LSA anonymous coercion** (CVE-2022-26925), the **RemoteRegistry
+  NTLM-relay fallback** (CVE-2024-43532) and — in v3 — the **IRemoteWinSpool relay level**
+  (CVE-2021-1678: MS-PAR bound below packet privacy is high posture, and the opnum-62
+  driver install on that session is critical), while **Relay/Coercion Watch** attributes
+  the original **PetitPotam** (CVE-2021-36942) when the coercion stream carries
+  `EfsRpcOpenFileRaw` — the one method the August 2021 patch fixed; and **ARP Watch** gains a passive ARP-frame capture
   that flags request rate/breadth and gratuitous floods — the shared shape behind the Juniper
   ARP control-plane DoS family (CVE-2018-0063 / CVE-2019-0033 / CVE-2021-0216 / CVE-2021-0292),
   attached as related context, not a per-CVE identification.

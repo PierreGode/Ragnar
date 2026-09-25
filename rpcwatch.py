@@ -527,6 +527,10 @@ FINDINGS = {
         "high", "winrm",
         "Malformed Accept-Encoding with an empty coding-list element "
         "(CVE-2021-31166 / CVE-2022-21907 http.sys kernel RCE)"),
+    "RPC-WINSPOOL-RELAY-LEVEL": (
+        "high", "auth",
+        "IRemoteWinSpool bound below RPC_C_AUTHN_LEVEL_PKT_PRIVACY "
+        "(CVE-2021-1678) - the insufficient auth level an NTLM relay needs"),
 }
 
 CATEGORIES = sorted({v[1] for v in FINDINGS.values()})
@@ -1684,6 +1688,27 @@ PRINTNIGHTMARE_CALLS = {
     },
 }
 
+# MS-PAR 3.1.4 opnum 62.  CVE-2021-1678: an attacker relays an NTLM session to
+# the IRemoteWinSpool interface and calls this to execute code.  The root cause
+# is an insufficient authentication level on the interface itself, so the
+# detection is the bind posture; the call is corroboration, not the trigger.
+PAR_ASYNC_INSTALL_PRINTER_DRIVER_FROM_PACKAGE = 62
+
+# The level Microsoft's fix requires on IRemoteWinSpool.  The June 8 2021
+# enforcement phase made this the default, so a bind below it today is either
+# an unpatched host or a live relay - both worth saying out loud, but it is a
+# posture finding and not proof of exploitation.
+WINSPOOL_REQUIRED_LEVEL = 6      # RPC_C_AUTHN_LEVEL_PKT_PRIVACY
+
+# EFSR opnum 0 is EfsRpcOpenFileRaw, and the August 2021 patch for
+# CVE-2021-36942 fixed ONLY that method - which is why the downlevel variants
+# stayed exploitable and CVE-2022-26925 had to follow.  That makes opnum 0 a
+# correct discriminator for attributing the coercion call to its CVE.
+COERCION_CVES = {
+    (IF_EFSR_LSA, 0): "CVE-2021-36942",
+    (IF_EFSR_EFS, 0): "CVE-2021-36942",
+}
+
 # MS-EFSR reached over \pipe\lsarpc is the interface Microsoft's advisory for
 # CVE-2022-26925 refers to as "the LSARPC interface": the patch made anonymous
 # connections to it illegal, because an unauthenticated caller could coerce a
@@ -1836,6 +1861,22 @@ class RPCEngine:
                 self.emitter.emit(ts, "RPC-COERCION-INTERFACE-BIND", subject,
                                   dict(base, description=desc), key_extra=(uuid,))
 
+            # CVE-2021-1678.  IRemoteWinSpool accepted sessions below packet
+            # privacy, so a relayed NTLM authentication could reach it and
+            # call RpcAsyncInstallPrinterDriverFromPackage for code execution.
+            if (uuid == IF_PAR and trailer is not None
+                    and new_level < WINSPOOL_REQUIRED_LEVEL):
+                self.emitter.emit(ts, "RPC-WINSPOOL-RELAY-LEVEL", subject,
+                                  dict(base, cve="CVE-2021-1678",
+                                       required_level=AUTHN_LEVEL_NAMES[
+                                           WINSPOOL_REQUIRED_LEVEL],
+                                       stage="bind",
+                                       note="below the level Microsoft's fix "
+                                            "requires; unpatched host or an "
+                                            "active relay, not proof of "
+                                            "exploitation"),
+                                  key_extra=(uuid, "bind"))
+
             # CVE-2024-43532.  The WinReg client's BaseBindToMachine falls back
             # to a legacy transport when SMB is unavailable and binds with
             # RpcBindingSetAuthInfo at RPC_C_AUTHN_LEVEL_CONNECT, which neither
@@ -1942,6 +1983,19 @@ class RPCEngine:
         if uuid in PRINTNIGHTMARE_CALLS and opnum in PRINTNIGHTMARE_CALLS[uuid]:
             self._printer_driver_call(ts, subject, base, stub, uuid, opnum,
                                       sealed, server_ip)
+        # The driver-install call on an association that never reached packet
+        # privacy is the exploit step, not just the posture.
+        if (uuid == IF_PAR
+                and opnum == PAR_ASYNC_INSTALL_PRINTER_DRIVER_FROM_PACKAGE
+                and (assoc.auth_level or RPC_C_AUTHN_LEVEL_NONE)
+                < WINSPOOL_REQUIRED_LEVEL):
+            self.emitter.emit(ts, "RPC-WINSPOOL-RELAY-LEVEL", subject,
+                              dict(base, cve="CVE-2021-1678",
+                                   call="RpcAsyncInstallPrinterDriverFromPackage",
+                                   stage="call",
+                                   required_level=AUTHN_LEVEL_NAMES[
+                                       WINSPOOL_REQUIRED_LEVEL]),
+                              severity="critical", key_extra=(uuid, "call"))
         if uuid in COERCION_CALLS and opnum in COERCION_CALLS[uuid]:
             self._coercion_call(ts, subject, base, stub, uuid, opnum, sealed,
                                 server_ip)
@@ -2026,6 +2080,9 @@ class RPCEngine:
         """
         opname = COERCION_CALLS[uuid][opnum]
         d = dict(base, call=opname)
+        cve = COERCION_CVES.get((uuid, opnum))
+        if cve:
+            d["cve"] = cve
         if sealed:
             self.emitter.emit(ts, "RPC-COERCION-CALL", subject,
                               dict(d, unc_path_visible=False,
@@ -3349,6 +3406,79 @@ def selftest():
         b""), dport=WINRM_HTTP_PORT)
     check("winrm-httpsys-accept-encoding",
           "WINRM-HTTPSYS-ACCEPT-ENCODING" in h.codes, sorted(h.codes))
+
+    # 28-33. IRemoteWinSpool relay level (CVE-2021-1678), ported from the
+    #        upstream v3 suite. Bind below PKT_PRIVACY is high posture; the
+    #        opnum-62 driver install on such an association is critical.
+    def _ws(h):
+        return [f for f in h.watch.emitter.emitted
+                if f.code == "RPC-WINSPOOL-RELAY-LEVEL"]
+
+    h = _STHarness(client="10.20.8.1")
+    _st_bind(h, IF_PAR, level=RPC_C_AUTHN_LEVEL_PKT_INTEGRITY)
+    ws = _ws(h)
+    check("winspool-bind-below-privacy-high",
+          len(ws) == 1 and ws[0].severity == "high"
+          and ws[0].details.get("cve") == "CVE-2021-1678"
+          and ws[0].details.get("stage") == "bind"
+          and ws[0].details.get("required_level") == "pkt-privacy",
+          [(f.severity, f.details.get("stage")) for f in ws])
+
+    h = _STHarness(client="10.20.8.2")
+    _st_bind(h, IF_PAR, level=RPC_C_AUTHN_LEVEL_CONNECT)
+    check("winspool-connect-level-fires", bool(_ws(h)), sorted(h.codes))
+
+    h = _STHarness(client="10.20.8.3")
+    _st_bind(h, IF_PAR, level=RPC_C_AUTHN_LEVEL_PKT_PRIVACY)
+    check("winspool-privacy-quiet", not _ws(h), sorted(h.codes))
+
+    h = _STHarness(client="10.20.8.4")
+    _st_bind(h, IF_PAR, level=RPC_C_AUTHN_LEVEL_PKT_INTEGRITY)
+    h.c2s(_st_co_pdu(PTYPE_REQUEST, _st_request_body(
+        PAR_ASYNC_INSTALL_PRINTER_DRIVER_FROM_PACKAGE, b"\x00" * 32),
+        auth=_st_sec_trailer(RPC_C_AUTHN_GSS_NEGOTIATE,
+                             RPC_C_AUTHN_LEVEL_PKT_INTEGRITY, _AUTH_TOKEN),
+        call_id=2))
+    call = [f for f in _ws(h) if f.details.get("stage") == "call"]
+    check("winspool-driver-install-critical",
+          call and call[0].severity == "critical"
+          and call[0].details.get("call") == "RpcAsyncInstallPrinterDriverFromPackage",
+          [(f.severity, f.details.get("stage")) for f in _ws(h)])
+
+    h = _STHarness(client="10.20.8.5")
+    _st_bind(h, IF_PAR, level=RPC_C_AUTHN_LEVEL_PKT_PRIVACY)
+    h.c2s(_st_co_pdu(PTYPE_REQUEST, _st_request_body(
+        PAR_ASYNC_INSTALL_PRINTER_DRIVER_FROM_PACKAGE, b"\x00" * 32),
+        auth=_st_sec_trailer(RPC_C_AUTHN_GSS_NEGOTIATE,
+                             RPC_C_AUTHN_LEVEL_PKT_PRIVACY, _AUTH_TOKEN),
+        call_id=3))
+    check("winspool-sealed-driver-install-quiet", not _ws(h), sorted(h.codes))
+
+    h = _STHarness(client="10.20.8.6")
+    _st_bind(h, IF_RPRN, level=RPC_C_AUTHN_LEVEL_PKT_INTEGRITY)
+    check("winspool-scoped-to-par-not-rprn", not _ws(h), sorted(h.codes))
+
+    # 34-35. PetitPotam attribution (CVE-2021-36942): EfsRpcOpenFileRaw is opnum 0,
+    #        the only method the August 2021 patch fixed. The engine attributes it;
+    #        the in-app verdict still defers coercion to Relay/Coercion Watch.
+    def _coercion_cves(h):
+        return [f.details.get("cve") for f in h.watch.emitter.emitted
+                if f.code == "RPC-COERCION-CALL"]
+
+    h = _STHarness(client="10.20.8.7")
+    _st_bind(h, IF_EFSR_LSA, level=RPC_C_AUTHN_LEVEL_PKT_INTEGRITY)
+    h.c2s(_st_co_pdu(PTYPE_REQUEST, _st_request_body(
+        0, _st_ndr_wstr("\\\\10.99.99.99\\x\\y.txt")), call_id=3))
+    check("petitpotam-opnum0-attributed-36942",
+          "CVE-2021-36942" in _coercion_cves(h), _coercion_cves(h))
+
+    h = _STHarness(client="10.20.8.8")
+    _st_bind(h, IF_EFSR_LSA, level=RPC_C_AUTHN_LEVEL_PKT_INTEGRITY)
+    h.c2s(_st_co_pdu(PTYPE_REQUEST, _st_request_body(
+        4, _st_ndr_wstr("\\\\10.99.99.99\\x\\y.txt")), call_id=3))
+    cves = _coercion_cves(h)
+    check("petitpotam-other-opnum-not-36942",
+          cves and "CVE-2021-36942" not in cves, cves)
 
     # 27. Catalogue integrity: every declared code has a known severity.
     bad = [c for c, spec in FINDINGS.items() if spec[0] not in SEVERITY_RANK]
