@@ -25919,14 +25919,14 @@ function updateProcessList(processes) {
         const memoryPercent = (proc.memory_percent || 0).toFixed(1);
         
         html += `
-            <div class="flex items-center justify-between p-2 bg-slate-800 rounded text-sm">
-                <div class="flex-1 truncate">
+            <div class="flex items-center justify-between gap-3 p-2 bg-slate-800 rounded text-sm">
+                <div class="flex-1 min-w-0 truncate" title="PID ${escapeHtml(String(proc.pid))}">
                     <span class="font-medium">${escapeHtml(String(proc.name || ''))}</span>
-                    <span class="text-gray-400 ml-2">${escapeHtml(String(proc.pid))}</span>
+                    <span class="text-gray-500 text-xs">${escapeHtml(String(proc.pid))}</span>
                 </div>
-                <div class="flex space-x-3 text-xs">
-                    <span class="text-blue-400">${cpuPercent}% CPU</span>
-                    <span class="text-green-400">${memoryPercent}% MEM</span>
+                <div class="flex gap-3 text-xs whitespace-nowrap" style="font-variant-numeric:tabular-nums">
+                    <span class="text-blue-400">CPU ${cpuPercent}%</span>
+                    <span class="text-green-400">MEM ${memoryPercent}%</span>
                 </div>
             </div>
         `;
@@ -25978,8 +25978,8 @@ function updateNetworkStats(data) {
     
     // Connection summary
     html += `
-        <div class="bg-slate-800 rounded p-3">
-            <h4 class="font-medium mb-2">Connections</h4>
+        <div class="bg-slate-800 rounded p-3 min-w-0">
+            <h4 class="font-medium mb-2 text-sm">Connections</h4>
             <div class="text-2xl font-bold text-blue-400">${data.total_connections}</div>
         </div>
     `;
@@ -25987,8 +25987,8 @@ function updateNetworkStats(data) {
     // Interface statistics
     Object.entries(data.interfaces).slice(0, 4).forEach(([name, stats]) => {
         html += `
-            <div class="bg-slate-800 rounded p-3">
-                <h4 class="font-medium mb-2">${escapeHtml(name)}</h4>
+            <div class="bg-slate-800 rounded p-3 min-w-0">
+                <h4 class="font-medium mb-2 text-sm truncate" title="${escapeHtml(name)}">${escapeHtml(name)}</h4>
                 <div class="text-xs space-y-1">
                     <div class="flex justify-between">
                         <span class="text-gray-400">Sent:</span>
