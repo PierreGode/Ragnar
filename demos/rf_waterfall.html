@@ -473,7 +473,7 @@
     this.replaying=false; this.replay=null; this._recPoll=null;
     this.busy=0; this.log=[]; this._lastLog=0; this._ismPoll=null;
     this.hist=[]; this.threeD=false; this._last3D=0;   // 3D terrain waterfall state
-    this.rot3d={yaw:0.55, pitch:0.72};  // 3D camera: yaw (turn), pitch (tilt down) — a landscape angle by default
+    this.rot3d={yaw:0.25, pitch:0.75};  // 3D camera: yaw (turn), pitch (tilt down) — a landscape angle by default
     this.zoom3d=1.0;
     try{ var _r3=JSON.parse(localStorage.getItem('rfwf.rot3d.'+cfg.short)||'null');
       if(_r3){ if(isFinite(_r3.yaw))this.rot3d.yaw=_r3.yaw; if(isFinite(_r3.pitch))this.rot3d.pitch=_r3.pitch; if(isFinite(_r3.zoom))this.zoom3d=_r3.zoom; } }catch(e){}
@@ -768,7 +768,7 @@
         if(self.threeD && cv===self.fall){                 // drag rotates the 3D view
           var rdx=e.clientX-dg.lx, rdy=e.clientY-dg.ly; dg.lx=e.clientX; dg.ly=e.clientY;
           self.rot3d.yaw+=rdx*0.010;
-          self.rot3d.pitch=Math.max(0.02,Math.min(1.5708,self.rot3d.pitch-rdy*0.008));  // up to 90deg = straight-down top view
+          self.rot3d.pitch=Math.max(0.02,Math.min(1.5708,self.rot3d.pitch-rdy*0.012));  // up to 90deg = straight-down top view
           self._hint3d=false; self._persistRot(); self.draw3D();
         }
         else if(dg.vert){ self.setScrollBack(dg.back+Math.round(dy*self.d/(self.STEP||1))); }
@@ -2945,33 +2945,32 @@
     var floor=this.rangeLo(), span=(this.rangeHi()-floor)||1, chi=this.rangeHi();
     var yaw=this.rot3d.yaw, pitch=this.rot3d.pitch;
     var cosT=Math.cos(yaw), sinT=Math.sin(yaw), cosP=Math.cos(pitch), sinP=Math.sin(pitch);
-    var SCALE=Math.min(W,H)*0.82*(this.zoom3d||1), HEIGHT=0.55;
-    var cx=W/2, cy=H*0.60;
-    // smoothed, clamped normalized heights (3-tap along frequency, so crests read
-    // rounded not stepped) + projected screen coords for every vertex
+    var HEIGHT=0.45, AX=Math.max(1,Math.min(4,W/Math.max(1,H)*1.15));
+    var proj=function(X,Y,Z,o){ var Xr=X*cosT+Z*sinT, Zr=-X*sinT+Z*cosT; o[0]=Xr; o[1]=-(Y*cosP-Zr*sinP); };
+    var bx0=1e9,bx1=-1e9,by0=1e9,by1=-1e9, pt=[0,0];
+    for(var k=0;k<8;k++){ proj((k&1?0.5:-0.5)*AX,(k&2?HEIGHT:0),(k&4?0.5:-0.5),pt);
+      if(pt[0]<bx0)bx0=pt[0]; if(pt[0]>bx1)bx1=pt[0]; if(pt[1]<by0)by0=pt[1]; if(pt[1]>by1)by1=pt[1]; }
+    var SCALE=Math.min(W*0.96/((bx1-bx0)||1), H*0.92/((by1-by0)||1))*(this.zoom3d||1);
+    var cx=W/2-(bx0+bx1)/2*SCALE, cy=H/2-(by0+by1)/2*SCALE;
     var SX=new Float32Array(R*C), SY=new Float32Array(R*C), HT=new Float32Array(R*C);
     for(var r=0;r<R;r++){ var row=hist[r];
       for(var c=0;c<C;c++){
         var a=(c>0?row[c-1]:row[c]), b=row[c], e=(c<C-1?row[c+1]:row[c]);
         var t=((a+2*b+e)/4-floor)/span; if(t<0)t=0; if(t>1)t=1; HT[r*C+c]=t;
-        var X=(c/(C-1)-0.5), Z=(r/(R-1)-0.5), Y=t*HEIGHT;
-        var Xr=X*cosT+Z*sinT, Zr=-X*sinT+Z*cosT, Yp=Y*cosP-Zr*sinP;
-        SX[r*C+c]=cx+Xr*SCALE; SY[r*C+c]=cy-Yp*SCALE;
+        proj((c/(C-1)-0.5)*AX, t*HEIGHT, (r/(R-1)-0.5), pt);
+        SX[r*C+c]=cx+pt[0]*SCALE; SY[r*C+c]=cy+pt[1]*SCALE;
       }
     }
-    // Painter's order: the projected grid's PLANAR depth is affine in (r,c), so
-    // it is monotonic along each axis — pick the iteration direction that goes
-    // far -> near and no per-quad sort is needed.
-    var rAsc=(cosT<0), cAsc=(sinT>0);
-    // per-quad shading: nearness (for depth dimming) from the same planar depth
-    var dR=cosT*cosP, dC=-sinT*cosP;           // depth gradient in r,c (planar)
+    // Painter's order: nearness is the rotated Zr (larger = closer to the viewer),
+    // affine in (r,c), so draw far -> near by picking each axis' direction.
+    var rAsc=(cosT>0), cAsc=(sinT<0);
+    var dR=cosT, dC=-sinT*AX;
     var d00=0, d01=dC, d10=dR, d11=dR+dC;
     var dMin=Math.min(d00,d01,d10,d11), dMax=Math.max(d00,d01,d10,d11), dRng=(dMax-dMin)||1;
     for(var ri=0;ri<R-1;ri++){ var rr=rAsc?ri:(R-2-ri);
       for(var ci=0;ci<C-1;ci++){ var cc=cAsc?ci:(C-2-ci);
         var i0=rr*C+cc, i1=i0+1, i2=i0+C, i3=i2+1;
-        var dep=dR*(rr/(R-1))+dC*(cc/(C-1)), near=(dMax-((dep-dMin)+dMin))/dRng;
-        near=(dep-dMin)/dRng; near=1-near;      // 1 = nearest
+        var dep=dR*(rr/(R-1))+dC*(cc/(C-1)), near=(dep-dMin)/dRng;
         var dim=0.5+0.5*near;
         var col=colorRGB(row3(hist,rr,cc),floor,chi);
         // a touch of slope shading: brighter where the ridge rises toward us
