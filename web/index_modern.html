@@ -7681,7 +7681,7 @@
                             </div>
                             <label class="flex items-center gap-1.5 text-xs text-gray-400 mt-3 cursor-pointer flex-wrap">
                                 <input type="checkbox" id="wd-au-pushover" class="accent-amber-500" onchange="saveAutoUpload()">
-                                <span>Pushover summary after each upload</span>
+                                <span>Push notification summary after each upload</span>
                                 <span id="wd-au-pushover-note" class="text-gray-500"></span>
                             </label>
                             <div id="wd-auto-upload-status" class="text-xs text-gray-500 mt-2"></div>
@@ -8349,9 +8349,9 @@
                     </div>
                 </div>
 
-                <!-- Pushover Notifications Section -->
+                <!-- Push Notifications Section (Pushover + Slack) -->
                 <div class="mb-8">
-                    <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Pushover Notifications</h3>
+                    <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Push Notifications</h3>
                     <div class="glass rounded-lg p-4">
                         <div class="flex flex-col gap-4 sm:flex-row sm:items-start mb-4">
                             <svg class="w-10 h-10 text-cyan-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -8360,17 +8360,18 @@
                             <div class="flex-1">
                                 <h4 class="font-medium text-lg mb-2">Push Notifications</h4>
                                 <p class="text-sm text-gray-400 mb-4">
-                                    Get real-time push notifications on your phone via <a href="https://pushover.net/" target="_blank" class="text-cyan-400 hover:text-cyan-300 underline">Pushover</a> when Ragnar discovers new devices, vulnerabilities, or credentials.
+                                    Get real-time notifications via <a href="https://pushover.net/" target="_blank" class="text-cyan-400 hover:text-cyan-300 underline">Pushover</a> and/or <a href="https://api.slack.com/messaging/webhooks" target="_blank" class="text-cyan-400 hover:text-cyan-300 underline">Slack</a> when Ragnar discovers new devices, vulnerabilities, or credentials. Every configured channel receives each alert.
                                 </p>
                                 <div class="space-y-3">
                                     <!-- Enable toggle -->
                                     <div>
                                         <label class="flex items-center space-x-3 cursor-pointer">
                                             <input type="checkbox" id="pushover-enabled-toggle" onchange="togglePushoverEnabled()" class="w-5 h-5 rounded border-gray-600 bg-gray-700 text-gray-600 focus:ring-0">
-                                            <span class="text-sm font-medium">Enable Pushover Notifications</span>
+                                            <span class="text-sm font-medium">Enable Push Notifications</span>
                                         </label>
-                                        <p class="text-xs text-gray-500 ml-0 sm:ml-8 mt-1">Send push notifications to your phone when events occur</p>
+                                        <p class="text-xs text-gray-500 ml-0 sm:ml-8 mt-1">Send notifications to every configured channel when events occur</p>
                                     </div>
+                                    <h5 class="text-sm font-semibold text-gray-200 pt-2">Pushover</h5>
                                     <!-- User Key -->
                                     <div>
                                         <label for="pushover-user-key" class="block text-sm font-medium text-gray-300 mb-2">Pushover User Key</label>
@@ -8389,6 +8390,24 @@
                                         </div>
                                         <p class="text-xs text-gray-500 mt-1">
                                             Get your keys from <a href="https://pushover.net/" target="_blank" class="text-cyan-400 hover:text-cyan-300 underline">pushover.net</a> — create an application to get the API Token.
+                                        </p>
+                                    </div>
+                                    <h5 class="text-sm font-semibold text-gray-200 pt-2">Slack</h5>
+                                    <!-- Slack Webhook -->
+                                    <div>
+                                        <label for="slack-webhook-url" class="block text-sm font-medium text-gray-300 mb-2">Slack Incoming Webhook URL</label>
+                                        <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                            <input type="password" id="slack-webhook-url" autocomplete="off" placeholder="https://hooks.slack.com/services/..."
+                                                   class="flex-1 w-full min-w-0 bg-slate-700 border border-slate-600 text-white py-2 px-3 rounded-lg focus:ring-2 focus:ring-cyan-500 focus:border-transparent">
+                                            <button onclick="saveSlackWebhook()" class="bg-cyan-600 hover:bg-cyan-700 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap w-full sm:w-auto">
+                                                Save Webhook
+                                            </button>
+                                            <button id="slack-webhook-remove" onclick="removeSlackWebhook()" class="hidden bg-slate-600 hover:bg-slate-500 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap w-full sm:w-auto">
+                                                Remove
+                                            </button>
+                                        </div>
+                                        <p class="text-xs text-gray-500 mt-1">
+                                            Create a Slack app with <a href="https://api.slack.com/messaging/webhooks" target="_blank" class="text-cyan-400 hover:text-cyan-300 underline">Incoming Webhooks</a> and paste the channel's webhook URL.
                                         </p>
                                     </div>
                                     <!-- Status -->
@@ -8456,7 +8475,7 @@
                                 </svg>
                                 Send Test Notification
                             </button>
-                            <span class="text-xs text-gray-500">Sends "Hello there Viking, are you ready for adventures?" to your device</span>
+                            <span class="text-xs text-gray-500">Sends "Hello there Viking, are you ready for adventures?" to every configured channel</span>
                         </div>
                     </div>
                 </div>
@@ -8803,7 +8822,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260927-console-mesh-share"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260926-push-slack"></script>
 
 
 

@@ -329,8 +329,8 @@ threshold 1, 60 s cooldown).
 > a model retunes this within ~30 s — no setting to change. For best accuracy, keep a
 > trained model active (see [Training](#two-training-paths)).
 
-Alerts reuse Ragnar's existing **Pushover** account: set your **User Key** and **API
-Token** once under the main dashboard's **Config → Pushover Notifications**, then enable
+Alerts reuse Ragnar's existing push channels (**Pushover** and/or **Slack**): set them
+up once under the main dashboard's **Config → Push Notifications**, then enable
 the RuSense triggers in the Settings tab. Use **Send test notification** to confirm
 delivery. (Config keys: `rusense_notify_*` in `shared.py`.)
 

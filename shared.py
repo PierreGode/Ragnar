@@ -878,7 +878,10 @@ class SharedData:
             "ai_max_tokens": 500,
             "ai_temperature": 0.7,
 
-            "__title_pushover__": "Pushover Notifications",
+            "__title_pushover__": "Push Notifications",
+            # Master switch for push notifications (key name kept for compat).
+            # Delivered to every configured channel: Pushover and/or Slack
+            # (RAGNAR_SLACK_WEBHOOK_URL in .env).
             "pushover_enabled": False,
             "pushover_notify_new_device": True,
             "pushover_notify_new_vulnerability": True,

@@ -15203,7 +15203,7 @@ def _auto_upload_start_worker():
 
 
 def _pushover_ready():
-    """'ok' | 'off' (keys set, Pushover disabled) | 'missing' (no keys)."""
+    """'ok' | 'off' (channel set, push disabled) | 'missing' (no Pushover/Slack)."""
     po = _rusense_pushover()
     if po is None or not po.is_configured():
         return 'missing'
@@ -28611,7 +28611,7 @@ def remove_ai_token():
 
 
 # ============================================================================
-# PUSHOVER NOTIFICATION ENDPOINTS
+# PUSH NOTIFICATION ENDPOINTS (Pushover + Slack)
 # ============================================================================
 
 @app.route('/api/pushover/keys', methods=['GET'])
@@ -28704,7 +28704,7 @@ def test_pushover():
             shared_data._pushover_service = pushover
 
         if not pushover.is_configured():
-            return jsonify({'success': False, 'message': 'Pushover keys not configured. Please save your User Key and API Token first.'}), 400
+            return jsonify({'success': False, 'message': 'No notification channel configured. Save your Pushover keys or a Slack webhook URL first.'}), 400
 
         result = pushover.send(
             message="Hello there Viking, are you ready for adventures?",
@@ -28715,6 +28715,57 @@ def test_pushover():
     except Exception as e:
         logger.error(f"Error testing Pushover: {e}")
         return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/slack/webhook', methods=['GET'])
+def get_slack_webhook():
+    """Get Slack webhook status (without revealing the full URL)."""
+    try:
+        from env_manager import EnvManager
+        url = EnvManager().get_env_key("RAGNAR_SLACK_WEBHOOK_URL")
+        return jsonify({
+            'configured': bool(url),
+            'preview': f"{url[:30]}...{url[-4:]}" if url and len(url) > 40 else None,
+        })
+    except Exception as e:
+        logger.error(f"Error getting Slack webhook status: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/slack/webhook', methods=['POST'])
+def save_slack_webhook():
+    """Save the Slack incoming-webhook URL to the .env file."""
+    try:
+        from env_manager import EnvManager
+        from pushover_service import SLACK_WEBHOOK_PREFIX
+        data = request.get_json() or {}
+        url = (data.get('webhook_url') or '').strip()
+        if not url:
+            return jsonify({'error': 'No webhook URL provided'}), 400
+        if not url.startswith(SLACK_WEBHOOK_PREFIX) or any(c.isspace() for c in url):
+            return jsonify({'error': f'Slack webhook URL must start with {SLACK_WEBHOOK_PREFIX}'}), 400
+        EnvManager().set_env_key("RAGNAR_SLACK_WEBHOOK_URL", url)
+        auto_enabled = False
+        if not shared_data.config.get('pushover_enabled', False):
+            shared_data.config['pushover_enabled'] = True
+            shared_data.save_config()
+            auto_enabled = True
+        return jsonify({'success': True, 'message': '✓ Slack webhook saved', 'auto_enabled': auto_enabled})
+    except Exception as e:
+        logger.error(f"Error saving Slack webhook: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/slack/webhook', methods=['DELETE'])
+def remove_slack_webhook():
+    """Remove the Slack webhook URL from the .env file."""
+    try:
+        from env_manager import EnvManager
+        EnvManager().delete_env_key("RAGNAR_SLACK_WEBHOOK_URL")
+        return jsonify({'success': True, 'message': 'Slack webhook removed'})
+    except Exception as e:
+        logger.error(f"Error removing Slack webhook: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 # ============================================================================
