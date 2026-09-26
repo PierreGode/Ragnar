@@ -137,10 +137,10 @@
   .ruler .tick{position:absolute;top:0;bottom:0;width:1px;background:var(--line)}
   .ruler .tlab{position:absolute;top:7px;transform:translateX(-50%);font-size:10px;color:var(--muted);white-space:nowrap}
   .ruler .ism{position:absolute;top:0;bottom:0;background:rgba(56,189,201,.09);border-left:1px solid rgba(56,189,201,.35);border-right:1px solid rgba(56,189,201,.35)}
-  .bplan{position:relative;height:17px;background:var(--panel-2);border-top:1px solid var(--line-soft);overflow:hidden;font-family:var(--mono)}
+  .bplan{position:relative;height:20px;background:var(--panel-2);border-top:1px solid var(--line-soft);overflow:hidden;font-family:var(--mono)}
   .bplan[hidden]{display:none}
-  .bplan .bp{position:absolute;height:13px;border-radius:3px;border:1px solid rgba(56,189,201,.28);background:rgba(56,189,201,.07);overflow:hidden;white-space:nowrap}
-  .bplan .bp span{position:absolute;left:4px;top:1px;font-size:9.5px;letter-spacing:.04em;color:var(--ink-dim)}
+  .bplan .bp{position:absolute;height:16px;border-radius:3px;border:1px solid rgba(56,189,201,.28);background:rgba(56,189,201,.07);overflow:hidden;white-space:nowrap}
+  .bplan .bp span{position:absolute;left:4px;top:0;line-height:14px;font-size:9.5px;letter-spacing:.04em;color:var(--ink-dim)}
   .bplan .bp.ham{border-color:rgba(245,185,66,.35);background:rgba(245,185,66,.08)} .bplan .bp.bc{border-color:rgba(129,140,248,.35);background:rgba(129,140,248,.08)}
   .bplan .bp.ism{border-color:rgba(63,181,107,.35);background:rgba(63,181,107,.08)} .bplan .bp.cell{border-color:rgba(251,113,133,.3);background:rgba(251,113,133,.07)}
   .ruler .ism .il{position:absolute;bottom:3px;left:50%;transform:translateX(-50%);font-size:9px;letter-spacing:.1em;color:var(--cyan);text-transform:uppercase;white-space:nowrap}
@@ -3194,9 +3194,9 @@
     inView.forEach(function(b){ var x0=Math.max(0,(b[0]-lo)/span*100), x1=Math.min(100,(b[1]-lo)/span*100), L=0;
       while(L<3 && (lanes[L]||[]).some(function(r){ return x0<r[1]-0.01 && x1>r[0]+0.01; })) L++;
       if(L>=3) return; (lanes[L]=lanes[L]||[]).push([x0,x1]);
-      html.push('<div class="bp '+b[4]+'" style="left:'+x0+'%;width:'+Math.max(0.3,x1-x0)+'%;top:'+(2+L*15)+'px" title="'+esc(b[2]+' '+b[0]+'–'+b[1]+' MHz: '+b[3])+'">'
+      html.push('<div class="bp '+b[4]+'" style="left:'+x0+'%;width:'+Math.max(0.3,x1-x0)+'%;top:'+(2+L*18)+'px" title="'+esc(b[2]+' '+b[0]+'–'+b[1]+' MHz: '+b[3])+'">'
         +((x1-x0)>5?'<span>'+esc(b[2])+(x1-x0>22?' · '+esc(b[3]):'')+'</span>':'')+'</div>'); });
-    g.style.height=(4+Math.max(1,lanes.length)*15)+'px';
+    g.style.height=(4+Math.max(1,lanes.length)*18)+'px';
     g.innerHTML=html.join('');
   };
   Scope.prototype.drawRuler=function(){
