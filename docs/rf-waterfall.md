@@ -259,7 +259,7 @@ per-row dB history). Add one by dropping an entry into `PALETTES` +
 
 ## 2D / 3D waterfall view
 
-**The 3D view is rotatable** — drag to turn and tilt it, wheel or pinch to zoom; the angle is remembered per browser. Power is height (peaks rise up to ~0.6× the depth of the surface, so weak signals still stand out), older sweeps recede along the time axis.
+**The 3D view is rotatable** — drag to turn and tilt it, wheel or pinch to zoom; the angle is remembered per browser. Power is height, older sweeps recede along the time axis.
 
 
 Each panel has a **View: 2D | 3D** toggle in the toolbar (default **2D**, the
