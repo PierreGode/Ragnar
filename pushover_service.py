@@ -12,6 +12,11 @@ logger = logging.getLogger(__name__)
 
 PUSHOVER_API_URL = "https://api.pushover.net/1/messages.json"
 
+try:
+    from notify_sinks import deliver as _sinks_deliver
+except Exception:
+    _sinks_deliver = None
+
 
 class PushoverService:
     """Lightweight wrapper around the Pushover HTTP API."""
@@ -101,6 +106,24 @@ class PushoverService:
         """Return True when Pushover is both configured and enabled in config."""
         return self.shared_data.config.get("pushover_enabled", False) and self.is_configured()
 
+    def sinks_enabled(self):
+        cfg = self.shared_data.config
+        return (bool(cfg.get("ntfy_enabled")) and bool((cfg.get("ntfy_topic") or "").strip())) or                (bool(cfg.get("webhook_enabled")) and bool((cfg.get("webhook_url") or "").strip()))
+
+    def delivery_enabled(self):
+        return self.is_enabled() or self.sinks_enabled()
+
+    def _dispatch(self, message, title="Ragnar", priority=0):
+        if self.is_enabled():
+            self.send(message, title=title, priority=priority)
+        if _sinks_deliver is not None and self.sinks_enabled():
+            try:
+                from notify_sinks import get_sinks
+                get_sinks(self.shared_data).reload()
+            except Exception:
+                pass
+            _sinks_deliver(title, message, priority, shared_data=self.shared_data)
+
     # ------------------------------------------------------------------
     # Core send
     # ------------------------------------------------------------------
@@ -158,7 +181,7 @@ class PushoverService:
 
     def notify_new_devices(self, new_ips):
         """Notify about devices that have NEVER been seen before (deduped against DB)."""
-        if not self.is_enabled():
+        if not self.delivery_enabled():
             return
         if not self.shared_data.config.get("pushover_notify_new_device", True):
             return
@@ -174,11 +197,11 @@ class PushoverService:
         ip_list = ", ".join(sorted(truly_new)[:5])
         suffix = f" (+{count - 5} more)" if count > 5 else ""
         msg = f"⚔️ {count} new device(s) discovered on the network for the first time:\n{ip_list}{suffix}"
-        threading.Thread(target=self.send, args=(msg, "Ragnar — New Device"), daemon=True).start()
+        threading.Thread(target=self._dispatch, args=(msg, "Ragnar — New Device"), daemon=True).start()
 
     def notify_device_lost(self, lost_ips):
         """Notify when devices go offline (and remember them for back-online detection)."""
-        if not self.is_enabled():
+        if not self.delivery_enabled():
             return
         # Always track offline state even if notifications are disabled, so back-online works
         self._offline_devices.update(lost_ips)
@@ -193,11 +216,11 @@ class PushoverService:
         ip_list = ", ".join(sorted(lost_ips)[:5])
         suffix = f" (+{count - 5} more)" if count > 5 else ""
         msg = f"🛡️ {count} device(s) went offline:\n{ip_list}{suffix}"
-        threading.Thread(target=self.send, args=(msg, "Ragnar — Device Lost"), daemon=True).start()
+        threading.Thread(target=self._dispatch, args=(msg, "Ragnar — Device Lost"), daemon=True).start()
 
     def notify_device_back_online(self, appeared_ips):
         """Notify when a previously known device that went offline comes back online."""
-        if not self.is_enabled():
+        if not self.delivery_enabled():
             return
         if not self.shared_data.config.get("pushover_notify_device_back_online", False):
             return
@@ -212,11 +235,11 @@ class PushoverService:
         ip_list = ", ".join(sorted(back_online)[:5])
         suffix = f" (+{count - 5} more)" if count > 5 else ""
         msg = f"📶 {count} device(s) back online:\n{ip_list}{suffix}"
-        threading.Thread(target=self.send, args=(msg, "Ragnar — Device Back Online"), daemon=True).start()
+        threading.Thread(target=self._dispatch, args=(msg, "Ragnar — Device Back Online"), daemon=True).start()
 
     def notify_new_vulnerabilities(self, new_total):
         """Notify about newly discovered vulnerabilities (compares against last notified count)."""
-        if not self.is_enabled():
+        if not self.delivery_enabled():
             return
         if not self.shared_data.config.get("pushover_notify_new_vulnerability", True):
             return
@@ -230,11 +253,11 @@ class PushoverService:
             logger.debug(f"Pushover: suppressed vuln alert (delta={delta}) during startup grace")
             return
         msg = f"🔥 {delta} new vulnerability/vulnerabilities found! (total: {new_total})"
-        threading.Thread(target=self.send, args=(msg, "Ragnar — Vulnerability Alert", 1), daemon=True).start()
+        threading.Thread(target=self._dispatch, args=(msg, "Ragnar — Vulnerability Alert", 1), daemon=True).start()
 
     def notify_new_credentials(self, new_count, total):
         """Notify when new credentials are captured."""
-        if not self.is_enabled():
+        if not self.delivery_enabled():
             return
         if not self.shared_data.config.get("pushover_notify_new_credential", True):
             return
@@ -248,17 +271,17 @@ class PushoverService:
             logger.debug(f"Pushover: suppressed credential alert during startup grace")
             return
         msg = f"🗝️ {new_count} new credential(s) captured! (total: {total})"
-        threading.Thread(target=self.send, args=(msg, "Ragnar — Credentials"), daemon=True).start()
+        threading.Thread(target=self._dispatch, args=(msg, "Ragnar — Credentials"), daemon=True).start()
 
     def notify_wardrive_upload(self, message, title="Ragnar — Wardrive upload", priority=0):
         """Summary of a finished wardrive's auto-upload (one per drive, sent once
         every service has a final result). Gated by pushover_enabled +
         pushover_notify_wardrive_upload."""
-        if not self.is_enabled():
+        if not self.delivery_enabled():
             return False
         if not self.shared_data.config.get("pushover_notify_wardrive_upload", True):
             return False
-        threading.Thread(target=self.send, args=(message[:1024], title, priority), daemon=True).start()
+        threading.Thread(target=self._dispatch, args=(message[:1024], title, priority), daemon=True).start()
         return True
 
     # ------------------------------------------------------------------
@@ -279,7 +302,7 @@ class PushoverService:
 
     def rusense_enabled(self, kind):
         """True when RuSense alerts are on, Pushover is usable, and `kind` is enabled."""
-        if not self.is_enabled():
+        if not self.delivery_enabled():
             return False
         if not self.shared_data.config.get("rusense_notify_enabled", False):
             return False
@@ -322,7 +345,7 @@ class PushoverService:
         on a transition into a bad verdict, and this adds a cooldown backstop).
         Sent on a daemon thread so the monitor loop never blocks. Returns True if
         a send was dispatched."""
-        if not self.is_enabled():
+        if not self.delivery_enabled():
             return False
         if not self.shared_data.config.get("pushover_notify_net_integrity", True):
             return False
@@ -352,7 +375,7 @@ class PushoverService:
         The caller (the Watchtower monitor loop) already dedupes per finding, so
         this is the last line of defence against notification spam. Sent on a
         daemon thread so the poll loop never blocks. Returns True if dispatched."""
-        if not self.is_enabled():
+        if not self.delivery_enabled():
             return False
         if not self.shared_data.config.get("watchtower_notify_enabled", True):
             return False

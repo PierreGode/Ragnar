@@ -555,6 +555,34 @@ const configMetadata = {
         label: "OpenAI API Token",
         description: "Your OpenAI API key for AI-powered features. Keep this confidential."
     },
+    ntfy_enabled: {
+        label: "Enable ntfy Notifications",
+        description: "Push alerts to an ntfy topic (ntfy.sh or self-hosted). No account required for public topics."
+    },
+    ntfy_server: {
+        label: "ntfy Server",
+        description: "Base URL of the ntfy server, e.g. https://ntfy.sh or https://ntfy.example.com"
+    },
+    ntfy_topic: {
+        label: "ntfy Topic",
+        description: "Topic name to publish to, e.g. ragnar-alerts"
+    },
+    ntfy_token: {
+        label: "ntfy Access Token",
+        description: "Optional bearer token for auth-protected ntfy topics. Leave blank for public topics."
+    },
+    webhook_enabled: {
+        label: "Enable Webhook Notifications",
+        description: "POST alert payloads to a generic JSON webhook (Slack/Discord/Mattermost/anything)."
+    },
+    webhook_url: {
+        label: "Webhook URL",
+        description: "HTTPS endpoint that accepts POST with a JSON body."
+    },
+    webhook_flavour: {
+        label: "Webhook Format",
+        description: "json = {source,title,message,priority,ts}; slack = {text: \"*title*\\nmessage\"} for Slack/Discord-compatible endpoints."
+    },
     wardriving_enabled: {
         label: "Enable Wardriving",
         description: "Enable the wardriving tab for WiFi network discovery with GPS mapping. Requires a USB GPS module for location data. Note: Automatic AP mode is disabled while wardriving is enabled — AP mode (hostapd) would take over wlan0 and block WiFi scanning."
@@ -22568,10 +22596,11 @@ function displayConfigForm(config) {
         'General': ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck'],
         'Network': ['network_max_failed_pings'],
         'Timing': ['startup_delay', 'web_delay', 'screen_delay', 'scan_interval'],
-        'Display': ['epd_type', 'screen_reversed', 'spi_clock_mhz', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness']
+        'Display': ['epd_type', 'screen_reversed', 'spi_clock_mhz', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness'],
+        'Notifications': ['ntfy_enabled', 'ntfy_server', 'ntfy_topic', 'ntfy_token', 'webhook_enabled', 'webhook_url', 'webhook_flavour']
     };
     
-    const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck', 'wardriving_enabled', 'wardriving_display', 'wardriving_auto_export', 'wardriving_wigle_include_zigbee'];
+    const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck', 'wardriving_enabled', 'wardriving_display', 'wardriving_auto_export', 'wardriving_wigle_include_zigbee', 'ntfy_enabled', 'webhook_enabled'];
     const alwaysShowKeys = new Set(['network_max_failed_pings', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'spi_clock_mhz', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness', 'wardriving_scan_interval', 'wardriving_gps_port', 'wardriving_gps_baudrate']);
     const fallbackValues = {
         network_max_failed_pings: 15,

@@ -878,6 +878,18 @@ class SharedData:
             "ai_max_tokens": 500,
             "ai_temperature": 0.7,
 
+            "__title_ntfy__": "ntfy / Webhook Notifications",
+            # ntfy (https://ntfy.sh or self-hosted) — no account needed for a
+            # public topic; a token unlocks protected topics.
+            "ntfy_enabled": False,
+            "ntfy_server": "https://ntfy.sh",
+            "ntfy_topic": "",
+            "ntfy_token": "",
+            # Generic JSON webhook. flavour 'slack' posts a {text: ...} block.
+            "webhook_enabled": False,
+            "webhook_url": "",
+            "webhook_flavour": "json",
+
             "__title_pushover__": "Pushover Notifications",
             "pushover_enabled": False,
             "pushover_notify_new_device": True,
