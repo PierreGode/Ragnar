@@ -334,7 +334,7 @@
 
   <footer id="footer"><div id="foot-msg"></div>
     <div style="margin-top:6px"><b>Backends:</b> rtl_sdr.py (rtl_power sweep · rtl_433 decode) · sdr_spectrum.py (hackrf_sweep). Click a signal to pin a marker and retune a narrow zoom sweep there; the sub-GHz panel can switch to rtl_433 to name devices (one dongle, so Waterfall and Decode are mutually exclusive).</div>
-    <div style="margin-top:6px"><b>📡 Mesh overlay:</b> the sub-GHz panel's <b>Mesh/LoRa</b> dropdown sweeps a chosen mesh's band and overlays its exact channels — <b>Z-Wave</b> (FSK) regions, plus the LoRa meshes <b>Meshtastic</b>, <b>MeshCore</b> and <b>LoRaWAN</b>. Watch bursts/chirps land on the channels: device chatter, retries, or a jammer parked on one. This is an <b>energy/occupancy view only</b> — LoRa (chirp spread-spectrum) can't be demodulated with rtl_power/rtl_433 and the payloads are encrypted, so you see presence and activity, not IDs or messages. Receive-only.</div>
+    <div style="margin-top:6px"><b>📡 Mesh overlay:</b> the sub-GHz panel's <b>Mesh/LoRa</b> dropdown sweeps a chosen mesh's band and overlays its exact channels — <b>Z-Wave</b> (FSK) regions, plus the LoRa meshes <b>Meshtastic</b>, <b>MeshCore</b> and <b>LoRaWAN</b>, and <b>Wi-Fi HaLow</b> (802.11ah) for the US, EU and other regions. Watch bursts/chirps land on the channels: device chatter, retries, or a jammer parked on one. This is an <b>energy/occupancy view only</b> — LoRa (chirp spread-spectrum) and HaLow (OFDM) can't be demodulated with rtl_power/rtl_433 and the payloads are encrypted, so you see presence and activity, not IDs or messages. Receive-only.</div>
   </footer>
 </div>
 
@@ -1403,6 +1403,10 @@
     var pag=(bpRegion===2)?[[152.0,152.9],[157.7,158.7],[929.0,932.0]]:[[169.4,169.825],[465.9,466.3],[147.5,147.9]];
     if(bw20Khz<40 && pag.some(function(r){ return fMHz>=r[0]&&fMHz<=r[1]; }))
       return {label:'likely POCSAG/FLEX pager', act:{page:'/pager-decode',name:'Pager Decode'}};
+    // Wi-Fi HaLow (802.11ah) channels are 1-16 MHz of OFDM; LoRa never exceeds
+    // 500 kHz — so anything this wide in a HaLow band is HaLow, not a chirp.
+    if(bw20Khz>=700 && ((fMHz>=902&&fMHz<=928)||(fMHz>=863&&fMHz<=869)||(fMHz>=779&&fMHz<=787)))
+      return {label:'wideband OFDM — likely Wi-Fi HaLow / 802.11ah (energy only)', act:null};
     if(bw20Khz>=90 && (near(869.5,0.7)||(fMHz>=902&&fMHz<=928)||near(433.2,0.4)))
       return {label:'wideband chirp — likely LoRa/mesh (energy only)', act:null};
     if(bw20Khz<45 && (near(433.92,1.0)||near(315,2)||near(345,6)||near(390,6)||near(868.3,1.2)||(fMHz>=902&&fMHz<=928)))
@@ -1731,9 +1735,9 @@
     if(!this.cfg.zwave || !map || this._ovBuilt) return;
     var self=this; this._ovBuilt=true;
     var tag=document.createElement('span'); tag.className='zwtag'; tag.textContent='📡 Mesh';
-    var sel=document.createElement('select'); sel.title='Overlay a mesh/LPWAN band + its channels (energy view — LoRa is not demodulated)';
-    var opt0=document.createElement('option'); opt0.value=''; opt0.textContent='Mesh / LoRa…'; sel.appendChild(opt0);
-    var order=['Z-Wave','Meshtastic','MeshCore','LoRaWAN'], byGroup={};
+    var sel=document.createElement('select'); sel.title='Overlay a mesh/LPWAN band + its channels (energy view — LoRa and Wi-Fi HaLow are not demodulated)';
+    var opt0=document.createElement('option'); opt0.value=''; opt0.textContent='Mesh / LoRa / HaLow…'; sel.appendChild(opt0);
+    var order=['Z-Wave','Meshtastic','MeshCore','LoRaWAN','Wi-Fi HaLow'], byGroup={};
     Object.keys(map).forEach(function(id){var g=map[id].group||'Other';(byGroup[g]=byGroup[g]||[]).push(id);});
     var groups=order.concat(Object.keys(byGroup).filter(function(g){return order.indexOf(g)<0;}));
     groups.forEach(function(g){ if(!byGroup[g])return;
@@ -3269,7 +3273,7 @@
     [433.05,434.79,'433 ISM','ISM / LPD433: remotes, sensors, TPMS','ism',1],[446.0,446.2,'PMR446','licence-free walkie-talkies (NFM / DMR)','',1],
     [462.5625,467.7125,'FRS/GMRS','family radios (NFM)','',2],[470.0,694.0,'UHF TV','DVB-T television','bc',1],[470.0,608.0,'UHF TV','ATSC television','bc',2],
     [791.0,821.0,'LTE 800 ↓','LTE band 20 downlink','cell',1],[832.0,862.0,'LTE 800 ↑','LTE band 20 uplink','cell',1],[824.0,849.0,'Cell 850 ↑','cellular uplink','cell',2],[869.0,894.0,'Cell 850 ↓','cellular downlink','cell',2],
-    [863.0,870.0,'868 SRD','short-range devices: LoRa, sensors, alarms','ism',1],[880.0,915.0,'GSM 900 ↑','GSM / LTE band 8 uplink','cell',1],[902.0,928.0,'915 ISM','ISM: LoRa, meters, Z-Wave','ism',2],
+    [863.0,870.0,'868 SRD','short-range devices: LoRa, Wi-Fi HaLow, sensors, alarms','ism',1],[880.0,915.0,'GSM 900 ↑','GSM / LTE band 8 uplink','cell',1],[902.0,928.0,'915 ISM','ISM: LoRa, Wi-Fi HaLow, meters, Z-Wave','ism',2],
     [925.0,960.0,'GSM 900 ↓','GSM / LTE band 8 downlink','cell',1],[1029.0,1031.0,'1030','SSR interrogation (radar → aircraft)','',0],[1089.0,1091.0,'1090','ADS-B / Mode S (aircraft)','',0],
     [1240.0,1300.0,'23 cm','amateur','ham',0],[1525.0,1559.0,'L-band ↓','Inmarsat / satcom downlink','',0],[1559.0,1610.0,'GNSS','GPS L1 / Galileo E1 / GLONASS / BeiDou','',0],
     [1616.0,1626.5,'Iridium','Iridium satellite phones','',0],[1710.0,1785.0,'1800 ↑','GSM / LTE band 3 uplink','cell',1],[1805.0,1880.0,'1800 ↓','GSM / LTE band 3 downlink','cell',1],

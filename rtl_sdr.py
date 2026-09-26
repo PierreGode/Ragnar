@@ -198,6 +198,96 @@ LORA_PLANS = {
                          "span": (921_000_000, 928_000_000),
                          "channels": [(923_200_000, "ch0"), (923_400_000, "ch1")],
                          "note": "AS923-1: 923.2/923.4 default (+ up to 8 channels)"},
+    # --- Wi-Fi HaLow (IEEE 802.11ah): sub-GHz Wi-Fi, 1-16 MHz OFDM channels.
+    #     A higher-bandwidth alternative to LoRaWAN. Energy view only here —
+    #     the OFDM is not demodulated and the traffic is WPA3-encrypted anyway. ---
+    "halow-us": {"proto": "Wi-Fi HaLow", "label": "Wi-Fi HaLow · US (902-928)",
+                         "span": (902000000, 928000000),
+                         "channels": [
+                                      (903000000, "ch2"),
+                                      (905000000, "ch6"),
+                                      (907000000, "ch10"),
+                                      (909000000, "ch14"),
+                                      (911000000, "ch18"),
+                                      (913000000, "ch22"),
+                                      (915000000, "ch26"),
+                                      (917000000, "ch30"),
+                                      (919000000, "ch34"),
+                                      (921000000, "ch38"),
+                                      (923000000, "ch42"),
+                                      (925000000, "ch46"),
+                                      (927000000, "ch50")],
+                         "note": "802.11ah US (FCC): 902-928 MHz, 1/2/4/8/16 MHz OFDM channels; markers = the 13 x 2 MHz channels (802.11ah numbering, centre = 902 + 0.5*n MHz)"},
+    "halow-eu": {"proto": "Wi-Fi HaLow", "label": "Wi-Fi HaLow · EU (863-868)",
+                         "span": (863000000, 868000000),
+                         "channels": [
+                                      (863500000, "ch1"),
+                                      (864000000, "ch2 2M"),
+                                      (864500000, "ch3"),
+                                      (865500000, "ch5"),
+                                      (866000000, "ch6 2M"),
+                                      (866500000, "ch7"),
+                                      (867500000, "ch9")],
+                         "note": "802.11ah Europe (ETSI SRD): 863-868 MHz, 1 and 2 MHz OFDM channels; centre = 863 + 0.5*n MHz"},
+    "halow-anz": {"proto": "Wi-Fi HaLow", "label": "Wi-Fi HaLow · AU/NZ (915-928)",
+                         "span": (915000000, 928000000),
+                         "channels": [
+                                      (917000000, "ch30"),
+                                      (919000000, "ch34"),
+                                      (921000000, "ch38"),
+                                      (923000000, "ch42"),
+                                      (925000000, "ch46"),
+                                      (927000000, "ch50")],
+                         "note": "802.11ah Australia / New Zealand: 915-928 MHz, US channel numbering; markers = the 2 MHz channels in band"},
+    "halow-jp": {"proto": "Wi-Fi HaLow", "label": "Wi-Fi HaLow · Japan (916.5-927.5)",
+                         "span": (916500000, 927500000),
+                         "channels": [
+                                      (917000000, "917"),
+                                      (918000000, "918"),
+                                      (919000000, "919"),
+                                      (920000000, "920"),
+                                      (921000000, "921"),
+                                      (922000000, "922"),
+                                      (923000000, "923"),
+                                      (924000000, "924"),
+                                      (925000000, "925"),
+                                      (926000000, "926"),
+                                      (927000000, "927")],
+                         "note": "802.11ah Japan (ARIB T108): 916.5-927.5 MHz, 1 MHz channels; markers = 1 MHz raster"},
+    "halow-kr": {"proto": "Wi-Fi HaLow", "label": "Wi-Fi HaLow · Korea (917.5-923.5)",
+                         "span": (917500000, 923500000),
+                         "channels": [
+                                      (918000000, "918"),
+                                      (919000000, "919"),
+                                      (920000000, "920"),
+                                      (921000000, "921"),
+                                      (922000000, "922"),
+                                      (923000000, "923")],
+                         "note": "802.11ah Korea: 917.5-923.5 MHz, 1/2/4 MHz channels; markers = 1 MHz raster"},
+    "halow-cn": {"proto": "Wi-Fi HaLow", "label": "Wi-Fi HaLow · China (779-787)",
+                         "span": (779000000, 787000000),
+                         "channels": [
+                                      (780000000, "780"),
+                                      (782000000, "782"),
+                                      (784000000, "784"),
+                                      (786000000, "786")],
+                         "note": "802.11ah China: 779-787 MHz (1/2/4/8 MHz channels; 755-779 MHz is low-power only); markers = 2 MHz raster"},
+    "halow-in": {"proto": "Wi-Fi HaLow", "label": "Wi-Fi HaLow · India (865-868)",
+                         "span": (865000000, 868000000),
+                         "channels": [
+                                      (865500000, "865.5"),
+                                      (866500000, "866.5"),
+                                      (867500000, "867.5")],
+                         "note": "802.11ah India: 865-868 MHz, 1 MHz channels"},
+    "halow-sg": {"proto": "Wi-Fi HaLow", "label": "Wi-Fi HaLow · Singapore (920-925)",
+                         "span": (920000000, 925000000),
+                         "channels": [
+                                      (920500000, "920.5"),
+                                      (921500000, "921.5"),
+                                      (922500000, "922.5"),
+                                      (923500000, "923.5"),
+                                      (924500000, "924.5")],
+                         "note": "802.11ah Singapore: 920-925 MHz (also 866-869 MHz), 1/2/4 MHz channels; markers = 1 MHz raster"},
 }
 
 
@@ -4412,6 +4502,17 @@ def _selftest_body(_saved_globals=None):
             if not (p["lo_hz"] <= ch["freq_hz"] <= p["hi_hz"]):
                 _lp_ok = False
     check("lora: every channel inside its span, span in RTL range + >=100 kHz", _lp_ok)
+    _hl = {k: v for k, v in lp.items() if v["proto"] == "Wi-Fi HaLow"}
+    check("halow: US, EU and other regions present",
+          {"halow-us", "halow-eu", "halow-jp", "halow-kr", "halow-cn",
+           "halow-anz", "halow-in", "halow-sg"} <= set(_hl))
+    check("halow: US grid is 13 x 2 MHz channels, 903..927 MHz",
+          len(_hl["halow-us"]["channels"]) == 13
+          and _hl["halow-us"]["channels"][0]["freq_hz"] == 903_000_000
+          and _hl["halow-us"]["channels"][-1]["freq_hz"] == 927_000_000)
+    check("halow: EU 1 MHz channels sit on 863 + 0.5*n (863.5 .. 867.5)",
+          {c["freq_hz"] for c in _hl["halow-eu"]["channels"]}
+          >= {863_500_000, 865_500_000, 867_500_000})
     check("lora: LoRaWAN EU868 lists the three mandatory uplinks",
           all(any(abs(c["freq_hz"] - f) < 1000 for c in lp["lorawan-eu868"]["channels"])
               for f in (868_100_000, 868_300_000, 868_500_000)))
