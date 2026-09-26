@@ -2254,6 +2254,12 @@ class WardrivingEngine:
         self.session = WardrivingSession(self.data_dir)
         self._running = True
         self._starting = False
+        # Tell the orchestrator to pause its active scans (nmap/attacks) while
+        # we drive — they thrash a small board and starve cold-start GPS.
+        try:
+            self.shared_data.wardriving_session_active = True
+        except Exception:
+            pass
         self.error = None
         self.scans_completed = 0
         self.bt_count = 0
@@ -2499,6 +2505,11 @@ class WardrivingEngine:
 
         self._running = False
         self._starting = False
+        # Let the orchestrator resume active scans now that we've stopped.
+        try:
+            self.shared_data.wardriving_session_active = False
+        except Exception:
+            pass
         if self.session:
             self.session.close()
         if self._gps:

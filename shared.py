@@ -1290,6 +1290,11 @@ class SharedData:
         self.display_should_exit = False
         self.orchestrator_should_exit = False
         self.webapp_should_exit = False
+        # Set True while a wardriving session is active. The orchestrator reads
+        # this to pause its active scans (nmap port/vuln, attacks): on a small
+        # board those scans thrash RAM/CPU and starve gpsd, so cold-start GPS
+        # never completes while wardriving. Passive wardriving keeps running.
+        self.wardriving_session_active = False
         self.web_portal_active = True  # Tracks whether the web portal is currently running
         self.ragnar_instance = None
         self.gateway_info = {}  # Populated by NetworkScanner.get_gateway_info()
