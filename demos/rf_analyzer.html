@@ -128,6 +128,14 @@
   footer{margin-top:20px;padding-top:14px;border-top:1px solid var(--line);font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.7}
   .aihr{border:none;border-top:1px solid var(--line);margin:9px 0}
   .aifollow{margin-top:2px}
+  /* control guide: one tap on a phone, the same text as the hover tooltips */
+  .anotice{margin:6px 0;padding:6px 10px;border-radius:6px;font-size:12.5px;color:var(--ink-dim);background:rgba(56,189,201,.08);border:1px solid rgba(56,189,201,.25)}
+  .guide{margin:8px 0 4px;border:1px solid var(--line);border-radius:8px;padding:6px 12px;background:rgba(255,255,255,.015)}
+  .guide summary{cursor:pointer;color:var(--ink-dim);font-size:13px;padding:2px 0}
+  .guide h4{margin:12px 0 4px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--cyan)}
+  .guide dl{margin:0;display:grid;grid-template-columns:minmax(90px,max-content) 1fr;gap:3px 12px;font-size:12.5px}
+  .guide dt{color:var(--ink);font-weight:600} .guide dd{margin:0;color:var(--muted)}
+  @media (max-width:560px){ .guide dl{grid-template-columns:1fr} .guide dd{margin-bottom:6px} }
 </style>
 </head>
 <body>
@@ -164,6 +172,7 @@
     <button id="kbdhelp" title="Keyboard shortcuts">⌨</button>
     <button id="reset" title="Reset zoom to the whole capture (R)">Reset zoom</button>
   </div>
+  <details id="guide" class="guide"><summary>ⓘ What every control does</summary><div id="guidebody"></div></details>
   <div id="kbdpop" class="kbdpop" hidden>
     <b>Keyboard shortcuts</b>
     <div><kbd>R</kbd> reset zoom · <kbd>B</kbd> back · <kbd>[</kbd>/<kbd>]</kbd> palette · <kbd>Z</kbd>/<kbd>X</kbd>/<kbd>C</kbd> zoom/measure/annotate · <kbd>D</kbd> demodulate · <kbd>L</kbd> copy link · <kbd>?</kbd> this help</div>
@@ -420,7 +429,16 @@
 
   function api(path,params){var q=Object.keys(params||{}).filter(function(k){return params[k]!=null;})
       .map(function(k){return k+'='+encodeURIComponent(params[k]);}).join('&');
-    return fetch(path+(q?'?'+q:'')).then(function(r){return r.json();});}
+    return fetch(path+(q?'?'+q:'')).then(function(r){return r.json();}).then(function(d){
+      // The server bounds heavy work: say so instead of silently showing a result.
+      if(d&&d.analysed_window) notice('ⓘ '+d.analysed_window.note+' ('+d.analysed_window.t0.toFixed(2)+'–'+d.analysed_window.t1.toFixed(2)+' s). Zoom in to choose a different part.');
+      else if(d&&d.busy) notice('⏳ '+d.error);
+      return d; });}
+  // A small non-blocking notice under the top bar, auto-hiding.
+  function notice(msg){ var n=document.getElementById('anotice');
+    if(!n){ n=document.createElement('div'); n.id='anotice'; n.className='anotice';
+      var st=document.getElementById('stats'); st.parentNode.insertBefore(n,st); }
+    n.textContent=msg; n.hidden=false; clearTimeout(n._t); n._t=setTimeout(function(){ n.hidden=true; },9000); }
   function api2(path,body){return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(body||{})}).then(function(r){return r.json();});}
   function fmtHz(hz){var a=Math.abs(hz); if(a>=1e6)return (hz/1e6).toFixed(3)+' MHz'; if(a>=1e3)return (hz/1e3).toFixed(1)+' kHz'; return Math.round(hz)+' Hz';}
@@ -1362,6 +1380,70 @@
   });
 
   // preselect a capture from a shared deep-link (?name=…); loadCapture applies the rest
+
+  // ---- plain-language help: one table drives the tooltips AND the guide ----
+  var TIPS=[
+    ['#cap','Capture','The recording to analyse. SigMF captures from the RF Waterfall (⤓ SigMF, or an armed trigger) appear here.'],
+    ['#updtype','Datatype','Raw IQ import only: how the samples are stored — cu8 is what an RTL-SDR records.'],
+    ['#uprate','Sample rate','Raw IQ import only: samples per second the file was recorded at.'],
+    ['#upfreq','Centre','Raw IQ import only: the frequency the radio was tuned to, in MHz.'],
+    ['#updo','Import','Add the chosen file to the capture list.'],
+    ['[data-dm="zoom"]','Zoom','Drag a box on the spectrogram to zoom into that time and frequency.'],
+    ['[data-dm="measure"]','Measure','Drag a box on the spectrogram to read its power, bandwidth and duration.'],
+    ['[data-dm="annotate"]','Annotate','Drag a box to label a signal. The label is saved into the capture\'s SigMF file.'],
+    ['#runmod','Analyze','Identify the marked signal: modulation (OOK, FSK, PSK…), symbol rate, constellation, FM deviation / AM depth and any CTCSS/DCS squelch tag.'],
+    ['[data-iv="iq"]','I/Q','Plot the raw in-phase and quadrature samples over time.'],
+    ['[data-iv="freq"]','Freq','Plot instantaneous frequency over time: FSK shows as steps, FM as a waveform.'],
+    ['[data-iv="amp"]','Amp','Plot amplitude over time: OOK shows as on/off pulses.'],
+    ['[data-iv="phase"]','Phase','Plot phase over time: PSK shows as sudden jumps.'],
+    ['[data-pm="avg"]','Avg','Average the spectrum over the view: steady carriers stand out.'],
+    ['[data-pm="max"]','Max-hold','Keep each frequency\'s peak: catches short bursts the average hides.'],
+    ['#rundec','Decode','Run rtl_433 over the whole capture to name known sensors, remotes and tyre-pressure sensors.'],
+    ['#runsig','Survey','List every separate signal in the view — frequency, bandwidth, duration, SNR. Click one to jump to it.'],
+    ['[data-m="ook"]','OOK/AM','Demodulate as on-off keying / AM: bits are the carrier switching on and off.'],
+    ['[data-m="fsk"]','FSK/FM','Demodulate as frequency-shift keying / FM: bits are two (or more) frequencies.'],
+    ['#bw','BW (kHz)','Demodulator bandwidth: wide enough to hold the whole signal, narrow enough to shut out its neighbours.'],
+    ['#run','Demodulate','Recover the bits from the marked signal using the mode and bandwidth above.'],
+    ['[data-v="bin"]','Bin','Show the bits as ones and zeros.'],
+    ['[data-v="hex"]','Hex','Show the bits as hexadecimal bytes.'],
+    ['#rundiff','Diff','Compare the recordings added with ＋ Compare: bits that never change are the device ID; bits that change are a counter or rolling code.'],
+    ['#runpsk','Demod (PSK)','Recover PSK symbols from one clean burst and report EVM — how tightly the symbols sit on their ideal points.'],
+    ['#pskorder','PSK order','Which PSK to try: BPSK (2 points), QPSK (4), 8PSK (8), or Auto to take the one that locks.'],
+    ['#runcyc','Detect','Estimate the symbol rate from the signal\'s repeating structure — works even when it can\'t be demodulated.'],
+    ['#rundechirp','De-chirp','LoRa: undo the chirps with the bandwidth and spreading factor beside it, turning each symbol into a steady tone.'],
+    ['#lorabw','LoRa BW','LoRa channel bandwidth. 125 kHz is the usual default.'],
+    ['#lorasf','LoRa SF','LoRa spreading factor, 7 to 12. Higher is slower but reaches further.'],
+    ['[data-fk="bandpass"]','Band-pass','Keep only the band between the A/B cursors (or around the marker) to isolate one signal.'],
+    ['[data-fk="notch"]','Notch','Cut out the band between the A/B cursors — for example a strong interferer.'],
+    ['#runfilt','Apply','Show the spectrum after the filter.'],
+    ['#aiask','Ask','Send your question to the AI analyst. It sees this capture\'s measurements and can propose actions that run the tools for you.']
+  ];
+  // Controls that already carry a tooltip but have no readable name of their own
+  // (inputs and selects) — name them for the guide without touching their text.
+  [['#symbaud','Symbol rate'],['#symbits','Bits per symbol'],['#gapms','Gap (ms)'],['#sigsnr','Min SNR (dB)'],
+   ['#boff','Offset (bits)'],['#pcoding','Pulse coding'],['#pskbaud','Symbol rate (Bd)']].forEach(function(n){
+    var el=document.querySelector(n[0]); if(el) el.setAttribute('data-gname',n[1]); });
+  document.querySelectorAll('#palette button').forEach(function(b){ if(!b.title) b.title='Colour palette for the spectrogram: '+b.textContent.trim(); });
+  TIPS.forEach(function(t){ var el=document.querySelector(t[0]); if(el&&!el.getAttribute('title')) el.setAttribute('title',t[2]); if(el) el.setAttribute('data-gname',t[1]); });
+  document.querySelectorAll('#aichips button[data-q]').forEach(function(b){ if(!b.title) b.title='Ask the AI: '+b.getAttribute('data-q'); });
+  // Guide: every titled control, grouped by the panel it sits in.
+  (function(){
+    var body=$('guidebody'); if(!body) return;
+    var groups=[], seen=[];
+    function grp(name){ for(var i=0;i<groups.length;i++) if(groups[i].name===name) return groups[i]; var g={name:name,items:[]}; groups.push(g); return g; }
+    document.querySelectorAll('button[title],select[title],input[title]').forEach(function(el){
+      if(el.closest('#guide')||el.type==='file'||seen.indexOf(el)>=0) return; seen.push(el);
+      var card=el.closest('.card'), h=card&&card.querySelector('h3');
+      var gname=h?(h.childNodes[0].textContent||'').trim():(el.closest('#uploadpop')?'Import a recording':'Top bar');
+      var name=el.getAttribute('data-gname')||(el.textContent||'').trim()||el.getAttribute('placeholder')||el.id;
+      if(el.closest('#aichips')) return;                     // the questions explain themselves
+      if(el.closest('#palette')){ if(el!==document.querySelector('#palette button')) return; name='Palette'; }
+      grp(gname||'Other').items.push([name,el.getAttribute('title')]);
+    });
+    body.innerHTML=groups.map(function(g){ return '<h4>'+esc(g.name)+'</h4><dl>'+g.items.map(function(it){
+      return '<dt>'+esc(it[0])+'</dt><dd>'+esc(it[1])+'</dd>'; }).join('')+'</dl>'; }).join('')
+      +'<p style="color:var(--muted);font-size:12px;margin:10px 0 2px">Long selections are analysed over their busiest 2 seconds, and one heavy analysis runs at a time — the panel says so when that happens. Full reference: <a href="https://github.com/PierreGode/Ragnar/blob/main/docs/rf-waterfall.md#signal-analyzer-on-box-sigmf-analysis" target="_blank" rel="noopener">docs/rf-waterfall.md</a>.</p>';
+  })();
   loadList(DEEP?DEEP.name:null);
 })();
 </script>

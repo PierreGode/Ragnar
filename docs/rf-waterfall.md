@@ -861,7 +861,30 @@ etc. Both open **`/rf-analyzer`** (`demos/rf_analyzer.html`) — a dedicated pag
 that analyses the recording *on the device* so it works from a phone, no desktop
 DSP tools needed.
 All the maths runs in numpy/scipy in `sigmf_analyzer.py`; the page is a viewer
-that requests windows:
+that requests windows.
+
+**Not sure what a control does?** Open **ⓘ What every control does** under the
+top bar: every button, selector and field on the page, grouped by panel, in plain
+language (the same text appears as a tooltip when you hover a control).
+
+**Built to run on small boards.** Analysis happens on the Ragnar itself, so it is
+kept inside what a 1–2 GB board can afford:
+
+- **The busiest 2 seconds.** Classify, demodulate, pulse decode, constellation,
+  FM/AM and squelch-tag analysis, de-chirp, cyclostationary and filtering never
+  need more than a couple of seconds of samples. When the selection is longer —
+  the whole capture, for instance — they analyse its busiest 2 s (at 2 MS/s),
+  and the page says which part it used. Zoom in to choose a different part.
+- **One heavy analysis at a time.** A second request waits for the first to
+  finish instead of running alongside it; the page says so if it has to wait.
+- **A memory budget for open captures.** A recording takes 8 bytes per sample in
+  memory (a 60 MB file is 240 MB), so the analyzer keeps recently opened
+  captures only within a budget of a fifth of free RAM (at most 768 MB), and
+  always keeps the one you are working on.
+
+Measured on a 60 MB capture: Ragnar's memory peaked at 1.1 GB instead of 2.8 GB,
+cyclostationary detection over the whole capture takes 5 s instead of several
+minutes, and whole-capture classify / demodulate take about half a second.
 
 - **Summary** — center/rate/duration, measured noise floor, peak frequency, SNR,
   occupied bandwidth, burst count.
