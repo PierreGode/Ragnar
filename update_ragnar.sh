@@ -315,6 +315,15 @@ if ! command -v rtl_test >/dev/null 2>&1; then
         echo -e "  ${YELLOW}⚠${NC} Could not install rtl-sdr/rtl-433 — RTL-SDR features stay disabled until they're present"
     fi
 fi
+# uhubctl lets the SDR self-healer cut a USB port's 5 V for a few seconds — the
+# software equivalent of replugging a dongle that is stuck on the bus.
+if ! command -v uhubctl >/dev/null 2>&1; then
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends uhubctl >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} Installed uhubctl (SDR self-healing: USB port power-cycle)"
+    else
+        echo -e "  ${YELLOW}⚠${NC} Could not install uhubctl — SDR recovery falls back to a USB controller reset"
+    fi
+fi
 if command -v rtl_test >/dev/null 2>&1 || dpkg -s rtl-sdr >/dev/null 2>&1; then
     _rtl_bl=/etc/modprobe.d/blacklist-rtl-sdr.conf
     if ! grep -q "dvb_usb_rtl28xxu" "$_rtl_bl" 2>/dev/null; then

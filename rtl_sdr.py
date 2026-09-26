@@ -352,6 +352,10 @@ _IQ_AVG_MAX = 24              # FFT windows averaged per row (Welch smoothing; c
 _IQ_SR_MIN = 1_000_000        # RTL-SDR minimum practical sample rate (Hz)
 _IQ_SR_MAX = 3_200_000        # RTL-SDR maximum sample rate (Hz)
 _IQ_EDGE_MARGIN = 1.15        # oversample the span this much so band edges stay clean
+_DC_HALF_HZ = 35_000          # half-width of the RTL-SDR centre hump that gets filled in
+_DC_CLEAR_HZ = 60_000         # tune this far past the band edge to keep the hump out of it
+_DC_SR_CAP = 2_400_000        # highest rate we raise to for that (drop-free on a Pi)
+_DC_SHIFT_MAX = 300_000       # how far off the band centre the tuner moves on wide spans
 
 # Tuner corrections shared by both captures (one dongle). PPM trims the RTL-SDR's
 # crystal offset (matters on the narrow Z-Wave/LoRa channels); gain is tuner gain
@@ -390,6 +394,13 @@ _detector = "rms"          # how the bins inside one display column are combined
 _bias_t = False            # 4.5 V on the antenna port (RTL-SDR Blog V3/V4) to power an LNA
 _direct = "auto"           # direct sampling: "auto" (on below 28.8 MHz), "on", "off"
 _conv_hz = 0               # up/down-converter LO: hardware freq = RF freq + _conv_hz
+# Every RTL-SDR shows a hump of its own at the frequency it is tuned to (DC
+# offset + LO leakage + 1/f noise): measured on this dongle at 2 MS/s it is
+# ~14 dB above the floor and about +-20 kHz wide — a steady "beam" in the
+# middle of the band that is not a signal. With this on, the tuner is placed
+# so the hump lands outside the band, or where it can't, away from the band
+# centre with its few bins filled in from the noise either side.
+_hide_dc = True
 
 
 # The R820T's discrete tuner gains (dB). Asking for anything else gets the
@@ -463,7 +474,7 @@ def _settings_path():
 
 
 _SETTINGS_KEYS = ("ppm", "gain", "agc", "fft", "avg", "window", "bins",
-                  "bias_t", "direct", "conv_hz", "detector")
+                  "bias_t", "direct", "conv_hz", "detector", "hide_dc")
 _SETTINGS_KEYS_G = tuple("_" + k for k in _SETTINGS_KEYS)
 
 
@@ -482,7 +493,8 @@ def _save_settings():
     try:
         d = {"ppm": _ppm, "gain": _gain, "agc": _agc, "fft": _fft, "avg": _avg,
              "window": _window, "bins": _bins, "bias_t": _bias_t,
-             "direct": _direct, "conv_hz": _conv_hz, "detector": _detector}
+             "direct": _direct, "conv_hz": _conv_hz, "detector": _detector,
+             "hide_dc": _hide_dc}
         path = _settings_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
@@ -498,7 +510,7 @@ def _load_settings():
     """Apply the saved settings at import. A fresh install has none, and gets
     the shipped defaults."""
     global _ppm, _gain, _agc, _fft, _avg, _window, _bins, _bias_t, _direct
-    global _conv_hz, _detector
+    global _conv_hz, _detector, _hide_dc
     try:
         with open(_settings_path()) as fh:
             d = json.load(fh)
@@ -529,6 +541,8 @@ def _load_settings():
             _conv_hz = int(d["conv_hz"])
         if d.get("detector") in _DETECTORS:
             _detector = d["detector"]
+        if "hide_dc" in d:
+            _hide_dc = bool(d["hide_dc"])
         return True
     except (TypeError, ValueError):
         return False
@@ -541,18 +555,19 @@ def get_tuning():
             "agc_status": agc_status(),
             "fft": _fft, "avg": _avg, "window": _window, "bins": _bins,
             "bias_t": _bias_t, "direct": _direct, "conv_hz": _conv_hz,
-            "detector": _detector,
+            "detector": _detector, "hide_dc": bool(_hide_dc),
             "fft_sizes": list(_FFT_SIZES), "windows": list(_WINDOWS),
             "bin_choices": list(_BIN_CHOICES), "detectors": list(_DETECTORS)}
 
 
 def set_tuning(ppm=None, gain=None, fft=None, avg=None, window=None, bins=None,
-               bias_t=None, direct=None, conv_hz=None, detector=None, agc=None):
+               bias_t=None, direct=None, conv_hz=None, detector=None, agc=None,
+               hide_dc=None):
     """Set PPM freq-correction, tuner gain and the resolution / hardware extras,
     then reapply to any running capture. gain may be a number (dB), or
     'auto'/'' /None for AGC. Invalid values are ignored (the setting is kept)."""
     global _ppm, _gain, _fft, _avg, _window, _bins, _bias_t, _direct, _conv_hz
-    global _detector, _agc
+    global _detector, _agc, _hide_dc
     if ppm is not None:
         try:
             _ppm = max(-1000, min(1000, int(float(ppm))))
@@ -599,6 +614,8 @@ def set_tuning(ppm=None, gain=None, fft=None, avg=None, window=None, bins=None,
         _detector = str(detector).lower()
     if bias_t is not None:
         _bias_t = str(bias_t).lower() in ("1", "true", "on", "yes")
+    if hide_dc is not None:
+        _hide_dc = str(hide_dc).lower() in ("1", "true", "on", "yes")
     if direct is not None and str(direct).lower() in ("auto", "on", "off"):
         _direct = str(direct).lower()
     if conv_hz is not None:
@@ -631,8 +648,8 @@ def reset_tuning():
 def _settings_sig():
     """Everything that changes a capture's output — a start() with a new value
     restarts the sweep even on the same span."""
-    return (_ppm, _gain, _fft, _avg, _window, _bins, _bias_t, _direct, _conv_hz,
-            _detector)
+    return (_hide_dc, _ppm, _gain, _fft, _avg, _window, _bins, _bias_t, _direct,
+            _conv_hz, _detector)
 
 
 def _parse_hz(txt):
@@ -980,6 +997,20 @@ def summarize_diagnosis(f):
     """
     if f.get("available"):
         return ("ok", "RTL-SDR ready: %s." % (f.get("model_name") or "detected"), [])
+    heal = f.get("heal") or {}
+    if heal.get("state") == "flapping" or (heal.get("drops_10min") or 0) >= _FLAP_DROPS:
+        why = "; ".join((heal.get("kernel_hints") or [])[:3]) or "repeated USB disconnects"
+        return ("usb_flapping",
+                "The RTL-SDR keeps dropping off USB (%d times in 10 min: %s). Ragnar recovers it "
+                "automatically, but this is a cable, port or dongle fault."
+                % (heal.get("drops_10min") or 0, why),
+                list(heal.get("advice") or []))
+    if not f.get("usb_present") and heal.get("state") in ("recovering", "failed"):
+        return ("usb_stuck", heal.get("message") or
+                "The RTL-SDR is plugged in but not answering on USB — Ragnar is power-cycling its port.",
+                list(heal.get("advice") or []) or
+                ["Wait a moment — Ragnar power-cycles the port with increasing gaps.",
+                 "If it never comes back, replug it by hand and try another cable."])
     if not f.get("usb_present"):
         fix = ["Use a solid PSU and a powered USB hub — RTL-SDR dongles draw ~300 mA.",
                "Use a data USB cable (not charge-only) and another port; reseat firmly.",
@@ -1034,6 +1065,7 @@ def diagnose():
         "rtl_test_opened": det.get("available", False),
         "probe_timeout": "timed out" in (det.get("error") or ""),
         "error": det.get("error"),
+        "heal": heal_status(),
     }
     state, summary, fix = summarize_diagnosis(facts)
     facts["state"] = state
@@ -1275,8 +1307,8 @@ def _iq_available():
         return False
 
 
-def _iq_plan(lo_hz, hi_hz):
-    """Pick a single-tune (center, sample_rate) covering [lo,hi] Hz, or None (pure).
+def _iq_plan(lo_hz, hi_hz, hide_dc=False):
+    """Pick a single-tune (center, sample_rate, notch_hz) covering [lo,hi] Hz, or None (pure).
 
     Returns None when the span is wider than one RTL-SDR tune can hold
     (``_IQ_MAX_SPAN_HZ``) — the caller then falls back to the rtl_power sweep.
@@ -1292,8 +1324,68 @@ def _iq_plan(lo_hz, hi_hz):
     if span <= 0 or span > _IQ_MAX_SPAN_HZ:
         return None
     center = (lo_hz + hi_hz) // 2
+    if hide_dc:
+        # Narrow band: tune just past its top edge so the hump is not in it at all.
+        need = int(round(2 * (span + _DC_CLEAR_HZ) * _IQ_EDGE_MARGIN))
+        if need <= _DC_SR_CAP:
+            return hi_hz + _DC_CLEAR_HZ, max(_IQ_SR_MIN, need), None
+        # Wide band: move the tuner off the band centre (433.92 MHz is where the
+        # remotes are) as far as the rate allows, and fill the hump in there.
+        shift = int(min(_DC_SHIFT_MAX, _DC_SR_CAP / (2.0 * _IQ_EDGE_MARGIN) - span / 2.0))
+        if shift > 2 * _DC_HALF_HZ:
+            sr = int(min(_IQ_SR_MAX, max(_IQ_SR_MIN,
+                                         round(2 * (span / 2.0 + shift) * _IQ_EDGE_MARGIN))))
+            return center + shift, sr, center + shift
+        sr = int(min(_IQ_SR_MAX, max(_IQ_SR_MIN, round(span * _IQ_EDGE_MARGIN))))
+        return center, sr, center
     sr = int(min(_IQ_SR_MAX, max(_IQ_SR_MIN, round(span * _IQ_EDGE_MARGIN))))
-    return center, sr
+    return center, sr, None
+
+
+def dc_info(tuner_hz, notch_hz, hide):
+    """What the page needs to be honest about the centre spike (pure, RF Hz).
+
+    ``filled`` gives the exact strip whose bins were filled in, so the display
+    can mark it and measurements can leave it out; ``outside`` means the tuner
+    sits past the band edge and nothing in the band was touched; ``shown`` means
+    the option is off and the spike is on screen at ``tuner_hz``.
+    """
+    t = int(tuner_hz)
+    if not hide:
+        return {"mode": "shown", "tuner_hz": t}
+    if notch_hz is None:
+        return {"mode": "outside", "tuner_hz": t}
+    n = int(notch_hz)
+    return {"mode": "filled", "tuner_hz": t,
+            "fill_hz": [n - _DC_HALF_HZ, n + _DC_HALF_HZ]}
+
+
+def _fill_dc(db, center_hz, sr_hz, notch_hz, half_hz=_DC_HALF_HZ):
+    """Fill the FFT bins within ``half_hz`` of ``notch_hz`` with a straight line
+    between the noise just either side (pure; ``db`` is fftshifted, low->high).
+
+    Returns the list, changed in place. Only ever the tuner's own hump: anything
+    real there is lost, which is why the plan keeps it off the band centre.
+    """
+    n = len(db)
+    if not n or notch_hz is None or sr_hz <= 0:
+        return db
+    bw = sr_hz / float(n)
+    k0 = (notch_hz - (center_hz - sr_hz / 2.0)) / bw
+    a = max(0, int(k0 - half_hz / bw))
+    b = min(n - 1, int(k0 + half_hz / bw) + 1)
+    if b <= a:
+        return db
+    side = max(2, int(8000 / bw))                      # ~8 kHz of noise either side
+    left = db[max(0, a - side):a] or db[b + 1:b + 1 + side]
+    right = db[b + 1:b + 1 + side] or left
+    if not left:
+        return db
+    lv = sorted(left)[len(left) // 2]                  # medians: a signal beside it
+    rv = sorted(right)[len(right) // 2]                # does not become the fill
+    for i in range(a, b + 1):
+        db[i] = lv + (rv - lv) * (i - a + 1) / float(b - a + 2)
+    return db
 
 
 _CLIP_WARN_FRAC = 1e-4     # >0.01% of samples pinned at the rail = overloading
@@ -1577,6 +1669,7 @@ class PowerSweep:
         self._stop = threading.Event()
         self._overload = None      # {"clip_frac":..,"headroom_db":..,"level":..}
         self._agc_pending = None   # a gain the managed loop wants applied
+        self._dc = None            # where the centre spike is hidden (see dc_info)
         self._frames = []
         self._seq = 0
         self._maxhold = None
@@ -1681,11 +1774,11 @@ class PowerSweep:
         _usb_settle(self._stop)                 # don't reopen the dongle the instant it closed
         if self._stop.is_set():
             return
-        plan = _iq_plan(lo, hi) if _iq_available() else None
+        plan = _iq_plan(lo, hi, _hide_dc) if _iq_available() else None
         # The managed gain restarts the capture here rather than through
         # set_tuning(), so it never reaches into this thread's own lifecycle.
         while plan and not self._stop.is_set():
-            ok = self._run_iq(lo, hi, plan[0], plan[1])
+            ok = self._run_iq(lo, hi, plan[0], plan[1], plan[2])
             want = self._agc_pending
             if want is not None and not self._stop.is_set():
                 self._agc_pending = None
@@ -1701,16 +1794,17 @@ class PowerSweep:
         # give the IQ engine one more try before settling for the slow sweep.
         stop = self._stop
         _usb_settle(stop)
-        if plan and not stop.wait(0.8) and self._run_iq(lo, hi, plan[0], plan[1]):
+        if plan and not stop.wait(0.8) and self._run_iq(lo, hi, plan[0], plan[1], plan[2]):
             return
         if stop.is_set():
             return
         self._engine = "rtl_power"
         self._floor_dyn = None
         self._overload = None        # the sweep engine never sees raw samples
+        self._dc = None              # rtl_power hops; there is no single centre spike
         self._run_rtl_power(lo, hi)
 
-    def _run_iq(self, lo, hi, center, sr):
+    def _run_iq(self, lo, hi, center, sr, notch=None):
         """Stream raw IQ from ``rtl_sdr`` and FFT it into waterfall rows.
 
         Returns True if the capture ran (or was stopped cleanly), False if it
@@ -1724,6 +1818,8 @@ class PowerSweep:
         except Exception:
             return False
         self._engine = "iq"
+        self._dc = dc_info(center - _conv_hz, notch - _conv_hz if notch is not None else None,
+                           _hide_dc)
         self._floor_dyn = None
         bins = _bins
         N = _fft or _auto_fft(sr, lo, hi, bins)
@@ -1792,7 +1888,10 @@ class PowerSweep:
                 spec = np.fft.fftshift(np.fft.fft(cwin, axis=1), axes=1)
                 psd = (spec.real ** 2 + spec.imag ** 2).mean(axis=0) / win_norm
                 db = 10.0 * np.log10(psd + 1e-12)
-                grid = _iq_to_grid(db.tolist(), center, sr, lo, hi, bins=bins)
+                dbl = db.tolist()
+                if notch is not None:
+                    _fill_dc(dbl, center, sr, notch)
+                grid = _iq_to_grid(dbl, center, sr, lo, hi, bins=bins)
                 floor_ema = self._update_iq_floor(grid, floor_ema)
                 self._push_frame(grid)
                 if self._agc_pending is not None:
@@ -1974,7 +2073,7 @@ class PowerSweep:
                     "frames_buffered": len(self._frames), "seq": self._seq,
                     "floor_dbm": self._active_floor(), "engine": self._engine,
                     "detector": _detector, "overload": self._overload,
-                    "error": self._error}
+                    "dc": self._dc, "error": self._error}
 
     def get_frames(self, since=0):
         try:
@@ -1989,7 +2088,7 @@ class PowerSweep:
                     "engine": self._engine,
                     "rbw_hz": round(self._rbw, 1) if getattr(self, "_rbw", None) else None,
                     "conv_hz": _conv_hz, "detector": _detector,
-                    "overload": self._overload,
+                    "overload": self._overload, "dc": self._dc,
                     "max_hold": list(self._maxhold) if self._maxhold else None,
                     "running": bool(self._thread and self._thread.is_alive()),
                     "error": self._error}
@@ -2095,7 +2194,7 @@ _power = PowerSweep()
 # "reset to defaults" and the selftest both have something honest to refer to.
 _DEFAULTS = {k: globals()[k] for k in
              ("_ppm", "_gain", "_agc", "_fft", "_avg", "_window", "_bins",
-              "_bias_t", "_direct", "_conv_hz", "_detector")}
+              "_bias_t", "_direct", "_conv_hz", "_detector", "_hide_dc")}
 _load_settings()          # a saved configuration wins over the shipped defaults
 _detect_cache = None
 
@@ -2182,6 +2281,500 @@ def usb_reset():
         except Exception:
             out["resumed"] = False
     return out
+
+
+# ---------------------------------------------------------------------------
+# USB self-healing
+# ---------------------------------------------------------------------------
+#
+# An RTL2832U dongle fails in three ways, and until now each one needed a person
+# to walk over and replug it:
+#
+#   * wedged  — still enumerated, still opens, but never delivers a sample;
+#   * stuck   — the port sees it connected, but it never finishes enumerating
+#               (kernel: "device not accepting address", "error -71",
+#               "Cannot enable. Maybe the USB cable is bad?"), and stays there;
+#   * gone    — nothing on the port at all.
+#
+# Wedged is cleared by a USB reset. Stuck is cleared by cutting the port's 5 V
+# for a few seconds — a real replug — which uhubctl can do on the Pi's root
+# ports ("ppps": per-port power switching). Gone is a person's job: nothing
+# here power-cycles a port that shows no device, so an unplugged dongle is left
+# alone. Attempts back off, the sweep that was running is resumed afterwards,
+# and when the dongle keeps dropping out the kernel's own evidence is reported
+# rather than a generic "check your power supply".
+
+_UHUBCTL = "/usr/sbin/uhubctl"
+_HEAL_INTERVAL_S = 5.0
+_HEAL_BACKOFF_S = (0, 15, 45, 120, 300)
+_HEAL_MAX_ATTEMPTS = 8               # per incident; then wait for a person
+_HEAL_STABLE_S = 600                 # healthy this long -> the incident is over
+_WEDGE_SILENT_S = 20.0               # sweep running, no new rows this long = wedged
+_FLAP_WINDOW_S = 600
+_FLAP_DROPS = 3                      # disconnects in the window = flapping
+_CYCLE_OFF_S = 3                     # port power off time (2 s was not always enough)
+_RTL_PIDS = ("2838", "2832", "2834", "2837")
+_KERNEL_HINTS = (
+    ("Maybe the USB cable is bad", "the kernel suspects the USB cable"),
+    ("over-current", "the port reported over-current"),
+    ("error -71", "USB protocol errors (-71): signal or power trouble on the cable/port"),
+    ("error -110", "the dongle stopped answering (timeout -110)"),
+    ("not accepting address", "the dongle would not take a USB address"),
+    ("unable to enumerate", "the kernel gave up enumerating the dongle"),
+)
+
+
+def parse_uhubctl(text):
+    """uhubctl's status listing -> [{hub, port, status, powered, connected, device}] (pure).
+
+    ``device`` is None for an empty port, "" for a port that reports a connection
+    but has no enumerated device ("connect []" — the stuck state), otherwise the
+    "vid:pid description" of the device.
+    """
+    ports, hub = [], None
+    for ln in (text or "").splitlines():
+        m = re.match(r"\s*Current status for hub (\S+)", ln)
+        if m:
+            hub = m.group(1)
+            continue
+        m = re.match(r"\s*Port (\d+): ([0-9a-fA-F]{4})\s*(.*)$", ln)
+        if not m or hub is None:
+            continue
+        rest = m.group(3)
+        flags = rest.split("[")[0].split()
+        dev = None
+        if "[" in rest:
+            inner = rest[rest.index("[") + 1:]
+            dev = inner[:inner.rindex("]")] if "]" in inner else inner
+            dev = dev.strip()
+        ports.append({"hub": hub, "port": int(m.group(1)), "status": m.group(2).lower(),
+                      "powered": "off" not in flags, "connected": "connect" in flags,
+                      "device": dev})
+    return ports
+
+
+def rtl_ports(ports):
+    """(ports with an enumerated RTL-SDR, ports stuck connected-but-unenumerated) (pure)."""
+    present, stuck = [], []
+    for pt in ports:
+        dev = (pt.get("device") or "").lower()
+        if dev:
+            vid, _, pid = dev.split()[0].partition(":")
+            if vid == "0bda" and pid in _RTL_PIDS:
+                present.append(pt)
+        elif pt.get("connected") and pt.get("device") == "":
+            stuck.append(pt)
+    return present, stuck
+
+
+def usb_target(devname):
+    """sysfs device name -> (uhubctl hub location, port) (pure).
+
+    "2-1" -> ("2", 1): port 1 of root hub 2.  "1-1.4" -> ("1-1", 4): port 4 of
+    the external hub at 1-1.
+    """
+    bus, _, path = str(devname).partition("-")
+    parts = path.split(".")
+    port = int(parts[-1])
+    hub = bus if len(parts) == 1 else bus + "-" + ".".join(parts[:-1])
+    return hub, port
+
+
+def usb_devname(hub, port):
+    """(uhubctl hub location, port) -> sysfs device name (pure). ("2", 1) -> "2-1"."""
+    hub = str(hub)
+    return ("%s-%d" % (hub, int(port))) if "-" not in hub else ("%s.%d" % (hub, int(port)))
+
+
+def _kernel_ts(line):
+    """Timestamp of a `dmesg --time-format iso` line, as epoch seconds, or None."""
+    import datetime
+    head = line.split(" ", 1)[0]
+    try:
+        return datetime.datetime.fromisoformat(head.replace(",", ".")).timestamp()
+    except ValueError:
+        return None
+
+
+def parse_kernel_usb(lines, devname, now, window_s=_FLAP_WINDOW_S):
+    """Disconnect count and plain-language hints for one USB port (pure).
+
+    ``lines`` are `dmesg --time-format iso` lines; only those inside the window
+    that name the port (``usb 2-1:``, ``usb2-port1:``) count.
+    """
+    if not devname:
+        return 0, []
+    bus, _, path = str(devname).partition("-")
+    tags = ["usb %s:" % devname]                 # "usb 2-1: USB disconnect ..."
+    if "." not in path:                          # root port: "usb usb2-port1: Cannot enable ..."
+        tags.append("usb%s-port%s:" % (bus, path))
+    drops, hints = 0, []
+    for ln in lines or ():
+        t = _kernel_ts(ln)
+        if t is None or now - t > window_s or t > now + 5:
+            continue
+        if not any(tag in ln for tag in tags):
+            continue
+        if "USB disconnect" in ln:
+            drops += 1
+        for needle, text in _KERNEL_HINTS:
+            if needle in ln and text not in hints:
+                hints.append(text)
+    return drops, hints
+
+
+def plan_heal(present, wedged, stuck_port, attempts, since_last_s, have_uhubctl):
+    """Next recovery step (pure). Returns (action, reason).
+
+    Actions: none, wait, usb_reset, power_cycle, rebind, unplugged, give_up.
+    A port is only ever power-cycled when there is evidence something is on it —
+    a wedged dongle or a stuck connection — never just because nothing answers.
+    """
+    if present and not wedged:
+        return "none", "healthy"
+    if attempts >= _HEAL_MAX_ATTEMPTS:
+        return "give_up", "recovery tried %d times" % attempts
+    if not present and not stuck_port:
+        return "unplugged", "nothing is connected to any USB port"
+    delay = _HEAL_BACKOFF_S[min(attempts, len(_HEAL_BACKOFF_S) - 1)]
+    if since_last_s < delay:
+        return "wait", "next attempt in %d s" % int(delay - since_last_s)
+    if present and wedged and attempts == 0:
+        return "usb_reset", "open but sending nothing"
+    reason = ("open but sending nothing" if present
+              else "plugged in but not answering on USB")
+    return ("power_cycle" if have_uhubctl else "rebind"), reason
+
+
+def _usb_rtl_devname():
+    """sysfs name ("2-1", "1-1.4") of the attached RTL-SDR, or None."""
+    root = "/sys/bus/usb/devices"
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return None
+    for name in sorted(names):
+        if ":" in name or name.startswith("usb"):
+            continue
+        d = os.path.join(root, name)
+        try:
+            with open(os.path.join(d, "idVendor")) as fh:
+                vid = fh.read().strip().lower()
+            with open(os.path.join(d, "idProduct")) as fh:
+                pid = fh.read().strip().lower()
+        except OSError:
+            continue
+        if (vid, pid) in _USB_IDS:
+            return name
+    return None
+
+
+def _usb_controller(bus):
+    """Platform controller (e.g. "xhci-hcd.0") that owns USB bus ``bus``."""
+    try:
+        real = os.path.realpath("/sys/bus/usb/devices/usb%s" % bus)
+    except OSError:
+        return None
+    parent = os.path.basename(os.path.dirname(real))
+    return parent or None
+
+
+class SdrHealer:
+    """Watch the RTL-SDR and put it back when it falls over."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+        self.enabled = True
+        self.state = "starting"
+        self.message = ""
+        self.present = False
+        self.port = None                 # last sysfs name the dongle was seen on
+        self.attempts = 0
+        self.last_attempt_t = 0.0
+        self.healthy_since = None
+        self.history = []
+        self.drops = 0
+        self.hints = []
+        self._stuck_prev = None
+        self._last_seq = None
+        self._last_seq_t = None
+        self._last_sweep = None          # (band, lo, hi, t) of the last running sweep
+        self._resume = None
+        self._dmesg_t = 0.0
+
+    # -- lifecycle ---------------------------------------------------------
+    def start(self):
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, name="sdr-healer", daemon=True)
+            self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                self.tick()
+            except Exception as exc:  # pragma: no cover - never let the watcher die
+                self.message = "self-heal check failed: %s" % exc
+            wait = _HEAL_INTERVAL_S if self.state != "unplugged" else 15.0
+            self._stop.wait(wait)
+
+    # -- facts -------------------------------------------------------------
+    def _uhub_ports(self):
+        if not _have(_UHUBCTL):
+            return None
+        # With a stuck dongle every query waits out the kernel's own failing
+        # re-enumeration of that port (~11 s here), so the timeout is generous.
+        rc, out, _err = _run([_UHUBCTL], timeout=40)
+        return parse_uhubctl(out) if rc == 0 else None
+
+    def _kernel(self, now):
+        # dmesg is re-read at most every 20 s; it is only evidence, not a trigger
+        if now - self._dmesg_t < 20 or not self.port:
+            return
+        self._dmesg_t = now
+        rc, out, _err = _run(["dmesg", "--time-format", "iso"], timeout=6)
+        if rc == 0 and out:
+            self.drops, self.hints = parse_kernel_usb(out.splitlines()[-600:], self.port, now)
+
+    def _wedged(self, now):
+        st = _power.status()
+        if not st.get("running"):
+            self._last_seq = None
+            return False
+        self._last_sweep = (st.get("band") or "433", (st.get("band_hz") or [None, None])[0],
+                            (st.get("band_hz") or [None, None])[1], now)
+        seq = st.get("seq")
+        if seq != self._last_seq:
+            self._last_seq, self._last_seq_t = seq, now
+            return False
+        return (now - (self._last_seq_t or now)) > _WEDGE_SILENT_S
+
+    # -- one pass ----------------------------------------------------------
+    def tick(self, now=None, confirm=True):
+        now = now or time.time()
+        if not self.enabled:
+            self.state, self.message = "disabled", "self-healing is switched off"
+            return
+        dev = _usb_rtl_devname()
+        self.present = bool(dev)
+        if dev:
+            self.port = dev
+        wedged = self._wedged(now) if dev else False
+        stuck_port = None
+        seen_stuck = False
+        if not dev or wedged:
+            ports = self._uhub_ports()
+            if ports is not None and not dev:
+                _pres, stuck = rtl_ports(ports)
+                # Only a connection that stays stuck across two checks counts —
+                # a dongle is briefly "connected, not enumerated" while it plugs in.
+                keys = sorted("%s:%d" % (p["hub"], p["port"]) for p in stuck)
+                seen_stuck = bool(keys)
+                if keys and not self.port:        # never seen yet: that port is where it is
+                    h0, _, p0 = keys[0].partition(":")
+                    self.port = usb_devname(h0, p0)
+                if keys and (keys == self._stuck_prev or not confirm):
+                    prefer = None
+                    if self.port:
+                        try:
+                            prefer = "%s:%d" % usb_target(self.port)
+                        except (ValueError, IndexError):
+                            prefer = None
+                    stuck_port = prefer if prefer in keys else keys[0]
+                self._stuck_prev = keys
+        self._kernel(now)
+        if dev and not wedged:
+            if self.healthy_since is None:
+                self.healthy_since = now
+            if self.attempts and now - self.healthy_since > _HEAL_STABLE_S:
+                self.attempts = 0            # incident over
+            self._resume_sweep()
+            self.state = "flapping" if self.drops >= _FLAP_DROPS else "ok"
+            self.message = self._flap_text() if self.state == "flapping" else "RTL-SDR on USB %s" % dev
+            return
+        self.healthy_since = None
+        if self._resume is None and self._last_sweep and now - self._last_sweep[3] < 60:
+            self._resume = self._last_sweep
+        action, reason = plan_heal(bool(dev), wedged, stuck_port, self.attempts,
+                                   now - self.last_attempt_t, _have(_UHUBCTL))
+        if action == "none":
+            return
+        if action == "wait":
+            what = "plugged in but not answering" if not dev else "open but silent"
+            self.state, self.message = "recovering", "Recovering the RTL-SDR (%s) — %s." % (what, reason)
+            return
+        if action == "unplugged":
+            if seen_stuck:
+                self.state = "recovering"
+                self.message = ("The RTL-SDR is connected on USB but not answering — confirming "
+                                "before power-cycling its port.")
+            else:
+                self.state, self.message = "unplugged", "No RTL-SDR on any USB port — it looks unplugged."
+            return
+        if action == "give_up":
+            self.state = "failed"
+            self.message = ("Ragnar tried to recover the RTL-SDR %d times without success — it needs "
+                            "replugging by hand." % self.attempts) + (" " + self._flap_text() if self.drops else "")
+            return
+        self._act(action, reason, dev, stuck_port, now)
+
+    def _act(self, action, reason, dev, stuck_port, now):
+        self.attempts += 1
+        self.last_attempt_t = now
+        self.state = "recovering"
+        target = stuck_port or (("%s:%d" % usb_target(dev)) if dev else None)
+        try:
+            power_stop()                     # close cleanly before touching the port
+        except Exception:
+            pass
+        try:
+            _ism.stop()
+        except Exception:
+            pass
+        ok, detail = False, ""
+        if action == "usb_reset":
+            r = usb_reset()
+            ok, detail = bool(r.get("ok")), r.get("error") or r.get("note", "")
+        elif action == "power_cycle" and target:
+            hub, _, port = target.partition(":")
+            rc, out, err = _run([_UHUBCTL, "-l", hub, "-p", port, "-a", "cycle",
+                                 "-d", str(_CYCLE_OFF_S)], timeout=30)
+            ok = rc == 0
+            detail = "power-cycled USB port %s (%d s off)" % (target, _CYCLE_OFF_S) if ok else (err or out).strip()[-160:]
+        elif action == "rebind" and target:
+            bus = target.split(":")[0].split("-")[0]
+            ctl = _usb_controller(bus)
+            ok = False
+            if ctl:
+                drv = "/sys/bus/platform/drivers/%s" % ctl.rsplit(".", 1)[0]
+                try:
+                    with open(drv + "/unbind", "w") as fh:
+                        fh.write(ctl)
+                    time.sleep(2)
+                    with open(drv + "/bind", "w") as fh:
+                        fh.write(ctl)
+                    ok, detail = True, "reset USB controller %s" % ctl
+                except OSError as exc:
+                    detail = "controller reset failed: %s" % exc
+        global _detect_cache
+        _detect_cache = None
+        # wait for it to come back
+        back = None
+        for _ in range(25):                  # a flaky dongle can take ~20 s to enumerate
+            time.sleep(1.0)
+            back = _usb_rtl_devname()
+            if back:
+                break
+        entry = {"ts": now, "action": action, "target": target, "reason": reason,
+                 "ok": bool(ok), "back": bool(back), "detail": detail}
+        self.history.append(entry)
+        del self.history[:-20]
+        if back:
+            self.port = back
+            if ok:
+                self.message = "Recovered the RTL-SDR: %s." % detail
+            else:
+                # the step itself failed, but the dongle re-enumerated anyway —
+                # say that, rather than "recovered: ... failed"
+                self.message = ("The RTL-SDR is back on USB %s — it re-enumerated by itself while "
+                                "Ragnar was recovering it (%s: %s)." % (back, action.replace("_", " "), detail))
+            self._resume_sweep()
+        else:
+            self.message = "Recovery attempt %d (%s) did not bring it back yet — %s." % (
+                self.attempts, action.replace("_", " "), detail or reason)
+        try:
+            _log_watchtower("RF_SDR_SELFHEAL", "info" if back else "warning",
+                            "RTL-SDR %s: %s -> %s" % (reason, action, "recovered" if back else "still absent"),
+                            {"port": target, "attempt": self.attempts})
+        except Exception:
+            pass
+
+    def _resume_sweep(self):
+        r = self._resume
+        if not r:
+            return
+        self._resume = None
+        if _power.status().get("running") or _ism.status().get("running"):
+            return
+        try:
+            if r[1] and r[2]:
+                power_start(r[0], lo_hz=r[1], hi_hz=r[2])
+            else:
+                power_start(r[0])
+        except Exception:
+            pass
+
+    def _flap_text(self):
+        why = "; ".join(self.hints[:3]) if self.hints else "no kernel detail"
+        return ("The RTL-SDR dropped off USB %d times in the last 10 minutes (%s). Ragnar recovers it, "
+                "but this is a cable, port or dongle fault." % (self.drops, why))
+
+    # -- report ------------------------------------------------------------
+    def status(self):
+        advice = []
+        if self.state in ("flapping", "failed") or (self.drops >= _FLAP_DROPS):
+            advice = ["Try a different USB cable — short and data-rated; avoid extension leads.",
+                      "Plug the dongle straight into the Pi (not through a hub) and try another port.",
+                      "If it drops on every cable and port, the dongle itself may be failing "
+                      "(NESDR SMArt dongles run hot — give it air)."]
+        if not _have(_UHUBCTL):
+            advice.append("Install uhubctl (sudo apt install uhubctl) so Ragnar can power-cycle a "
+                          "stuck dongle — without it recovery falls back to resetting the whole USB controller.")
+        return {"enabled": self.enabled, "state": self.state, "message": self.message,
+                "present": self.present, "port": self.port, "attempts": self.attempts,
+                "drops_10min": self.drops, "kernel_hints": list(self.hints),
+                "uhubctl": _have(_UHUBCTL), "history": list(self.history[-8:]),
+                "advice": advice}
+
+
+def _log_watchtower(code, severity, msg, extra=None):
+    """Append one event to the RF Watchtower feed (best effort)."""
+    d = "/var/log/ragnar"
+    if not os.path.isdir(d):
+        return
+    ev = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "module": "rfwatch", "code": code,
+          "severity": severity, "msg": msg}
+    if extra:
+        ev.update(extra)
+    with open(os.path.join(d, "rfwatch.jsonl"), "a") as fh:
+        fh.write(json.dumps(ev) + "\n")
+
+
+_healer = SdrHealer()
+
+
+def start_healer(enabled=True):
+    """Start the background self-healer (idempotent)."""
+    _healer.enabled = bool(enabled)
+    _healer.start()
+    return _healer.status()
+
+
+def heal_status():
+    return _healer.status()
+
+
+def heal_now():
+    """Run the recovery ladder once, immediately, ignoring the backoff."""
+    _healer.last_attempt_t = 0.0
+    if _healer.attempts >= _HEAL_MAX_ATTEMPTS:
+        _healer.attempts = _HEAL_MAX_ATTEMPTS - 1     # a person asked: one more go
+    _healer._stuck_prev = None
+    _healer._dmesg_t = 0.0
+    _healer.tick(confirm=False)       # a person asked: one observation is enough
+    return _healer.status()
+
+
+def set_heal_enabled(on):
+    _healer.enabled = bool(on)
+    return _healer.status()
 
 
 def _running():
@@ -3995,6 +4588,7 @@ def status():
         st["detect"] = d
     else:
         st["detect"] = detect()
+    st["heal"] = heal_status()
     return st
 
 
@@ -4142,6 +4736,33 @@ def _selftest_body(_saved_globals=None):
           _iq_plan(433_050_000, 434_790_000)[1] >= int(1_740_000 * _IQ_EDGE_MARGIN) - 1)
     check("iq: sub-min span still tunes (clamped to _IQ_SR_MIN)",
           _iq_plan(868_100_000, 868_300_000)[1] == _IQ_SR_MIN)
+    # --- hide the tuner's own centre hump ---
+    _n = _iq_plan(868_100_000, 868_300_000, True)
+    check("dc: a narrow band is tuned past its edge — the hump is not in it",
+          _n[2] is None and _n[0] - (_n[1] / (2 * _IQ_EDGE_MARGIN)) <= 868_100_000
+          and _n[0] >= 868_300_000 + _DC_HALF_HZ)
+    _w = _iq_plan(433_050_000, 434_790_000, True)
+    check("dc: a wide band moves the tuner off 433.92 MHz and notches it there",
+          _w[2] == _w[0] and abs(_w[0] - 433_920_000) > 4 * _DC_HALF_HZ
+          and _w[1] <= _DC_SR_CAP
+          and _w[0] - _w[1] / (2 * _IQ_EDGE_MARGIN) <= 433_050_000 + 1
+          and _w[0] + _w[1] / (2 * _IQ_EDGE_MARGIN) >= 434_790_000 - 1)
+    check("dc: off, the plan is unchanged", _iq_plan(433_050_000, 434_790_000)[2] is None
+          and _iq_plan(433_050_000, 434_790_000)[0] == 433_920_000)
+    _db = [-70.0] * 1024
+    for _i in range(500, 525):
+        _db[_i] = -55.0
+    _db[300] = -30.0                                    # a real signal elsewhere
+    _fill_dc(_db, 1_000_000, 1_024_000, 1_000_000 + 0)  # hump at bin 512
+    check("dc: the hump is filled from the noise beside it, a real signal kept",
+          max(_db[480:545]) < -69.0 and _db[300] == -30.0)
+    check("dc: no notch is a no-op", _fill_dc([1.0, 2.0], 0, 1, None) == [1.0, 2.0])
+    _i = dc_info(434_093_478, 434_093_478, True)
+    check("dc: the filled strip is reported exactly",
+          _i["mode"] == "filled" and _i["fill_hz"] == [434_093_478 - _DC_HALF_HZ, 434_093_478 + _DC_HALF_HZ])
+    check("dc: outside / shown say so and report no strip",
+          dc_info(868_360_000, None, True) == {"mode": "outside", "tuner_hz": 868_360_000}
+          and dc_info(433_920_000, None, False)["mode"] == "shown")
 
     # --- IQ PSD -> display grid: a tone lands in the right column, edges dropped ---
     _N, _ctr, _sr = 1024, 868_350_000, 3_000_000
@@ -4361,6 +4982,64 @@ def _selftest_body(_saved_globals=None):
         globals()["_no_persist"] = _np_was
         import shutil as _sh
         _sh.rmtree(_sdir, ignore_errors=True)
+
+    # --- USB self-healing -----------------------------------------------------
+    _uh = """Current status for hub 2 [1d6b:0002 Linux xhci-hcd xHCI Host Controller xhci-hcd.0, USB 2.00, 2 ports, ppps]
+  Port 1: 0101 power connect []
+  Port 2: 0100 power
+Current status for hub 4 [1d6b:0002 Linux xhci-hcd, USB 2.00, 2 ports, ppps]
+  Port 1: 0503 power highspeed enable connect [0bda:2838 Nooelec NESDR SMArt v5 75881080]
+  Port 2: 0000 off
+Current status for hub 1-1 [2109:3431 USB2.0 Hub, USB 2.10, 4 ports, ppps]
+  Port 4: 0103 power enable connect [046d:c52b Logitech USB Receiver]"""
+    _up = parse_uhubctl(_uh)
+    check("heal: uhubctl listing parses every port",
+          len(_up) == 5 and _up[0] == {"hub": "2", "port": 1, "status": "0101", "powered": True,
+                                       "connected": True, "device": ""})
+    check("heal: an unpowered port and an external hub are understood",
+          _up[3]["powered"] is False and _up[4]["hub"] == "1-1" and _up[4]["port"] == 4)
+    _pr, _st = rtl_ports(_up)
+    check("heal: finds the enumerated RTL-SDR and the stuck (connect, no device) port",
+          [(p["hub"], p["port"]) for p in _pr] == [("4", 1)]
+          and [(p["hub"], p["port"]) for p in _st] == [("2", 1)])
+    check("heal: another device on a port is neither RTL nor stuck",
+          all(p["port"] != 4 or p["hub"] != "1-1" for p in _pr + _st))
+    check("heal: sysfs names map to uhubctl targets and back",
+          usb_target("2-1") == ("2", 1) and usb_target("1-1.4") == ("1-1", 4)
+          and usb_devname("2", 1) == "2-1" and usb_devname("1-1", 4) == "1-1.4")
+    _now = 1_790_000_000.0
+    def _kl(dt, txt):
+        import datetime
+        return datetime.datetime.fromtimestamp(_now - dt).astimezone().isoformat().replace(".", ",") + " " + txt
+    _lines = [_kl(900, "usb 2-1: USB disconnect, device number 3"),       # outside the window
+              _kl(300, "usb 2-1: USB disconnect, device number 12"),
+              _kl(200, "usb 2-1: device descriptor read/64, error -71"),
+              _kl(150, "usb usb2-port1: Cannot enable. Maybe the USB cable is bad?"),
+              _kl(100, "usb 2-1: USB disconnect, device number 20"),
+              _kl(50, "usb 4-1: USB disconnect, device number 2")]        # another port
+    _d, _h = parse_kernel_usb(_lines, "2-1", _now)
+    check("heal: counts this port's disconnects inside the window only", _d == 2, str(_d))
+    check("heal: turns the kernel's messages into plain hints",
+          any("cable" in x for x in _h) and any("-71" in x for x in _h), str(_h))
+    check("heal: no port known -> no evidence, not a crash", parse_kernel_usb(_lines, None, _now) == (0, []))
+    # the decision table
+    check("heal: a healthy dongle is left alone", plan_heal(True, False, None, 0, 999, True)[0] == "none")
+    check("heal: NOTHING on any port is never power-cycled (it is unplugged)",
+          plan_heal(False, False, None, 0, 999, True)[0] == "unplugged")
+    check("heal: open-but-silent gets a USB reset first",
+          plan_heal(True, True, None, 0, 999, True)[0] == "usb_reset")
+    check("heal: ...and a port power-cycle if that did not help",
+          plan_heal(True, True, None, 1, 999, True)[0] == "power_cycle")
+    check("heal: a stuck port is power-cycled",
+          plan_heal(False, False, "2:1", 0, 999, True)[0] == "power_cycle")
+    check("heal: without uhubctl it falls back to a controller reset",
+          plan_heal(False, False, "2:1", 0, 999, False)[0] == "rebind")
+    check("heal: attempts back off (15 s after the first)",
+          plan_heal(False, False, "2:1", 1, 5, True)[0] == "wait"
+          and plan_heal(False, False, "2:1", 1, 16, True)[0] == "power_cycle"
+          and plan_heal(False, False, "2:1", 3, 100, True)[0] == "wait")
+    check("heal: it stops and asks for a person after the attempt limit",
+          plan_heal(False, False, "2:1", _HEAL_MAX_ATTEMPTS, 999, True)[0] == "give_up")
 
     # --- USB recovery --------------------------------------------------------
     _up = _usb_device_path()

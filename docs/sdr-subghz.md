@@ -91,6 +91,12 @@ walks every layer detection depends on and prints a one-line verdict plus the
 exact fix — "no dongle on the USB bus (power/cable)", "tools not installed", or
 "DVB-T driver holding it".
 
+**Ragnar recovers a stuck or silent dongle by itself** — it power-cycles the USB
+port the dongle is stuck on and restarts the sweep — and the check reports what
+that watcher is doing, with the kernel's own evidence when the dongle keeps
+dropping out (see [self-healing](rf-waterfall.md#when-the-dongle-stops-responding--self-healing)).
+It also shows **⭮ Recover now**.
+
 When the fix is server-side (tools missing, or the DVB-T driver holding the
 device), the check shows a one-click button — **⬇ Install RTL-SDR tools** /
 **🔓 Free the dongle** — that POSTs to `/api/net/rtl/install`, which apt-installs

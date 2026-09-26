@@ -769,6 +769,13 @@ EOF
             && log "SUCCESS" "Installed rtl-sdr + rtl-433 (RTL-SDR sub-GHz / ISM)" \
             || log "WARNING" "Could not install rtl-sdr/rtl-433 - RTL-SDR features stay disabled until they're present"
     fi
+    # uhubctl lets the SDR self-healer cut a USB port's 5 V for a few seconds —
+    # the software equivalent of replugging a dongle that is stuck on the bus.
+    if ! command -v uhubctl >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends uhubctl >/dev/null 2>&1 \
+            && log "SUCCESS" "Installed uhubctl (SDR self-healing: USB port power-cycle)" \
+            || log "WARNING" "Could not install uhubctl - SDR recovery falls back to a USB controller reset"
+    fi
     if command -v rtl_test >/dev/null 2>&1 || dpkg -s rtl-sdr >/dev/null 2>&1; then
         cat > /etc/modprobe.d/blacklist-rtl-sdr.conf << 'EOF'
 # Ragnar: keep the DVB-T kernel drivers off RTL-SDR dongles so rtl_power /

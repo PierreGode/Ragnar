@@ -2133,7 +2133,8 @@ function wifiSdrCheck() {
     ]).then(([d, hk]) => {
         if (!d) { box.innerHTML = '<span style="color:#f87171">SDR check failed — the endpoint did not respond.</span>'; return; }
         const tone = { ok: ['#34d399', '✅'], no_usb: ['#fb7185', '⛔'], tools_missing: ['#fbbf24', '⚙️'],
-                       dvb_held: ['#fbbf24', '🔒'], probe_timeout: ['#fbbf24', '⏱️'] }[d.state] || ['#94a3b8', 'ℹ️'];
+                       dvb_held: ['#fbbf24', '🔒'], probe_timeout: ['#fbbf24', '⏱️'],
+                       usb_stuck: ['#fbbf24', '🔁'], usb_flapping: ['#fb7185', '⚡'] }[d.state] || ['#94a3b8', 'ℹ️'];
         const col = tone[0], icon = tone[1];
         const fixes = (d.fix || []).map(s =>
             `<li style="display:flex;gap:.4rem"><span style="color:${col}">›</span><code class="font-mono text-xs" style="color:#e5e7eb;word-break:break-all">${escapeHtml(String(s))}</code></li>`).join('');
@@ -2145,6 +2146,18 @@ function wifiSdrCheck() {
             `blacklist: ${yn(d.blacklisted, 'set', 'absent')}`,
             d.throttled ? `power: ${d.undervoltage ? '<span style="color:#fb7185">under-voltage (' + escapeHtml(String(d.throttled)) + ')</span>' : '<span style="color:#34d399">ok</span>'}` : ''
         ].filter(Boolean).join(' · ');
+        // Self-healing: what the watcher is doing about the dongle, and a button
+        // to run the recovery ladder now (power-cycles a stuck port).
+        const h = d.heal || {};
+        const last = (h.history || []).slice(-1)[0];
+        const healLine = (h.state && h.state !== 'ok')
+            ? `<div class="mt-2 text-xs" style="color:#9ca3af">🩹 Self-heal: ${escapeHtml(String(h.message || h.state))}`
+              + (last ? ` <span style="color:#6b7280">(last: ${escapeHtml(String(last.action).replace('_', ' '))} ${escapeHtml(String(last.target || ''))} → ${last.back ? 'back' : 'not back yet'})</span>` : '')
+              + (h.enabled === false ? ' <span style="color:#fbbf24">— switched off</span>' : '') + `</div>`
+            : '';
+        const healBtn = (h.state && ['recovering', 'failed', 'flapping', 'unplugged'].indexOf(h.state) >= 0) || d.state === 'no_usb'
+            ? `<button type="button" onclick="wifiSdrHeal(this)" style="margin-top:.6rem;margin-left:.4rem;background:#0f766e;color:#fff;border:0;border-radius:6px;padding:.45rem .8rem;font-weight:600;cursor:pointer" title="Run the recovery ladder now: USB reset, or power-cycle the port the dongle is stuck on (the same as replugging it).">⭮ Recover now</button>`
+            : '';
         const hkline = hk && hk.detect
             ? `<div class="mt-2 text-xs" style="color:#9ca3af">HackRF (Wi-Fi bands): ${hk.detect.available ? '<span style="color:#34d399">detected</span>' : escapeHtml(String(hk.detect.error || 'not detected'))}</div>`
             : '';
@@ -2161,13 +2174,22 @@ function wifiSdrCheck() {
                <div style="flex:1;min-width:0">
                  <div class="font-semibold" style="color:${col}">${escapeHtml(String(d.summary || 'SDR check'))}</div>
                  ${fixes ? `<ul style="margin-top:.5rem;display:flex;flex-direction:column;gap:.25rem">${fixes}</ul>` : ''}
-                 ${actBtn}
+                 ${actBtn}${healBtn}
+                 ${healLine}
                  <div class="mt-2 text-xs" style="color:#9ca3af">${facts}</div>
                  ${hkline}
                </div>
                <button type="button" onclick="document.getElementById('wifi-sdr-diag').classList.add('hidden')" class="text-xs" style="color:#6b7280" title="Dismiss">✕</button>
              </div>`;
     });
+}
+
+// "Recover now": run the self-heal ladder once (it can take ~30 s: a stuck
+// dongle is power-cycled and then has to re-enumerate), then re-run the check.
+function wifiSdrHeal(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = '⭮ Recovering… (up to ~40 s)'; }
+    fetch('/api/net/rtl/heal', { method: 'POST' }).then(r => r.json()).catch(() => null)
+        .then(() => wifiSdrCheck());
 }
 
 // One-click install/fix from the SDR check panel: apt-installs rtl-sdr+rtl-433

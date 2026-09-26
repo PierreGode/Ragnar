@@ -84,6 +84,9 @@
   .stat .v{font-family:var(--mono);font-size:14px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
   /* Front-end overload: loud, because every level in an overloaded capture lies. */
   .stat.ovld .v{color:#fbbf24}
+  .stat.dcstat .v{color:#fbbf24;font-size:11px}
+  .stat.dcstat.clean .v{color:var(--live)}
+  .dcwarn{color:#fbbf24}
   .stat.ovld.bad .v{color:#fb7185}
   .stat.ovld.bad{animation:ovldp 1.4s ease-in-out infinite}
   @keyframes ovldp{0%,100%{opacity:1}50%{opacity:.45}}
@@ -137,10 +140,10 @@
   .ruler .tick{position:absolute;top:0;bottom:0;width:1px;background:var(--line)}
   .ruler .tlab{position:absolute;top:7px;transform:translateX(-50%);font-size:10px;color:var(--muted);white-space:nowrap}
   .ruler .ism{position:absolute;top:0;bottom:0;background:rgba(56,189,201,.09);border-left:1px solid rgba(56,189,201,.35);border-right:1px solid rgba(56,189,201,.35)}
-  .bplan{position:relative;height:17px;background:var(--panel-2);border-top:1px solid var(--line-soft);overflow:hidden;font-family:var(--mono)}
+  .bplan{position:relative;height:20px;background:var(--panel-2);border-top:1px solid var(--line-soft);overflow:hidden;font-family:var(--mono)}
   .bplan[hidden]{display:none}
-  .bplan .bp{position:absolute;height:13px;border-radius:3px;border:1px solid rgba(56,189,201,.28);background:rgba(56,189,201,.07);overflow:hidden;white-space:nowrap}
-  .bplan .bp span{position:absolute;left:4px;top:1px;font-size:9.5px;letter-spacing:.04em;color:var(--ink-dim)}
+  .bplan .bp{position:absolute;height:16px;border-radius:3px;border:1px solid rgba(56,189,201,.28);background:rgba(56,189,201,.07);overflow:hidden;white-space:nowrap}
+  .bplan .bp span{position:absolute;left:4px;top:0;line-height:14px;font-size:9.5px;letter-spacing:.04em;color:var(--ink-dim)}
   .bplan .bp.ham{border-color:rgba(245,185,66,.35);background:rgba(245,185,66,.08)} .bplan .bp.bc{border-color:rgba(129,140,248,.35);background:rgba(129,140,248,.08)}
   .bplan .bp.ism{border-color:rgba(63,181,107,.35);background:rgba(63,181,107,.08)} .bplan .bp.cell{border-color:rgba(251,113,133,.3);background:rgba(251,113,133,.07)}
   .ruler .ism .il{position:absolute;bottom:3px;left:50%;transform:translateX(-50%);font-size:9px;letter-spacing:.1em;color:var(--cyan);text-transform:uppercase;white-space:nowrap}
@@ -163,6 +166,8 @@
   .drow input[type=range]{flex:1 1 90px;min-width:70px;accent-color:var(--cyan)}
   .drow input[type=number],.drow input[type=text],.drow select{width:72px;font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 6px}
   .drow select{width:auto;max-width:100%;min-width:0}
+  .drow label.dchk{min-width:0;display:inline-flex;align-items:center;gap:6px;color:var(--ink);cursor:pointer}
+  .drow label.dchk input{accent-color:var(--cyan);width:16px;height:16px;margin:0}
   .dnote{font-size:10px;line-height:1.5;color:var(--muted)}
   .dnote b{color:var(--ink-dim);font-weight:500}
   .svbands{display:flex;flex-wrap:wrap;gap:4px 10px} .svbands label{min-width:0;color:var(--ink-dim);font-size:11px;display:inline-flex;align-items:center;gap:3px}
@@ -239,6 +244,7 @@
   .scope-head .fsbtn:hover{border-color:rgba(56,189,201,.5);color:var(--cyan);background:rgba(56,189,201,.08)}
   .scope:fullscreen,.scope:-webkit-full-screen{width:100vw;height:100vh;border-radius:0;border:0;background:var(--ground);display:flex;flex-direction:column}
   .scope:fullscreen .scope-body,.scope:-webkit-full-screen .scope-body{flex:1 1 auto;min-height:0}
+  .scope.is3d canvas.fall{height:546px}   /* 3D panel is 30% taller than the 420px 2D fall */
   .scope:fullscreen .fall-wrap,.scope:-webkit-full-screen .fall-wrap{flex:1 1 auto;min-height:0}
   .scope:fullscreen canvas.fall,.scope:-webkit-full-screen canvas.fall{height:100%}
   .scope:fullscreen .fsbtn,.scope:-webkit-full-screen .fsbtn{border-color:rgba(56,189,201,.5);color:var(--cyan)}
@@ -266,6 +272,8 @@
     .stat{min-width:0;flex:1 0 27%}
     /* a taller waterfall — the point of the page — and a roomier signal list */
     canvas.fall{height:min(46vh,340px)}
+    .scope.is3d canvas.fall{height:min(60vh,442px)}
+    .scope:fullscreen canvas.fall,.scope:-webkit-full-screen canvas.fall{height:100%}
     .loglist{max-height:200px}
     /* slightly bigger number inputs for touch */
     .tunergrp .tin,.tunesel .tin,.radiobar input.rf,.iqsec,.calf{padding:6px 6px;font-size:12px}
@@ -473,7 +481,7 @@
     this.replaying=false; this.replay=null; this._recPoll=null;
     this.busy=0; this.log=[]; this._lastLog=0; this._ismPoll=null;
     this.hist=[]; this.threeD=false; this._last3D=0;   // 3D terrain waterfall state
-    this.rot3d={yaw:0.55, pitch:0.72};  // 3D camera: yaw (turn), pitch (tilt down) — a landscape angle by default
+    this.rot3d={yaw:0.25, pitch:0.75};  // 3D camera: yaw (turn), pitch (tilt down) — a landscape angle by default
     this.zoom3d=1.0;
     try{ var _r3=JSON.parse(localStorage.getItem('rfwf.rot3d.'+cfg.short)||'null');
       if(_r3){ if(isFinite(_r3.yaw))this.rot3d.yaw=_r3.yaw; if(isFinite(_r3.pitch))this.rot3d.pitch=_r3.pitch; if(isFinite(_r3.zoom))this.zoom3d=_r3.zoom; } }catch(e){}
@@ -510,6 +518,7 @@
         +'<div class="stat"><span class="k">Rows/s</span><span class="v rate">&mdash;</span></div>'
         +'<div class="stat" title="Resolution bandwidth: the frequency width of one FFT bin"><span class="k">RBW</span><span class="v rbwv">&mdash;</span></div>'
         +'<div class="stat detstat" title="Detector: how the FFT bins in one display column are combined. Peak finds signals; RMS measures them."><span class="k">Det</span><span class="v detv">&mdash;</span></div>'
+        +'<div class="stat dcstat" hidden><span class="k">SDR spike</span><span class="v dcv">&mdash;</span></div>'
         +'<div class="stat ovld" hidden title="The receiver front end is overloading. Levels are wrong and the display may show images and intermodulation that are not on the air. Lower the gain."><span class="k">Front end</span><span class="v ovldv">&mdash;</span></div>'
       +'</div>'
       +'<button class="fsbtn" title="Expand this waterfall to full screen">&#9974;&nbsp;Full screen</button>'
@@ -768,7 +777,7 @@
         if(self.threeD && cv===self.fall){                 // drag rotates the 3D view
           var rdx=e.clientX-dg.lx, rdy=e.clientY-dg.ly; dg.lx=e.clientX; dg.ly=e.clientY;
           self.rot3d.yaw+=rdx*0.010;
-          self.rot3d.pitch=Math.max(0.02,Math.min(1.5708,self.rot3d.pitch-rdy*0.008));  // up to 90deg = straight-down top view
+          self.rot3d.pitch=Math.max(0.02,Math.min(1.5708,self.rot3d.pitch-rdy*0.012));  // up to 90deg = straight-down top view
           self._hint3d=false; self._persistRot(); self.draw3D();
         }
         else if(dg.vert){ self.setScrollBack(dg.back+Math.round(dy*self.d/(self.STEP||1))); }
@@ -1228,7 +1237,7 @@
     fetch('/api/net/rtl/record/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n})})
       .then(function(){ self.exitReplay(); self.refreshRecordings(); });
   };
-  Scope.prototype.enterReplay=function(name){ var self=this;
+  Scope.prototype.enterReplay=function(name){ var self=this; this.dc=null; this._dcUI();
     fetch('/api/net/rtl/record/get?name='+encodeURIComponent(name)).then(function(r){return r.json();}).then(function(d){
       if(!d||!d.ok||!d.frames.length){ self.recStat.innerHTML='<span style="color:#fb7185">recording empty</span>'; return; }
       var h=d.header||{}, lo=(h.lo_hz||430e6)/1e6, hi=(h.hi_hz||930e6)/1e6, floor=(typeof h.floor==='number')?h.floor:-120;
@@ -1370,7 +1379,7 @@
         +' · ChPwr '+Math.round(meas.chPwr)+this.unit()
         +(function(sc){ var E=sc.fieldStrength(meas.pk,f);
             return (E==null)?'':' · E <b>'+E.toFixed(1)+' dBµV/m</b>'; })(this)
-        +' · <span class="zi">'+esc(cls.label)+'</span></span>';
+        +' · <span class="zi">'+esc(cls.label)+'</span></span>'+(meas.dc?this._dcNote():'');
       this._markDecode(cls, f);   // offer a jump to the matching decoder
       this._markVerify(f, meas.bw20);
       this._markWiki(f);
@@ -1478,6 +1487,33 @@
   // Front-end health from the capture: an overloaded ADC clips, and clipping
   // manufactures harmonics and intermod that look exactly like transmitters. Say
   // so loudly rather than drawing them as if they were real.
+  // ---- the RTL-SDR centre spike: where it is hidden, and honesty about it ----
+  // The server reports {mode:'filled', fill_hz:[a,b]} when a strip of bins was
+  // filled in from the noise beside it. Everything that reads a level uses
+  // these to leave that strip out, or to say a result includes it.
+  Scope.prototype._dcSpan=function(){
+    var d=this.dc; if(!d||d.mode!=='filled'||!d.fill_hz||this.mode!=='live'||this.replaying) return null;
+    var a=d.fill_hz[0]/1e6, b=d.fill_hz[1]/1e6; if(b<=this.lo||a>=this.hi) return null; return [a,b]; };
+  Scope.prototype._dcCols=function(n){ var sp=this._dcSpan(); if(!sp||!n||!(this.hi>this.lo)) return null;
+    var w=(this.hi-this.lo)/n, i0=Math.max(0,Math.floor((sp[0]-this.lo)/w)), i1=Math.min(n-1,Math.ceil((sp[1]-this.lo)/w)-1);
+    return i1>=i0?[i0,i1]:null; };
+  Scope.prototype._dcIn=function(i,dc){ return !!dc && i>=dc[0] && i<=dc[1]; };
+  Scope.prototype._dcHit=function(fLo,fHi){ var sp=this._dcSpan(); if(!sp) return false;
+    if(fHi==null) fHi=fLo; if(fHi<fLo){ var t=fLo; fLo=fHi; fHi=t; } return fLo<sp[1] && fHi>sp[0]; };
+  Scope.prototype._dcNote=function(){ var sp=this._dcSpan(); if(!sp) return '';
+    return ' <span class="zi dcwarn" title="Between '+fmtMHz(sp[0])+' and '+fmtMHz(sp[1])+' the display shows noise filled in over the SDR\'s own centre spike, not a measurement. Untick Settings → Resolution → Hide the SDR centre spike to measure there.">⚠ includes filled bins (SDR spike)</span>'; };
+  Scope.prototype._dcUI=function(){
+    var el=this.el.querySelector('.dcstat'), v=this.el.querySelector('.dcv'); if(!el) return;
+    var d=(this.mode==='live'&&!this.replaying)?this.dc:null;
+    if(!d||d.mode==='shown'){ el.hidden=true; return; }
+    el.hidden=false; var sp=this._dcSpan();
+    el.classList.toggle('clean', d.mode==='outside' || !sp);
+    if(d.mode==='outside'){ v.textContent='hidden';
+      el.title='The SDR\'s own centre spike is hidden: the dongle is tuned to '+fmtMHz(d.tuner_hz/1e6)+', past the edge of this band, so nothing in view was filled in.'; }
+    else { v.textContent=sp?('filled ±'+Math.round((d.fill_hz[1]-d.fill_hz[0])/2000)+' kHz'):'hidden';
+      el.title='The SDR\'s own centre spike is hidden. The dongle is tuned to '+fmtMHz(d.tuner_hz/1e6)+' and '+fmtMHz(d.fill_hz[0]/1e6)+' – '+fmtMHz(d.fill_hz[1]/1e6)
+        +' is filled in from the noise either side (hatched on the display). Peak search, the signal list and limit lines leave that strip out; measurements that include it say so.'; }
+  };
   Scope.prototype._setOverload=function(ov){
     var el=this.el.querySelector('.ovld'), v=this.el.querySelector('.ovldv');
     if(!el) return;
@@ -1508,7 +1544,7 @@
     if(!this.mTab) return; var self=this, ref=this.marks[0], refL=ref?this.levelAt(ref.f):null;
     var fk=function(dMHz){ var a=Math.abs(dMHz)*1000; return (dMHz>=0?'+':'−')+(a>=1000?(a/1000).toFixed(4)+' MHz':a.toFixed(a<10?2:1)+' kHz'); };
     this.mTab.innerHTML=this.marks.map(function(m,i){ var L=self.levelAt(m.f);
-      var lv=(L==null)?'—':(Math.round(L*10)/10).toFixed(1)+self.unit();
+      var lv=(L==null)?'—':(Math.round(L*10)/10).toFixed(1)+self.unit()+(self._dcHit(m.f)?' <span class="dcwarn" title="This marker sits in the strip filled in over the SDR centre spike: the level is not a measurement.">⚠ filled</span>':'');
       var dl=(i===0)?'<span class="dl">reference</span>':('<span class="dl">Δ</span> '+fk(m.f-ref.f)+'  '+((L!=null&&refL!=null)?((L-refL>=0?'+':'−')+Math.abs(L-refL).toFixed(1)+' dB'):''));
       return '<tr data-i="'+i+'" class="'+(i===self.mAct?'act':'')+'"><td class="mn m'+(i+1)+'">'+(i===self.mAct?'▸':'&nbsp;')+'M'+(i+1)+'</td>'
         +'<td>'+fmtMHz(m.f)+'</td><td>'+lv+'</td><td>'+dl+'</td>'
@@ -1537,7 +1573,7 @@
     this.markTxt.innerHTML='<span class="markmeas"><b>&#931; Band power</b> '+fmtMHz(f0)+' → '+fmtMHz(f1)
       +' · <b>'+tot.toFixed(1)+this.unit()+'</b> over '+(bwHz>=1e6?(bwHz/1e6).toFixed(3)+' MHz':(bwHz/1e3).toFixed(1)+' kHz')
       +' · density <b>'+dens.toFixed(1)+this.unit()+'/Hz</b> · '+nb+' bins'
-      +' <span class="zi">'+(this.det||'peak')+' detector</span></span>';
+      +' <span class="zi">'+(this.det||'peak')+' detector</span></span>'+(this._dcHit(f0,f1)?this._dcNote():'');
     if((this.det||'peak')!=='rms') this.markTxt.innerHTML+=' <span class="zi" title="A peak-detected trace reads noise high, so an integrated power over mostly-noise bins reads high too. Switch the detector to RMS in Settings for a power figure you can quote.">⚠ switch the detector to RMS to quote this</span>';
   };
   // Noise marker: level per 1 Hz. Corrects for the resolution bandwidth, the
@@ -1560,7 +1596,7 @@
       +avg.toFixed(1)+this.unit()+' in '+(rbw>=1000?(rbw/1000).toFixed(2)+' kHz':Math.round(rbw)+' Hz')+' RBW'
       +' → <b>'+dens.toFixed(1)+this.unit()+'/Hz</b>'
       +' <span class="zi" title="Corrected for the '+win+' window (ENBW '+enbw+'× RBW)'+(corr?' and the +2.51 dB log-average bias':'')+', averaged over '+k+' bins">'
-      +'('+win+', '+det+(corr?', +2.51 dB log correction':'')+')</span></span>';
+      +'('+win+', '+det+(corr?', +2.51 dB log correction':'')+')</span></span>'+(this._dcHit(this.lo+i0*bin,this.lo+(i1+1)*bin)?this._dcNote():'');
     if(det==='peak') this.markTxt.innerHTML+=' <span class="zi" title="A peak detector keeps the largest of several noisy bins, so this figure is a few dB high. RMS is the detector for a noise measurement.">⚠ peak detector — reads high, use RMS</span>';
   };
   // Reference trace: store the live trace, then show the difference against it.
@@ -1606,7 +1642,7 @@
       +' · main <b>'+main.toFixed(1)+this.unit()+'</b>'
       +' · lower <b>'+fmt(lo1)+'</b> · upper <b>'+fmt(hi1)+'</b>'
       +' <span class="zi" title="Measured on the '+(this.det||'peak')+' detector over the signal\'s own 99% occupied bandwidth. Adjacent-channel figures below about −60 dB are at the limit of what an RTL-SDR front end can show.">'
-      +(this.det==='rms'?'rms':'⚠ use the RMS detector')+'</span></span>';
+      +(this.det==='rms'?'rms':'⚠ use the RMS detector')+'</span></span>'+(this._dcHit(f0-1.5*chMHz,f0+1.5*chMHz)?this._dcNote():'');
   };
   // Spur search — everything else in view, as an offset and a level relative to
   // the carrier. This is how you tell a transmitter's own spurious emissions
@@ -1618,9 +1654,10 @@
     var n=p.length, bin=(this.hi-this.lo)/n, nf=(this.noiseDb!=null?this.noiseDb:this.floor);
     var ci=Math.round((this.marker-this.lo)/bin-0.5), carrier=p[Math.max(0,Math.min(n-1,ci))];
     var m=this.measureAt(this.marker), skip=Math.max(2,Math.round(((m&&m.bw20)||25)/1000/bin));
-    var out=[], i;
+    var out=[], i, dcS=this._dcCols(n);
     for(i=1;i<n-1;i++){
       if(Math.abs(i-ci)<=skip) continue;
+      if(this._dcIn(i,dcS)) continue;
       if(p[i]<=p[i-1]||p[i]<p[i+1]) continue;
       if(p[i]<nf+10) continue;             // 10 dB over the floor: below that a
                                            // noise ripple counts as a spur
@@ -1665,7 +1702,8 @@
   };
   // Strongest bin on the live row -> its centre frequency.
   Scope.prototype.peakFreq=function(){ var p=this.shown||this.row; if(!p||!p.length) return null;
-    var bi=0; for(var i=1;i<p.length;i++) if(p[i]>p[bi]) bi=i; return this.lo+(bi+0.5)*(this.hi-this.lo)/p.length; };
+    var dc=this._dcCols(p.length), bi=-1; for(var i=0;i<p.length;i++){ if(this._dcIn(i,dc)) continue; if(bi<0||p[i]>p[bi]) bi=i; }
+    if(bi<0) return null; return this.lo+(bi+0.5)*(this.hi-this.lo)/p.length; };
   Scope.prototype.peakSearch=function(){ var f=this.peakFreq(); if(f==null) return;
     if(!this.marks.length) this.marks.push({f:f}); else this.marks[this.mAct].f=f;
     this.placeMarker(); this._measureMarker(); };
@@ -1680,7 +1718,9 @@
     var n=p.length, bw=(this.hi-this.lo)/n, i=Math.floor((this.marker-this.lo)/bw), nf=(this.noiseDb!=null)?this.noiseDb:this.floor, thr=nf+PEAK_EXC;
     i=Math.max(0,Math.min(n-1,i));
     var mn=p[i], found=-1;
+    var dc=this._dcCols(n);
     for(var j=i+dir;j>=0&&j<n;j+=dir){
+      if(this._dcIn(j,dc)) continue;                 // the filled strip holds no peaks
       if(p[j]<mn) mn=p[j];
       if(p[j]>thr && p[j]-mn>=PEAK_EXC){ var best=j;               // rising edge of a new peak: climb to its top
         while(j+dir>=0&&j+dir<n&&p[j+dir]>=p[j]-0.5){ j+=dir; if(p[j]>p[best]) best=j; }
@@ -1795,7 +1835,9 @@
         +(det.needs_blog_driver?' · needs RTL-SDR Blog driver':'');
       // radio vanished mid-decode -> drop back
       if(self.decoding && !self.available){ self.setView('wf'); }
+      self.heal=(st&&st.heal)||null;
       self.applyDesired(); self.updateTag();
+      if(self.mode==='idle') self._idleVeil();      // keep the no-radio screen current
     }).catch(function(){});
   };
   Scope.prototype.applyDesired=function(){
@@ -1813,7 +1855,34 @@
     else if(mode==='synth'){ this.hideVeil(); this.bandSel.classList.toggle('hidden',!this.cfg.synthBands);
       this.model=this.cfg.synth(this.synthBand||this.cfg.synthDefault); this.lo=this.model.lo;this.hi=this.model.hi;this.floor=this.model.floor; this.drawRuler(); }
     else{ this.bandSel.classList.add('hidden'); this.zoomBtn.disabled=true;
-      this.showVeil('No '+this.cfg.short+' detected', this.detErr||('Connect a '+this.cfg.short+' to stream true RF, or enable the RF Waterfall demo for a synthetic feed.')); }
+      this._idleVeil(); }
+  };
+  // No radio: say what the self-healer is doing about it, not just "not detected".
+  Scope.prototype._idleVeil=function(){
+    var h=(this.cfg.tuner&&this.heal)||{}, st=h.state;
+    if(st==='recovering'){
+      this.showVeil('🩹 Recovering the '+this.cfg.short+'…', h.message||'Ragnar is power-cycling the USB port the dongle is stuck on.');
+      this._veilHealBtn();
+    } else if(st==='failed'){
+      this.showVeil('⚠ The '+this.cfg.short+' needs replugging', h.message||'Automatic recovery did not bring it back.');
+      this._veilHealBtn();
+    } else {
+      this.showVeil('No '+this.cfg.short+' detected', this.detErr||('Connect a '+this.cfg.short+' to stream true RF, or enable the RF Waterfall demo for a synthetic feed.'));
+      var b=this.veil.querySelector('.vrst'); if(b) b.remove();
+    }
+  };
+  Scope.prototype._veilHealBtn=function(){
+    var self=this; if(this.veil.querySelector('.vrst')) return;
+    var b=document.createElement('button'); b.className='mini vrst'; b.style.marginTop='10px';
+    b.innerHTML='⭮&nbsp;Recover now';
+    b.title='Run the recovery ladder now: power-cycle the USB port the dongle is stuck on (the same as replugging it). Can take ~30 s.';
+    b.addEventListener('click',function(){ b.disabled=true; b.innerHTML='⭮&nbsp;recovering… (up to ~40 s)';
+      fetch('/api/net/rtl/reset',{method:'POST'}).then(function(r){return r.json();}).then(function(x){
+        b.disabled=false; b.innerHTML='⭮&nbsp;Recover now';
+        if(x&&x.ok){ self._stall=0; self._rangeKnown=false; self.checkStatus(); }
+        else if(x) self.veilS.textContent=(x.heal&&x.heal.message)||x.error||'Not back yet.'; })
+        .catch(function(){ b.disabled=false; b.innerHTML='⭮&nbsp;Recover now'; }); });
+    this.veil.appendChild(b);
   };
   Scope.prototype.updateTag=function(){
     var m=this.decoding?'decode':this.mode;
@@ -1862,6 +1931,7 @@
         self.rbw=(typeof d.rbw_hz==='number')?d.rbw_hz:null;
         if(d.detector) self.det=d.detector;
         self._setOverload(d.overload);
+        self.dc=d.dc||null; self._dcUI();
         self.hideVeil();
         // Enqueue instead of painting per-poll — loop() releases rows at one
         // steady rate, so poll/network jitter never shows as speed changes.
@@ -1965,20 +2035,20 @@
     var N=power.length,f=this.fctx;
     // measured noise floor (robust low-percentile) drives SNR + signal detection
     var nf=this._noiseFloor(power); this.noiseDb=nf;
-    var peakDb=-999,peakIdx=0,busyC=0,thr=nf+10;
+    var peakDb=-999,peakIdx=0,busyC=0,thr=nf+10, dcC=this._dcCols(N);
     this._pushHist(power);                    // keep recent rows for the 3D surface
     if(this.threeD){                          // 3D terrain view: measure, then redraw the surface (throttled)
-      for(var cm=0;cm<N;cm++){ if(power[cm]>peakDb){peakDb=power[cm];peakIdx=cm;} if(power[cm]>thr)busyC++; }
+      for(var cm=0;cm<N;cm++){ if(this._dcIn(cm,dcC)) continue; if(power[cm]>peakDb){peakDb=power[cm];peakIdx=cm;} if(power[cm]>thr)busyC++; }
       var _t3=performance.now(); if(_t3-this._last3D>=60){ this._last3D=_t3; this.draw3D(); }
     } else if(this.scrollBack>0){             // looking back in history: hold the view steady
-      for(var cb=0;cb<N;cb++){ if(power[cb]>peakDb){peakDb=power[cb];peakIdx=cb;} if(power[cb]>thr)busyC++; }
+      for(var cb=0;cb<N;cb++){ if(this._dcIn(cb,dcC)) continue; if(power[cb]>peakDb){peakDb=power[cb];peakIdx=cb;} if(power[cb]>thr)busyC++; }
       this.scrollBack=Math.min(this.scrollBack+1,this.hrows.length-1);
     } else {                                  // classic 2D waterfall: scroll the canvas + paint the new row
       var _clo=this.rangeLo(), _chi=this.rangeHi();
       f.drawImage(this.fall,0,0,this.W,this.H-this.STEP,0,this.STEP,this.W,this.H-this.STEP);
       for(var c=0;c<N;c++){var x0=(c*this.W/N)|0,x1=((c+1)*this.W/N)|0;
         f.fillStyle=color(power[c],_clo,_chi); f.fillRect(x0,0,(x1-x0)||1,this.STEP);
-        if(power[c]>peakDb){peakDb=power[c];peakIdx=c;} if(power[c]>thr)busyC++;}
+        if(this._dcIn(c,dcC)) continue; if(power[c]>peakDb){peakDb=power[c];peakIdx=c;} if(power[c]>thr)busyC++;}
     }
     this.row=raw; this.shown=power;          // measurements read true levels; display/detection use the filtered row
     this.peak={db:peakDb,idx:peakIdx}; this.snr=peakDb-nf;
@@ -2134,6 +2204,8 @@
       var c=cs[k];
       if(c.f<this.lo||c.f>this.hi){ c.lvl=null; continue; }
       var i=Math.round((c.f-this.lo)/bin-0.5); i=Math.max(0,Math.min(n-1,i));
+      c.dc=this._dcHit(c.f);
+      if(c.dc){ c.lvl=null; continue; }             // filled in, not measured: don't log it
       var v=power[i]; c.lvl=v; c.seen=(c.seen||0)+1;
       if(v>=thr){ c.on=(c.on||0)+1; c.last=now; }
     }
@@ -2147,7 +2219,7 @@
       var ago=c.last?Math.round((now-c.last)/1000):null;
       return '<tr'+(act?' class="act"':'')+'><td class="mn">'+(act?'●':'○')+'</td>'
         +'<td>'+fmtMHz(c.f)+'</td><td>'+esc(c.n||'')+'</td>'
-        +'<td>'+(live?(Math.round(c.lvl)+self.unit()):'<span class="dl">not in view</span>')+'</td>'
+        +'<td>'+(live?(Math.round(c.lvl)+self.unit()):(c.dc?'<span class="dcwarn" title="This channel sits in the strip filled in over the SDR centre spike, so it is not measured. Untick Hide the SDR centre spike to watch it.">⚠ SDR spike</span>':'<span class="dl">not in view</span>'))+'</td>'
         +'<td>'+(c.seen?Math.round(100*(c.on||0)/c.seen)+'% on':'—')+'</td>'
         +'<td>'+(ago==null?'<span class="dl">never</span>':(ago<2?'now':(ago<90?ago+'s ago':Math.round(ago/60)+'m ago')))+'</td>'
         +'<td><button data-a="go" data-i="'+i+'" title="Mark and centre on it">↔</button> '
@@ -2255,8 +2327,8 @@
   // Evaluate one displayed row; start / end violation events.
   Scope.prototype._limitCheck=function(p){
     var L=this.limitArr(p.length); if(!L){ if(this._limIn){ this._limIn=false; this.el.classList.remove('limfail'); } this._limUI(); return; }
-    var worst=-1e9, wi=-1;
-    for(var i=0;i<p.length;i++){ var lv=L.a?L.a[i]:L.c, ex=p[i]-lv; if(ex>worst){ worst=ex; wi=i; } }
+    var worst=-1e9, wi=-1, dc=this._dcCols(p.length);
+    for(var i=0;i<p.length;i++){ if(this._dcIn(i,dc)) continue; var lv=L.a?L.a[i]:L.c, ex=p[i]-lv; if(ex>worst){ worst=ex; wi=i; } }
     var now=Date.now();
     if(worst>0){
       this._limOut=0;
@@ -2281,7 +2353,8 @@
     this.limTag.hidden=!on;
     if(on){ var armed=!!L||this.lim.mode==='level';
       this.limTag.className='tag limtag '+(this._limIn?'fail':'pass');
-      this.limTag.textContent=!armed?'no mask':(this._limIn?'FAIL':'PASS')+(this.limCount?' · '+this.limCount:''); }
+      this.limTag.textContent=!armed?'no mask':(this._limIn?'FAIL':'PASS')+(this.limCount?' · '+this.limCount:'')+(this._dcSpan()?' *':'');
+      this.limTag.title=this._dcSpan()?'* The strip filled in over the SDR centre spike ('+fmtMHz(this._dcSpan()[0])+' – '+fmtMHz(this._dcSpan()[1])+') is not checked.':''; }
     var U=this.unit();
     q('.limlog',this).innerHTML=this.limLog.slice(0,20).map(function(e){ var d=new Date(e.t);
       return '<div><span class="lx">'+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')+':'+String(d.getSeconds()).padStart(2,'0')
@@ -2601,6 +2674,7 @@
         +'<div class="drow"><label>Detector</label><select class="rdet">'
           +'<option value="peak">Peak (find signals)</option><option value="rms">RMS (measure power)</option>'
           +'<option value="avg">Average (dB)</option><option value="sample">Sample</option><option value="min">Min (noise floor)</option></select></div>'
+        +'<div class="drow"><label>SDR spike</label><label class="dchk" title="Every RTL-SDR shows a steady line of its own at the frequency it is tuned to. On: narrow bands are tuned so that line falls outside them; wide bands move the tuner off the band centre and fill the ~50 kHz line in from the noise beside it."><input type="checkbox" class="rhdc"> Hide the SDR centre spike</label></div>'
         +'<div class="dnote"><b>Detector</b> decides how the FFT bins inside one display column are combined, and it changes every level you read. <b>Peak</b> finds signals but reads a noise floor several dB high — use it to look. <b>RMS</b> averages power and is the detector to use when a level, channel power or noise figure has to be right. <b>Average</b> averages in dB (steadier, reads noise lower still). <b>Sample</b> takes the bin at the column centre, unsmoothed. <b>Min</b> digs the floor out from under bursty traffic.</div>'
         +'<div class="dnote"><b>Auto FFT</b> keeps ≥2 FFT bins per column at any zoom (finer RBW when zoomed in). More <b>averaging</b> = smoother, slower to react. <b>Flat-top</b> reads signal levels most accurately; <b>Blackman-Harris</b> best separates a weak signal next to a strong one. Applies to the whole dongle.</div>');
       var fft=g.querySelector('.rfft'), avg=g.querySelector('.ravg'), win=g.querySelector('.rwin'), bins=g.querySelector('.rbins');
@@ -2611,6 +2685,8 @@
       bins.addEventListener('change',function(){ self.rtlApply({bins:+bins.value}); });
       var det=g.querySelector('.rdet');
       det.addEventListener('change',function(){ self.det=det.value; self.rtlApply({detector:det.value}); self.repaint(); });
+      var hdc=g.querySelector('.rhdc');
+      hdc.addEventListener('change',function(){ self.rtlApply({hide_dc:hdc.checked?1:0}); });
     } else {
       g.insertAdjacentHTML('beforeend',
         '<div class="drow"><label>RBW</label><select class="rhb"><option value="0">Auto</option>'
@@ -2698,7 +2774,8 @@
       this._gainUI(t);
       if(r){ var f=r.querySelector('.rfft'); if(f){ f.value=String(t.fft||0); r.querySelector('.ravg').value=t.avg; r.querySelector('.ravgn').textContent=t.avg;
         r.querySelector('.rwin').value=t.window; r.querySelector('.rbins').value=String(t.bins);
-        var dsel=r.querySelector('.rdet'); if(dsel && t.detector){ dsel.value=t.detector; this.det=t.detector; } } }
+        var dsel=r.querySelector('.rdet'); if(dsel && t.detector){ dsel.value=t.detector; this.det=t.detector; }
+        var hdc=r.querySelector('.rhdc'); if(hdc) hdc.checked=(t.hide_dc===undefined)?true:!!t.hide_dc; } }
     } else { var h=this.hw;
       g.querySelector('.hlna').value=h.lna; g.querySelector('.hlnan').textContent=h.lna; g.querySelector('.hvga').value=h.vga; g.querySelector('.hvgan').textContent=h.vga;
       pr(g.querySelector('.hamp'),!!h.amp); pr(g.querySelector('.hant'),!!h.antenna); }
@@ -2827,11 +2904,30 @@
   };
 
   // ---- time axis (left edge of the 2D waterfall) --------------------------
+  // Hatch the strip filled in over the SDR centre spike, so it is never
+  // mistaken for a measurement. label: write what it is (the trace has room).
+  Scope.prototype._dcHatch=function(g,W,H,label){
+    var sp=this._dcSpan(); if(!sp) return;
+    var x0=Math.max(0,(sp[0]-this.lo)/(this.hi-this.lo)*W), x1=Math.min(W,(sp[1]-this.lo)/(this.hi-this.lo)*W);
+    if(x1-x0<1) x1=x0+1;
+    var d=this.d||1;
+    g.save(); g.beginPath(); g.rect(x0,0,x1-x0,H); g.clip();
+    g.fillStyle='rgba(245,185,66,0.07)'; g.fillRect(x0,0,x1-x0,H);
+    g.strokeStyle='rgba(245,185,66,0.32)'; g.lineWidth=1;
+    g.beginPath(); for(var k=x0-H;k<x1;k+=6*d){ g.moveTo(k,H); g.lineTo(k+H,0); } g.stroke();
+    g.restore();
+    g.setLineDash([3*d,3*d]); g.strokeStyle='rgba(245,185,66,0.6)'; g.lineWidth=1;
+    g.beginPath(); g.moveTo(x0+0.5,0); g.lineTo(x0+0.5,H); g.moveTo(x1-0.5,0); g.lineTo(x1-0.5,H); g.stroke(); g.setLineDash([]);
+    if(label){ g.font=(9*d)+'px ui-monospace,monospace'; g.fillStyle='rgba(245,185,66,0.95)'; g.textBaseline='top';
+      var txt='SDR spike filled', tw=g.measureText(txt).width, tx=(x1+4*d+tw<W)?x1+4*d:Math.max(0,x0-4*d-tw);
+      g.fillText(txt,tx,2*d); }
+  };
   Scope.prototype._drawTimeGrid=function(){
     var cv=this.tgrid; if(!cv) return;
     var d=this.d||1, W=this.fall.width, H=this.fall.height;
     if(cv.width!==W) cv.width=W; if(cv.height!==H) cv.height=H;
     var g=cv.getContext('2d'); g.clearRect(0,0,W,H);
+    if(!this.threeD && this.scrollBack===0) this._dcHatch(g,W,H,false);
     if(!tsShow||this.threeD||!this.hrows.length) return;
     var S=this.STEP||1, end=this.hrows.length-1-this.scrollBack, n=Math.min(end+1,Math.ceil(H/S));
     if(n<2) return;
@@ -2945,33 +3041,32 @@
     var floor=this.rangeLo(), span=(this.rangeHi()-floor)||1, chi=this.rangeHi();
     var yaw=this.rot3d.yaw, pitch=this.rot3d.pitch;
     var cosT=Math.cos(yaw), sinT=Math.sin(yaw), cosP=Math.cos(pitch), sinP=Math.sin(pitch);
-    var SCALE=Math.min(W,H)*0.82*(this.zoom3d||1), HEIGHT=0.55;
-    var cx=W/2, cy=H*0.60;
-    // smoothed, clamped normalized heights (3-tap along frequency, so crests read
-    // rounded not stepped) + projected screen coords for every vertex
+    var HEIGHT=0.45, AX=Math.max(1,Math.min(4,W/Math.max(1,H)*1.15));
+    var proj=function(X,Y,Z,o){ var Xr=X*cosT+Z*sinT, Zr=-X*sinT+Z*cosT; o[0]=Xr; o[1]=-(Y*cosP-Zr*sinP); };
+    var bx0=1e9,bx1=-1e9,by0=1e9,by1=-1e9, pt=[0,0];
+    for(var k=0;k<8;k++){ proj((k&1?0.5:-0.5)*AX,(k&2?HEIGHT:0),(k&4?0.5:-0.5),pt);
+      if(pt[0]<bx0)bx0=pt[0]; if(pt[0]>bx1)bx1=pt[0]; if(pt[1]<by0)by0=pt[1]; if(pt[1]>by1)by1=pt[1]; }
+    var SCALE=Math.min(W*0.96/((bx1-bx0)||1), H*0.92/((by1-by0)||1))*(this.zoom3d||1);
+    var cx=W/2-(bx0+bx1)/2*SCALE, cy=H/2-(by0+by1)/2*SCALE;
     var SX=new Float32Array(R*C), SY=new Float32Array(R*C), HT=new Float32Array(R*C);
     for(var r=0;r<R;r++){ var row=hist[r];
       for(var c=0;c<C;c++){
         var a=(c>0?row[c-1]:row[c]), b=row[c], e=(c<C-1?row[c+1]:row[c]);
         var t=((a+2*b+e)/4-floor)/span; if(t<0)t=0; if(t>1)t=1; HT[r*C+c]=t;
-        var X=(c/(C-1)-0.5), Z=(r/(R-1)-0.5), Y=t*HEIGHT;
-        var Xr=X*cosT+Z*sinT, Zr=-X*sinT+Z*cosT, Yp=Y*cosP-Zr*sinP;
-        SX[r*C+c]=cx+Xr*SCALE; SY[r*C+c]=cy-Yp*SCALE;
+        proj((c/(C-1)-0.5)*AX, t*HEIGHT, (r/(R-1)-0.5), pt);
+        SX[r*C+c]=cx+pt[0]*SCALE; SY[r*C+c]=cy+pt[1]*SCALE;
       }
     }
-    // Painter's order: the projected grid's PLANAR depth is affine in (r,c), so
-    // it is monotonic along each axis — pick the iteration direction that goes
-    // far -> near and no per-quad sort is needed.
-    var rAsc=(cosT<0), cAsc=(sinT>0);
-    // per-quad shading: nearness (for depth dimming) from the same planar depth
-    var dR=cosT*cosP, dC=-sinT*cosP;           // depth gradient in r,c (planar)
+    // Painter's order: nearness is the rotated Zr (larger = closer to the viewer),
+    // affine in (r,c), so draw far -> near by picking each axis' direction.
+    var rAsc=(cosT>0), cAsc=(sinT<0);
+    var dR=cosT, dC=-sinT*AX;
     var d00=0, d01=dC, d10=dR, d11=dR+dC;
     var dMin=Math.min(d00,d01,d10,d11), dMax=Math.max(d00,d01,d10,d11), dRng=(dMax-dMin)||1;
     for(var ri=0;ri<R-1;ri++){ var rr=rAsc?ri:(R-2-ri);
       for(var ci=0;ci<C-1;ci++){ var cc=cAsc?ci:(C-2-ci);
         var i0=rr*C+cc, i1=i0+1, i2=i0+C, i3=i2+1;
-        var dep=dR*(rr/(R-1))+dC*(cc/(C-1)), near=(dMax-((dep-dMin)+dMin))/dRng;
-        near=(dep-dMin)/dRng; near=1-near;      // 1 = nearest
+        var dep=dR*(rr/(R-1))+dC*(cc/(C-1)), near=(dep-dMin)/dRng;
         var dim=0.5+0.5*near;
         var col=colorRGB(row3(hist,rr,cc),floor,chi);
         // a touch of slope shading: brighter where the ridge rises toward us
@@ -2994,6 +3089,7 @@
   };
   Scope.prototype.setThreeD=function(on){
     on=!!on; this.threeD=on;
+    this.el.classList.toggle('is3d',on); this.resize();   // 3D gets a taller panel
     if(this.d3Sel) Array.prototype.forEach.call(this.d3Sel.querySelectorAll('button'),function(b){
       b.setAttribute('aria-pressed', (b.getAttribute('data-3d')==='1')===on?'true':'false'); });
     if(on){ this.scrollBack=0; this.draw3D(); this._drawTimeGrid(); } else { this.repaint(); }   // 2D resumes from history
@@ -3024,12 +3120,12 @@
   // read <100%). Throttled render to keep the list stable.
   Scope.prototype.updateSignals=function(power,nf){
     var n=power.length; if(!n) return;
-    var thr=nf+8, binMHz=(this.hi-this.lo)/n, sig=this.signals||(this.signals={}), k;
+    var thr=nf+8, binMHz=(this.hi-this.lo)/n, sig=this.signals||(this.signals={}), k, dc=this._dcCols(n), self=this;
     // find regions above threshold (>=2 bins to reject single-bin spikes)
     var regions=[],c=0;
     while(c<n){
-      if(power[c]>thr){ var s=c,pk=power[c]; c++;
-        while(c<n && power[c]>thr){ if(power[c]>pk)pk=power[c]; c++; }
+      if(power[c]>thr && !self._dcIn(c,dc)){ var s=c,pk=power[c]; c++;
+        while(c<n && power[c]>thr && !self._dcIn(c,dc)){ if(power[c]>pk)pk=power[c]; c++; }
         var e=c-1; if(e-s>=1) regions.push({s:s,e:e,pk:pk}); }
       else c++;
     }
@@ -3096,6 +3192,7 @@
     for(i=l20;i<=r20;i++){ acc+=lin(p[i]); if(acc>=tot*0.005){lo99=i;break;} }
     acc=0; for(i=r20;i>=l20;i--){ acc+=lin(p[i]); if(acc>=tot*0.005){hi99=i;break;} }
     return {peakF:this.lo+(pkI+0.5)*binMHz, pk:livePk, snr:livePk-nf, smoothed:useAvg, bwDrop:Math.round(dropFor(20)),
+            dc:this._dcHit(this.lo+l20*binMHz, this.lo+(r20+1)*binMHz),
             bw3:(r3-l3+1)*binMHz*1000, bw20:(r20-l20+1)*binMHz*1000,
             obw99:(hi99-lo99+1)*binMHz*1000, chPwr:10*Math.log10(tot||1e-12)};
   };
@@ -3149,11 +3246,13 @@
     if(LA){ t.setLineDash([5,4]); t.strokeStyle='rgba(251,113,133,0.9)'; t.lineWidth=Math.max(1,this.d); t.beginPath();
       for(var li=0;li<N;li++){ var lx=li*W/N, ly=yFor(LA.a?LA.a[li]:LA.c); if(li===0)t.moveTo(lx,ly); else t.lineTo(lx,ly); } t.stroke(); t.setLineDash([]);
       t.fillStyle='rgba(251,113,133,0.35)';
-      for(var lj=0;lj<N;lj++){ var lim=LA.a?LA.a[lj]:LA.c; if(power[lj]>lim){ var y1=yFor(power[lj]), y0=yFor(lim); t.fillRect(lj*W/N,y1,Math.max(1,W/N),y0-y1); } } }
+      var dcL=this._dcCols(N);
+      for(var lj=0;lj<N;lj++){ if(this._dcIn(lj,dcL)) continue; var lim=LA.a?LA.a[lj]:LA.c; if(power[lj]>lim){ var y1=yFor(power[lj]), y0=yFor(lim); t.fillRect(lj*W/N,y1,Math.max(1,W/N),y0-y1); } } }
     // live spectrum (filled), drawn on top
     t.fillStyle="rgba(56,189,201,0.12)"; t.strokeStyle="#38bdc9"; t.lineWidth=Math.max(1,this.d); t.beginPath();
     for(var c=0;c<N;c++){var x=c*W/N,y=yFor(power[c]); if(c===0)t.moveTo(x,y);else t.lineTo(x,y);}
     t.stroke(); t.lineTo(W,H); t.lineTo(0,H); t.closePath(); t.fill();
+    this._dcHatch(t,W,H,true);
     var px=this.peak.idx*W/N; t.strokeStyle="rgba(245,185,66,0.8)"; t.lineWidth=Math.max(1,this.d);
     t.beginPath(); t.moveTo(px,0); t.lineTo(px,H); t.stroke();
   };
@@ -3194,9 +3293,9 @@
     inView.forEach(function(b){ var x0=Math.max(0,(b[0]-lo)/span*100), x1=Math.min(100,(b[1]-lo)/span*100), L=0;
       while(L<3 && (lanes[L]||[]).some(function(r){ return x0<r[1]-0.01 && x1>r[0]+0.01; })) L++;
       if(L>=3) return; (lanes[L]=lanes[L]||[]).push([x0,x1]);
-      html.push('<div class="bp '+b[4]+'" style="left:'+x0+'%;width:'+Math.max(0.3,x1-x0)+'%;top:'+(2+L*15)+'px" title="'+esc(b[2]+' '+b[0]+'–'+b[1]+' MHz: '+b[3])+'">'
+      html.push('<div class="bp '+b[4]+'" style="left:'+x0+'%;width:'+Math.max(0.3,x1-x0)+'%;top:'+(2+L*18)+'px" title="'+esc(b[2]+' '+b[0]+'–'+b[1]+' MHz: '+b[3])+'">'
         +((x1-x0)>5?'<span>'+esc(b[2])+(x1-x0>22?' · '+esc(b[3]):'')+'</span>':'')+'</div>'); });
-    g.style.height=(4+Math.max(1,lanes.length)*15)+'px';
+    g.style.height=(4+Math.max(1,lanes.length)*18)+'px';
     g.innerHTML=html.join('');
   };
   Scope.prototype.drawRuler=function(){
