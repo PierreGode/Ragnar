@@ -1019,6 +1019,11 @@ class Display:
         try:
             from actions.exploit_engine import get_stats
             s = get_stats()
+            # keep the icon-row counter in sync
+            try:
+                self.shared_data.exploitnbr = int(s.get('vulnerable', 0))
+            except Exception:
+                pass
             return f"{s.get('vulnerable',0)} vuln/{s.get('attempted',0)}"
         except Exception:
             return "n/a"
@@ -1952,10 +1957,12 @@ class Display:
                   (getattr(sd, 'port', None),   sd.portnbr),
                   (getattr(sd, 'vuln', None),   sd.vulnnbr),
                   (getattr(sd, 'cred', None),   sd.crednbr)])
+        self._exploit_stat_line()  # refresh sd.exploitnbr
         _row(37, [(getattr(sd, 'zombie', None),  sd.zombiesnbr),
                   (getattr(sd, 'data', None),    sd.datanbr),
                   (getattr(sd, 'money', None),   sd.coinnbr),
-                  (getattr(sd, 'attacks', None), sd.attacksnbr)])
+                  (getattr(sd, 'exploit', None) or getattr(sd, 'attacks', None),
+                   getattr(sd, 'exploitnbr', 0))])
         draw.line((1, 54, W - 1, 54), fill=0)
 
         # --- mood / status lines ---
@@ -2101,11 +2108,13 @@ class Display:
                   (getattr(sd, 'vuln', None),      sd.vulnnbr),
                   (getattr(sd, 'cred', None),      sd.crednbr),
                   (getattr(sd, 'zombie', None),    sd.zombiesnbr)])
+        self._exploit_stat_line()  # refresh sd.exploitnbr
         _row(40, [(getattr(sd, 'data', None),      sd.datanbr),
                   (getattr(sd, 'money', None),     sd.coinnbr),
                   (getattr(sd, 'level', None),     sd.levelnbr),
                   (getattr(sd, 'networkkb', None), sd.networkkbnbr),
-                  (getattr(sd, 'attacks', None),   sd.attacksnbr)])
+                  (getattr(sd, 'exploit', None) or getattr(sd, 'attacks', None),
+                   getattr(sd, 'exploitnbr', 0))])
         draw.line((1, 58, W - 1, 58), fill=0)
 
         # --- lower zone: info column on the left, a framed sprite panel right ---

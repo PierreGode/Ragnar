@@ -1827,6 +1827,8 @@ class SharedData:
             self.cred = self.load_image(os.path.join(self.staticpicdir, 'cred.bmp'), scale=img_scale)
             self.attack = self.load_image(os.path.join(self.staticpicdir, 'attack.bmp'), scale=img_scale)
             self.attacks = self.load_image(os.path.join(self.staticpicdir, 'attacks.bmp'), scale=img_scale)
+            self.exploit = self.load_image(os.path.join(self.staticpicdir, 'attacks.bmp'), scale=img_scale)
+            self.exploitnbr = 0
             self.gold = self.load_image(os.path.join(self.staticpicdir, 'gold.bmp'), scale=img_scale)
             self.networkkb = self.load_image(os.path.join(self.staticpicdir, 'networkkb.bmp'), scale=img_scale)
             self.zombie = self.load_image(os.path.join(self.staticpicdir, 'zombie.bmp'), scale=img_scale)
