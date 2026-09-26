@@ -202,6 +202,19 @@ Hide the SDR centre spike** (on by default) deals with it:
   window is hidden too, which is why it is kept away from the band centre.
   Untick it to see exactly what the dongle delivers.
 
+The filled strip is never passed off as a measurement:
+- It is **hatched** (amber) on the waterfall and the trace, labelled *SDR spike
+  filled*, and the **SDR spike** tile in the readout says *filled ±35 kHz* (or
+  *hidden* when the tuner sits outside the band and nothing was touched).
+- **Peak search, Next peak, spur search, the signal list and the Peak/SNR/Busy
+  readouts** leave the strip out.
+- A **marker, band power, noise marker or ACPR** result that overlaps it gets
+  *⚠ includes filled bins (SDR spike)*; a marker in it shows *⚠ filled* in the
+  marker table.
+- **Channels** inside it show *⚠ SDR spike* and are not logged.
+- **Limit lines** don't check it; the PASS/FAIL tag gets a `*` whose tooltip
+  names the unchecked strip.
+
 The **Image check** button tells the spike apart from a real transmitter either
 way (verdict *DC spike* or *image*).
 

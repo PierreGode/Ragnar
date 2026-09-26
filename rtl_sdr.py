@@ -1342,6 +1342,24 @@ def _iq_plan(lo_hz, hi_hz, hide_dc=False):
     return center, sr, None
 
 
+def dc_info(tuner_hz, notch_hz, hide):
+    """What the page needs to be honest about the centre spike (pure, RF Hz).
+
+    ``filled`` gives the exact strip whose bins were filled in, so the display
+    can mark it and measurements can leave it out; ``outside`` means the tuner
+    sits past the band edge and nothing in the band was touched; ``shown`` means
+    the option is off and the spike is on screen at ``tuner_hz``.
+    """
+    t = int(tuner_hz)
+    if not hide:
+        return {"mode": "shown", "tuner_hz": t}
+    if notch_hz is None:
+        return {"mode": "outside", "tuner_hz": t}
+    n = int(notch_hz)
+    return {"mode": "filled", "tuner_hz": t,
+            "fill_hz": [n - _DC_HALF_HZ, n + _DC_HALF_HZ]}
+
+
 def _fill_dc(db, center_hz, sr_hz, notch_hz, half_hz=_DC_HALF_HZ):
     """Fill the FFT bins within ``half_hz`` of ``notch_hz`` with a straight line
     between the noise just either side (pure; ``db`` is fftshifted, low->high).
@@ -1651,6 +1669,7 @@ class PowerSweep:
         self._stop = threading.Event()
         self._overload = None      # {"clip_frac":..,"headroom_db":..,"level":..}
         self._agc_pending = None   # a gain the managed loop wants applied
+        self._dc = None            # where the centre spike is hidden (see dc_info)
         self._frames = []
         self._seq = 0
         self._maxhold = None
@@ -1782,6 +1801,7 @@ class PowerSweep:
         self._engine = "rtl_power"
         self._floor_dyn = None
         self._overload = None        # the sweep engine never sees raw samples
+        self._dc = None              # rtl_power hops; there is no single centre spike
         self._run_rtl_power(lo, hi)
 
     def _run_iq(self, lo, hi, center, sr, notch=None):
@@ -1798,6 +1818,8 @@ class PowerSweep:
         except Exception:
             return False
         self._engine = "iq"
+        self._dc = dc_info(center - _conv_hz, notch - _conv_hz if notch is not None else None,
+                           _hide_dc)
         self._floor_dyn = None
         bins = _bins
         N = _fft or _auto_fft(sr, lo, hi, bins)
@@ -2051,7 +2073,7 @@ class PowerSweep:
                     "frames_buffered": len(self._frames), "seq": self._seq,
                     "floor_dbm": self._active_floor(), "engine": self._engine,
                     "detector": _detector, "overload": self._overload,
-                    "error": self._error}
+                    "dc": self._dc, "error": self._error}
 
     def get_frames(self, since=0):
         try:
@@ -2066,7 +2088,7 @@ class PowerSweep:
                     "engine": self._engine,
                     "rbw_hz": round(self._rbw, 1) if getattr(self, "_rbw", None) else None,
                     "conv_hz": _conv_hz, "detector": _detector,
-                    "overload": self._overload,
+                    "overload": self._overload, "dc": self._dc,
                     "max_hold": list(self._maxhold) if self._maxhold else None,
                     "running": bool(self._thread and self._thread.is_alive()),
                     "error": self._error}
@@ -4735,6 +4757,12 @@ def _selftest_body(_saved_globals=None):
     check("dc: the hump is filled from the noise beside it, a real signal kept",
           max(_db[480:545]) < -69.0 and _db[300] == -30.0)
     check("dc: no notch is a no-op", _fill_dc([1.0, 2.0], 0, 1, None) == [1.0, 2.0])
+    _i = dc_info(434_093_478, 434_093_478, True)
+    check("dc: the filled strip is reported exactly",
+          _i["mode"] == "filled" and _i["fill_hz"] == [434_093_478 - _DC_HALF_HZ, 434_093_478 + _DC_HALF_HZ])
+    check("dc: outside / shown say so and report no strip",
+          dc_info(868_360_000, None, True) == {"mode": "outside", "tuner_hz": 868_360_000}
+          and dc_info(433_920_000, None, False)["mode"] == "shown")
 
     # --- IQ PSD -> display grid: a tone lands in the right column, edges dropped ---
     _N, _ctr, _sr = 1024, 868_350_000, 3_000_000
