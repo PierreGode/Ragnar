@@ -2974,7 +2974,7 @@
     var floor=this.rangeLo(), span=(this.rangeHi()-floor)||1, chi=this.rangeHi();
     var yaw=this.rot3d.yaw, pitch=this.rot3d.pitch;
     var cosT=Math.cos(yaw), sinT=Math.sin(yaw), cosP=Math.cos(pitch), sinP=Math.sin(pitch);
-    var HEIGHT=0.45, AX=Math.max(1,Math.min(4,W/Math.max(1,H)*1.15));
+    var HEIGHT=0.585, AX=Math.max(1,Math.min(4,W/Math.max(1,H)*1.15));
     var proj=function(X,Y,Z,o){ var Xr=X*cosT+Z*sinT, Zr=-X*sinT+Z*cosT; o[0]=Xr; o[1]=-(Y*cosP-Zr*sinP); };
     var bx0=1e9,bx1=-1e9,by0=1e9,by1=-1e9, pt=[0,0];
     for(var k=0;k<8;k++){ proj((k&1?0.5:-0.5)*AX,(k&2?HEIGHT:0),(k&4?0.5:-0.5),pt);
