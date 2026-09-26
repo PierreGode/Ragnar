@@ -73,10 +73,12 @@ Each panel has a row of **band-scope presets** and a **Manual tune** box:
     frame's `band_mhz` reports the widened `[lo, hi]` so the page's ruler
     matches what's drawn. The panel's zoom/manual-tune floor (`minSpan:2`) is
     aligned to this, so HackRF's effective resolution floor is uniform.
-- **📡 Mesh / LoRa overlay** (the dropdown, on *both* panels) sweeps a chosen
-  mesh/LPWAN band and overlays its exact channel centres — Z-Wave (FSK) regions
-  plus the LoRa meshes Meshtastic / MeshCore / LoRaWAN. It's an
-  **energy/occupancy view only** (LoRa CSS can't be demodulated by
+- **📡 Mesh / LoRa / HaLow overlay** (the dropdown, on *both* panels) sweeps a chosen
+  mesh/LPWAN band and overlays its exact channel centres — Z-Wave (FSK) regions,
+  the LoRa meshes Meshtastic / MeshCore / LoRaWAN, and **Wi-Fi HaLow (802.11ah)**
+  for the US, EU, AU/NZ, Japan, Korea, China, India and Singapore (see
+  [sdr-subghz.md](sdr-subghz.md#mesh-overlays-z-wave--meshtastic--meshcore--lorawan--wi-fi-halow)). It's an
+  **energy/occupancy view only** (LoRa CSS and HaLow OFDM can't be demodulated by
   `rtl_power`/`hackrf_sweep`, and the payloads are encrypted): you see bursts
   land on the channels, not IDs or messages. Options come from
   `rtl_sdr.zwave_plan()` / `lora_plan()` via `/api/net/rtl/{zwave,lora}`. Some
