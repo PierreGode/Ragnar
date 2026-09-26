@@ -198,6 +198,29 @@ LORA_PLANS = {
                          "span": (921_000_000, 928_000_000),
                          "channels": [(923_200_000, "ch0"), (923_400_000, "ch1")],
                          "note": "AS923-1: 923.2/923.4 default (+ up to 8 channels)"},
+    # --- Zigbee Suzi: the sub-GHz feature of Zigbee 4.0 / Zigbee PRO 2023 (CSA,
+    #     certification from 2026), on IEEE 802.15.4 sub-GHz radios in the 868 MHz
+    #     (Europe) and 915 MHz (North America) bands. The CSA's channel plan is
+    #     not public, so the markers are IEEE 802.15.4's own published sub-GHz
+    #     channels — a reference grid, not a claim about Suzi's. Energy view only. ---
+    "suzi-eu868": {"proto": "Zigbee Suzi", "label": "Zigbee Suzi · EU 868 (863-870)",
+                         "span": (863_000_000, 870_000_000),
+                         "channels": [(868_300_000, "802.15.4 ch0")],
+                         "note": "Zigbee sub-GHz (Suzi), Europe 868 MHz band. Suzi's own channel plan is in the CSA spec (not public); the marker is IEEE 802.15.4's 868.3 MHz channel 0 for reference — read the real channel from where the energy lands"},
+    "suzi-na915": {"proto": "Zigbee Suzi", "label": "Zigbee Suzi · NA 915 (902-928)",
+                         "span": (902_000_000, 928_000_000),
+                         "channels": [
+                                      (906000000, "ch1"),
+                                      (908000000, "ch2"),
+                                      (910000000, "ch3"),
+                                      (912000000, "ch4"),
+                                      (914000000, "ch5"),
+                                      (916000000, "ch6"),
+                                      (918000000, "ch7"),
+                                      (920000000, "ch8"),
+                                      (922000000, "ch9"),
+                                      (924000000, "ch10")],
+                         "note": "Zigbee sub-GHz (Suzi), North America 915 MHz band. Suzi's own channel plan is in the CSA spec (not public); markers are IEEE 802.15.4's 915 MHz channels 1-10 (906-924 MHz, 2 MHz apart) for reference"},
     # --- Wi-Fi HaLow (IEEE 802.11ah): sub-GHz Wi-Fi, 1-16 MHz OFDM channels.
     #     A higher-bandwidth alternative to LoRaWAN. Energy view only here —
     #     the OFDM is not demodulated and the traffic is WPA3-encrypted anyway. ---
@@ -4513,6 +4536,13 @@ def _selftest_body(_saved_globals=None):
     check("halow: EU 1 MHz channels sit on 863 + 0.5*n (863.5 .. 867.5)",
           {c["freq_hz"] for c in _hl["halow-eu"]["channels"]}
           >= {863_500_000, 865_500_000, 867_500_000})
+    _sz = {k: v for k, v in lp.items() if v["proto"] == "Zigbee Suzi"}
+    check("suzi: EU 868 and NA 915 presets present", {"suzi-eu868", "suzi-na915"} <= set(_sz))
+    check("suzi: NA markers are 802.15.4 channels 1-10, 906..924 MHz, 2 MHz apart",
+          [c["freq_hz"] for c in _sz["suzi-na915"]["channels"]]
+          == [(906 + 2 * k) * 1_000_000 for k in range(10)])
+    check("suzi: the EU reference marker is 802.15.4 channel 0 at 868.3 MHz",
+          [c["freq_hz"] for c in _sz["suzi-eu868"]["channels"]] == [868_300_000])
     check("lora: LoRaWAN EU868 lists the three mandatory uplinks",
           all(any(abs(c["freq_hz"] - f) < 1000 for c in lp["lorawan-eu868"]["channels"])
               for f in (868_100_000, 868_300_000, 868_500_000)))
