@@ -30,6 +30,7 @@ import json
 import math
 import os
 import struct
+import threading
 import time
 
 
@@ -48,7 +49,134 @@ def _safe(name):
 # --------------------------------------------------------------------------
 
 _CACHE = {}          # name -> (mtime, iq(complex64), fs, fc, meta)
-_CACHE_MAX = 3       # keep only a few captures resident (they can be tens of MB)
+_CACHE_MAX = 3       # never more than this many captures resident...
+# ...and never more than this many BYTES. A capture decodes to 8 bytes per
+# sample (complex64), so a 60 MB cu8 file is 240 MB in RAM. Counting files let
+# three of those sit resident — ~720 MB — which is enough on its own to get
+# Ragnar OOM-killed on a 1-2 GB board. The budget scales with the RAM the box
+# actually has free, and the capture being analysed is always kept.
+_CACHE_BUDGET_MAX = 768 * 1024 * 1024
+
+# The per-signal operations (classify, demod, pulse, constellation, subaudible,
+# modulation quality, dechirp, cyclic, filter) never need more than a couple of
+# seconds of samples. Given the whole capture they used to process all of it,
+# making several full-length copies — a 60 MB capture drove Ragnar from 0.75 GB
+# to 2.7 GB. Longer selections are analysed over the busiest window this long.
+_SEL_MAX_SAMPLES = 4_000_000          # 2 s at 2 MS/s
+_MIX_CHUNK = 1 << 20                  # mixer works in 1 M-sample chunks
+
+# Heavy analysis is serialised: two multi-hundred-MB jobs at once (a second click,
+# or a job still grinding after you left the page) is how a small board runs out.
+_HEAVY_LOCK = threading.BoundedSemaphore(1)
+_tls = threading.local()
+
+
+def _mem_available():
+    """MemAvailable in bytes, or None (pure-ish: reads /proc/meminfo)."""
+    try:
+        with open("/proc/meminfo") as fh:
+            for ln in fh:
+                if ln.startswith("MemAvailable:"):
+                    return int(ln.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _cache_budget():
+    """Bytes the capture cache may hold: a fifth of free RAM, 64 MB..768 MB."""
+    avail = _mem_available()
+    if not avail:
+        return 256 * 1024 * 1024
+    return int(max(64 * 1024 * 1024, min(_CACHE_BUDGET_MAX, avail * 0.2)))
+
+
+def _cache_trim(keep=None):
+    """Evict oldest captures until the cache fits its count and byte budget."""
+    budget = _cache_budget()
+    def total():
+        return sum(v[1].nbytes for v in _CACHE.values())
+    for k in list(_CACHE.keys()):
+        if len(_CACHE) <= 1:
+            break
+        if len(_CACHE) <= _CACHE_MAX and total() <= budget:
+            break
+        if k != keep:
+            _CACHE.pop(k, None)
+
+
+def _decode_interleaved(raw_f32_fill, n_complex):
+    """Allocate the complex64 result once and let the caller fill its float view."""
+    import numpy as np
+    iq = np.empty(n_complex, dtype=np.complex64)
+    raw_f32_fill(iq.view(np.float32))        # [re0, im0, re1, im1, ...] in place
+    return iq
+
+
+def _pick_window(iq, fs, t0, t1, cap=_SEL_MAX_SAMPLES):
+    """(i0, i1, truncated) for a selection, bounded to ``cap`` samples (pure-ish).
+
+    Within an over-long selection the window with the most energy is used — that
+    is where the signal is — found by a chunked scan, so it costs no full-length
+    copy. The choice is recorded per request so the API can report it.
+    """
+    import numpy as np
+    n = len(iq)
+    i0 = 0 if t0 is None else max(0, min(n, int(float(t0) * fs)))
+    i1 = n if t1 is None else max(0, min(n, int(float(t1) * fs)))
+    if i1 <= i0:
+        i0, i1 = 0, n
+    if not cap or (i1 - i0) <= cap:
+        _tls.window = None
+        return i0, i1, False
+    blk = max(1, cap // 16)                 # 16 blocks per window of scan resolution
+    nb = (i1 - i0) // blk
+    e = np.empty(nb, dtype=np.float64)
+    for b in range(nb):
+        seg = iq[i0 + b * blk: i0 + (b + 1) * blk]
+        e[b] = float(np.vdot(seg, seg).real)
+    per = max(1, cap // blk)
+    if nb <= per:
+        best = 0
+    else:
+        cs = np.concatenate(([0.0], np.cumsum(e)))
+        best = int(np.argmax(cs[per:] - cs[:-per]))
+    w0 = i0 + best * blk
+    w1 = min(i1, w0 + cap)
+    _tls.window = {"t0": round(w0 / fs, 4), "t1": round(w1 / fs, 4),
+                   "requested_t0": round(i0 / fs, 4), "requested_t1": round(i1 / fs, 4),
+                   "note": "selection longer than %.1f s: analysed the busiest %.1f s of it"
+                           % (cap / fs, (w1 - w0) / fs)}
+    return w0, w1, True
+
+
+def window_reset():
+    _tls.window = None
+
+
+def window_note():
+    """The window the last heavy op on this thread actually analysed, if bounded."""
+    return getattr(_tls, "window", None)
+
+
+def _mix(x, foff, fs):
+    """Shift ``x`` by -foff Hz, in complex64, chunk by chunk.
+
+    The old form built a full-length int64 index and a complex128 exponential —
+    several times the capture's size in RAM for one multiply. Phase is kept in
+    float64 per chunk so accuracy does not drift over long captures.
+    """
+    import numpy as np
+    x = np.asarray(x)
+    if not foff:
+        return x.astype(np.complex64, copy=False)
+    out = np.empty(len(x), dtype=np.complex64)
+    w = -2.0 * np.pi * float(foff) / float(fs)
+    for a in range(0, len(x), _MIX_CHUNK):
+        b = min(len(x), a + _MIX_CHUNK)
+        ph = w * np.arange(a, b, dtype=np.float64)
+        out[a:b] = x[a:b] * np.exp(1j * ph).astype(np.complex64)
+    return out
 
 
 def _paths(name):
@@ -73,31 +201,34 @@ def load(name):
     fs = float(g.get("core:sample_rate") or 0) or 1.0
     fc = float(cap0.get("core:frequency") or 0)
     dtype = (g.get("core:datatype") or "cu8").lower()
-    # Decode the common SigMF/SDR interleaved-IQ datatypes to normalised complex64.
+    # Decode the common SigMF/SDR interleaved-IQ datatypes straight into one
+    # complex64 array (filled through its float32 view): no float32 copy, no
+    # complex128 intermediate. A 60 MB cu8 file peaks at ~300 MB, not ~1 GB.
     if dtype.startswith("cf64"):                      # complex float64
-        a = np.fromfile(data_p, dtype="<f8"); a = a[: (a.size // 2) * 2].astype(np.float32)
-        iq = a[0::2] + 1j * a[1::2]
+        a = np.fromfile(data_p, dtype="<f8"); a = a[: (a.size // 2) * 2]
+        iq = _decode_interleaved(lambda v: np.copyto(v, a, casting="unsafe"), a.size // 2)
     elif dtype.startswith("cf32"):                    # complex float32 (GNU Radio, IQEngine)
         a = np.fromfile(data_p, dtype="<f4"); a = a[: (a.size // 2) * 2]
-        iq = a[0::2] + 1j * a[1::2]
+        iq = a.view(np.complex64).copy()
     elif dtype.startswith("ci16") or dtype.startswith("cs16"):   # signed 16-bit
-        a = np.fromfile(data_p, dtype="<i2").astype(np.float32); a = a[: (a.size // 2) * 2]
-        iq = (a[0::2] + 1j * a[1::2]) / 32768.0
+        a = np.fromfile(data_p, dtype="<i2"); a = a[: (a.size // 2) * 2]
+        iq = _decode_interleaved(lambda v: np.multiply(a, 1.0 / 32768.0, out=v, casting="unsafe"), a.size // 2)
     elif dtype.startswith("cu16"):                    # unsigned 16-bit
-        a = np.fromfile(data_p, dtype="<u2").astype(np.float32) - 32768.0; a = a[: (a.size // 2) * 2]
-        iq = (a[0::2] + 1j * a[1::2]) / 32768.0
+        a = np.fromfile(data_p, dtype="<u2"); a = a[: (a.size // 2) * 2]
+        def _f16(v):
+            np.subtract(a, 32768.0, out=v, casting="unsafe"); v *= 1.0 / 32768.0
+        iq = _decode_interleaved(_f16, a.size // 2)
     elif dtype.startswith("cs8") or dtype.startswith("ci8"):     # signed 8-bit
-        raw = np.fromfile(data_p, dtype=np.uint8); raw = raw[: (raw.size // 2) * 2]
-        s = raw.astype(np.int8).astype(np.float32)
-        iq = (s[0::2] + 1j * s[1::2]) / 128.0
+        raw = np.fromfile(data_p, dtype=np.int8); raw = raw[: (raw.size // 2) * 2]
+        iq = _decode_interleaved(lambda v: np.multiply(raw, 1.0 / 128.0, out=v, casting="unsafe"), raw.size // 2)
     else:                                             # cu8 (default): unsigned 8-bit
         raw = np.fromfile(data_p, dtype=np.uint8); raw = raw[: (raw.size // 2) * 2]
-        f = raw.astype(np.float32) - 127.5
-        iq = (f[0::2] + 1j * f[1::2]) / 127.5
-    iq = iq.astype(np.complex64)
-    if len(_CACHE) >= _CACHE_MAX:
-        _CACHE.pop(next(iter(_CACHE)))
+        def _f8(v):
+            np.subtract(raw, 127.5, out=v, casting="unsafe"); v /= 127.5   # divide, as before: bit-identical
+        iq = _decode_interleaved(_f8, raw.size // 2)
+    _CACHE.pop(name, None)
     _CACHE[name] = (mtime, iq, fs, fc, meta)
+    _cache_trim(keep=name)
     return iq, fs, fc, meta
 
 
@@ -454,16 +585,14 @@ def demod(name, mode="ook", f_offset_hz=0.0, bw_hz=None, t0=None, t1=None):
     from scipy import signal as sig
     iq, fs, fc, _ = load(name)
     dur = len(iq) / fs
-    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
-    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
-    x = iq[i0:i1] if i1 > i0 else iq
+    i0, i1, _ = _pick_window(iq, fs, t0, t1)
+    x = iq[i0:i1]
     if len(x) < 16:
         return {"ok": False, "error": "selection too short"}
     foff = float(f_offset_hz or 0.0)
     bw = float(bw_hz) if bw_hz else min(fs / 4, 200e3)
     bw = max(1e3, min(bw, fs / 2))
-    n = np.arange(len(x))
-    x = x * np.exp(-2j * np.pi * (foff / fs) * n)     # mix the signal down to DC
+    x = _mix(x, foff, fs)                              # mix the signal down to DC
     dec = int(max(1, fs // (bw * 2)))                  # decimate to ~2*bw
     if dec > 1:
         x = sig.decimate(x, dec, ftype="fir")
@@ -612,16 +741,14 @@ def pulse_decode(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None, coding="au
     import numpy as np
     from scipy import signal as sig
     iq, fs, fc, _ = load(name)
-    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
-    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
-    x = iq[i0:i1] if i1 > i0 else iq
+    i0, i1, _ = _pick_window(iq, fs, t0, t1)
+    x = iq[i0:i1]
     if len(x) < 32:
         return {"ok": False, "error": "selection too short"}
     foff = float(f_offset_hz or 0.0)
     bw = float(bw_hz) if bw_hz else min(fs / 4, 200e3)
     bw = max(1e3, min(bw, fs / 2))
-    n = np.arange(len(x))
-    x = x * np.exp(-2j * np.pi * (foff / fs) * n)
+    x = _mix(x, foff, fs)
     dec = int(max(1, fs // (bw * 2)))
     if dec > 1:
         x = sig.decimate(x, dec, ftype="fir")
@@ -732,16 +859,14 @@ def _prep_selection(name, f_offset_hz, bw_hz, t0, t1):
     from scipy import signal as sig
     iq, fs, fc, _ = load(name)
     dur = len(iq) / fs
-    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
-    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
-    x = iq[i0:i1] if i1 > i0 else iq
+    i0, i1, _ = _pick_window(iq, fs, t0, t1)
+    x = iq[i0:i1]
     if len(x) < 16:
         return np.zeros(0, dtype=np.complex64), fs
     foff = float(f_offset_hz or 0.0)
     bw = float(bw_hz) if bw_hz else min(fs / 4, 200e3)
     bw = max(1e3, min(bw, fs / 2))
-    n = np.arange(len(x))
-    x = x * np.exp(-2j * np.pi * (foff / fs) * n)
+    x = _mix(x, foff, fs)
     dec = int(max(1, fs // (bw * 2)))
     if dec > 1:
         x = sig.decimate(x, dec, ftype="fir")
@@ -1517,9 +1642,8 @@ def dechirp(name, bw_hz=125000, sf=7, f_offset_hz=0.0, t0=None, t1=None, os=2, h
     from scipy.signal import resample_poly
     from fractions import Fraction
     iq, fs, fc, _ = load(name)
-    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
-    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
-    x = iq[i0:i1] if i1 > i0 else iq
+    i0, i1, _ = _pick_window(iq, fs, t0, t1)
+    x = iq[i0:i1]
     try:
         bw = float(bw_hz); sf = int(sf); os = int(max(1, min(4, os)))
     except (TypeError, ValueError):
@@ -1530,8 +1654,7 @@ def dechirp(name, bw_hz=125000, sf=7, f_offset_hz=0.0, t0=None, t1=None, os=2, h
         return {"ok": False, "error": "bandwidth must be >0 and <= sample rate"}
     if len(x) < 256:
         return {"ok": False, "error": "selection too short"}
-    n = np.arange(len(x))
-    x = x * np.exp(-2j * np.pi * (float(f_offset_hz) / fs) * n)      # channel -> DC
+    x = _mix(x, float(f_offset_hz or 0.0), fs)                       # channel -> DC
     fs2 = os * bw
     frac = Fraction(fs2 / fs).limit_denominator(2000)
     up, down = frac.numerator, frac.denominator
@@ -1583,7 +1706,13 @@ def _cyclic_profile(x, fs, amax_hz, n=700):
     # high-pass: subtract a slow moving-average so the random-data low-frequency
     # bulk doesn't swamp the (relatively sharp) symbol-rate transition line.
     k = max(3, int(len(d) * 0.02))
-    d = d - np.convolve(d, np.ones(k) / k, mode="same")
+    # Moving average by running sum: O(N). np.convolve with a kernel 2% of the
+    # input is O(N^2) — 42 s for one second of samples, hours for a capture.
+    cs = np.concatenate(([0.0], np.cumsum(d, dtype=np.float64)))
+    h = k // 2
+    lo = np.clip(np.arange(len(d)) - h, 0, len(d))
+    hi = np.clip(np.arange(len(d)) - h + k, 0, len(d))
+    d = d - ((cs[hi] - cs[lo]) / k).astype(d.dtype)
     w = np.hanning(len(d)).astype(np.float32)
     F = np.abs(np.fft.rfft(d * w))
     f = np.fft.rfftfreq(len(d), 1.0 / fs)
@@ -1635,14 +1764,13 @@ def cyclic(name, f_offset_hz=0.0, t0=None, t1=None, amax_hz=None):
     a strength; ``locked`` when the top peak is confident."""
     import numpy as np
     iq, fs, fc, _ = load(name)
-    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
-    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
-    x = iq[i0:i1] if i1 > i0 else iq
+    i0, i1, _ = _pick_window(iq, fs, t0, t1)
+    x = iq[i0:i1]
     if len(x) < 256:
         return {"ok": False, "error": "selection too short"}
     foff = float(f_offset_hz or 0.0)
     if foff:
-        x = x * np.exp(-2j * np.pi * (foff / fs) * np.arange(len(x)))
+        x = _mix(x, foff, fs)
     amax = float(amax_hz) if amax_hz else min(fs / 4.0, 100000.0)
     amax = max(1000.0, min(amax, fs / 2.0))
     f, prof = _cyclic_profile(x, fs, amax)
@@ -2956,11 +3084,12 @@ def selftest():
         # --- Segment 7: cyclostationary symbol-rate detector (pure core) ---
         from scipy import signal as _sg
         _fs = 1_000_000.0
+        _rs = np.random.RandomState(7)          # seeded: a random draw made this flaky
         def _ook(baud):
-            sps = int(_fs / baud); nbb = 300; bits = np.random.randint(0, 2, nbb).astype(float)
+            sps = int(_fs / baud); nbb = 300; bits = _rs.randint(0, 2, nbb).astype(float)
             k = max(2, sps // 8)
             env = _sg.lfilter(np.ones(k) / k, 1, np.repeat(bits, sps))
-            return env + (np.random.randn(nbb * sps) + 1j * np.random.randn(nbb * sps)) * 0.03
+            return env + (_rs.randn(nbb * sps) + 1j * _rs.randn(nbb * sps)) * 0.03
         # high baud: confident lock; mid baud: found (strength scales with baud/SNR)
         _f, _p = _cyclic_profile(_ook(20000), _fs, 70000)
         _pk = _cyclic_peaks(_f, _p)
@@ -3330,6 +3459,74 @@ def selftest():
     check("am: a single spike does not claim 100% modulation",
           am_depth([1.0] * 500 + [9.0])["depth_pct"] < 5.0)
     check("am: bad input returns nothing", am_depth([]) is None and am_depth(None) is None)
+
+    # --- memory safety: lean decode, bounded windows, chunked mixer, cache budget ---
+    import numpy as _np2, tempfile as _tf2, shutil as _sh2
+    _tmp2 = _tf2.mkdtemp()
+    _saved2 = globals()["_cap_dir"]
+    globals()["_cap_dir"] = lambda: _tmp2
+    try:
+        _rs2 = _np2.random.RandomState(3)
+        def _write(nm, dt, raw):
+            raw.tofile(os.path.join(_tmp2, nm + ".sigmf-data"))
+            with open(os.path.join(_tmp2, nm + ".sigmf-meta"), "w") as _fh:
+                json.dump({"global": {"core:datatype": dt, "core:sample_rate": 1e6, "core:version": "1.0.0"},
+                           "captures": [{"core:sample_start": 0, "core:frequency": 433.92e6}],
+                           "annotations": []}, _fh)
+        _u8 = _rs2.randint(0, 256, 20000).astype(_np2.uint8)
+        _write("m_cu8", "cu8", _u8)
+        _ref = ((_u8.astype(_np2.float64) - 127.5) / 127.5)
+        _ref = (_ref[0::2] + 1j * _ref[1::2]).astype(_np2.complex64)
+        _CACHE.clear()
+        _got = load("m_cu8")[0]
+        check("mem: lean cu8 decode is bit-identical to the reference formula",
+              _got.dtype == _np2.complex64 and _np2.array_equal(_got, _ref))
+        _i8 = _rs2.randint(-128, 128, 20000).astype(_np2.int8)
+        _write("m_cs8", "cs8", _i8)
+        _ref8 = (_i8.astype(_np2.float64) / 128.0)
+        _ref8 = (_ref8[0::2] + 1j * _ref8[1::2]).astype(_np2.complex64)
+        check("mem: lean cs8 decode is bit-identical to the reference formula",
+              _np2.array_equal(load("m_cs8")[0], _ref8))
+        _i16 = _rs2.randint(-32768, 32768, 20000).astype("<i2")
+        _write("m_ci16", "ci16_le", _i16)
+        _r16 = (_i16.astype(_np2.float64) / 32768.0)
+        _r16 = (_r16[0::2] + 1j * _r16[1::2]).astype(_np2.complex64)
+        check("mem: lean ci16 decode matches the reference formula",
+              _np2.allclose(load("m_ci16")[0], _r16, atol=1e-7))
+        # chunked complex64 mixer == the direct complex128 exponential
+        _x = (_rs2.randn(3_000_000) + 1j * _rs2.randn(3_000_000)).astype(_np2.complex64)
+        _want = (_x * _np2.exp(-2j * _np2.pi * (12345.0 / 1e6) * _np2.arange(len(_x)))).astype(_np2.complex64)
+        _mixed = _mix(_x, 12345.0, 1e6)
+        check("mem: chunked mixer matches the full-length exponential (across chunk joins)",
+              _mixed.dtype == _np2.complex64 and float(_np2.max(_np2.abs(_mixed - _want))) < 1e-3,
+              "%.2e" % float(_np2.max(_np2.abs(_mixed - _want))))
+        check("mem: zero offset returns the samples unchanged", _np2.array_equal(_mix(_x[:100], 0.0, 1e6), _x[:100]))
+        # bounded window lands on the burst
+        _n = 10_000_000
+        _q = (_rs2.randn(_n) * 0.01).astype(_np2.complex64)
+        _q[7_300_000:7_500_000] += 1.0
+        _a, _b, _tr = _pick_window(_q, 1e6, None, None, cap=1_000_000)
+        check("mem: over-long selection is capped and flagged",
+              _tr and (_b - _a) <= 1_000_000 and window_note() is not None)
+        check("mem: the capped window contains the burst",
+              _a <= 7_300_000 and _b >= 7_500_000, "%d..%d" % (_a, _b))
+        _a2, _b2, _tr2 = _pick_window(_q, 1e6, 7.0, 7.6, cap=1_000_000)
+        check("mem: a selection already under the cap is left exactly as asked",
+              (not _tr2) and _a2 == 7_000_000 and _b2 == 7_600_000 and window_note() is None)
+        # cache honours a byte budget and always keeps the capture in use
+        _saved_budget = globals()["_cache_budget"]
+        globals()["_cache_budget"] = lambda: 1
+        try:
+            _CACHE.clear(); load("m_cu8"); load("m_cs8"); load("m_ci16")
+            check("mem: cache evicts down to the budget but keeps the capture in use",
+                  list(_CACHE.keys()) == ["m_ci16"])
+        finally:
+            globals()["_cache_budget"] = _saved_budget
+        check("mem: heavy operations share one lock", hasattr(_HEAVY_LOCK, "acquire"))
+    finally:
+        globals()["_cap_dir"] = _saved2
+        _CACHE.clear()
+        _sh2.rmtree(_tmp2, ignore_errors=True)
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,

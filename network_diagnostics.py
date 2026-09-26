@@ -26774,12 +26774,32 @@ def register_network_diagnostics(app, logger=None):
         except (TypeError, ValueError): return None
 
     def _analyze(fn, **kw):
+        # Anything that loads a capture is serialised: two multi-hundred-MB
+        # analyses at once (a second click, or one still running after the page
+        # was left) is what runs a small Ragnar out of memory. Bit-string tools
+        # (frames / crc / fingerprint) touch no capture and never wait.
+        heavy = bool(kw.get('name'))
+        lock = getattr(sigmf_analyzer, '_HEAVY_LOCK', None) if heavy else None
+        if lock is not None and not lock.acquire(timeout=60):
+            return jsonify({"ok": False, "busy": True,
+                            "error": "another analysis is still running — try again when it finishes"}), 429
         try:
-            return jsonify(fn(**kw))
+            if hasattr(sigmf_analyzer, 'window_reset'):
+                sigmf_analyzer.window_reset()
+            r = fn(**kw)
+            w = sigmf_analyzer.window_note() if hasattr(sigmf_analyzer, 'window_note') else None
+            if w and isinstance(r, dict):
+                r.setdefault("analysed_window", w)
+            return jsonify(r)
         except ValueError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 404
+        except MemoryError:
+            return jsonify({"ok": False, "error": "not enough free memory for this analysis — zoom to a shorter selection"}), 507
         except Exception as exc:   # pragma: no cover - defensive
             return jsonify({"ok": False, "error": str(exc)}), 500
+        finally:
+            if lock is not None:
+                lock.release()
 
     @app.route('/api/net/rtl/analyze/list', methods=['GET'])
     def net_rtl_analyze_list():
