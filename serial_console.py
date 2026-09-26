@@ -407,7 +407,8 @@ def start(port, baud='auto'):
         holder = None
     if holder:
         return {'success': False, 'error': 'port is in use by %s' % holder}
-    save_config({'port': port, 'baud': baud, 'enabled': True})
+    save_config({'port': port, 'baud': baud, 'enabled': True,
+                 'share_mesh': bool(load_config().get('share_mesh'))})
     _register_claim()
     _reader.start(port, baud)
     return {'success': True, 'status': _reader.status()}
@@ -417,7 +418,7 @@ def stop(release=False):
     _reader.stop()
     cfg = load_config()
     if release:
-        cfg = {}
+        cfg = {'share_mesh': bool(cfg.get('share_mesh'))}   # the share choice outlives the port
     else:
         cfg['enabled'] = False
     save_config(cfg)
@@ -427,7 +428,21 @@ def stop(release=False):
 def status():
     st = _reader.status()
     st['reserved_port'] = reserved_port()
+    st['share_mesh'] = shared_with_mesh()
     return st
+
+
+def shared_with_mesh():
+    """Per-unit opt-in: may other mesh units VIEW this console's output on tag
+    trust (read-only)? Off by default; control (start/stop) never follows it."""
+    return bool(load_config().get('share_mesh'))
+
+
+def set_share(on):
+    cfg = load_config()
+    cfg['share_mesh'] = bool(on)
+    save_config(cfg)
+    return {'success': True, 'share_mesh': bool(on)}
 
 
 def output(since=0, limit=1000):

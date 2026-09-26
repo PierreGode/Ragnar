@@ -1350,7 +1350,8 @@
                     <label class="flex items-center gap-1 text-gray-400"><input type="checkbox" id="sc-stamps"> Timestamps</label>
                     <button onclick="scClearView()" class="text-gray-400 hover:text-white">Clear view</button>
                     <button onclick="scDownload()" class="text-gray-400 hover:text-white">Download log</button>
-                    <button onclick="scStop(true)" title="Stop and un-reserve the port so other components may use it" class="text-gray-500 hover:text-red-300 sm:ml-auto">Release port</button>
+                    <label id="sc-share-wrap" class="flex items-center gap-1 text-gray-400" title="Let other Ragnars in the mesh VIEW this console's output (read-only). Starting/stopping it from another unit still needs the mesh secret."><input type="checkbox" id="sc-share" onchange="scShareChanged()"> Share with mesh (view-only)</label>
+                    <button id="sc-release" onclick="scStop(true)" title="Stop and un-reserve the port so other components may use it" class="text-gray-500 hover:text-red-300 sm:ml-auto">Release port</button>
                 </div>
             </div>
         </div>
@@ -8802,7 +8803,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260926-serial-console"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260927-console-mesh-share"></script>
 
 
 

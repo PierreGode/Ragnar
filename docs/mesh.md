@@ -133,9 +133,10 @@ Tailscale. Because the app is pure REST, a plain HTTP relay covers all of it.
 The web dashboard uses the same gateway for the
 [Device Console](serial-console.md): pick another unit in the card and its
 read-only serial console (a switch or firewall cabled to that Ragnar) streams
-through this unit. Only a content-free status summary
-(`/api/mesh/serial-console/status`) is readable on tag trust; the console output
-itself needs the gateway, and therefore the mesh secret.
+through this unit — full view and control. Without a mesh secret, a unit can still
+**share its console view-only**: its operator ticks *Share with mesh* on that unit,
+and peers read the output on tag trust through a dedicated `/api/mesh/` route.
+Sharing is off by default and per unit.
 
 ---
 
