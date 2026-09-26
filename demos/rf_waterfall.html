@@ -163,6 +163,8 @@
   .drow input[type=range]{flex:1 1 90px;min-width:70px;accent-color:var(--cyan)}
   .drow input[type=number],.drow input[type=text],.drow select{width:72px;font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 6px}
   .drow select{width:auto;max-width:100%;min-width:0}
+  .drow label.dchk{min-width:0;display:inline-flex;align-items:center;gap:6px;color:var(--ink);cursor:pointer}
+  .drow label.dchk input{accent-color:var(--cyan);width:16px;height:16px;margin:0}
   .dnote{font-size:10px;line-height:1.5;color:var(--muted)}
   .dnote b{color:var(--ink-dim);font-weight:500}
   .svbands{display:flex;flex-wrap:wrap;gap:4px 10px} .svbands label{min-width:0;color:var(--ink-dim);font-size:11px;display:inline-flex;align-items:center;gap:3px}
@@ -2633,6 +2635,7 @@
         +'<div class="drow"><label>Detector</label><select class="rdet">'
           +'<option value="peak">Peak (find signals)</option><option value="rms">RMS (measure power)</option>'
           +'<option value="avg">Average (dB)</option><option value="sample">Sample</option><option value="min">Min (noise floor)</option></select></div>'
+        +'<div class="drow"><label>SDR spike</label><label class="dchk" title="Every RTL-SDR shows a steady line of its own at the frequency it is tuned to. On: narrow bands are tuned so that line falls outside them; wide bands move the tuner off the band centre and fill the ~50 kHz line in from the noise beside it."><input type="checkbox" class="rhdc"> Hide the SDR centre spike</label></div>'
         +'<div class="dnote"><b>Detector</b> decides how the FFT bins inside one display column are combined, and it changes every level you read. <b>Peak</b> finds signals but reads a noise floor several dB high — use it to look. <b>RMS</b> averages power and is the detector to use when a level, channel power or noise figure has to be right. <b>Average</b> averages in dB (steadier, reads noise lower still). <b>Sample</b> takes the bin at the column centre, unsmoothed. <b>Min</b> digs the floor out from under bursty traffic.</div>'
         +'<div class="dnote"><b>Auto FFT</b> keeps ≥2 FFT bins per column at any zoom (finer RBW when zoomed in). More <b>averaging</b> = smoother, slower to react. <b>Flat-top</b> reads signal levels most accurately; <b>Blackman-Harris</b> best separates a weak signal next to a strong one. Applies to the whole dongle.</div>');
       var fft=g.querySelector('.rfft'), avg=g.querySelector('.ravg'), win=g.querySelector('.rwin'), bins=g.querySelector('.rbins');
@@ -2643,6 +2646,8 @@
       bins.addEventListener('change',function(){ self.rtlApply({bins:+bins.value}); });
       var det=g.querySelector('.rdet');
       det.addEventListener('change',function(){ self.det=det.value; self.rtlApply({detector:det.value}); self.repaint(); });
+      var hdc=g.querySelector('.rhdc');
+      hdc.addEventListener('change',function(){ self.rtlApply({hide_dc:hdc.checked?1:0}); });
     } else {
       g.insertAdjacentHTML('beforeend',
         '<div class="drow"><label>RBW</label><select class="rhb"><option value="0">Auto</option>'
@@ -2730,7 +2735,8 @@
       this._gainUI(t);
       if(r){ var f=r.querySelector('.rfft'); if(f){ f.value=String(t.fft||0); r.querySelector('.ravg').value=t.avg; r.querySelector('.ravgn').textContent=t.avg;
         r.querySelector('.rwin').value=t.window; r.querySelector('.rbins').value=String(t.bins);
-        var dsel=r.querySelector('.rdet'); if(dsel && t.detector){ dsel.value=t.detector; this.det=t.detector; } } }
+        var dsel=r.querySelector('.rdet'); if(dsel && t.detector){ dsel.value=t.detector; this.det=t.detector; }
+        var hdc=r.querySelector('.rhdc'); if(hdc) hdc.checked=(t.hide_dc===undefined)?true:!!t.hide_dc; } }
     } else { var h=this.hw;
       g.querySelector('.hlna').value=h.lna; g.querySelector('.hlnan').textContent=h.lna; g.querySelector('.hvga').value=h.vga; g.querySelector('.hvgan').textContent=h.vga;
       pr(g.querySelector('.hamp'),!!h.amp); pr(g.querySelector('.hant'),!!h.antenna); }

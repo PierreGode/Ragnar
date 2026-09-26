@@ -26554,7 +26554,8 @@ def register_network_diagnostics(app, logger=None):
                                               window=data.get('window'), bins=data.get('bins'),
                                               bias_t=data.get('bias_t'), direct=data.get('direct'),
                                               conv_hz=data.get('conv_hz'),
-                                              detector=data.get('detector')))
+                                              detector=data.get('detector'),
+                                              hide_dc=data.get('hide_dc')))
         return jsonify(rtl_sdr.get_tuning())
 
     # Prove a peak is a transmitter and not a mixer image or the DC spike: the

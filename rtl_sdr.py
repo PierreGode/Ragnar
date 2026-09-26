@@ -352,6 +352,10 @@ _IQ_AVG_MAX = 24              # FFT windows averaged per row (Welch smoothing; c
 _IQ_SR_MIN = 1_000_000        # RTL-SDR minimum practical sample rate (Hz)
 _IQ_SR_MAX = 3_200_000        # RTL-SDR maximum sample rate (Hz)
 _IQ_EDGE_MARGIN = 1.15        # oversample the span this much so band edges stay clean
+_DC_HALF_HZ = 35_000          # half-width of the RTL-SDR centre hump that gets filled in
+_DC_CLEAR_HZ = 60_000         # tune this far past the band edge to keep the hump out of it
+_DC_SR_CAP = 2_400_000        # highest rate we raise to for that (drop-free on a Pi)
+_DC_SHIFT_MAX = 300_000       # how far off the band centre the tuner moves on wide spans
 
 # Tuner corrections shared by both captures (one dongle). PPM trims the RTL-SDR's
 # crystal offset (matters on the narrow Z-Wave/LoRa channels); gain is tuner gain
@@ -390,6 +394,13 @@ _detector = "rms"          # how the bins inside one display column are combined
 _bias_t = False            # 4.5 V on the antenna port (RTL-SDR Blog V3/V4) to power an LNA
 _direct = "auto"           # direct sampling: "auto" (on below 28.8 MHz), "on", "off"
 _conv_hz = 0               # up/down-converter LO: hardware freq = RF freq + _conv_hz
+# Every RTL-SDR shows a hump of its own at the frequency it is tuned to (DC
+# offset + LO leakage + 1/f noise): measured on this dongle at 2 MS/s it is
+# ~14 dB above the floor and about +-20 kHz wide — a steady "beam" in the
+# middle of the band that is not a signal. With this on, the tuner is placed
+# so the hump lands outside the band, or where it can't, away from the band
+# centre with its few bins filled in from the noise either side.
+_hide_dc = True
 
 
 # The R820T's discrete tuner gains (dB). Asking for anything else gets the
@@ -463,7 +474,7 @@ def _settings_path():
 
 
 _SETTINGS_KEYS = ("ppm", "gain", "agc", "fft", "avg", "window", "bins",
-                  "bias_t", "direct", "conv_hz", "detector")
+                  "bias_t", "direct", "conv_hz", "detector", "hide_dc")
 _SETTINGS_KEYS_G = tuple("_" + k for k in _SETTINGS_KEYS)
 
 
@@ -482,7 +493,8 @@ def _save_settings():
     try:
         d = {"ppm": _ppm, "gain": _gain, "agc": _agc, "fft": _fft, "avg": _avg,
              "window": _window, "bins": _bins, "bias_t": _bias_t,
-             "direct": _direct, "conv_hz": _conv_hz, "detector": _detector}
+             "direct": _direct, "conv_hz": _conv_hz, "detector": _detector,
+             "hide_dc": _hide_dc}
         path = _settings_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
@@ -498,7 +510,7 @@ def _load_settings():
     """Apply the saved settings at import. A fresh install has none, and gets
     the shipped defaults."""
     global _ppm, _gain, _agc, _fft, _avg, _window, _bins, _bias_t, _direct
-    global _conv_hz, _detector
+    global _conv_hz, _detector, _hide_dc
     try:
         with open(_settings_path()) as fh:
             d = json.load(fh)
@@ -529,6 +541,8 @@ def _load_settings():
             _conv_hz = int(d["conv_hz"])
         if d.get("detector") in _DETECTORS:
             _detector = d["detector"]
+        if "hide_dc" in d:
+            _hide_dc = bool(d["hide_dc"])
         return True
     except (TypeError, ValueError):
         return False
@@ -541,18 +555,19 @@ def get_tuning():
             "agc_status": agc_status(),
             "fft": _fft, "avg": _avg, "window": _window, "bins": _bins,
             "bias_t": _bias_t, "direct": _direct, "conv_hz": _conv_hz,
-            "detector": _detector,
+            "detector": _detector, "hide_dc": bool(_hide_dc),
             "fft_sizes": list(_FFT_SIZES), "windows": list(_WINDOWS),
             "bin_choices": list(_BIN_CHOICES), "detectors": list(_DETECTORS)}
 
 
 def set_tuning(ppm=None, gain=None, fft=None, avg=None, window=None, bins=None,
-               bias_t=None, direct=None, conv_hz=None, detector=None, agc=None):
+               bias_t=None, direct=None, conv_hz=None, detector=None, agc=None,
+               hide_dc=None):
     """Set PPM freq-correction, tuner gain and the resolution / hardware extras,
     then reapply to any running capture. gain may be a number (dB), or
     'auto'/'' /None for AGC. Invalid values are ignored (the setting is kept)."""
     global _ppm, _gain, _fft, _avg, _window, _bins, _bias_t, _direct, _conv_hz
-    global _detector, _agc
+    global _detector, _agc, _hide_dc
     if ppm is not None:
         try:
             _ppm = max(-1000, min(1000, int(float(ppm))))
@@ -599,6 +614,8 @@ def set_tuning(ppm=None, gain=None, fft=None, avg=None, window=None, bins=None,
         _detector = str(detector).lower()
     if bias_t is not None:
         _bias_t = str(bias_t).lower() in ("1", "true", "on", "yes")
+    if hide_dc is not None:
+        _hide_dc = str(hide_dc).lower() in ("1", "true", "on", "yes")
     if direct is not None and str(direct).lower() in ("auto", "on", "off"):
         _direct = str(direct).lower()
     if conv_hz is not None:
@@ -631,8 +648,8 @@ def reset_tuning():
 def _settings_sig():
     """Everything that changes a capture's output — a start() with a new value
     restarts the sweep even on the same span."""
-    return (_ppm, _gain, _fft, _avg, _window, _bins, _bias_t, _direct, _conv_hz,
-            _detector)
+    return (_hide_dc, _ppm, _gain, _fft, _avg, _window, _bins, _bias_t, _direct,
+            _conv_hz, _detector)
 
 
 def _parse_hz(txt):
@@ -1290,8 +1307,8 @@ def _iq_available():
         return False
 
 
-def _iq_plan(lo_hz, hi_hz):
-    """Pick a single-tune (center, sample_rate) covering [lo,hi] Hz, or None (pure).
+def _iq_plan(lo_hz, hi_hz, hide_dc=False):
+    """Pick a single-tune (center, sample_rate, notch_hz) covering [lo,hi] Hz, or None (pure).
 
     Returns None when the span is wider than one RTL-SDR tune can hold
     (``_IQ_MAX_SPAN_HZ``) — the caller then falls back to the rtl_power sweep.
@@ -1307,8 +1324,50 @@ def _iq_plan(lo_hz, hi_hz):
     if span <= 0 or span > _IQ_MAX_SPAN_HZ:
         return None
     center = (lo_hz + hi_hz) // 2
+    if hide_dc:
+        # Narrow band: tune just past its top edge so the hump is not in it at all.
+        need = int(round(2 * (span + _DC_CLEAR_HZ) * _IQ_EDGE_MARGIN))
+        if need <= _DC_SR_CAP:
+            return hi_hz + _DC_CLEAR_HZ, max(_IQ_SR_MIN, need), None
+        # Wide band: move the tuner off the band centre (433.92 MHz is where the
+        # remotes are) as far as the rate allows, and fill the hump in there.
+        shift = int(min(_DC_SHIFT_MAX, _DC_SR_CAP / (2.0 * _IQ_EDGE_MARGIN) - span / 2.0))
+        if shift > 2 * _DC_HALF_HZ:
+            sr = int(min(_IQ_SR_MAX, max(_IQ_SR_MIN,
+                                         round(2 * (span / 2.0 + shift) * _IQ_EDGE_MARGIN))))
+            return center + shift, sr, center + shift
+        sr = int(min(_IQ_SR_MAX, max(_IQ_SR_MIN, round(span * _IQ_EDGE_MARGIN))))
+        return center, sr, center
     sr = int(min(_IQ_SR_MAX, max(_IQ_SR_MIN, round(span * _IQ_EDGE_MARGIN))))
-    return center, sr
+    return center, sr, None
+
+
+def _fill_dc(db, center_hz, sr_hz, notch_hz, half_hz=_DC_HALF_HZ):
+    """Fill the FFT bins within ``half_hz`` of ``notch_hz`` with a straight line
+    between the noise just either side (pure; ``db`` is fftshifted, low->high).
+
+    Returns the list, changed in place. Only ever the tuner's own hump: anything
+    real there is lost, which is why the plan keeps it off the band centre.
+    """
+    n = len(db)
+    if not n or notch_hz is None or sr_hz <= 0:
+        return db
+    bw = sr_hz / float(n)
+    k0 = (notch_hz - (center_hz - sr_hz / 2.0)) / bw
+    a = max(0, int(k0 - half_hz / bw))
+    b = min(n - 1, int(k0 + half_hz / bw) + 1)
+    if b <= a:
+        return db
+    side = max(2, int(8000 / bw))                      # ~8 kHz of noise either side
+    left = db[max(0, a - side):a] or db[b + 1:b + 1 + side]
+    right = db[b + 1:b + 1 + side] or left
+    if not left:
+        return db
+    lv = sorted(left)[len(left) // 2]                  # medians: a signal beside it
+    rv = sorted(right)[len(right) // 2]                # does not become the fill
+    for i in range(a, b + 1):
+        db[i] = lv + (rv - lv) * (i - a + 1) / float(b - a + 2)
+    return db
 
 
 _CLIP_WARN_FRAC = 1e-4     # >0.01% of samples pinned at the rail = overloading
@@ -1696,11 +1755,11 @@ class PowerSweep:
         _usb_settle(self._stop)                 # don't reopen the dongle the instant it closed
         if self._stop.is_set():
             return
-        plan = _iq_plan(lo, hi) if _iq_available() else None
+        plan = _iq_plan(lo, hi, _hide_dc) if _iq_available() else None
         # The managed gain restarts the capture here rather than through
         # set_tuning(), so it never reaches into this thread's own lifecycle.
         while plan and not self._stop.is_set():
-            ok = self._run_iq(lo, hi, plan[0], plan[1])
+            ok = self._run_iq(lo, hi, plan[0], plan[1], plan[2])
             want = self._agc_pending
             if want is not None and not self._stop.is_set():
                 self._agc_pending = None
@@ -1716,7 +1775,7 @@ class PowerSweep:
         # give the IQ engine one more try before settling for the slow sweep.
         stop = self._stop
         _usb_settle(stop)
-        if plan and not stop.wait(0.8) and self._run_iq(lo, hi, plan[0], plan[1]):
+        if plan and not stop.wait(0.8) and self._run_iq(lo, hi, plan[0], plan[1], plan[2]):
             return
         if stop.is_set():
             return
@@ -1725,7 +1784,7 @@ class PowerSweep:
         self._overload = None        # the sweep engine never sees raw samples
         self._run_rtl_power(lo, hi)
 
-    def _run_iq(self, lo, hi, center, sr):
+    def _run_iq(self, lo, hi, center, sr, notch=None):
         """Stream raw IQ from ``rtl_sdr`` and FFT it into waterfall rows.
 
         Returns True if the capture ran (or was stopped cleanly), False if it
@@ -1807,7 +1866,10 @@ class PowerSweep:
                 spec = np.fft.fftshift(np.fft.fft(cwin, axis=1), axes=1)
                 psd = (spec.real ** 2 + spec.imag ** 2).mean(axis=0) / win_norm
                 db = 10.0 * np.log10(psd + 1e-12)
-                grid = _iq_to_grid(db.tolist(), center, sr, lo, hi, bins=bins)
+                dbl = db.tolist()
+                if notch is not None:
+                    _fill_dc(dbl, center, sr, notch)
+                grid = _iq_to_grid(dbl, center, sr, lo, hi, bins=bins)
                 floor_ema = self._update_iq_floor(grid, floor_ema)
                 self._push_frame(grid)
                 if self._agc_pending is not None:
@@ -2110,7 +2172,7 @@ _power = PowerSweep()
 # "reset to defaults" and the selftest both have something honest to refer to.
 _DEFAULTS = {k: globals()[k] for k in
              ("_ppm", "_gain", "_agc", "_fft", "_avg", "_window", "_bins",
-              "_bias_t", "_direct", "_conv_hz", "_detector")}
+              "_bias_t", "_direct", "_conv_hz", "_detector", "_hide_dc")}
 _load_settings()          # a saved configuration wins over the shipped defaults
 _detect_cache = None
 
@@ -4652,6 +4714,27 @@ def _selftest_body(_saved_globals=None):
           _iq_plan(433_050_000, 434_790_000)[1] >= int(1_740_000 * _IQ_EDGE_MARGIN) - 1)
     check("iq: sub-min span still tunes (clamped to _IQ_SR_MIN)",
           _iq_plan(868_100_000, 868_300_000)[1] == _IQ_SR_MIN)
+    # --- hide the tuner's own centre hump ---
+    _n = _iq_plan(868_100_000, 868_300_000, True)
+    check("dc: a narrow band is tuned past its edge — the hump is not in it",
+          _n[2] is None and _n[0] - (_n[1] / (2 * _IQ_EDGE_MARGIN)) <= 868_100_000
+          and _n[0] >= 868_300_000 + _DC_HALF_HZ)
+    _w = _iq_plan(433_050_000, 434_790_000, True)
+    check("dc: a wide band moves the tuner off 433.92 MHz and notches it there",
+          _w[2] == _w[0] and abs(_w[0] - 433_920_000) > 4 * _DC_HALF_HZ
+          and _w[1] <= _DC_SR_CAP
+          and _w[0] - _w[1] / (2 * _IQ_EDGE_MARGIN) <= 433_050_000 + 1
+          and _w[0] + _w[1] / (2 * _IQ_EDGE_MARGIN) >= 434_790_000 - 1)
+    check("dc: off, the plan is unchanged", _iq_plan(433_050_000, 434_790_000)[2] is None
+          and _iq_plan(433_050_000, 434_790_000)[0] == 433_920_000)
+    _db = [-70.0] * 1024
+    for _i in range(500, 525):
+        _db[_i] = -55.0
+    _db[300] = -30.0                                    # a real signal elsewhere
+    _fill_dc(_db, 1_000_000, 1_024_000, 1_000_000 + 0)  # hump at bin 512
+    check("dc: the hump is filled from the noise beside it, a real signal kept",
+          max(_db[480:545]) < -69.0 and _db[300] == -30.0)
+    check("dc: no notch is a no-op", _fill_dc([1.0, 2.0], 0, 1, None) == [1.0, 2.0])
 
     # --- IQ PSD -> display grid: a tone lands in the right column, edges dropped ---
     _N, _ctr, _sr = 1024, 868_350_000, 3_000_000

@@ -24,7 +24,7 @@ interrupting whatever is running — see [Concurrency](#concurrency).
 | `POST /api/net/rtl/power/start` | Start a sweep. `{band}` (`315`/`433`/`868`/`915`/`subghz`) or `{lo_hz, hi_hz}` |
 | `POST /api/net/rtl/power/stop` | Stop it |
 | `GET /api/net/rtl/power/frames?since=<seq>` | New rows since `seq`, plus `band_hz`, `floor_dbm`, `engine`, `rbw_hz`, `detector`, `overload`, `max_hold` |
-| `GET\|POST /api/net/rtl/tuning` | Read or set `ppm`, `gain`, `agc`, `fft`, `avg`, `window`, `bins`, `detector`, `bias_t`, `direct`, `conv_hz` |
+| `GET\|POST /api/net/rtl/tuning` | Read or set `ppm`, `gain`, `agc`, `fft`, `avg`, `window`, `bins`, `detector`, `bias_t`, `direct`, `conv_hz`, `hide_dc` (hide the RTL-SDR centre spike; default on) |
 | `POST /api/net/rtl/calibrate` | PPM from a reference: `{true_mhz, near_mhz}` |
 | `POST /api/net/rtl/tuning/reset` | Restore the shipped defaults (gain, detector, resolution, hardware options) |
 | `POST /api/net/rtl/reset` | USB-reset a silent dongle; if it is missing or stuck, run the self-heal recovery instead |

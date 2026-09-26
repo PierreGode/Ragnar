@@ -188,6 +188,23 @@ bandwidth (the width of one FFT bin).
   rectangle default).
 - *HackRF:* **RBW** (hackrf_sweep bin width: Auto, or 2.5 kHz–1 MHz).
 
+**SDR centre spike.** Every RTL-SDR shows a steady line of its own at the
+frequency it is tuned to — DC offset, LO leakage and low-frequency noise. On
+this Pi's dongle it measured ~14 dB above the floor and about ±25 kHz wide, and
+with the tuner in the middle of the 433 MHz band it sat exactly on 433.92 MHz,
+where it looks like a transmitter that never stops. **⚙ Settings → Resolution →
+Hide the SDR centre spike** (on by default) deals with it:
+- *Narrow bands* (up to ~1 MHz): the dongle is tuned 60 kHz past the band's top
+  edge, so the spike is not in the band at all and nothing is hidden.
+- *Wide bands*: the tuner moves off the band centre (up to 300 kHz, at up to
+  2.4 MS/s — 433.05–434.79 MHz tunes to 434.093 MHz) and the ±35 kHz around it
+  is filled in from the noise either side. A real signal inside that ~70 kHz
+  window is hidden too, which is why it is kept away from the band centre.
+  Untick it to see exactly what the dongle delivers.
+
+The **Image check** button tells the spike apart from a real transmitter either
+way (verdict *DC spike* or *image*).
+
 **Detector.** An FFT produces far more bins than the display has columns, so
 several bins have to be combined into each column — and the rule used decides
 every level on the page. The **Det** tile shows the active rule and
