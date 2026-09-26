@@ -114,9 +114,9 @@ driver is holding it. That lets `/status` tell three cases apart:
   DVB-T driver still holds it (blacklist `dvb_usb_rtl28xxu`, replug).
 - **`available: true`** — good; the SDR tab and RF Waterfall button light up.
 
-## Mesh overlays (Z-Wave / Meshtastic / MeshCore / LoRaWAN / Wi-Fi HaLow)
+## Mesh overlays (Z-Wave / Meshtastic / MeshCore / LoRaWAN / Wi-Fi HaLow / Zigbee Suzi)
 
-Both RF Waterfall panels (RTL-SDR and HackRF) have a **📡 Mesh / LoRa / HaLow** dropdown that
+Both RF Waterfall panels (RTL-SDR and HackRF) have a **📡 Mesh / IoT bands** dropdown that
 sweeps a chosen mesh's band and overlays its exact channel centres on the
 spectrum, so you can watch the mesh's bursts/chirps land on its channels — device
 chatter, retries, or a **jammer** parked on a channel.
@@ -143,14 +143,34 @@ chatter, retries, or a **jammer** parked on a channel.
 
   1, 2, 4, 8 and 16 MHz channels share each band, so the markers are a reference
   grid, not a claim about which width a given network uses — the energy on the
-  waterfall shows that. Click a HaLow burst and the measurement names it: anything
-  700 kHz or wider in 863–869, 902–928 or 779–787 MHz is identified as
-  *wideband OFDM — likely Wi-Fi HaLow*, because LoRa never exceeds 500 kHz.
+  waterfall shows that.
+- **Zigbee Suzi** — the sub-GHz feature of Zigbee 4.0 / Zigbee PRO 2023 from the
+  Connectivity Standards Alliance (certification from 2026), running on IEEE
+  802.15.4 sub-GHz radios for longer range than 2.4 GHz Zigbee:
+
+  | Preset | Band | Markers |
+  | --- | --- | --- |
+  | EU 868 | 863–870 MHz | IEEE 802.15.4 channel 0 at 868.3 MHz |
+  | NA 915 | 902–928 MHz | IEEE 802.15.4 channels 1–10, 906–924 MHz, 2 MHz apart |
+
+  The bands are the ones the Alliance names (868 MHz Europe, 915 MHz North
+  America). **Suzi's own channel plan is in the Alliance's specification, which
+  is not public**, so the markers are IEEE 802.15.4's published sub-GHz channels
+  as a reference grid — not a claim that Suzi uses them. Read the real channels
+  from where the energy lands.
+
+**Naming what you click.** Click a burst in these bands and the measurement
+labels it by width. LoRa never exceeds 500 kHz, so a signal 700 kHz or wider in
+863–869, 902–928 or 779–787 MHz is *likely Wi-Fi HaLow or 802.15.4 / Zigbee
+Suzi* — width alone cannot separate those two (HaLow is 1–16 MHz of OFDM; 802.15.4
+at 915 MHz is 1–2 MHz). A burst between 90 and 700 kHz is *likely LoRa, or an FSK
+mesh such as Zigbee Suzi*.
 
 **This is an energy / occupancy view, not a decoder — and deliberately so:**
 
-- **Wi-Fi HaLow is not demodulated either** — it is 802.11 OFDM, and the
-  traffic is WPA3-encrypted. Presence, channel and width are what you get.
+- **Wi-Fi HaLow and Zigbee Suzi are not demodulated either** — HaLow is 802.11
+  OFDM and WPA3-encrypted; Suzi is 802.15.4 with Zigbee's AES-128 network
+  encryption. Presence, channel and width are what you get.
 - **LoRa cannot be demodulated with `rtl_power`/`rtl_433`.** LoRa is chirp
   spread-spectrum; demodulating it needs `gr-lora_sdr` (GNU Radio — heavy) or a
   real LoRa radio (SX127x/SX126x). This view never claims to read LoRa frames.
