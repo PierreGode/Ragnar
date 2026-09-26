@@ -1795,7 +1795,9 @@
         +(det.needs_blog_driver?' · needs RTL-SDR Blog driver':'');
       // radio vanished mid-decode -> drop back
       if(self.decoding && !self.available){ self.setView('wf'); }
+      self.heal=(st&&st.heal)||null;
       self.applyDesired(); self.updateTag();
+      if(self.mode==='idle') self._idleVeil();      // keep the no-radio screen current
     }).catch(function(){});
   };
   Scope.prototype.applyDesired=function(){
@@ -1813,7 +1815,34 @@
     else if(mode==='synth'){ this.hideVeil(); this.bandSel.classList.toggle('hidden',!this.cfg.synthBands);
       this.model=this.cfg.synth(this.synthBand||this.cfg.synthDefault); this.lo=this.model.lo;this.hi=this.model.hi;this.floor=this.model.floor; this.drawRuler(); }
     else{ this.bandSel.classList.add('hidden'); this.zoomBtn.disabled=true;
-      this.showVeil('No '+this.cfg.short+' detected', this.detErr||('Connect a '+this.cfg.short+' to stream true RF, or enable the RF Waterfall demo for a synthetic feed.')); }
+      this._idleVeil(); }
+  };
+  // No radio: say what the self-healer is doing about it, not just "not detected".
+  Scope.prototype._idleVeil=function(){
+    var h=(this.cfg.tuner&&this.heal)||{}, st=h.state;
+    if(st==='recovering'){
+      this.showVeil('🩹 Recovering the '+this.cfg.short+'…', h.message||'Ragnar is power-cycling the USB port the dongle is stuck on.');
+      this._veilHealBtn();
+    } else if(st==='failed'){
+      this.showVeil('⚠ The '+this.cfg.short+' needs replugging', h.message||'Automatic recovery did not bring it back.');
+      this._veilHealBtn();
+    } else {
+      this.showVeil('No '+this.cfg.short+' detected', this.detErr||('Connect a '+this.cfg.short+' to stream true RF, or enable the RF Waterfall demo for a synthetic feed.'));
+      var b=this.veil.querySelector('.vrst'); if(b) b.remove();
+    }
+  };
+  Scope.prototype._veilHealBtn=function(){
+    var self=this; if(this.veil.querySelector('.vrst')) return;
+    var b=document.createElement('button'); b.className='mini vrst'; b.style.marginTop='10px';
+    b.innerHTML='⭮&nbsp;Recover now';
+    b.title='Run the recovery ladder now: power-cycle the USB port the dongle is stuck on (the same as replugging it). Can take ~30 s.';
+    b.addEventListener('click',function(){ b.disabled=true; b.innerHTML='⭮&nbsp;recovering… (up to ~40 s)';
+      fetch('/api/net/rtl/reset',{method:'POST'}).then(function(r){return r.json();}).then(function(x){
+        b.disabled=false; b.innerHTML='⭮&nbsp;Recover now';
+        if(x&&x.ok){ self._stall=0; self._rangeKnown=false; self.checkStatus(); }
+        else if(x) self.veilS.textContent=(x.heal&&x.heal.message)||x.error||'Not back yet.'; })
+        .catch(function(){ b.disabled=false; b.innerHTML='⭮&nbsp;Recover now'; }); });
+    this.veil.appendChild(b);
   };
   Scope.prototype.updateTag=function(){
     var m=this.decoding?'decode':this.mode;

@@ -342,25 +342,46 @@ live spectrum client-side from the incoming frames:
   bursty remote reads ~5% and a continuous carrier ~100%). This is the "what's
   actually on the band" answer.
 
-## When the dongle stops responding
+## When the dongle stops responding — self-healing
 
 
-An RTL2832U can end up in a state where it still enumerates, still opens and
-still passes `rtl_test` — but never delivers a single sample. The panel then
-sits there: engine running, no rows. Repeated open/close cycles are what put it
-there, which is why captures are serialised and the USB device is given time to
-settle between them.
+RTL-SDR dongles fail in three ways, and Ragnar recovers the two it can by itself.
+A background watcher checks the dongle every few seconds:
 
-The panel now detects it — running, but nothing arriving for several seconds —
-and offers **⭮ Reset dongle**, which is also in **⚙ Settings → Hardware**. It
-re-enumerates the device over USB (`USBDEVFS_RESET`), exactly what the kernel
-does when you unplug and replug it: whatever is using the radio is stopped
-first, the device is reset, and the sweep you were running is restarted. No walk
-to the box, no `sudo`, no power cycle.
+| What it sees | What it does |
+| --- | --- |
+| **Open but silent** — the sweep is running but no rows arrive for 20 s | a USB reset (`USBDEVFS_RESET`); if that does not help, a port power-cycle |
+| **Stuck** — the port reports a device *connected* but it never finishes enumerating (kernel: `error -71`, `device not accepting address`, `Cannot enable. Maybe the USB cable is bad?`) | cuts that port's 5 V for 3 s and turns it back on — the software equivalent of unplugging and replugging it |
+| **Gone** — nothing connected on any port | nothing: it looks unplugged, and a port with nothing on it is never power-cycled |
 
-It needs root (the web UI normally runs as root); if it cannot, it says so
-rather than pretending to have fixed anything.
-API: `POST /api/net/rtl/reset`.
+Attempts back off (15 s, 45 s, 2 min, 5 min between tries) so a failing dongle is
+never hammered, and after 8 attempts it stops and asks for a person. Once the
+dongle is back, the sweep you were running is started again. Every recovery is
+logged to Watchtower as `RF_SDR_SELFHEAL`.
+
+The port power-cycle uses **uhubctl** — the Pi's root USB ports support per-port
+power switching — which the installer and updater install. Without it the
+fallback is resetting the whole USB controller, which also briefly drops anything
+else on it.
+
+**When the dongle keeps dropping out**, recovering it is not a fix: repeated
+disconnects on a Pi whose own supply is healthy point at the cable, the port or
+the dongle. The watcher reads the kernel log for the dongle's port, and the SDR
+check and the waterfall then say so plainly — for example *"dropped off USB 6
+times in 10 minutes (the kernel suspects the USB cable; USB protocol errors
+-71)"* — with what to try: a different short, data-rated cable, plugging straight
+into the Pi rather than through a hub, another port, and finally another dongle.
+
+**By hand:** the no-radio screen and the dashboard's **🩺 SDR check** show what
+the watcher is doing and offer **⭮ Recover now**, which runs the same steps
+immediately (a stuck dongle can take ~30 s to power-cycle and re-enumerate).
+The waterfall's own "radio is open but sending nothing" screen does the same.
+To switch self-healing off, set `rtl_self_heal` to `false` in the config or
+`POST /api/net/rtl/health {"enabled": false}`.
+
+API: `GET /api/net/rtl/health` (state, port, recent drops, kernel evidence,
+history), `POST /api/net/rtl/heal` (recover now), `POST /api/net/rtl/reset`
+(USB reset if present, otherwise the recovery ladder).
 
 ## Front-end health and proving a signal is real
 

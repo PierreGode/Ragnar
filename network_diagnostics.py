@@ -26577,8 +26577,38 @@ def register_network_diagnostics(app, logger=None):
     # USB, which is what replugging does.
     @app.route('/api/net/rtl/reset', methods=['POST'])
     def net_rtl_reset():
+        # Present but silent -> a USB reset. Missing or stuck -> the self-heal
+        # ladder (power-cycles the port it is stuck on).
         _log("net/rtl/reset")
-        return jsonify(rtl_sdr.usb_reset())
+        if rtl_sdr._usb_rtl_devname():
+            return jsonify(rtl_sdr.usb_reset())
+        h = rtl_sdr.heal_now()
+        return jsonify({"ok": bool(h.get("present")), "healed": True, "heal": h,
+                        "error": None if h.get("present") else h.get("message")})
+
+    # Self-healing: the background watcher that recovers a wedged, stuck or
+    # vanished dongle. GET = what it is doing; POST {enabled} switches it;
+    # POST /heal runs the recovery ladder now.
+    @app.route('/api/net/rtl/health', methods=['GET', 'POST'])
+    def net_rtl_health():
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            if 'enabled' in data:
+                on = bool(data.get('enabled'))
+                try:
+                    from init_shared import shared_data as _sd
+                    _sd.config['rtl_self_heal'] = on
+                    if hasattr(_sd, 'save_config'):
+                        _sd.save_config()
+                except Exception:
+                    pass
+                return jsonify(rtl_sdr.set_heal_enabled(on))
+        return jsonify(rtl_sdr.heal_status())
+
+    @app.route('/api/net/rtl/heal', methods=['POST'])
+    def net_rtl_heal():
+        _log("net/rtl/heal")
+        return jsonify(rtl_sdr.heal_now())
 
     # Harmonic check: measures 2x..nx the carrier, one tune at a time.
     @app.route('/api/net/rtl/harmonics', methods=['POST'])
@@ -27440,6 +27470,18 @@ def register_network_diagnostics(app, logger=None):
     # detection depends on (USB bus, tools, DVB driver, power, rtl_test) and
     # returns a one-line verdict + concrete fix steps. Reachable even when no
     # dongle is detected, so a user can find out *why*.
+    try:
+        _heal_on = True
+        try:
+            from init_shared import shared_data as _sd
+            _heal_on = bool(_sd.config.get('rtl_self_heal', True))
+        except Exception:
+            pass
+        rtl_sdr.start_healer(enabled=_heal_on)
+        _log("rtl self-heal watcher started (enabled=%s)" % _heal_on)
+    except Exception as _exc:
+        _log("rtl self-heal watcher not started: %s" % _exc)
+
     @app.route('/api/net/rtl/diagnose', methods=['GET'])
     def net_rtl_diagnose():
         _log("net/rtl/diagnose")

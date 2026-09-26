@@ -27,7 +27,9 @@ interrupting whatever is running — see [Concurrency](#concurrency).
 | `GET\|POST /api/net/rtl/tuning` | Read or set `ppm`, `gain`, `agc`, `fft`, `avg`, `window`, `bins`, `detector`, `bias_t`, `direct`, `conv_hz` |
 | `POST /api/net/rtl/calibrate` | PPM from a reference: `{true_mhz, near_mhz}` |
 | `POST /api/net/rtl/tuning/reset` | Restore the shipped defaults (gain, detector, resolution, hardware options) |
-| `POST /api/net/rtl/reset` | Re-enumerate the dongle over USB when it has stopped delivering samples |
+| `POST /api/net/rtl/reset` | USB-reset a silent dongle; if it is missing or stuck, run the self-heal recovery instead |
+| `GET\|POST /api/net/rtl/health` | Self-heal watcher: state, port, recent USB drops, kernel evidence, history; `POST {enabled}` switches it |
+| `POST /api/net/rtl/heal` | Run the recovery ladder now (power-cycles the port a stuck dongle is on) |
 
 A frame is `{seq, ts, power[]}` where `power` has `bins` entries spread evenly
 over `band_hz`. Poll `frames` with the last `seq` you saw; nothing is lost
