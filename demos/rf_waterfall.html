@@ -2904,8 +2904,8 @@
   };
 
   // ---- time axis (left edge of the 2D waterfall) --------------------------
-  // Hatch the strip filled in over the SDR centre spike, so it is never
-  // mistaken for a measurement. label: write what it is (the trace has room).
+  // Hatch the strip filled in over the SDR centre spike on the trace, so it is
+  // never mistaken for a measurement. label: write what it is.
   Scope.prototype._dcHatch=function(g,W,H,label){
     var sp=this._dcSpan(); if(!sp) return;
     var x0=Math.max(0,(sp[0]-this.lo)/(this.hi-this.lo)*W), x1=Math.min(W,(sp[1]-this.lo)/(this.hi-this.lo)*W);
@@ -2927,7 +2927,6 @@
     var d=this.d||1, W=this.fall.width, H=this.fall.height;
     if(cv.width!==W) cv.width=W; if(cv.height!==H) cv.height=H;
     var g=cv.getContext('2d'); g.clearRect(0,0,W,H);
-    if(!this.threeD && this.scrollBack===0) this._dcHatch(g,W,H,false);
     if(!tsShow||this.threeD||!this.hrows.length) return;
     var S=this.STEP||1, end=this.hrows.length-1-this.scrollBack, n=Math.min(end+1,Math.ceil(H/S));
     if(n<2) return;

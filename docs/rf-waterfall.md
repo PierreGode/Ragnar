@@ -203,7 +203,7 @@ Hide the SDR centre spike** (on by default) deals with it:
   Untick it to see exactly what the dongle delivers.
 
 The filled strip is never passed off as a measurement:
-- It is **hatched** (amber) on the waterfall and the trace, labelled *SDR spike
+- It is **hatched** (amber) on the spectrum trace below the waterfall, labelled *SDR spike
   filled*, and the **SDR spike** tile in the readout says *filled ±35 kHz* (or
   *hidden* when the tuner sits outside the band and nothing was touched).
 - **Peak search, Next peak, spur search, the signal list and the Peak/SNR/Busy
