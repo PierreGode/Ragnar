@@ -67,3 +67,29 @@ def test_vuln_scan_aborts_when_wardriving_starts(monkeypatch):
             break
         scanned.append(row['IPs'])
     assert scanned == []
+
+
+def test_nmap_scanner_skips_when_wardriving(monkeypatch):
+    """The scanner action itself must skip when wardriving is active, so a
+    manually triggered scan (web UI) pauses too, not only the orchestrator."""
+    from actions import nmap_vuln_scanner
+
+    class FakeSD:
+        wardriving_session_active = True
+        ragnarorch_status = ""
+
+    scanner = nmap_vuln_scanner.NmapVulnScanner.__new__(
+        nmap_vuln_scanner.NmapVulnScanner)
+    scanner.shared_data = FakeSD()
+
+    called = {'scanned': False}
+    monkeypatch.setattr(scanner, 'scan_vulnerabilities',
+                        lambda *a, **k: called.__setitem__('scanned', True) or "x")
+    row = {'Ports': '80', 'Hostnames': 'h', 'MAC Address': 'aa:bb:cc:dd:ee:ff'}
+    assert scanner.execute('10.0.0.5', row, 'NmapVulnScanner') == 'skipped'
+    assert called['scanned'] is False        # scan never launched
+
+    scanner.shared_data.wardriving_session_active = False
+    monkeypatch.setattr(scanner, 'scan_vulnerabilities', lambda *a, **k: None)
+    # Now it proceeds (returns 'skipped' only because scan_vulnerabilities None)
+    assert scanner.execute('10.0.0.5', row, 'NmapVulnScanner') in ('skipped', 'success')

@@ -452,6 +452,12 @@ class NmapVulnScanner:
         Executes the vulnerability scan for a given IP and row data.
         Returns: 'success' if scan was performed, 'skipped' if already scanned, 'failed' on error
         """
+        # Pause during wardriving regardless of caller (orchestrator or the
+        # web UI's manual scan). An nmap vuln scan thrashes a small board and
+        # starves gpsd, so it must not run while a drive is capturing.
+        if getattr(self.shared_data, 'wardriving_session_active', False):
+            logger.info(f"⏸ Skipping nmap vuln scan of {ip}: wardriving active")
+            return 'skipped'
         self.shared_data.ragnarorch_status = "NmapVulnScanner"
         ports = row.get("Ports", "")
         scan_result = self.scan_vulnerabilities(ip, row["Hostnames"], row["MAC Address"], ports)

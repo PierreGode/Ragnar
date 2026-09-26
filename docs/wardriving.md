@@ -368,10 +368,19 @@ also hammering hosts.
 Starting a wardriving session sets `shared_data.wardriving_session_active`, and
 the orchestrator pauses its whole active-scan/attack cycle (status
 `PAUSED_WARDRIVE`) for the duration — including aborting any per-host
-vulnerability scan already in flight. **Passive wardriving capture keeps running
-the entire time**; only the active scans stop. They resume automatically when
-the session stops, with an immediate refresh rather than waiting out the old
-interval. This frees the CPU so cold-start GPS can complete during the drive.
+vulnerability scan already in flight. The nmap vulnerability scanner itself also
+checks the flag, so a **manually triggered** scan (from the Adv Scan tab) is
+skipped during a drive too, not only the orchestrator's automatic ones.
+**Passive wardriving capture keeps running the entire time**; only the active
+scans stop. They resume automatically when the session stops, with an immediate
+refresh rather than waiting out the old interval. This frees the CPU so
+cold-start GPS can complete during the drive.
+
+Note: this is separate from the existing **wardriving-on-boot** behaviour, which
+sets `manual_mode` so the orchestrator never starts in the first place. The flag
+above covers the case where wardriving is started *after* the orchestrator is
+already running (or scans are triggered manually). Scans launched directly from
+a shell (`nmap`, `lynis` over SSH) are outside Ragnar and are not affected.
 
 ### Status Fields (`/api/wardriving/gps`)
 
