@@ -145,5 +145,12 @@
         "b_port": 21,
         "b_status": "brute_force_ftp",
         "b_parent": null
+    },
+    {
+        "b_module": "exploit_action",
+        "b_class": "ExploitRunner",
+        "b_port": null,
+        "b_status": "exploit_runner",
+        "b_parent": null
     }
 ]

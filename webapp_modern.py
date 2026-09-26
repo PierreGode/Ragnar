@@ -27325,6 +27325,9 @@ def get_dashboard_quick():
             'new_target_ips': new_target_ips,
             'lost_target_ips': lost_target_ips,
             'port_count': port_count,
+            'exploit_count': _exploit_count(),
+            'exploit_attempted': _exploit_stat('attempted'),
+            'exploit_host_count': _exploit_stat('host_count'),
             'vulnerability_count': vulnerability_count,
             'vulnerable_hosts_count': vulnerable_hosts_count,
             'vulnerable_host_count': vulnerable_hosts_count,
@@ -28104,7 +28107,7 @@ def get_ai_vulnerability_analysis():
         return jsonify({
             'enabled': True,
             'analysis': analysis,
-            'exploit_count': _exploit_count(), 'exploit_attempted': _exploit_stat('attempted'), 'exploit_host_count': _exploit_stat('host_count'), 'vulnerability_count': len(vulnerabilities)
+            'vulnerability_count': len(vulnerabilities)
         })
 
     except Exception as e:

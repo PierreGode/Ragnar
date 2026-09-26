@@ -345,6 +345,11 @@ class Display:
                                     livestatus_df = pd.read_csv(livestatus_file)
                                     if not livestatus_df.empty:
                                         livestatus_df.loc[0, 'Vulnerabilities Count'] = self.shared_data.vulnnbr
+                                        try:
+                                            from actions.exploit_engine import get_stats
+                                            livestatus_df.loc[0, 'Exploit Count'] = int(get_stats().get('vulnerable', 0))
+                                        except Exception:
+                                            pass
                                         livestatus_df.to_csv(self.shared_data.livestatusfile, index=False)
                                         logger.debug(f"Updated livestatusfile with vulnerability count: {self.shared_data.vulnnbr}")
                             else:
@@ -388,7 +393,7 @@ class Display:
                         return
 
                     # Ensure required columns exist; add them with default 0 if missing
-                    required_columns = ['Total Open Ports', 'Alive Hosts Count', 'All Known Hosts Count', 'Vulnerabilities Count']
+                    required_columns = ['Total Open Ports', 'Alive Hosts Count', 'All Known Hosts Count', 'Vulnerabilities Count', 'Exploit Count']
                     for column in required_columns:
                         if column not in livestatus_df.columns:
                             logger.warning(f"Column '{column}' missing in livestatus file, initializing with 0")
@@ -490,8 +495,15 @@ class Display:
         comment = self.commentaire_ia.get_commentaire(status)
         if comment:
             self.shared_data.ragnarsays = comment
-            self.shared_data.ragnarstatustext = self.shared_data.ragnarorch_status
-        else:
+        # Surface exploit summary in the status line the e-ink "current status"
+        # and web console both read.
+        try:
+            ex_line = self._exploit_stat_line()
+            if ex_line and ex_line != "n/a":
+                self.shared_data.ragnarstatustext = f"{self.shared_data.ragnarorch_status} | EX:{ex_line}"
+            else:
+                self.shared_data.ragnarstatustext = self.shared_data.ragnarorch_status
+        except Exception:
             pass
 
     # # # def is_bluetooth_connected(self):
@@ -2384,6 +2396,7 @@ class Display:
         if data:
             stats = [
                 ("Vulns found", str(getattr(sd, 'vulnnbr', 0))),
+                ("Exploits", self._exploit_stat_line()),
                 ("Scan reports", str(data['scans'])),
                 ("Hosts scanned", str(data['hosts'])),
                 ("Services", str(data['services'])),
