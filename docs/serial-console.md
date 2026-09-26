@@ -91,15 +91,27 @@ its silent identify window; press ↻ after ~30 s and it will be free.
 The unit picker lists this unit plus every Ragnar in the mesh, labelled
 *console live*, *console cabled*, *no console*, *offline* or *unreachable*.
 Discovery reads a small, **content-free** status route on each peer
-(`GET /api/mesh/serial-console/status` — port assigned? running? baud? — never
-any output). Viewing, starting and stopping a remote console go through the
-[mesh gateway](mesh.md#mesh-gateway-reach-the-fleet-through-one-unit): the
-dashboard sends `X-Ragnar-Target: <unit>` and this unit relays the request.
-The gateway is **gated behind the mesh secret**, so console output never crosses
-the mesh on tag trust alone — set a [mesh secret](mesh.md#hardening-a-shared-tailnet-the-mesh-secret)
-to view remote consoles. Console output can contain sensitive material (a
-`show running-config` someone ran at the console), which is why it is not exposed
-on the tag-only peer routes.
+(`GET /api/mesh/serial-console/status` — port assigned? running? shared? baud? —
+never any output). There are two ways to view a remote console:
+
+1. **Share with mesh (view-only)** — the simple way. On the unit **with the
+   cable**, tick **Share with mesh (view-only)** in the card. Every other unit in
+   the mesh can then pick it and *watch* the output; the port, baud and
+   Start/Stop controls are locked on the viewing side (start and stop it on the
+   unit itself). This works on tag trust — no mesh secret needed — and is **off by
+   default**, per unit, so nothing leaves a unit until its operator switches it on.
+   The choice is remembered across restarts and survives *Release port*.
+2. **Mesh secret — full view and control.** With a
+   [mesh secret](mesh.md#hardening-a-shared-tailnet-the-mesh-secret) armed on both
+   units, the card talks to the remote unit through the
+   [mesh gateway](mesh.md#mesh-gateway-reach-the-fleet-through-one-unit)
+   (`X-Ragnar-Target`): you can pick its port, set the baud and start/stop it as if
+   it were local.
+
+If neither applies, picking the unit tells you it has not shared its console.
+Console output can contain sensitive material (a `show running-config` someone
+ran at the console), which is why sharing is an explicit, per-unit opt-in rather
+than automatic on tag trust.
 
 A typical deployment: a small Ragnar (Pi Zero 2 W is enough) cabled to the console
 of a core switch or edge firewall in a rack, joined to the mesh, and watched from
@@ -129,6 +141,9 @@ the unit on your desk.
 | POST | `/api/serial-console/clear` | clear the buffered lines |
 | GET | `/api/serial-console/units` | this unit + mesh peers with their console summary |
 | GET | `/api/mesh/serial-console/status` | peer-readable, content-free console summary |
+| POST | `/api/serial-console/share` | `{share}` — opt this unit's console in/out of view-only mesh sharing |
+| GET | `/api/mesh/serial-console/output/<since>` | peer-readable output — **only** while sharing is on (cursor in the path: the mesh proof covers the path, not the query) |
+| GET | `/api/serial-console/peer-output?unit=ID&since=N` | this unit fetches a peer's *shared* output over the mesh |
 
 Any of the `/api/serial-console/*` calls can be sent to another unit with the
 `X-Ragnar-Target` header (mesh secret required). Self-test:

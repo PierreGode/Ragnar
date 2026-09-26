@@ -14237,7 +14237,7 @@ def _serial_console_summary():
     return {'has_console': bool(port), 'running': bool(st.get('running')),
             'state': st.get('state'), 'baud': st.get('baud'),
             'port_label': label or (os.path.basename(port) if port else None),
-            'read_only': True}
+            'shared': bool(st.get('share_mesh')), 'read_only': True}
 
 
 @app.route('/api/mesh/serial-console/status', methods=['GET'])
@@ -14251,6 +14251,53 @@ def api_mesh_serial_console_status():
         return jsonify({'success': False, 'error': str(e)}), 500
     out.update({'success': True, 'name': _mesh_viking_name() or socket.gethostname()})
     return jsonify(out)
+
+
+@app.route('/api/mesh/serial-console/output/<int:since>', methods=['GET'])
+def api_mesh_serial_console_output(since):
+    """Peer-readable console OUTPUT — only when this unit's operator has opted in
+    ("Share this console with the mesh"). Read-only lines; no control. The cursor
+    is a path segment, not a query string, because the mesh proof is computed
+    over the path alone."""
+    import serial_console
+    if not serial_console.shared_with_mesh():
+        return jsonify({'success': True, 'shared': False, 'lines': [], 'last': 0,
+                        'error': 'this unit has not shared its console with the mesh'})
+    out = serial_console.output(since=max(0, since))
+    st = out.get('status') or {}
+    out['status'] = {k: st.get(k) for k in ('running', 'state', 'port', 'baud', 'baud_setting',
+                                            'auto_settled', 'bytes', 'last_rx', 'read_only')}
+    out.update({'success': True, 'shared': True})
+    return jsonify(out)
+
+
+@app.route('/api/serial-console/share', methods=['POST'])
+def api_serial_console_share():
+    import serial_console
+    data = request.get_json(silent=True) or {}
+    return jsonify(serial_console.set_share(bool(data.get('share'))))
+
+
+@app.route('/api/serial-console/peer-output')
+def api_serial_console_peer_output():
+    """Hub side of shared (view-only) remote consoles: fetch a peer's shared
+    console output over the mesh on tag trust. Works without the mesh secret, but
+    only for a peer whose operator switched sharing on."""
+    unit = (request.args.get('unit') or '').strip()
+    try:
+        since = max(0, int(request.args.get('since', 0)))
+    except (TypeError, ValueError):
+        since = 0
+    if not (mesh_available and _mesh_enabled()):
+        return jsonify({'success': False, 'error': 'mesh is not enabled'}), 400
+    node = _resolve_delegate_node(unit)        # roster-bound: no arbitrary targets
+    if not node:
+        return jsonify({'success': False, 'error': 'unknown mesh unit'}), 404
+    rep = mesh_manager.poll_peer(node, port=_mesh_node_port(), timeout=6,
+                                 path='/api/mesh/serial-console/output/%d' % since)
+    if not rep.get('reachable'):
+        return jsonify({'success': False, 'error': rep.get('error') or 'unit unreachable'}), 504
+    return jsonify(rep)
 
 
 @app.route('/api/serial-console/units')
@@ -14291,6 +14338,7 @@ def api_serial_console_units():
                           'reachable': bool(r.get('reachable')) and bool(r.get('success')),
                           'has_console': bool(r.get('has_console')),
                           'running': bool(r.get('running')), 'state': r.get('state'),
+                          'shared': bool(r.get('shared')),
                           'baud': r.get('baud'), 'port_label': r.get('port_label'),
                           'error': r.get('error') if not r.get('reachable') else None})
     return jsonify({'units': units, 'gateway_ready': gateway_ready,

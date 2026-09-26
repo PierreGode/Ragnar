@@ -21199,6 +21199,46 @@ const scState = { unit: 'local', last: 0, buf: [], timer: null, busy: false, gat
 const SC_MAX_DOM_LINES = 5000;
 const SC_MAX_BUF = 20000;
 
+function scUnit() {
+    return scState.units.find(x => x.id === scState.unit) || { id: scState.unit, local: scState.unit === 'local' };
+}
+
+// How the selected unit is reached: 'local'; 'gateway' (mesh secret — full view +
+// control); 'shared' (its operator opted in — view-only on tag trust); 'blocked'.
+function scMode() {
+    const u = scUnit();
+    if (u.local || scState.unit === 'local') return 'local';
+    if (scState.gateway) return 'gateway';
+    if (u.shared) return 'shared';
+    return 'blocked';
+}
+
+function scSetControls(mode) {
+    const lock = mode === 'shared' || mode === 'blocked';
+    ['sc-port', 'sc-baud', 'sc-start', 'sc-stop', 'sc-release'].forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.disabled = lock;
+        el.classList.toggle('opacity-50', lock);
+    });
+    const wrap = document.getElementById('sc-share-wrap');
+    if (wrap) wrap.classList.toggle('hidden', mode !== 'local');   // .flex beats the hidden attribute
+}
+
+async function scShareChanged() {
+    const box = document.getElementById('sc-share');
+    if (!box) return;
+    try {
+        const r = await fetchAPI('/api/serial-console/share', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ share: box.checked }) });
+        box.checked = !!r.share_mesh;
+    } catch (e) {
+        box.checked = !box.checked;
+        scSetStatus(`<span class="text-red-400">${escapeHtml(e.message)}</span>`);
+    }
+}
+
 function scOpts(extra = {}) {
     const headers = Object.assign({}, extra.headers || {});
     if (scState.unit && scState.unit !== 'local') headers['X-Ragnar-Target'] = scState.unit;
@@ -21243,7 +21283,7 @@ async function scRefresh() {
                 if (!x.local) {
                     if (!x.online) note = ' — offline';
                     else if (!x.reachable) note = ' — unreachable';
-                    else note = x.has_console ? (x.running ? ' — console live' : ' — console cabled') : ' — no console';
+                    else note = x.has_console ? (x.running ? ' — console live' : ' — console cabled') + (x.shared ? ' (shared)' : '') : ' — no console';
                 } else if (x.has_console) {
                     note = x.running ? ' — console live' : ' — console cabled';
                 }
@@ -21254,8 +21294,16 @@ async function scRefresh() {
         }
     } catch (e) { /* mesh off or unavailable: stay on this unit */ }
 
-    if (scState.unit !== 'local' && !scState.gateway) {
-        scSetStatus('<span class="text-amber-300">Viewing another unit\'s console needs the mesh secret (Mesh settings) — the mesh gateway that relays it is secret-gated.</span>');
+    const mode = scMode();
+    scSetControls(mode);
+    if (mode === 'blocked') {
+        const u = scUnit();
+        scSetStatus(`<span class="text-amber-300">${escapeHtml(u.name || 'That unit')} has not shared its console. On that unit, tick <strong>Share with mesh (view-only)</strong> in this card — or arm the mesh secret on both units for full view + control.</span>`);
+        return;
+    }
+    if (mode === 'shared') {
+        const u = scUnit();
+        scSetStatus(`<span class="text-emerald-300">View-only:</span> ${escapeHtml(u.name || 'this unit')} shares its console with the mesh${u.port_label ? ' · ' + escapeHtml(u.port_label) : ''}. Start/stop happen on that unit.`);
         return;
     }
     // Ports on the selected unit
@@ -21278,6 +21326,8 @@ async function scRefresh() {
         }
         const b = document.getElementById('sc-baud');
         if (b && st.baud_setting) b.value = String(st.baud_setting);
+        const sh = document.getElementById('sc-share');
+        if (sh && mode === 'local') sh.checked = !!st.share_mesh;
         scSetStatus(scDescribe(st));
     } catch (e) {
         scSetStatus(`<span class="text-red-400">${escapeHtml(e.message)}</span>`);
@@ -21344,10 +21394,17 @@ function scAppend(lines) {
 
 async function scPoll() {
     if (scState.busy) return;
-    if (scState.unit !== 'local' && !scState.gateway) return;
+    const mode = scMode();
+    if (mode === 'blocked') return;
     scState.busy = true;
     try {
-        const d = await fetchAPI(`/api/serial-console/output?since=${scState.last}`, scOpts());
+        const d = mode === 'shared'
+            ? await fetchAPI(`/api/serial-console/peer-output?unit=${encodeURIComponent(scState.unit)}&since=${scState.last}`)
+            : await fetchAPI(`/api/serial-console/output?since=${scState.last}`, scOpts());
+        if (mode === 'shared' && d.shared === false) {
+            scSetStatus(`<span class="text-amber-300">${escapeHtml(scUnit().name || 'That unit')} stopped sharing its console.</span>`);
+            return;
+        }
         const lines = d.lines || [];
         if (d.last < scState.last) {            // viewer restarted remotely: resync
             scState.last = 0;
@@ -21358,7 +21415,9 @@ async function scPoll() {
             scAppend(lines);
         }
         if (d.status) {
-            scSetStatus(scDescribe(Object.assign({ reserved_port: d.status.port }, d.status)));
+            const prefix = mode === 'shared'
+                ? `<span class="text-emerald-300">View-only</span> · ${escapeHtml(scUnit().name || '')} · ` : '';
+            scSetStatus(prefix + scDescribe(Object.assign({ reserved_port: d.status.port }, d.status)));
         }
     } catch (e) {
         scSetStatus(`<span class="text-red-400">${escapeHtml(e.message)}</span>`);
