@@ -26780,7 +26780,9 @@ def register_network_diagnostics(app, logger=None):
         # (frames / crc / fingerprint) touch no capture and never wait.
         heavy = bool(kw.get('name'))
         lock = getattr(sigmf_analyzer, '_HEAVY_LOCK', None) if heavy else None
-        if lock is not None and not lock.acquire(timeout=60):
+        # 120 s: on a Pi Zero (~6x slower) the first spectrogram of a big capture
+        # alone can take ~40 s, with the page's other requests queued behind it.
+        if lock is not None and not lock.acquire(timeout=120):
             return jsonify({"ok": False, "busy": True,
                             "error": "another analysis is still running — try again when it finishes"}), 429
         try:

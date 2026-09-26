@@ -188,7 +188,7 @@
       <span class="lbl">centre</span><input id="upfreq" size="7" placeholder="MHz">
     </div>
     <div style="margin-top:8px"><button id="updo" class="go">Import</button> <span id="upstat" class="symout"></span></div>
-    <div style="margin-top:6px;color:var(--muted)"><b>Flipper .sub</b> (RAW → synthesised OOK) · <b>SigMF</b> (select both the .sigmf-meta and .sigmf-data) · <b>raw IQ</b> (.cu8/.cs8/.cs16/.cf32 — set datatype + sample rate + centre). Keep files under ~50&nbsp;MB on a 512&nbsp;MB Pi.</div>
+    <div style="margin-top:6px;color:var(--muted)"><b>Flipper .sub</b> (RAW → synthesised OOK) · <b>SigMF</b> (select both the .sigmf-meta and .sigmf-data) · <b>raw IQ</b> (.cu8/.cs8/.cs16/.cf32 — set datatype + sample rate + centre). Recordings are read straight from disk rather than loaded into memory, so their size is limited by free storage, not RAM — even on a 512&nbsp;MB Pi Zero.</div>
   </div>
 
   <div class="stats" id="stats"></div>
@@ -1442,7 +1442,7 @@
     });
     body.innerHTML=groups.map(function(g){ return '<h4>'+esc(g.name)+'</h4><dl>'+g.items.map(function(it){
       return '<dt>'+esc(it[0])+'</dt><dd>'+esc(it[1])+'</dd>'; }).join('')+'</dl>'; }).join('')
-      +'<p style="color:var(--muted);font-size:12px;margin:10px 0 2px">Long selections are analysed over their busiest 2 seconds, and one heavy analysis runs at a time — the panel says so when that happens. Full reference: <a href="https://github.com/PierreGode/Ragnar/blob/main/docs/rf-waterfall.md#signal-analyzer-on-box-sigmf-analysis" target="_blank" rel="noopener">docs/rf-waterfall.md</a>.</p>';
+      +'<p style="color:var(--muted);font-size:12px;margin:10px 0 2px">Recordings are read from disk as needed, long selections are analysed over their busiest part (0.25–2 s, depending on the free RAM), and one heavy analysis runs at a time — the panel says so when that happens. Full reference: <a href="https://github.com/PierreGode/Ragnar/blob/main/docs/rf-waterfall.md#signal-analyzer-on-box-sigmf-analysis" target="_blank" rel="noopener">docs/rf-waterfall.md</a>.</p>';
   })();
   loadList(DEEP?DEEP.name:null);
 })();

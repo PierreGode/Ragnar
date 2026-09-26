@@ -105,6 +105,133 @@ def _cache_trim(keep=None):
             _CACHE.pop(k, None)
 
 
+class _IQFile:
+    """A recording that stays on disk until someone asks for samples.
+
+    The raw file is memory-mapped (two bytes per sample for cu8) and only the
+    slice an operation asks for is decoded to complex64. Decoding the whole
+    capture up front cost 8 bytes per sample — a 60 MB recording took 240 MB of
+    RAM before any button was pressed, which a 512 MB Pi Zero does not have.
+    Mapped pages are file cache: the kernel reads them on demand and drops them
+    under pressure, so they never count against the analyzer.
+
+    Supports ``len()``, slicing (with step) and ``view(a, b)`` for a sub-window
+    that is still not decoded. Anything that really needs the whole array gets it
+    through ``__array__`` — which is exactly what the analysis paths avoid.
+    """
+    __slots__ = ("_pairs", "_kind", "_a", "_b")
+
+    def __init__(self, pairs, kind, a=0, b=None):
+        self._pairs = pairs
+        self._kind = kind
+        self._a = a
+        self._b = len(pairs) if b is None else b
+
+    def __len__(self):
+        return self._b - self._a
+
+    @property
+    def nbytes(self):
+        return 0                       # mapped file pages, not heap
+
+    @property
+    def dtype(self):
+        import numpy as np
+        return np.dtype(np.complex64)
+
+    def _decode(self, p):
+        import numpy as np
+        out = np.empty(len(p), dtype=np.complex64)
+        v = out.view(np.float32).reshape(-1, 2)
+        k = self._kind
+        if k == "cu8":
+            np.subtract(p, 127.5, out=v, casting="unsafe"); v /= 127.5
+        elif k == "cs8":
+            np.multiply(p, 1.0 / 128.0, out=v, casting="unsafe")
+        elif k == "ci16":
+            np.multiply(p, 1.0 / 32768.0, out=v, casting="unsafe")
+        elif k == "cu16":
+            np.subtract(p, 32768.0, out=v, casting="unsafe"); v *= 1.0 / 32768.0
+        else:                          # cf32 / cf64
+            np.copyto(v, p, casting="unsafe")
+        return out
+
+    def __getitem__(self, key):
+        n = len(self)
+        if isinstance(key, slice):
+            a, b, st = key.indices(n)
+            return self._decode(self._pairs[self._a + a: self._a + b: st])
+        i = int(key)
+        if i < 0:
+            i += n
+        if not 0 <= i < n:
+            raise IndexError("sample index out of range")
+        return self._decode(self._pairs[self._a + i: self._a + i + 1])[0]
+
+    def view(self, a, b):
+        n = len(self)
+        a = max(0, min(n, int(a))); b = max(a, min(n, int(b)))
+        return _IQFile(self._pairs, self._kind, self._a + a, self._a + b)
+
+    def __array__(self, dtype=None, copy=None):
+        arr = self[:]
+        return arr if dtype is None else arr.astype(dtype)
+
+
+def _span(iq, a, b):
+    """iq[a:b] without decoding it when iq is a mapped capture."""
+    if isinstance(iq, _IQFile):
+        return iq.view(a, b)
+    return iq[a:b]
+
+
+_RAW_KINDS = (("cf64", "cf64", "<f8"), ("cf32", "cf32", "<f4"),
+              ("ci16", "ci16", "<i2"), ("cs16", "ci16", "<i2"),
+              ("cu16", "cu16", "<u2"), ("cs8", "cs8", "i1"), ("ci8", "cs8", "i1"))
+
+
+def _raw_kind(dtype):
+    """SigMF datatype -> (decoder kind, numpy element type). cu8 is the default."""
+    d = (dtype or "cu8").lower()
+    for pre, kind, elem in _RAW_KINDS:
+        if d.startswith(pre):
+            return kind, elem
+    return "cu8", "u1"
+
+
+def _sel_cap():
+    """Samples a per-signal analysis may take, scaled to the RAM this box has free.
+
+    4 M (2 s at 2 MS/s) on a board with room; down to 0.5 M (0.25 s) on a Pi Zero.
+    A fraction of a second holds dozens of frames of a remote or sensor, and the
+    analysis works on several copies of the window, so this is what keeps it
+    inside a 512 MB board.
+    """
+    avail = _mem_available()
+    if not avail:
+        return _SEL_MAX_SAMPLES
+    return int(max(500_000, min(_SEL_MAX_SAMPLES, avail // 200)))
+
+
+def _fft(x):
+    """FFT that keeps complex64 (scipy.fft) — numpy would double it to complex128."""
+    try:
+        import scipy.fft as sfft
+        return sfft.fft(x, axis=-1)
+    except Exception:
+        import numpy as np
+        return np.fft.fft(x, axis=-1)
+
+
+def _ifft(x):
+    try:
+        import scipy.fft as sfft
+        return sfft.ifft(x)
+    except Exception:
+        import numpy as np
+        return np.fft.ifft(x)
+
+
 def _decode_interleaved(raw_f32_fill, n_complex):
     """Allocate the complex64 result once and let the caller fill its float view."""
     import numpy as np
@@ -113,7 +240,7 @@ def _decode_interleaved(raw_f32_fill, n_complex):
     return iq
 
 
-def _pick_window(iq, fs, t0, t1, cap=_SEL_MAX_SAMPLES):
+def _pick_window(iq, fs, t0, t1, cap=None):
     """(i0, i1, truncated) for a selection, bounded to ``cap`` samples (pure-ish).
 
     Within an over-long selection the window with the most energy is used — that
@@ -121,6 +248,8 @@ def _pick_window(iq, fs, t0, t1, cap=_SEL_MAX_SAMPLES):
     copy. The choice is recorded per request so the API can report it.
     """
     import numpy as np
+    if cap is None:
+        cap = _sel_cap()
     n = len(iq)
     i0 = 0 if t0 is None else max(0, min(n, int(float(t0) * fs)))
     i1 = n if t1 is None else max(0, min(n, int(float(t1) * fs)))
@@ -200,32 +329,14 @@ def load(name):
     cap0 = (meta.get("captures") or [{}])[0]
     fs = float(g.get("core:sample_rate") or 0) or 1.0
     fc = float(cap0.get("core:frequency") or 0)
-    dtype = (g.get("core:datatype") or "cu8").lower()
-    # Decode the common SigMF/SDR interleaved-IQ datatypes straight into one
-    # complex64 array (filled through its float32 view): no float32 copy, no
-    # complex128 intermediate. A 60 MB cu8 file peaks at ~300 MB, not ~1 GB.
-    if dtype.startswith("cf64"):                      # complex float64
-        a = np.fromfile(data_p, dtype="<f8"); a = a[: (a.size // 2) * 2]
-        iq = _decode_interleaved(lambda v: np.copyto(v, a, casting="unsafe"), a.size // 2)
-    elif dtype.startswith("cf32"):                    # complex float32 (GNU Radio, IQEngine)
-        a = np.fromfile(data_p, dtype="<f4"); a = a[: (a.size // 2) * 2]
-        iq = a.view(np.complex64).copy()
-    elif dtype.startswith("ci16") or dtype.startswith("cs16"):   # signed 16-bit
-        a = np.fromfile(data_p, dtype="<i2"); a = a[: (a.size // 2) * 2]
-        iq = _decode_interleaved(lambda v: np.multiply(a, 1.0 / 32768.0, out=v, casting="unsafe"), a.size // 2)
-    elif dtype.startswith("cu16"):                    # unsigned 16-bit
-        a = np.fromfile(data_p, dtype="<u2"); a = a[: (a.size // 2) * 2]
-        def _f16(v):
-            np.subtract(a, 32768.0, out=v, casting="unsafe"); v *= 1.0 / 32768.0
-        iq = _decode_interleaved(_f16, a.size // 2)
-    elif dtype.startswith("cs8") or dtype.startswith("ci8"):     # signed 8-bit
-        raw = np.fromfile(data_p, dtype=np.int8); raw = raw[: (raw.size // 2) * 2]
-        iq = _decode_interleaved(lambda v: np.multiply(raw, 1.0 / 128.0, out=v, casting="unsafe"), raw.size // 2)
-    else:                                             # cu8 (default): unsigned 8-bit
-        raw = np.fromfile(data_p, dtype=np.uint8); raw = raw[: (raw.size // 2) * 2]
-        def _f8(v):
-            np.subtract(raw, 127.5, out=v, casting="unsafe"); v /= 127.5   # divide, as before: bit-identical
-        iq = _decode_interleaved(_f8, raw.size // 2)
+    # Map, don't decode: only the samples an analysis asks for are ever turned
+    # into complex64. See _IQFile.
+    kind, elem = _raw_kind(g.get("core:datatype") or "cu8")
+    itemsize = np.dtype(elem).itemsize
+    npairs = os.path.getsize(data_p) // (2 * itemsize)
+    if npairs <= 0:
+        raise ValueError("capture is empty")
+    iq = _IQFile(np.memmap(data_p, dtype=elem, mode="r", shape=(npairs, 2)), kind)
     _CACHE.pop(name, None)
     _CACHE[name] = (mtime, iq, fs, fc, meta)
     _cache_trim(keep=name)
@@ -344,15 +455,21 @@ def stft_grid(iq, fs, fc, t0, t1, f0, f1, w=900, h=360, nfft=1024):
     if i1 - i0 < nfft:
         i1 = min(n, i0 + nfft)
         i0 = max(0, i1 - nfft)
-    seg = iq[i0:i1]
+    L = i1 - i0
     win = np.hanning(nfft).astype(np.float32)
-    ncol = max(1, (len(seg) - nfft) // nfft + 1)          # non-overlapping frames
+    ncol = max(1, (L - nfft) // nfft + 1)                 # non-overlapping frames
     ncol = min(ncol, 4000)
-    starts = np.linspace(0, max(0, len(seg) - nfft), ncol).astype(int)
-    frames = np.stack([seg[s:s + nfft] for s in starts]) * win           # (T, nfft)
-    S = np.fft.fftshift(np.fft.fft(frames, axis=1), axes=1)
-    P = (S.real ** 2 + S.imag ** 2) / (nfft * float(np.sum(win ** 2)))
-    db = (10.0 * np.log10(P + 1e-12)).T                                  # (freq, time)
+    starts = np.linspace(0, max(0, L - nfft), ncol).astype(int)
+    # Frames are read one block at a time straight from the capture and FFT'd in
+    # single precision, so the grid never needs the whole window in memory.
+    norm = float(nfft * float(np.sum(win ** 2)))
+    db = np.empty((ncol, nfft), dtype=np.float32)
+    for c0 in range(0, ncol, 256):
+        blk = np.stack([iq[i0 + st:i0 + st + nfft] for st in starts[c0:c0 + 256]]) * win
+        S = np.fft.fftshift(_fft(blk), axes=1)
+        P = (S.real ** 2 + S.imag ** 2) / norm
+        db[c0:c0 + len(blk)] = 10.0 * np.log10(P + 1e-12)
+    db = db.T                                                            # (freq, time)
     fbins = np.fft.fftshift(np.fft.fftfreq(nfft, 1.0 / fs)) + fc         # absolute Hz
     # crop to [f0,f1]
     lo = np.searchsorted(fbins, f0); hi = np.searchsorted(fbins, f1)
@@ -424,7 +541,7 @@ def psd(name, t0=None, t1=None, n=900, mode="avg"):
     i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
     i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
     reduce = "max" if str(mode).lower().startswith("max") else "mean"
-    freqs, db = welch_psd(iq[i0:i1] if i1 > i0 else iq, fs, reduce=reduce)
+    freqs, db = welch_psd(_span(iq, i0, i1) if i1 > i0 else iq, fs, reduce=reduce)
     n = int(max(64, min(1600, n)))
     fr = (freqs + fc) / 1e6
     if len(db) > n:
@@ -448,7 +565,7 @@ def measure(name, t0, t1, f0, f1):
     i0, i1 = int(t0 * fs), int(t1 * fs)
     if i1 - i0 < 16:
         return {"ok": False, "error": "time selection too short"}
-    freqs, db = welch_psd(iq[i0:i1], fs)
+    freqs, db = welch_psd(_span(iq, i0, i1), fs)
     absf = freqs + fc
     f0, f1 = float(min(f0, f1)), float(max(f0, f1))
     mask = (absf >= f0) & (absf <= f1)
@@ -474,14 +591,18 @@ def envelope(name, t0=None, t1=None, n=1200):
     dur = len(iq) / fs
     i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
     i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
-    seg = iq[i0:i1] if i1 > i0 else iq
-    mag = np.abs(seg)
+    if i1 <= i0:
+        i0, i1 = 0, len(iq)
+    L = i1 - i0
     n = int(max(64, min(4000, n)))
-    if len(mag) > n:                                   # block-mean then to dB
-        edges = (np.arange(n + 1) * len(mag) / n).astype(int)
-        mag = np.array([mag[edges[i]:max(edges[i] + 1, edges[i + 1])].mean() for i in range(n)])
+    if L > n:                                          # block-mean, one block at a time
+        edges = (np.arange(n + 1) * L / n).astype(int)
+        mag = np.array([float(np.abs(iq[i0 + edges[i]:i0 + max(edges[i] + 1, edges[i + 1])]).mean())
+                        for i in range(n)])
+    else:
+        mag = np.abs(iq[i0:i1])
     db = 20.0 * np.log10(mag + 1e-6)
-    t = (i0 / fs) + np.linspace(0, (len(seg)) / fs, len(db))
+    t = (i0 / fs) + np.linspace(0, L / fs, len(db))
     return {"ok": True, "t": [round(x, 5) for x in t.tolist()],
             "db": [round(x, 1) for x in db.tolist()]}
 
@@ -525,9 +646,8 @@ def bursts(name, thresh_db=8.0, min_ms=1.0, gap_ms=25.0):
     """
     import numpy as np
     iq, fs, fc, _ = load(name)
-    mag = np.abs(iq)
-    step = max(1, len(mag) // 200000)          # coarse envelope; cheap on long files
-    env = mag[::step]
+    step = max(1, len(iq) // 200000)           # coarse envelope; cheap on long files
+    env = np.abs(iq[::step])                   # only every step-th sample is decoded
     env_fs = fs / step
     edb = 20.0 * np.log10(env + 1e-6)
     nf = float(np.percentile(edb, 20))
@@ -536,7 +656,7 @@ def bursts(name, thresh_db=8.0, min_ms=1.0, gap_ms=25.0):
     min_len = max(1, int(min_ms / 1000.0 * env_fs))
     out = []
     for s, e in _merge_runs(on, gap, min_len):
-        seg = iq[s * step: e * step]
+        seg = _span(iq, s * step, e * step)    # a burst can be the whole capture
         if len(seg) < 8:
             continue
         fr, db = welch_psd(seg, fs, nfft=min(2048, 1 << int(np.log2(max(2, len(seg))))))
@@ -1519,7 +1639,7 @@ def signals(name, t0=None, t1=None, snr_db=12.0, nfft=512, max_signals=40):
     iq, fs, fc, _ = load(name)
     i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
     i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
-    x = iq[i0:i1] if i1 > i0 else iq
+    x = _span(iq, i0, i1) if i1 > i0 else iq
     base_t = i0 / fs
     tracks, floor = _detect_signals(x, fs, fc, nfft=int(nfft), snr_db=float(snr_db),
                                     max_signals=int(max_signals))
@@ -1543,12 +1663,12 @@ def _fft_bandmask(x, fs, fc, f0_hz, f1_hz, kind):
     """Zero the FFT bins outside (band-pass) or inside (notch) [f0,f1] Hz (pure)."""
     import numpy as np
     n = len(x)
-    X = np.fft.fftshift(np.fft.fft(x))
+    X = np.fft.fftshift(_fft(np.asarray(x, dtype=np.complex64)))
     freqs = np.fft.fftshift(np.fft.fftfreq(n, 1.0 / fs)) + fc
     lo, hi = (f0_hz, f1_hz) if f0_hz <= f1_hz else (f1_hz, f0_hz)
     inband = (freqs >= lo) & (freqs <= hi)
     mask = inband if str(kind).lower().startswith("band") else ~inband
-    xf = np.fft.ifft(np.fft.ifftshift(X * mask))
+    xf = _ifft(np.fft.ifftshift(X * mask))
     return xf.astype(np.complex64)
 
 
@@ -1558,9 +1678,8 @@ def filter_preview(name, kind="bandpass", f0_hz=None, f1_hz=None, t0=None, t1=No
     filtering (bins mapped through the capture centre), not the mixed-to-DC path."""
     import numpy as np
     iq, fs, fc, _ = load(name)
-    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
-    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
-    x = iq[i0:i1] if i1 > i0 else iq
+    i0, i1, _ = _pick_window(iq, fs, t0, t1)   # it FFTs the whole selection
+    x = iq[i0:i1]
     if len(x) < 32:
         return {"ok": False, "error": "selection too short to filter"}
     if f0_hz is None or f1_hz is None:
@@ -3513,15 +3632,31 @@ def selftest():
         _a2, _b2, _tr2 = _pick_window(_q, 1e6, 7.0, 7.6, cap=1_000_000)
         check("mem: a selection already under the cap is left exactly as asked",
               (not _tr2) and _a2 == 7_000_000 and _b2 == 7_600_000 and window_note() is None)
-        # cache honours a byte budget and always keeps the capture in use
-        _saved_budget = globals()["_cache_budget"]
-        globals()["_cache_budget"] = lambda: 1
-        try:
-            _CACHE.clear(); load("m_cu8"); load("m_cs8"); load("m_ci16")
-            check("mem: cache evicts down to the budget but keeps the capture in use",
-                  list(_CACHE.keys()) == ["m_ci16"])
-        finally:
-            globals()["_cache_budget"] = _saved_budget
+        # an open capture is a file mapping: it costs no heap until samples are read
+        _CACHE.clear(); load("m_cu8"); load("m_cs8"); load("m_ci16")
+        check("mem: open captures are mapped, not decoded (no heap held)",
+              sum(v[1].nbytes for v in _CACHE.values()) == 0 and len(_CACHE) <= _CACHE_MAX)
+        # lazy reads == a full decode, for every way the analyzer indexes a capture
+        _L = load("m_cu8")[0]; _F = _np2.asarray(_L)
+        check("lazy: slices, steps and single samples equal the full decode",
+              _np2.array_equal(_L[100:900], _F[100:900]) and _np2.array_equal(_L[::7], _F[::7])
+              and _np2.array_equal(_L[5:5000:13], _F[5:5000:13]) and _L[-1] == _F[-1] and _L[3] == _F[3])
+        _V = _L.view(1000, 6000)
+        check("lazy: a view is a window that is still not decoded",
+              len(_V) == 5000 and _V.nbytes == 0 and _np2.array_equal(_V[10:20], _F[1010:1020])
+              and _np2.array_equal(_V.view(100, 200)[:], _F[1100:1200]))
+        check("lazy: welch PSD over a view == over the decoded slice",
+              _np2.allclose(welch_psd(_V, 1e6)[1], welch_psd(_F[1000:6000], 1e6)[1], atol=1e-4))
+        _env = envelope("m_cu8", n=64)
+        _mag = _np2.abs(_F); _ed = (_np2.arange(65) * len(_mag) / 64).astype(int)
+        _want = 20 * _np2.log10(_np2.array([_mag[_ed[i]:max(_ed[i] + 1, _ed[i + 1])].mean() for i in range(64)]) + 1e-6)
+        check("lazy: streamed envelope == envelope of the decoded capture",
+              _np2.allclose(_env["db"], _np2.round(_want, 1), atol=0.11))
+        check("lazy: every SigMF datatype maps to a decoder",
+              [_raw_kind(d)[0] for d in ("cu8", "cs8", "ci8", "ci16_le", "cs16", "cu16", "cf32_le", "cf64")]
+              == ["cu8", "cs8", "cs8", "ci16", "ci16", "cu16", "cf32", "cf64"])
+        check("lazy: the per-signal window shrinks with free RAM, within 0.5 M..4 M samples",
+              500_000 <= _sel_cap() <= _SEL_MAX_SAMPLES)
         check("mem: heavy operations share one lock", hasattr(_HEAVY_LOCK, "acquire"))
     finally:
         globals()["_cap_dir"] = _saved2

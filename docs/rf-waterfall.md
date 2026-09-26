@@ -867,24 +867,28 @@ that requests windows.
 top bar: every button, selector and field on the page, grouped by panel, in plain
 language (the same text appears as a tooltip when you hover a control).
 
-**Built to run on small boards.** Analysis happens on the Ragnar itself, so it is
-kept inside what a 1–2 GB board can afford:
+**Built to run on a Pi Zero.** Analysis happens on the Ragnar itself, so it has
+to fit in what a 512 MB board can spare:
 
-- **The busiest 2 seconds.** Classify, demodulate, pulse decode, constellation,
-  FM/AM and squelch-tag analysis, de-chirp, cyclostationary and filtering never
-  need more than a couple of seconds of samples. When the selection is longer —
-  the whole capture, for instance — they analyse its busiest 2 s (at 2 MS/s),
-  and the page says which part it used. Zoom in to choose a different part.
-- **One heavy analysis at a time.** A second request waits for the first to
-  finish instead of running alongside it; the page says so if it has to wait.
-- **A memory budget for open captures.** A recording takes 8 bytes per sample in
-  memory (a 60 MB file is 240 MB), so the analyzer keeps recently opened
-  captures only within a budget of a fifth of free RAM (at most 768 MB), and
-  always keeps the one you are working on.
+- **Recordings stay on disk.** A capture is memory-mapped and only the samples an
+  operation asks for are decoded, so opening a recording costs almost no RAM
+  whatever its size — the mapped pages are file cache the kernel can drop. Size
+  is limited by free storage, not memory.
+- **The busiest part of a long selection.** Classify, demodulate, pulse decode,
+  constellation, FM/AM and squelch-tag analysis, de-chirp, cyclostationary and
+  filtering work on a bounded window: 2 s at 2 MS/s on a board with memory to
+  spare, down to 0.25 s on a Pi Zero (scaled to the RAM that is free). When the
+  selection is longer they take its busiest window, and the page says which part
+  it used. Zoom in to choose a different part.
+- **Whole-capture views stream.** The overview spectrogram, spectrum, envelope,
+  burst list and signal survey read the file in blocks instead of loading it.
+- **One heavy analysis at a time.** A second request waits for the first rather
+  than running alongside it, and the page says when it has to wait.
 
-Measured on a 60 MB capture: Ragnar's memory peaked at 1.1 GB instead of 2.8 GB,
-cyclostationary detection over the whole capture takes 5 s instead of several
-minutes, and whole-capture classify / demodulate take about half a second.
+Measured on a 60 MB capture with the analyzer limited as on a Pi Zero: opening
+it went from +351 MB to +66 MB (most of that is reclaimable file cache), the
+spectrogram from +389 MB to +92 MB, filtering from +2 GB to +118 MB and
+cyclostationary detection from +538 MB to +145 MB.
 
 - **Summary** — center/rate/duration, measured noise floor, peak frequency, SNR,
   occupied bandwidth, burst count.
