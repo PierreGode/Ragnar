@@ -239,6 +239,7 @@
   .scope-head .fsbtn:hover{border-color:rgba(56,189,201,.5);color:var(--cyan);background:rgba(56,189,201,.08)}
   .scope:fullscreen,.scope:-webkit-full-screen{width:100vw;height:100vh;border-radius:0;border:0;background:var(--ground);display:flex;flex-direction:column}
   .scope:fullscreen .scope-body,.scope:-webkit-full-screen .scope-body{flex:1 1 auto;min-height:0}
+  .scope.is3d canvas.fall{height:546px}   /* 3D panel is 30% taller than the 420px 2D fall */
   .scope:fullscreen .fall-wrap,.scope:-webkit-full-screen .fall-wrap{flex:1 1 auto;min-height:0}
   .scope:fullscreen canvas.fall,.scope:-webkit-full-screen canvas.fall{height:100%}
   .scope:fullscreen .fsbtn,.scope:-webkit-full-screen .fsbtn{border-color:rgba(56,189,201,.5);color:var(--cyan)}
@@ -266,6 +267,8 @@
     .stat{min-width:0;flex:1 0 27%}
     /* a taller waterfall — the point of the page — and a roomier signal list */
     canvas.fall{height:min(46vh,340px)}
+    .scope.is3d canvas.fall{height:min(60vh,442px)}
+    .scope:fullscreen canvas.fall,.scope:-webkit-full-screen canvas.fall{height:100%}
     .loglist{max-height:200px}
     /* slightly bigger number inputs for touch */
     .tunergrp .tin,.tunesel .tin,.radiobar input.rf,.iqsec,.calf{padding:6px 6px;font-size:12px}
@@ -3022,6 +3025,7 @@
   };
   Scope.prototype.setThreeD=function(on){
     on=!!on; this.threeD=on;
+    this.el.classList.toggle('is3d',on); this.resize();   // 3D gets a taller panel
     if(this.d3Sel) Array.prototype.forEach.call(this.d3Sel.querySelectorAll('button'),function(b){
       b.setAttribute('aria-pressed', (b.getAttribute('data-3d')==='1')===on?'true':'false'); });
     if(on){ this.scrollBack=0; this.draw3D(); this._drawTimeGrid(); } else { this.repaint(); }   // 2D resumes from history
