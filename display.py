@@ -1002,6 +1002,15 @@ class Display:
             hint = hint[:-1]
         draw.text((int(4 * sx), h - int(16 * sy)), hint, font=font, fill=0)
 
+    def _exploit_stat_line(self):
+        """One-line exploit summary for the e-ink status page."""
+        try:
+            from actions.exploit_engine import get_stats
+            s = get_stats()
+            return f"{s.get('vulnerable',0)} vuln/{s.get('attempted',0)}"
+        except Exception:
+            return "n/a"
+
     def _draw_stat_rows(self, draw, y, stats):
         """Draw key-value stat rows. Returns final y position."""
         w = getattr(self, 'render_w', self.shared_data.width)
@@ -2323,6 +2332,7 @@ class Display:
                 ("Hosts alive", f"{data['alive']}/{data['total']}"),
                 ("Open ports", str(data['ports'])),
                 ("Credentials", str(getattr(sd, 'crednbr', 0))),
+                ("Exploits", self._exploit_stat_line()),
                 ("Status", str(getattr(sd, 'ragnarorch_status', 'IDLE'))),
             ]
             y = self._draw_stat_rows(draw, y, stats)
@@ -2350,6 +2360,7 @@ class Display:
                 ("Hosts found", str(getattr(sd, 'targetnbr', 0))),
                 ("Open ports", str(getattr(sd, 'portnbr', 0))),
                 ("Credentials", str(getattr(sd, 'crednbr', 0))),
+                ("Exploits", self._exploit_stat_line()),
                 ("Network KB", str(getattr(sd, 'networkkbnbr', 0))),
                 ("Status", str(getattr(sd, 'ragnarorch_status', 'IDLE'))),
             ]

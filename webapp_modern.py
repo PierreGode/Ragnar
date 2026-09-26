@@ -27197,6 +27197,36 @@ def debug_scanned_networks():
     except Exception as e:
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()})
 
+def _exploit_stat(key):
+    try:
+        from actions.exploit_engine import get_stats
+        return int(get_stats().get(key, 0) or 0)
+    except Exception:
+        return 0
+
+
+def _exploit_count():
+    """Best-effort vulnerable-exploit count for the dashboard."""
+    try:
+        from actions.exploit_engine import get_stats
+        return int(get_stats().get('vulnerable', 0))
+    except Exception:
+        return 0
+
+
+@app.route('/api/exploits/stats')
+def get_exploit_stats():
+    """Aggregate exploit-engine results for the dashboard and e-ink display."""
+    try:
+        from actions.exploit_engine import get_stats, ExploitEngine
+        stats = get_stats()
+        stats['enabled'] = ExploitEngine(shared_data).is_enabled()
+        return jsonify(stats)
+    except Exception as e:
+        logger.error(f"exploit stats error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/dashboard/quick')
 def get_dashboard_quick():
     """OPTIMIZED: Combined fast endpoint that returns all essential dashboard data in one call.
@@ -28074,7 +28104,7 @@ def get_ai_vulnerability_analysis():
         return jsonify({
             'enabled': True,
             'analysis': analysis,
-            'vulnerability_count': len(vulnerabilities)
+            'exploit_count': _exploit_count(), 'exploit_attempted': _exploit_stat('attempted'), 'exploit_host_count': _exploit_stat('host_count'), 'vulnerability_count': len(vulnerabilities)
         })
 
     except Exception as e:

@@ -11826,7 +11826,7 @@ async function loadDashboardData() {
         // OPTIMIZATION: Show loading state with pulse animation
         const statsElements = [
             'target-count', 'target-total-count', 'target-inactive-count',
-            'port-count', 'vuln-count', 'cred-count', 'level-count', 'scanned-network-count', 'points-count'
+            'port-count', 'vuln-count', 'cred-count', 'level-count', 'scanned-network-count', 'points-count', 'exploit-count', 'dashboard-exploit-attempts-count', 'dashboard-exploit-hosts-count'
         ];
         
         // Add subtle pulse animation to show loading
@@ -11864,7 +11864,7 @@ async function loadDashboardData() {
         // Remove pulse animation on error too
         const statsElements = [
             'target-count', 'target-total-count', 'target-inactive-count',
-            'port-count', 'vuln-count', 'cred-count', 'level-count', 'scanned-network-count', 'points-count'
+            'port-count', 'vuln-count', 'cred-count', 'level-count', 'scanned-network-count', 'points-count', 'exploit-count', 'dashboard-exploit-attempts-count', 'dashboard-exploit-hosts-count'
         ];
         statsElements.forEach(id => {
             const el = document.getElementById(id);
@@ -12005,6 +12005,15 @@ function updateDashboardStats(stats) {
     updateElement('dashboard-scanned-network-count', scannedNetworks);
     scaleStatNumber('dashboard-scanned-network-count', scannedNetworks);
     updateElement('points-count', points);
+
+    // Exploit engine stats (from /api/dashboard/quick -> exploit_count)
+    const exploitCount = toNumber(stats.exploit_count ?? stats.exploit_vulnerable ?? 0, 0);
+    const exploitAttempts = toNumber(stats.exploit_attempted ?? 0, 0);
+    const exploitHosts = toNumber(stats.exploit_host_count ?? 0, 0);
+    updateElement('exploit-count', exploitCount);
+    scaleStatNumber('exploit-count', exploitCount);
+    updateElement('dashboard-exploit-attempts-count', exploitAttempts);
+    updateElement('dashboard-exploit-hosts-count', exploitHosts);
 
     const activeSummary = totalTargets > 0 ? `${activeTargets}/${totalTargets} active` : `${activeTargets} active`;
     const newSummary = newTargets > 0 ? `${newTargets} new` : 'No new targets';
