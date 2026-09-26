@@ -23349,7 +23349,7 @@ async function saveAIToken() {
     }
 }
 
-// ─── Pushover Notification Functions ───────────────────────────────────
+// ─── Push Notification Functions (Pushover + Slack) ────────────────────
 async function loadPushoverConfiguration(config) {
     // Sync toggle checkboxes from config
     const toggle = document.getElementById('pushover-enabled-toggle');
@@ -23384,6 +23384,54 @@ async function loadPushoverConfiguration(config) {
     } catch (e) {
         console.error('Failed to fetch Pushover key status:', e);
     }
+
+    try {
+        const sw = await fetchAPI('/api/slack/webhook');
+        const whInput = document.getElementById('slack-webhook-url');
+        if (whInput) {
+            whInput.value = '';
+            whInput.placeholder = sw.configured ? `Configured: ${sw.preview || '••••'}` : 'https://hooks.slack.com/services/...';
+        }
+        const rm = document.getElementById('slack-webhook-remove');
+        if (rm) rm.classList.toggle('hidden', !sw.configured);
+    } catch (e) {
+        console.error('Failed to fetch Slack webhook status:', e);
+    }
+}
+
+async function saveSlackWebhook() {
+    const input = document.getElementById('slack-webhook-url');
+    const url = input ? input.value.trim() : '';
+    if (!url) {
+        showPushoverStatus('⚠ Please enter a Slack webhook URL.', 'yellow');
+        return;
+    }
+    try {
+        const result = await postAPI('/api/slack/webhook', { webhook_url: url });
+        if (result.success) {
+            showPushoverStatus('✓ Slack webhook saved!', 'green');
+            addConsoleMessage('Slack webhook saved', 'success');
+            const config = await fetchAPI('/api/config');
+            await loadPushoverConfiguration(config);
+        } else {
+            throw new Error(result.error || result.message || 'Save failed');
+        }
+    } catch (e) {
+        showPushoverStatus('✗ Failed to save Slack webhook: ' + (e.message || 'unknown error'), 'red');
+    }
+}
+
+async function removeSlackWebhook() {
+    try {
+        const resp = await networkAwareFetch('/api/slack/webhook', { method: 'DELETE' });
+        const result = await resp.json();
+        if (!resp.ok || !result.success) throw new Error(result.error || 'Remove failed');
+        showPushoverStatus('ℹ Slack webhook removed', 'blue');
+        const config = await fetchAPI('/api/config');
+        await loadPushoverConfiguration(config);
+    } catch (e) {
+        showPushoverStatus('✗ Failed to remove Slack webhook: ' + (e.message || 'unknown error'), 'red');
+    }
 }
 
 async function togglePushoverEnabled() {
@@ -23391,11 +23439,11 @@ async function togglePushoverEnabled() {
     if (!cb) return;
     try {
         await postAPI('/api/config', { pushover_enabled: cb.checked });
-        showPushoverStatus(cb.checked ? '✓ Pushover notifications enabled' : 'ℹ Pushover notifications disabled',
+        showPushoverStatus(cb.checked ? '✓ Push notifications enabled' : 'ℹ Push notifications disabled',
             cb.checked ? 'green' : 'blue');
     } catch (e) {
         cb.checked = !cb.checked;
-        showPushoverStatus('✗ Failed to toggle Pushover: ' + (e.message || 'unknown error'), 'red');
+        showPushoverStatus('✗ Failed to toggle push notifications: ' + (e.message || 'unknown error'), 'red');
     }
 }
 
@@ -23455,8 +23503,8 @@ async function testPushover() {
     try {
         const result = await postAPI('/api/pushover/test', {});
         if (result.success) {
-            showPushoverStatus('✓ Test notification sent! Check your device.', 'green', 5000);
-            addConsoleMessage('Pushover test notification sent', 'success');
+            showPushoverStatus('✓ ' + (result.message || 'Test notification sent') + ' — check your device/channel.', 'green', 6000);
+            addConsoleMessage('Push test notification sent', 'success');
         } else {
             throw new Error(result.message || 'Send failed');
         }
@@ -32265,8 +32313,8 @@ function _renderAutoUpload(d) {
     const po = document.getElementById('wd-au-pushover');
     if (po) po.checked = !!d.notify_pushover;
     const poNote = document.getElementById('wd-au-pushover-note');
-    if (poNote) poNote.textContent = { missing: '(set up Pushover in Settings → Notifications)',
-                                       off: '(Pushover is switched off in Settings → Notifications)' }[d.pushover_ready] || '';
+    if (poNote) poNote.textContent = { missing: '(set up Pushover or Slack in Settings → Push Notifications)',
+                                       off: '(Push notifications are switched off in Settings → Push Notifications)' }[d.pushover_ready] || '';
     const st = document.getElementById('wd-auto-upload-status');
     if (st) {
         const missing = picked.filter(t => !ready[t]).map(t => ({ wigle: 'WiGLE', wdgwars: 'WDGWars', wardrift: 'Wardrift' })[t]);

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Pushover Notification Service for Ragnar
-Sends push notifications via the Pushover API for security events.
+Push Notification Service for Ragnar
+Sends push notifications for security events via every configured channel:
+Pushover (phone push) and/or Slack (incoming webhook).
 """
 
 import logging
@@ -11,10 +12,14 @@ import time
 logger = logging.getLogger(__name__)
 
 PUSHOVER_API_URL = "https://api.pushover.net/1/messages.json"
+SLACK_WEBHOOK_PREFIX = "https://hooks.slack.com/"
 
 
 class PushoverService:
-    """Lightweight wrapper around the Pushover HTTP API."""
+    """Push-notification dispatcher (historical name kept for its many callers).
+
+    send() fans each message out to every configured channel — Pushover and/or
+    a Slack incoming webhook — so all alert sources reach both."""
 
     def __init__(self, shared_data):
         self.shared_data = shared_data
@@ -92,13 +97,31 @@ class PushoverService:
             logger.debug(f"Pushover key lookup failed: {e}")
             return None, None
 
-    def is_configured(self):
+    def _get_slack_webhook(self):
+        """Return the Slack incoming-webhook URL, or None if not configured."""
+        try:
+            from env_manager import EnvManager
+            url = EnvManager().get_env_key("RAGNAR_SLACK_WEBHOOK_URL")
+            return url or None
+        except Exception as e:
+            logger.debug(f"Slack webhook lookup failed: {e}")
+            return None
+
+    def pushover_configured(self):
         """Return True when both Pushover keys are present."""
         user_key, api_token = self._get_keys()
         return bool(user_key and api_token)
 
+    def slack_configured(self):
+        """Return True when a Slack webhook URL is present."""
+        return bool(self._get_slack_webhook())
+
+    def is_configured(self):
+        """Return True when at least one delivery channel is configured."""
+        return self.pushover_configured() or self.slack_configured()
+
     def is_enabled(self):
-        """Return True when Pushover is both configured and enabled in config."""
+        """Return True when push notifications are configured and enabled in config."""
         return self.shared_data.config.get("pushover_enabled", False) and self.is_configured()
 
     # ------------------------------------------------------------------
@@ -106,7 +129,54 @@ class PushoverService:
     # ------------------------------------------------------------------
 
     def send(self, message, title="Ragnar", priority=0, sound="pushover"):
-        """Send a Pushover notification. Returns dict with success/message."""
+        """Send a notification to every configured channel (Pushover, Slack).
+
+        Returns dict with success/message; success is True when at least one
+        channel delivered."""
+        results = {}
+        if self.pushover_configured():
+            results["Pushover"] = self._send_pushover(message, title, priority, sound)
+        webhook = self._get_slack_webhook()
+        if webhook:
+            results["Slack"] = self._send_slack(webhook, message, title, priority)
+        if not results:
+            return {"success": False, "message": "No notification channel configured"}
+        ok = [name for name, r in results.items() if r.get("success")]
+        failed = [f"{name}: {r.get('message')}" for name, r in results.items() if not r.get("success")]
+        if ok:
+            msg = f"Notification sent via {', '.join(ok)}"
+            if failed:
+                msg += f" (failed — {'; '.join(failed)})"
+            return {"success": True, "message": msg, "channels": results}
+        return {"success": False, "message": "; ".join(failed), "channels": results}
+
+    def _send_slack(self, webhook, message, title="Ragnar", priority=0):
+        """POST a message to a Slack incoming webhook."""
+        if not webhook.startswith(SLACK_WEBHOOK_PREFIX):
+            return {"success": False, "message": "Slack webhook URL must start with " + SLACK_WEBHOOK_PREFIX}
+        try:
+            import urllib.request
+            import json
+
+            prefix = ":rotating_light: " if priority and int(priority) >= 1 else ""
+            payload = json.dumps({"text": f"{prefix}*{title}*\n{message}"}).encode("utf-8")
+            req = urllib.request.Request(
+                webhook, data=payload, method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                body = resp.read().decode("utf-8", "replace").strip()
+                if resp.status == 200:
+                    logger.info(f"Slack notification sent: {title}")
+                    return {"success": True, "message": "Notification sent"}
+                logger.warning(f"Slack webhook error: {resp.status} {body}")
+                return {"success": False, "message": f"Slack error: {body or resp.status}"}
+        except Exception as e:
+            logger.error(f"Slack send failed: {e}")
+            return {"success": False, "message": str(e)}
+
+    def _send_pushover(self, message, title="Ragnar", priority=0, sound="pushover"):
+        """POST a message to the Pushover API."""
         user_key, api_token = self._get_keys()
         if not user_key or not api_token:
             return {"success": False, "message": "Pushover keys not configured"}
