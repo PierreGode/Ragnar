@@ -152,14 +152,22 @@ class FTPConnector:
         mac_address = self.scan.loc[self.scan['IPs'] == adresse_ip, 'MAC Address'].values[0]
         hostname = self.scan.loc[self.scan['IPs'] == adresse_ip, 'Hostnames'].values[0]
 
-        total_tasks = len(self.users) * len(self.passwords) + 1  # Include one for the anonymous attempt
+        try:
+            from actions.ai_credential_engine import build_credential_list
+            cred_list = build_credential_list(
+                self.shared_data, self.users, self.passwords,
+                ip=adresse_ip, service="ftp",
+            )
+        except Exception as exc:
+            logger.warning("ai_creds unavailable (%s) — using wordlist only", exc)
+            cred_list = [(u, pw) for u in self.users for pw in self.passwords]
+        total_tasks = len(cred_list) + 1  # Include one for the anonymous attempt
         
-        for user in self.users:
-            for password in self.passwords:
-                if self.shared_data.orchestrator_should_exit:
-                    logger.info("Orchestrator exit signal received, stopping bruteforce task addition.")
-                    return False, []
-                self.queue.put((adresse_ip, user, password, mac_address, hostname, port))
+        for user, password in cred_list:
+            if self.shared_data.orchestrator_should_exit:
+                logger.info("Orchestrator exit signal received, stopping bruteforce task addition.")
+                return False, []
+            self.queue.put((adresse_ip, user, password, mac_address, hostname, port))
 
         success_flag = [False]
         threads = []

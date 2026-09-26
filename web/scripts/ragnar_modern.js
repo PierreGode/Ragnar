@@ -555,6 +555,18 @@ const configMetadata = {
         label: "OpenAI API Token",
         description: "Your OpenAI API key for AI-powered features. Keep this confidential."
     },
+    ai_creds_enabled: {
+        label: "AI-Assisted Credentials",
+        description: "Ask the AI for ranked (user, password) pairs before the wordlist spray. Uses the AI settings above — no second endpoint needed. Fail-open to the wordlist if AI is off."
+    },
+    ai_creds_max_pairs: {
+        label: "AI Credential Pairs (max)",
+        description: "Maximum ranked pairs per host/service (1-50). Default: 25."
+    },
+    ai_creds_model: {
+        label: "AI Creds — model override",
+        description: "Optional. Blank = use the main AI model. Set a cheaper model (e.g. mimo-v2.6-flash) to save tokens."
+    },
     wardriving_enabled: {
         label: "Enable Wardriving",
         description: "Enable the wardriving tab for WiFi network discovery with GPS mapping. Requires a USB GPS module for location data. Note: Automatic AP mode is disabled while wardriving is enabled — AP mode (hostapd) would take over wlan0 and block WiFi scanning."
@@ -22568,10 +22580,11 @@ function displayConfigForm(config) {
         'General': ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck'],
         'Network': ['network_max_failed_pings'],
         'Timing': ['startup_delay', 'web_delay', 'screen_delay', 'scan_interval'],
-        'Display': ['epd_type', 'screen_reversed', 'spi_clock_mhz', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness']
+        'Display': ['epd_type', 'screen_reversed', 'spi_clock_mhz', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness'],
+        'AI Credentials': ['ai_creds_enabled', 'ai_creds_max_pairs', 'ai_creds_model']
     };
     
-    const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck', 'wardriving_enabled', 'wardriving_display', 'wardriving_auto_export', 'wardriving_wigle_include_zigbee'];
+    const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck', 'wardriving_enabled', 'wardriving_display', 'wardriving_auto_export', 'wardriving_wigle_include_zigbee', 'ai_creds_enabled'];
     const alwaysShowKeys = new Set(['network_max_failed_pings', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'spi_clock_mhz', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness', 'wardriving_scan_interval', 'wardriving_gps_port', 'wardriving_gps_baudrate']);
     const fallbackValues = {
         network_max_failed_pings: 15,

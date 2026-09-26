@@ -200,8 +200,17 @@ class SSHConnector:
         mac_address = ip_rows['MAC Address'].values[0]
         hostname = ip_rows['Hostnames'].values[0]
 
-        # Build credential list
-        cred_list = [(user, password) for user in self.users for password in self.passwords]
+        # Build credential list — AI-ranked pairs first (when enabled), then
+        # the wordlist spray. See actions/ai_credential_engine.py.
+        try:
+            from actions.ai_credential_engine import build_credential_list
+            cred_list = build_credential_list(
+                self.shared_data, self.users, self.passwords,
+                ip=adresse_ip, service="ssh",
+            )
+        except Exception as exc:
+            logger.warning("ai_creds unavailable (%s) — using wordlist only", exc)
+            cred_list = [(user, password) for user in self.users for password in self.passwords]
         total_tasks = len(cred_list)
         success = False
 

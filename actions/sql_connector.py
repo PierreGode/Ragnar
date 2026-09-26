@@ -164,10 +164,18 @@ class SQLConnector:
     def run_bruteforce(self, adresse_ip, port):
         self.load_scan_file()
 
-        total_tasks = len(self.users) * len(self.passwords)
-        
-        for user in self.users:
-            for password in self.passwords:
+        try:
+            from actions.ai_credential_engine import build_credential_list
+            cred_list = build_credential_list(
+                self.shared_data, self.users, self.passwords,
+                ip=adresse_ip, service="sql",
+            )
+        except Exception as exc:
+            logger.warning("ai_creds unavailable (%s) — using wordlist only", exc)
+            cred_list = [(u, pw) for u in self.users for pw in self.passwords]
+        total_tasks = len(cred_list)
+
+        for user, password in cred_list:
                 if self.shared_data.orchestrator_should_exit:
                     logger.info("Orchestrator exit signal received, stopping bruteforce task addition.")
                     return False, []

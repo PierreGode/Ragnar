@@ -878,6 +878,13 @@ class SharedData:
             "ai_max_tokens": 500,
             "ai_temperature": 0.7,
 
+            # AI-assisted credentials: ranked (user, password) pairs from the
+            # model before the wordlist spray. Fail-open. See
+            # actions/ai_credential_engine.py.
+            "ai_creds_enabled": False,
+            "ai_creds_max_pairs": 25,
+            "ai_creds_model": "",
+
             "__title_pushover__": "Pushover Notifications",
             "pushover_enabled": False,
             "pushover_notify_new_device": True,
