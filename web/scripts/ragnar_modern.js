@@ -555,6 +555,38 @@ const configMetadata = {
         label: "OpenAI API Token",
         description: "Your OpenAI API key for AI-powered features. Keep this confidential."
     },
+    exploit_enabled: {
+        label: "Enable Exploit Engine",
+        description: "Turn CVE findings into scoped exploit attempts. OFF by default — exploitation can crash services and is only legal against systems you own or are authorized to test. USE AT YOUR OWN RISK."
+    },
+    exploit_allow_all: {
+        label: "!!! Allow ALL Targets (NO SCOPE LIMIT)",
+        description: "DANGER: disables every scope guardrail. External, third-party, and cloud hosts become fair game. Illegal to use against systems without authorization. Crashing production is on YOU. The authors accept NO liability. Prefer the allowlist."
+    },
+    exploit_allow_external: {
+        label: "Allow External Targets",
+        description: "Permit exploitation of non-RFC1918 addresses. Still safer than Allow-ALL. Prefer the allowlist for specific hosts."
+    },
+    exploit_allowlist: {
+        label: "Exploit Allowlist",
+        description: "Comma-separated IPs allowed through even if external. Example: 203.0.113.10, 198.51.100.5"
+    },
+    exploit_min_cvss: {
+        label: "Min CVSS for Exploits",
+        description: "Only attempt CVEs at or above this score (high-value CVEs bypass). Default: 7.0"
+    },
+    exploit_max_per_host: {
+        label: "Max Exploit Attempts / Host",
+        description: "Cap on attempts per host per run (1-50). Default: 5"
+    },
+    exploit_ai_triage: {
+        label: "AI Exploit Triage",
+        description: "Ask the AI which CVEs are plausible for the observed banner before attempting. Reuses the main AI settings. Reduces noise and crash risk."
+    },
+    exploit_ai_model: {
+        label: "Exploit AI — model override",
+        description: "Optional. Blank = use the main AI model. Set a stronger model for better exploit triage."
+    },
     wardriving_enabled: {
         label: "Enable Wardriving",
         description: "Enable the wardriving tab for WiFi network discovery with GPS mapping. Requires a USB GPS module for location data. Note: Automatic AP mode is disabled while wardriving is enabled — AP mode (hostapd) would take over wlan0 and block WiFi scanning."
@@ -22568,10 +22600,11 @@ function displayConfigForm(config) {
         'General': ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck'],
         'Network': ['network_max_failed_pings'],
         'Timing': ['startup_delay', 'web_delay', 'screen_delay', 'scan_interval'],
-        'Display': ['epd_type', 'screen_reversed', 'spi_clock_mhz', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness']
+        'Display': ['epd_type', 'screen_reversed', 'spi_clock_mhz', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness'],
+        'Exploits': ['exploit_enabled', 'exploit_allow_all', 'exploit_allow_external', 'exploit_allowlist', 'exploit_min_cvss', 'exploit_max_per_host', 'exploit_ai_triage', 'exploit_ai_model']
     };
     
-    const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck', 'wardriving_enabled', 'wardriving_display', 'wardriving_auto_export', 'wardriving_wigle_include_zigbee'];
+    const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck', 'wardriving_enabled', 'wardriving_display', 'wardriving_auto_export', 'wardriving_wigle_include_zigbee', 'exploit_enabled', 'exploit_allow_all', 'exploit_allow_external', 'exploit_ai_triage'];
     const alwaysShowKeys = new Set(['network_max_failed_pings', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'spi_clock_mhz', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness', 'wardriving_scan_interval', 'wardriving_gps_port', 'wardriving_gps_baudrate']);
     const fallbackValues = {
         network_max_failed_pings: 15,

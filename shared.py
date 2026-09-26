@@ -878,6 +878,20 @@ class SharedData:
             "ai_max_tokens": 500,
             "ai_temperature": 0.7,
 
+            # Exploitation engine (actions/exploit_engine.py).
+            # OFF by default: exploitation can crash services. Scope is
+            # RFC1918-only unless allowlisted / opted in. See docs/EXPLOIT_ENGINE.md
+            # for the risks and the NO-LIABILITY terms.
+            "exploit_enabled": False,
+            # DANGER: disables ALL scope filtering. Operator assumes full liability.
+            "exploit_allow_all": False,
+            "exploit_allow_external": False,
+            "exploit_allowlist": [],
+            "exploit_min_cvss": 7.0,
+            "exploit_max_per_host": 5,
+            "exploit_ai_triage": True,
+            "exploit_ai_model": "",
+
             "__title_pushover__": "Pushover Notifications",
             "pushover_enabled": False,
             "pushover_notify_new_device": True,
