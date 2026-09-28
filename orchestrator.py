@@ -497,12 +497,16 @@ class Orchestrator:
         # Check if attacks are enabled (skip attack actions if disabled, but allow scanning)
         enable_attacks = getattr(self.shared_data, 'enable_attacks', True)
         attack_action_names = [
-            'SSHBruteforce', 'FTPBruteforce', 'TelnetBruteforce', 
+            'SSHBruteforce', 'FTPBruteforce', 'TelnetBruteforce',
             'RDPBruteforce', 'SMBBruteforce', 'SQLBruteforce',
-            'SSHConnector', 'FTPConnector', 'TelnetConnector', 
+            'SSHConnector', 'FTPConnector', 'TelnetConnector',
             'RDPConnector', 'SMBConnector', 'SQLConnector',
-            'StealDataSQL', 'StealFilesFTP', 'StealFilesRDP', 
-            'StealFilesSMB', 'StealFilesSSH', 'StealFilesTelnet'
+            'StealDataSQL', 'StealFilesFTP', 'StealFilesRDP',
+            'StealFilesSMB', 'StealFilesSSH', 'StealFilesTelnet',
+            # Pentest actions are offensive too — they log into a compromised
+            # host and run an audit (Lynis installs packages over SSH; BLE
+            # pentest actively probes devices). "Attacks off" must stop them.
+            'LynisPentestSSH', 'BLEPentest'
         ]
         if not enable_attacks and action.action_name in attack_action_names:
             logger.debug(f"Skipping attack action {action.action_name} for {ip}:{action.port} - attacks are disabled")
