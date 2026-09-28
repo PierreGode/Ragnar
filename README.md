@@ -92,6 +92,7 @@ Every feature below has a full guide in [`docs/`](docs). Short version here, det
 - **Vault — encrypted file store** — a password-protected, AES-256-GCM store in the **Files** tab (contents *and* index are ciphertext on disk; scrypt-derived key; auto-locks; no recovery). See [Vault](docs/vault.md).
 - **In-browser file editor** — open any text file (JSON, Python, shell, YAML, config, etc.) in the Files tab and edit it directly from the dashboard. Changes save back to disk — useful for tweaking console scripts, configs and scan results without SSH.
 - **Web Terminal** — optional in-dashboard shell (xterm.js ↔ PTY over Socket.IO) as the non-root `ragnar` user; off by default and login-gated — enable only on trusted networks.
+- **Levels, points & Norse ranks** — activity earns points that roll up into a level, a rank (Thrall → Karl → Hersir → Jarl → Konungr → … → **Ragnar** at the level-1000 cap) and **renown** beyond it. The dashboard Level card shows the rank, a progress bar to the next level, and a per-source breakdown. Points now come from a year's worth of features — defense detections (every Watch/Guard/WIDS detector, via Watchtower), wardriving, recon, and mesh — not just the original five. Existing progress is preserved exactly on upgrade (no windfall, no reset). See [Levels, Points & Ranks](docs/gamification.md).
 - **Kill Switch** — `/api/kill` wipes all databases, logs and data. See [Kill Switch](docs/KILL_SWITCH.md).
 
 <p align="center">

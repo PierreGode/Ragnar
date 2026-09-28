@@ -2667,6 +2667,16 @@ def _watchtower_check_once():
     wt = _wt_get()
     new = wt.poll()
 
+    # Gamification: reward defense activity. poll() returns only genuinely new
+    # log lines, so each finding is counted once. Points scale with severity.
+    if new:
+        try:
+            by_sev = collections.Counter(a.get('severity', 'info') for a in new)
+            for sev, cnt in by_sev.items():
+                shared_data.award_event_points(f'defense_detection_{sev}', count=cnt)
+        except Exception as exc:
+            logger.debug(f"[watchtower] point award skipped: {exc}")
+
     floor = _wtmod.SEV_RANK.get(cfg.get('watchtower_notify_min_severity', 'high'), 3)
     try:
         realert_s = max(0.0, float(cfg.get('watchtower_realert_hours', 0))) * 3600
@@ -2794,6 +2804,25 @@ def watchtower_monitor_loop():
             if not shared_data.config.get('watchtower_enabled', False):
                 break
             _time.sleep(5)
+
+
+@app.route('/api/gamification', methods=['GET'])
+def gamification_summary():
+    """Level, points, progress to next level, Norse rank, renown and the
+    per-source point breakdown for the dashboard Level card."""
+    try:
+        shared_data.update_stats()
+    except Exception as exc:
+        logger.debug(f"[gamification] update_stats skipped: {exc}")
+    try:
+        return jsonify(shared_data.get_gamification_summary())
+    except Exception as exc:
+        logger.error(f"[gamification] summary failed: {exc}")
+        return jsonify({
+            'level': safe_int(getattr(shared_data, 'levelnbr', 0)),
+            'points': safe_int(getattr(shared_data, 'coinnbr', 0)),
+            'rank': None, 'breakdown': [],
+        }), 200
 
 
 @app.route('/api/net/watchtower', methods=['GET'])
@@ -4026,6 +4055,9 @@ _mesh_lock = threading.Lock()
 # dashboard refresh.
 _mesh_peer_health = {}
 _mesh_last_poll = 0.0
+# Gamification: mesh peer ids we have already awarded points for, so a peer that
+# comes and goes only earns once per session (not on every poll cycle).
+_gam_seen_mesh_peers = set()
 # Per-peer set of alert keys already folded into the incident engine. Peers
 # serve a rolling window, so every poll re-sends what we saw last cycle.
 _mesh_alert_seen = {}
@@ -5141,6 +5173,14 @@ def _mesh_poll_once():
     # hammering the operator's laptop and phone with HTTP requests.
     tag = _mesh_tag()
     peers = [p for p in state.get('peers', []) if tag in p.get('tags', [])]
+    # Gamification: award for each newly-seen Ragnar mesh peer (once per id).
+    try:
+        fresh = [p.get('id') for p in peers if p.get('id') and p['id'] not in _gam_seen_mesh_peers]
+        if fresh:
+            _gam_seen_mesh_peers.update(fresh)
+            shared_data.award_event_points('mesh_peer', count=len(fresh))
+    except Exception as exc:
+        logger.debug(f"[mesh] peer point award skipped: {exc}")
     # Poll every tagged unit, even ones Tailscale currently marks offline: its
     # Online flag lags real reachability, and skipping "offline" peers is what
     # silently stopped data sharing once units went idle. The poll doubles as

@@ -1348,6 +1348,50 @@ class SharedData:
         self.points_per_data_file = 10
         self.points_per_zombie = 40
         self.points_per_vulnerability = 20
+        # --- level progression (curve unchanged: 1 + points // points_per_level) ---
+        # Level 1000 is the cap/pinnacle; points earned beyond it become "renown".
+        self.max_level = 1000
+        self.renown_points_per_star = 10000
+        # New snapshot point sources (a year of features earned nothing before).
+        # These are baselined on first sight so existing lifetime totals never
+        # cause a retroactive windfall — only *new* activity is rewarded.
+        self.points_per_attack = 30
+        self.points_per_port = 2
+        self.points_per_scanned_network = 5
+        self.points_per_host = 3
+        self._NEW_METRIC_KEYS = {
+            "attacksnbr", "portnbr", "scanned_networks_count", "hosts_known"
+        }
+        # Event-based point sources — awarded via award_event_points() from the
+        # rest of the app (defense detections, wardriving, RF, mesh, recon…).
+        self.event_point_values = {
+            "defense_detection_critical": 15,
+            "defense_detection_high": 10,
+            "defense_detection_medium": 5,
+            "defense_detection_low": 2,
+            "defense_detection_info": 1,
+            "wardrive_network": 4,
+            "gps_fix": 1,
+            "rf_capture": 3,
+            "rf_decode": 2,
+            "adsb_contact": 1,
+            "radio_device": 2,      # BT / BLE / Zigbee discovery
+            "mesh_peer": 20,
+            "scan_completed": 8,
+        }
+        # Norse rank ladder (min_level, name); derived from the numeric level so
+        # it is automatically backward-compatible. Ragnar (1000) is the capstone.
+        self.rank_ladder = [
+            (1,    "Thrall"),
+            (10,   "Karl"),
+            (25,   "Hersir"),
+            (50,   "Jarl"),
+            (100,  "Konungr"),
+            (200,  "Berserkr"),
+            (350,  "Einherjar"),
+            (600,  "Jötunn"),
+            (1000, "Ragnar"),
+        ]
         self.show_first_image = True
         self.network_hosts_snapshot = {}
         self.total_targetnbr = 0
@@ -1402,11 +1446,12 @@ class SharedData:
         os.makedirs(self.datadir, exist_ok=True)
 
         default_data = {
-            "version": 1,
+            "version": 2,
             "total_points": 0,
             "level": 1,
             "mac_points": {},
-            "lifetime_counts": {}
+            "lifetime_counts": {},
+            "event_counts": {}
         }
 
         loaded_data = {}
@@ -1426,8 +1471,27 @@ class SharedData:
             self.gamification_data["mac_points"] = {}
         if not isinstance(self.gamification_data.get("lifetime_counts"), dict):
             self.gamification_data["lifetime_counts"] = {}
+        if not isinstance(self.gamification_data.get("event_counts"), dict):
+            self.gamification_data["event_counts"] = {}
+
+        # v1 -> v2 migration: total_points is preserved exactly, so no existing
+        # level changes. New snapshot metrics are baselined lazily on first sight
+        # in update_stats(), so nobody gets a retroactive point windfall.
+        prior_version = 0
+        try:
+            prior_version = int(loaded_data.get("version", 1)) if loaded_data else 2
+        except (TypeError, ValueError):
+            prior_version = 1
+        if loaded_data and prior_version < 2:
+            self.gamification_data["version"] = 2
+            logger.info(
+                f"Migrated gamification data v{prior_version} -> v2 (level/points "
+                f"preserved; new point sources start earning from now)."
+            )
 
         self._update_gamification_state()
+        if loaded_data and prior_version < 2:
+            self.save_gamification_data()
 
     def save_gamification_data(self):
         """Persist gamification progress to disk."""
@@ -1442,10 +1506,13 @@ class SharedData:
             logger.error(f"Failed to save gamification data: {exc}")
 
     def calculate_level(self, total_points: int) -> int:
-        """Calculate the level from total points using a slower progression curve."""
+        """Level from total points. Curve is unchanged (1 + points // 200) so no
+        existing progress is altered; only the top is capped at ``max_level``
+        (1000). Points earned past the cap become renown (see get_renown)."""
         if total_points < 0:
             total_points = 0
-        return max(1, 1 + total_points // max(self.points_per_level, 1))
+        level = 1 + total_points // max(self.points_per_level, 1)
+        return max(1, min(level, int(self.max_level)))
 
     def _update_gamification_state(self):
         """Synchronize in-memory level/points from gamification data."""
@@ -1453,6 +1520,155 @@ class SharedData:
         self.coinnbr = total_points
         self.levelnbr = self.calculate_level(total_points)
         self.gamification_data["level"] = self.levelnbr
+
+    def get_rank(self, level: int) -> dict:
+        """Map a numeric level to its Norse rank and the next rank up."""
+        level = max(1, int(level or 1))
+        current = self.rank_ladder[0]
+        nxt = None
+        for i, (min_level, name) in enumerate(self.rank_ladder):
+            if level >= min_level:
+                current = (min_level, name)
+                nxt = self.rank_ladder[i + 1] if i + 1 < len(self.rank_ladder) else None
+            else:
+                break
+        return {
+            "name": current[1],
+            "min_level": current[0],
+            "next_name": nxt[1] if nxt else None,
+            "next_level": nxt[0] if nxt else None,
+        }
+
+    def get_renown(self, total_points: int) -> int:
+        """Renown stars earned beyond the level cap (0 until the cap is reached)."""
+        cap_points = (int(self.max_level) - 1) * max(self.points_per_level, 1)
+        extra = int(total_points or 0) - cap_points
+        if extra <= 0:
+            return 0
+        return extra // max(int(self.renown_points_per_star), 1)
+
+    def award_event_points(self, event_type: str, count: int = 1, points_each=None) -> int:
+        """Award points for a new-feature activity (defense detection, wardrive
+        network, RF decode, mesh peer, …). Idempotency is the caller's job: pass
+        only genuinely new events. Returns the points added."""
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            return 0
+        if count <= 0:
+            return 0
+        per = points_each if points_each is not None else self.event_point_values.get(event_type, 0)
+        try:
+            per = int(per)
+        except (TypeError, ValueError):
+            return 0
+        total = per * count
+        if total <= 0:
+            return 0
+        with self._stats_lock:
+            event_counts = self.gamification_data.setdefault("event_counts", {})
+            slot = event_counts.setdefault(event_type, {"count": 0, "points": 0})
+            slot["count"] = int(slot.get("count", 0)) + count
+            slot["points"] = int(slot.get("points", 0)) + total
+            self.gamification_data["total_points"] = int(
+                self.gamification_data.get("total_points", 0) or 0) + total
+            prev_level = self.levelnbr
+            self._update_gamification_state()
+            self.save_gamification_data()
+            if self.levelnbr != prev_level:
+                logger.info(f"Awarded {total} pts ({event_type}×{count}) — "
+                            f"Level {prev_level} -> {self.levelnbr}")
+        return total
+
+    def get_gamification_summary(self) -> dict:
+        """Everything the UI needs for the level card: level, points, progress to
+        the next level, rank, renown, and a per-source point breakdown."""
+        points = int(self.coinnbr or 0)
+        ppl = max(int(self.points_per_level), 1)
+        level = self.calculate_level(points)
+        cap = int(self.max_level)
+        at_cap = level >= cap
+
+        if at_cap:
+            into_level = points - (cap - 1) * ppl
+            per_level = 0
+            to_next = 0
+            progress_pct = 100
+        else:
+            into_level = points - (level - 1) * ppl
+            per_level = ppl
+            to_next = per_level - into_level
+            progress_pct = int(into_level / per_level * 100) if per_level else 100
+
+        rank = self.get_rank(level)
+        renown = self.get_renown(points)
+
+        # Per-source breakdown ------------------------------------------------
+        lifetime = self.gamification_data.get("lifetime_counts", {}) or {}
+        events = self.gamification_data.get("event_counts", {}) or {}
+        macs = self.gamification_data.get("mac_points", {}) or {}
+
+        snapshot_meta = {
+            "crednbr": ("Credentials", self.points_per_credential),
+            "datanbr": ("Data files", self.points_per_data_file),
+            "zombiesnbr": ("Zombies", self.points_per_zombie),
+            "vulnnbr": ("Vulnerabilities", self.points_per_vulnerability),
+            "attacksnbr": ("Attacks", self.points_per_attack),
+            "portnbr": ("Open ports", self.points_per_port),
+            "scanned_networks_count": ("Networks scanned", self.points_per_scanned_network),
+            "hosts_known": ("Hosts discovered", self.points_per_host),
+        }
+        event_labels = {
+            "defense_detection_critical": "Defense (critical)",
+            "defense_detection_high": "Defense (high)",
+            "defense_detection_medium": "Defense (medium)",
+            "defense_detection_low": "Defense (low)",
+            "defense_detection_info": "Defense (info)",
+            "wardrive_network": "Wardrive networks",
+            "gps_fix": "GPS fixes",
+            "rf_capture": "RF captures",
+            "rf_decode": "RF decodes",
+            "adsb_contact": "ADS-B contacts",
+            "radio_device": "BT/BLE/Zigbee devices",
+            "mesh_peer": "Mesh peers",
+            "scan_completed": "Scans completed",
+        }
+
+        breakdown = []
+        mac_pts = sum(int(v.get("points", 0)) for v in macs.values() if isinstance(v, dict))
+        if mac_pts:
+            breakdown.append({"source": "MAC addresses", "count": len(macs), "points": mac_pts})
+        for key, (label, per) in snapshot_meta.items():
+            cnt = int(lifetime.get(key, 0) or 0)
+            pts = cnt * int(per)
+            if pts:
+                breakdown.append({"source": label, "count": cnt, "points": pts})
+        for key, slot in events.items():
+            if not isinstance(slot, dict):
+                continue
+            pts = int(slot.get("points", 0) or 0)
+            if pts:
+                breakdown.append({"source": event_labels.get(key, key),
+                                  "count": int(slot.get("count", 0) or 0), "points": pts})
+        breakdown.sort(key=lambda d: d["points"], reverse=True)
+
+        return {
+            "level": level,
+            "points": points,
+            "max_level": cap,
+            "at_cap": at_cap,
+            "points_into_level": max(0, into_level),
+            "points_per_level": per_level,
+            "points_to_next": max(0, to_next),
+            "progress_pct": max(0, min(100, progress_pct)),
+            "rank": rank["name"],
+            "rank_min_level": rank["min_level"],
+            "next_rank": rank["next_name"],
+            "next_rank_level": rank["next_level"],
+            "renown": renown,
+            "renown_points_per_star": int(self.renown_points_per_star),
+            "breakdown": breakdown,
+        }
 
     def normalize_mac(self, mac_address: str) -> str:
         """Return a normalized MAC address suitable for persistence."""
@@ -2168,9 +2384,21 @@ class SharedData:
                 "datanbr": (int(self.datanbr or 0), self.points_per_data_file),
                 "zombiesnbr": (int(self.zombiesnbr or 0), self.points_per_zombie),
                 "vulnnbr": (int(self.vulnnbr or 0), self.points_per_vulnerability),
+                # New snapshot sources — a year of recon/defense activity that
+                # earned nothing before. Baselined on first sight (see below).
+                "attacksnbr": (int(getattr(self, "attacksnbr", 0) or 0), self.points_per_attack),
+                "portnbr": (int(self.portnbr or 0), self.points_per_port),
+                "scanned_networks_count": (int(getattr(self, "scanned_networks_count", 0) or 0), self.points_per_scanned_network),
+                "hosts_known": (int(self.total_targetnbr or 0), self.points_per_host),
             }
 
             for key, (current_value, points_value) in metrics.items():
+                # New metrics: baseline the existing lifetime total once, without
+                # awarding, so upgrading users don't get a retroactive windfall —
+                # only activity from now on earns points.
+                if key in self._NEW_METRIC_KEYS and key not in lifetime_counts:
+                    lifetime_counts[key] = current_value
+                    continue
                 recorded_value = int(lifetime_counts.get(key, 0) or 0)
                 if current_value > recorded_value:
                     delta = current_value - recorded_value

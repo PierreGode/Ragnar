@@ -191,7 +191,7 @@
 - `SharedData` configures `EPDHelper` based on `config.epd_type`, orientation, and `screen_reversed`. Supported profiles defined in `DISPLAY_PROFILES` map width/height/flip options.
 - `display.py` composes layered canvas: background template → headline metrics (targets, creds, vulns) → Wi-Fi info (SSID, IP) → rotating comments/AI quips → loot ticker. Fonts loaded from `resources/fonts` with fallback.
 - Supports full refresh every configurable interval (default 2 minutes) to clear ghosting; partial updates used for incremental status changes. Full refresh triggered when `screen_reversed` changes or hardware profile swapped.
-- Gamification data from `data/gamification.json` surfaces progress badges (e.g., "First Blood", "Credential Hoarder"). Each badge includes icon path under `resources/images/badges`.
+- Gamification data from `data/gamification.json` tracks lifetime points, which map to a level (`1 + points // 200`, capped at 1000), a Norse rank (Thrall … Ragnar) and renown beyond the cap. Points come from snapshot sources (MACs, creds, data, zombies, vulns, attacks, ports, networks, hosts) and event sources awarded via `SharedData.award_event_points()` (defense detections through Watchtower, wardriving, RF, mesh). The dashboard reads `GET /api/gamification`. See [Levels, Points & Ranks](gamification.md).
 - Display subsystem listens to `shared_data.ragnarorch_status`, network stats, AI summary, and Wi-Fi manager state for real-time updates.
 
 ### 10.1 Display Data Sources (`display.py`)

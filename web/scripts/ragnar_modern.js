@@ -11662,7 +11662,9 @@ async function loadInitialData() {
             updateDashboardStats(quickData);
             updateDashboardStatus(quickData);
         }
-        
+        // Populate the Level card's point-source breakdown tooltip (best-effort).
+        refreshLevelBreakdown();
+
         // OPTIMIZATION: Defer WiFi + LAN status to after dashboard is visible
         setTimeout(() => {
             refreshWifiStatus().catch(err => console.warn('WiFi status load failed:', err));
@@ -12030,6 +12032,77 @@ function buildLastSyncDisplay(stats) {
     return 'Sync pending…';
 }
 
+// ---------------------------------------------------------------------------
+// Level / gamification card. The numeric level and points come from the stats
+// payload; rank, progress bar and renown are derived here so no extra request
+// is needed on the hot path. Mirror of the backend curve in shared.py.
+// ---------------------------------------------------------------------------
+const LEVEL_POINTS_PER_LEVEL = 200;
+const LEVEL_MAX = 1000;
+const LEVEL_RENOWN_PER_STAR = 10000;
+const LEVEL_RANKS = [
+    [1, 'Thrall'], [10, 'Karl'], [25, 'Hersir'], [50, 'Jarl'], [100, 'Konungr'],
+    [200, 'Berserkr'], [350, 'Einherjar'], [600, 'Jötunn'], [1000, 'Ragnar'],
+];
+
+function levelRankFor(level) {
+    let current = LEVEL_RANKS[0], next = null;
+    for (let i = 0; i < LEVEL_RANKS.length; i++) {
+        if (level >= LEVEL_RANKS[i][0]) {
+            current = LEVEL_RANKS[i];
+            next = LEVEL_RANKS[i + 1] || null;
+        } else break;
+    }
+    return { name: current[1], next: next ? next[1] : null, nextLevel: next ? next[0] : null };
+}
+
+function renderLevelProgress(level, points) {
+    level = Math.max(1, Math.min(LEVEL_MAX, toNumber(level, 1)));
+    points = Math.max(0, toNumber(points, 0));
+    const rank = levelRankFor(level);
+    const atCap = level >= LEVEL_MAX;
+
+    const rankEl = document.getElementById('level-rank');
+    if (rankEl) rankEl.textContent = '· ' + rank.name;
+
+    const renownEl = document.getElementById('level-renown');
+    if (renownEl) {
+        const stars = atCap ? Math.floor(Math.max(0, points - (LEVEL_MAX - 1) * LEVEL_POINTS_PER_LEVEL) / LEVEL_RENOWN_PER_STAR) : 0;
+        renownEl.textContent = stars > 0 ? ('· ★' + stars) : '';
+        renownEl.title = stars > 0 ? (stars + ' renown — earned past the level cap') : '';
+    }
+
+    const bar = document.getElementById('level-progress-bar');
+    const text = document.getElementById('level-progress-text');
+    if (atCap) {
+        if (bar) bar.style.width = '100%';
+        if (text) text.textContent = 'Max level — Ragnar. Every point now earns renown ★.';
+        return;
+    }
+    const into = Math.max(0, Math.min(LEVEL_POINTS_PER_LEVEL, points - (level - 1) * LEVEL_POINTS_PER_LEVEL));
+    const toNext = Math.max(0, LEVEL_POINTS_PER_LEVEL - into);
+    const pct = Math.max(0, Math.min(100, Math.floor(into / LEVEL_POINTS_PER_LEVEL * 100)));
+    if (bar) bar.style.width = pct + '%';
+    if (text) {
+        const nextRank = (rank.nextLevel && level + 1 >= rank.nextLevel)
+            ? ` — become ${rank.next}!` : '';
+        text.textContent = `${toNext} pts to Level ${level + 1}${nextRank}`;
+    }
+}
+
+// Lazily fetch the per-source point breakdown and hang it on the card's tooltip.
+async function refreshLevelBreakdown() {
+    try {
+        const g = await fetchAPI('/api/gamification');
+        const card = document.getElementById('level-card');
+        if (!card || !g) return;
+        const rows = Array.isArray(g.breakdown) ? g.breakdown : [];
+        if (!rows.length) { card.title = 'No points earned yet'; return; }
+        const lines = rows.map(r => `${r.source}: ${r.points} pts (${r.count})`);
+        card.title = 'Points by source\n' + lines.join('\n');
+    } catch (e) { /* non-fatal */ }
+}
+
 function updateDashboardStats(stats) {
     if (!stats || typeof stats !== 'object') {
         return;
@@ -12086,6 +12159,7 @@ function updateDashboardStats(stats) {
     updateElement('dashboard-scanned-network-count', scannedNetworks);
     scaleStatNumber('dashboard-scanned-network-count', scannedNetworks);
     updateElement('points-count', points);
+    renderLevelProgress(level, points);
 
     const activeSummary = totalTargets > 0 ? `${activeTargets}/${totalTargets} active` : `${activeTargets} active`;
     const newSummary = newTargets > 0 ? `${newTargets} new` : 'No new targets';
