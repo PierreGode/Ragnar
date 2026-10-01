@@ -21425,6 +21425,37 @@ async function rubberDuckyRefreshScripts() {
     }
 }
 
+async function rubberDuckyUploadScript(input) {
+    /**Upload a .ducky/.txt script into files/rubber-ducky/ and select it*/
+    const file = input.files && input.files[0];
+    input.value = '';  // allow re-uploading the same filename later
+    if (!file) return;
+    const statusDiv = document.getElementById('rubber-ducky-status');
+    const statusMsg = document.getElementById('rubber-ducky-status-message');
+    try {
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('path', '/rubber-ducky');
+        const r = await fetch('/api/files/upload', { method: 'POST', body: fd });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || data.error) throw new Error(data.error || `upload failed (${r.status})`);
+        await rubberDuckyRefreshScripts();
+        const sel = document.getElementById('rubber-ducky-script-select');
+        if (sel) { sel.value = file.name; rubberDuckyOnScriptSelect(); }
+        if (statusMsg) {
+            statusMsg.textContent = `✅ Uploaded ${file.name}`;
+            statusMsg.className = 'rounded-lg border border-green-700 bg-green-900/70 px-4 py-3 text-sm text-green-200';
+            statusDiv.classList.remove('hidden');
+        }
+    } catch (e) {
+        if (statusMsg) {
+            statusMsg.textContent = `❌ Upload failed: ${e.message}`;
+            statusMsg.className = 'rounded-lg border border-red-700 bg-red-900/70 px-4 py-3 text-sm text-red-200';
+            statusDiv.classList.remove('hidden');
+        }
+    }
+}
+
 async function rubberDuckyRefreshDevices() {
     /**Fetch and populate HID device list*/
     try {

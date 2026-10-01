@@ -4672,6 +4672,13 @@
                         <select id="rubber-ducky-script-select" onchange="rubberDuckyOnScriptSelect()" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-yellow-400">
                             <option value="">Loading scripts...</option>
                         </select>
+                        <div class="flex items-center gap-2 mt-2">
+                            <button onclick="rubberDuckyRefreshScripts()" class="text-xs text-gray-300 bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded">Refresh</button>
+                            <label class="text-xs text-gray-300 bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded cursor-pointer">
+                                Upload
+                                <input type="file" accept=".ducky,.txt" class="hidden" onchange="rubberDuckyUploadScript(this)">
+                            </label>
+                        </div>
                     </div>
                     <div>
                         <label class="text-xs uppercase tracking-wide text-gray-400">Target Device</label>
