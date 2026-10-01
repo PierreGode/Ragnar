@@ -8,11 +8,8 @@ Only use on systems you own or have explicit permission to test.
 """
 
 import os
-import sys
-import re
 import time
 import logging
-import subprocess
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
@@ -45,6 +42,50 @@ MODIFIERS = {
     'ALT': 0x04,
     'GUI': 0x08,  # Windows/Command key
 }
+
+# Characters produced by holding Shift. Each maps to the UNSHIFTED key whose
+# keycode is sent together with the Shift modifier (US layout).
+SHIFT_CHARS = {
+    '!': '1', '@': '2', '#': '3', '$': '4', '%': '5',
+    '^': '6', '&': '7', '*': '8', '(': '9', ')': '0',
+    '_': '-', '+': '=', '{': '[', '}': ']', '|': '\\',
+    ':': ';', '"': "'", '~': '`', '<': ',', '>': '.', '?': '/',
+}
+
+# Unshifted punctuation → the HID_KEYCODES name for that physical key.
+SYMBOL_KEYS = {
+    ' ': 'SPACE', '-': 'MINUS', '=': 'EQUAL', '[': 'LBRACKET',
+    ']': 'RBRACKET', '\\': 'BACKSLASH', ';': 'SEMICOLON', "'": 'QUOTE',
+    '`': 'BACKTICK', ',': 'COMMA', '.': 'PERIOD', '/': 'SLASH',
+}
+
+
+def resolve_char(char: str) -> Tuple[Optional[int], int]:
+    """Map a single printable character to (keycode, modifiers).
+
+    Returns (None, 0) if the character cannot be typed on a US layout.
+    Handles letter case and Shift-produced symbols so the keystrokes a host
+    receives match the script text (e.g. ``!`` and uppercase letters).
+    """
+    if char.isalpha():
+        keycode = HID_KEYCODES[char.upper()]
+        mods = MODIFIERS['SHIFT'] if char.isupper() else 0
+        return keycode, mods
+
+    if char.isdigit():
+        return HID_KEYCODES[char], 0
+
+    if char in SHIFT_CHARS:
+        base = SHIFT_CHARS[char]
+        keycode = HID_KEYCODES.get(base)
+        if keycode is None:
+            keycode = HID_KEYCODES[SYMBOL_KEYS[base]]
+        return keycode, MODIFIERS['SHIFT']
+
+    if char in SYMBOL_KEYS:
+        return HID_KEYCODES[SYMBOL_KEYS[char]], 0
+
+    return None, 0
 
 
 class RubberDuckyScript:
@@ -217,7 +258,11 @@ class RubberDuckyScript:
                 preview.append(f"{i}. Press: {'+'.join(mods)}+{cmd['key']}")
 
             elif cmd['type'] == 'modifier':
-                preview.append(f"{i}. Hold: {cmd['modifier']}")
+                key = (cmd.get('key') or '').strip()
+                if key:
+                    preview.append(f"{i}. Press: {cmd['modifier']}+{key.upper()}")
+                else:
+                    preview.append(f"{i}. Hold: {cmd['modifier']}")
 
         if self.errors:
             preview.append("\n⚠ Parsing Errors:")
@@ -226,59 +271,69 @@ class RubberDuckyScript:
 
         return "\n".join(preview)
 
-    async def execute_on_device(self, device_path: str, timeout: int = 30) -> Dict:
-        """Execute script on HID device
+    def execute_on_device(self, device_path: str, timeout: int = 30) -> Dict:
+        """Execute script on a USB HID keyboard gadget.
 
         Args:
-            device_path: Path to /dev/hidraw* device
+            device_path: Path to the HID gadget node (``/dev/hidg0``) that
+                emulates a keyboard to the connected host.
             timeout: Max execution time in seconds
 
         Returns:
             Dict with execution status and result
         """
+        if not os.path.exists(device_path):
+            return {'success': False, 'error': f"Device not found: {device_path}"}
+
+        executed = 0
+        start_time = time.time()
+
         try:
-            if not os.path.exists(device_path):
-                return {
-                    'success': False,
-                    'error': f"Device not found: {device_path}"
-                }
+            # Open the gadget node once and stream every report through it.
+            # Re-opening per keystroke would truncate/reset the endpoint; a
+            # single unbuffered handle is both correct and faster.
+            with open(device_path, 'wb', buffering=0) as fh:
+                for cmd in self.commands:
+                    if time.time() - start_time > timeout:
+                        return {
+                            'success': False,
+                            'executed': executed,
+                            'error': f'Timeout after {executed} commands'
+                        }
 
-            executed = 0
-            start_time = time.time()
+                    try:
+                        if cmd['type'] == 'delay':
+                            time.sleep(cmd['ms'] / 1000.0)
 
-            for cmd in self.commands:
-                if time.time() - start_time > timeout:
-                    return {
-                        'success': False,
-                        'executed': executed,
-                        'error': f'Timeout after {executed} commands'
-                    }
+                        elif cmd['type'] == 'string':
+                            self._send_string(fh, cmd['text'])
 
-                try:
-                    if cmd['type'] == 'delay':
-                        time.sleep(cmd['ms'] / 1000.0)
+                        elif cmd['type'] == 'key':
+                            self._send_key(fh, cmd['key'])
 
-                    elif cmd['type'] == 'string':
-                        self._send_string(device_path, cmd['text'])
+                        elif cmd['type'] == 'key_with_modifier':
+                            self._send_key_with_modifier(fh, cmd['key'], cmd['modifiers'])
 
-                    elif cmd['type'] == 'key':
-                        self._send_key(device_path, cmd['key'])
+                        elif cmd['type'] == 'modifier':
+                            # e.g. GUI r (Win+R), CTRL c — a modifier plus an
+                            # optional single key.
+                            mod_mask = MODIFIERS.get(cmd['modifier'], 0)
+                            key = (cmd.get('key') or '').strip().upper()
+                            if key and key in HID_KEYCODES:
+                                self._write_report(fh, HID_KEYCODES[key], mod_mask)
+                            elif key:
+                                logger.warning(f"Unmapped modifier combo key: {key!r}")
+                            else:
+                                self._write_report(fh, 0, mod_mask)
 
-                    elif cmd['type'] == 'key_with_modifier':
-                        self._send_key_with_modifier(
-                            device_path,
-                            cmd['key'],
-                            cmd['modifiers']
-                        )
+                        executed += 1
 
-                    executed += 1
-
-                except Exception as e:
-                    return {
-                        'success': False,
-                        'executed': executed,
-                        'error': f"Command {executed} failed: {str(e)}"
-                    }
+                    except Exception as e:
+                        return {
+                            'success': False,
+                            'executed': executed,
+                            'error': f"Command {executed} failed: {str(e)}"
+                        }
 
             return {
                 'success': True,
@@ -288,140 +343,87 @@ class RubberDuckyScript:
 
         except Exception as e:
             logger.error(f"Script execution error: {e}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
+            return {'success': False, 'executed': executed, 'error': str(e)}
 
-    def _send_string(self, device_path: str, text: str):
+    def _send_string(self, fh, text: str):
         """Send string by typing each character"""
         for char in text:
-            self._send_char(device_path, char)
+            self._send_char(fh, char)
             time.sleep(0.02)  # Small delay between chars
 
-    def _send_char(self, device_path: str, char: str):
-        """Send single character"""
-        key = char.upper() if char.isalpha() else char
+    def _send_char(self, fh, char: str):
+        """Send a single character, applying Shift for capitals and symbols."""
+        keycode, modifiers = resolve_char(char)
+        if keycode is None:
+            logger.warning(f"Cannot map character: {char!r}")
+            return
+        self._write_report(fh, keycode, modifiers)
 
-        if key in HID_KEYCODES:
-            keycode = HID_KEYCODES[key]
-        else:
-            # Try to map special chars
-            special_map = {
-                ' ': 'SPACE',
-                '.': 'PERIOD',
-                ',': 'COMMA',
-                '-': 'MINUS',
-                '=': 'EQUAL',
-                '[': 'LBRACKET',
-                ']': 'RBRACKET',
-                ';': 'SEMICOLON',
-                "'": 'QUOTE',
-                '/': 'SLASH',
-                '\\': 'BACKSLASH',
-                '`': 'BACKTICK',
-            }
-            if char in special_map:
-                key = special_map[char]
-                keycode = HID_KEYCODES[key]
-            else:
-                logger.warning(f"Cannot map character: {char}")
-                return
-
-        self._send_hid_report(device_path, keycode, 0)
-
-    def _send_key(self, device_path: str, key: str):
+    def _send_key(self, fh, key: str):
         """Send key press"""
         if key in HID_KEYCODES:
-            keycode = HID_KEYCODES[key]
-            self._send_hid_report(device_path, keycode, 0)
+            self._write_report(fh, HID_KEYCODES[key], 0)
 
-    def _send_key_with_modifier(self, device_path: str, key: str, modifiers: int):
+    def _send_key_with_modifier(self, fh, key: str, modifiers: int):
         """Send key with modifier(s)"""
         if key in HID_KEYCODES:
-            keycode = HID_KEYCODES[key]
-            self._send_hid_report(device_path, keycode, modifiers)
+            self._write_report(fh, HID_KEYCODES[key], modifiers)
 
-    def _send_hid_report(self, device_path: str, keycode: int, modifiers: int):
-        """Send raw HID report to device
+    def _write_report(self, fh, keycode: int, modifiers: int):
+        """Write one press+release to an open HID gadget handle.
 
-        Standard USB keyboard HID report format:
-        [Modifier, Reserved, Key1, Key2, Key3, Key4, Key5, Key6]
+        Standard USB boot-keyboard report:
+        [Modifier, Reserved, Key1..Key6]
         """
-        try:
-            with open(device_path, 'wb') as f:
-                # Press key
-                report = bytes([modifiers, 0, keycode, 0, 0, 0, 0, 0])
-                f.write(report)
+        fh.write(bytes([modifiers, 0, keycode, 0, 0, 0, 0, 0]))  # press
+        time.sleep(0.01)
+        fh.write(bytes([0, 0, 0, 0, 0, 0, 0, 0]))                # release
 
-                # Release key
-                time.sleep(0.01)
-                report = bytes([0, 0, 0, 0, 0, 0, 0, 0])
-                f.write(report)
 
-        except Exception as e:
-            logger.error(f"HID write error: {e}")
-            raise
+def hid_gadget_ready() -> bool:
+    """True when a USB HID keyboard gadget node (/dev/hidg*) is present.
+
+    The node only exists when the box is configured as a USB HID gadget and
+    the gadget is bound to a UDC (plugged into a host). ``install_ragnar.sh``
+    adds the ``hid.usb0`` function to the composite gadget.
+    """
+    try:
+        return any(Path('/dev').glob('hidg*'))
+    except Exception:
+        return False
 
 
 def list_hid_devices() -> List[Dict]:
-    """List available HID devices (USB Ducky, keyboards, etc.)"""
+    """List USB HID keyboard gadget nodes usable as injection targets.
+
+    These are ``/dev/hidg*`` nodes — the keyboard the Pi presents to a host it
+    is plugged into. (``/dev/hidraw*`` is the opposite direction — a peripheral
+    attached to the Pi — so it is intentionally not listed here.)
+    """
     devices = []
-
     try:
-        # Look for /dev/hidraw* devices
-        hidraw_devices = Path('/dev').glob('hidraw*')
-
-        for hidraw in hidraw_devices:
-            try:
-                # Try to get device info
-                phy_path = Path('/sys/class/hidraw') / hidraw.name / 'device'
-                if phy_path.exists():
-                    name_file = phy_path / 'name'
-                    if name_file.exists():
-                        name = name_file.read_text().strip()
-                    else:
-                        name = hidraw.name
-
-                    devices.append({
-                        'path': str(hidraw),
-                        'name': name,
-                        'type': 'hidraw'
-                    })
-            except Exception as e:
-                logger.debug(f"Error reading HID device info: {e}")
-
+        for node in sorted(Path('/dev').glob('hidg*')):
+            devices.append({
+                'path': str(node),
+                'name': f'USB HID keyboard gadget ({node.name})',
+                'type': 'gadget',
+            })
     except Exception as e:
-        logger.error(f"Error listing HID devices: {e}")
-
-    # Also check for USB Ducky devices directly
-    try:
-        result = subprocess.run(
-            ['lsusb', '-d', '16c0:'],  # Hacker Boards vendor ID
-            capture_output=True,
-            text=True,
-            timeout=2
-        )
-
-        if result.returncode == 0:
-            for line in result.stdout.strip().split('\n'):
-                if 'Rubber Ducky' in line or 'USB Keyboard' in line:
-                    devices.append({
-                        'name': line.split(':', 1)[1].strip() if ':' in line else line,
-                        'path': 'usb_device',
-                        'type': 'usb'
-                    })
-
-    except Exception as e:
-        logger.debug(f"Error running lsusb: {e}")
+        logger.error(f"Error listing HID gadget devices: {e}")
 
     return devices
 
 
-def list_scripts(scripts_dir: str = 'files/rubber-ducky') -> List[Dict]:
+# Scripts live in the repo's files/ tree so the Files tab can manage them.
+# Resolve from this module's location so the executor and the web upload target
+# always agree regardless of the process working directory.
+DEFAULT_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / 'files' / 'rubber-ducky'
+
+
+def list_scripts(scripts_dir=None) -> List[Dict]:
     """List available rubber ducky scripts"""
     scripts = []
-    scripts_path = Path(scripts_dir)
+    scripts_path = Path(scripts_dir) if scripts_dir else DEFAULT_SCRIPTS_DIR
 
     if not scripts_path.exists():
         scripts_path.mkdir(parents=True, exist_ok=True)
@@ -429,7 +431,7 @@ def list_scripts(scripts_dir: str = 'files/rubber-ducky') -> List[Dict]:
 
     try:
         for script_file in scripts_path.glob('*'):
-            if script_file.is_file() and script_file.suffix in ['.ducky', '.txt', '.py']:
+            if script_file.is_file() and script_file.suffix in ['.ducky', '.txt']:
                 try:
                     size = script_file.stat().st_size
                     mtime = script_file.stat().st_mtime

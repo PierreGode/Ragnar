@@ -12,6 +12,7 @@ browse than search.
 
 ## Core scanning & offense
 - [Scanning & Attacks](scanning-and-attacks.md) — the core discovery / assess / brute-force / file-steal loop
+- [Rubber Ducky Script Executor](rubber-ducky.md) — Pentest-tab USB HID keystroke injection (`/dev/hidg0`)
 - [Advanced Vulnerability Scanning](adv-scan.md) — Adv Scan tab: Nuclei / Nikto / SQLMap / ZAP, RAM gating, mesh delegation
 - [Traffic Analysis](traffic-analysis.md) — passive `tcpdump` analyzer + C2 / scan / tunnel detection
 - [AI Integration](AI_INTEGRATION.md) — hosted or self-hosted LLM analysis

@@ -20640,14 +20640,18 @@ def rubber_ducky_list_scripts():
 
 @app.route('/api/rubber-ducky/devices', methods=['GET'])
 def rubber_ducky_list_devices():
-    """List available HID devices"""
+    """List available HID keyboard gadget devices"""
     try:
-        from python.rubber_ducky import list_hid_devices
+        from python.rubber_ducky import list_hid_devices, hid_gadget_ready
         devices = list_hid_devices()
         return jsonify({
             'success': True,
             'devices': devices,
-            'count': len(devices)
+            'count': len(devices),
+            'gadget_ready': hid_gadget_ready(),
+            'hint': ('No USB HID keyboard gadget found. Configure the HID gadget '
+                     '(reinstall or update Ragnar) and plug the device into the '
+                     'target host via USB.') if not devices else ''
         })
     except Exception as e:
         logger.error(f"Error listing HID devices: {e}")
@@ -20718,8 +20722,9 @@ def rubber_ducky_execute():
 
         from python.rubber_ducky import RubberDuckyScript, list_scripts
 
-        # Validate device path (security check)
-        if not device_path.startswith('/dev/hidraw'):
+        # Validate device path (security check): only the HID keyboard gadget
+        # node may be written to, never an arbitrary file.
+        if not device_path.startswith('/dev/hidg') or '..' in device_path:
             return jsonify({'error': 'Invalid device path'}), 400
 
         # Find script
@@ -23865,7 +23870,8 @@ def list_files_api():
                 {'name': 'logs', 'is_directory': True, 'path': '/logs'},
                 {'name': 'backups', 'is_directory': True, 'path': '/backups'},
                 {'name': 'uploads', 'is_directory': True, 'path': '/uploads'},
-                {'name': 'console_scripts', 'is_directory': True, 'path': '/console_scripts'}
+                {'name': 'console_scripts', 'is_directory': True, 'path': '/console_scripts'},
+                {'name': 'rubber-ducky', 'is_directory': True, 'path': '/rubber-ducky'}
             ])
         
         # Map paths to actual directories
@@ -23905,6 +23911,12 @@ def list_files_api():
             try:
                 actual_path = _resolve_legacy_path('/console_scripts',
                     os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'console_scripts'), path)
+            except ValueError:
+                return jsonify({'error': 'Invalid path'}), 400
+        elif path == '/rubber-ducky' or path.startswith('/rubber-ducky/'):
+            try:
+                actual_path = _resolve_legacy_path('/rubber-ducky',
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'files', 'rubber-ducky'), path)
             except ValueError:
                 return jsonify({'error': 'Invalid path'}), 400
         else:
@@ -24009,6 +24021,12 @@ def preview_file_api():
             try:
                 actual_path = _resolve_legacy_path('/console_scripts',
                     os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'console_scripts'), file_path)
+            except ValueError:
+                return jsonify({'error': 'Invalid path'}), 400
+        elif file_path == '/rubber-ducky' or file_path.startswith('/rubber-ducky/'):
+            try:
+                actual_path = _resolve_legacy_path('/rubber-ducky',
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'files', 'rubber-ducky'), file_path)
             except ValueError:
                 return jsonify({'error': 'Invalid path'}), 400
         else:
@@ -24161,6 +24179,12 @@ def download_file_api():
                     os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'console_scripts'), file_path)
             except ValueError:
                 return jsonify({'error': 'Invalid file path'}), 400
+        elif file_path == '/rubber-ducky' or file_path.startswith('/rubber-ducky/'):
+            try:
+                actual_path = _resolve_legacy_path('/rubber-ducky',
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'files', 'rubber-ducky'), file_path)
+            except ValueError:
+                return jsonify({'error': 'Invalid file path'}), 400
         else:
             return jsonify({'error': 'Invalid file path'}), 400
 
@@ -24242,6 +24266,12 @@ def delete_file_api():
                     os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'console_scripts'), file_path)
             except ValueError:
                 return jsonify({'error': 'Invalid file path'}), 400
+        elif file_path == '/rubber-ducky' or file_path.startswith('/rubber-ducky/'):
+            try:
+                actual_path = _resolve_legacy_path('/rubber-ducky',
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'files', 'rubber-ducky'), file_path)
+            except ValueError:
+                return jsonify({'error': 'Invalid file path'}), 400
         else:
             return jsonify({'error': 'Invalid file path'}), 400
 
@@ -24274,6 +24304,9 @@ def _resolve_upload_target(target_path):
         return _resolve_legacy_path('/uploads', shared_data.upload_dir, target_path)
     if target_path == '/backups' or target_path.startswith('/backups/'):
         return _resolve_legacy_path('/backups', shared_data.backupdir, target_path)
+    if target_path == '/rubber-ducky' or target_path.startswith('/rubber-ducky/'):
+        return _resolve_legacy_path('/rubber-ducky',
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'files', 'rubber-ducky'), target_path)
     raise ValueError('Invalid upload path')
 
 
@@ -24305,6 +24338,9 @@ def _resolve_readable_path(file_path):
     if file_path == '/console_scripts' or file_path.startswith('/console_scripts/'):
         return _resolve_legacy_path('/console_scripts',
             os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'console_scripts'), file_path)
+    if file_path == '/rubber-ducky' or file_path.startswith('/rubber-ducky/'):
+        return _resolve_legacy_path('/rubber-ducky',
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'files', 'rubber-ducky'), file_path)
     raise ValueError('Invalid path')
 
 

@@ -4662,9 +4662,9 @@
                             </svg>
                             Rubber Ducky Script Executor
                         </h3>
-                        <p class="text-sm text-gray-400">Run hardware keyboard emulation scripts on USB HID devices. Upload .ducky or .txt scripts to <code class="bg-slate-800 px-2 py-1 rounded text-xs">files/rubber-ducky/</code></p>
+                        <p class="text-sm text-gray-400">Emulate a USB keyboard to a host the Pi is plugged into, driving it from a script. Requires the HID gadget (<code class="bg-slate-800 px-2 py-1 rounded text-xs">/dev/hidg0</code>) configured by the installer. Upload .ducky or .txt scripts to <code class="bg-slate-800 px-2 py-1 rounded text-xs">files/rubber-ducky/</code>.</p>
                     </div>
-                    <span class="text-xs text-yellow-200 bg-yellow-900/50 px-3 py-1 rounded-full">Requires USB HID Device</span>
+                    <span class="text-xs text-yellow-200 bg-yellow-900/50 px-3 py-1 rounded-full">Requires HID Gadget</span>
                 </div>
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div>
@@ -4679,6 +4679,7 @@
                             <option value="">Select Device</option>
                         </select>
                         <button onclick="rubberDuckyRefreshDevices()" class="text-xs text-gray-300 bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded mt-2">Refresh Devices</button>
+                        <p id="rubber-ducky-device-hint" class="text-xs text-yellow-300/80 mt-2 hidden"></p>
                     </div>
                     <div>
                         <label class="text-xs uppercase tracking-wide text-gray-400">&nbsp;</label>
@@ -4701,6 +4702,7 @@
                 <p class="text-xs text-gray-500 mt-4">
                     💾 <strong>Upload scripts:</strong> Use the Files tab to upload .ducky or .txt scripts to <code class="bg-slate-800 px-1 rounded">files/rubber-ducky/</code> (empty folder created automatically).
                     <strong>Formats:</strong> Official Ducky syntax (.ducky) or plain text instructions (type:, press:, wait:, key:).
+                    <strong>Target:</strong> the device dropdown lists the Pi's USB keyboard gadget (<code class="bg-slate-800 px-1 rounded">/dev/hidg0</code>); plug the Pi into the host you are testing.
                 </p>
             </div>
 
@@ -9197,7 +9199,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260930-osi-matrix"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261001-rubber-ducky"></script>
 
 
 

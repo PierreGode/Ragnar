@@ -4,6 +4,15 @@
 
 ### 2026-10-01
 
+#### [#895](https://github.com/PierreGode/Ragnar/pull/895) — feat(pentest): Rubber Ducky script executor (USB HID keystroke injection)
+*branch `work/2026-10-01` · 10 file(s), +1016 / −5*
+
+- New Pentest-tab card: pick a script, pick the `/dev/hidg0` keyboard-gadget target, preview the actions, and run — gated by Pentest Mode + `enable_attacks`
+- `python/rubber_ducky.py`: parses official `.ducky` syntax and plain-text scripts, Shift-aware typing, streams HID reports to the gadget node (opens once; handles `GUI r`-style modifier combos)
+- Installer adds a `hid.usb0` function to the composite USB gadget (ECM networking preserved); updater patches an existing gadget script in place (reboot exposes `/dev/hidg0`)
+- `files/rubber-ducky/` surfaced as its own folder in the Files tab for uploads (ships empty)
+- **Docs:** [rubber-ducky.md](rubber-ducky.md), [scanning-and-attacks.md](scanning-and-attacks.md), [docs index](README.md), [releases.md](releases.md)
+
 #### [#879](https://github.com/PierreGode/Ragnar/pull/879) — fix(display): don't error when an interface (e.g. usb0) is absent
 *Merged 2026-10-01 · branch `fix/usb0-missing-interface` · 2 file(s), +15 / −12*
 

@@ -1,9 +1,0 @@
-# Example Rubber Ducky Script - Plain Text Format
-# This script runs a system command
-
-type: whoami
-wait: 500
-press: enter
-wait: 1000
-type: echo "Rubber Ducky Test Complete"
-press: enter

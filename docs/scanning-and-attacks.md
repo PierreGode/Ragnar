@@ -65,6 +65,7 @@ is fully auditable after the fact.
 
 ## Related
 
+- [Rubber Ducky Script Executor](rubber-ducky.md) — Pentest-tab USB HID keystroke injection
 - [Advanced Vulnerability Scanning](adv-scan.md) — Nuclei / Nikto / SQLMap / ZAP, mesh delegation, RAM gating
 - [Traffic Analysis](traffic-analysis.md) — passive host discovery + C2 / scan / tunnel detection
 - [Authority Verification & network tools](nettools.md) — the detection-only L2→L7 watcher suite

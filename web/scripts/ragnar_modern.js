@@ -21391,15 +21391,21 @@ async function rubberDuckyRefreshDevices() {
         const select = document.getElementById('rubber-ducky-device-select');
         select.innerHTML = '<option value="">Select a device...</option>';
 
+        const hintEl = document.getElementById('rubber-ducky-device-hint');
         if (data.devices.length === 0) {
-            select.innerHTML += '<option disabled>No HID devices detected</option>';
+            select.innerHTML += '<option disabled>No HID keyboard gadget detected</option>';
+            if (hintEl) {
+                hintEl.textContent = data.hint || 'No USB HID keyboard gadget found.';
+                hintEl.classList.remove('hidden');
+            }
             return;
         }
+        if (hintEl) hintEl.classList.add('hidden');
 
         data.devices.forEach(device => {
             const option = document.createElement('option');
             option.value = device.path;
-            option.textContent = `${device.name} (${device.type})`;
+            option.textContent = device.name;
             select.appendChild(option);
         });
     } catch (error) {
