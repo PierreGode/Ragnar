@@ -20611,13 +20611,155 @@ def pentest_get_report():
     try:
         if not BLUETOOTH_PENTEST_AVAILABLE or bluetooth_pentest is None:
             return jsonify({'error': 'Bluetooth pentest module not available'}), 503
-        
+
         report = bluetooth_pentest.generate_report()
-        
+
         return jsonify(report)
-        
+
     except Exception as e:
         logger.error(f"Error generating report: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# Rubber Ducky Routes
+@app.route('/api/rubber-ducky/scripts', methods=['GET'])
+def rubber_ducky_list_scripts():
+    """List available rubber ducky scripts"""
+    try:
+        from python.rubber_ducky import list_scripts
+        scripts = list_scripts()
+        return jsonify({
+            'success': True,
+            'scripts': scripts,
+            'count': len(scripts)
+        })
+    except Exception as e:
+        logger.error(f"Error listing scripts: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/rubber-ducky/devices', methods=['GET'])
+def rubber_ducky_list_devices():
+    """List available HID devices"""
+    try:
+        from python.rubber_ducky import list_hid_devices
+        devices = list_hid_devices()
+        return jsonify({
+            'success': True,
+            'devices': devices,
+            'count': len(devices)
+        })
+    except Exception as e:
+        logger.error(f"Error listing HID devices: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/rubber-ducky/preview', methods=['POST'])
+def rubber_ducky_preview():
+    """Preview a rubber ducky script"""
+    try:
+        data = request.get_json() or {}
+        script_name = data.get('script')
+
+        if not script_name:
+            return jsonify({'error': 'Script name required'}), 400
+
+        from python.rubber_ducky import RubberDuckyScript, list_scripts
+
+        # Find script
+        scripts = list_scripts()
+        script_path = None
+        for script in scripts:
+            if script['name'] == script_name:
+                script_path = script['path']
+                break
+
+        if not script_path:
+            return jsonify({'error': f'Script not found: {script_name}'}), 404
+
+        # Read script content
+        with open(script_path, 'r') as f:
+            content = f.read()
+
+        # Parse based on file extension
+        duck = RubberDuckyScript()
+        if script_path.endswith('.ducky'):
+            success = duck.parse_ducky_format(content)
+        else:
+            success = duck.parse_text_format(content)
+
+        return jsonify({
+            'success': success,
+            'preview': duck.get_preview(),
+            'command_count': len(duck.commands),
+            'errors': duck.errors
+        })
+
+    except Exception as e:
+        logger.error(f"Error previewing script: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/rubber-ducky/execute', methods=['POST'])
+def rubber_ducky_execute():
+    """Execute a rubber ducky script on a device"""
+    try:
+        # Check if attacks are enabled
+        enable_attacks = getattr(shared_data, 'enable_attacks', True)
+        if not enable_attacks:
+            return jsonify({'error': 'Attacks are disabled'}), 403
+
+        data = request.get_json() or {}
+        script_name = data.get('script')
+        device_path = data.get('device')
+
+        if not script_name or not device_path:
+            return jsonify({'error': 'Script and device required'}), 400
+
+        from python.rubber_ducky import RubberDuckyScript, list_scripts
+
+        # Validate device path (security check)
+        if not device_path.startswith('/dev/hidraw'):
+            return jsonify({'error': 'Invalid device path'}), 400
+
+        # Find script
+        scripts = list_scripts()
+        script_path = None
+        for script in scripts:
+            if script['name'] == script_name:
+                script_path = script['path']
+                break
+
+        if not script_path:
+            return jsonify({'error': f'Script not found: {script_name}'}), 404
+
+        # Read script content
+        with open(script_path, 'r') as f:
+            content = f.read()
+
+        # Parse based on file extension
+        duck = RubberDuckyScript()
+        if script_path.endswith('.ducky'):
+            success = duck.parse_ducky_format(content)
+        else:
+            success = duck.parse_text_format(content)
+
+        if not success:
+            return jsonify({
+                'success': False,
+                'error': 'Script parsing failed',
+                'errors': duck.errors
+            }), 400
+
+        # Execute (sync for now, could be async later)
+        result = duck.execute_on_device(device_path, timeout=30)
+
+        logger.info(f"Rubber Ducky execution on {device_path}: {result}")
+
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"Error executing script: {e}")
         return jsonify({'error': str(e)}), 500
 
 

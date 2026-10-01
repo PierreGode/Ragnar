@@ -1,0 +1,6 @@
+# Example Rubber Ducky Script - Hello World
+# This script types out "Hello, World!" and presses Enter
+
+DELAY 500
+STRING Hello, World!
+ENTER

@@ -4652,6 +4652,58 @@
                 <div id="lynis-audit-status" class="text-sm text-gray-400 mt-2 hidden"></div>
             </div>
 
+            <!-- Rubber Ducky Script Executor -->
+            <div class="glass rounded-xl p-6 mb-6">
+                <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-4">
+                    <div>
+                        <h3 class="text-xl font-semibold text-yellow-200 flex items-center gap-2">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9 5a4 4 0 100-8 4 4 0 000 8z"></path>
+                            </svg>
+                            Rubber Ducky Script Executor
+                        </h3>
+                        <p class="text-sm text-gray-400">Run hardware keyboard emulation scripts on USB HID devices. Upload .ducky or .txt scripts to <code class="bg-slate-800 px-2 py-1 rounded text-xs">files/rubber-ducky/</code></p>
+                    </div>
+                    <span class="text-xs text-yellow-200 bg-yellow-900/50 px-3 py-1 rounded-full">Requires USB HID Device</span>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label class="text-xs uppercase tracking-wide text-gray-400">Select Script</label>
+                        <select id="rubber-ducky-script-select" onchange="rubberDuckyOnScriptSelect()" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-yellow-400">
+                            <option value="">Loading scripts...</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="text-xs uppercase tracking-wide text-gray-400">Target Device</label>
+                        <select id="rubber-ducky-device-select" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-yellow-400">
+                            <option value="">Select Device</option>
+                        </select>
+                        <button onclick="rubberDuckyRefreshDevices()" class="text-xs text-gray-300 bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded mt-2">Refresh Devices</button>
+                    </div>
+                    <div>
+                        <label class="text-xs uppercase tracking-wide text-gray-400">&nbsp;</label>
+                        <button id="rubber-ducky-execute-btn" onclick="rubberDuckyExecute()" class="mt-1 w-full bg-yellow-600 hover:bg-yellow-700 text-white py-2 px-3 rounded font-semibold tracking-wide">Execute Script</button>
+                    </div>
+                </div>
+
+                <!-- Script Preview -->
+                <div id="rubber-ducky-preview" class="mt-4 hidden">
+                    <label class="text-xs uppercase tracking-wide text-gray-400">Script Preview</label>
+                    <div id="rubber-ducky-preview-content" class="mt-2 bg-slate-900/50 border border-slate-700 rounded p-3 max-h-48 overflow-y-auto text-xs font-mono text-gray-300 whitespace-pre-wrap">
+                    </div>
+                </div>
+
+                <!-- Status and Feedback -->
+                <div id="rubber-ducky-status" class="hidden mt-4">
+                    <div id="rubber-ducky-status-message" class="rounded-lg border border-slate-700 bg-slate-900/70 px-4 py-3 text-sm text-gray-200"></div>
+                </div>
+
+                <p class="text-xs text-gray-500 mt-4">
+                    💾 <strong>Upload scripts:</strong> Use the Files tab to upload .ducky or .txt scripts to <code class="bg-slate-800 px-1 rounded">files/rubber-ducky/</code> (empty folder created automatically).
+                    <strong>Formats:</strong> Official Ducky syntax (.ducky) or plain text instructions (type:, press:, wait:, key:).
+                </p>
+            </div>
+
             <!-- AirSnitch Wi-Fi Client Isolation Testing -->
             <div class="mb-8">
                 <div class="glass rounded-xl p-6">
