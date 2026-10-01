@@ -24091,7 +24091,8 @@ def preview_file_api():
         ext = os.path.splitext(actual_path)[1].lower()
 
         TEXT_EXTENSIONS = {'.txt', '.log', '.csv', '.json', '.xml', '.yaml', '.yml',
-                           '.md', '.conf', '.cfg', '.ini', '.nmap', '.gnmap', '.sh', '.py'}
+                           '.md', '.conf', '.cfg', '.ini', '.nmap', '.gnmap', '.sh', '.py',
+                           '.ducky'}
         IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg'}
 
         if ext == '.pdf' or mime_type == 'application/pdf':
@@ -24139,7 +24140,7 @@ EDITABLE_EXTENSIONS = {'.txt', '.log', '.json', '.xml', '.yaml', '.yml',
                        '.md', '.conf', '.cfg', '.ini', '.sh', '.py',
                        '.csv', '.env', '.toml', '.html', '.css', '.js',
                        '.bat', '.ps1', '.rb', '.pl', '.lua', '.sql',
-                       '.nmap', '.gnmap', '.rules'}
+                       '.nmap', '.gnmap', '.rules', '.ducky'}
 
 @app.route('/api/files/save', methods=['POST'])
 def save_file_api():
@@ -25369,7 +25370,8 @@ def safe_preview_api():
         ext = os.path.splitext(name)[1].lower()
 
         TEXT_EXTENSIONS = {'.txt', '.log', '.csv', '.json', '.xml', '.yaml', '.yml',
-                           '.md', '.conf', '.cfg', '.ini', '.nmap', '.gnmap', '.sh', '.py'}
+                           '.md', '.conf', '.cfg', '.ini', '.nmap', '.gnmap', '.sh', '.py',
+                           '.ducky'}
         IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg'}
 
         if ext == '.pdf' or mime == 'application/pdf':

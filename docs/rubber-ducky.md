@@ -112,7 +112,8 @@ Typing is Shift-aware on a US layout, so capitals and shifted symbols
 Scripts live in `files/rubber-ducky/`, which is exposed in the **Files** tab as
 its own `rubber-ducky` folder. Upload `.ducky` or `.txt` files there (the folder
 ships with one safe demo, `demo_hello.ducky`); they appear in the script
-dropdown immediately. Selecting a script
+dropdown immediately. `.ducky` files open as editable text in the Files tab
+(like `.txt`/`.json`), so you can tweak a script in place. Selecting a script
 shows a human-readable **preview** of every action before you run it.
 
 ## Workflow
