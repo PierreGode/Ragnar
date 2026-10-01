@@ -21350,13 +21350,25 @@ async function rubberDuckyInit() {
     revshellInit();
 }
 
+async function _rdJson(r) {
+    /**Parse a fetch Response as JSON, or throw a clear message when the backend
+       is stale (new routes return 404/HTML until the webapp is restarted).*/
+    const ct = r.headers.get('content-type') || '';
+    if (!ct.includes('json')) {
+        throw new Error(r.status === 404
+            ? 'endpoint not found — restart Ragnar to load the new routes'
+            : `unexpected ${r.status} response`);
+    }
+    return r.json();
+}
+
 async function rubberDuckyLoadLibrary() {
     /**Fetch the bundled payload library and render install buttons*/
     const box = document.getElementById('rubber-ducky-library');
     if (!box) return;
     try {
         const r = await fetch('/api/rubber-ducky/library');
-        const data = await r.json();
+        const data = await _rdJson(r);
         const list = (data && data.payloads) || [];
         if (!list.length) { box.innerHTML = '<p class="text-gray-500">No library payloads.</p>'; return; }
         box.innerHTML = '';
@@ -21384,7 +21396,7 @@ async function rubberDuckyInstall(name) {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name })
         });
-        const data = await r.json();
+        const data = await _rdJson(r);
         if (!r.ok || !data.success) throw new Error(data.error || 'install failed');
         await rubberDuckyRefreshScripts();
         const sel = document.getElementById('rubber-ducky-script-select');
@@ -21429,7 +21441,7 @@ async function rubberDuckyEditSave() {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name, content })
         });
-        const data = await r.json();
+        const data = await _rdJson(r);
         if (!r.ok || !data.success) throw new Error(data.error || 'save failed');
         await rubberDuckyRefreshScripts();
         const sel = document.getElementById('rubber-ducky-script-select');
@@ -21716,7 +21728,7 @@ async function revshellGenerate() {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ip, port, shell })
         });
-        const data = await r.json();
+        const data = await _rdJson(r);
         if (!r.ok || !data.success) throw new Error(data.error || 'generate failed');
         const ipEl = document.getElementById('revshell-ip');
         if (ipEl && !ipEl.value) ipEl.value = data.ip;
@@ -21761,7 +21773,7 @@ async function revshellListener(action) {
         const r = await fetch(`/api/revshell/listener/${action}`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body
         });
-        const data = await r.json();
+        const data = await _rdJson(r);
         if (!r.ok || data.success === false) throw new Error(data.error || 'failed');
         revshellRefreshStatus();
     } catch (e) {
