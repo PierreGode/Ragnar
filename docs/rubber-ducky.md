@@ -68,7 +68,8 @@ Typing is Shift-aware on a US layout, so capitals and shifted symbols
 
 Scripts live in `files/rubber-ducky/`, which is exposed in the **Files** tab as
 its own `rubber-ducky` folder. Upload `.ducky` or `.txt` files there (the folder
-ships empty); they appear in the script dropdown immediately. Selecting a script
+ships with one safe demo, `demo_hello.ducky`); they appear in the script
+dropdown immediately. Selecting a script
 shows a human-readable **preview** of every action before you run it.
 
 ## Workflow
@@ -78,6 +79,10 @@ shows a human-readable **preview** of every action before you run it.
 3. Pentest tab → **Rubber Ducky Script Executor**.
 4. Pick a script (preview appears), pick the `/dev/hidg0` target, press
    **Execute Script**. The status line reports how many commands ran.
+
+**Quick validation:** run the bundled `demo_hello.ducky` with any text field
+focused on the target host — it only types a couple of lines (no commands), so
+it is a safe way to confirm the whole path works end to end.
 
 ## Files
 

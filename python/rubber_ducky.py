@@ -103,22 +103,27 @@ class RubberDuckyScript:
         - STRING <text>
         - ENTER / SPACE / TAB / etc.
         - Modifiers: CTRL, SHIFT, ALT, GUI
+        - REM / leading-# comment lines
         """
         lines = content.strip().split('\n')
         line_num = 0
 
         for line_num, line in enumerate(lines, 1):
-            # Remove comments
-            if '#' in line:
-                line = line[:line.index('#')]
-
             line = line.strip()
             if not line:
+                continue
+
+            # Comment lines only: a leading '#' or a REM directive. Inline '#'
+            # is left intact — it is a legal character inside a STRING payload.
+            if line.startswith('#'):
                 continue
 
             parts = line.split(None, 1)
             command = parts[0].upper()
             arg = parts[1] if len(parts) > 1 else None
+
+            if command == 'REM':
+                continue
 
             try:
                 if command == 'DELAY':
