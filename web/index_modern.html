@@ -4720,11 +4720,92 @@
                     <div id="rubber-ducky-status-message" class="rounded-lg border border-slate-700 bg-slate-900/70 px-4 py-3 text-sm text-gray-200"></div>
                 </div>
 
+                <!-- Payload library + inline editor -->
+                <div class="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div class="bg-slate-900/40 border border-slate-700 rounded p-3">
+                        <div class="flex items-center justify-between mb-2">
+                            <span class="text-xs uppercase tracking-wide text-gray-400">Payload Library</span>
+                            <button onclick="rubberDuckyLoadLibrary()" class="text-xs bg-slate-700 hover:bg-slate-600 text-white px-2 py-1 rounded">↺</button>
+                        </div>
+                        <div id="rubber-ducky-library" class="space-y-2 max-h-48 overflow-y-auto text-xs">
+                            <p class="text-gray-500">Loading…</p>
+                        </div>
+                        <p class="text-[11px] text-gray-500 mt-2">Ready-made payloads — Install copies one into your scripts folder to run or edit.</p>
+                    </div>
+                    <div class="bg-slate-900/40 border border-slate-700 rounded p-3">
+                        <div class="flex items-center justify-between mb-2">
+                            <span class="text-xs uppercase tracking-wide text-gray-400">Editor</span>
+                            <div class="flex items-center gap-2">
+                                <button onclick="rubberDuckyEditNew()" class="text-xs bg-slate-700 hover:bg-slate-600 text-white px-2 py-1 rounded">New</button>
+                                <button onclick="rubberDuckyEditLoad()" class="text-xs bg-slate-700 hover:bg-slate-600 text-white px-2 py-1 rounded">Edit selected</button>
+                            </div>
+                        </div>
+                        <input id="rubber-ducky-edit-name" type="text" placeholder="name.ducky" class="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs mb-2 focus:outline-none focus:border-yellow-400">
+                        <textarea id="rubber-ducky-edit-content" rows="6" placeholder="REM New payload&#10;DELAY 500&#10;STRING hello&#10;ENTER" class="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs font-mono focus:outline-none focus:border-yellow-400" spellcheck="false"></textarea>
+                        <button onclick="rubberDuckyEditSave()" class="mt-2 w-full bg-yellow-600 hover:bg-yellow-700 text-white py-1.5 rounded text-sm font-semibold">Save Script</button>
+                    </div>
+                </div>
+
                 <p class="text-xs text-gray-500 mt-4">
                     💾 <strong>Upload scripts:</strong> Use the Files tab to upload .ducky or .txt scripts to <code class="bg-slate-800 px-1 rounded">files/rubber-ducky/</code> (ships with a safe <code class="bg-slate-800 px-1 rounded">demo_hello.ducky</code> you can run to validate the setup).
                     <strong>Formats:</strong> Official Ducky syntax (.ducky) or plain text instructions (type:, press:, wait:, key:).
                     <strong>Target:</strong> the device dropdown lists the Pi's USB keyboard gadget (<code class="bg-slate-800 px-1 rounded">/dev/hidg0</code>); plug the Pi into the host you are testing.
                 </p>
+            </div>
+
+            <!-- Reverse Shell Generator + Listener -->
+            <div class="glass rounded-xl p-6 mb-6">
+                <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-4">
+                    <div>
+                        <h3 class="text-xl font-semibold text-pink-200 flex items-center gap-2">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M3 4h18a1 1 0 011 1v14a1 1 0 01-1 1H3a1 1 0 01-1-1V5a1 1 0 011-1z"></path>
+                            </svg>
+                            Reverse Shell
+                        </h3>
+                        <p class="text-sm text-gray-400">Generate connect-back one-liners and catch them with the built-in listener. Authorized testing only.</p>
+                    </div>
+                    <span class="text-xs text-pink-200 bg-pink-900/50 px-3 py-1 rounded-full">LHOST auto-filled</span>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+                    <div>
+                        <label class="text-xs uppercase tracking-wide text-gray-400">LHOST</label>
+                        <input id="revshell-ip" type="text" placeholder="auto" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-pink-400">
+                    </div>
+                    <div>
+                        <label class="text-xs uppercase tracking-wide text-gray-400">LPORT</label>
+                        <input id="revshell-port" type="number" value="4444" min="1" max="65535" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-pink-400">
+                    </div>
+                    <div>
+                        <label class="text-xs uppercase tracking-wide text-gray-400">Shell</label>
+                        <input id="revshell-shell" type="text" value="/bin/bash" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-pink-400">
+                    </div>
+                    <div>
+                        <label class="text-xs uppercase tracking-wide text-gray-400">&nbsp;</label>
+                        <button onclick="revshellGenerate()" class="mt-1 w-full bg-pink-700 hover:bg-pink-600 text-white py-2 px-3 rounded font-semibold tracking-wide">Generate</button>
+                    </div>
+                </div>
+
+                <div id="revshell-payloads" class="mt-4 space-y-2"></div>
+
+                <!-- Listener -->
+                <div class="mt-4 bg-slate-900/40 border border-slate-700 rounded p-3">
+                    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                        <div>
+                            <span class="text-xs uppercase tracking-wide text-gray-400">Catch Listener</span>
+                            <p id="revshell-listener-status" class="text-xs text-gray-400 mt-1">Stopped</p>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <button onclick="revshellListener('start')" class="text-xs bg-green-700 hover:bg-green-600 text-white px-3 py-1.5 rounded">Start</button>
+                            <button onclick="revshellListener('stop')" class="text-xs bg-red-800 hover:bg-red-700 text-white px-3 py-1.5 rounded">Stop</button>
+                        </div>
+                    </div>
+                    <div id="revshell-console" class="mt-2 bg-slate-950/70 border border-slate-800 rounded p-2 h-40 overflow-y-auto text-xs font-mono text-green-300 whitespace-pre-wrap">Listener stopped.</div>
+                    <div class="flex items-center gap-2 mt-2">
+                        <input id="revshell-cmd" type="text" placeholder="command to send…" onkeydown="if(event.key==='Enter')revshellSend()" class="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-xs font-mono focus:outline-none focus:border-pink-400">
+                        <button onclick="revshellSend()" class="text-xs bg-pink-700 hover:bg-pink-600 text-white px-3 py-1.5 rounded">Send</button>
+                    </div>
+                </div>
             </div>
 
             <!-- AirSnitch Wi-Fi Client Isolation Testing -->

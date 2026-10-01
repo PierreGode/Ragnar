@@ -1,0 +1,12 @@
+REM Windows host recon — writes basic system info to the Desktop (recon.txt).
+REM Authorized testing only.
+DELAY 1000
+GUI r
+DELAY 500
+STRING cmd
+ENTER
+DELAY 1000
+STRING echo === %USERNAME%@%COMPUTERNAME% === > "%USERPROFILE%\Desktop\recon.txt"
+ENTER
+STRING systeminfo >> "%USERPROFILE%\Desktop\recon.txt" & ipconfig /all >> "%USERPROFILE%\Desktop\recon.txt"
+ENTER

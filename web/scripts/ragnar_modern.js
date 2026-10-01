@@ -21346,6 +21346,106 @@ async function rubberDuckyInit() {
     await rubberDuckyRefreshScripts();
     await rubberDuckyRefreshDevices();
     await rubberDuckyGadgetStatus();
+    rubberDuckyLoadLibrary();
+    revshellInit();
+}
+
+async function rubberDuckyLoadLibrary() {
+    /**Fetch the bundled payload library and render install buttons*/
+    const box = document.getElementById('rubber-ducky-library');
+    if (!box) return;
+    try {
+        const r = await fetch('/api/rubber-ducky/library');
+        const data = await r.json();
+        const list = (data && data.payloads) || [];
+        if (!list.length) { box.innerHTML = '<p class="text-gray-500">No library payloads.</p>'; return; }
+        box.innerHTML = '';
+        list.forEach(p => {
+            const row = document.createElement('div');
+            row.className = 'flex items-start justify-between gap-2 border-b border-slate-800 pb-2';
+            row.innerHTML = `<div class="min-w-0"><div class="text-gray-200 truncate">${escapeHtml(p.name)}</div>`
+                + `<div class="text-gray-500 truncate">${escapeHtml(p.description || '')}</div></div>`;
+            const btn = document.createElement('button');
+            btn.className = 'text-xs bg-slate-700 hover:bg-slate-600 text-white px-2 py-1 rounded shrink-0';
+            btn.textContent = 'Install';
+            btn.onclick = () => rubberDuckyInstall(p.name);
+            row.appendChild(btn);
+            box.appendChild(row);
+        });
+    } catch (e) {
+        box.innerHTML = `<p class="text-red-400">Error: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+async function rubberDuckyInstall(name) {
+    /**Copy a library payload into the scripts folder and select it*/
+    try {
+        const r = await fetch('/api/rubber-ducky/library/install', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+        });
+        const data = await r.json();
+        if (!r.ok || !data.success) throw new Error(data.error || 'install failed');
+        await rubberDuckyRefreshScripts();
+        const sel = document.getElementById('rubber-ducky-script-select');
+        if (sel) { sel.value = data.name; rubberDuckyOnScriptSelect(); }
+    } catch (e) {
+        alert('Install failed: ' + e.message);
+    }
+}
+
+function rubberDuckyEditNew() {
+    /**Clear the editor for a new script*/
+    const n = document.getElementById('rubber-ducky-edit-name');
+    const c = document.getElementById('rubber-ducky-edit-content');
+    if (n) n.value = '';
+    if (c) c.value = '';
+    if (n) n.focus();
+}
+
+async function rubberDuckyEditLoad() {
+    /**Load the selected script's contents into the editor*/
+    const name = document.getElementById('rubber-ducky-script-select').value;
+    if (!name) { alert('Select a script first'); return; }
+    try {
+        const r = await fetch(`/api/files/preview?path=${encodeURIComponent('/rubber-ducky/' + name)}`);
+        const data = await r.json();
+        if (data.type !== 'text') throw new Error('not a text file');
+        document.getElementById('rubber-ducky-edit-name').value = name;
+        document.getElementById('rubber-ducky-edit-content').value = data.content || '';
+    } catch (e) {
+        alert('Could not load: ' + e.message);
+    }
+}
+
+async function rubberDuckyEditSave() {
+    /**Save the editor contents as a script in files/rubber-ducky/*/
+    const name = document.getElementById('rubber-ducky-edit-name').value.trim();
+    const content = document.getElementById('rubber-ducky-edit-content').value;
+    const statusDiv = document.getElementById('rubber-ducky-status');
+    const statusMsg = document.getElementById('rubber-ducky-status-message');
+    try {
+        const r = await fetch('/api/rubber-ducky/save', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, content })
+        });
+        const data = await r.json();
+        if (!r.ok || !data.success) throw new Error(data.error || 'save failed');
+        await rubberDuckyRefreshScripts();
+        const sel = document.getElementById('rubber-ducky-script-select');
+        if (sel) { sel.value = data.name; rubberDuckyOnScriptSelect(); }
+        if (statusMsg) {
+            statusMsg.textContent = `✅ Saved ${data.name}`;
+            statusMsg.className = 'rounded-lg border border-green-700 bg-green-900/70 px-4 py-3 text-sm text-green-200';
+            statusDiv.classList.remove('hidden');
+        }
+    } catch (e) {
+        if (statusMsg) {
+            statusMsg.textContent = `❌ Save failed: ${e.message}`;
+            statusMsg.className = 'rounded-lg border border-red-700 bg-red-900/70 px-4 py-3 text-sm text-red-200';
+            statusDiv.classList.remove('hidden');
+        }
+    }
 }
 
 function rubberDuckyRenderGadget(data) {
@@ -21583,6 +21683,132 @@ async function rubberDuckyExecute() {
         executeBtn.disabled = false;
         executeBtn.textContent = 'Execute Script';
     }
+}
+
+// ============================================================================
+// REVERSE SHELL GENERATOR + LISTENER
+// ============================================================================
+
+let _revshellPollTimer = null;
+
+async function revshellInit() {
+    /**Prefill LHOST with the box LAN IP and sync listener state*/
+    try {
+        const ipEl = document.getElementById('revshell-ip');
+        if (ipEl && !ipEl.value) {
+            const r = await fetch('/api/revshell/lan-ip');
+            const d = await r.json();
+            if (d && d.ip) ipEl.value = d.ip;
+        }
+    } catch (e) { /* ignore */ }
+    revshellRefreshStatus();
+}
+
+async function revshellGenerate() {
+    /**Generate reverse-shell one-liners and render them with copy buttons*/
+    const box = document.getElementById('revshell-payloads');
+    const ip = document.getElementById('revshell-ip').value.trim();
+    const port = document.getElementById('revshell-port').value;
+    const shell = document.getElementById('revshell-shell').value.trim() || '/bin/bash';
+    box.innerHTML = '<p class="text-xs text-gray-500">Generating…</p>';
+    try {
+        const r = await fetch('/api/revshell/generate', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ip, port, shell })
+        });
+        const data = await r.json();
+        if (!r.ok || !data.success) throw new Error(data.error || 'generate failed');
+        const ipEl = document.getElementById('revshell-ip');
+        if (ipEl && !ipEl.value) ipEl.value = data.ip;
+        box.innerHTML = '';
+        (data.payloads || []).forEach(p => {
+            const row = document.createElement('div');
+            row.className = 'bg-slate-900/50 border border-slate-800 rounded p-2';
+            const head = document.createElement('div');
+            head.className = 'flex items-center justify-between mb-1';
+            head.innerHTML = `<span class="text-xs font-medium text-pink-200">${escapeHtml(p.name)}</span>`;
+            const copy = document.createElement('button');
+            copy.className = 'text-[11px] bg-slate-700 hover:bg-slate-600 text-white px-2 py-0.5 rounded';
+            copy.textContent = 'Copy';
+            copy.onclick = () => revshellCopy(p.payload, copy);
+            head.appendChild(copy);
+            const code = document.createElement('div');
+            code.className = 'text-[11px] font-mono text-gray-300 whitespace-pre-wrap break-all';
+            code.textContent = p.payload;
+            row.appendChild(head); row.appendChild(code);
+            box.appendChild(row);
+        });
+    } catch (e) {
+        box.innerHTML = `<p class="text-xs text-red-400">Error: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+function revshellCopy(text, btn) {
+    const done = () => { if (btn) { const t = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => btn.textContent = t, 1200); } };
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, () => {});
+        }
+    } catch (e) { /* ignore */ }
+}
+
+async function revshellListener(action) {
+    /**Start or stop the catch listener*/
+    try {
+        const body = action === 'start'
+            ? JSON.stringify({ port: document.getElementById('revshell-port').value })
+            : '{}';
+        const r = await fetch(`/api/revshell/listener/${action}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body
+        });
+        const data = await r.json();
+        if (!r.ok || data.success === false) throw new Error(data.error || 'failed');
+        revshellRefreshStatus();
+    } catch (e) {
+        const c = document.getElementById('revshell-console');
+        if (c) c.textContent = 'Error: ' + e.message;
+    }
+}
+
+async function revshellRefreshStatus() {
+    /**Poll listener status and update the console; self-schedules while running*/
+    try {
+        const r = await fetch('/api/revshell/listener/status');
+        const s = await r.json();
+        const statusEl = document.getElementById('revshell-listener-status');
+        const con = document.getElementById('revshell-console');
+        if (statusEl) {
+            statusEl.textContent = s.running
+                ? (s.connected ? `Connected — ${s.peer}` : `Listening on :${s.port}`)
+                : 'Stopped';
+            statusEl.className = 'text-xs mt-1 ' + (s.connected ? 'text-green-400' : s.running ? 'text-blue-300' : 'text-gray-400');
+        }
+        if (con && typeof s.output === 'string') {
+            const atBottom = con.scrollHeight - con.scrollTop - con.clientHeight < 40;
+            con.textContent = s.output || (s.running ? '' : 'Listener stopped.');
+            if (atBottom) con.scrollTop = con.scrollHeight;
+        }
+        if (_revshellPollTimer) { clearTimeout(_revshellPollTimer); _revshellPollTimer = null; }
+        // Keep polling only while the tab is on Pentest and the listener runs.
+        if (s.running && currentTab === 'pentest') {
+            _revshellPollTimer = setTimeout(revshellRefreshStatus, 1500);
+        }
+    } catch (e) { /* ignore transient errors */ }
+}
+
+async function revshellSend() {
+    /**Send a command line to the connected session*/
+    const input = document.getElementById('revshell-cmd');
+    const data = input.value;
+    if (!data) return;
+    input.value = '';
+    try {
+        await fetch('/api/revshell/listener/send', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ data })
+        });
+        setTimeout(revshellRefreshStatus, 300);
+    } catch (e) { /* ignore */ }
 }
 
 // ============================================================================

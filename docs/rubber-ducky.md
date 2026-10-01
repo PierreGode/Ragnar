@@ -88,9 +88,10 @@ ENTER
 ```
 
 Supported: `DELAY <ms>`, `STRING <text>`, `ENTER`/`SPACE`/`TAB`, any named key,
-and a modifier (`CTRL`/`SHIFT`/`ALT`/`GUI`) optionally followed by a key
-(e.g. `GUI r`). A `REM` line, or a line beginning with `#`, is a comment; an
-inline `#` inside a `STRING` is kept as a literal character.
+and one or more modifiers (`CTRL`/`SHIFT`/`ALT`/`GUI`) optionally followed by a
+key — `GUI r`, `CTRL ALT t`, `CTRL ALT DELETE`. A `REM` line, or a line
+beginning with `#`, is a comment; an inline `#` inside a `STRING` is kept as a
+literal character.
 
 **Plain text** (`.txt`)
 
@@ -115,6 +116,20 @@ ships with one safe demo, `demo_hello.ducky`); they appear in the script
 dropdown immediately. `.ducky` files open as editable text in the Files tab
 (like `.txt`/`.json`), so you can tweak a script in place. Selecting a script
 shows a human-readable **preview** of every action before you run it.
+
+## Payload library & inline editor
+
+The card has two helpers under the status line:
+
+- **Payload library** — ready-made payloads bundled in the repo
+  (`resources/ducky_payloads/`): host recon for Windows/Linux/macOS, a Windows
+  saved-Wi-Fi-profile dump, and a Windows reverse-shell template. **Install**
+  copies one into `files/rubber-ducky/` to run or edit.
+- **Editor** — write a script inline: **New** clears it, **Edit selected**
+  loads the chosen script, **Save Script** writes it to `files/rubber-ducky/`
+  (name must end in `.ducky`/`.txt`) and selects it. Pairs with the
+  [Reverse Shell](reverse-shell.md) card — generate a one-liner, paste it into a
+  payload, save, run.
 
 ## Workflow
 
@@ -151,10 +166,12 @@ as typing on the physically connected host.
 
 | Path | Role |
 | --- | --- |
-| `python/rubber_ducky.py` | Parser, preview, HID gadget writer, device/script enumeration |
+| `python/rubber_ducky.py` | Parser, preview, HID gadget writer, device/script enumeration, library + save |
 | `files/rubber-ducky/` | Script folder (managed from the Files tab) |
+| `resources/ducky_payloads/` | Bundled, read-only payload library |
 | `scripts/hid_gadget.sh` | On-demand gadget control (`status`/`up`/`down`) |
 | `/api/rubber-ducky/{scripts,devices,preview,execute}` | Script endpoints |
+| `/api/rubber-ducky/{library,library/install,save}` | Payload library + inline-editor endpoints |
 | `/api/rubber-ducky/gadget/{status,enable,disable}` | On-demand gadget control endpoints |
 | `/etc/ragnar/hid_gadget.enabled` | Opt-in marker (persists the gadget across updates) |
 

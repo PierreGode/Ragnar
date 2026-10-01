@@ -11,8 +11,10 @@
 - `python/rubber_ducky.py`: parses official `.ducky` syntax and plain-text scripts, Shift-aware typing, streams HID reports to the gadget node (opens once; handles `GUI r`-style modifier combos)
 - **Opt-in** HID gadget setup in installer/updater (`RAGNAR_HID_GADGET=1` + `/etc/ragnar/hid_gadget.enabled` marker): adds the `dwc2,dr_mode=peripheral` overlay, drops the conflicting legacy `g_ether`, and adds `hid.usb0` — default off so the Cardputer/plain-ECM boxes are untouched; also fixes the non-idempotent `cmdline.txt` edit
 - On-demand **Enable/Disable** gadget control in the card (`scripts/hid_gadget.sh` + `/api/rubber-ducky/gadget/*`): brings `/dev/hidg0` up/down live, preserving `usb0` networking
-- `files/rubber-ducky/` surfaced as its own folder in the Files tab for uploads, with a bundled safe demo (`demo_hello.ducky`) for end-to-end validation
-- **Docs:** [rubber-ducky.md](rubber-ducky.md), [scanning-and-attacks.md](scanning-and-attacks.md), [docs index](README.md), [releases.md](releases.md)
+- `files/rubber-ducky/` surfaced as its own folder in the Files tab for uploads, with a bundled safe demo (`demo_hello.ducky`) for end-to-end validation; `.ducky` files are editable text in the Files tab
+- Ducky card gains a **Refresh/Upload** for scripts, a **payload library** (`resources/ducky_payloads/`: Win/Linux/macOS recon, Wi-Fi-profile dump, reverse-shell template) with one-click Install, and an **inline editor**; `.ducky` parser now handles multi-modifier combos (`CTRL ALT t`)
+- New **Reverse Shell** card: generates connect-back one-liners (Bash/nc/Python/PowerShell/Perl/PHP) + a built-in catch listener (`python/revshell.py`)
+- **Docs:** [rubber-ducky.md](rubber-ducky.md), [reverse-shell.md](reverse-shell.md), [scanning-and-attacks.md](scanning-and-attacks.md), [docs index](README.md), [releases.md](releases.md)
 
 #### [#879](https://github.com/PierreGode/Ragnar/pull/879) — fix(display): don't error when an interface (e.g. usb0) is absent
 *Merged 2026-10-01 · branch `fix/usb0-missing-interface` · 2 file(s), +15 / −12*

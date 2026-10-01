@@ -20816,6 +20816,121 @@ def rubber_ducky_gadget_disable():
     return jsonify(payload), status
 
 
+@app.route('/api/rubber-ducky/library', methods=['GET'])
+def rubber_ducky_library():
+    """List the bundled payload library."""
+    try:
+        from python.rubber_ducky import list_library
+        payloads = list_library()
+        return jsonify({'success': True, 'payloads': payloads, 'count': len(payloads)})
+    except Exception as e:
+        logger.error(f"Error listing payload library: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/rubber-ducky/library/install', methods=['POST'])
+def rubber_ducky_library_install():
+    """Copy a library payload into the editable scripts folder."""
+    try:
+        from python.rubber_ducky import install_payload
+        name = (request.get_json() or {}).get('name')
+        result = install_payload(name)
+        return jsonify(result), (200 if result.get('success') else 400)
+    except Exception as e:
+        logger.error(f"Error installing payload: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/rubber-ducky/save', methods=['POST'])
+def rubber_ducky_save():
+    """Create or overwrite a script in the editable scripts folder."""
+    try:
+        from python.rubber_ducky import save_script
+        data = request.get_json() or {}
+        result = save_script(data.get('name'), data.get('content', ''))
+        return jsonify(result), (200 if result.get('success') else 400)
+    except Exception as e:
+        logger.error(f"Error saving script: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# Reverse shell generator + catch listener (Pentest-tab tool)
+@app.route('/api/revshell/generate', methods=['POST'])
+def revshell_generate():
+    """Generate reverse-shell one-liners for an LHOST/LPORT."""
+    try:
+        from python.revshell import generate, get_lan_ip
+        data = request.get_json() or {}
+        ip = (data.get('ip') or '').strip() or get_lan_ip()
+        try:
+            port = int(data.get('port') or 4444)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Invalid port'}), 400
+        if not (1 <= port <= 65535):
+            return jsonify({'error': 'Port must be 1-65535'}), 400
+        shell = data.get('shell') or '/bin/bash'
+        return jsonify({'success': True, 'ip': ip, 'port': port,
+                        'payloads': generate(ip, port, shell)})
+    except Exception as e:
+        logger.error(f"Error generating reverse shell: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/revshell/lan-ip', methods=['GET'])
+def revshell_lan_ip():
+    """Return the box's primary LAN IP (default LHOST)."""
+    try:
+        from python.revshell import get_lan_ip
+        return jsonify({'success': True, 'ip': get_lan_ip()})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/revshell/listener/start', methods=['POST'])
+def revshell_listener_start():
+    """Start the catch listener on a port."""
+    try:
+        from python.revshell import LISTENER
+        port = (request.get_json() or {}).get('port', 4444)
+        result = LISTENER.start(port)
+        logger.info(f"Reverse shell listener start: {result}")
+        return jsonify(result), (200 if result.get('success') else 400)
+    except Exception as e:
+        logger.error(f"Error starting listener: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/revshell/listener/status', methods=['GET'])
+def revshell_listener_status():
+    """Listener state + captured output."""
+    try:
+        from python.revshell import LISTENER
+        return jsonify(LISTENER.status())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/revshell/listener/send', methods=['POST'])
+def revshell_listener_send():
+    """Send a command line to the connected session."""
+    try:
+        from python.revshell import LISTENER
+        result = LISTENER.send((request.get_json() or {}).get('data', ''))
+        return jsonify(result), (200 if result.get('success') else 400)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/revshell/listener/stop', methods=['POST'])
+def revshell_listener_stop():
+    """Stop the catch listener."""
+    try:
+        from python.revshell import LISTENER
+        return jsonify(LISTENER.stop())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/actions', methods=['GET'])
 def get_actions():
     """Get available actions"""

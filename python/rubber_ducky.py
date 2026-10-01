@@ -157,11 +157,21 @@ class RubberDuckyScript:
                     self.commands.append({'type': 'key', 'key': command})
 
                 elif command in MODIFIERS:
-                    # Modifier + optional key
+                    # One or more modifiers, then an optional final key, e.g.
+                    # "GUI r", "CTRL ALT t", "CTRL ALT DELETE".
+                    mods = MODIFIERS[command]
+                    key = None
+                    for tok in (arg.split() if arg else []):
+                        tu = tok.upper()
+                        if tu in MODIFIERS:
+                            mods |= MODIFIERS[tu]
+                        else:
+                            key = tu  # first non-modifier token is the key
+                            break
                     self.commands.append({
-                        'type': 'modifier',
-                        'modifier': command,
-                        'key': arg
+                        'type': 'key_with_modifier',
+                        'key': key,
+                        'modifiers': mods
                     })
 
                 else:
@@ -260,14 +270,8 @@ class RubberDuckyScript:
 
             elif cmd['type'] == 'key_with_modifier':
                 mods = [k for k, v in MODIFIERS.items() if cmd['modifiers'] & v]
-                preview.append(f"{i}. Press: {'+'.join(mods)}+{cmd['key']}")
-
-            elif cmd['type'] == 'modifier':
-                key = (cmd.get('key') or '').strip()
-                if key:
-                    preview.append(f"{i}. Press: {cmd['modifier']}+{key.upper()}")
-                else:
-                    preview.append(f"{i}. Hold: {cmd['modifier']}")
+                combo = '+'.join(mods + ([cmd['key']] if cmd.get('key') else []))
+                preview.append(f"{i}. Press: {combo}")
 
         if self.errors:
             preview.append("\n⚠ Parsing Errors:")
@@ -319,18 +323,6 @@ class RubberDuckyScript:
                         elif cmd['type'] == 'key_with_modifier':
                             self._send_key_with_modifier(fh, cmd['key'], cmd['modifiers'])
 
-                        elif cmd['type'] == 'modifier':
-                            # e.g. GUI r (Win+R), CTRL c — a modifier plus an
-                            # optional single key.
-                            mod_mask = MODIFIERS.get(cmd['modifier'], 0)
-                            key = (cmd.get('key') or '').strip().upper()
-                            if key and key in HID_KEYCODES:
-                                self._write_report(fh, HID_KEYCODES[key], mod_mask)
-                            elif key:
-                                logger.warning(f"Unmapped modifier combo key: {key!r}")
-                            else:
-                                self._write_report(fh, 0, mod_mask)
-
                         executed += 1
 
                     except Exception as e:
@@ -369,10 +361,15 @@ class RubberDuckyScript:
         if key in HID_KEYCODES:
             self._write_report(fh, HID_KEYCODES[key], 0)
 
-    def _send_key_with_modifier(self, fh, key: str, modifiers: int):
-        """Send key with modifier(s)"""
-        if key in HID_KEYCODES:
+    def _send_key_with_modifier(self, fh, key, modifiers: int):
+        """Send a key plus modifier(s); key may be None for a modifier-only press."""
+        if not key:
+            self._write_report(fh, 0, modifiers)          # e.g. GUI alone
+        elif key in HID_KEYCODES:
             self._write_report(fh, HID_KEYCODES[key], modifiers)
+        else:
+            logger.warning(f"Unmapped modifier-combo key: {key!r}")
+            self._write_report(fh, 0, modifiers)
 
     def _write_report(self, fh, keycode: int, modifiers: int):
         """Write one press+release to an open HID gadget handle.
@@ -455,3 +452,84 @@ def list_scripts(scripts_dir=None) -> List[Dict]:
         logger.error(f"Error listing scripts: {e}")
 
     return sorted(scripts, key=lambda x: x['name'])
+
+
+# Bundled, read-only payload library shipped with the repo.
+DEFAULT_LIBRARY_DIR = Path(__file__).resolve().parent.parent / 'resources' / 'ducky_payloads'
+
+
+def _first_comment(path: Path) -> str:
+    """First REM / leading-# line of a payload, used as its description."""
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                s = line.strip()
+                if s.upper().startswith('REM '):
+                    return s[4:].strip()
+                if s.startswith('#'):
+                    return s.lstrip('#').strip()
+                if s:
+                    break
+    except Exception:
+        pass
+    return ''
+
+
+def list_library(library_dir=None) -> List[Dict]:
+    """List the bundled payload library (name + description)."""
+    out = []
+    lib = Path(library_dir) if library_dir else DEFAULT_LIBRARY_DIR
+    if not lib.exists():
+        return out
+    try:
+        for p in sorted(lib.glob('*')):
+            if p.is_file() and p.suffix in ['.ducky', '.txt']:
+                out.append({'name': p.name, 'description': _first_comment(p),
+                            'size': p.stat().st_size})
+    except Exception as e:
+        logger.error(f"Error listing payload library: {e}")
+    return out
+
+
+def _safe_script_name(name: str) -> Optional[str]:
+    """Return a safe basename ending in .ducky/.txt, or None if invalid."""
+    if not name:
+        return None
+    base = os.path.basename(name.strip())
+    if base in ('', '.', '..') or '/' in name or '\\' in name:
+        return None
+    if not base.lower().endswith(('.ducky', '.txt')):
+        return None
+    return base
+
+
+def install_payload(name: str) -> Dict:
+    """Copy a bundled library payload into the editable scripts folder."""
+    base = _safe_script_name(name)
+    if not base:
+        return {'success': False, 'error': 'Invalid payload name'}
+    src = DEFAULT_LIBRARY_DIR / base
+    if not src.is_file():
+        return {'success': False, 'error': f'Not in library: {base}'}
+    DEFAULT_SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+    dst = DEFAULT_SCRIPTS_DIR / base
+    try:
+        dst.write_text(src.read_text(encoding='utf-8', errors='replace'), encoding='utf-8')
+        return {'success': True, 'name': base}
+    except Exception as e:
+        logger.error(f"Error installing payload {base}: {e}")
+        return {'success': False, 'error': str(e)}
+
+
+def save_script(name: str, content: str) -> Dict:
+    """Create or overwrite a script in the editable scripts folder."""
+    base = _safe_script_name(name)
+    if not base:
+        return {'success': False, 'error': 'Name must be a .ducky or .txt file'}
+    DEFAULT_SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        (DEFAULT_SCRIPTS_DIR / base).write_text(content or '', encoding='utf-8')
+        return {'success': True, 'name': base}
+    except Exception as e:
+        logger.error(f"Error saving script {base}: {e}")
+        return {'success': False, 'error': str(e)}
