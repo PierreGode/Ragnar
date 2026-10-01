@@ -21345,6 +21345,54 @@ async function rubberDuckyInit() {
     /**Initialize rubber ducky UI on pentest tab load*/
     await rubberDuckyRefreshScripts();
     await rubberDuckyRefreshDevices();
+    await rubberDuckyGadgetStatus();
+}
+
+function rubberDuckyRenderGadget(data) {
+    /**Render the USB HID gadget status line from a status/enable/disable payload*/
+    const el = document.getElementById('rubber-ducky-gadget-status');
+    if (!el) return;
+    if (!data || data.ok === false) {
+        el.textContent = '⚠ ' + ((data && data.error) || 'gadget status unavailable');
+        el.className = 'text-xs text-yellow-300 mt-1';
+        return;
+    }
+    if (data.hidg0) {
+        const attached = data.state === 'configured' ? ' · host attached' :
+                         (data.state ? ` · host: ${data.state}` : '');
+        el.textContent = `Enabled — /dev/hidg0 ready${attached}`;
+        el.className = 'text-xs text-green-400 mt-1';
+    } else if (!data.udc) {
+        el.textContent = 'No USB device controller — enable the HID-gadget option in the installer/updater and reboot';
+        el.className = 'text-xs text-yellow-300 mt-1';
+    } else {
+        el.textContent = 'Disabled — /dev/hidg0 not present';
+        el.className = 'text-xs text-gray-400 mt-1';
+    }
+}
+
+async function rubberDuckyGadgetStatus() {
+    /**Fetch and render the HID gadget status*/
+    try {
+        const r = await fetch('/api/rubber-ducky/gadget/status');
+        rubberDuckyRenderGadget(await r.json());
+    } catch (e) {
+        rubberDuckyRenderGadget({ ok: false, error: e.message });
+    }
+}
+
+async function rubberDuckyGadget(action) {
+    /**Enable or disable the HID gadget on demand, then refresh status + devices*/
+    const el = document.getElementById('rubber-ducky-gadget-status');
+    if (el) { el.textContent = action === 'enable' ? 'Enabling…' : 'Disabling…'; el.className = 'text-xs text-blue-300 mt-1'; }
+    try {
+        const r = await fetch(`/api/rubber-ducky/gadget/${action}`, { method: 'POST' });
+        rubberDuckyRenderGadget(await r.json());
+    } catch (e) {
+        rubberDuckyRenderGadget({ ok: false, error: e.message });
+    }
+    // The device dropdown depends on /dev/hidg0, so refresh it too.
+    await rubberDuckyRefreshDevices();
 }
 
 async function rubberDuckyRefreshScripts() {

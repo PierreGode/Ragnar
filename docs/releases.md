@@ -5,11 +5,12 @@
 ### 2026-10-01
 
 #### [#895](https://github.com/PierreGode/Ragnar/pull/895) — feat(pentest): Rubber Ducky script executor (USB HID keystroke injection)
-*branch `work/2026-10-01` · 10 file(s), +1016 / −5*
+*branch `work/2026-10-01` · 13 file(s)*
 
-- New Pentest-tab card: pick a script, pick the `/dev/hidg0` keyboard-gadget target, preview the actions, and run — gated by Pentest Mode + `enable_attacks`
+- New Pentest-tab card: pick a script, pick the `/dev/hidg0` keyboard-gadget target, preview the actions, and run — gated by Pentest Mode only (no dependency on the global `enable_attacks` flag, matching the other manual tools)
 - `python/rubber_ducky.py`: parses official `.ducky` syntax and plain-text scripts, Shift-aware typing, streams HID reports to the gadget node (opens once; handles `GUI r`-style modifier combos)
-- Installer adds a `hid.usb0` function to the composite USB gadget (ECM networking preserved); updater patches an existing gadget script in place (reboot exposes `/dev/hidg0`)
+- **Opt-in** HID gadget setup in installer/updater (`RAGNAR_HID_GADGET=1` + `/etc/ragnar/hid_gadget.enabled` marker): adds the `dwc2,dr_mode=peripheral` overlay, drops the conflicting legacy `g_ether`, and adds `hid.usb0` — default off so the Cardputer/plain-ECM boxes are untouched; also fixes the non-idempotent `cmdline.txt` edit
+- On-demand **Enable/Disable** gadget control in the card (`scripts/hid_gadget.sh` + `/api/rubber-ducky/gadget/*`): brings `/dev/hidg0` up/down live, preserving `usb0` networking
 - `files/rubber-ducky/` surfaced as its own folder in the Files tab for uploads, with a bundled safe demo (`demo_hello.ducky`) for end-to-end validation
 - **Docs:** [rubber-ducky.md](rubber-ducky.md), [scanning-and-attacks.md](scanning-and-attacks.md), [docs index](README.md), [releases.md](releases.md)
 

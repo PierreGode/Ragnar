@@ -20706,13 +20706,13 @@ def rubber_ducky_preview():
 
 @app.route('/api/rubber-ducky/execute', methods=['POST'])
 def rubber_ducky_execute():
-    """Execute a rubber ducky script on a device"""
-    try:
-        # Check if attacks are enabled
-        enable_attacks = getattr(shared_data, 'enable_attacks', True)
-        if not enable_attacks:
-            return jsonify({'error': 'Attacks are disabled'}), 403
+    """Execute a rubber ducky script on a device.
 
+    Gated only by Pentest Mode (the tab is hidden otherwise), exactly like the
+    other manual Pentest-tab tools — it deliberately does NOT depend on the
+    global ``enable_attacks`` flag.
+    """
+    try:
         data = request.get_json() or {}
         script_name = data.get('script')
         device_path = data.get('device')
@@ -20766,6 +20766,54 @@ def rubber_ducky_execute():
     except Exception as e:
         logger.error(f"Error executing script: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+def _rubber_ducky_gadget(cmd):
+    """Run scripts/hid_gadget.sh <cmd> and return (parsed_json, http_status).
+
+    On-demand control of the HID keyboard gadget (status/up/down). The webapp
+    runs as root in production; fall back to sudo -n otherwise.
+    """
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts', 'hid_gadget.sh')
+    if not os.path.exists(script):
+        return {'ok': False, 'error': 'scripts/hid_gadget.sh missing — update Ragnar'}, 500
+    argv = ['bash', script, cmd]
+    if os.geteuid() != 0:
+        argv = ['sudo', '-n'] + argv
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=20)
+        out = (proc.stdout or '').strip()
+        try:
+            payload = json.loads(out.splitlines()[-1]) if out else {}
+        except (ValueError, IndexError):
+            payload = {'ok': False, 'error': (proc.stderr or out or 'no output').strip()[:300]}
+        return payload, (200 if payload.get('ok') else 500)
+    except Exception as e:
+        logger.error(f"HID gadget {cmd} failed: {e}")
+        return {'ok': False, 'error': str(e)}, 500
+
+
+@app.route('/api/rubber-ducky/gadget/status', methods=['GET'])
+def rubber_ducky_gadget_status():
+    """Report HID keyboard gadget state (UDC / bound / hidg0 / attached)."""
+    payload, status = _rubber_ducky_gadget('status')
+    return jsonify(payload), status
+
+
+@app.route('/api/rubber-ducky/gadget/enable', methods=['POST'])
+def rubber_ducky_gadget_enable():
+    """Bring the HID keyboard gadget up on demand (adds hid.usb0, binds)."""
+    payload, status = _rubber_ducky_gadget('up')
+    logger.info(f"Rubber Ducky gadget enable: {payload}")
+    return jsonify(payload), status
+
+
+@app.route('/api/rubber-ducky/gadget/disable', methods=['POST'])
+def rubber_ducky_gadget_disable():
+    """Tear the HID keyboard gadget down on demand (removes hid.usb0)."""
+    payload, status = _rubber_ducky_gadget('down')
+    logger.info(f"Rubber Ducky gadget disable: {payload}")
+    return jsonify(payload), status
 
 
 @app.route('/api/actions', methods=['GET'])

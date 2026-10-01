@@ -5,9 +5,9 @@ script into whatever host it is plugged into — the classic "Rubber Ducky"
 keystroke-injection workflow, for authorised testing of systems you own or have
 explicit permission to test.
 
-> Pentest Mode must be enabled for the tab to appear, and keystroke injection is
-> gated by the global `enable_attacks` flag — with attacks off, the execute
-> endpoint refuses with `403`.
+> Pentest Mode must be enabled for the tab to appear. That is the only gate —
+> like the other manual Pentest-tab tools, the Ducky does **not** depend on the
+> global `enable_attacks` flag.
 
 ## How it works
 
@@ -49,13 +49,28 @@ A **Pi Zero 2 W** is the recommended box for testing and demos.
 
 ## Software setup
 
-The HID gadget function (`hid.usb0`) is added to the composite USB gadget by the
-installer. On boxes installed before this feature shipped, run the updater — it
-patches the gadget script in place (no live network disruption) and the
-`/dev/hidg0` node appears after the next reboot. Gadget mode (`dwc2`) must be
-enabled, and the gadget only binds — so `/dev/hidg0` only appears — once the
-gadget port is physically connected to a host. If no gadget node is present the
-device dropdown stays empty and shows a hint explaining how to enable it.
+The HID gadget is **opt-in** — it is off by default so the plain ECM gadget, and
+boards such as the Cardputer (Pi CM0), are left untouched.
+
+**Permanent (installer/updater):** run either with `RAGNAR_HID_GADGET=1`, e.g.
+`sudo RAGNAR_HID_GADGET=1 bash update_ragnar.sh`. That writes the marker
+`/etc/ragnar/hid_gadget.enabled` (so later updates keep it) and applies three
+things: the `dwc2,dr_mode=peripheral` overlay in `config.txt` (creates the USB
+device controller), removal of the legacy `g_ether` from `cmdline.txt` plus a
+blacklist (it otherwise claims the controller and blocks the gadget), and the
+`hid.usb0` function in the gadget script. **A reboot is required** for the boot
+config to take effect; the gadget then binds — and `/dev/hidg0` appears — once
+the gadget port is connected to a host.
+
+**On-demand (web UI):** the card has an **Enable / Disable** control that brings
+`/dev/hidg0` up or down live (via `scripts/hid_gadget.sh`), without a reboot —
+provided the USB device controller already exists (i.e. the overlay above is in
+place). Use this to toggle the keyboard off when you are not testing. If no
+controller is present, the control says so and points you at the installer
+option. This is runtime only; persistence across reboots is the installer flag.
+
+If no gadget node is present, the device dropdown stays empty and shows a hint
+explaining how to enable it.
 
 ## Script formats
 
@@ -102,7 +117,7 @@ shows a human-readable **preview** of every action before you run it.
 
 ## Workflow
 
-1. Enable Pentest Mode (and `enable_attacks`).
+1. Enable Pentest Mode.
 2. Plug the Pi into the target host's USB port.
 3. Pentest tab → **Rubber Ducky Script Executor**.
 4. Pick a script (preview appears), pick the `/dev/hidg0` target, press
@@ -137,7 +152,10 @@ as typing on the physically connected host.
 | --- | --- |
 | `python/rubber_ducky.py` | Parser, preview, HID gadget writer, device/script enumeration |
 | `files/rubber-ducky/` | Script folder (managed from the Files tab) |
-| `/api/rubber-ducky/{scripts,devices,preview,execute}` | Backend endpoints |
+| `scripts/hid_gadget.sh` | On-demand gadget control (`status`/`up`/`down`) |
+| `/api/rubber-ducky/{scripts,devices,preview,execute}` | Script endpoints |
+| `/api/rubber-ducky/gadget/{status,enable,disable}` | On-demand gadget control endpoints |
+| `/etc/ragnar/hid_gadget.enabled` | Opt-in marker (persists the gadget across updates) |
 
 ---
 

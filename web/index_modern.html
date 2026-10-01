@@ -4687,6 +4687,22 @@
                     </div>
                 </div>
 
+                <!-- USB HID Gadget on-demand control -->
+                <div class="mt-4 bg-slate-900/40 border border-slate-700 rounded p-3">
+                    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                        <div>
+                            <span class="text-xs uppercase tracking-wide text-gray-400">USB HID Keyboard Gadget</span>
+                            <p id="rubber-ducky-gadget-status" class="text-xs text-gray-300 mt-1">Checking…</p>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <button onclick="rubberDuckyGadget('enable')" class="text-xs bg-green-700 hover:bg-green-600 text-white px-3 py-1.5 rounded">Enable</button>
+                            <button onclick="rubberDuckyGadget('disable')" class="text-xs bg-red-800 hover:bg-red-700 text-white px-3 py-1.5 rounded">Disable</button>
+                            <button onclick="rubberDuckyGadgetStatus()" title="Refresh" class="text-xs bg-slate-700 hover:bg-slate-600 text-white px-2 py-1.5 rounded">↺</button>
+                        </div>
+                    </div>
+                    <p class="text-[11px] text-gray-500 mt-2">On-demand: brings <code class="bg-slate-800 px-1 rounded">/dev/hidg0</code> up or down now. Making it permanent across reboots is the installer/updater HID-gadget option.</p>
+                </div>
+
                 <!-- Script Preview -->
                 <div id="rubber-ducky-preview" class="mt-4 hidden">
                     <label class="text-xs uppercase tracking-wide text-gray-400">Script Preview</label>
