@@ -412,6 +412,17 @@ def init():
     _register_claim()
     cfg = load_config()
     if cfg.get('enabled') and cfg.get('port'):
+        # Same guard as start(): never resume on top of another reader (a
+        # wardriving companion, CYD, ...) — two readers split the byte stream.
+        try:
+            import serial_claims
+            holder = serial_claims.claims(exclude_owner=OWNER).get(_real(cfg['port']))
+        except Exception:
+            holder = None
+        if holder:
+            _reader.state = 'error'
+            _reader.error = 'port is in use by %s' % holder
+            return
         try:
             _reader.start(cfg['port'], cfg.get('baud', 'auto'),
                           allow_write=bool(cfg.get('allow_write')))
