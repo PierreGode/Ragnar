@@ -6647,6 +6647,14 @@ PWN_INSTALL_SCRIPT = os.path.join(shared_data.currentdir, 'scripts', 'install_pw
 PWN_SERVICE_FILE = '/etc/systemd/system/pwnagotchi.service'
 PWN_CONFIG_FILE = '/etc/pwnagotchi/config.toml'
 PWN_LAUNCHER_PATH = '/usr/bin/pwnagotchi-launcher'
+# Bettercap service layer that Pwnagotchi mode drives over its REST API. Without
+# these, a swap to Pwnagotchi hangs forever on "waiting for bettercap API to be
+# available ..." (GitHub #896), so the health check treats them as critical.
+PWN_BETTERCAP_SERVICE_FILE = '/etc/systemd/system/bettercap.service'
+PWN_BETTERCAP_LAUNCHER_PATH = '/usr/bin/bettercap-launcher'
+# monstart/monstop create the mon0 monitor interface the launcher/caplet bind to.
+PWN_MONSTART_PATH = '/usr/bin/monstart'
+PWN_MONSTOP_PATH = '/usr/bin/monstop'
 # One-shot boot flags written by the Pwnagotchi web UI (MANU/AUTO buttons) or by
 # Ragnar. The launcher consumes them on read. The persistent file keeps every
 # Pwnagotchi launch in manual mode until the Ragnar toggle is turned off.
@@ -7157,7 +7165,26 @@ _PWN_COMPONENT_SPEC = (
     ('launcher', 'pwnagotchi-launcher wrapper', True),
     ('binary', 'pwnagotchi executable', True),
     ('runtime', 'pwnagotchi + pydrive2 import (launches without exit-code)', True),
+    # Bettercap service layer. Pwnagotchi does not sniff Wi-Fi itself — it drives
+    # a local bettercap over its REST API and blocks forever on "waiting for
+    # bettercap API to be available ..." until that API answers, so a missing
+    # service layer is a swap-blocking critical gap even though every
+    # pwnagotchi-side piece above reads healthy (GitHub #896).
+    ('bettercap_binary', 'bettercap executable', True),
+    ('bettercap_service', 'bettercap.service unit (serves the API Pwnagotchi waits on)', True),
+    ('bettercap_launcher', 'bettercap-launcher wrapper (creates mon0 + runs bettercap)', True),
+    ('monitor_scripts', 'monstart/monstop monitor-interface helpers', True),
 )
+
+
+def _pwn_bettercap_binary_ok() -> bool:
+    """True when a bettercap executable the launcher can exec is present."""
+    if shutil.which('bettercap'):
+        return True
+    return any(
+        os.path.isfile(p) and os.access(p, os.X_OK)
+        for p in ('/usr/bin/bettercap', '/usr/local/bin/bettercap')
+    )
 
 
 def _pwnagotchi_component_health() -> dict:
@@ -7183,6 +7210,14 @@ def _pwnagotchi_component_health() -> dict:
         'launcher': launcher_ok,
         'binary': binary_ok,
         'runtime': runtime_ok,
+        'bettercap_binary': _pwn_bettercap_binary_ok(),
+        'bettercap_service': os.path.exists(PWN_BETTERCAP_SERVICE_FILE),
+        'bettercap_launcher': (os.path.isfile(PWN_BETTERCAP_LAUNCHER_PATH)
+                               and os.access(PWN_BETTERCAP_LAUNCHER_PATH, os.X_OK)),
+        'monitor_scripts': all(
+            os.path.isfile(p) and os.access(p, os.X_OK)
+            for p in (PWN_MONSTART_PATH, PWN_MONSTOP_PATH)
+        ),
     }
 
     labels = {key: label for key, label, _critical in _PWN_COMPONENT_SPEC}
@@ -8193,15 +8228,25 @@ def _execute_pwn_mode_switch(target_mode: str) -> None:
         # the sequence in its own transient cgroup, fully outside ragnar.service,
         # so it survives ragnar's cgroup teardown.
         try:
+            # Gate only the first start on ragnar actually stopping (so pwnagotchi
+            # never fights ragnar for the display/GPIO), then run every start
+            # best-effort with `;`/`|| true`. Chaining the starts with `&&` used
+            # to leave the box in BOTH modes down: if `start bettercap` exit-coded
+            # (e.g. the unit was missing — GitHub #896), the `&&` short-circuited
+            # and pwnagotchi.service never started, stranding a stopped ragnar.
+            # bettercap is ordered first because pwnagotchi connects to its API,
+            # but pwnagotchi's launcher waits/retries for that API, so starting
+            # pwnagotchi even if bettercap lagged is safe.
             subprocess.Popen(
                 ['systemd-run', '--no-block', '--collect',
                  '--unit=ragnar-to-pwnagotchi-swap',
                  'bash', '-c',
-                 'systemctl stop ragnar.service'
-                 ' && python3 -OO /home/ragnar/Ragnar/wipe_epd.py 2>/dev/null; true'
-                 ' && systemctl start bettercap.service'
-                 ' && systemctl start pwnagotchi.service'
-                 ' && systemctl start ragnar-swap-button.service'],
+                 'systemctl stop ragnar.service && {'
+                 ' python3 -OO /home/ragnar/Ragnar/wipe_epd.py 2>/dev/null || true;'
+                 ' systemctl start bettercap.service || true;'
+                 ' systemctl start pwnagotchi.service || true;'
+                 ' systemctl start ragnar-swap-button.service || true;'
+                 ' }'],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
