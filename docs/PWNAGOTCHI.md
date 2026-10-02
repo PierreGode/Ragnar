@@ -90,12 +90,21 @@ all-or-nothing:
 | launcher wrapper | `/usr/bin/pwnagotchi-launcher` present and executable |
 | pwnagotchi executable | real `pwnagotchi` binary resolvable |
 | pwnagotchi + pydrive2 import | `import pwnagotchi, pydrive2` succeeds in a clean interpreter (the launcher will start instead of exit-coding) |
+| bettercap executable | `bettercap` binary resolvable (Pwnagotchi drives it over the REST API) |
+| `bettercap.service` unit | `/etc/systemd/system/bettercap.service` present — serves the API Pwnagotchi blocks on |
+| bettercap launcher | `/usr/bin/bettercap-launcher` present and executable (brings up `mon0`, runs bettercap) |
+| monitor helpers | `/usr/bin/monstart` + `/usr/bin/monstop` present and executable (create the `mon0` monitor interface) |
 
 Each row shows ✓ / ✗. The badge reflects three states:
 
 - **Healthy** — everything present.
 - **Needs Repair** (red) — a *critical* piece is missing: the clone, service unit,
-  `config.toml`, launcher wrapper, the executable, or the **runtime import**.
+  `config.toml`, launcher wrapper, the executable, the **runtime import**, or the
+  **bettercap service layer** (bettercap binary, `bettercap.service`,
+  `bettercap-launcher`, or the `monstart`/`monstop` helpers). The bettercap rows
+  matter because Pwnagotchi does not sniff Wi-Fi itself — it drives a local
+  bettercap over its REST API and hangs forever on *"waiting for bettercap API to
+  be available ..."* if that service layer is absent.
 
 > **Why the runtime-import row exists:** the pip steps in the installer all swallow
 > their own errors so a flaky network never aborts an install. The cost was that a
@@ -217,12 +226,19 @@ Adapt the exact commands to your nexmon version and kernel.
 2. A transient systemd unit (`ragnar-to-pwnagotchi-swap`) is created via `systemd-run` to survive Ragnar's cgroup teardown
 3. The sequence runs:
    ```
-   systemctl stop ragnar.service
-   python3 -OO /home/ragnar/Ragnar/wipe_epd.py   # release GPIO/SPI
-   systemctl start bettercap.service               # API on port 8081
-   systemctl start pwnagotchi.service              # connects to bettercap
-   systemctl start ragnar-swap-button.service       # listen for swap-back
+   systemctl stop ragnar.service && {
+     python3 -OO /home/ragnar/Ragnar/wipe_epd.py || true  # release GPIO/SPI
+     systemctl start bettercap.service   || true          # API on port 8081
+     systemctl start pwnagotchi.service  || true          # connects to bettercap
+     systemctl start ragnar-swap-button.service || true   # listen for swap-back
+   }
    ```
+   Only the first start is gated on Ragnar actually stopping (so Pwnagotchi never
+   fights Ragnar for the display/GPIO); the individual starts are then best-effort
+   (`|| true`) so one failing start can't strand the box with Ragnar stopped and
+   nothing else up. `bettercap.service` runs `/usr/bin/bettercap-launcher`, which
+   brings up the `mon0` monitor interface (via `monstart`) and execs bettercap with
+   the `pwnagotchi-auto` caplet (REST + WebSocket API on `127.0.0.1:8081`).
 4. Pwnagotchi web UI becomes available at `http://<ip>:8080`
 
 ### Pwnagotchi → Ragnar
@@ -377,6 +393,30 @@ display, disable touch entirely with `Option "Ignore" "on"` in the same block.
 
 ## 🔍 Troubleshooting
 
+### Pwnagotchi hangs on "waiting for bettercap API to be available ..."
+
+```bash
+sudo journalctl -u pwnagotchi -n 40 --no-pager
+# pwnagotchi-launcher[...]: [INFO] ... : waiting for bettercap API to be available ...  (loops forever)
+sudo systemctl status bettercap.service
+# Unit bettercap.service not found.   ← the service layer was never staged
+```
+
+Pwnagotchi does not sniff Wi-Fi itself — it drives a local **bettercap** over its
+REST API (`127.0.0.1:8081`) and blocks forever until that API answers. If
+`bettercap.service` is missing (an install from before this was staged on a
+from-scratch node), bettercap never starts and Pwnagotchi waits indefinitely.
+
+**Fix:** open the dashboard **Installation Check** card — the bettercap rows now
+show ✗ and a **Repair Installation** button appears. Click it (or run
+`sudo ./scripts/install_pwnagotchi.sh`). The installer creates
+`/etc/systemd/system/bettercap.service` and `/usr/bin/bettercap-launcher`
+templated to your configured monitor interface (`mon0`), then bettercap serves the
+API Pwnagotchi is waiting on. (The upstream build ships these only as pi-gen
+build-stage templates under `/opt/pwnagotchi/stage3/06-patches/files/`, and the
+stage launcher hardcodes `wlan0mon` — the Ragnar-staged launcher uses your
+`config.toml` `mon_iface` instead.)
+
 ### E-ink goes blank but Pwnagotchi never loads on port 8080
 
 This means the switch started but Pwnagotchi crashed during startup. Check logs:
@@ -446,6 +486,19 @@ sudo nano /usr/bin/monstop              # update STA_IF = "..."
 ```
 
 ### Ragnar won't start after a bad swap
+
+If a swap left **both** modes down (`ragnar.service` `failed`, `pwnagotchi`
+`inactive`), reset the failed state and bring Ragnar back:
+
+```bash
+sudo systemctl reset-failed ragnar && sudo systemctl start ragnar
+```
+
+(The swap now starts each service best-effort so a single failing start no longer
+strands the box this way, but an older build or an unrelated failure can still
+leave it wedged.)
+
+Or run the catch-all repair:
 
 ```bash
 sudo /home/ragnar/Ragnar/scripts/fix_services.sh

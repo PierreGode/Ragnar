@@ -4,6 +4,15 @@
 
 ### 2026-10-02
 
+#### [#901](https://github.com/PierreGode/Ragnar/pull/901) — fix(pwnagotchi): stage the bettercap service layer on install (#896)
+*branch `fix/pwnagotchi-bettercap-service-896` · 4 file(s)*
+
+- **Root cause ([#896](https://github.com/PierreGode/Ragnar/issues/896)):** on a from-scratch node, *Switch to Pwnagotchi* hung forever on `waiting for bettercap API to be available ...`. Pwnagotchi drives a local **bettercap** over its REST API (`127.0.0.1:8081`), but `install_pwnagotchi.sh` only *patched* `bettercap.service` **if it already existed** — it never created it. bettercap/pwngrid ship upstream only as pi-gen build-stage templates, so the whole service layer was simply absent and nothing served the API
+- `install_pwnagotchi.sh` now **stages** `/etc/systemd/system/bettercap.service` + `/usr/bin/bettercap-launcher`, templated to the configured monitor interface (`config.toml` `mon_iface` = `mon0`) instead of the upstream-hardcoded **`wlan0mon`**. The launcher runs `monstart` to create `mon0`, then execs bettercap with the `pwnagotchi-auto` caplet (REST + WebSocket on `:8081`). The obsolete `ragnar-websocket.conf` ExecStart drop-in is removed (the caplet now owns the WebSocket setting; the drop-in would have bypassed the launcher). `pwngrid-peer.service` is intentionally **not** staged — Ragnar runs a pwngrid no-op shim with grid/advertise disabled
+- **Health check (Finding 3):** `/api/pwnagotchi/status` now checks the bettercap binary, `bettercap.service`, `bettercap-launcher`, and the `monstart`/`monstop` helpers, so a swap-blocking gap reports **Needs Repair** instead of a false `healthy: true`. The dashboard **Repair** button re-runs the installer to stage the missing layer
+- **Swap resilience (Finding "both modes down"):** the Ragnar→Pwnagotchi `systemd-run` sequence now gates only the first start on Ragnar stopping, then starts bettercap/pwnagotchi/swap-button **best-effort** (`|| true`) — a single failing start can no longer short-circuit the `&&` chain and leave Ragnar stopped with nothing up
+- **Docs:** [PWNAGOTCHI.md](PWNAGOTCHI.md) (Installation Check rows, swap sequence, new troubleshooting entry), [releases.md](releases.md)
+
 #### [#900](https://github.com/PierreGode/Ragnar/pull/900) — docs(pentest): Rubber Ducky card shows supported boards + GPIO-powering note
 *branch `fix/ducky-board-power-info` · 2 file(s)*
 
