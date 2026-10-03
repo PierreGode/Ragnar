@@ -1101,15 +1101,34 @@ pulls the files:
 | Host → Piglet | Piglet → host |
 |---|---|
 | `@PIGLET HELLO` | `@PH <fw> <chip> <mac> sd=<0\|1>` |
-| `@PIGLET LIST` | `@PL BEGIN`, one `@PL F <path>\t<size>\t<active>` per CSV in `/logs` and `/uploaded`, `@PL END <n>` |
+| `@PIGLET LIST` | `@PL BEGIN`, one `@PL F <path>\t<size>\t<active>\t<mtime>` per CSV in `/logs` and `/uploaded` (`mtime` from v2.61), `@PL END <n>` |
 | `@PIGLET GET <path> [offset]` | `@PG BEGIN <path> <size> <offset>`, `@PG D <seq> <crc32> <base64 of 144 B>` …, `@PG END <path> <size> <sent>` (or `@PG ERR <why>`) |
 
-- **When it runs:** automatically each time a Piglet (or Piglet Core) connects
-  while wardriving runs (`wardriving_piglet_sync`, default on), and on demand
-  with **Import from Piglet (USB)** on the Import card
-  (`POST /api/wardriving/piglet/sync`, `GET` for the last result). If
-  wardriving isn't running, the button opens the free ESP32 port itself and
-  holds a `piglet-sync` serial claim while it works.
+- **When it runs:** automatically **as soon as a Piglet is plugged in**
+  (`wardriving_piglet_sync`, default on), and on demand with **Import from
+  Piglet (USB)** on the Import card (`POST /api/wardriving/piglet/sync`, `GET`
+  for the last result).
+  - **Wardriving running:** the wardriving listener syncs when it attaches the
+    Piglet.
+  - **Wardriving stopped:** a plug-in watcher (`PlugWatcher`) notices the new
+    Espressif native-USB device under `/dev/serial/by-id` and syncs it once per
+    plug-in. USB-UART bridge boards (CH340/CP210x), which reset when their port
+    is opened, are never probed, and ports held by other components (serial
+    claims) are left alone.
+  - Every direct sync holds a `piglet-sync` serial claim, and only one runs at
+    a time.
+- **Newest drive first:** Piglet v2.61+ adds each file's last-write time to
+  `LIST`. Piglet sets its clock from GPS, so finished drives carry real times,
+  and Ragnar fetches the newest first. Files with unknown times come next, and
+  files that failed before come last. A full card no longer makes today's drive
+  wait behind months of old ones.
+- **Failing files:**
+  - An SD read error (`@PG ERR read-error`, v2.61+) stops that file at once.
+  - A transfer that makes no progress after 2 resumes is abandoned.
+  - A failed file waits 6 hours before it's retried, and is skipped for good
+    after 3 failed syncs (reported as `unreadable`).
+  - If the port itself disappears, the sync stops instead of failing every
+    remaining file.
 - **Integrity:** every 144-byte chunk carries its own CRC32. A damaged or
   missing chunk, or a stalled link, resumes the transfer at the last good byte
   (up to 8 times per file) instead of failing it. Piglet mutes ESP-IDF logging
