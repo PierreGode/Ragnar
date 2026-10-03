@@ -32,6 +32,9 @@ from datetime import datetime, timezone
 logger = logging.getLogger("PigletSync")
 
 STATE_FILE = 'piglet_imports.json'
+# esp_reset_reason() values that mean the Piglet crashed rather than powered on
+CRASH_RESETS = {4: 'a panic', 5: 'the interrupt watchdog', 6: 'the task watchdog',
+                7: 'a watchdog', 8: 'deep sleep wake', 9: 'a brownout'}
 FAIL_RETRY_AFTER_S = 6 * 3600   # a file that failed waits this long before a retry
 FAIL_GIVE_UP = 3                # ...and is skipped for good after this many failed syncs
 MIN_VALID_EPOCH = 1420070400    # 2015: older last-write times mean "clock not set" 
@@ -87,10 +90,19 @@ class PigletLink:
             line = self._next(('@PH ',), HELLO_RETRY_S)
             if line:
                 parts = line.split()
-                return {'fw': parts[1] if len(parts) > 1 else '',
+                kv = dict(p.split('=', 1) for p in parts[4:] if '=' in p)
+                info = {'fw': parts[1] if len(parts) > 1 else '',
                         'chip': parts[2] if len(parts) > 2 else '',
                         'mac': parts[3] if len(parts) > 3 else '',
-                        'sd': line.endswith('sd=1')}
+                        'sd': kv.get('sd') == '1'}
+                if 'rst' in kv:                     # v2.61+: last reset reason + uptime
+                    info['reset_reason'] = int(kv['rst']) if kv['rst'].isdigit() else kv['rst']
+                    info['uptime_s'] = int(kv['up']) if kv.get('up', '').isdigit() else None
+                    if info['reset_reason'] in CRASH_RESETS:
+                        logger.warning(f"Piglet {info['mac']} last rebooted from "
+                                       f"{CRASH_RESETS[info['reset_reason']]} "
+                                       f"{info['uptime_s']} s ago")
+                return info
         return None
 
     def list_files(self):
