@@ -257,6 +257,13 @@ qualify. The meshtastic library's own auto-detect would otherwise fall back to
   public broker refuses a bare `msh/#`, so a topic like that just stays quiet.
   This only filters the **Internet** feed: a USB node hears whatever its own
   LoRa radio picks up locally, whatever the region setting.
+- **Where a message came from** — every MQTT message carries an amber region
+  badge read off its topic: the levels between `msh` and the protocol version
+  `2`, so `msh/EU_868/SE/2/e/LongFast/!…` shows **EU_868/SE** and
+  `msh/US/2/e/…` shows **US**. Hover the badge for the full topic. Map stations
+  heard over MQTT show the same value as **Region** in their popup. Messages
+  from your own USB node (`SERIAL`) have no region badge; they came in over
+  local LoRa.
 - **Transmit** — the **Send** box puts a text message onto the mesh: through the
   connected node's **LoRa RF** when a node is present (licence-free ISM), else
   over **MQTT** (which reaches RF only via a downlink-enabled gateway). Messages

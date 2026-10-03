@@ -610,6 +610,18 @@ MESH_MQTT_REGIONS = [
 ]
 
 
+def mqtt_topic_region(topic):
+    """Region a message came from, read off its MQTT topic: the levels between
+    'msh' and the protocol version '2' (msh/EU_868/SE/2/e/... -> 'EU_868/SE').
+    Topics without a '2' level fall back to the first level after 'msh'."""
+    parts = (topic or "").split("/")
+    if len(parts) < 2 or parts[0] != "msh":
+        return None
+    if "2" in parts[1:]:
+        return "/".join(parts[1:parts.index("2", 1)]) or None
+    return parts[1] or None
+
+
 def mqtt_region_topic(region):
     """Topic filter for a region root, or the global default for ''/'all'."""
     region = (region or "").strip().strip("/")
@@ -726,7 +738,8 @@ def parse_mqtt_protobuf(topic, payload, key=_MESH_DEFAULT_KEY):
         return None
     sender = ("!%08x" % (frm & 0xFFFFFFFF)) if frm is not None else None
     rec = {"src": "mqtt", "from_num": frm, "sender": sender, "channel": channel,
-           "topic": topic, "ts": time.time(), "snr": snr}
+           "topic": topic, "region": mqtt_topic_region(topic),
+           "ts": time.time(), "snr": snr}
     if portnum == _PORT_TEXT:
         rec["type"] = "text"; rec["text"] = (pl or b"").decode("utf-8", "replace")
     elif portnum == _PORT_POSITION and pl:
@@ -770,7 +783,7 @@ def parse_mqtt_json(topic, payload):
         sender = "!%08x" % (frm & 0xFFFFFFFF)
     rec = {"type": t, "from_num": frm, "sender": sender, "to": d.get("to"),
            "channel": d.get("channel", 0), "ts": d.get("timestamp") or time.time(),
-           "topic": topic, "src": "mqtt"}
+           "topic": topic, "region": mqtt_topic_region(topic), "src": "mqtt"}
     if t == "text":
         rec["text"] = pl.get("text") if isinstance(pl, dict) else (pl if isinstance(pl, str) else None)
     elif t == "position" and isinstance(pl, dict):
@@ -914,11 +927,13 @@ class MeshMqtt:
             if rec.get("lat") is not None and rec.get("lon") is not None and rec.get("sender"):
                 self._positions[rec["sender"]] = {
                     "id": rec["sender"], "lat": rec["lat"], "lon": rec["lon"],
-                    "long_name": rec.get("long_name"), "ts": time.time(), "src": "mqtt"}
+                    "long_name": rec.get("long_name"), "ts": time.time(), "src": "mqtt",
+                    "region": rec.get("region")}
             if rec.get("type") == "nodeinfo" and rec.get("sender"):
                 p = self._positions.setdefault(rec["sender"], {"id": rec["sender"], "src": "mqtt"})
                 p["long_name"] = rec.get("long_name") or p.get("long_name")
                 p["short_name"] = rec.get("short_name")
+                p["region"] = p.get("region") or rec.get("region")
                 p["ts"] = time.time()
             # the worldwide public feed is unbounded — evict the oldest stations
             if len(self._positions) > _MQTT_STATION_MAX:
@@ -1058,6 +1073,7 @@ def nodes(bbox=None, limit=1500):
             merged.append({"id": p["id"], "num": None,
                            "long_name": p.get("long_name"), "short_name": p.get("short_name"),
                            "lat": p.get("lat"), "lon": p.get("lon"), "src": "mqtt",
+                           "region": p.get("region"),
                            "last_heard": int(p.get("ts") or 0), "is_self": False})
             have.add(p["id"])
     if bbox:
@@ -1252,6 +1268,13 @@ def selftest():
           mqtt_region_topic("") == MESH_MQTT["topic"] and mqtt_region_topic("all") == MESH_MQTT["topic"])
     check("mqtt: wildcard/odd region rejected",
           mqtt_region_topic("+") is None and mqtt_region_topic("a/b") is None)
+    check("mqtt: message region from topic (sub-topics kept)",
+          mqtt_topic_region("msh/EU_868/SE/2/e/LongFast/!1") == "EU_868/SE"
+          and mqtt_topic_region("msh/US/2/json/x/!2") == "US"
+          and mqtt_topic_region("msh/EU_868/HQ-Gw/mesh1") == "EU_868"
+          and mqtt_topic_region("other/x") is None)
+    check("mqtt: decoded records carry region",
+          (parse_mqtt_json("msh/US/2/json/LongFast/!1", '{"type":"text","from":1,"payload":{"text":"hi"}}') or {}).get("region") == "US")
     regs = [r["id"] for r in detect().get("mqtt_defaults", {}).get("regions", [])]
     check("mqtt: detect() lists regions for the UI", "EU_868" in regs and "US" in regs, str(regs[:4]))
 

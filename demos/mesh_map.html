@@ -118,7 +118,7 @@
       +row('ID', n.id)+row('Hardware', n.hw_model)+row('Role', n.role)
       +row('SNR', n.snr!=null?n.snr+' dB':'')+row('Hops', n.hops)
       +row('Battery', n.battery!=null?n.battery+'%':'')+row('Altitude', n.altitude!=null?n.altitude+' m':'')
-      +row('Source', (n.src||'serial').toUpperCase())+row('Heard', ago(n.last_heard))+'</div>';
+      +row('Source', (n.src||'serial').toUpperCase())+row('Region', n.region)+row('Heard', ago(n.last_heard))+'</div>';
   }
   function upsertMarker(n){
     if(n.lat==null||n.lon==null) return;

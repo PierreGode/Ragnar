@@ -61,6 +61,7 @@
   .msg{padding:6px 14px;border-bottom:1px solid var(--line-soft);font-size:12px}
   .msg.latest{background:rgba(123,140,210,.12);border-left:2px solid var(--mesh);padding-left:12px}
   .msg .mf{color:var(--cyan);font-family:var(--mono);font-size:11px} .msg .mt{color:var(--ink)} .msg .mm{color:var(--muted);font-family:var(--mono);font-size:10px}
+  .rgn{font-family:var(--mono);font-size:8.5px;color:#e0b85e;border:1px solid rgba(224,184,94,.55);border-radius:3px;padding:0 3px;margin-right:5px;white-space:nowrap}
   .snrbadge{font-family:var(--mono);font-size:10px}
   input.tin,select.tin{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:5px 7px}
   select.tin{max-width:170px;cursor:pointer}
@@ -257,6 +258,7 @@
       var who=m.outbound?'you ▸ '+esc(m.to||'^all'):(esc(byId[m.from||m.sender]||m.from||m.sender||'?'));
       return '<div class="msg'+(i===0?' latest':'')+'"><span class="mm" style="margin-right:6px" title="'+ago(m.ts)+' ago">'+hhmm(m.ts)+'</span>'
         +'<span style="font-size:8.5px;color:'+scol+';border:1px solid '+scol+';border-radius:3px;padding:0 3px;margin-right:5px;text-transform:uppercase">'+src+'</span>'
+        +(m.region?'<span class="rgn" title="'+esc(m.topic||'')+'">'+esc(m.region)+'</span>':'')
         +'<span class="mf" style="color:'+(m.outbound?'#c98bf0':'')+'">'+who+'</span> <span class="mt">'+esc(m.text||'')+'</span>'
         +(m.snr!=null?' <span class="mm">SNR '+m.snr+'</span>':'')+'</div>';
     }).join('');
