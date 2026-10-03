@@ -985,6 +985,7 @@ class SharedData:
             "wardriving_gps_port": "auto",
             "wardriving_gps_baudrate": 9600,
             "wardriving_gps_assist": True,
+            "wardriving_piglet_sync": True,
             "wardriving_gps_set_clock": True,
             "wardriving_interfaces": [],
             "wardriving_auto_export": True,

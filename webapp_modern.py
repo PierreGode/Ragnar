@@ -16063,6 +16063,68 @@ def wardriving_gps_enable():
         logger.error(f"Wardriving GPS enable error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+_piglet_sync_port = None
+
+
+@app.route('/api/wardriving/piglet/sync', methods=['GET', 'POST'])
+def wardriving_piglet_sync():
+    """Import a Piglet's solo-drive CSVs from its SD card over USB serial.
+
+    GET  → the last sync result.
+    POST → sync now: through the wardriving listener when it already holds
+           the Piglet, otherwise by opening each free Espressif USB port
+           until one answers the Piglet SerialSync protocol (firmware v2.60+).
+    """
+    global _piglet_sync_port
+    try:
+        engine = _get_wardriving_engine()
+        if request.method == 'GET':
+            return jsonify(getattr(engine, 'piglet_sync_status', None) or {'state': 'idle'})
+        if engine._running:
+            ports = engine.request_piglet_sync()
+            if ports:
+                engine.piglet_sync_status = {'state': 'queued', 'port': ports[0], 'at': time.time()}
+                return jsonify({'queued': True, 'ports': ports})
+            return jsonify({'error': 'Wardriving is running but no Piglet is connected'}), 404
+        if _piglet_sync_port:
+            return jsonify({'error': f'A sync is already running on {_piglet_sync_port}'}), 409
+        import glob as _g
+        import serial_claims
+        candidates = [p for p in sorted(_g.glob('/dev/ttyACM*') + _g.glob('/dev/ttyUSB*'))
+                      if engine._port_is_espressif(p) and not serial_claims.is_claimed(p)]
+        if not candidates:
+            return jsonify({'error': 'No free ESP32 USB port found — is the Piglet plugged in?'}), 404
+
+        def _worker():
+            global _piglet_sync_port
+            import piglet_sync
+            serial_claims.register('piglet-sync', lambda: _piglet_sync_port)
+            try:
+                for port in candidates:
+                    _piglet_sync_port = port
+                    engine.piglet_sync_status = {'state': 'running', 'port': port, 'at': time.time()}
+                    try:
+                        summary = piglet_sync.sync_port(port, engine.data_dir, hello_wait_s=20.0)
+                    except Exception as e:
+                        summary = {'supported': False, 'error': str(e)}
+                    if summary.get('supported'):
+                        summary.update({'state': 'done', 'port': port, 'at': time.time()})
+                        engine.piglet_sync_status = summary
+                        return
+                engine.piglet_sync_status = {
+                    'state': 'error', 'at': time.time(),
+                    'error': 'No Piglet answered (needs Piglet firmware v2.60+ with serial sync)'}
+            finally:
+                _piglet_sync_port = None
+                serial_claims.unregister('piglet-sync')
+
+        threading.Thread(target=_worker, daemon=True, name='piglet-sync').start()
+        return jsonify({'started': True, 'ports': candidates})
+    except Exception as e:
+        logger.error(f"Piglet sync error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/wardriving/import', methods=['POST'])
 def wardriving_import_csv():
     """Import a WiGLE CSV file into the current or a new wardriving session."""

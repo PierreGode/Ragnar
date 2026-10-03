@@ -8191,6 +8191,13 @@
                             </div>
                             <div id="wd-import-result" class="text-xs mt-2 hidden"></div>
                             <div class="border-t border-slate-700 mt-3 pt-3">
+                                <div class="text-xs text-gray-400 mb-2">Solo drives on a Piglet <span class="text-gray-500">— plug it in over USB and pull its SD-card logs; each drive becomes a session (needs Piglet firmware v2.60+). Also runs automatically whenever a Piglet connects while wardriving.</span></div>
+                                <div class="flex flex-wrap gap-2 items-center">
+                                    <button type="button" onclick="syncPiglet()" class="bg-pink-700 hover:bg-pink-600 text-white px-3 py-1.5 rounded text-xs transition-colors">Import from Piglet (USB)</button>
+                                    <span id="wd-piglet-sync-status" class="text-xs text-gray-500 break-words"></span>
+                                </div>
+                            </div>
+                            <div class="border-t border-slate-700 mt-3 pt-3">
                                 <div class="text-xs text-gray-400 mb-2">WiGLE upload API <span class="text-gray-500">— optional, lets the <span class="text-cyan-400">↑ WiGLE</span> button on a session push it to <a href="https://wigle.net" target="_blank" rel="noopener" class="text-cyan-400 hover:text-cyan-300">wigle.net</a></span></div>
                                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
                                     <input type="text" id="wd-wigle-name" placeholder="WiGLE API name" class="bg-slate-700 text-white text-xs rounded px-2 py-1.5 border border-slate-600">
@@ -9380,7 +9387,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261002-ducky-mesh"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261003-piglet-sync"></script>
 
 
 
