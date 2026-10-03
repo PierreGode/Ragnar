@@ -197,7 +197,9 @@ def detect():
     mqtt_ok = _mqtt_client is not None
     mqtt_extra = {"mqtt_available": mqtt_ok, "mqtt_defaults": {
         "host": MESH_MQTT["host"], "port": MESH_MQTT["port"],
-        "user": MESH_MQTT["user"], "topic": MESH_MQTT["topic"]}}
+        "user": MESH_MQTT["user"], "topic": MESH_MQTT["topic"],
+        "regions": [{"id": r, "label": l, "topic": "msh/%s/#" % r}
+                    for r, l in MESH_MQTT_REGIONS]}}
     usb_id, usb_desc = None, None
     rc, out, _ = _run(["lsusb"], timeout=4)
     if rc == 0 and out:
@@ -595,6 +597,28 @@ MESH_MQTT = {
     "publish_topic": "msh/2/json/mqtt/",    # downlink command topic (JSON)
 }
 
+# Region roots gateways publish under on the public broker (msh/<root>/...).
+# A region filter is "msh/<root>/#" so country/city sub-topics (msh/EU_868/SE/2/…,
+# msh/US/FL/2/…) are included; the default topic above only sees the region root.
+MESH_MQTT_REGIONS = [
+    ("EU_868", "Europe 868"), ("EU_433", "Europe 433"), ("UK_868", "UK 868"),
+    ("US", "United States"), ("ANZ", "Australia / NZ"), ("CN", "China"),
+    ("JP", "Japan"), ("KR", "Korea"), ("TW", "Taiwan"), ("IN", "India"),
+    ("RU", "Russia"), ("PL", "Poland"), ("TH", "Thailand"), ("MY_919", "Malaysia"),
+    ("SG_923", "Singapore"), ("PH", "Philippines"), ("BR_902", "Brazil"),
+    ("NZ_865", "New Zealand 865"), ("UA_868", "Ukraine"),
+]
+
+
+def mqtt_region_topic(region):
+    """Topic filter for a region root, or the global default for ''/'all'."""
+    region = (region or "").strip().strip("/")
+    if not region or region.lower() == "all":
+        return MESH_MQTT["topic"]
+    if not all(c.isalnum() or c in "_-" for c in region):
+        return None
+    return "msh/%s/#" % region
+
 # Meshtastic default channel PSK ("AQ==" -> the well-known LongFast key). Public-
 # channel traffic is encrypted with this, so it's readable; private channels use
 # their own key and stay opaque.
@@ -819,6 +843,9 @@ class MeshMqtt:
             old, self._client, self._connected = self._client, None, False
         _stop_paho(old)
         with self._lock:
+            if self._cfg.get("topic") != cfg["topic"]:
+                self._positions = {}        # a new region/topic: drop the old feed
+                self._messages = []
             self._cfg = cfg
             self._error = None
             try:
@@ -1217,6 +1244,16 @@ def selftest():
     check("tx: send with no serial/mqtt -> error (no crash)",
           r.get("ok") is False and "connected" in (r.get("error") or ""), str(r))
     check("tx: empty message rejected", send_text("   ").get("ok") is False)
+
+    # --- MQTT region filter ---
+    check("mqtt: region -> msh/<root>/# (sub-topics included)",
+          mqtt_region_topic("US") == "msh/US/#", mqtt_region_topic("US"))
+    check("mqtt: '' / all -> global default topic",
+          mqtt_region_topic("") == MESH_MQTT["topic"] and mqtt_region_topic("all") == MESH_MQTT["topic"])
+    check("mqtt: wildcard/odd region rejected",
+          mqtt_region_topic("+") is None and mqtt_region_topic("a/b") is None)
+    regs = [r["id"] for r in detect().get("mqtt_defaults", {}).get("regions", [])]
+    check("mqtt: detect() lists regions for the UI", "EU_868" in regs and "US" in regs, str(regs[:4]))
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,

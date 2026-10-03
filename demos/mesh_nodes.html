@@ -62,6 +62,8 @@
   .msg.latest{background:rgba(123,140,210,.12);border-left:2px solid var(--mesh);padding-left:12px}
   .msg .mf{color:var(--cyan);font-family:var(--mono);font-size:11px} .msg .mt{color:var(--ink)} .msg .mm{color:var(--muted);font-family:var(--mono);font-size:10px}
   .snrbadge{font-family:var(--mono);font-size:10px}
+  input.tin,select.tin{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:5px 7px}
+  select.tin{max-width:170px;cursor:pointer}
   footer{margin-top:16px;font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.6}
 </style>
 </head>
@@ -86,7 +88,8 @@
     <div class="grp"><a href="/mesh-map" class="ctl" title="Full-screen map of the mesh (Leaflet)" style="border-color:rgba(123,140,210,.5);color:var(--mesh)">&#128506;&nbsp;Full map view</a></div>
     <div class="grp"><button class="ctl go" id="startbtn" aria-pressed="false" title="Connect to the USB Meshtastic node (real LoRa RF)">&#9654;&nbsp;Node</button></div>
     <div class="grp"><button class="ctl go" id="mqtt-btn" aria-pressed="false" title="Connect the Meshtastic MQTT Internet feed (no node needed)">&#9729;&nbsp;MQTT</button></div>
-    <div class="grp"><span class="lbl">Topic</span><input class="tin" id="mqtt-topic" style="width:148px" placeholder="msh/+/2/json/#"></div>
+    <div class="grp"><span class="lbl">Region</span><select class="tin" id="mqtt-region" title="Which region of the public Meshtastic MQTT feed to show"><option value="">All regions</option><option value="__custom">Custom topic…</option></select></div>
+    <div class="grp"><span class="lbl">Topic</span><input class="tin" id="mqtt-topic" style="width:148px" placeholder="msh/+/2/#" title="MQTT topic filter (set by Region, or type your own)"></div>
     <div class="grp"><span class="tag idle" id="devtag">detecting…</span></div>
     <div class="grp"><span class="tag idle" id="mqtttag">MQTT off</span></div>
   </div>
@@ -273,6 +276,37 @@
     fetch('/api/net/mesh/mqtt/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(topic?{topic:topic}:{})})
       .then(function(r){return r.json();}).then(function(res){ if(res&&res.error){ mqttOn=false; b.setAttribute('aria-pressed','false'); b.innerHTML='&#9729;&nbsp;MQTT'; showVeil('MQTT connect failed',res.error); } else { hideVeil(); ensurePoll(); } updateSend(); }).catch(function(){});
   });
+
+  // ---- MQTT region / topic selector ----
+  // Region list comes from the backend (detect().mqtt_defaults.regions). Picking one
+  // fills the Topic box (msh/<region>/#); a live MQTT feed reconnects on the new
+  // topic and the backend drops the previous region's nodes/messages.
+  var regionsLoaded=false;
+  function loadRegions(list){
+    if(regionsLoaded||!list||!list.length) return; regionsLoaded=true;
+    var sel=document.getElementById('mqtt-region'), cust=sel.querySelector('option[value="__custom"]');
+    list.forEach(function(r){ var o=document.createElement('option'); o.value=r.topic; o.textContent=r.label+' ('+r.id+')'; sel.insertBefore(o,cust); });
+    var saved=''; try{ saved=localStorage.getItem('meshMqttTopic')||''; }catch(e){}
+    if(saved && !document.getElementById('mqtt-topic').value) document.getElementById('mqtt-topic').value=saved;
+    syncRegion();
+  }
+  function syncRegion(){
+    var t=document.getElementById('mqtt-topic').value.trim(), sel=document.getElementById('mqtt-region'), hit=false;
+    for(var i=0;i<sel.options.length;i++){ if(sel.options[i].value===t) hit=true; }
+    sel.value = !t ? '' : (hit ? t : '__custom');
+  }
+  function applyTopic(){
+    var t=document.getElementById('mqtt-topic').value.trim();
+    try{ localStorage.setItem('meshMqttTopic',t); }catch(e){}
+    if(!mqttOn||DEMO_ON) return;
+    fetch('/api/net/mesh/mqtt/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(t?{topic:t}:{})})
+      .then(function(r){return r.json();}).then(function(res){ if(res&&res.error){ showVeil('MQTT connect failed',res.error); } pollLive(); }).catch(function(){});
+  }
+  document.getElementById('mqtt-region').addEventListener('change',function(){
+    if(this.value==='__custom'){ document.getElementById('mqtt-topic').focus(); return; }
+    document.getElementById('mqtt-topic').value=this.value; applyTopic();
+  });
+  document.getElementById('mqtt-topic').addEventListener('change',function(){ syncRegion(); applyTopic(); });
   function updateSend(){ var can=running||mqttOn; document.getElementById('m-send').disabled=!can;
     document.getElementById('m-hint').textContent = can
       ? (running?'Sends via the connected node (LoRa RF).':'Sends via MQTT (needs a downlink-enabled gateway to reach RF).')
@@ -340,6 +374,7 @@
     fetch('/api/net/mesh/status').then(function(r){return r.json();}).then(function(st){
       var det=(st&&st.detect)||{}; var dt=document.getElementById('devtag');
       if(det.mqtt_defaults&&det.mqtt_defaults.topic&&!document.getElementById('mqtt-topic').value){ document.getElementById('mqtt-topic').placeholder=det.mqtt_defaults.topic; }
+      if(det.mqtt_defaults) loadRegions(det.mqtt_defaults.regions);
       // MQTT (Internet) state — independent of the USB node
       var mq=(st&&st.mqtt)||{}, mt=document.getElementById('mqtttag'), mb=document.getElementById('mqtt-btn');
       if(mq.connected){ mqttOn=true; mt.className='tag live'; mt.textContent='MQTT on'; mb.setAttribute('aria-pressed','true'); mb.innerHTML='&#10074;&#10074;&nbsp;MQTT'; ensurePoll(); }
