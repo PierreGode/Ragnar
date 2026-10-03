@@ -32942,6 +32942,38 @@ async function importWigleCsv() {
     }
 }
 
+// Pull a Piglet's SD-card CSVs over USB and import each drive as a session.
+async function syncPiglet() {
+    const el = document.getElementById('wd-piglet-sync-status');
+    const show = (text, cls) => { if (el) { el.textContent = text; el.className = 'text-xs break-words ' + cls; } };
+    try {
+        show('Starting…', 'text-blue-400');
+        const res = await fetch('/api/wardriving/piglet/sync', { method: 'POST' });
+        const start = await res.json();
+        if (start.error) { show(start.error, 'text-red-400'); return; }
+        for (let i = 0; i < 600; i++) {                 // up to ~20 min for a big card
+            await new Promise(r => setTimeout(r, 2000));
+            const st = await (await fetch('/api/wardriving/piglet/sync')).json();
+            if (st.state === 'running' || st.state === 'queued') {
+                show(`Syncing on ${st.port || 'USB'}…`, 'text-blue-400');
+                continue;
+            }
+            if (st.state === 'error') { show(st.error || 'Sync failed', 'text-red-400'); return; }
+            if (st.state === 'done') {
+                const n = (st.imported || []).length;
+                const errs = (st.errors || []).length;
+                show(`${st.piglet ? 'Piglet ' + st.piglet.fw + ': ' : ''}${n} drive(s) imported, ${st.skipped || 0} skipped`
+                     + (errs ? `, ${errs} error(s): ${st.errors[0]}` : ''), errs ? 'text-yellow-400' : 'text-green-400');
+                loadWardrivingData();
+                return;
+            }
+        }
+        show('Still running — check back later', 'text-yellow-400');
+    } catch (e) {
+        show('Sync failed: ' + e.message, 'text-red-400');
+    }
+}
+
 async function detectSerialPort() {
     const portInput = document.getElementById('wd-serial-port');
     const statusEl = document.getElementById('wd-serial-status');

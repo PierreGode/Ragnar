@@ -2,6 +2,18 @@
 
 ## Releases
 
+### 2026-10-03
+
+#### feat(wardriving): import Piglet solo drives over USB
+*branch `feature/piglet-serial-sync` · PR pending*
+
+- A drive done with Piglet on its own only lived on its SD card. Piglet firmware **v2.60** (SerialSync) answers `@PIGLET HELLO/LIST/GET` on its USB port, and new [`piglet_sync.py`](../piglet_sync.py) pulls every finished CSV and imports each one as its own session (`session_<first seen>_piglet`)
+- Runs automatically when a Piglet connects while wardriving (`wardriving_piglet_sync`, default on) and on demand via **Import from Piglet (USB)** on the Import card (`POST/GET /api/wardriving/piglet/sync`). With wardriving stopped it opens the free ESP32 port itself under a `piglet-sync` serial claim
+- Per-chunk CRC32 + resume-at-offset (up to 8 resumes per file); Piglet mutes IDF logging while serving so Wi-Fi log lines can't corrupt data lines. About 140 KiB/s on an ESP32-C5
+- Skips the file Piglet is writing (the live stream covers it) and files with no GPS positions; remembers imports per Piglet MAC + file name (`data/wardriving/piglet_imports.json`), so a file Piglet later moves to `/uploaded` is not imported twice
+- **CSV import now keeps real times:** rows use their `FirstSeen` instead of the import time, a GPS track is rebuilt from positioned rows, `0,0` is stored as "no position", pre-clock `1970` rows take the file's nearest valid time; also fixes a `TypeError` on cell rows (`upsert_cell_tower` missing args). Applies to the manual **Import CSV** too
+- **Docs:** [wardriving.md](wardriving.md) "USB sync of solo drives", [README.md](../README.md)
+
 ### 2026-10-02
 
 #### [#905](https://github.com/PierreGode/Ragnar/pull/905) — feat(ducky): drive the Rubber Ducky HID across the mesh
