@@ -2234,6 +2234,15 @@ class WardrivingEngine:
         except Exception:
             return set()
 
+    @staticmethod
+    def _port_holder(port):
+        """Owner of ``port`` if another component holds/reserves it, else None."""
+        try:
+            import serial_claims
+            return serial_claims.claims(exclude_owner='wardrive-*').get(os.path.realpath(port))
+        except Exception:
+            return None
+
     def _gpsd_configured_realpath(self):
         """realpath of the device gpsd is currently pinned to, or None.
 
@@ -2679,6 +2688,14 @@ class WardrivingEngine:
         if gps_port and port == gps_port:
             logger.warning(f"Skipping companion on {port}: same port as GPS")
             return None
+        # Every start path (USB monitor, manual Connect) funnels through here, so
+        # enforce serial_claims here too: a second reader on a port another
+        # component holds (e.g. the serial console) splits the byte stream —
+        # banners and probe replies get eaten and Huginn mis-identifies.
+        holder = self._port_holder(port)
+        if holder:
+            logger.warning(f"Skipping companion on {port}: port is reserved by {holder}")
+            return None
         existing = self._companions.get(port)
         if existing and existing.thread and existing.thread.is_alive():
             return existing
@@ -2699,6 +2716,9 @@ class WardrivingEngine:
         gps_port = self._gps.port if self._gps else None
         if gps_port and port == gps_port:
             return {'error': f'Port {port} is already in use by GPS'}
+        holder = self._port_holder(port)
+        if holder:
+            return {'error': f'Port {port} is reserved by {holder} — release it there first'}
         companion = self._start_companion_thread(port)
         if companion is None:
             return {'error': f'Could not start companion on {port}'}
@@ -3033,6 +3053,14 @@ class WardrivingEngine:
                 # stops that listener, handing the port back to its owner.
                 foreign = self._foreign_ports()
                 if foreign:
+                    # Say so once per device: otherwise a companion on a reserved
+                    # port just never appears ("No GPS device detected").
+                    logged = self.__dict__.setdefault('_claim_skip_logged', set())
+                    for dev_id, node in present.items():
+                        if os.path.realpath(node) in foreign and dev_id not in logged:
+                            logged.add(dev_id)
+                            logger.warning(f"[usb-monitor] not attaching {node}: reserved by "
+                                           f"{self._port_holder(node) or 'another component'}")
                     present = {k: v for k, v in present.items()
                                if os.path.realpath(v) not in foreign}
                 managed = self._managed_devices
