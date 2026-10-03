@@ -32,6 +32,12 @@ from datetime import datetime, timezone
 logger = logging.getLogger("PigletSync")
 
 STATE_FILE = 'piglet_imports.json'
+# esp_reset_reason() values that mean the Piglet crashed rather than powered on
+CRASH_RESETS = {4: 'a panic', 5: 'the interrupt watchdog', 6: 'the task watchdog',
+                7: 'a watchdog', 8: 'deep sleep wake', 9: 'a brownout'}
+FAIL_RETRY_AFTER_S = 6 * 3600   # a file that failed waits this long before a retry
+FAIL_GIVE_UP = 3                # ...and is skipped for good after this many failed syncs
+MIN_VALID_EPOCH = 1420070400    # 2015: older last-write times mean "clock not set" 
 HELLO_RETRY_S = 1.0
 IDLE_TIMEOUT_S = 8.0          # max silence while a reply is in flight
 
@@ -84,10 +90,19 @@ class PigletLink:
             line = self._next(('@PH ',), HELLO_RETRY_S)
             if line:
                 parts = line.split()
-                return {'fw': parts[1] if len(parts) > 1 else '',
+                kv = dict(p.split('=', 1) for p in parts[4:] if '=' in p)
+                info = {'fw': parts[1] if len(parts) > 1 else '',
                         'chip': parts[2] if len(parts) > 2 else '',
                         'mac': parts[3] if len(parts) > 3 else '',
-                        'sd': line.endswith('sd=1')}
+                        'sd': kv.get('sd') == '1'}
+                if 'rst' in kv:                     # v2.61+: last reset reason + uptime
+                    info['reset_reason'] = int(kv['rst']) if kv['rst'].isdigit() else kv['rst']
+                    info['uptime_s'] = int(kv['up']) if kv.get('up', '').isdigit() else None
+                    if info['reset_reason'] in CRASH_RESETS:
+                        logger.warning(f"Piglet {info['mac']} last rebooted from "
+                                       f"{CRASH_RESETS[info['reset_reason']]} "
+                                       f"{info['uptime_s']} s ago")
+                return info
         return None
 
     def list_files(self):
@@ -105,11 +120,14 @@ class PigletLink:
             if len(fields) >= 3:
                 try:
                     files.append({'path': fields[0], 'size': int(fields[1]),
-                                  'active': fields[2] == '1'})
+                                  'active': fields[2] == '1',
+                                  # v2.61+: last-write epoch (0/absent = unknown)
+                                  'mtime': int(fields[3]) if len(fields) > 3 and fields[3].isdigit() else 0})
                 except ValueError:
                     continue
 
     MAX_RESUMES = 8
+    MAX_STUCK = 2        # resumes in a row that make no progress before giving up
 
     def get_file(self, path):
         """Download one file. Every chunk carries its own CRC32; a damaged or
@@ -117,11 +135,20 @@ class PigletLink:
         byte instead of failing the whole file."""
         data = bytearray()
         size = None
+        stuck, last_len = 0, -1
         for attempt in range(self.MAX_RESUMES + 1):
             try:
                 size = self._get_part(path, data)
                 return bytes(data)
             except _ResumableError as e:
+                # A transfer that keeps failing at the same byte is a bad spot
+                # on the card, not a flaky link: stop after a few tries
+                # instead of burning minutes on it every sync.
+                stuck = stuck + 1 if len(data) == last_len else 0
+                last_len = len(data)
+                if stuck >= self.MAX_STUCK:
+                    raise PigletSyncError(f'{path}: no progress past byte {len(data)} '
+                                          f'after {stuck + 1} tries') from e
                 logger.info(f"{path}: {e} — resuming at byte {len(data)} "
                             f"(attempt {attempt + 1}/{self.MAX_RESUMES})")
                 self._drain()
@@ -150,6 +177,9 @@ class PigletLink:
             if line is None:
                 raise _ResumableError(f'stalled after chunk {expect}')
             if line.startswith('@PG ERR'):
+                if line[8:].startswith('read-error'):
+                    # The card itself can't read this spot; retrying won't help.
+                    raise PigletSyncError(f'{path}: SD read error at byte {line.split()[-1]}')
                 raise _ResumableError(line[8:])
             if line.startswith('@PG END'):
                 if size is None or len(data) != size:
@@ -272,19 +302,43 @@ def sync(link, data_dir, hello_wait_s=20.0):
         summary['errors'].append('Piglet SD card not ready')
         return summary
     state = load_state(data_dir)
-    done = state.setdefault(info['mac'] or 'unknown', {})
+    mac = info['mac'] or 'unknown'
+    done = state.setdefault(mac, {})
+    failed = state.setdefault('_failed', {}).setdefault(mac, {})
+    now = time.time()
+    todo = []
     for f in link.list_files():
         name = os.path.basename(f['path'])
+        fail = failed.get(name)
         if f['active'] or name in done:
             summary['skipped'] += 1
-            continue
+        elif fail and fail.get('count', 0) >= FAIL_GIVE_UP:
+            summary['skipped'] += 1
+            summary.setdefault('unreadable', []).append(name)
+        elif fail and now - fail.get('last', 0) < FAIL_RETRY_AFTER_S:
+            summary['skipped'] += 1                 # failed recently: retry later
+        else:
+            todo.append(f)
+    # Newest drive first (by last-write time; unknown times last), and files
+    # that failed before after everything else — a full card must not make
+    # today's drive wait behind months of old ones or a bad file.
+    todo.sort(key=lambda f: (os.path.basename(f['path']) in failed,
+                             -(f.get('mtime') if f.get('mtime', 0) >= MIN_VALID_EPOCH else 0)))
+    for f in todo:
+        name = os.path.basename(f['path'])
         try:
             data = link.get_file(f['path'])
             sid, result = import_csv_bytes(data, data_dir, f"piglet {info['mac']} {f['path']}")
         except Exception as e:
             summary['errors'].append(str(e))
             logger.warning(f"Piglet sync: {e}")
+            rec = failed.setdefault(name, {'count': 0})
+            rec.update(count=rec['count'] + 1, last=time.time(), error=str(e)[:200])
+            save_state(data_dir, state)
+            if isinstance(e, OSError):
+                break                               # the port is gone; stop
             continue
+        failed.pop(name, None)
         done[name] = {'size': f['size'], 'session_id': sid, 'at': time.time()}
         if not sid:
             done[name]['skipped'] = result          # e.g. 'no GPS positions'
@@ -305,3 +359,70 @@ def sync_port(port, data_dir, hello_wait_s=20.0):
             ser.timeout = min(timeout_s, 1.0)
             return ser.readline()
         return sync(PigletLink(ser.write, readline), data_dir, hello_wait_s)
+
+
+# ── plug-in watcher ──────────────────────────────────────────────────────────
+
+class PlugWatcher:
+    """Sync a Piglet as soon as it is plugged in, wardriving or not.
+
+    Polls /dev/serial/by-id for Espressif native-USB devices (the XIAO
+    S3/C3/C5/C6 Piglets enumerate as "Espressif ..."; those don't reset when
+    the port is opened, unlike the USB-UART bridges on CYD-style boards, which
+    are never probed). Each device is tried once per plug-in; one that doesn't
+    answer HELLO (Huginn, older Piglet firmware) is left alone until it is
+    unplugged and plugged in again.
+
+    enabled()     -> bool   config switch
+    busy(port)    -> bool   held by someone else (wardriving listener, claims)
+    run(port)     -> dict   performs the sync (and owns locking/claims)
+    """
+
+    BY_ID = '/dev/serial/by-id'
+
+    def __init__(self, enabled, busy, run, interval=5.0, settle=3.0):
+        self._enabled, self._busy, self._run = enabled, busy, run
+        self.interval, self.settle = interval, settle
+        self._seen = {}                 # by-id name -> port it was handled on
+
+    def candidates(self):
+        try:
+            names = os.listdir(self.BY_ID)
+        except OSError:
+            return {}
+        out = {}
+        for n in names:
+            if 'Espressif' in n:
+                out[n] = os.path.realpath(os.path.join(self.BY_ID, n))
+        return out
+
+    def tick(self):
+        """One poll. Returns the list of (port, result) synced this tick."""
+        cur = self.candidates()
+        for gone in set(self._seen) - set(cur):          # unplugged: forget it
+            del self._seen[gone]
+        done = []
+        for dev_id, port in cur.items():
+            if self._seen.get(dev_id) == port:
+                continue
+            if not self._enabled() or self._busy(port):
+                continue                                  # try again next tick
+            self._seen[dev_id] = port
+            try:
+                done.append((port, self._run(port)))
+            except Exception as e:
+                logger.warning(f"Piglet plug-in sync on {port} failed: {e}")
+        return done
+
+    def start(self):
+        def _loop():
+            time.sleep(self.settle)
+            while True:
+                try:
+                    self.tick()
+                except Exception as e:
+                    logger.debug(f"Piglet watcher: {e}")
+                time.sleep(self.interval)
+        import threading
+        threading.Thread(target=_loop, daemon=True, name='piglet-plug-watch').start()
+        return self
