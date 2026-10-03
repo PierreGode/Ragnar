@@ -2,6 +2,17 @@
 
 ## Releases
 
+### 2026-10-04
+
+#### feat(mesh): pick the Meshtastic MQTT region
+*branch `feature/meshtastic-mqtt-region` · PR pending*
+
+- **Region picker** next to the MQTT Topic box on Mesh Nodes and Mesh Map: All regions (`msh/+/2/#`), or one region root (`msh/EU_868/#`, `msh/US/#`, ANZ, CN, JP, …) including country and city sub-topics; *Custom topic* for a hand-typed filter. Choice is remembered per browser
+- Changing the topic while MQTT is on reconnects at once, and the backend drops the old region's nodes/messages (`MeshMqtt.connect`)
+- Region list served by `detect()` (`mqtt_defaults.regions`); `mqtt_region_topic()` + 4 self-tests (26/26)
+- **Region badge on every MQTT message** (e.g. `EU_868/SE`, `US`, `ANZ`), read off the topic by `mqtt_topic_region()`; hover shows the full topic; map popups show **Region** for MQTT stations. +2 self-tests (28/28)
+- **Docs:** [sdr-subghz.md](sdr-subghz.md) "Choosing a region" / "Where a message came from"
+
 ### 2026-10-03
 
 #### fix(wardriving): Piglet sync — newest drive first, give up on stuck files, sync on plug-in

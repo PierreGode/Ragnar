@@ -238,11 +238,32 @@ qualify. The meshtastic library's own auto-detect would otherwise fall back to
   stay encrypted.
 - **MQTT (Internet bridge)** — Meshtastic gateways bridge the mesh to an MQTT
   broker the way APRS IGates bridge to APRS-IS. The **☁ MQTT** button connects a
-  broker (default the public `mqtt.meshtastic.org`, JSON topic `msh/+/2/json/#`)
-  and streams mesh traffic **worldwide with no node at all** — nodes, positions
-  and text messages parsed from the JSON stream (`parse_mqtt_json`). Runs
+  broker (default the public `mqtt.meshtastic.org`, topic `msh/+/2/#`) and
+  streams mesh traffic **worldwide with no node at all** — nodes, positions and
+  text messages from the encrypted `/e/` stream and the JSON stream. Runs
   independently of the USB node and of the RTL-SDR. Uses **paho-mqtt** (in
   `requirements.txt`; the Install button grabs it too).
+- **Choosing a region** — the **Region** picker next to the Topic box (Mesh
+  Nodes and Mesh Map) narrows the feed to one region root: picking *United
+  States* sets the topic to `msh/US/#`, *Europe 868* to `msh/EU_868/#`, and so
+  on (also ANZ, CN, JP, KR, TW, IN, RU, PL, TH, MY, SG, PH, BR, NZ, UA, UK, EU
+  433). A region topic ends in `#`, so it also includes country and city
+  sub-topics that the all-regions default does not (`msh/EU_868/SE/2/…`,
+  `msh/US/FL/2/…`). **All regions** goes back to `msh/+/2/#`. For anything
+  narrower, type your own filter in the Topic box (for example
+  `msh/EU_868/SE/#` for Sweden) and the picker shows *Custom topic*. Changing
+  the region while MQTT is on reconnects straight away and drops the previous
+  region's nodes and messages. The choice is remembered in the browser. The
+  public broker refuses a bare `msh/#`, so a topic like that just stays quiet.
+  This only filters the **Internet** feed: a USB node hears whatever its own
+  LoRa radio picks up locally, whatever the region setting.
+- **Where a message came from** — every MQTT message carries an amber region
+  badge read off its topic: the levels between `msh` and the protocol version
+  `2`, so `msh/EU_868/SE/2/e/LongFast/!…` shows **EU_868/SE** and
+  `msh/US/2/e/…` shows **US**. Hover the badge for the full topic. Map stations
+  heard over MQTT show the same value as **Region** in their popup. Messages
+  from your own USB node (`SERIAL`) have no region badge; they came in over
+  local LoRa.
 - **Transmit** — the **Send** box puts a text message onto the mesh: through the
   connected node's **LoRa RF** when a node is present (licence-free ISM), else
   over **MQTT** (which reaches RF only via a downlink-enabled gateway). Messages
