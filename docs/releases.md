@@ -4,6 +4,15 @@
 
 ### 2026-10-04
 
+#### fix(gc9a01): stop the round TFT showing only static
+*branch `fix/gc9a01-spi-speed` · PR pending*
+
+- **Root cause:** the GC9A01 1.28" round display driver hardcoded SPI at the panel's 40 MHz maximum. Over Dupont/jumper wiring that clock corrupts the init-sequence command bytes, so the controller is never configured and the panel shows only its power-on noise ("snow"/static)
+- Default SPI clock lowered to a safe **20 MHz**, matching the conservative approach of the ILI9486 driver
+- Added environment overrides mirroring the 3.5" TFT driver: `RAGNAR_GC9A01_SPI_HZ`, `RAGNAR_GC9A01_MADCTL`, `RAGNAR_GC9A01_INVERT`, and `RAGNAR_GC9A01_RST_PIN` / `_DC_PIN` / `_BL_PIN` (`-1` disables backlight control). Users can drop the clock further (`10000000`) if still noisy
+- Display inversion (`INVON`) and MADCTL are now env-tunable instead of hardcoded; backlight pin respects `-1`
+- New "1.28" GC9A01 round TFT" section in [Display Controls](DISPLAY_CONTROLS.md) with wiring and a static/snow troubleshooting table
+
 #### feat(mesh): pick the Meshtastic MQTT region
 *branch `feature/meshtastic-mqtt-region` · PR pending*
 
