@@ -42,6 +42,10 @@ FILE_OWNERS = {
     'python/apcguard.py': 'APC Guard',
     'python/apcguard_selftest.py': 'APC Guard',
     'python/apcguard_scapy_xcheck.py': 'APC Guard',
+    'python/liebert_guard.py': 'Liebert Guard',
+    'python/test_liebert_guard.py': 'Liebert Guard',
+    'python/liebert_guard_conformance.py': 'Liebert Guard',
+    'python/liebert_guard_scapy_selftest.py': 'Liebert Guard',
     'actions/ble_pentest.py': 'BLE Pentest (active)',
 }
 FILE_PREFIX_OWNERS = {'python/dns_doctor_passive/': 'DNS Watch'}
@@ -56,6 +60,7 @@ ND_PREFIXES = [
     ('_arista', 'Arista Guard'), ('_ARISTA', 'Arista Guard'), ('do_arista', 'Arista Guard'),
     ('_aruba', 'Aruba Guard'), ('_ARUBA', 'Aruba Guard'),
     ('_apc', 'APC Guard'), ('_APC', 'APC Guard'), ('do_apc', 'APC Guard'),
+    ('_liebert', 'Liebert Guard'), ('_LIEBERT', 'Liebert Guard'), ('do_liebert', 'Liebert Guard'),
     ('_arp', 'ARP Watch'),
     ('_cdp', 'CDP Watch'), ('_CDP', 'CDP Watch'),
     ('_cisco', 'Cisco Guard'), ('_CISCO', 'Cisco Guard'), ('_ikev2', 'Cisco Guard'),
@@ -105,6 +110,7 @@ CONTEXT_OWNERS = {'BGP Path Watch:advisory', 'OSPF Watch:advisory', 'SR-MPLS Wat
 NAMES = {
     'CVE-2002-20001': 'D(HE)at', 'CVE-2022-40735': 'D(HE)at', 'CVE-2024-41996': 'D(HE)at',
     'CVE-2003-0001': 'Etherleak',
+    'CVE-2014-9222': 'Misfortune Cookie', 'CVE-2025-41426': 'Liebert RDU101 / IS-UNITY HTTP method overflow',
     'CVE-2020-11896': 'Ripple20 IPv4 tunnelling RCE', 'CVE-2020-11897': 'Ripple20 IPv6 OOB write (not APC)',
     'CVE-2020-11898': 'Ripple20 ICMPv4 heap leak', 'CVE-2020-11899': 'Ripple20 IPv6 OOB read',
     'CVE-2020-11901': 'Ripple20 DNS resolver RCE', 'CVE-2020-11902': 'Ripple20 IPv6-in-IPv4 OOB read',

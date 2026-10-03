@@ -14,8 +14,8 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **225 CVEs detected from the wire.** 266 distinct CVE IDs are named across Ragnar's
-  code; 225 of them a passive detector actually identifies. The rest are named, not detected:
+- **227 CVEs detected from the wire.** 268 distinct CVE IDs are named across Ragnar's
+  code; 227 of them a passive detector actually identifies. The rest are named, not detected:
   32 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
@@ -27,11 +27,11 @@ behind them is Solarflere's work.
   **CVE-2026-86060**.
 - **Two CISA KEV entries** join the corpus with SMTP Watch (CVE-2019-10149, CVE-2018-6789),
   and APC Guard adds the KEV-listed Ripple20 CVE-2020-11899.
-- Weighted to the current threat wave (all named IDs): **36 CVEs from 2023, 47 from 2024, 33 from 2025, and
-  34 from 2026.**
+- Weighted to the current threat wave (all named IDs): **36 CVEs from 2023, 47 from 2024, 34 from 2025, and
+  36 from 2026.**
 - Spanning **~40 passive detectors** from L2 to L7 plus the timing- and forwarding-plane
-  watchers (BFD, PTP, SR-MPLS) and the **IPsec/IKE** key-exchange posture detector, **seven
-  in-app vendor CVE guards** (Cisco, Juniper, Arista, Comware, MikroTik, Aruba, APC) and **Dell
+  watchers (BFD, PTP, SR-MPLS) and the **IPsec/IKE** key-exchange posture detector, **eight
+  in-app vendor CVE guards** (Cisco, Juniper, Arista, Comware, MikroTik, Aruba, APC, Liebert) and **Dell
   Guard** as a standalone daemon.
 - **Cross-protocol crypto-attack coverage** — the same cryptographic weaknesses are named
   everywhere they appear: **SWEET32** (CVE-2016-2183) in TLS, SSH and IKE; **D(HE)at**
@@ -174,7 +174,10 @@ behind them is Solarflere's work.
   *version in range*, never *vulnerable*), fragmented and trimmed IP-in-IP tunnels
   (CVE-2020-11896), an ICMP reply that quotes memory the packet never carried — heap
   disclosure seen on the wire (CVE-2020-11898), IPv6-in-IPv4 to a card (CVE-2020-11902),
-  and malformed DNS answers (CVE-2020-11901).
+  and malformed DNS answers (CVE-2020-11901). Its companion **Liebert Guard** covers Vertiv /
+  Liebert power cards: RomPager **Misfortune Cookie** banners (CVE-2014-9222, Liebert MPH rack
+  PDUs) and the oversized-HTTP-method request that overflows Liebert RDU101 / IS-UNITY cards
+  (CVE-2025-41426).
 
 _(Counts reflect the detector code as of September 2026 and grow as new modules land.)_
 

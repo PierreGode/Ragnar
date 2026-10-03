@@ -1023,7 +1023,7 @@
                 <div class="flex items-center justify-between gap-4 mb-3">
                     <div class="min-w-0">
                         <h3 class="text-lg font-semibold">Watchtower</h3>
-                        <p class="text-xs text-gray-400">Live findings from the passive watcher daemons — ARP Guard · NDP (IPv6) · Wi-Fi · Legacy Wi-Fi · WPS · Cert · SNMP · IS-IS · IGMP · Dell Guard (OS10 SSRF) · Cisco/Juniper/Arista/Comware/MikroTik/Aruba/APC guards · IPsec/IKE Watch (plus any other watcher writing JSONL)</p>
+                        <p class="text-xs text-gray-400">Live findings from the passive watcher daemons — ARP Guard · NDP (IPv6) · Wi-Fi · Legacy Wi-Fi · WPS · Cert · SNMP · IS-IS · IGMP · Dell Guard (OS10 SSRF) · Cisco/Juniper/Arista/Comware/MikroTik/Aruba/APC/Liebert guards · IPsec/IKE Watch (plus any other watcher writing JSONL)</p>
                     </div>
                     <div class="shrink-0 flex items-center gap-2">
                         <button onclick="watchtowerClear()" title="Clear the alerts shown here. The watchers keep their place in each log, so only genuinely new findings re-appear." class="bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-1.5 rounded text-xs whitespace-nowrap">Clear</button>
@@ -1860,7 +1860,7 @@
                 <div class="glass rounded-xl p-3 sm:p-4 mb-6">
                     <div id="net-layer-bar" class="flex flex-wrap items-center gap-1">
                         <button id="net-layer-btn-overview" data-layer="overview" onclick="showNetLayer('overview')" class="net-layer-btn px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap bg-Ragnar-600 text-white">Overview</button>
-                        <button id="net-layer-btn-l7" data-layer="l7" onclick="showNetLayer('l7')" class="net-layer-btn px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap text-slate-400 hover:bg-slate-700 hover:text-white">L7 Application <span class="opacity-60 font-normal">27</span></button>
+                        <button id="net-layer-btn-l7" data-layer="l7" onclick="showNetLayer('l7')" class="net-layer-btn px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap text-slate-400 hover:bg-slate-700 hover:text-white">L7 Application <span class="opacity-60 font-normal">28</span></button>
                         <button id="net-layer-btn-l6" data-layer="l6" onclick="showNetLayer('l6')" class="net-layer-btn px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap text-slate-400 hover:bg-slate-700 hover:text-white">L6 Presentation <span class="opacity-60 font-normal">2</span></button>
                         <button id="net-layer-btn-l5" data-layer="l5" onclick="showNetLayer('l5')" class="net-layer-btn px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap text-slate-400 hover:bg-slate-700 hover:text-white">L5 Session <span class="opacity-60 font-normal">2</span></button>
                         <button id="net-layer-btn-l4" data-layer="l4" onclick="showNetLayer('l4')" class="net-layer-btn px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap text-slate-400 hover:bg-slate-700 hover:text-white">L4 Transport <span class="opacity-60 font-normal">2</span></button>
@@ -1877,8 +1877,8 @@
                         <!-- Visibility matrix reference (overview) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Module visibility matrix <span class="text-xs font-normal text-gray-500">— reference guide · every module by OSI layer × vantage tier</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20260930" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_full.jpg?v=20260930" alt="Ragnar module visibility matrix: every module by OSI layer and vantage tier" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261003" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_full.jpg?v=20261003" alt="Ragnar module visibility matrix: every module by OSI layer and vantage tier" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">A clean verdict is only as wide as the tap: check a module's vantage tier before reading silence as safety. Each layer button above shows its own band of this matrix. Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image to open it full-size.</p>
                         </details>
@@ -1919,7 +1919,7 @@
                             <div class="flex items-center justify-between gap-4">
                                 <div class="min-w-0">
                                     <h3 class="text-lg font-semibold">Watchtower <span class="text-xs font-normal text-gray-500">— unified watcher alerts</span></h3>
-                                    <p class="text-sm text-gray-400">One pane for the deep standalone watchers that each run as their own daemon — <strong>ARP&nbsp;Guard</strong>, <strong>NDP&nbsp;Watch</strong> (IPv6), <strong>Wi-Fi&nbsp;Watch</strong>, <strong>Legacy&nbsp;Wi-Fi</strong>, <strong>WPS&nbsp;Watch</strong>, <strong>Cert&nbsp;Watch</strong>, <strong>SNMP</strong>, <strong>IS-IS</strong>, <strong>IGMP</strong> and <strong>Dell&nbsp;Guard</strong> (OS10 SSRF-egress, <code>CVE-2025-22474</code>) — <strong>plus the in-app vendor CVE guards</strong> (<strong>Cisco</strong>, <strong>Juniper</strong>, <strong>Arista</strong>, <strong>Comware/VRF-hop</strong>, <strong>MikroTik/RouterOS</strong>, <strong>Aruba/PAPI</strong> and <strong>APC&nbsp;NMC/Ripple20</strong> — whose continuous <span class="font-mono">apcguard@</span> daemon streams here too), which now stream their findings into the same feed (any other watcher dropping a JSONL log in the watched dir is picked up automatically too). Watchtower tails each one's JSON-lines log, normalizes them into a single feed, and pages new <strong>high/critical</strong> findings through one deduped Pushover path. Read-only over the logs — it captures nothing itself. The standalone watchers each need their systemd unit running to appear here; the in-app guards feed it automatically whenever Extended Monitoring is on.</p>
+                                    <p class="text-sm text-gray-400">One pane for the deep standalone watchers that each run as their own daemon — <strong>ARP&nbsp;Guard</strong>, <strong>NDP&nbsp;Watch</strong> (IPv6), <strong>Wi-Fi&nbsp;Watch</strong>, <strong>Legacy&nbsp;Wi-Fi</strong>, <strong>WPS&nbsp;Watch</strong>, <strong>Cert&nbsp;Watch</strong>, <strong>SNMP</strong>, <strong>IS-IS</strong>, <strong>IGMP</strong> and <strong>Dell&nbsp;Guard</strong> (OS10 SSRF-egress, <code>CVE-2025-22474</code>) — <strong>plus the in-app vendor CVE guards</strong> (<strong>Cisco</strong>, <strong>Juniper</strong>, <strong>Arista</strong>, <strong>Comware/VRF-hop</strong>, <strong>MikroTik/RouterOS</strong>, <strong>Aruba/PAPI</strong>, <strong>APC&nbsp;NMC/Ripple20</strong> and <strong>Liebert/RomPager</strong> — whose continuous <span class="font-mono">apcguard@</span> and <span class="font-mono">liebert_guard@</span> daemons stream here too), which now stream their findings into the same feed (any other watcher dropping a JSONL log in the watched dir is picked up automatically too). Watchtower tails each one's JSON-lines log, normalizes them into a single feed, and pages new <strong>high/critical</strong> findings through one deduped Pushover path. Read-only over the logs — it captures nothing itself. The standalone watchers each need their systemd unit running to appear here; the in-app guards feed it automatically whenever Extended Monitoring is on.</p>
                                 </div>
                                 <label class="toggle-switch relative inline-flex items-center cursor-pointer shrink-0">
                                     <input type="checkbox" id="watchtower-enabled" class="sr-only peer" onchange="onWatchtowerToggled(this)">
@@ -1948,10 +1948,10 @@
                         <!-- Routing-scanner self-test + Scapy -->
                         <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
                             <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                                <h3 class="text-lg font-semibold">Detector Self-Test <span class="text-xs font-normal text-gray-500">(IGMP · IPv6 · NDP · RA Guard · NTP · ICMP · SNMP · TLS · Cert · STP · SMB · Relay · LDAP · SSH · Telnet · DTP · CDP · VTP · EIGRP · IS-IS · FHRP · OSPF · ARP · MAC · DHCP · DNS · BGP · LACP · RPC · BFD · PTP · SR-MPLS · IPsec/IKE · DNS-Watch · Cisco · Juniper · Arista · Comware · MikroTik · Aruba · APC · Dell · speaker · OWD)</span></h3>
+                                <h3 class="text-lg font-semibold">Detector Self-Test <span class="text-xs font-normal text-gray-500">(IGMP · IPv6 · NDP · RA Guard · NTP · ICMP · SNMP · TLS · Cert · STP · SMB · Relay · LDAP · SSH · Telnet · DTP · CDP · VTP · EIGRP · IS-IS · FHRP · OSPF · ARP · MAC · DHCP · DNS · BGP · LACP · RPC · BFD · PTP · SR-MPLS · IPsec/IKE · DNS-Watch · Cisco · Juniper · Arista · Comware · MikroTik · Aruba · APC · Liebert · Dell · speaker · OWD)</span></h3>
                                 <div id="scapy-status" class="text-xs text-gray-400"></div>
                             </div>
-                            <p class="text-sm text-gray-400 mb-3 mt-1">Validates every passive detector by running each classifier against crafted attack captures — no root, no live traffic. Covers the routing/L2 scanners (IGMP, IPv6 first-hop, NDP, STP, DTP, CDP incl. <strong>CDPwn</strong> CVE screening, VTP, EIGRP, IS-IS, FHRP, OSPF), the host/AD detectors (SNMP, TLS, Cert, SMB, LDAP, Relay, <strong>SSH</strong> regreSSHion/Terrapin, <strong>Telnet</strong>, <strong>RPC/NetLogon</strong> incl. <strong>Zerologon</strong> / DCSync / WinRM), the link-aggregation integrity monitor (<strong>LACP</strong> LAG-hijack / flapping), the timing- and forwarding-plane watchers (<strong>BFD</strong> failover manipulation, <strong>PTP</strong> grandmaster takeover, <strong>SR-MPLS</strong> segment injection), the <strong>IPsec/IKE</strong> key-exchange posture detector (D(HE)at / weak DH groups, SWEET32, Aggressive Mode) — part of the cross-protocol <strong>D(HE)at</strong> (CVE-2002-20001) coverage that also names finite-field DH exposure in <strong>TLS</strong> and <strong>SSH</strong>, the vendor CVE guards (<strong>Cisco</strong>, <strong>Juniper</strong>, <strong>Arista</strong>, <strong>Comware</strong>, <strong>MikroTik</strong>, <strong>Aruba</strong>, <strong>APC</strong> (its vendored module's own 516-check tier plus the in-app capture adapter) and <strong>Dell</strong> — Dell Guard runs as a standalone daemon, so the panel exercises its offline classifier self-test), and the poisoning / rogue-device checks (<strong>ARP</strong> incl. HSRP/VRRP virtual-MAC awareness, <strong>MAC</strong> spoof/vendor-OUI/randomization incl. HSRP/VRRP virtual-MAC awareness, <strong>DHCP</strong> rogue-server/starvation, <strong>DNS</strong> poison parser/anchors). Installing <strong>Scapy</strong> adds an end-to-end leg that builds real packets, writes a pcap and parses it back through <span class="font-mono">tcpdump</span> (and Cert Watch grades a real local handshake), so the whole capture→parse→classify path is exercised. Recommended for a fully-validated security tool.</p>
+                            <p class="text-sm text-gray-400 mb-3 mt-1">Validates every passive detector by running each classifier against crafted attack captures — no root, no live traffic. Covers the routing/L2 scanners (IGMP, IPv6 first-hop, NDP, STP, DTP, CDP incl. <strong>CDPwn</strong> CVE screening, VTP, EIGRP, IS-IS, FHRP, OSPF), the host/AD detectors (SNMP, TLS, Cert, SMB, LDAP, Relay, <strong>SSH</strong> regreSSHion/Terrapin, <strong>Telnet</strong>, <strong>RPC/NetLogon</strong> incl. <strong>Zerologon</strong> / DCSync / WinRM), the link-aggregation integrity monitor (<strong>LACP</strong> LAG-hijack / flapping), the timing- and forwarding-plane watchers (<strong>BFD</strong> failover manipulation, <strong>PTP</strong> grandmaster takeover, <strong>SR-MPLS</strong> segment injection), the <strong>IPsec/IKE</strong> key-exchange posture detector (D(HE)at / weak DH groups, SWEET32, Aggressive Mode) — part of the cross-protocol <strong>D(HE)at</strong> (CVE-2002-20001) coverage that also names finite-field DH exposure in <strong>TLS</strong> and <strong>SSH</strong>, the vendor CVE guards (<strong>Cisco</strong>, <strong>Juniper</strong>, <strong>Arista</strong>, <strong>Comware</strong>, <strong>MikroTik</strong>, <strong>Aruba</strong>, <strong>APC</strong> (its vendored module's own 516-check tier plus the in-app capture adapter), <strong>Liebert</strong> (likewise, 198 checks plus live loopback) and <strong>Dell</strong> — Dell Guard runs as a standalone daemon, so the panel exercises its offline classifier self-test), and the poisoning / rogue-device checks (<strong>ARP</strong> incl. HSRP/VRRP virtual-MAC awareness, <strong>MAC</strong> spoof/vendor-OUI/randomization incl. HSRP/VRRP virtual-MAC awareness, <strong>DHCP</strong> rogue-server/starvation, <strong>DNS</strong> poison parser/anchors). Installing <strong>Scapy</strong> adds an end-to-end leg that builds real packets, writes a pcap and parses it back through <span class="font-mono">tcpdump</span> (and Cert Watch grades a real local handshake), so the whole capture→parse→classify path is exercised. Recommended for a fully-validated security tool.</p>
                             <div class="flex flex-wrap items-center gap-2">
                                 <button onclick="runRoutingSelftest()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Run self-test</button>
                                 <button id="scapy-install-btn" onclick="installNetTool('scapy', this, runRoutingSelftest)" class="hidden bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm whitespace-nowrap" title="Install the Scapy Python module for the end-to-end packet-crafting self-test">Install Scapy</button>
@@ -2010,8 +2010,8 @@
                         <!-- Visibility matrix reference (l7) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L7 Application <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20260930" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l7.jpg?v=20260930" alt="Module visibility matrix, L7 Application band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261003" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l7.jpg?v=20261003" alt="Module visibility matrix, L7 Application band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2364,7 +2364,7 @@
                         <!-- APC Guard (APC / Schneider NMC — Ripple20) -->
                         <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
                             <h3 class="text-lg font-semibold mb-1">APC Guard <span class="text-xs font-normal text-gray-500">(APC / Schneider NMC · rack PDU · ATS · UPS)</span></h3>
-                            <p class="text-xs text-amber-300/90 mb-2">Passive APC Network Management Card guard for <strong>Ripple20</strong> (Treck TCP/IP stack) — <strong>detection-only</strong>, never transmits. Reads the card's <strong>SNMP sysDescr</strong> and gates the <strong>NMC1 / NMC2 / NMC3</strong> AOS version against Schneider's per-application table (<strong>APC-001/002/003</strong>, version in range — never "vulnerable", sysDescr can't prove patch state). Flags the attack shapes against a known card: <strong>fragmented IP-in-IP</strong> and an <strong>inner length shorter than the data</strong> (APC-101/102, CVE-2020-11896), a <strong>protocol-unreachable that quotes bytes not in the packet</strong> — heap disclosure (APC-106, CVE-2020-11898), <strong>IPv6-in-IPv4</strong> to a card (APC-105, CVE-2020-11902), and <strong>malformed DNS answers</strong> — CNAME overrun, looping or overlong names (APC-111/112, CVE-2020-11901). Tunnel and DNS attempts are only analysed against cards it knows: cards seen answering SNMP are <strong>remembered across scans</strong>, and you can <strong>declare cards</strong> below (add a MAC only where the tap sees the card's own frames). IPv4 + IPv6.</p>
+                            <p class="text-xs text-amber-300/90 mb-2">Passive APC Network Management Card guard for <strong>Ripple20</strong> (Treck TCP/IP stack) — <strong>detection-only</strong>, never transmits. Reads the card's <strong>SNMP sysDescr</strong> and gates the <strong>NMC1 / NMC2 / NMC3</strong> AOS version against Schneider's per-application table (<strong>APC-001/002/003</strong>, version in range — never "vulnerable", sysDescr can't prove patch state). Flags the attack shapes against a known card: <strong>fragmented IP-in-IP</strong> and an <strong>inner length shorter than the data</strong> (APC-101/102, CVE-2020-11896), a <strong>protocol-unreachable that quotes bytes not in the packet</strong> — heap disclosure (APC-106, CVE-2020-11898), <strong>IPv6-in-IPv4</strong> to a card (APC-105, CVE-2020-11902), and <strong>malformed DNS answers</strong> — CNAME overrun, looping or overlong names (APC-111/112, CVE-2020-11901). Tunnel and DNS attempts are only analysed against cards it knows: cards seen answering SNMP are <strong>remembered across scans</strong>, and you can <strong>declare cards</strong> below (add a MAC only where the tap sees the card's own frames). IPv4 + IPv6. For Vertiv / Liebert power cards, see <strong>Liebert Guard</strong> (next card).</p>
                             <p class="text-sm text-gray-400 mb-3">One short passive capture on the segment (a SPAN/mirror of the management VLAN sees the SNMP polls and any tunnel traffic).</p>
                             <div class="flex flex-wrap items-center gap-2">
                                 <select id="apc-guard-iface" title="Interface for the capture — LAN-only: pick the LAN/uplink NIC or a SPAN/mirror port (Wi-Fi is ignored)" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
@@ -2378,6 +2378,21 @@
                                 <label class="flex items-center gap-1 text-xs text-gray-400 whitespace-nowrap" title="Clear the cards learned from SNMP replies on the next scan"><input type="checkbox" id="apc-guard-forget"> Forget learned cards</label>
                             </div>
                             <div id="apc-guard-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
+                        </div>
+                        <!-- Liebert Guard (Vertiv / Liebert power cards — companion to APC Guard) -->
+                        <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
+                            <h3 class="text-lg font-semibold mb-1">Liebert Guard <span class="text-xs font-normal text-gray-500">(Vertiv / Liebert · rack PDU · cooling · UPS cards · RomPager)</span></h3>
+                            <p class="text-xs text-amber-300/90 mb-2">Passive companion to <strong>APC Guard</strong> for the other big power-gear family — <strong>detection-only</strong>, never transmits. Reads the card's <strong>cleartext HTTP</strong> web UI: a <strong>RomPager</strong> <span class="font-mono">Server:</span> banner below 4.34 is the <strong>Misfortune Cookie</strong> range (<strong>LG-001</strong>, CVE-2014-9222 — Liebert MPH rack PDUs, RPC-1000 cards fixed in 4.D40.1; a banner can't prove the cookie feature is on or that a backport is missing, so it's posture), an unparseable banner is <strong>LG-002</strong>, and a patched one is inventory (<strong>LG-003</strong>). A request whose <strong>HTTP method is longer than 64 bytes</strong> is the shape that overflows the <strong>Liebert RDU101</strong> and <strong>IS-UNITY</strong> cards (<strong>LG-101</strong>, CVE-2025-41426) — an attempt, flagged for any server on the port. It flags RomPager on any host, not only Liebert cards. HTTPS is opaque. IPv4 + IPv6.</p>
+                            <p class="text-sm text-gray-400 mb-3">One short passive capture of the card's web port (a SPAN/mirror of the management VLAN, where APC Guard also listens).</p>
+                            <div class="flex flex-wrap items-center gap-2">
+                                <select id="liebert-guard-iface" title="Interface for the capture — LAN-only: pick the LAN/uplink NIC or a SPAN/mirror port (Wi-Fi is ignored)" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                                    <option value="">Auto (LAN connections)</option>
+                                </select>
+                                <input id="liebert-guard-secs" type="number" min="5" max="60" value="20" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                                <label class="flex items-center gap-1 text-xs text-gray-400 whitespace-nowrap" title="TCP port of the card's HTTP web UI">port <input id="liebert-guard-port" type="number" min="1" max="65535" value="80" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300"></label>
+                                <button onclick="runLiebertGuard()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan Liebert</button>
+                            </div>
+                            <div id="liebert-guard-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
                         </div>
                         <h3 class="md:col-span-2 text-xs font-semibold uppercase tracking-wider text-gray-400">Active tools</h3>
                         <!-- DNS Doctor -->
@@ -2481,8 +2496,8 @@
                         <!-- Visibility matrix reference (l6) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L6 Presentation <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20260930" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l6.jpg?v=20260930" alt="Module visibility matrix, L6 Presentation band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261003" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l6.jpg?v=20261003" alt="Module visibility matrix, L6 Presentation band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2533,8 +2548,8 @@
                         <!-- Visibility matrix reference (l5) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L5 Session <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20260930" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l5.jpg?v=20260930" alt="Module visibility matrix, L5 Session band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261003" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l5.jpg?v=20261003" alt="Module visibility matrix, L5 Session band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2578,8 +2593,8 @@
                         <!-- Visibility matrix reference (l4) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L4 Transport <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20260930" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l4.jpg?v=20260930" alt="Module visibility matrix, L4 Transport band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261003" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l4.jpg?v=20261003" alt="Module visibility matrix, L4 Transport band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2625,8 +2640,8 @@
                         <!-- Visibility matrix reference (l3) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L3 Network <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20260930" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l3.jpg?v=20260930" alt="Module visibility matrix, L3 Network band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261003" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l3.jpg?v=20261003" alt="Module visibility matrix, L3 Network band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -2840,8 +2855,8 @@
                         <!-- Visibility matrix reference (l2) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L2 Data Link <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20260930" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l2.jpg?v=20260930" alt="Module visibility matrix, L2 Data Link band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261003" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l2.jpg?v=20261003" alt="Module visibility matrix, L2 Data Link band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -3042,8 +3057,8 @@
                         <!-- Visibility matrix reference (l1) -->
                         <details class="glass rounded-xl p-3 sm:p-4 md:col-span-2" ontoggle="netMatrixLoad(this)">
                             <summary class="cursor-pointer select-none text-sm font-semibold text-gray-300 hover:text-white">Visibility matrix · L1 Physical <span class="text-xs font-normal text-gray-500">— what a tap must see for each module here</span></summary>
-                            <a href="/web/images/osi/matrix_full.jpg?v=20260930" target="_blank" rel="noopener" title="Open the full matrix">
-                                <img data-src="/web/images/osi/matrix_l1.jpg?v=20260930" alt="Module visibility matrix, L1 Physical band" class="block w-full h-auto rounded-lg mt-3">
+                            <a href="/web/images/osi/matrix_full.jpg?v=20261003" target="_blank" rel="noopener" title="Open the full matrix">
+                                <img data-src="/web/images/osi/matrix_l1.jpg?v=20261003" alt="Module visibility matrix, L1 Physical band" class="block w-full h-auto rounded-lg mt-3">
                             </a>
                             <p class="text-xs text-gray-500 mt-2">Card letters are the vantage tier: <strong>A</strong> VLAN-wide · <strong>B</strong> link-local · <strong>C</strong> on-path unicast · <strong>D</strong> configured peer · <strong>E</strong> active / local · <strong>RF</strong> over-the-air. Tap the image for the full matrix (all layers).</p>
                         </details>
@@ -9387,7 +9402,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261003-piglet-sync"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261003-liebert-guard"></script>
 
 
 

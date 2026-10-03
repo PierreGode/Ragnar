@@ -17,19 +17,22 @@ packet or sends one. The watchers stay the sensors; Watchtower is the aggregator
 
 Alongside the standalone daemons, the **in-app vendor CVE guards** —
 [`cisco_guard`, `juniper_guard`, `arista_guard`](nettools.md#vendor-cve-guards),
-[`comware_guard`](nettools.md#comware-guard), `mikrotik_guard`, `aruba_guard` and
-[`apc_guard`](nettools.md#apc-guard) — append their findings as
+[`comware_guard`](nettools.md#comware-guard), `mikrotik_guard`, `aruba_guard`,
+[`apc_guard`](nettools.md#apc-guard) and [`liebert_guard`](nettools.md#liebert-guard) — append their findings as
 JSON-lines to `/var/log/ragnar/<guard>.jsonl` (time-window deduplicated so the
 background rotation cannot spam the log with a standing condition). Watchtower
 picks them up through the same glob and treats them exactly like any other
 source, so a Cisco SNMP-overflow attempt, a Comware VRF-hop or a Ripple20 tunnel
-attack on an APC card lands in the same pane and the same Pushover path as an
+attack on an APC card or a Misfortune Cookie banner on a Liebert card lands in the same pane and the same Pushover path as an
 ARP-poisoning or an evil-twin. Unlike the daemons, the guards need no systemd
 unit — Cisco, Juniper, Arista and Comware feed Watchtower automatically whenever
-**Extended Monitoring** is on, and MikroTik, Aruba and APC on every scan. APC
-Guard also has an opt-in continuous daemon (`apcguard@<iface>`) that writes
-`/var/log/ragnar/apcguard.jsonl`; Watchtower reads its native `title` as the
-headline.
+**Extended Monitoring** is on, and MikroTik, Aruba, APC and Liebert on every scan.
+APC Guard and Liebert Guard also have opt-in continuous daemons
+(`apcguard@<iface>`, `liebert_guard@<iface>`) that write
+`/var/log/ragnar/apcguard.jsonl` and `/var/log/ragnar/liebertguard.jsonl`. Watchtower
+reads APC's native `title` and Liebert's `note` as the headline, and for Liebert's
+`server`/`client` records takes the client as the source of an attempt and the card
+itself as the source of a banner finding.
 
 The in-app **L5–L7 observers** [`ssh_watch`](nettools.md#ssh-watch) and
 [`telnet_watch`](nettools.md#telnet-watch) feed the pane the same way, appending

@@ -117,9 +117,14 @@ DEFAULT_SOURCES = {
                     'paths': ['/var/log/ragnar/aruba_guard.jsonl']},
     'apc_guard': {'label': 'APC Guard (NMC Ripple20)',
                   'paths': ['/var/log/ragnar/apc_guard.jsonl']},
+    'liebert_guard': {'label': 'Liebert Guard (RomPager / RDU101)',
+                      'paths': ['/var/log/ragnar/liebert_guard.jsonl']},
     # Continuous apcguard@<iface> daemon (python/apcguard.py, scripts/apcguard@.service).
     'apcguard': {'label': 'APC Guard daemon (NMC Ripple20)',
                  'paths': ['/var/log/ragnar/apcguard.jsonl']},
+    # Continuous liebert_guard@<iface> daemon (python/liebert_guard.py).
+    'liebertguard': {'label': 'Liebert Guard daemon (RomPager / RDU101)',
+                     'paths': ['/var/log/ragnar/liebertguard.jsonl']},
     # In-app L5-L7 passive observers (ssh_watch / telnet_watch do_*_watch) emit
     # their non-info findings here so the unified pane tails them too.
     'ssh_watch':     {'label': 'SSH Watch (regreSSHion / Terrapin)',
@@ -268,13 +273,21 @@ def normalize(raw, source):
     if ts is None:
         ts = time.time()
     codes = _codes(raw)
-    title = _first(raw, 'summary', 'reason', 'title', 'detail', 'message', 'msg',
+    title = _first(raw, 'summary', 'reason', 'title', 'note', 'detail', 'message', 'msg',
                    'signal', 'sni', 'subject_cn')
     if not title:
         title = ', '.join(codes) if codes else source
     src = _first(raw, 'src', 'sender_ip', 'server_ip', 'saddr', 'source_ip',
                  'identity', 'system')
     target = _first(raw, 'target', 'dst', 'group', 'victim', 'server_port')
+    # server/client records (liebert_guard): an attempt comes FROM the client at the
+    # server; a banner finding is about the server itself.
+    if src is None and raw.get('server') is not None:
+        attempt = str(raw.get('severity', '')).lower() in ('high', 'critical') \
+            and raw.get('banner') is None and raw.get('client') is not None
+        src = raw.get('client') if attempt else raw.get('server')
+        if attempt and target is None:
+            target = raw.get('server')
     module = raw.get('module') or source
     # Dedup key: same source + finding + endpoints = the same standing condition.
     key = '|'.join([source, ','.join(codes) or str(title),
@@ -492,6 +505,17 @@ def _self_test():
     apc = normalize({'module': 'apcguard', 'code': 'APC-101', 'severity': 'critical',
                      'title': 'Fragmented IPv4-in-IP tunnel datagram sent to an NMC',
                      'detail': {'ident': 7}, 'src': '8.8.8.8'}, 'apcguard')
+    lg = normalize({'module': 'liebert_guard', 'code': 'LG-101', 'severity': 'high',
+                    'server': '10.9.0.5', 'client': '203.0.113.9', 'banner': None,
+                    'note': 'HTTP request line with a method token over 64 bytes',
+                    'detail': 'method_len=70'}, 'liebertguard')
+    lb = normalize({'module': 'liebert_guard', 'code': 'LG-001', 'severity': 'critical',
+                    'server': '10.9.0.5', 'client': '10.9.0.77', 'banner': 'RomPager/4.07',
+                    'note': 'RomPager banner is in the CVE-2014-9222 range', 'detail': None},
+                   'liebertguard')
+    ck('liebert attempt: src=client target=server, note as title',
+       lg['src'] == '203.0.113.9' and lg['target'] == '10.9.0.5' and lg['title'].startswith('HTTP request'))
+    ck('liebert banner: src=server', lb['src'] == '10.9.0.5' and lb['title'].startswith('RomPager'))
     ck('apcguard title beats dict detail', apc['title'].startswith('Fragmented')
        and apc['severity'] == 'critical')
 
