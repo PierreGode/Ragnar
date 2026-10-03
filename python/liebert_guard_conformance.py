@@ -661,6 +661,26 @@ check("HTTP/1.0 and 1.1 status lines", all(codes_of(run([frame(resp(b"RomPager/4
 check("HTTP/2 or garbage status line is not a response head", run([frame(b"HTTP/2 200\r\nServer: RomPager/4.07\r\n\r\n")]) == [])
 big = b"HTTP/1.1 200 OK\r\nServer: RomPager/4.07\r\n" + b"X-Pad: " + b"a" * 9000 + b"\r\n\r\n"
 check("head over the 8 KiB cap is still inspected up to the cap", codes_of(run(split_frames(big, [1000, 3000, 6000, 9000]))) == ["LG-001"])
+def padded_head(k):
+    return resp(b"RomPager/4.07", extra=b"X-Pad: " + b"a" * k + b"\r\n", body=b"")
+
+
+h330, h1030, h5000 = padded_head(250), padded_head(950), padded_head(4900)
+check("heads of %d / %d / %d bytes (padding sizes for the work-budget checks)" % (len(h330), len(h1030), len(h5000)),
+      len(h330) < 400 and 1000 < len(h1030) < 1100 and 4500 < len(h5000) < 6000)
+check("an in-order head of %d bytes sent as one-byte segments is judged (inside the work budget)" % len(h330),
+      codes_of(run([frame(h330[i:i + 1], seq=1000 + i) for i in range(len(h330))])) == ["LG-001"])
+check("PINNED LIMIT (L15): an in-order head of %d bytes sent as one-byte segments exceeds the work budget and is not judged" % len(h1030),
+      run([frame(h1030[i:i + 1], seq=1000 + i) for i in range(len(h1030))]) == [])
+check("the same %d- and %d-byte heads sent REVERSED are judged: the head's first byte arrives last, so the cost is one assembly" %
+      (len(h1030), len(h5000)),
+      all(codes_of(run([frame(h[i:i + 1], seq=1000 + i) for i in reversed(range(len(h)))])) == ["LG-001"] for h in (h1030, h5000)))
+check("an earlier segment that only LOOKS like a head start (a lone 'H') does not stop a later real head being found, in either order",
+      codes_of(run([frame(b"H", seq=900), frame(HEAD, seq=5000)])) == ["LG-001"]
+      and codes_of(run([frame(HEAD, seq=5000), frame(b"H", seq=900)])) == ["LG-001"])
+check("%d decoy head-starts ('H') ahead of the real head cannot crowd it out of the candidate list (MAX_CANDS is %d): a real head start "
+      "evicts the oldest candidate" % (3 * lg.Detector.MAX_CANDS, lg.Detector.MAX_CANDS),
+      codes_of(run([frame(b"H", seq=100 + i) for i in range(3 * lg.Detector.MAX_CANDS)] + [frame(HEAD, seq=5000)])) == ["LG-001"])
 check("head with no terminator and no Server header produces nothing and no crash",
       run(split_frames(b"HTTP/1.1 200 OK\r\n" + b"a" * 20000, list(range(1000, 20000, 1000)))) == [])
 
@@ -922,6 +942,19 @@ for n_ in (300, 900, 100):
     d.feed(0, frame(b"B" * n_, seq=5000, sport=40000, dport=80))
 check("request flow size follows the longest segment at a seq (300 -> 900, then a 100 duplicate changes nothing)",
       [f["size"] for f in d.reqs.values()] == [900])
+import time as _time  # noqa: E402
+
+for label, mk, dct in (("response", lambda i: frame(b"HTTP/1.1 200 OK\r\nX: " if i == 0 else b"a", seq=1000 if i == 0 else 1019 + i), "flows"),
+                       ("request", lambda i: frame(b"A", sport=40000, dport=80, seq=1000 + i), "reqs")):
+    d = lg.Detector(emit=lambda f: None)
+    frames_ = [mk(i) for i in range(20000)]
+    t0 = _time.perf_counter()
+    for i, fr_ in enumerate(frames_):
+        d.feed(float(i), fr_)
+    dt = _time.perf_counter() - t0
+    worst = max([f["work"] for f in getattr(d, dct).values()] or [0])
+    check("adversarial %s flow of 20000 one-byte segments: %.2f s (a cubic reassembler took minutes) and no flow's work (%d) "
+          "exceeds MAX_WORK + one assembly" % (label, dt, worst), dt < 8.0 and worst <= lg.Detector.MAX_WORK + 9000)
 check("default MAX_SEEN is sane (>= flow cap, <= 1M)", 4096 <= lg.Detector.MAX_SEEN <= 1_000_000)
 d = lg.Detector(emit=lambda f: None)
 for i in range(200000):

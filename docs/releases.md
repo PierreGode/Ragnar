@@ -4,8 +4,16 @@
 
 ### 2026-10-04
 
-#### fix(gc9a01): stop the round TFT showing only static
-*branch `fix/gc9a01-spi-speed` · PR pending*
+#### [#911](https://github.com/PierreGode/Ragnar/pull/911) — feat(net): Liebert Guard v2 — bounded reassembly
+*branch `feature/liebert-guard-v2`*
+
+- Vendored **liebert_guard v2**: reassembly is now incremental with a per-flow work budget (`MAX_WORK` 200,000 steps, `MAX_CANDS` 16), so a stream of tiny TCP segments can no longer make one frame expensive — on the Pi 5, 1,524 one-byte segments went from **12.35 s to 0.08 s**
+- Same codes (LG-001/002/003/101), CVEs and output; new limit: a head or request line split into more than ~630 in-order one-byte segments is not judged
+- Conformance tier updated (493 → 501). All author tiers pass on the Pi 5 (ARM64): module 198 incl. live loopback, conformance 501, scapy 554, perf 29, unit verifier 74; Detector Self-Test 206/206, all 47 suites green from the web path
+- **Docs:** [nettools.md](nettools.md) "Liebert Guard"
+
+#### [#910](https://github.com/PierreGode/Ragnar/pull/910) — fix(gc9a01): stop the round TFT showing only static
+*branch `fix/gc9a01-spi-speed`*
 
 - **Root cause:** the GC9A01 1.28" round display driver hardcoded SPI at the panel's 40 MHz maximum. Over Dupont/jumper wiring that clock corrupts the init-sequence command bytes, so the controller is never configured and the panel shows only its power-on noise ("snow"/static)
 - Default SPI clock lowered to a safe **20 MHz**, matching the conservative approach of the ILI9486 driver

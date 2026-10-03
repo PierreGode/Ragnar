@@ -3456,12 +3456,21 @@ It flags RomPager on **any** host (printers and switches ship it too), and only 
 visible — the web UI on HTTPS is opaque. IPv4 + IPv6. The source of an `LG-101` finding is the
 client sending it; the source of a banner finding is the card.
 
+**v2 — bounded reassembly.** The module parses every frame on the tap in Python, and v1's
+reassembly could be made cubic by a stream of tiny TCP segments (measured on the Pi 5: 1,524
+one-byte segments cost 12.35 s in v1, 0.08 s in v2). v2 records head-start candidates and the
+lowest request sequence number as segments arrive and counts every assembly step against a
+per-flow **work budget** (`MAX_WORK` 200,000 steps, `MAX_CANDS` 16 candidates); a flow that
+exhausts it is dropped, so cost stays linear in the packets sent. The one trade-off: a response
+head or request line delivered as more than about 630 separate *in-order* one-byte segments is
+not judged (the same data in reverse order still is). Detection, codes and output are unchanged.
+
 - Endpoint: `GET /api/net/liebert-guard` `{interface, seconds (5-60), port (default 80)}` · binary: `tcpdump`
 - CLI: `python3 network_diagnostics.py liebert-guard [--iface I] [--seconds N] [--port P] [--json]`
 - Self-test: `liebert-guard-selftest` — the module's own 198-check tier (plus a live loopback
   capture per address family when run as root) in its own interpreter, and the in-app adapter
   (pcap replay, finding mapping, verdicts, port selection, and a real `tcpdump` pass through the
-  capture filter). `python/liebert_guard_conformance.py` (493 checks) and
+  capture filter). `python/liebert_guard_conformance.py` (501 checks) and
   `python/liebert_guard_scapy_selftest.py` (554) are the module's deeper tiers.
 
 **Continuous mode (opt-in daemon).** `scripts/liebert_guard@.service` runs the module on one

@@ -149,6 +149,16 @@ def _parse(buf, linktype):
     return fam, src, dst, sport, dport, seq, payload
 
 
+def _is_start(data):
+    """Could this segment begin an HTTP response? Prefix-tolerant: 1-6 bytes of "HTTP/1." still count."""
+    return data.startswith(_HTTP) or (len(data) < len(_HTTP) and _HTTP.startswith(data))
+
+
+def _rel(s, first):
+    """Signed distance of sequence number s from `first`, correct across the 2**32 wrap."""
+    return ((s - first + 0x80000000) & 0xFFFFFFFF) - 0x80000000
+
+
 class Detector:
     """Feed frames in; findings come out via emit(dict). Holds no sockets and sends nothing."""
 
@@ -157,6 +167,8 @@ class Detector:
     MAX_SEEN = 65536
     MAX_METHOD = 64
     MAX_REQ = 8192
+    MAX_WORK = 200000      # reassembly steps one flow may cost before it is dropped (bounds CPU against tiny segments)
+    MAX_CANDS = 16         # response-head start candidates tracked per flow
 
     def __init__(self, port=80, cooldown=3600, emit=None, max_flows=4096):
         self.port, self.cooldown, self.max_flows = port, cooldown, max_flows
@@ -179,11 +191,16 @@ class Detector:
         key = (src, sport, dst, dport)
         fl = self.flows.get(key)
         if fl is None:
-            fl = self.flows[key] = {"segs": {}, "size": 0, "fam": fam}
+            fl = self.flows[key] = {"segs": {}, "size": 0, "fam": fam, "cands": [], "work": 0}
             if len(self.flows) > self.max_flows:
                 self.flows.popitem(last=False)
         else:
             self.flows.move_to_end(key)
+        if _is_start(payload) and seq not in fl["cands"]:
+            if len(fl["cands"]) >= self.MAX_CANDS and payload.startswith(_HTTP):
+                fl["cands"].pop(0)                          # a real head start outranks the oldest candidate
+            if len(fl["cands"]) < self.MAX_CANDS:
+                fl["cands"].append(seq)
         old = fl["segs"].get(seq)
         if old is None or len(payload) > len(old):   # a longer retransmit of the same range wins
             fl["size"] += len(payload) - (len(old) if old else 0)
@@ -194,6 +211,8 @@ class Detector:
             self._inspect(ts, fam, src, dst, head)
         elif fl["size"] > self.MAX_FLOW_BYTES:
             del self.flows[key]
+        elif fl["work"] > self.MAX_WORK:
+            del self.flows[key]
 
     def _request(self, ts, fam, src, dst, sport, dport, seq, payload):
         """Client -> server: judge the request line of the flow. The flow is anchored at the lowest sequence
@@ -202,12 +221,14 @@ class Detector:
         key = (src, sport, dst, dport)
         fl = self.reqs.get(key)
         if fl is None:
-            fl = self.reqs[key] = {"segs": {}, "size": 0, "first": seq}
+            fl = self.reqs[key] = {"segs": {}, "size": 0, "first": seq, "lo": seq, "work": 0}
             if len(self.reqs) > self.max_flows:
                 self.reqs.popitem(last=False)
         else:
             self.reqs.move_to_end(key)
         payload = payload[:self.MAX_REQ]
+        if _rel(seq, fl["first"]) < _rel(fl["lo"], fl["first"]):
+            fl["lo"] = seq                                  # the lowest sequence number seen, kept incrementally
         old = fl["segs"].get(seq)
         if old is None or len(payload) > len(old):
             fl["size"] += len(payload) - (len(old) if old else 0)
@@ -219,16 +240,22 @@ class Detector:
                        "method_len=%d sample=%s" % (len(method), method[:24].decode("ascii")))
         elif fl["size"] >= self.MAX_REQ:
             del self.reqs[key]
+        elif fl["work"] > self.MAX_WORK:
+            del self.reqs[key]
 
     def _method(self, fl):
         """Method token of the request line at the start of the flow, or None if there is no complete,
         well-formed request line (token SP target SP HTTP/1.x) yet."""
         first, segs = fl["first"], fl["segs"]
-        start = min(segs, key=lambda s: ((s - first + 0x80000000) & 0xFFFFFFFF) - 0x80000000)
-        buf, cur = b"", start
-        while cur in segs and len(buf) < self.MAX_REQ:
-            buf += segs[cur]
-            cur = (cur + len(segs[cur])) & 0xFFFFFFFF
+        start = fl["lo"]
+        pieces, cur, total = [], start, 0
+        while cur in segs and total < self.MAX_REQ:
+            p = segs[cur]
+            pieces.append(p)
+            total += len(p)
+            cur = (cur + len(p)) & 0xFFFFFFFF
+            fl["work"] += 1
+        buf = b"".join(pieces)
         buf = buf.lstrip(b"\r\n")                      # servers skip empty lines before the request line
         nl = buf.find(b"\n")
         if nl < 0:
@@ -238,21 +265,28 @@ class Detector:
         return m.group(1) if m else None
 
     def _head(self, fl):
-        """Reassemble from any segment that could begin an HTTP response; return head bytes or None.
-        The anchor is prefix-tolerant: a first segment of 1-6 bytes ("H", "HTT") still anchors."""
+        """Reassemble from each candidate start and return the head bytes, or None. Candidates are recorded as segments
+        arrive (prefix-tolerant: a first segment of 1-6 bytes still anchors), so no arrival rescans every stored segment,
+        and every step is counted against the flow's work budget."""
         segs = fl["segs"]
-        for start, data in segs.items():
-            if not (data.startswith(_HTTP) or (len(data) < len(_HTTP) and _HTTP.startswith(data))):
+        for start in fl["cands"]:
+            if start not in segs:
                 continue
-            buf, cur = b"", start
-            while cur in segs and len(buf) <= self.MAX_HEAD:
-                buf += segs[cur]
-                cur = (cur + len(segs[cur])) & 0xFFFFFFFF
-                if len(buf) >= len(_HTTP) and not buf.startswith(_HTTP):
-                    break
-                m = _HEAD_END.search(buf)
-                if m and buf.startswith(_HTTP):
-                    return buf[:m.start()]
+            pieces, cur, total = [], start, 0
+            while cur in segs and total <= self.MAX_HEAD:
+                p = segs[cur]
+                pieces.append(p)
+                total += len(p)
+                cur = (cur + len(p)) & 0xFFFFFFFF
+                fl["work"] += 1
+            buf = b"".join(pieces)
+            if len(buf) >= len(_HTTP) and not buf.startswith(_HTTP):
+                continue
+            if len(buf) < len(_HTTP) and not _HTTP.startswith(buf):
+                continue
+            m = _HEAD_END.search(buf)
+            if m and buf.startswith(_HTTP):
+                return buf[:m.start()]
             if len(buf) > self.MAX_HEAD and buf.startswith(_HTTP):
                 return buf
         return None
