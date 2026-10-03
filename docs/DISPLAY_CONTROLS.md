@@ -330,3 +330,43 @@ the defaults target the common ILI9486 320×480 HAT:
 > hardware-validated against every board variant. If your panel needs different
 > settings that worked, please open an issue with the board name and the env-var
 > values so the defaults can be improved.
+
+## 1.28" GC9A01 round TFT (240×240)
+
+Select **GC9A01 1.28" round** under **Settings → Display**, or set
+`"epd_type": "gc9a01"` in the config. Ragnar renders a full-colour round
+dashboard (Viking mascot, status ring, SSID/GPS line). SPI must be enabled
+(`raspi-config` → Interfaces → SPI, or `dtparam=spi=on`).
+
+### Wiring (Raspberry Pi 40-pin header)
+
+| Signal | GPIO (BCM) | Pin | Override env var |
+|--------|-----------|-----|------------------|
+| `VCC`  | 3.3V      | 1/17 | — |
+| `GND`  | GND       | 6   | — |
+| `DIN`  | GPIO10 / MOSI | 19 | — (SPI0) |
+| `CLK`  | GPIO11 / SCLK | 23 | — (SPI0) |
+| `CS`   | GPIO8 / CE0 | 24 | — (SPI0) |
+| `DC`   | GPIO25    | 22  | `RAGNAR_GC9A01_DC_PIN` |
+| `RST`  | GPIO27    | 13  | `RAGNAR_GC9A01_RST_PIN` |
+| `BL`   | GPIO18    | 12  | `RAGNAR_GC9A01_BL_PIN` (`-1` = no backlight pin) |
+
+### Only getting static / "snow"?
+
+A GC9A01 that shows nothing but random noise is almost always being clocked too
+fast for the wiring: at the panel's 40 MHz ceiling the init-sequence bytes get
+corrupted over Dupont/jumper leads, so the controller is never configured and
+you see its power-on noise. Ragnar now defaults to a safer **20 MHz**; if it is
+still noisy, keep lowering `RAGNAR_GC9A01_SPI_HZ` (try `10000000`, then
+`8000000`) and use the shortest leads you can.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `RAGNAR_GC9A01_SPI_HZ` | `20000000` | SPI clock. Lower (e.g. `10000000`) if the panel shows static/noise on long wiring |
+| `RAGNAR_GC9A01_MADCTL` | `0x48` | Scan direction + colour order. Change if the image is mirrored/rotated or colours look swapped |
+| `RAGNAR_GC9A01_INVERT` | `1` | `1` = INVON (normal for GC9A01). Set `0` if the panel shows a photo-negative image |
+| `RAGNAR_GC9A01_RST_PIN` / `RAGNAR_GC9A01_DC_PIN` / `RAGNAR_GC9A01_BL_PIN` | `27` / `25` / `18` | GPIO overrides for boards that wire these differently |
+
+> **Status:** the GC9A01 round-TFT driver is community-contributed and not yet
+> hardware-validated against every panel batch. If different settings worked for
+> your board, please open an issue with the values.
