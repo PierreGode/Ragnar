@@ -66,6 +66,7 @@ matrix to zoom (`/web/images/osi/`).
 | [MikroTik Guard](#mikrotik-switch-and-router-guard) | Diagnostics · L7 | `GET /api/net/mikrotik-guard` |
 | [Aruba Guard](#aruba-guard) | Diagnostics · L7 | `GET /api/net/aruba-guard` |
 | [APC Guard](#apc-guard) | Diagnostics · L7 | `GET /api/net/apc-guard` |
+| [Liebert Guard](#liebert-guard) | Diagnostics · L7 | `GET /api/net/liebert-guard` |
 | [DNS Doctor (poisoning check)](#dns-doctor) | Diagnostics · L7 | `POST /api/net/dns` |
 | [Captive Portal Check](#captive-portal-check) | Diagnostics · L7 | `GET /api/net/captive-portal` |
 | [DHCP Snooping (inline)](#dhcp-snooping-inline) | Diagnostics · L7 | `GET /api/net/dhcp-snoop` + `/dhcp-snoop/status`, `/config`, `/setup` |
@@ -3112,8 +3113,8 @@ It's **detection-only**, but the traceroute is *active probing*, so it runs
 
 ### Vendor CVE Guards
 
-Seven passive, **detection-only** vendor guards — Cisco, Juniper, Arista, Comware, MikroTik,
-Aruba and APC (plus the standalone Dell Guard daemon) — watch a network segment and report
+Eight passive, **detection-only** vendor guards — Cisco, Juniper, Arista, Comware, MikroTik,
+Aruba, APC and Liebert (plus the standalone Dell Guard daemon) — watch a network segment and report
 **three classes** of evidence about a tracked set of router/switch CVEs — never
 transmitting, probing, or authenticating:
 
@@ -3429,12 +3430,72 @@ one level is not unwrapped; a reply is matched only to a request the tap also sa
 module's lab has never run against a real NMC — `APC-103`/`APC-106` are exercised by an emulated
 Treck-style responder.
 
-> **Watchtower feed.** All seven vendor guards append their findings as JSON-lines to
+#### Liebert Guard
+*Card: **Diagnostics** sub-tab, **L7**, right after APC Guard.* The companion to APC Guard for
+the other big power-gear family: **Vertiv / Liebert** power and cooling management cards. The
+detection engine is the vendored standalone module `python/liebert_guard.py` (Python standard
+library only). The in-app scan captures one HTTP port (default 80) with `tcpdump` — plus the
+shared IPv6 extension-header clause, since the module itself filters in-process precisely so an
+extension header cannot hide a frame — and replays the capture through the module. Never
+transmits.
+
+- **`LG-001`** (critical, posture, CVE-2014-9222 **Misfortune Cookie**): a RomPager `Server:`
+  banner below 4.34 — the range of the Liebert MPH rack PDUs (Emerson-era RPC-1000 cards, fixed in
+  firmware 4.D40.1). A banner cannot prove the cookie feature is enabled or that a vendor
+  backport is missing, so this is *version in range*, not *vulnerable*.
+- **`LG-002`** (low) a RomPager banner whose version cannot be parsed; **`LG-003`** (info) RomPager
+  4.34 or later, kept for asset inventory.
+- **`LG-101`** (high, attack, **CVE-2025-41426**): an HTTP request line whose method token is
+  longer than 64 bytes — the request that overflows the stack of **Liebert RDU101**
+  (≤ 1.9.0.0, fixed 1.9.1.2) and **IS-UNITY** (≤ 8.4.1.0, fixed 8.4.3.1) cards. An attempt
+  detector: it fires for any server on the port, patched cards included, and cannot show the
+  target is a Liebert card. Registered method names are under 20 bytes, so it never fires on
+  normal traffic.
+
+It flags RomPager on **any** host (printers and switches ship it too), and only cleartext HTTP is
+visible — the web UI on HTTPS is opaque. IPv4 + IPv6. The source of an `LG-101` finding is the
+client sending it; the source of a banner finding is the card.
+
+**v2 — bounded reassembly.** The module parses every frame on the tap in Python, and v1's
+reassembly could be made cubic by a stream of tiny TCP segments (measured on the Pi 5: 1,524
+one-byte segments cost 12.35 s in v1, 0.08 s in v2). v2 records head-start candidates and the
+lowest request sequence number as segments arrive and counts every assembly step against a
+per-flow **work budget** (`MAX_WORK` 200,000 steps, `MAX_CANDS` 16 candidates); a flow that
+exhausts it is dropped, so cost stays linear in the packets sent. The one trade-off: a response
+head or request line delivered as more than about 630 separate *in-order* one-byte segments is
+not judged (the same data in reverse order still is). Detection, codes and output are unchanged.
+
+- Endpoint: `GET /api/net/liebert-guard` `{interface, seconds (5-60), port (default 80)}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py liebert-guard [--iface I] [--seconds N] [--port P] [--json]`
+- Self-test: `liebert-guard-selftest` — the module's own 198-check tier (plus a live loopback
+  capture per address family when run as root) in its own interpreter, and the in-app adapter
+  (pcap replay, finding mapping, verdicts, port selection, and a real `tcpdump` pass through the
+  capture filter). `python/liebert_guard_conformance.py` (501 checks) and
+  `python/liebert_guard_scapy_selftest.py` (554) are the module's deeper tiers.
+
+**Continuous mode (opt-in daemon).** `scripts/liebert_guard@.service` runs the module on one
+interface and streams findings to `/var/log/ragnar/liebertguard.jsonl`, which Watchtower tails.
+It keeps the author's hardening (`CAP_NET_RAW` only, `AF_PACKET`/`AF_UNIX` only,
+`IPAddressDeny=any`, `MemoryDenyWriteExecute=yes`, syscall filter) but runs as the shared
+`ragnar` user rather than a dynamic one, because a dynamic user would move `/var/log/ragnar`.
+Verified on this project's Raspberry Pi 5 (ARM64).
+
+```
+sudo cp scripts/liebert_guard@.service /etc/systemd/system/
+sudo install -d /etc/ragnar/liebert_guard
+echo 'LG_ARGS="--promisc"' | sudo tee /etc/ragnar/liebert_guard/eth1.env   # optional; -p 8080 for another port
+sudo systemctl daemon-reload && sudo systemctl enable --now liebert_guard@eth1
+```
+
+One instance judges one port; for a second port, copy the unit under another name with its own
+`LG_ARGS`.
+
+> **Watchtower feed.** All eight vendor guards append their findings as JSON-lines to
 > `/var/log/ragnar/<guard>.jsonl` (time-window deduplicated) on every scan, so
 > [Watchtower](#watchtower) tails them into the unified alert pane and single Pushover path
 > alongside the standalone watcher daemons. Cisco, Juniper, Arista and Comware also run in the
-> Extended Monitoring rotation; MikroTik, Aruba and APC run when you scan them (and APC's
-> daemon, above, writes `apcguard.jsonl`).
+> Extended Monitoring rotation; MikroTik, Aruba, APC and Liebert run when you scan them (and the
+> APC and Liebert daemons write `apcguard.jsonl` and `liebertguard.jsonl`).
 
 #### Dell Guard (standalone daemon)
 Dell **SmartFabric OS10** SSRF-egress sensor for **CVE-2025-22474** (CWE-918, CVSS 6.8,

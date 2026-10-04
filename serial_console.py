@@ -655,6 +655,114 @@ def load_script(script_id):
     except Exception:
         return None
 
+# ---------------------------------------------------------------------------
+# External script library — github.com/PierreGode/RagnarScripts, cloned by the
+# user. Console scripts live under its "console-scripts/" subfolder. Installing
+# copies one into _SCRIPTS_DIR; the local folder stays fully editable so a user
+# can still create and upload their own. The discovery heuristic is kept in sync
+# with python/rubber_ducky._ragnar_scripts_repo().
+# ---------------------------------------------------------------------------
+_RAGNAR_SCRIPTS_SUBDIR = 'console-scripts'
+
+
+def _ragnar_scripts_repo():
+    """Locate a cloned RagnarScripts library repo, or return None.
+
+    Delegates to :mod:`ragnar_scripts` (the canonical discovery + auto-sync
+    module); the inline search below is a standalone fallback kept in sync with
+    it. Search order: ``$RAGNAR_SCRIPTS_DIR``, a ``RagnarScripts`` folder beside
+    the Ragnar repo, ``~/RagnarScripts``, then the common pi/ragnar clone paths.
+    """
+    try:
+        import ragnar_scripts
+        d = ragnar_scripts.repo_dir()
+        return str(d) if d else None
+    except Exception:
+        pass
+    candidates = []
+    env = os.environ.get('RAGNAR_SCRIPTS_DIR')
+    if env:
+        candidates.append(os.path.expanduser(env))
+    candidates += [
+        os.path.join(os.path.dirname(MODULE_DIR), 'RagnarScripts'),
+        os.path.expanduser('~/RagnarScripts'),
+        '/home/pi/RagnarScripts',
+        '/home/ragnar/RagnarScripts',
+    ]
+    seen = set()
+    for c in candidates:
+        if not c:
+            continue
+        rc = os.path.realpath(c)
+        if rc in seen:
+            continue
+        seen.add(rc)
+        if os.path.isdir(c):
+            return c
+    return None
+
+
+def list_library():
+    """List console scripts available in the cloned RagnarScripts repo.
+
+    Returns ``{available, repo, scripts}``. ``scripts`` carries each script's
+    id/name/description/vendor/commands plus an ``installed`` flag (True when a
+    script of the same id already sits in the local library)."""
+    repo = _ragnar_scripts_repo()
+    if not repo:
+        return {'available': False, 'repo': None, 'scripts': []}
+    libdir = os.path.join(repo, _RAGNAR_SCRIPTS_SUBDIR)
+    scripts = []
+    if os.path.isdir(libdir):
+        for fn in sorted(os.listdir(libdir)):
+            if not fn.endswith('.json'):
+                continue
+            stem = fn[:-5]
+            if not _SCRIPT_ID_RE.match(stem):
+                continue
+            try:
+                with open(os.path.join(libdir, fn)) as f:
+                    s = json.load(f)
+            except Exception:
+                continue
+            cmds = s.get('commands', [])
+            scripts.append({
+                'id': stem,
+                'name': s.get('name', stem),
+                'description': s.get('description', ''),
+                'vendor': s.get('vendor', ''),
+                'commands': len(cmds) if isinstance(cmds, list) else 0,
+                'installed': os.path.isfile(os.path.join(_SCRIPTS_DIR, fn)),
+            })
+    return {'available': True, 'repo': libdir, 'scripts': scripts}
+
+
+def install_library_script(script_id):
+    """Copy a console script from the RagnarScripts repo into the local library."""
+    if not isinstance(script_id, str) or not _SCRIPT_ID_RE.match(script_id):
+        return {'success': False, 'error': 'invalid script id'}
+    repo = _ragnar_scripts_repo()
+    if not repo:
+        return {'success': False, 'error': 'RagnarScripts repo not found'}
+    src = os.path.join(repo, _RAGNAR_SCRIPTS_SUBDIR, script_id + '.json')
+    if not os.path.isfile(src):
+        return {'success': False, 'error': 'not in RagnarScripts'}
+    try:
+        with open(src) as f:
+            data = json.load(f)
+    except Exception as e:
+        return {'success': False, 'error': f'invalid script: {e}'}
+    os.makedirs(_SCRIPTS_DIR, exist_ok=True)
+    dst = os.path.join(_SCRIPTS_DIR, script_id + '.json')
+    try:
+        with open(dst, 'w') as f:
+            json.dump(data, f, indent=2)
+            f.write('\n')
+        return {'success': True, 'id': script_id, 'name': data.get('name', script_id)}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
 _script_runner = None
 _script_status = {'running': False, 'script_id': None, 'step': 0, 'total': 0, 'error': None}
 

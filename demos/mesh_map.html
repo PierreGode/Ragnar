@@ -32,7 +32,8 @@
   button.ctl,a.ctl{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:var(--panel);border:1px solid var(--line);padding:6px 11px;border-radius:7px;cursor:pointer;text-decoration:none}
   button.ctl:hover,a.ctl:hover{border-color:var(--mesh);color:#fff} a.back{border-color:rgba(56,189,201,.4);color:var(--cyan)}
   button.go[aria-pressed="true"]{background:rgba(63,181,107,.14);border-color:rgba(63,181,107,.5);color:var(--live)}
-  input.tin{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:5px 7px;width:140px}
+  input.tin,select.tin{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:5px 7px;width:140px}
+  select.tin{width:auto;max-width:170px;cursor:pointer}
   .tag{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;padding:2px 7px;border-radius:5px;border:1px solid}
   .tag.live{color:var(--live);border-color:rgba(63,181,107,.45);background:rgba(63,181,107,.10)}
   .tag.idle{color:var(--idle);border-color:rgba(84,96,116,.4);background:rgba(84,96,116,.10)}
@@ -62,7 +63,8 @@
   <button class="ctl go" id="node-btn" aria-pressed="false" title="Connect the USB Meshtastic node">&#9654;&nbsp;Node</button>
   <button class="ctl go" id="mqtt-btn" aria-pressed="false" title="Connect the MQTT Internet feed (no node needed)">&#9729;&nbsp;MQTT</button>
   <button class="ctl go" id="world-btn" aria-pressed="false" title="Public worldwide feed — every mesh node beaconing to the public MQTT broker" style="border-color:rgba(94,200,240,.55);color:var(--is)">&#127758;&nbsp;World</button>
-  <input class="tin" id="mqtt-topic" placeholder="msh/+/2/json/#" title="APRS-IS-style topic filter">
+  <select class="tin" id="mqtt-region" title="Which region of the public Meshtastic MQTT feed to show"><option value="">All regions</option><option value="__custom">Custom topic…</option></select>
+  <input class="tin" id="mqtt-topic" placeholder="msh/+/2/#" title="MQTT topic filter (set by Region, or type your own)">
   <button class="ctl" id="fit-btn" title="Fit the view to all positioned nodes">&#9974;&nbsp;Fit</button>
   <button class="ctl go" id="links-btn" aria-pressed="true" title="Draw links from your node to the others (coloured by SNR)">&#8618;&nbsp;Links</button>
   <div class="spacer"></div>
@@ -116,7 +118,7 @@
       +row('ID', n.id)+row('Hardware', n.hw_model)+row('Role', n.role)
       +row('SNR', n.snr!=null?n.snr+' dB':'')+row('Hops', n.hops)
       +row('Battery', n.battery!=null?n.battery+'%':'')+row('Altitude', n.altitude!=null?n.altitude+' m':'')
-      +row('Source', (n.src||'serial').toUpperCase())+row('Heard', ago(n.last_heard))+'</div>';
+      +row('Source', (n.src||'serial').toUpperCase())+row('Region', n.region)+row('Heard', ago(n.last_heard))+'</div>';
   }
   function upsertMarker(n){
     if(n.lat==null||n.lon==null) return;
@@ -174,6 +176,37 @@
     fetch('/api/net/mesh/mqtt/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(topic?{topic:topic}:{})})
       .then(function(r){return r.json();}).then(function(res){ if(res&&res.error){ mqttOn=false; b.setAttribute('aria-pressed','false'); b.innerHTML='&#9729;&nbsp;MQTT'; showVeil('MQTT connect failed: '+esc(res.error)); } }).catch(function(){});
   });
+
+  // ---- MQTT region / topic selector ----
+  // Region list comes from the backend (detect().mqtt_defaults.regions). Picking one
+  // fills the Topic box (msh/<region>/#); a live MQTT feed reconnects on the new
+  // topic and the backend drops the previous region's nodes/messages.
+  var regionsLoaded=false;
+  function loadRegions(list){
+    if(regionsLoaded||!list||!list.length) return; regionsLoaded=true;
+    var sel=document.getElementById('mqtt-region'), cust=sel.querySelector('option[value="__custom"]');
+    list.forEach(function(r){ var o=document.createElement('option'); o.value=r.topic; o.textContent=r.label+' ('+r.id+')'; sel.insertBefore(o,cust); });
+    var saved=''; try{ saved=localStorage.getItem('meshMqttTopic')||''; }catch(e){}
+    if(saved && !document.getElementById('mqtt-topic').value) document.getElementById('mqtt-topic').value=saved;
+    syncRegion();
+  }
+  function syncRegion(){
+    var t=document.getElementById('mqtt-topic').value.trim(), sel=document.getElementById('mqtt-region'), hit=false;
+    for(var i=0;i<sel.options.length;i++){ if(sel.options[i].value===t) hit=true; }
+    sel.value = !t ? '' : (hit ? t : '__custom');
+  }
+  function applyTopic(){
+    var t=document.getElementById('mqtt-topic').value.trim();
+    try{ localStorage.setItem('meshMqttTopic',t); }catch(e){}
+    if(!mqttOn||DEMO_ON) return;
+    fetch('/api/net/mesh/mqtt/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(t?{topic:t}:{})})
+      .then(function(r){return r.json();}).then(function(res){ if(res&&res.error){ showVeil('MQTT connect failed',res.error); } clearAll(); }).catch(function(){});
+  }
+  document.getElementById('mqtt-region').addEventListener('change',function(){
+    if(this.value==='__custom'){ document.getElementById('mqtt-topic').focus(); return; }
+    document.getElementById('mqtt-topic').value=this.value; applyTopic();
+  });
+  document.getElementById('mqtt-topic').addEventListener('change',function(){ syncRegion(); applyTopic(); });
   // 🌍 World — the public worldwide feed: connect the public MQTT broker on its
   // global topic and zoom the map out to the whole planet.
   var worldMode=false;
@@ -189,6 +222,7 @@
     }
     worldMode=true; wb.setAttribute('aria-pressed','true');
     document.getElementById('mqtt-topic').value='';   // '' -> backend default global topic
+    syncRegion(); try{ localStorage.setItem('meshMqttTopic',''); }catch(e){}
     firstFit=true;                                     // keep the world view; don't auto-zoom to the first few
     map.setView([20,0],2);
     showVeil(WORLD_HINT);
@@ -205,6 +239,7 @@
       var mt=document.getElementById('mqtttag'); mt.className='tag '+(mq.connected?'live':'idle'); mt.textContent=mq.connected?'MQTT on':(det.mqtt_available===false?'MQTT n/a':'MQTT off');
       if(mq.connected){ mqttOn=true; document.getElementById('mqtt-btn').setAttribute('aria-pressed','true'); document.getElementById('mqtt-btn').innerHTML='&#10074;&#10074;&nbsp;MQTT'; }
       if(det.mqtt_defaults&&det.mqtt_defaults.topic){ document.getElementById('mqtt-topic').placeholder=det.mqtt_defaults.topic; }
+      if(det.mqtt_defaults) loadRegions(det.mqtt_defaults.regions);
     }).catch(function(){});
     if(DEMO_ON) return;   // in demo the synth timers own the map; don't wipe them with the empty live feed
     loadNodes();

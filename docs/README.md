@@ -13,6 +13,7 @@ browse than search.
 ## Core scanning & offense
 - [Scanning & Attacks](scanning-and-attacks.md) — the core discovery / assess / brute-force / file-steal loop
 - [Rubber Ducky Script Executor](rubber-ducky.md) — Pentest-tab USB HID keystroke injection (`/dev/hidg0`), payload library + editor
+- [RagnarScripts](ragnarscripts.md) — external, user-cloned script library installable from the dashboard (ducky payloads + console scripts)
 - [Reverse Shell](reverse-shell.md) — Pentest-tab connect-back one-liner generator + catch listener
 - [Advanced Vulnerability Scanning](adv-scan.md) — Adv Scan tab: Nuclei / Nikto / SQLMap / ZAP, RAM gating, mesh delegation
 - [Traffic Analysis](traffic-analysis.md) — passive `tcpdump` analyzer + C2 / scan / tunnel detection
@@ -35,6 +36,7 @@ browse than search.
 - [CYD firmware & flashing](cyd-firmware.md) — build and flash the ESP32 CYD companion node firmware
 - [WiFi Defense (WIDS)](wifi-defense.md) — passive 802.11 intrusion detection
 - [Wardriving](wardriving.md) — WiFi/BLE/cell logging with GPS recovery
+- [Wardrive firmware comparison](wardrivecomparison.md) — Huginn vs Piglet measured on one ESP32-C5
 - [Diagnostics panel](diagnostics.md) — radios / power / GPS sky view + Starview observatory
 - [Cellular modem](cell.md) · [SDR / Sub-GHz](sdr-subghz.md) · [RF Waterfall](rf-waterfall.md) · [RF Waterfall — capability guide](rf-waterfall-guide.md) · [AirSnitch](airsnitch.md)
 

@@ -22993,6 +22993,238 @@ def _apc_selftest():
             'total': len(scenarios), 'scenarios': scenarios}
 
 
+# ==========================================================================
+# Liebert Guard — passive Vertiv / Liebert power-management web-UI monitor
+# ==========================================================================
+# Companion to APC Guard on the power plane. The detection engine is the vendored
+# standalone liebert_guard (python/liebert_guard.py, stdlib only): RomPager
+# Misfortune Cookie banner screening (CVE-2014-9222, Liebert MPH rack PDUs /
+# RPC-1000 cards) and the oversized-HTTP-method request that overflows Liebert
+# RDU101 / IS-UNITY cards (CVE-2025-41426). In-app we capture one bounded window
+# on the chosen HTTP port with tcpdump and replay the pcap through its Detector
+# with packet timestamps. The module filters in-process; the capture filter adds
+# the shared IPv6 extension-header clause so a v6 head behind one still arrives.
+# Never transmits.
+_LIEBERT_GUARD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   'data', 'liebert_guard.json')
+_liebert_guard_lock = threading.Lock()
+_LIEBERT_PY_DIR = _APC_PY_DIR
+_LIEBERT_SEVERITY = {'info': 'INFO', 'low': 'LOW', 'high': 'HIGH', 'critical': 'CRITICAL'}
+# Banner screening is posture (a version in range, not proof); the long-method
+# request is an attempt.
+_LIEBERT_KLASS = {'LG-001': 'POSTURE', 'LG-002': 'POSTURE', 'LG-003': 'POSTURE',
+                  'LG-101': 'ATTACK'}
+_LIEBERT_NAMES = {
+    'LG-001': 'RomPager banner below 4.34 — Misfortune Cookie range',
+    'LG-002': 'RomPager banner, version not parseable',
+    'LG-003': 'RomPager 4.34 or later (inventory)',
+    'LG-101': 'Oversized HTTP method — Liebert RDU101 / IS-UNITY overflow shape',
+}
+_LIEBERT_CVES = ('CVE-2014-9222', 'CVE-2025-41426')
+
+
+def _liebert_module():
+    if _LIEBERT_PY_DIR not in sys.path:
+        sys.path.insert(0, _LIEBERT_PY_DIR)
+    import liebert_guard
+    return liebert_guard
+
+
+def _liebert_bpf(port):
+    return 'tcp port %d or %s' % (port, _GUARD_IP6_EXTHDR_BPF)
+
+
+def _liebert_map_finding(f):
+    code = f.get('code', '')
+    detail = {k: f.get(k) for k in ('server', 'client', 'port', 'family', 'banner',
+                                     'version', 'note') if f.get(k) is not None}
+    if f.get('detail'):
+        detail['evidence'] = f['detail']
+    # The source of an attempt is the client; of a banner, the server itself.
+    src = f.get('client') if code == 'LG-101' else f.get('server')
+    return {'code': code, 'name': _LIEBERT_NAMES.get(code, code),
+            'severity': _LIEBERT_SEVERITY.get(f.get('severity'), 'MEDIUM'),
+            'klass': _LIEBERT_KLASS.get(code, 'POSTURE'),
+            'cves': [f['cve']] if f.get('cve') else [],
+            'src': src, 'detail': detail}
+
+
+def _liebert_analyze_pcap(path, port=80):
+    """Replay a classic pcap through liebert_guard.Detector. Returns (findings, frames)."""
+    lg = _liebert_module()
+    raw, n = [], 0
+    det = lg.Detector(port=port, emit=raw.append)
+    for ts, frame, lt in lg.read_pcap(path):
+        n += 1
+        try:
+            det.feed(ts, frame, lt)
+        except Exception:
+            continue
+    return [_liebert_map_finding(f) for f in raw], n
+
+
+def do_liebert_guard(interface=None, seconds=20, port=80, quick=False):
+    """Passive Vertiv / Liebert guard (detection-only). Captures one HTTP port for a
+    few seconds and replays it through the vendored liebert_guard: RomPager
+    Misfortune Cookie banners (CVE-2014-9222) and the oversized-method request
+    that overflows Liebert RDU101 / IS-UNITY cards (CVE-2025-41426). Never transmits."""
+    iface, iface_error = _lan_guard_iface(interface, 'Liebert Guard')
+    if iface_error:
+        return iface_error
+    seconds = _clamp_int(seconds, 20, 5, 60)
+    port = _clamp_int(port, 80, 1, 65535)
+    if not _have('tcpdump'):
+        return {'success': False, 'interface': iface,
+                'error': 'tcpdump is not installed. Click Install to add it.',
+                'missing_tool': 'tcpdump'}
+    try:
+        _liebert_module()
+    except Exception as e:
+        return {'success': False, 'interface': iface, 'error': 'liebert_guard module: %s' % e}
+    tmpdir = tempfile.mkdtemp(prefix='liebertguard-')
+    pcap = os.path.join(tmpdir, 'cap.pcap')
+    try:
+        res = _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-s', '0',
+                    '-c', '20000', '-w', pcap, _liebert_bpf(port)], timeout=seconds + 8)
+        if not os.path.exists(pcap):
+            err = (res.get('err') or 'capture failed').strip()
+            return {'success': False, 'interface': iface, 'error': err[:200]}
+        try:
+            findings, frames = _liebert_analyze_pcap(pcap, port)
+        except (OSError, ValueError) as e:
+            return {'success': False, 'interface': iface, 'error': str(e)[:200]}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    result = _guard_finish('liebert_guard', iface, seconds, findings, range(frames))
+    result['port'] = port
+    if not quick:
+        _guard_record_event(_LIEBERT_GUARD_PATH, _liebert_guard_lock, result)
+    _guard_emit_jsonl('liebert_guard', result)
+    return result
+
+
+def _liebert_frame(src, dst, sport, dport, payload, seq=1000, v6=False):
+    """A minimal Ethernet/IP/TCP frame (the module does not verify checksums)."""
+    import ipaddress as _ip
+    tcp = struct.pack('!HHIIBBHHH', sport, dport, seq, 0, 0x50, 0x18, 65535, 0, 0) + payload
+    if v6:
+        ip = struct.pack('!IHBB', 0x60000000, len(tcp), 6, 64) \
+            + _ip.ip_address(src).packed + _ip.ip_address(dst).packed
+        et = 0x86DD
+    else:
+        ip = struct.pack('!BBHHHBBH', 0x45, 0, 20 + len(tcp), 1, 0, 64, 6, 0) \
+            + _ip.ip_address(src).packed + _ip.ip_address(dst).packed
+        et = 0x0800
+    return b'\x02\x00\x00\x00\x00\x02\x02\x00\x00\x00\x00\x01' + struct.pack('!H', et) + ip + tcp
+
+
+def _liebert_selftest():
+    """Liebert Guard: the vendored module tier (198 checks plus its live loopback
+    captures, run in its own interpreter — it needs scapy and its live tier is not
+    thread-safe to host) plus the in-app adapter: pcap replay, mapping, verdicts,
+    dual-stack, and a real tcpdump pass through the capture filter."""
+    scenarios = []
+
+    def sc(name, ok, expect='', got=''):
+        scenarios.append({'name': name, 'pass': bool(ok), 'expect': expect, 'got': str(got)})
+
+    try:
+        lg = _liebert_module()
+    except Exception as e:
+        return {'success': False, 'scenarios': [
+            {'name': 'liebert_guard import failed: %s' % e, 'pass': False,
+             'expect': 'import', 'got': 'error'}]}
+
+    # 1. The module's own tier. Prints '<ver>: N passed, F failed | live tier: ...'.
+    res = _run([sys.executable or 'python3', os.path.join(_LIEBERT_PY_DIR, 'test_liebert_guard.py')],
+               timeout=240)
+    out = (res.get('out') or '') + (res.get('err') or '')
+    m = re.search(r'(\d+)\s+passed,\s+(\d+)\s+failed', out)
+    if m:
+        passed, failed = int(m.group(1)), int(m.group(2))
+        for i in range(passed):
+            scenarios.append({'name': 'liebert_guard check %d' % (i + 1), 'pass': True,
+                              'expect': 'pass', 'got': 'pass'})
+        for ln in out.splitlines():
+            if ln.strip().startswith('FAIL'):
+                sc(ln.strip()[4:].strip(' :'), False, 'pass', 'FAIL')
+        if failed and not any(not s['pass'] for s in scenarios):
+            sc('liebert_guard module self-test', False, '0 failed', '%d failed' % failed)
+    else:
+        sc('liebert_guard module self-test', False, 'N passed, 0 failed',
+           'rc %s %s' % (res.get('rc'), out.strip()[-160:]))
+
+    # 2. In-app adapter.
+    srv, cli, atk = '10.9.0.5', '10.9.0.77', '203.0.113.9'
+    resp = b'HTTP/1.1 200 OK\r\nServer: RomPager/4.07 UPnP/1.0\r\nContent-Length: 0\r\n\r\n'
+    patched = b'HTTP/1.1 200 OK\r\nServer: RomPager/4.51\r\n\r\n'
+    longm = b'A' * 70 + b' / HTTP/1.1\r\nHost: x\r\n\r\n'
+    frames = [(1000.0, _liebert_frame(srv, cli, 80, 40000, resp)),
+              (1001.0, _liebert_frame(atk, srv, 40001, 80, longm)),
+              (1002.0, _liebert_frame('2001:db8::5', '2001:db8::77', 80, 40002, resp, v6=True))]
+    tmpdir = tempfile.mkdtemp(prefix='liebert-st-')
+
+    def write(path, fr):
+        with open(path, 'wb') as fh:
+            fh.write(struct.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
+            for ts, f in fr:
+                fh.write(struct.pack('<IIII', int(ts), 0, len(f), len(f)) + f)
+    try:
+        p0 = os.path.join(tmpdir, 'clean.pcap')
+        write(p0, [(1000.0, _liebert_frame(srv, cli, 80, 40000,
+                                           b'HTTP/1.1 200 OK\r\nServer: lighttpd/1.4\r\n\r\n'))])
+        f0, _ = _liebert_analyze_pcap(p0)
+        sc('liebert-clean-server', _guard_verdict(f0) == 'clean', 'clean', _guard_verdict(f0))
+
+        p1 = os.path.join(tmpdir, 'all.pcap')
+        write(p1, frames)
+        f1, n1 = _liebert_analyze_pcap(p1)
+        codes = sorted((f['code'], f['detail'].get('family')) for f in f1)
+        sc('liebert-rompager-v4-v6', ('LG-001', 'ipv4') in codes and ('LG-001', 'ipv6') in codes,
+           'LG-001 on both families', codes)
+        lg001 = next((f for f in f1 if f['code'] == 'LG-001'), {})
+        sc('liebert-lg001-mapping', lg001.get('severity') == 'CRITICAL'
+           and lg001.get('klass') == 'POSTURE' and lg001.get('cves') == ['CVE-2014-9222']
+           and lg001.get('src') == srv, 'CRITICAL POSTURE CVE-2014-9222 src=server',
+           {k: lg001.get(k) for k in ('severity', 'klass', 'src')})
+        lg101 = next((f for f in f1 if f['code'] == 'LG-101'), {})
+        sc('liebert-lg101-attempt', lg101.get('klass') == 'ATTACK' and lg101.get('src') == atk
+           and lg101.get('cves') == ['CVE-2025-41426'] and _guard_verdict(f1) == 'attack',
+           'ATTACK src=client → attack', {k: lg101.get(k) for k in ('klass', 'src')})
+
+        p2 = os.path.join(tmpdir, 'patched.pcap')
+        write(p2, [(1000.0, _liebert_frame(srv, cli, 80, 40000, patched))])
+        f2, _ = _liebert_analyze_pcap(p2)
+        sc('liebert-patched-is-inventory', [f['code'] for f in f2] == ['LG-003']
+           and _guard_verdict(f2) == 'observed', 'LG-003 → observed', [f['code'] for f in f2])
+
+        p3 = os.path.join(tmpdir, 'port.pcap')
+        write(p3, [(1000.0, _liebert_frame(srv, cli, 8080, 40000, resp))])
+        sc('liebert-port-selects', not _liebert_analyze_pcap(p3, 80)[0]
+           and _liebert_analyze_pcap(p3, 8080)[0], 'silent on 80, fires on 8080', '')
+
+        sc('liebert-tables-cover-codes', set(_LIEBERT_KLASS) == set(lg.SEVERITY) == set(_LIEBERT_NAMES)
+           and set(_LIEBERT_SEVERITY) >= set(lg.SEVERITY.values())
+           and set(_LIEBERT_CVES) == set(lg.CVES.values()), 'every code mapped', '')
+
+        if _have('tcpdump'):
+            pout = os.path.join(tmpdir, 'out.pcap')
+            r = _run(['tcpdump', '-nn', '-r', p1, '-w', pout, _liebert_bpf(80)], timeout=20)
+            try:
+                f4, n4 = _liebert_analyze_pcap(pout)
+            except (OSError, ValueError):
+                f4, n4 = [], 0
+            sc('liebert-tcpdump-bpf-replay', n4 == n1 == 3 and _guard_verdict(f4) == 'attack',
+               '3 frames admitted → attack', '%d frames %s %s' % (
+                   n4, _guard_verdict(f4), (r.get('err') or '')[-60:]))
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    failed = sum(1 for s in scenarios if not s['pass'])
+    return {'success': failed == 0, 'passed': len(scenarios) - failed,
+            'total': len(scenarios), 'scenarios': scenarios}
+
+
 def _guard_rec(proto=None, src='10.0.0.9', sport=40000, dst='10.0.0.1',
                dport=None, payload=b'', dissect='', vlan_tags=0, ipver=4,
                ip_raw=b''):
@@ -24345,6 +24577,7 @@ def do_routing_selftest():
               'mikrotik_guard': _mikrotik_selftest(),
               'aruba_guard': _aruba_selftest(),
               'apc_guard': _apc_selftest(),
+              'liebert_guard': _liebert_selftest(),
               'dell_guard': _dell_selftest(),
               'bgp_speaker': bgp_speaker.selftest(), 'path_asymmetry': path_asymmetry.selftest()}
     return {
@@ -26408,6 +26641,16 @@ def register_network_diagnostics(app, logger=None):
         _log(f"net/apc-guard iface={iface or 'default-route'} secs={secs}")
         return jsonify(do_apc_guard(interface=iface, seconds=secs, cards=cards,
                                     forget=forget))
+
+    @app.route('/api/net/liebert-guard', methods=['GET'])
+    def net_liebert_guard():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 20, 5, 60)
+        port = _clamp_int(request.args.get('port'), 80, 1, 65535)
+        _log(f"net/liebert-guard iface={iface or 'default-route'} secs={secs} port={port}")
+        return jsonify(do_liebert_guard(interface=iface, seconds=secs, port=port))
 
     @app.route('/api/net/dell-guard', methods=['GET', 'POST'])
     def net_dell_guard():
@@ -28917,11 +29160,15 @@ def _cli(argv=None):
                            ('comware', 'HPE Comware / Huawei VRF-hopping (MPLS)'),
                            ('mikrotik', 'MikroTik RouterOS (CCR/CRS)'),
                            ('aruba', 'HPE Aruba ArubaOS (PAPI)'),
-                           ('apc', 'APC / Schneider NMC (Ripple20)')):
+                           ('apc', 'APC / Schneider NMC (Ripple20)'),
+                           ('liebert', 'Vertiv Liebert power cards (RomPager / RDU101)')):
         gp = sub.add_parser('%s-guard' % _gname,
                             help='passive %s CVE guard (posture/exposure/attack)' % _ghelp)
         gp.add_argument('--iface', '-i', default=None, help='interface (default: route)')
         gp.add_argument('--seconds', '-s', type=int, default=20, help='capture window (5-40; APC 5-60)')
+        if _gname == 'liebert':
+            gp.add_argument('--port', '-p', type=int, default=80,
+                            help='HTTP port of the card web UI to judge (default 80)')
         if _gname == 'apc':
             gp.add_argument('--cards', default=None,
                             help="declared NMCs: 'ADDR[=MAC],...' (replaces the saved list)")
@@ -29893,12 +30140,15 @@ def _cli(argv=None):
         'mikrotik-guard': (do_mikrotik_guard, 'MikroTik'),
         'aruba-guard': (do_aruba_guard, 'Aruba'),
         'apc-guard': (do_apc_guard, 'APC'),
+        'liebert-guard': (do_liebert_guard, 'Liebert'),
     }
     if args.cmd in _GUARD_CLI:
         fn, label = _GUARD_CLI[args.cmd]
         kw = {'interface': args.iface, 'seconds': args.seconds}
         if args.cmd == 'comware-guard':
             kw['role'] = getattr(args, 'role', 'unknown')
+        if args.cmd == 'liebert-guard':
+            kw['port'] = args.port
         if args.cmd == 'apc-guard':
             kw['cards'] = args.cards
             kw['forget'] = args.forget
@@ -29927,6 +30177,7 @@ def _cli(argv=None):
         'mikrotik-guard-selftest': (_mikrotik_selftest, 'MikroTik'),
         'aruba-guard-selftest': (_aruba_selftest, 'Aruba'),
         'apc-guard-selftest': (_apc_selftest, 'APC'),
+        'liebert-guard-selftest': (_liebert_selftest, 'Liebert'),
     }
     if args.cmd in _GUARD_SELFTEST_CLI:
         fn, label = _GUARD_SELFTEST_CLI[args.cmd]

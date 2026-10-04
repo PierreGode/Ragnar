@@ -233,6 +233,8 @@ class _CompanionState:
         self.port = port
         self.thread: threading.Thread | None = None
         self.connected: bool = False
+        # Set by the API to pull Piglet's SD logs on the listener's next turn.
+        self.piglet_sync_request: bool = False
         self.networks: int = 0
         # Split by band so a dual-band companion (Huginn on an ESP32-C5) shows
         # what each radio is actually contributing instead of one merged total.
@@ -321,6 +323,26 @@ class _CompanionState:
             'esp_zigbee_count':  self.esp_zigbee_count,
             'esp_alerts':        self.esp_alerts[-5:],
         }
+
+
+def _wigle_time_to_iso(value):
+    """WiGLE CSV FirstSeen ('YYYY-MM-DD HH:MM:SS', UTC) → ISO-8601 UTC, or
+    None when absent/unparseable/implausible (e.g. a device that logged
+    before it had a clock: 1970/2000 epochs)."""
+    value = (value or '').strip()
+    if not value:
+        return None
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M'):
+        try:
+            dt = datetime.strptime(value[:19], fmt).replace(tzinfo=timezone.utc)
+            break
+        except ValueError:
+            continue
+    else:
+        return None
+    if dt.year < 2015:
+        return None
+    return dt.isoformat()
 
 
 class WardrivingSession:
@@ -613,7 +635,7 @@ class WardrivingSession:
             self._stats_cache = None
 
     def upsert_network(self, bssid, ssid, security, channel, frequency,
-                       rssi, lat, lon, alt, speed, hdop, interface=''):
+                       rssi, lat, lon, alt, speed, hdop, interface='', seen_at=None):
         """Insert or update a discovered network (thread-safe)."""
         # Sanitize SSID: strip null bytes, hex escape sequences, and non-printable chars
         if ssid:
@@ -624,7 +646,7 @@ class WardrivingSession:
             # If nothing printable remains, treat as hidden
             if not ssid or all(ord(c) < 32 for c in ssid):
                 ssid = ''
-        now = datetime.now(timezone.utc).isoformat()
+        now = seen_at or datetime.now(timezone.utc).isoformat()
         band = '5GHz' if (frequency and int(frequency) > 4900) else '2.4GHz'
         if frequency and int(frequency) > 5925:
             band = '6GHz'
@@ -735,14 +757,14 @@ class WardrivingSession:
                 logger.error(f"DB upsert error: {e}")
         return False
 
-    def log_gps_track(self, lat, lon, alt, speed, satellites, hdop):
-        """Log a GPS trackpoint."""
+    def log_gps_track(self, lat, lon, alt, speed, satellites, hdop, timestamp=None):
+        """Log a GPS trackpoint (at `timestamp`, default now)."""
         with self._lock:
             try:
                 with sqlite3.connect(self.db_path) as conn:
                     conn.execute(
                         "INSERT INTO gps_track (timestamp, latitude, longitude, altitude, speed_kmh, satellites, hdop) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (time.time(), lat, lon, alt, speed, satellites, hdop)
+                        (timestamp or time.time(), lat, lon, alt, speed, satellites, hdop)
                     )
             except Exception as e:
                 logger.debug(f"GPS track log error: {e}")
@@ -762,7 +784,7 @@ class WardrivingSession:
         a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
         return R * 2 * atan2(sqrt(a), sqrt(1 - a))
 
-    def upsert_bluetooth(self, mac, name, rssi, device_type, lat, lon, alt):
+    def upsert_bluetooth(self, mac, name, rssi, device_type, lat, lon, alt, seen_at=None):
         """Insert or update a discovered Bluetooth device.
 
         GPS position logic:
@@ -771,7 +793,7 @@ class WardrivingSession:
           consecutive pings at a new location (>GPS_DRIFT_THRESHOLD_M away).
           This filters out GPS drift/jumps while still tracking moving devices.
         """
-        now = datetime.now(timezone.utc).isoformat()
+        now = seen_at or datetime.now(timezone.utc).isoformat()
         with self._lock:
             try:
                 with sqlite3.connect(self.db_path) as conn:
@@ -873,10 +895,10 @@ class WardrivingSession:
             except Exception as e:
                 logger.debug(f"BT upsert error: {e}")
 
-    def upsert_cell_tower(self, cell_id, mcc, mnc, lac, tech, provider,
-                          signal_dbm, band_freq, lat, lon):
+    def upsert_cell_tower(self, cell_id, mcc='', mnc='', lac='', tech='', provider='',
+                          signal_dbm=None, band_freq='', lat=None, lon=None, seen_at=None):
         """Insert or update a detected cell tower."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = seen_at or datetime.now(timezone.utc).isoformat()
         with self._lock:
             try:
                 with sqlite3.connect(self.db_path) as conn:
@@ -1899,6 +1921,26 @@ class WardrivingSession:
             if 'mac' not in col_map:
                 return {'error': 'CSV missing MAC/BSSID column', 'imported': 0}
 
+            # Rows keep the time they were SEEN (the CSV's FirstSeen, UTC per
+            # the WiGLE format), not the time of the import — an imported
+            # drive must read as the drive, and exports rebuild the route from
+            # these times. Positioned rows also rebuild the GPS track (one
+            # point per 5 s), so the map, backfill and route have a trail.
+            last_track_ts = None
+            # A device that logs before it has a clock (Piglet: 1970-01-01)
+            # gets the nearest valid time instead of the import time: the
+            # previous valid row's, or the file's first valid one.
+            last_valid_seen = None
+            if 'firstseen' in col_map:
+                for _l in data_lines:
+                    try:
+                        _r = next(csv.reader([_l]))
+                    except Exception:
+                        continue
+                    if col_map['firstseen'] < len(_r):
+                        last_valid_seen = _wigle_time_to_iso(_r[col_map['firstseen']])
+                        if last_valid_seen:
+                            break
             for line in data_lines:
                 if not line:
                     continue
@@ -1951,18 +1993,34 @@ class WardrivingSession:
                     except (ValueError, TypeError):
                         pass
 
+                if lat == 0 and lon == 0:
+                    lat = lon = alt = None      # 0,0 = "no fix" (Piglet before lock)
+
+                seen_at = None
+                if 'firstseen' in col_map and col_map['firstseen'] < len(row):
+                    seen_at = _wigle_time_to_iso(row[col_map['firstseen']])
+                if seen_at:
+                    last_valid_seen = seen_at
+                else:
+                    seen_at = last_valid_seen
+                if seen_at and lat is not None and lon is not None:
+                    ts = datetime.fromisoformat(seen_at).timestamp()
+                    if last_track_ts is None or ts - last_track_ts >= 5:
+                        self.log_gps_track(lat, lon, alt, None, None, None, timestamp=ts)
+                        last_track_ts = ts
+
                 # Determine type
                 record_type = ''
                 if 'type' in col_map and col_map['type'] < len(row):
                     record_type = row[col_map['type']].strip().upper()
 
                 if record_type in ('BT', 'BLE', 'BLUETOOTH'):
-                    self.upsert_bluetooth(mac, ssid, rssi, 'BLE', lat, lon, alt)
+                    self.upsert_bluetooth(mac, ssid, rssi, 'BLE', lat, lon, alt, seen_at=seen_at)
                     imported_bt += 1
                 elif record_type in ('GSM', 'CDMA', 'LTE', 'UMTS', 'CELL', '5G', 'NR'):
                     self.upsert_cell_tower(
                         cell_id=mac, tech=record_type, provider=ssid,
-                        signal_dbm=rssi, lat=lat, lon=lon
+                        signal_dbm=rssi, lat=lat, lon=lon, seen_at=seen_at
                     )
                     imported_cell += 1
                 else:
@@ -1977,7 +2035,7 @@ class WardrivingSession:
                         bssid=mac, ssid=ssid, security=auth,
                         channel=channel, frequency=freq, rssi=rssi,
                         lat=lat, lon=lon, alt=alt, speed=None, hdop=None,
-                        interface='import'
+                        interface='import', seen_at=seen_at
                     )
                     imported_wifi += 1
 
@@ -4632,7 +4690,15 @@ class WardrivingEngine:
                     _last_diag = time.time()
                     _last_devcheck = time.time()
                     _sample_lines = []
+                    # Solo drives: pull any finished CSVs off Piglet's SD card
+                    # (firmware with SerialSync answers; older firmware simply
+                    # doesn't, and the live stream carries on either way).
+                    if companion.name in ('Piglet', 'Piglet Core'):
+                        self._piglet_sync(ser, companion, _readline)
                     while self._running and companion.port in self._companions:
+                        if companion.piglet_sync_request:
+                            companion.piglet_sync_request = False
+                            self._piglet_sync(ser, companion, _readline, manual=True)
                         try:
                             raw = _readline(2.0)
                             if raw:
@@ -4795,6 +4861,41 @@ class WardrivingEngine:
         if alt is None:
             alt = gps_alt
         return lat, lon, alt, True
+
+    def _piglet_sync(self, ser, companion, readline, manual=False):
+        """Import Piglet's finished SD logs as sessions (see piglet_sync).
+        Lines that aren't sync replies keep flowing to the live parser."""
+        if not manual and not self.shared_data.config.get('wardriving_piglet_sync', True):
+            return
+        try:
+            import piglet_sync
+            link = piglet_sync.PigletLink(
+                ser.write, readline, lambda line: self._parse_serial_line(line, companion))
+            self.piglet_sync_status = {'state': 'running', 'port': companion.port,
+                                       'at': time.time()}
+            summary = piglet_sync.sync(link, self.data_dir,
+                                       hello_wait_s=20.0 if not manual else 10.0)
+            summary.update({'state': 'done', 'port': companion.port, 'at': time.time()})
+            self.piglet_sync_status = summary
+            if summary.get('supported'):
+                logger.warning(
+                    f"[wardriving] Piglet sync on {companion.port}: "
+                    f"{len(summary['imported'])} file(s) imported, {summary['skipped']} skipped, "
+                    f"{len(summary['errors'])} error(s)")
+        except Exception as e:
+            self.piglet_sync_status = {'state': 'error', 'error': str(e),
+                                       'port': companion.port, 'at': time.time()}
+            logger.warning(f"[wardriving] Piglet sync failed on {companion.port}: {e!r}")
+
+    def request_piglet_sync(self):
+        """Ask every connected Piglet listener to sync now. Returns the ports
+        asked (empty when no Piglet is connected through the engine)."""
+        ports = []
+        for c in list(getattr(self, '_companions', {}).values()):
+            if c.connected and c.name in ('Piglet', 'Piglet Core'):
+                c.piglet_sync_request = True
+                ports.append(c.port)
+        return ports
 
     def _parse_serial_line(self, line: str, companion: '_CompanionState'):
         """Parse a single line from one ESP32 serial companion."""

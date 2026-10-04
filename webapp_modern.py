@@ -14603,6 +14603,41 @@ def api_serial_console_script_status():
     return jsonify(serial_console.script_status())
 
 
+@app.route('/api/ragnar-scripts/sync', methods=['POST'])
+def api_ragnar_scripts_sync():
+    """Clone or git-pull the external RagnarScripts library (throttled).
+
+    Called when the Dashboard / Pentest tabs open so freshly-pushed shared
+    scripts appear without a manual pull. Best-effort — a failure (offline, no
+    git) is reported but never an error the UI must handle."""
+    try:
+        import ragnar_scripts
+        force = bool((request.get_json(silent=True) or {}).get('force'))
+        return jsonify(ragnar_scripts.sync(force=force))
+    except Exception as e:
+        logger.warning(f"RagnarScripts sync error: {e}")
+        return jsonify({'ok': False, 'error': str(e)})
+
+
+@app.route('/api/serial-console/library')
+def api_serial_console_library():
+    """List console scripts available in the cloned RagnarScripts repo."""
+    import serial_console
+    return jsonify(serial_console.list_library())
+
+
+@app.route('/api/serial-console/library/install', methods=['POST'])
+def api_serial_console_library_install():
+    """Install a console script from the RagnarScripts repo into data/console_scripts/."""
+    import serial_console
+    body = request.get_json(silent=True) or {}
+    sid = (body.get('script_id') or body.get('id') or '').strip()
+    if not sid:
+        return jsonify({'success': False, 'error': 'missing script_id'}), 400
+    result = serial_console.install_library_script(sid)
+    return jsonify(result), (200 if result.get('success') else 400)
+
+
 @app.route('/api/power/test', methods=['GET', 'POST'])
 def api_power_test():
     """Idle-vs-load power test. POST {duration, loads:[cpu,sdr,wifi]} starts
@@ -16027,6 +16062,111 @@ def wardriving_gps_enable():
     except Exception as e:
         logger.error(f"Wardriving GPS enable error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+_piglet_sync_port = None
+_piglet_sync_lock = threading.Lock()
+
+
+def _piglet_sync_on_port(port, hello_wait_s=20.0):
+    """Sync one port directly (engine not holding it). One sync at a time,
+    under a 'piglet-sync' serial claim. Returns the summary, or None when
+    another sync is already running."""
+    global _piglet_sync_port
+    import piglet_sync
+    import serial_claims
+    engine = _get_wardriving_engine()
+    with _piglet_sync_lock:
+        if _piglet_sync_port:
+            return None
+        _piglet_sync_port = port
+    serial_claims.register('piglet-sync', lambda: _piglet_sync_port)
+    try:
+        engine.piglet_sync_status = {'state': 'running', 'port': port, 'at': time.time()}
+        try:
+            summary = piglet_sync.sync_port(port, engine.data_dir, hello_wait_s=hello_wait_s)
+        except Exception as e:
+            summary = {'supported': False, 'error': str(e)}
+        if summary.get('supported'):
+            summary.update({'state': 'done', 'port': port, 'at': time.time()})
+            engine.piglet_sync_status = summary
+            if summary.get('imported'):
+                logger.info(f"Piglet sync on {port}: {len(summary['imported'])} drive(s) imported")
+        return summary
+    finally:
+        _piglet_sync_port = None
+        serial_claims.unregister('piglet-sync')
+
+
+def _piglet_port_busy(port):
+    """Held by the wardriving listener, another component, or a sync."""
+    import serial_claims
+    engine = _get_wardriving_engine()
+    if engine._running:
+        # The wardriving USB monitor attaches new ESP32s itself and syncs a
+        # Piglet on connect; opening the port here too would split its stream.
+        return True
+    return bool(_piglet_sync_port) or serial_claims.is_claimed(port, exclude_owner='piglet-sync')
+
+
+@app.route('/api/wardriving/piglet/sync', methods=['GET', 'POST'])
+def wardriving_piglet_sync():
+    """Import a Piglet's solo-drive CSVs from its SD card over USB serial.
+
+    GET  → the last sync result.
+    POST → sync now: through the wardriving listener when it already holds
+           the Piglet, otherwise by opening each free Espressif USB port
+           until one answers the Piglet SerialSync protocol (firmware v2.60+).
+    A Piglet is also synced automatically when plugged in (PlugWatcher below).
+    """
+    try:
+        engine = _get_wardriving_engine()
+        if request.method == 'GET':
+            return jsonify(getattr(engine, 'piglet_sync_status', None) or {'state': 'idle'})
+        if engine._running:
+            ports = engine.request_piglet_sync()
+            if ports:
+                engine.piglet_sync_status = {'state': 'queued', 'port': ports[0], 'at': time.time()}
+                return jsonify({'queued': True, 'ports': ports})
+        if _piglet_sync_port:
+            return jsonify({'error': f'A sync is already running on {_piglet_sync_port}'}), 409
+        import glob as _g
+        import serial_claims
+        candidates = [p for p in sorted(_g.glob('/dev/ttyACM*') + _g.glob('/dev/ttyUSB*'))
+                      if engine._port_is_espressif(p) and not serial_claims.is_claimed(p)]
+        if not candidates:
+            return jsonify({'error': 'No free ESP32 USB port found — is the Piglet plugged in?'}), 404
+
+        def _worker():
+            for port in candidates:
+                summary = _piglet_sync_on_port(port)
+                if summary and summary.get('supported'):
+                    return
+            engine.piglet_sync_status = {
+                'state': 'error', 'at': time.time(),
+                'error': 'No Piglet answered (needs Piglet firmware v2.60+ with serial sync)'}
+
+        threading.Thread(target=_worker, daemon=True, name='piglet-sync').start()
+        return jsonify({'started': True, 'ports': candidates})
+    except Exception as e:
+        logger.error(f"Piglet sync error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+def _start_piglet_plug_watcher():
+    """Sync a Piglet the moment it's plugged in, wardriving or not."""
+    try:
+        import piglet_sync
+        piglet_sync.PlugWatcher(
+            enabled=lambda: bool(shared_data.config.get('wardriving_piglet_sync', True)),
+            busy=_piglet_port_busy,
+            run=_piglet_sync_on_port,
+        ).start()
+    except Exception as e:
+        logger.warning(f"Piglet plug-in watcher not started: {e}")
+
+
+_start_piglet_plug_watcher()
+
 
 @app.route('/api/wardriving/import', methods=['POST'])
 def wardriving_import_csv():
@@ -20621,6 +20761,115 @@ def pentest_get_report():
         return jsonify({'error': str(e)}), 500
 
 
+# ---------------------------------------------------------------------------
+# Rubber Ducky — mesh HID control
+# ---------------------------------------------------------------------------
+# A Ragnar plugged into a host PC via USB-OTG can't use its wired port at the
+# same time, so it rides Wi-Fi — and another Ragnar on the mesh can drive its
+# HID keyboard over the tailnet, exactly the way the Device Console is driven
+# across the mesh. Transport is the existing secret-gated web gateway
+# (X-Ragnar-Target relayed to the peer); on top of that each unit must opt in
+# with "Allow mesh units to run payloads" (rubber_ducky.mesh_allowed()), which
+# _ducky_mesh_write_guard() enforces on every state-changing, relayed request.
+
+def _rubber_ducky_summary():
+    """This unit's HID/ducky posture, for the unit picker and peer discovery."""
+    from python.rubber_ducky import (list_hid_devices, hid_gadget_ready,
+                                     list_scripts, mesh_allowed)
+    devices = list_hid_devices()
+    ready = hid_gadget_ready()
+    return {'has_gadget': bool(devices) or bool(ready),
+            'gadget_ready': bool(ready),
+            'script_count': len(list_scripts()),
+            'mesh_allow': mesh_allowed()}
+
+
+def _ducky_mesh_write_guard():
+    """For a ducky request relayed from a mesh peer (``g.mesh_gateway``), refuse
+    a state-changing op unless this unit ticked "Allow mesh units to run
+    payloads". Returns a Flask response to short-circuit, or None to proceed."""
+    if not getattr(g, 'mesh_gateway', False):
+        return None
+    try:
+        from python.rubber_ducky import mesh_allowed
+        if mesh_allowed():
+            return None
+    except Exception as e:
+        logger.error(f"ducky mesh guard error: {e}")
+    return jsonify({'success': False, 'error': (
+        'This unit has not enabled mesh HID control. Tick "Allow mesh units to '
+        'run payloads" on its Rubber Ducky card.')}), 403
+
+
+@app.route('/api/mesh/rubber-ducky/status', methods=['GET'])
+def api_mesh_rubber_ducky_status():
+    """Peer-readable (GET under /api/mesh/): lets a hub discover which mesh units
+    have a USB HID gadget and whether they've opted into mesh control. No control
+    here — running a payload goes through the secret-gated gateway + the guard."""
+    try:
+        out = _rubber_ducky_summary()
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+    out.update({'success': True, 'name': _mesh_viking_name() or socket.gethostname()})
+    return jsonify(out)
+
+
+@app.route('/api/rubber-ducky/units', methods=['GET'])
+def api_rubber_ducky_units():
+    """This unit plus every mesh peer with its HID summary, so the Rubber Ducky
+    card can run a payload on any Ragnar wired to a host. Driving a peer relays
+    through the mesh gateway, which needs the mesh secret."""
+    units = []
+    try:
+        local = _rubber_ducky_summary()
+    except Exception as e:
+        local = {'has_gadget': False, 'error': str(e)}
+    local.update({'id': 'local', 'name': (_mesh_viking_name() if mesh_available else None)
+                  or socket.gethostname(), 'local': True, 'reachable': True})
+    units.append(local)
+    gateway_ready = False
+    if mesh_available and _mesh_enabled():
+        gateway_ready = bool(_mesh_secret())
+        peers = _mesh_tagged_peers()
+        results = {}
+
+        def _poll(node):
+            results[node.get('id')] = mesh_manager.poll_peer(
+                node, port=_mesh_node_port(), timeout=4,
+                path='/api/mesh/rubber-ducky/status')
+
+        threads = [threading.Thread(target=_poll, args=(p,), daemon=True)
+                   for p in peers if p.get('online') and p.get('id')]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=6)
+        for p in peers:
+            r = results.get(p.get('id')) or {}
+            units.append({'id': p.get('id'), 'local': False,
+                          'name': r.get('name') or p.get('hostname') or p.get('dns_name'),
+                          'online': bool(p.get('online')),
+                          'reachable': bool(r.get('reachable')) and bool(r.get('success')),
+                          'has_gadget': bool(r.get('has_gadget')),
+                          'gadget_ready': bool(r.get('gadget_ready')),
+                          'mesh_allow': bool(r.get('mesh_allow')),
+                          'script_count': r.get('script_count'),
+                          'error': r.get('error') if not r.get('reachable') else None})
+    return jsonify({'units': units, 'gateway_ready': gateway_ready,
+                    'mesh_enabled': bool(mesh_available and _mesh_enabled())})
+
+
+@app.route('/api/rubber-ducky/mesh-allow', methods=['GET', 'POST'])
+def api_rubber_ducky_mesh_allow():
+    """Get or set THIS unit's opt-in to mesh-driven HID control (the checkbox).
+    Always local — never relayed — so each unit governs its own HID."""
+    from python.rubber_ducky import mesh_allowed, set_mesh_allowed
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+        return jsonify(set_mesh_allowed(bool(data.get('allow'))))
+    return jsonify({'success': True, 'mesh_allow': mesh_allowed()})
+
+
 # Rubber Ducky Routes
 @app.route('/api/rubber-ducky/scripts', methods=['GET'])
 def rubber_ducky_list_scripts():
@@ -20713,6 +20962,9 @@ def rubber_ducky_execute():
     global ``enable_attacks`` flag.
     """
     try:
+        guard = _ducky_mesh_write_guard()
+        if guard:
+            return guard
         data = request.get_json() or {}
         script_name = data.get('script')
         device_path = data.get('device')
@@ -20803,6 +21055,9 @@ def rubber_ducky_gadget_status():
 @app.route('/api/rubber-ducky/gadget/enable', methods=['POST'])
 def rubber_ducky_gadget_enable():
     """Bring the HID keyboard gadget up on demand (adds hid.usb0, binds)."""
+    guard = _ducky_mesh_write_guard()
+    if guard:
+        return guard
     payload, status = _rubber_ducky_gadget('up')
     logger.info(f"Rubber Ducky gadget enable: {payload}")
     return jsonify(payload), status
@@ -20811,6 +21066,9 @@ def rubber_ducky_gadget_enable():
 @app.route('/api/rubber-ducky/gadget/disable', methods=['POST'])
 def rubber_ducky_gadget_disable():
     """Tear the HID keyboard gadget down on demand (removes hid.usb0)."""
+    guard = _ducky_mesh_write_guard()
+    if guard:
+        return guard
     payload, status = _rubber_ducky_gadget('down')
     logger.info(f"Rubber Ducky gadget disable: {payload}")
     return jsonify(payload), status
@@ -20832,6 +21090,9 @@ def rubber_ducky_library():
 def rubber_ducky_library_install():
     """Copy a library payload into the editable scripts folder."""
     try:
+        guard = _ducky_mesh_write_guard()
+        if guard:
+            return guard
         from python.rubber_ducky import install_payload
         name = (request.get_json() or {}).get('name')
         result = install_payload(name)
@@ -20841,10 +21102,40 @@ def rubber_ducky_library_install():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/rubber-ducky/ragnar-scripts', methods=['GET'])
+def rubber_ducky_ragnar_scripts():
+    """List ducky payloads available in the cloned RagnarScripts repo."""
+    try:
+        from python.rubber_ducky import list_ragnar_scripts
+        return jsonify(list_ragnar_scripts())
+    except Exception as e:
+        logger.error(f"Error listing RagnarScripts payloads: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/rubber-ducky/ragnar-scripts/install', methods=['POST'])
+def rubber_ducky_ragnar_scripts_install():
+    """Install a ducky payload from the RagnarScripts repo into files/rubber-ducky/."""
+    try:
+        guard = _ducky_mesh_write_guard()
+        if guard:
+            return guard
+        from python.rubber_ducky import install_ragnar_script
+        name = (request.get_json(silent=True) or {}).get('name')
+        result = install_ragnar_script(name)
+        return jsonify(result), (200 if result.get('success') else 400)
+    except Exception as e:
+        logger.error(f"Error installing RagnarScripts payload: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/rubber-ducky/save', methods=['POST'])
 def rubber_ducky_save():
     """Create or overwrite a script in the editable scripts folder."""
     try:
+        guard = _ducky_mesh_write_guard()
+        if guard:
+            return guard
         from python.rubber_ducky import save_script
         data = request.get_json() or {}
         result = save_script(data.get('name'), data.get('content', ''))
@@ -24462,7 +24753,9 @@ def _resolve_upload_target(target_path):
     """Map an /uploads or /backups virtual dir (possibly nested) to a real dir.
 
     Returns the actual directory path, or raises ValueError on a bad/escaping
-    path. Only the writable uploads and backups trees are allowed as targets.
+    path. The writable trees allowed as upload targets are Uploads, Backups and
+    the two script libraries (rubber-ducky payloads and console scripts) — so a
+    script can be added straight from the Files tab.
     """
     if target_path == '/uploads' or target_path.startswith('/uploads/'):
         return _resolve_legacy_path('/uploads', shared_data.upload_dir, target_path)
@@ -24471,6 +24764,9 @@ def _resolve_upload_target(target_path):
     if target_path == '/rubber-ducky' or target_path.startswith('/rubber-ducky/'):
         return _resolve_legacy_path('/rubber-ducky',
             os.path.join(os.path.dirname(os.path.abspath(__file__)), 'files', 'rubber-ducky'), target_path)
+    if target_path == '/console_scripts' or target_path.startswith('/console_scripts/'):
+        return _resolve_legacy_path('/console_scripts',
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'console_scripts'), target_path)
     raise ValueError('Invalid upload path')
 
 
@@ -24510,7 +24806,8 @@ def _resolve_readable_path(file_path):
 
 @app.route('/api/files/upload', methods=['POST'])
 def upload_file_api():
-    """Upload one or more files into an /uploads or /backups folder."""
+    """Upload one or more files into a writable folder (Uploads, Backups, the
+    rubber-ducky payload library or the console_scripts library)."""
     try:
         if 'file' not in request.files:
             return jsonify({'error': 'No file provided'}), 400
@@ -29814,6 +30111,21 @@ def run_server(host='0.0.0.0', port=8000, ssl_cert=None, ssl_key=None, https_por
             serial_console.init()
         except Exception as e:
             logger.warning(f"Serial console init skipped: {e}")
+
+        # Clone/pull the external RagnarScripts library on boot so shared ducky
+        # and console scripts are available without a manual git pull. Runs in
+        # the background (never blocks the web server binding) and is never fatal.
+        def _boot_ragnar_scripts():
+            try:
+                import ragnar_scripts
+                st = ragnar_scripts.sync(force=True)
+                if st.get('ok'):
+                    logger.info(f"RagnarScripts {st.get('action')} ok: {st.get('dir')}")
+                else:
+                    logger.info(f"RagnarScripts sync skipped: {st.get('error')}")
+            except Exception as _rs_err:
+                logger.warning(f"RagnarScripts boot sync error: {_rs_err}")
+        socketio.start_background_task(_boot_ragnar_scripts)
 
         # Synchronize counts in the background so the web server binds
         # immediately instead of waiting for a full DB scan first.

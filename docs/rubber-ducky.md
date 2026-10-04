@@ -129,9 +129,11 @@ Typing is Shift-aware on a US layout, so capitals and shifted symbols
 ## Uploading scripts
 
 Scripts live in `files/rubber-ducky/`, which is exposed in the **Files** tab as
-its own `rubber-ducky` folder. Upload `.ducky` or `.txt` files there (the folder
-ships with one safe demo, `demo_hello.ducky`); they appear in the script
-dropdown immediately. `.ducky` files open as editable text in the Files tab
+its own `rubber-ducky` folder. Browse into it and use **⬆ Upload here** to add
+`.ducky` or `.txt` files (the folder ships with one safe demo,
+`demo_hello.ducky`); they appear in the script dropdown immediately. The card's
+own **Upload** button (next to the script picker) does the same thing without
+leaving the Pentest tab. `.ducky` files open as editable text in the Files tab
 (like `.txt`/`.json`), so you can tweak a script in place. Selecting a script
 shows a human-readable **preview** of every action before you run it.
 
@@ -139,10 +141,18 @@ shows a human-readable **preview** of every action before you run it.
 
 The card has two helpers under the status line:
 
-- **Payload library** — ready-made payloads bundled in the repo
-  (`resources/ducky_payloads/`): host recon for Windows/Linux/macOS, a Windows
-  saved-Wi-Fi-profile dump, and a Windows reverse-shell template. **Install**
-  copies one into `files/rubber-ducky/` to run or edit.
+- **Payload library** — one combined list of ready-made payloads from two
+  sources, each row tagged so you can tell them apart:
+  - **bundled** — shipped in the repo (`resources/ducky_payloads/`): host recon
+    for Windows/Linux/macOS, a Windows saved-Wi-Fi-profile dump, and a Windows
+    reverse-shell template.
+  - **RagnarScripts** — the shared [RagnarScripts](ragnarscripts.md) library
+    (`rubber-ducky/`), shown here automatically once the repo is present (Ragnar
+    [auto-clones/pulls](ragnarscripts.md#auto-sync) it). A RagnarScripts payload
+    already copied locally shows **Reinstall**.
+
+  **Install** copies the chosen payload into `files/rubber-ducky/` to run or
+  edit; your own scripts there are never touched.
 - **Editor** — write a script inline: **New** clears it, **Edit selected**
   loads the chosen script, **Save Script** writes it to `files/rubber-ducky/`
   (name must end in `.ducky`/`.txt`) and selects it. Pairs with the
@@ -156,6 +166,33 @@ The card has two helpers under the status line:
 3. Pentest tab → **Rubber Ducky Script Executor**.
 4. Pick a script (preview appears), pick the `/dev/hidg0` target, press
    **Execute Script**. The status line reports how many commands ran.
+
+## Driving another unit over the mesh
+
+When a Ragnar is plugged into a host PC over USB-OTG, that port is both its power
+and its data link to the target — so it can't also use wired Ethernet, and it
+runs on **Wi-Fi**. That's enough for a *second* Ragnar on the LAN/mesh to drive
+its HID: you operate from your own unit and the keystrokes come out of the one
+cabled to the host. Same model as the [Device Console](serial-console.md) across
+the mesh.
+
+- **Run on** — the picker at the top of the card. `This unit` is the default;
+  pick a mesh peer to target its `/dev/hidg0`. The list shows each peer's state
+  (`HID, mesh-allowed`, `HID (not allowed)`, `no HID`, offline/unreachable).
+  Script list, device list, preview and **Execute** then all act on that unit.
+- **Allow mesh units to run payloads on this unit** — the checkbox. Off by
+  default: a unit will not let the mesh touch its keyboard until its own operator
+  ticks this. Set it on the unit that's **cabled to the host** (reach its
+  dashboard over Wi-Fi, or tick it before you plug it in).
+- **Mesh secret** — cross-unit control rides the same secret-gated gateway as
+  the rest of hub mode, so the [mesh secret](mesh.md) must be armed on **both**
+  units (Config → Mesh). Tag membership alone is not enough. Without it the card
+  tells you what's missing.
+
+So the two gates are independent: the **secret** proves the request came from
+your mesh (transport), and the **checkbox** is the target unit's explicit opt-in
+(per-unit). A relayed **Execute**, gadget enable/disable, save or install is
+refused unless the target has ticked the box.
 
 ## Testing & validation
 

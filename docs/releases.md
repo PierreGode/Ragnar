@@ -2,7 +2,114 @@
 
 ## Releases
 
+### 2026-10-04
+
+#### docs: wardrive firmware comparison on the ESP32-C5
+*branch `docs/wardrive-comparison` · PR pending*
+
+- New [wardrivecomparison.md](wardrivecomparison.md): Huginn vs Piglet measured on the same Seeed XIAO ESP32-C5 (Huginn → Piglet → Huginn, 10 min each, Pi 5 `wlan0` as drift tracker). Huginn sweeps in ~5.3 s vs 9.7 s (1.8× more detections/min, plus BLE); Piglet hears slightly more per sweep; Huginn's scan-timing calibration; open issue with one channel-5 AP after `show_hidden`
+- Linked from the [docs index](README.md)
+
+#### fix(rf-waterfall): keep the scroll flowing on a slow sweep instead of freezing
+*branch `fix/rf-waterfall-smooth-scroll` · PR pending*
+
+- **Symptom:** the RF Waterfall froze for ~1 s every couple of seconds, then jumped to catch up, instead of scrolling as a smooth constant flow
+- **Root cause:** live rows are genlocked to their producer timestamp behind a ~0.6 s buffer. The real-time IQ engine feeds 16 rows/s so the buffer stays full and the scroll is smooth — but wide sub-GHz bands fall back to the `rtl_power` sweep, which emits only ~1 row per completed sweep (`-i 1`). That gap is longer than the 0.6 s buffer, so the playhead starves between sweeps: freeze, then a jump when the next frame lands (same for any wide/slow producer, e.g. a wide HackRF span)
+- **Fix:** when the queue drains between frames, hold the last line and scroll it at the chosen **Scroll rate** (Slow/Normal/Fast = 5/12/24 rows/s) until real data resumes — the way SDR++/gqrx scroll on a slow sweep. New spectrum still arrives at the engine's true rate and **Rows/s** still reports it; the hold only keeps the picture moving
+- Held rows are recorded in history with their own wall-clock time, so the time grid, repaint, scroll-back and CSV export stay 1:1 with the pixels on screen; measurement, detection and the noise-print recorder see only real rows. A fast engine never starves, so the hold never engages there (IQ path unchanged); a genuine multi-second stall stops the hold and lets the panel raise its waiting veil
+- Verified by pacing simulation: `rtl_power` ~1/s now scrolls at a constant 12/s with ≤67 ms hitches (was ~1 s freezes); IQ 16/s is unchanged (zero hold rows). Not yet confirmed on live hardware (the DVB-T driver was holding the dongle on the dev box)
+- Also changed the **default colour window** to a fixed **Ref level −50 dB, Range 15** (top −50, bottom −65) instead of auto-range; a per-browser setting saved in Settings → Display range still wins
+- **Docs:** [rf-waterfall.md](rf-waterfall.md) "Sub-GHz engine" — rewrote the steady-flow note, added "No freeze on a slow sweep"
+
+#### [#911](https://github.com/PierreGode/Ragnar/pull/911) — feat(net): Liebert Guard v2 — bounded reassembly
+*branch `feature/liebert-guard-v2`*
+
+- Vendored **liebert_guard v2**: reassembly is now incremental with a per-flow work budget (`MAX_WORK` 200,000 steps, `MAX_CANDS` 16), so a stream of tiny TCP segments can no longer make one frame expensive — on the Pi 5, 1,524 one-byte segments went from **12.35 s to 0.08 s**
+- Same codes (LG-001/002/003/101), CVEs and output; new limit: a head or request line split into more than ~630 in-order one-byte segments is not judged
+- Conformance tier updated (493 → 501). All author tiers pass on the Pi 5 (ARM64): module 198 incl. live loopback, conformance 501, scapy 554, perf 29, unit verifier 74; Detector Self-Test 206/206, all 47 suites green from the web path
+- **Docs:** [nettools.md](nettools.md) "Liebert Guard"
+
+#### [#910](https://github.com/PierreGode/Ragnar/pull/910) — fix(gc9a01): stop the round TFT showing only static
+*branch `fix/gc9a01-spi-speed`*
+
+- **Root cause:** the GC9A01 1.28" round display driver hardcoded SPI at the panel's 40 MHz maximum. Over Dupont/jumper wiring that clock corrupts the init-sequence command bytes, so the controller is never configured and the panel shows only its power-on noise ("snow"/static)
+- Default SPI clock lowered to a safe **20 MHz**, matching the conservative approach of the ILI9486 driver
+- Added environment overrides mirroring the 3.5" TFT driver: `RAGNAR_GC9A01_SPI_HZ`, `RAGNAR_GC9A01_MADCTL`, `RAGNAR_GC9A01_INVERT`, and `RAGNAR_GC9A01_RST_PIN` / `_DC_PIN` / `_BL_PIN` (`-1` disables backlight control). Users can drop the clock further (`10000000`) if still noisy
+- Display inversion (`INVON`) and MADCTL are now env-tunable instead of hardcoded; backlight pin respects `-1`
+- New "1.28" GC9A01 round TFT" section in [Display Controls](DISPLAY_CONTROLS.md) with wiring and a static/snow troubleshooting table
+
+#### feat(mesh): pick the Meshtastic MQTT region
+*branch `feature/meshtastic-mqtt-region` · PR pending*
+
+- **Region picker** next to the MQTT Topic box on Mesh Nodes and Mesh Map: All regions (`msh/+/2/#`), or one region root (`msh/EU_868/#`, `msh/US/#`, ANZ, CN, JP, …) including country and city sub-topics; *Custom topic* for a hand-typed filter. Choice is remembered per browser
+- Changing the topic while MQTT is on reconnects at once, and the backend drops the old region's nodes/messages (`MeshMqtt.connect`)
+- Region list served by `detect()` (`mqtt_defaults.regions`); `mqtt_region_topic()` + 4 self-tests (26/26)
+- **Region badge on every MQTT message** (e.g. `EU_868/SE`, `US`, `ANZ`), read off the topic by `mqtt_topic_region()`; hover shows the full topic; map popups show **Region** for MQTT stations. +2 self-tests (28/28)
+- **Docs:** [sdr-subghz.md](sdr-subghz.md) "Choosing a region" / "Where a message came from"
+
+### 2026-10-03
+
+#### fix(wardriving): Piglet sync — newest drive first, give up on stuck files, sync on plug-in
+*branch `feature/piglet-sync-newest-plugin` · PR pending*
+
+- **Newest first:** with Piglet v2.61 `LIST` carries each file's last-write time; Ragnar fetches the newest drive first (unknown times next, previously failed files last). On a full card the first field sync imported months-old drives before the new ones
+- **Stuck files:** SD read errors (`@PG ERR read-error`, v2.61) stop that file at once; 2 no-progress resumes abandon it; a failed file waits 6 h before a retry and is skipped after 3 failed syncs (`unreadable`); a vanished port stops the sync instead of failing every remaining file
+- **Sync on plug-in:** new `PlugWatcher` syncs a Piglet when it's plugged in even with wardriving stopped (Espressif native-USB devices only, once per plug-in, respects serial claims; defers to the wardriving listener while it runs). Button and watcher share one guarded `_piglet_sync_on_port()`
+- **Docs:** [wardriving.md](wardriving.md) "USB sync of solo drives"
+
+#### [#907](https://github.com/PierreGode/Ragnar/pull/907) — feat(net): Liebert Guard + updated visibility matrix
+*branch `feature/liebert-guard`*
+
+- **Liebert Guard**, the companion to APC Guard for Vertiv / Liebert power cards: vendored stdlib-only `python/liebert_guard.py` replayed in-app from a bounded `tcpdump` capture of the card's HTTP port. **LG-001** RomPager banner below 4.34 (**Misfortune Cookie**, CVE-2014-9222 — Liebert MPH / RPC-1000), **LG-002/003** unparseable / patched banner, **LG-101** HTTP method over 64 bytes (CVE-2025-41426 — Liebert RDU101 / IS-UNITY overflow)
+- Card in **Diagnostics → L7** right after APC Guard (port picker); `GET /api/net/liebert-guard`, CLI `liebert-guard` / `liebert-guard-selftest`; Detector Self-Test row **206/206** (module tier in its own interpreter, incl. live loopback capture)
+- Opt-in hardened `scripts/liebert_guard@.service` → `/var/log/ragnar/liebertguard.jsonl`, tested on the Pi 5; runs as `ragnar` (a dynamic user would move `/var/log/ragnar`)
+- Watchtower: Liebert sources, `note` as headline, attempt source = client / banner source = card
+- New **module visibility matrix** (52 detectors) in the docs and the web UI reference cards; CVE index 268 named / 227 detected
+- **Docs:** [nettools.md](nettools.md) "Liebert Guard", [watchtower.md](watchtower.md), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [README (root)](../README.md)
+
+#### [#906](https://github.com/PierreGode/Ragnar/pull/906) — feat(wardriving): import Piglet solo drives over USB
+*branch `feature/piglet-serial-sync`*
+
+- A drive done with Piglet on its own only lived on its SD card. Piglet firmware **v2.60** (SerialSync) answers `@PIGLET HELLO/LIST/GET` on its USB port, and new [`piglet_sync.py`](../piglet_sync.py) pulls every finished CSV and imports each one as its own session (`session_<first seen>_piglet`)
+- Runs automatically when a Piglet connects while wardriving (`wardriving_piglet_sync`, default on) and on demand via **Import from Piglet (USB)** on the Import card (`POST/GET /api/wardriving/piglet/sync`). With wardriving stopped it opens the free ESP32 port itself under a `piglet-sync` serial claim
+- Per-chunk CRC32 + resume-at-offset (up to 8 resumes per file); Piglet mutes IDF logging while serving so Wi-Fi log lines can't corrupt data lines. About 140 KiB/s on an ESP32-C5
+- Skips the file Piglet is writing (the live stream covers it) and files with no GPS positions; remembers imports per Piglet MAC + file name (`data/wardriving/piglet_imports.json`), so a file Piglet later moves to `/uploaded` is not imported twice
+- **CSV import now keeps real times:** rows use their `FirstSeen` instead of the import time, a GPS track is rebuilt from positioned rows, `0,0` is stored as "no position", pre-clock `1970` rows take the file's nearest valid time; also fixes a `TypeError` on cell rows (`upsert_cell_tower` missing args). Applies to the manual **Import CSV** too
+- **Docs:** [wardriving.md](wardriving.md) "USB sync of solo drives", [README.md](../README.md)
+
 ### 2026-10-02
+
+#### [#905](https://github.com/PierreGode/Ragnar/pull/905) — feat(ducky): drive the Rubber Ducky HID across the mesh
+*branch `feat/ducky-mesh` · 6 file(s)*
+
+- A Ragnar plugged into a host PC via USB-OTG can't use wired Ethernet at the same time, so it rides Wi-Fi — and now a **second Ragnar on the mesh can run Ducky payloads on its HID**, the same way the Device Console is driven across the mesh
+- **Run on** picker added to the Rubber Ducky card (this unit + mesh peers, each showing HID/allowed state); selecting a peer tags every script/device/preview/execute/install call with `X-Ragnar-Target` so this unit's secret-gated gateway relays it (`duckyState` + `rdFetch` in ragnar_modern.js)
+- **Allow mesh units to run payloads on this unit** checkbox (off by default), persisted in `data/rubber_ducky.json` (`mesh_allowed()` / `set_mesh_allowed()` in `python/rubber_ducky.py`). `_ducky_mesh_write_guard()` refuses a *relayed* execute / gadget enable-disable / save / install unless the target unit ticked it — so the two gates are independent: the **mesh secret** authorises transport, the **checkbox** is the target's per-unit opt-in
+- New endpoints: `GET /api/rubber-ducky/units`, `GET/POST /api/rubber-ducky/mesh-allow`, and the peer-discovery `GET /api/mesh/rubber-ducky/status`
+- **Docs:** [rubber-ducky.md](rubber-ducky.md) "Driving another unit over the mesh"
+
+#### [#904](https://github.com/PierreGode/Ragnar/pull/904) — feat(scripts): install ducky + console scripts from the external RagnarScripts library
+*branch `feat/ragnarscripts-install-library` · 12 file(s)*
+
+- Ragnar now reads a second, **user-cloned** script source — [RagnarScripts](https://github.com/PierreGode/RagnarScripts) — alongside the built-in demos, which stay exactly where they are. Discovery order: `$RAGNAR_SCRIPTS_DIR` → a `RagnarScripts/` folder beside the repo → `~/RagnarScripts` → `/home/pi` or `/home/ragnar`
+- **Auto-sync** (`ragnar_scripts.py`): best-effort `git clone` (when missing) / `git pull` (when present) on web-server start and when the **Dashboard**/**Pentest** tabs open, so pushed scripts appear without a manual pull. Anonymous HTTPS (public repo, no creds), throttled ~30 s, backgrounded, `safe.directory=*` for cross-user checkouts, never fatal. New endpoint `POST /api/ragnar-scripts/sync`; the two `_ragnar_scripts_repo()` helpers now delegate to this module
+- **Rubber Ducky card:** RagnarScripts `.ducky`/`.txt` payloads (repo's `rubber-ducky/` folder) are folded directly into the existing **Payload Library** list, mixed with the bundled `resources/ducky_payloads/` payloads and tagged **RagnarScripts** vs **bundled**, with per-row Install/Reinstall (`list_ragnar_scripts()` / `install_ragnar_script()` in `python/rubber_ducky.py`)
+- **Device Console card:** new expandable **Install console scripts** section lists `.json` sequences from the repo's `console-scripts/` folder (name/vendor/command-count), installs into this unit's `data/console_scripts/` and refreshes the Run-script picker (`list_library()` / `install_library_script()` in `serial_console.py`)
+- APIs: `GET/POST /api/rubber-ducky/ragnar-scripts[/install]`, `GET/POST /api/serial-console/library[/install]`. Installs are name/id-validated (traversal rejected) and JSON-validated for console scripts
+- The **local folders stay fully editable** — Upload here / Files-tab / inline editor all still work; installing never deletes a user's own scripts (same-name install overwrites, shown as *Reinstall*)
+- Bumped the `ragnar_modern.js` cache-bust (`?v=20261002-ragnarscripts`)
+- **RagnarScripts repo** seeded with the folder structure and a few harmless test scripts (3 ducky payloads, 3 console scripts) + READMEs
+- **Docs:** new [ragnarscripts.md](ragnarscripts.md); updated [rubber-ducky.md](rubber-ducky.md), [serial-console.md](serial-console.md), [README.md](../README.md), [docs index](README.md)
+
+#### [#903](https://github.com/PierreGode/Ragnar/pull/903) — fix(files): upload scripts into console_scripts & rubber-ducky + console-card Upload button
+*branch `fix/files-upload-console-ducky` · 7 file(s)*
+
+- **Bug:** the Files tab only showed the **⬆ Upload here** toolbar inside `/uploads` and `/backups`, so there was no way to add a script from the **console_scripts** or **rubber-ducky** folders — the upload always fell back to `/uploads`. The backend also rejected `/console_scripts` as an upload target
+- Added an `isUploadablePath()` superset (writable trees **plus** the two script libraries) so the folder toolbar's **Upload here** button now appears in `console_scripts` and `rubber-ducky`, and `uploadFile()` targets the folder actually being browsed. The general-purpose **+ New folder** button stays limited to Uploads/Backups (the libraries are flat)
+- Backend: `_resolve_upload_target()` now accepts `/console_scripts` (mapped to `data/console_scripts/`); `/rubber-ducky` was already allowed. Uploaded `.json` scripts are picked up by `serial_console.list_scripts()` immediately
+- **Feature:** added an **Upload** button next to the **Run Script** picker on the Dashboard **Device Console** card (mirrors the Rubber Ducky card) — pick a `.json` console script, it's added to the local unit's library and auto-selected (`scUploadScript()`)
+- Bumped the `ragnar_modern.js` cache-bust (`?v=20261002-folder-upload`)
+- **Docs:** [serial-console.md](serial-console.md), [rubber-ducky.md](rubber-ducky.md), [README.md](../README.md), [releases.md](releases.md)
 
 #### [#900](https://github.com/PierreGode/Ragnar/pull/900) — docs(pentest): Rubber Ducky card shows supported boards + GPIO-powering note
 *branch `fix/ducky-board-power-info` · 2 file(s)*

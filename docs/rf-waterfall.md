@@ -97,13 +97,22 @@ is named under the panel title (`RTL-SDR · IQ FFT · real-time` vs
 the scroll-speed setting.
 
 **Steady flow.** Live rows are never painted as they arrive. They go into a small
-buffer (~0.8 s), and the page releases them at **one steady rate**: the SDR's
-measured data rate, worked out from the frames' own timestamps rather than from
-the jittery poll timing. The buffer is kept full by nudging the pace **at most
-±12%**, which is imperceptible, so network or backend jitter never shows up as
-a change of speed. After an interruption the buffer grows (up to 2 s) so a
-repeat is absorbed. A backlog that is seconds old (the tab was in the
-background, or the backend stalled for a long time) is skipped, not fast-forwarded.
+buffer and the page plays them back behind a fixed ~0.6 s latency, each row at
+its **own producer timestamp** — so the scroll speed is exactly the rate the SDR
+produced rows, with no rate estimate to drift and no catch-up surge when poll or
+network timing jitters.
+
+**No freeze on a slow sweep.** When the engine produces rows *slower* than a
+smooth scroll — the `rtl_power` sweep updates only ~1×/s, and a wide span retunes
+between frames — the buffer empties between frames. Rather than let the picture
+freeze and then jump when the next frame lands, the page **holds the last line**,
+scrolling it at the **Scroll rate** you pick (Slow / Normal / Fast = 5 / 12 / 24
+rows a second) until real data resumes. New spectrum still appears at the
+engine's true rate, and **Rows/s** still reports that true rate — the hold only
+keeps the waterfall flowing instead of stalling. A fast engine (IQ, ~16/s) always
+has rows buffered ahead, so the hold never engages. A *genuine* stall (the tab
+was backgrounded, or the backend wedged) stops the hold after a few seconds and
+the panel shows its "waiting" veil rather than scrolling stale data forever.
 
 - **IQ FFT (real-time)** — for any span that fits a **single RTL-SDR tune**
   (≤ `rtl_sdr._IQ_MAX_SPAN_HZ`, ~2.8 MHz: zooms, manual tunes, Z-Wave regions,
@@ -116,9 +125,11 @@ background, or the backend stalled for a long time) is skipped, not fast-forward
 - **`rtl_power` sweep** — the fallback for **wide bands** that can't fit one tune
   (the full `868`/`915`/`subghz` scans need the dongle to retune across the
   range) and for any host missing `rtl_sdr` or numpy. `rtl_power` integrates
-  `-i 1 s` per sweep, so it advances at best ~1 row/s — fine for a broad "what's
-  out there" scan, slow for a narrow zoom (which is exactly why the IQ engine
-  exists).
+  `-i 1 s` per sweep, so it produces at best ~1 *new* row/s — fine for a broad
+  "what's out there" scan, slow for a narrow zoom (which is exactly why the IQ
+  engine exists). The waterfall still **scrolls smoothly** at your chosen Scroll
+  rate: the last line is held between sweeps (see "No freeze on a slow sweep"
+  above), so a slow producer no longer shows up as a freeze-then-jump.
 
 Both engines emit the same frame shape, feed the same ring buffer, recorder and
 `/api/net/rtl/power/frames`, so nothing else on the page changes.

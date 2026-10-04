@@ -10,8 +10,8 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **266** distinct CVE IDs
-- **225** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **268** distinct CVE IDs
+- **227** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
 - **32** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
@@ -28,7 +28,7 @@ detector works is in [nettools.md](nettools.md).
 | 2008 | 2 |
 | 2011 | 1 |
 | 2013 | 3 |
-| 2014 | 6 |
+| 2014 | 7 |
 | 2015 | 9 |
 | 2016 | 5 |
 | 2017 | 6 |
@@ -39,7 +39,7 @@ detector works is in [nettools.md](nettools.md).
 | 2022 | 19 |
 | 2023 | 36 |
 | 2024 | 47 |
-| 2025 | 33 |
+| 2025 | 34 |
 | 2026 | 36 |
 
 ## By detector
@@ -69,6 +69,7 @@ detector works is in [nettools.md](nettools.md).
 | Juniper Guard | 9 |
 | LACP Watch | 1 |
 | LDAP Watch | 3 |
+| Liebert Guard | 2 |
 | MikroTik Guard | 16 |
 | NTP Watch | 12 |
 | OSPF Watch | 9 |
@@ -107,6 +108,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2013-5211](https://nvd.nist.gov/vuln/detail/CVE-2013-5211) | NTP monlist amplification | detected | NTP Watch | — |
 | [CVE-2014-0160](https://nvd.nist.gov/vuln/detail/CVE-2014-0160) | Heartbleed | detected | TLS Watch | — |
 | [CVE-2014-7271](https://nvd.nist.gov/vuln/detail/CVE-2014-7271) |  | detected | SR-MPLS Watch | — |
+| [CVE-2014-9222](https://nvd.nist.gov/vuln/detail/CVE-2014-9222) | Misfortune Cookie | detected | Liebert Guard | — |
 | [CVE-2014-9295](https://nvd.nist.gov/vuln/detail/CVE-2014-9295) | NTP Autokey crypto_recv overflow | detected | NTP Watch | — |
 | [CVE-2014-9298](https://nvd.nist.gov/vuln/detail/CVE-2014-9298) |  | detected | NTP Watch | — |
 | [CVE-2014-9750](https://nvd.nist.gov/vuln/detail/CVE-2014-9750) |  | detected | NTP Watch | — |
@@ -308,6 +310,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2025-38741](https://nvd.nist.gov/vuln/detail/CVE-2025-38741) | Duplicate SSH host key | detected | Dell Guard, SSH Watch | — |
 | [CVE-2025-40778](https://nvd.nist.gov/vuln/detail/CVE-2025-40778) | Unsolicited-RR cache poisoning | detected | DNS Watch | — |
 | [CVE-2025-40780](https://nvd.nist.gov/vuln/detail/CVE-2025-40780) | Weak port/ID PRNG | detected | DNS Watch | — |
+| [CVE-2025-41426](https://nvd.nist.gov/vuln/detail/CVE-2025-41426) | Liebert RDU101 / IS-UNITY HTTP method overflow | detected | Liebert Guard | — |
 | [CVE-2025-44954](https://nvd.nist.gov/vuln/detail/CVE-2025-44954) |  | detected | SSH Watch | — |
 | [CVE-2025-50681](https://nvd.nist.gov/vuln/detail/CVE-2025-50681) |  | detected | IGMP / MLD Watch | — |
 | [CVE-2025-59978](https://nvd.nist.gov/vuln/detail/CVE-2025-59978) |  | detected | Juniper Guard | — |
