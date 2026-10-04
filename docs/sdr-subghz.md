@@ -209,6 +209,24 @@ qualify. The meshtastic library's own auto-detect would otherwise fall back to
 - **Node DB** — id, long/short name, hardware model, role, SNR, hops away,
   battery/voltage, GPS position, last-heard. Plotted on a compact node radar
   (self at centre, links coloured by SNR) plus a full table.
+- **Filter / sort** — a toolbar above the table filters the roster client-side
+  (no refetch): search (name / id / hardware / role), a role picker built from
+  the roles actually present, an activity/attribute filter (Active &lt;15m, Heard
+  &lt;2h, Has GPS, Direct 0-hop, Multi-hop), and sort by heard / name / SNR /
+  hops / battery. Self always sorts first; the caption shows *Showing X of Y*.
+- **Per-node actions** — clicking a row opens an actions panel for that node:
+  **Trace route**, **Message** (prefills the send box with the node id),
+  **Focus on map** (centres the radar on it), and **Copy ID**.
+- **Trace route (see the jumps)** — asks the mesh for the path to a node and
+  draws the hops as a chain, `you → relay (SNR) → … → target (SNR)`, with the
+  per-link SNR in dB and a hop count. This is Meshtastic's own traceroute
+  (`sendTraceRoute`): the request goes out over LoRa and the reply is captured
+  off the receive bus, so it **needs a connected USB node** (MQTT-only can't
+  trace) and can take 10–40 s — each hop adds airtime, and firmware rate-limits
+  it. The button is disabled until a node is connected. `POST
+  /api/net/mesh/traceroute` starts it (runs on a background thread, since the
+  library call blocks); the UI polls `GET /api/net/mesh/traceroute/result?id=`
+  for the parsed route.
 - **🗺 Full map view** (`/mesh-map`, `demos/mesh_map.html`) — a full-screen
   **Leaflet** slippy map (vendored `web/vendor/leaflet`, key-free dark
   Esri / OSM / satellite tile layers — no API key, like the wardrive map) with
@@ -594,6 +612,8 @@ timestamp), **Mic-E**, messages/acks, objects, status and best-effort weather �
 | `POST /api/net/mesh/start` · `/stop` · `/install` | Connect / disconnect the USB Meshtastic node; install meshtastic + paho-mqtt |
 | `POST /api/net/mesh/mqtt/connect` `{host?,port?,user?,password?,topic?}` · `/mqtt/disconnect` | Connect/disconnect the Meshtastic MQTT Internet feed (no node needed) |
 | `POST /api/net/mesh/send` `{text,to?,channel?,via?}` | Send a mesh text message via the node (LoRa) or MQTT (`via`=auto\|serial\|mqtt) |
+| `POST /api/net/mesh/traceroute` `{id,hop_limit?}` | Start a Meshtastic traceroute to a node (needs a USB node; runs async) |
+| `GET  /api/net/mesh/traceroute/result?id=` | Latest traceroute result for a node id — forward hop chain with per-link SNR |
 | `GET  /api/net/pager/status` · `/messages?since=` | Pager decode state (`mode`, `demods`, `invert`, `qcii_available`) + decoded POCSAG/FLEX/QCII messages |
 | `POST /api/net/pager/start` `{freq_hz, mode?, demods?, invert?}` · `/stop` · `/install` | Start/stop pager decode (`mode`=`pocsag_flex`\|`qcii`; `demods`=subset of POCSAG512/1200/2400/FLEX; `invert`=flip bitstream); install multimon-ng |
 | `GET  /api/net/vor/status` | VOR decode state + latest `fix` (radial/lock/quality) |
