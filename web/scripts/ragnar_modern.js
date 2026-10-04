@@ -37465,6 +37465,136 @@ function _meshControlBar(id, feature, unit) {
     </div>`;
 }
 
+// Tailnet path summary for a peer, straight from the status payload (no probe):
+// a direct WireGuard path vs. a DERP relay, plus the node's tailnet addresses.
+// This is the "how am I reaching this unit" half of "see the jumps".
+function _meshPathLine(unit) {
+    const ips = (unit.ips && unit.ips.length) ? unit.ips : (unit.ip ? [unit.ip] : []);
+    const ipStr = ips.map(escapeHtml).join(', ');
+    let path;
+    if (unit.direct) path = '<span class="text-green-300">Direct connection</span>';
+    else if (unit.relay) path = `<span class="text-amber-300">Relayed via DERP</span> <span class="text-gray-500">(${escapeHtml(unit.relay)})</span>`;
+    else path = '<span class="text-gray-400">Path not yet known</span>';
+    return `<span class="text-xs text-gray-400">Tailnet path: ${path}${ipStr ? ` · <span class="font-mono">${ipStr}</span>` : ''}</span>`;
+}
+
+// The per-node Actions bar: live network probes from THIS unit to the peer. Only
+// shown for a reachable peer with an address (an unreachable one gets Trace +
+// Diagnose on its banner instead, so the page never carries two output boxes).
+function _meshActionsBar(unit) {
+    if (!unit.ip) return '';
+    const ip = escapeHtml(unit.ip);
+    const port = _meshNodePort();
+    return `<div class="glass rounded-lg p-4 mb-3">
+        <div class="flex items-center justify-between gap-2 mb-3 flex-wrap">
+            <h4 class="font-semibold">Actions</h4>
+            ${_meshPathLine(unit)}
+        </div>
+        <div class="flex flex-wrap gap-2">
+            <button onclick="meshProbe('${ip}','trace',this)"
+                    class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-xs px-3 py-1.5 rounded transition-colors">Trace route</button>
+            <button onclick="meshProbe('${ip}','ping',this)"
+                    class="bg-slate-700 hover:bg-slate-600 text-gray-200 text-xs px-3 py-1.5 rounded transition-colors">Ping</button>
+            <button onclick="meshDiagnose('${ip}', ${port}, this)"
+                    class="bg-slate-700 hover:bg-slate-600 text-gray-200 text-xs px-3 py-1.5 rounded transition-colors">Diagnose</button>
+            <button onclick="meshCopyText('${ip}',this)"
+                    class="bg-slate-700 hover:bg-slate-600 text-gray-200 text-xs px-3 py-1.5 rounded transition-colors">Copy IP</button>
+        </div>
+        <div class="mesh-diag-out mt-3"></div>
+        <div class="mesh-probe-out mt-3"></div>
+    </div>`;
+}
+
+// Draw a traceroute result as a hop list — the "jumps" between this unit and the
+// peer. A relayed tailnet path or a dead hop shows up plainly here.
+function _meshRenderTrace(d) {
+    const hops = d.hops || [];
+    if (!hops.length) {
+        return `<div class="text-sm text-amber-200 border border-amber-800 rounded-lg p-3 bg-amber-950/30">
+            No hops returned.${d.raw ? `<pre class="mt-2 text-[11px] font-mono text-amber-100/80 whitespace-pre-wrap overflow-x-auto">${escapeHtml(d.raw)}</pre>` : ''}</div>`;
+    }
+    const rows = hops.map(h => `
+        <div class="flex items-center gap-3 py-1 border-b border-slate-800/60 text-xs">
+            <span class="w-6 text-right text-gray-500 font-mono">${h.hop}</span>
+            <span class="flex-1 font-mono ${h.ip ? 'text-gray-100' : 'text-gray-600'}">${h.ip ? escapeHtml(h.ip) : '* no reply'}</span>
+            <span class="text-gray-400 font-mono">${h.rtt_ms != null ? h.rtt_ms.toFixed(1) + ' ms' : ''}</span>
+        </div>`).join('');
+    const n = d.hop_count != null ? d.hop_count : hops.filter(h => h.ip).length;
+    const hopBadge = n <= 1 ? 'border-green-800 text-green-300 bg-green-950/30' : 'border-slate-700 text-gray-300';
+    return `<div class="text-sm border border-slate-700 rounded-lg p-3 bg-slate-900/50">
+        <div class="flex items-center gap-2 mb-2 flex-wrap">
+            <span class="font-semibold">Route to <span class="font-mono">${escapeHtml(d.target)}</span></span>
+            <span class="text-[11px] px-2 py-0.5 rounded border ${hopBadge}">${n} hop${n === 1 ? '' : 's'}</span>
+        </div>
+        ${rows}
+    </div>`;
+}
+
+function _meshRenderPing(d) {
+    const loss = d.loss_pct;
+    const ok = typeof loss === 'number' && loss < 100;
+    const tone = ok ? 'border-green-800 bg-green-950/30 text-green-200'
+                    : 'border-amber-800 bg-amber-950/30 text-amber-100';
+    return `<div class="text-sm border rounded-lg p-3 ${tone}">
+        <div class="flex items-center gap-2 mb-1">
+            <span class="w-2.5 h-2.5 rounded-full ${ok ? 'bg-green-400' : 'bg-amber-400'}"></span>
+            <span class="font-semibold">Ping <span class="font-mono">${escapeHtml(d.target)}</span></span>
+        </div>
+        <div class="opacity-90 text-xs">
+            ${d.received != null ? `${d.received}/${d.transmitted} replies · ${loss}% loss` : 'No summary parsed.'}
+            ${d.rtt_avg != null ? ` · avg ${d.rtt_avg} ms (min ${d.rtt_min} / max ${d.rtt_max})` : ''}
+        </div>
+    </div>`;
+}
+
+// Run a traceroute/ping from this unit to a peer. The target is validated
+// server-side against the known mesh roster, so this only passes an address the
+// status payload already gave us. Output lands in the nearest .mesh-probe-out.
+async function meshProbe(ip, kind, btn) {
+    const host = btn && (btn.closest('.glass') || btn.closest('.rounded-lg'));
+    const box = (host && host.querySelector('.mesh-probe-out')) || document.querySelector('.mesh-probe-out');
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = kind === 'ping' ? 'Pinging…' : 'Tracing…'; }
+    if (box) box.innerHTML = `<div class="text-sm text-gray-400">${kind === 'ping' ? 'Pinging' : 'Tracing route to'}
+        <span class="font-mono">${escapeHtml(ip)}</span> from this unit…</div>`;
+    const res = await _meshApi('/api/mesh/probe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ip, kind })
+    });
+    const d = res.data || {};
+    if (!res.ok || !d.success) {
+        const msg = d.error || res.error || ('HTTP ' + res.status);
+        if (box) box.innerHTML = `<div class="text-sm text-red-300 border border-red-800 rounded-lg p-3 bg-red-950/30">${escapeHtml(msg)}</div>`;
+    } else if (box) {
+        box.innerHTML = kind === 'ping' ? _meshRenderPing(d) : _meshRenderTrace(d);
+    }
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+}
+window.meshProbe = meshProbe;
+
+// Copy a short string (an IP) to the clipboard, with a graceful fallback for
+// browsers/contexts where navigator.clipboard is unavailable.
+function meshCopyText(text, btn) {
+    const done = () => {
+        if (!btn) return;
+        const o = btn.textContent; btn.textContent = 'Copied';
+        setTimeout(() => { btn.textContent = o; }, 1200);
+    };
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done).catch(done);
+        } else {
+            const ta = document.createElement('textarea');
+            ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta); ta.select();
+            try { document.execCommand('copy'); } catch (e) {}
+            document.body.removeChild(ta); done();
+        }
+    } catch (e) { done(); }
+}
+window.meshCopyText = meshCopyText;
+
 // Render the node page for one unit into #mesh-node-detail.
 function _meshRenderNodeDetail(id) {
     const el = document.getElementById('mesh-node-detail');
@@ -37514,11 +37644,24 @@ function _meshRenderNodeDetail(id) {
             <p class="text-sm text-gray-300">This node is not answering right now
                 (<span class="text-amber-300">${escapeHtml(st.label)}</span>) — its data below may be stale or empty.
                 Run a probe from <strong>this</strong> unit to find out why.</p>
-            ${diagIp ? `<button onclick="meshDiagnose('${diagIp}', ${_meshNodePort()}, this)"
-                    class="mt-3 bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-sm px-4 py-2 rounded transition-colors">Diagnose connection</button>
-                <div class="mesh-diag-out mt-3"></div>` : ''}
+            ${diagIp ? `<div class="flex flex-wrap gap-2 mt-3">
+                    <button onclick="meshDiagnose('${diagIp}', ${_meshNodePort()}, this)"
+                        class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-sm px-4 py-2 rounded transition-colors">Diagnose connection</button>
+                    <button onclick="meshProbe('${diagIp}','trace',this)"
+                        class="bg-slate-700 hover:bg-slate-600 text-gray-200 text-sm px-4 py-2 rounded transition-colors">Trace route</button>
+                    <button onclick="meshProbe('${diagIp}','ping',this)"
+                        class="bg-slate-700 hover:bg-slate-600 text-gray-200 text-sm px-4 py-2 rounded transition-colors">Ping</button>
+                </div>
+                <div class="text-xs text-gray-500 mt-2">${_meshPathLine(unit)}</div>
+                <div class="mesh-diag-out mt-3"></div>
+                <div class="mesh-probe-out mt-3"></div>` : ''}
         </div>`;
     }
+
+    // Live probes from this unit to the peer. For an unreachable node the same
+    // buttons live on its banner (above), so this bar is reachable-only to keep
+    // exactly one probe output box on the page at a time.
+    const actionsBar = (!isSelf && st.reachable) ? _meshActionsBar(unit) : '';
 
     const featureSections = ['traffic', 'threats', 'integrity', 'watchtower'].map(f => `
         <div class="glass rounded-lg p-4 mb-3">
@@ -37549,6 +37692,7 @@ function _meshRenderNodeDetail(id) {
             </div>
         </div>
         ${overview}
+        ${actionsBar}
         ${featureSections}
         ${vulnSection}`;
 }
@@ -37727,6 +37871,126 @@ function renderMeshHealth(h) {
             chip(h.not_polled, 'not polled yet', slate),
             chip(h.published, 'published', green),
         ].filter(Boolean).join('');
+    }
+}
+
+// ── Mesh node list: filter + sort ───────────────────────────────────────────
+// Client-side only: it works over _meshLastData (already pulled server-side), so
+// filtering/sorting a fleet never costs a round-trip and stays instant on a Pi
+// Zero. Self is never filtered out — it is shown in its own card above the list.
+const _meshFilter = { search: '', status: 'all', sort: 'name' };
+const _MESH_SEV_RANK_JS = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
+
+// Worst severity a node is carrying (its own Watchtower + incident worst),
+// mirroring the server-side rollup so the sort agrees with the health summary.
+function _meshNodeWorstRank(unit) {
+    const h = unit.health || {};
+    let r = -1;
+    [(h.watchtower || {}).worst, (h.incidents || {}).worst].forEach(s => {
+        if (s && (_MESH_SEV_RANK_JS[s] ?? -1) > r) r = _MESH_SEV_RANK_JS[s];
+    });
+    return r;
+}
+
+// Same "needs attention" test the Mesh Health card counts with: unreachable,
+// offline, key warning/expired, undervoltage, or a high/critical finding.
+function _meshNodeNeedsAttention(unit, st) {
+    const h = unit.health || {};
+    const keyBad = ['warn', 'critical', 'expired'].includes(unit.key_state);
+    const under = !!((h.power || {}).undervoltage);
+    const offline = !unit.online && !st.reachable;
+    return (st.polled && !st.reachable) || offline || keyBad || under
+        || _meshNodeWorstRank(unit) >= _MESH_SEV_RANK_JS.high;
+}
+
+// Which status bucket a node is in, in the same language as the health summary.
+function _meshNodeBucket(st) {
+    if (st.reachable) return 'online';
+    if (!st.polled) return 'notpolled';
+    return 'unreachable';
+}
+
+function _meshNodeMatchesSearch(unit, q) {
+    if (!q) return true;
+    const hay = [
+        meshUnitTitle(unit), unit.label, unit.short_name, unit.hostname, unit.ip,
+        unit.unit_id ? 'unit ' + unit.unit_id : '',
+        unit.unit_id ? 'unit ' + String(unit.unit_id).padStart(2, '0') : '',
+        unit.unit_id ? String(unit.unit_id).padStart(2, '0') : '',
+        ...(unit.ips || [])
+    ].filter(Boolean).join(' ').toLowerCase();
+    return hay.includes(q);
+}
+
+function meshOnFilterChange() {
+    const g = id => document.getElementById(id);
+    _meshFilter.search = ((g('mesh-filter-search') || {}).value || '').trim().toLowerCase();
+    _meshFilter.status = (g('mesh-filter-status') || {}).value || 'all';
+    _meshFilter.sort = (g('mesh-filter-sort') || {}).value || 'name';
+    if (_meshLastData) _meshRenderPeerList(_meshLastData);
+}
+window.meshOnFilterChange = meshOnFilterChange;
+
+function meshResetFilters() {
+    _meshFilter.search = ''; _meshFilter.status = 'all'; _meshFilter.sort = 'name';
+    const set = (id, v) => { const e = document.getElementById(id); if (e) e.value = v; };
+    set('mesh-filter-search', ''); set('mesh-filter-status', 'all'); set('mesh-filter-sort', 'name');
+    if (_meshLastData) _meshRenderPeerList(_meshLastData);
+}
+window.meshResetFilters = meshResetFilters;
+
+// Render the (filtered, sorted) peer list. Split out of renderMesh so the filter
+// controls can re-run it over the last payload without a re-poll.
+function _meshRenderPeerList(data) {
+    const cards = document.getElementById('mesh-peer-cards');
+    if (!cards) return;
+    const bar = document.getElementById('mesh-filter-bar');
+    const count = document.getElementById('mesh-filter-count');
+    const cardCtx = { enabled: data.enabled, meshTag: data.mesh_tag, nodePort: data.node_port };
+    const all = (data.peers || []).filter(p => p.is_ragnar);
+
+    // The filter bar only earns its space once there is more than one peer.
+    if (bar) bar.classList.toggle('hidden', all.length < 2);
+
+    if (!all.length) {
+        cards.innerHTML = `<p class="text-sm text-gray-500">
+            No other Ragnar units on this tailnet yet. A unit joins the mesh by carrying the
+            <code class="text-gray-400">${escapeHtml(data.mesh_tag || 'tag:ragnar-mesh')}</code> tag.
+        </p>`;
+        if (count) count.textContent = '';
+        return;
+    }
+
+    const f = _meshFilter;
+    const shown = all.filter(unit => {
+        const st = _meshNodeStatus(unit, false);
+        if (!_meshNodeMatchesSearch(unit, f.search)) return false;
+        if (f.status === 'all') return true;
+        if (f.status === 'attention') return _meshNodeNeedsAttention(unit, st);
+        return _meshNodeBucket(st) === f.status;
+    });
+
+    const byName = (a, b) => meshUnitTitle(a).toLowerCase().localeCompare(meshUnitTitle(b).toLowerCase());
+    shown.sort((a, b) => {
+        switch (f.sort) {
+            case 'unit': return ((a.unit_id || 999) - (b.unit_id || 999)) || byName(a, b);
+            case 'severity': return (_meshNodeWorstRank(b) - _meshNodeWorstRank(a)) || byName(a, b);
+            case 'alerts': return ((((b.health || {}).watchtower || {}).total) || 0)
+                - ((((a.health || {}).watchtower || {}).total) || 0) || byName(a, b);
+            case 'cpu': return (((b.health || {}).cpu_percent) || 0)
+                - (((a.health || {}).cpu_percent) || 0) || byName(a, b);
+            default: return byName(a, b);
+        }
+    });
+
+    cards.innerHTML = shown.length
+        ? shown.map(p => meshNodeBanner(p, false, cardCtx)).join('')
+        : `<p class="text-sm text-gray-500">No nodes match the current filter.
+           <button onclick="meshResetFilters()" class="text-cyan-400 hover:text-cyan-300 underline">Clear</button></p>`;
+    if (count) {
+        count.textContent = shown.length === all.length
+            ? `${all.length} node${all.length === 1 ? '' : 's'}`
+            : `Showing ${shown.length} of ${all.length}`;
     }
 }
 
@@ -37967,16 +38231,7 @@ function renderMesh(data) {
         document.getElementById('mesh-self-card').innerHTML = meshNodeBanner(data.self, true, cardCtx);
     }
 
-    const ragnarPeers = (data.peers || []).filter(p => p.is_ragnar);
-    const cards = document.getElementById('mesh-peer-cards');
-    if (!ragnarPeers.length) {
-        cards.innerHTML = `<p class="text-sm text-gray-500">
-            No other Ragnar units on this tailnet yet. A unit joins the mesh by carrying the
-            <code class="text-gray-400">${escapeHtml(data.mesh_tag || 'tag:ragnar-mesh')}</code> tag.
-        </p>`;
-    } else {
-        cards.innerHTML = ragnarPeers.map(p => meshNodeBanner(p, false, cardCtx)).join('');
-    }
+    _meshRenderPeerList(data);
 
     renderPiConnect(data.pi_connect || {});
     renderHttpsNote(data);

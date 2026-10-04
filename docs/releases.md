@@ -4,6 +4,16 @@
 
 ### 2026-10-04
 
+#### feat(mesh): filters, sort, and per-node probes (trace route / ping) on the Mesh Nodes card
+*branch `feature/mesh-node-filters-actions` · PR pending*
+
+- **Filter/sort toolbar** above the **Mesh Nodes** list (appears once there is more than one peer): search by name / unit number (`3`, `03`, `unit 03`) / site label / hostname / tailnet IP; filter by status (*All / Online / Needs attention / Unreachable / Not polled*); sort by name, unit number, worst **severity**, open **alerts**, or **CPU**. A *Showing X of Y* counter plus **Reset**. All client-side over the already-polled roster — **no round-trip**, instant even on a Pi Zero; your own unit is never filtered out
+- **"Needs attention"** reuses the exact Mesh Health test (unreachable, offline, node-key warning/expiry, undervoltage, or a high/critical finding), so the filter and the summary agree
+- **Node-page Actions bar** — probes a peer *from the unit you are looking at*: a **Tailnet path** line (direct WireGuard vs. relayed via DERP + region, from already-polled data, no probe), **Trace route** (`traceroute` drawn as a hop list — "the jumps" — with a hop-count badge), **Ping** (loss + min/avg/max RTT), plus the existing **Diagnose** and a **Copy IP**. An unreachable node gets Trace + Ping next to **Diagnose** on its banner, to show where the path dies
+- New `POST /api/mesh/probe` (`{ip, kind: "trace"|"ping"}`), session-gated like `/api/mesh/diagnose` and **not** peer-callable. The target is pinned server-side to the known mesh roster (self or a tagged peer), so the route is a fleet tool, not an arbitrary-target traceroute box
+- Docs: [mesh.md](mesh.md) gains *Filtering and sorting the list* and *Node actions: path, trace route, ping*
+- Verified: traceroute/ping parsers against live loopback output; the filter/sort/search and the trace/ping/path renderers against mock payloads (status narrowing, zero-padded unit search, no-match state, direct vs DERP path, hop list)
+
 #### docs: wardrive firmware comparison on the ESP32-C5
 *branch `docs/wardrive-comparison` · PR pending*
 
