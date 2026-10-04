@@ -12,6 +12,7 @@
 - **Fix:** when the queue drains between frames, hold the last line and scroll it at the chosen **Scroll rate** (Slow/Normal/Fast = 5/12/24 rows/s) until real data resumes — the way SDR++/gqrx scroll on a slow sweep. New spectrum still arrives at the engine's true rate and **Rows/s** still reports it; the hold only keeps the picture moving
 - Held rows are recorded in history with their own wall-clock time, so the time grid, repaint, scroll-back and CSV export stay 1:1 with the pixels on screen; measurement, detection and the noise-print recorder see only real rows. A fast engine never starves, so the hold never engages there (IQ path unchanged); a genuine multi-second stall stops the hold and lets the panel raise its waiting veil
 - Verified by pacing simulation: `rtl_power` ~1/s now scrolls at a constant 12/s with ≤67 ms hitches (was ~1 s freezes); IQ 16/s is unchanged (zero hold rows). Not yet confirmed on live hardware (the DVB-T driver was holding the dongle on the dev box)
+- Also changed the **default colour window** to a fixed **Ref level −50 dB, Range 15** (top −50, bottom −65) instead of auto-range; a per-browser setting saved in Settings → Display range still wins
 - **Docs:** [rf-waterfall.md](rf-waterfall.md) "Sub-GHz engine" — rewrote the steady-flow note, added "No freeze on a slow sweep"
 
 #### [#911](https://github.com/PierreGode/Ragnar/pull/911) — feat(net): Liebert Guard v2 — bounded reassembly
