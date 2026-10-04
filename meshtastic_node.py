@@ -300,6 +300,7 @@ class MeshLink:
         self._owner = None       # who started the link ('user', 'wardrift', ...)
         self._local_stats = {}   # latest LocalStats telemetry from our own node
         self._local_stats_ts = 0.0
+        self._traceroutes = {}   # dest node id -> latest traceroute result
 
     def status(self):
         with self._lock:
@@ -360,7 +361,13 @@ class MeshLink:
         self._take_local_stats(packet)
         try:
             dec = (packet or {}).get("decoded") or {}
-            if dec.get("portnum") not in ("TEXT_MESSAGE_APP", 1):
+            portnum = dec.get("portnum")
+            # A traceroute reply ("see the jumps"): the responder is the node we
+            # traced, and the payload carries the path of nodes the probe crossed.
+            if portnum in ("TRACEROUTE_APP", 70):
+                self._store_traceroute(packet, dec)
+                return
+            if portnum not in ("TEXT_MESSAGE_APP", 1):
                 return
             text = dec.get("text")
             if text is None and isinstance(dec.get("payload"), (bytes, bytearray)):
@@ -566,6 +573,118 @@ class MeshLink:
             return {"ok": True, "via": "serial", "to": dest or "^all", "channel": int(channel or 0)}
         except Exception as exc:
             return {"ok": False, "error": "send failed: %s" % exc}
+
+    # ---- Traceroute ("see the jumps") -----------------------------------
+    @staticmethod
+    def _num_to_id(num):
+        if num is None:
+            return None
+        if isinstance(num, str):
+            return num
+        try:
+            return "!%08x" % (int(num) & 0xFFFFFFFF)
+        except (TypeError, ValueError):
+            return None
+
+    def _name_for(self, nid):
+        """Human name for a node id, from the node DB; falls back to the id."""
+        if not nid:
+            return "?"
+        for n in self._nodes:
+            if n.get("id") == nid:
+                return n.get("long_name") or n.get("short_name") or nid
+        return nid
+
+    def _store_traceroute(self, packet, dec):
+        """Parse a TRACEROUTE_APP reply into a forward (and, if present, return)
+        path of {id, name, snr_db} hops, keyed by the node we traced (the
+        responder). Mirrors the meshtastic CLI's own route reconstruction."""
+        try:
+            # The RouteDiscovery, either already decoded by the lib or as payload.
+            as_dict = dec.get("traceroute")
+            if not isinstance(as_dict, dict):
+                payload = dec.get("payload")
+                if not isinstance(payload, (bytes, bytearray)):
+                    return
+                from meshtastic import mesh_pb2
+                import google.protobuf.json_format as _json_format
+                rd = mesh_pb2.RouteDiscovery()
+                rd.ParseFromString(bytes(payload))
+                as_dict = _json_format.MessageToDict(rd)
+
+            origin_id = packet.get("toId") or self._num_to_id(packet.get("to"))   # us
+            target_id = packet.get("fromId") or self._num_to_id(packet.get("from"))  # traced node
+            if not target_id:
+                return
+
+            UNK = -128
+
+            def _chain(route_key, snr_key, start_id, end_id):
+                route = as_dict.get(route_key) or []
+                snrs = as_dict.get(snr_key) or []
+                valid = len(snrs) == len(route) + 1
+                chain = [{"id": start_id, "name": self._name_for(start_id), "snr_db": None}]
+                for i, num in enumerate(route):
+                    nid = self._num_to_id(num)
+                    snr = (snrs[i] / 4.0) if (valid and snrs[i] != UNK) else None
+                    chain.append({"id": nid, "name": self._name_for(nid), "snr_db": snr})
+                end_snr = (snrs[-1] / 4.0) if (valid and snrs and snrs[-1] != UNK) else None
+                chain.append({"id": end_id, "name": self._name_for(end_id), "snr_db": end_snr})
+                return chain, len(route) + 1
+
+            fwd, hops = _chain("route", "snrTowards", origin_id, target_id)
+            result = {"ok": True, "target": target_id,
+                      "target_name": self._name_for(target_id),
+                      "route": fwd, "hops": hops, "ts": time.time(), "inflight": False}
+            if "routeBack" in as_dict or "snrBack" in as_dict:
+                back, _ = _chain("routeBack", "snrBack", target_id, origin_id)
+                result["route_back"] = back
+            with self._lock:
+                self._traceroutes[target_id] = result
+        except Exception:
+            pass
+
+    def send_traceroute(self, dest, hop_limit=None, channel=0):  # pragma: no cover - hardware path
+        """Kick off a traceroute to `dest`. The library call blocks until the
+        reply (or a timeout), so it runs on a background thread; the reply is
+        captured by `_store_traceroute` over the receive bus and read back via
+        `get_traceroute`."""
+        with self._lock:
+            iface = self._iface
+            connected = self._connected
+        if not (iface and connected):
+            return {"ok": False, "error": "no Meshtastic node connected — traceroute needs a USB node (MQTT can't trace)"}
+        if not dest:
+            return {"ok": False, "error": "no destination node"}
+        try:
+            hl = int(hop_limit) if hop_limit else 7
+        except (TypeError, ValueError):
+            hl = 7
+        hl = max(1, min(hl, 7))
+        with self._lock:
+            self._traceroutes[dest] = {"inflight": True, "requested_ts": time.time()}
+
+        def _run():
+            err = None
+            try:
+                iface.sendTraceRoute(dest, hl, channelIndex=int(channel or 0))
+            except Exception as exc:
+                err = str(exc)
+            with self._lock:
+                cur = dict(self._traceroutes.get(dest) or {})
+                cur["inflight"] = False
+                # Keep a fresh captured route; only record the error otherwise.
+                if err and not (cur.get("ok") and cur.get("ts", 0) >= cur.get("requested_ts", 0)):
+                    cur["error"] = err
+                self._traceroutes[dest] = cur
+
+        threading.Thread(target=_run, name="mesh-traceroute", daemon=True).start()
+        return {"ok": True, "pending": True, "hop_limit": hl}
+
+    def get_traceroute(self, dest):
+        with self._lock:
+            res = self._traceroutes.get(dest)
+            return dict(res) if res else {"ok": False, "none": True}
 
     def stop(self):
         self._stop.set()
@@ -1048,6 +1167,18 @@ def send_text(text, dest=None, channel=0, via="auto"):
     return last
 
 
+def traceroute(dest, hop_limit=None, channel=0):
+    """Start a traceroute to a node over the connected USB link."""
+    return _link.send_traceroute(dest, hop_limit=hop_limit, channel=channel)
+
+
+def traceroute_result(dest):
+    """Latest traceroute result for a node id (or a pending/none marker)."""
+    if not dest:
+        return {"ok": False, "error": "no node id"}
+    return _link.get_traceroute(dest)
+
+
 def status():
     st = _link.status()
     st["mqtt"] = _mqtt.status()
@@ -1180,6 +1311,30 @@ def selftest():
     check("node: id synthesized from num when user.id missing",
           normalize_node({"num": 0x11223344, "user": {}})["id"] == "!11223344")
     check("node: junk -> None", normalize_node(None) is None and normalize_node(42) is None)
+
+    # --- Traceroute reply parsing ("see the jumps") ---
+    tlink = MeshLink()
+    tlink._nodes = [
+        {"id": "!7c5b2a10", "long_name": "Base Camp"},
+        {"id": "!11112222", "long_name": "Relay"},
+        {"id": "!a1b2c3d4", "long_name": "Trail Node"},
+    ]
+    tr_packet = {"toId": "!7c5b2a10", "to": 2086892048,
+                 "fromId": "!a1b2c3d4", "from": 2712847316}
+    tr_dec = {"portnum": "TRACEROUTE_APP",
+              "traceroute": {"route": [0x11112222], "snrTowards": [20, -24]}}
+    tlink._store_traceroute(tr_packet, tr_dec)
+    tr = tlink.get_traceroute("!a1b2c3d4")
+    check("traceroute: parsed + keyed by traced node",
+          tr.get("ok") and tr.get("hops") == 2 and len(tr.get("route", [])) == 3, str(tr))
+    check("traceroute: hop chain ids in order",
+          [h["id"] for h in tr.get("route", [])] == ["!7c5b2a10", "!11112222", "!a1b2c3d4"],
+          str([h.get("id") for h in tr.get("route", [])]))
+    check("traceroute: SNR scaled /4, origin has none",
+          tr["route"][0]["snr_db"] is None and tr["route"][1]["snr_db"] == 5.0
+          and tr["route"][2]["snr_db"] == -6.0, str([h.get("snr_db") for h in tr["route"]]))
+    check("traceroute: names resolved from node DB",
+          tr["route"][1]["name"] == "Relay" and tr["target_name"] == "Trail Node", str(tr.get("target_name")))
 
     # lsusb USB-id probe
     lsu = ("Bus 001 Device 004: ID 10c4:ea60 Silicon Labs CP210x UART Bridge\n"

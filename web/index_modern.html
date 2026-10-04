@@ -4144,6 +4144,33 @@
                         Poll now
                     </button>
                 </div>
+                <!-- Filter / sort toolbar. Client-side over the already-polled
+                     roster, so it never costs a round-trip; hidden until there
+                     is more than one peer to sift. -->
+                <div id="mesh-filter-bar" class="flex flex-wrap items-center gap-2 mb-3 hidden">
+                    <input id="mesh-filter-search" type="search" oninput="meshOnFilterChange()"
+                           placeholder="Search name, unit #, IP, site…" style="min-width:10rem"
+                           class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-sm">
+                    <select id="mesh-filter-status" onchange="meshOnFilterChange()"
+                            class="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-sm">
+                        <option value="all">All status</option>
+                        <option value="online">Online</option>
+                        <option value="attention">Needs attention</option>
+                        <option value="unreachable">Unreachable</option>
+                        <option value="notpolled">Not polled</option>
+                    </select>
+                    <select id="mesh-filter-sort" onchange="meshOnFilterChange()"
+                            class="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-sm">
+                        <option value="name">Sort: Name</option>
+                        <option value="unit">Sort: Unit #</option>
+                        <option value="severity">Sort: Severity</option>
+                        <option value="alerts">Sort: Alerts</option>
+                        <option value="cpu">Sort: CPU</option>
+                    </select>
+                    <button onclick="meshResetFilters()"
+                            class="text-xs text-gray-400 hover:text-white px-2 py-1.5">Reset</button>
+                    <span id="mesh-filter-count" class="text-[11px] text-gray-500 ml-auto"></span>
+                </div>
                 <div id="mesh-peer-cards" class="space-y-2"></div>
                 <p id="mesh-last-poll" class="text-xs text-gray-500 mt-3"></p>
                 <!-- Mesh-secret nudge (only when a separate mesh has none) lives
@@ -9402,7 +9429,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261003-liebert-guard"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261004-mesh-node-filters"></script>
 
 
 

@@ -5904,6 +5904,123 @@ def mesh_diagnose():
     return jsonify({'success': True, 'result': result})
 
 
+def _mesh_known_node_ips():
+    """Every tailnet address of a node this unit knows in the mesh (self + each
+    tagged peer). A probe target must be in this set — see mesh_probe(). We take
+    all of a node's addresses, not just the primary, so a peer reached on its
+    IPv6 address is still recognised as itself."""
+    ips = set()
+    if not mesh_available:
+        return ips
+    try:
+        state = mesh_manager.status()
+    except Exception:
+        return ips
+    tag = _mesh_tag()
+    for node in list(state.get('peers', [])) + ([state.get('self')] if state.get('self') else []):
+        if not node or (node is not state.get('self') and tag not in node.get('tags', [])):
+            continue
+        for a in ([node.get('ip')] + list(node.get('ips') or [])):
+            if a:
+                ips.add(a)
+    return ips
+
+
+def _mesh_parse_traceroute(text):
+    """Parse `traceroute -n` text into [{hop, ip, rtt_ms}] so the UI can draw the
+    jumps instead of showing a wall of text. A hop that never answered (`* * *`)
+    is kept with ip=None so the gap is visible rather than silently dropped."""
+    hops = []
+    for line in (text or '').splitlines():
+        line = line.strip()
+        m = re.match(r'^(\d+)\s+(.*)$', line)
+        if not m:
+            continue
+        hop_no = int(m.group(1))
+        rest = m.group(2)
+        ip = None
+        ipm = re.search(r'(\d{1,3}(?:\.\d{1,3}){3}|[0-9a-fA-F:]{2,}:[0-9a-fA-F:]*)', rest)
+        if ipm and ipm.group(1) != '*':
+            ip = ipm.group(1)
+        rttm = re.search(r'([\d.]+)\s*ms', rest)
+        hops.append({'hop': hop_no, 'ip': ip,
+                     'rtt_ms': float(rttm.group(1)) if rttm else None})
+    return hops
+
+
+def _mesh_run_probe(kind, ip):
+    """Run a traceroute or ping from THIS unit to `ip` (already validated as a
+    known mesh node). Returns a structured result; never raises."""
+    is_v6 = ':' in ip
+    if kind == 'ping':
+        cmd = ['ping', '-6' if is_v6 else '-4', '-n', '-c', '4', '-w', '8', ip]
+        timeout = 14
+    else:
+        cmd = ['traceroute', '-6' if is_v6 else '-4', '-n',
+               '-q', '1', '-w', '2', '-m', '15', ip]
+        timeout = 60
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        out = (proc.stdout or '') + (proc.stderr or '')
+    except FileNotFoundError:
+        return {'error': f'{cmd[0]} is not installed on this unit.',
+                'missing_tool': cmd[0], 'raw': ''}
+    except subprocess.TimeoutExpired:
+        return {'error': f'{kind} timed out after {timeout}s.', 'raw': ''}
+    except Exception as exc:
+        return {'error': f'{type(exc).__name__} while running {kind}.', 'raw': ''}
+
+    result = {'kind': kind, 'target': ip, 'raw': out.strip()}
+    if kind == 'trace':
+        hops = _mesh_parse_traceroute(out)
+        result['hops'] = hops
+        answered = [h for h in hops if h['ip']]
+        result['hop_count'] = len(answered)
+    else:
+        m = re.search(r'(\d+) packets transmitted, (\d+) received.*?([\d.]+)% packet loss',
+                      out, re.S)
+        if m:
+            result['transmitted'] = int(m.group(1))
+            result['received'] = int(m.group(2))
+            result['loss_pct'] = float(m.group(3))
+        rtt = re.search(r'=\s*([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+)\s*ms', out)
+        if rtt:
+            result['rtt_min'] = float(rtt.group(1))
+            result['rtt_avg'] = float(rtt.group(2))
+            result['rtt_max'] = float(rtt.group(3))
+    return result
+
+
+@app.route('/api/mesh/probe', methods=['POST'])
+def mesh_probe():
+    """Run a live network probe (traceroute / ping) from THIS unit to a mesh
+    node, so the operator can see the path and reachability between units — how
+    many hops away a peer is, and whether the link is direct or via a relay.
+
+    Operator action (POST, session-gated). The target is pinned to an address
+    this unit already knows as a mesh node (self or a tagged peer): the probe is
+    a fleet tool, not a general traceroute box, and constraining the target to
+    the known roster keeps the route from being turned into an arbitrary network
+    scanner.
+    """
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    data = request.get_json(silent=True) or {}
+    ip = (data.get('ip') or '').strip()
+    kind = (data.get('kind') or 'trace').strip().lower()
+    if kind not in ('trace', 'ping'):
+        return jsonify({'success': False, 'error': 'Unknown probe kind.'}), 400
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Invalid peer address.'}), 400
+    if ip not in _mesh_known_node_ips():
+        return jsonify({'success': False,
+                        'error': 'That address is not a known mesh node.'}), 400
+    result = _mesh_run_probe(kind, ip)
+    return jsonify(dict({'success': True}, **result))
+
+
 @app.route('/api/mesh/install', methods=['POST'])
 def mesh_install():
     """Install the Tailscale client on this unit from the web UI.

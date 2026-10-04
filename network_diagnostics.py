@@ -27938,6 +27938,16 @@ def register_network_diagnostics(app, logger=None):
         return jsonify(meshtastic_node.send_text(data.get('text'), dest=data.get('to'),
                                                  channel=data.get('channel', 0), via=data.get('via', 'auto')))
 
+    @app.route('/api/net/mesh/traceroute', methods=['POST'])
+    def net_mesh_traceroute():
+        data = request.get_json(silent=True) or {}
+        _log(f"net/mesh/traceroute to={data.get('id')}")
+        return jsonify(meshtastic_node.traceroute(data.get('id'), hop_limit=data.get('hop_limit')))
+
+    @app.route('/api/net/mesh/traceroute/result', methods=['GET'])
+    def net_mesh_traceroute_result():
+        return jsonify(meshtastic_node.traceroute_result(request.args.get('id')))
+
     @app.route('/api/net/mesh/selftest', methods=['GET'])
     def net_mesh_selftest():
         return jsonify(meshtastic_node.selftest())

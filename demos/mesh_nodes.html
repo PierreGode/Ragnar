@@ -65,6 +65,20 @@
   .snrbadge{font-family:var(--mono);font-size:10px}
   input.tin,select.tin{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:5px 7px}
   select.tin{max-width:170px;cursor:pointer}
+  .nodefilter{display:flex;flex-wrap:wrap;gap:7px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
+  .nodeact{padding:12px 14px;border-bottom:1px solid var(--line-soft);background:rgba(123,140,210,.05)}
+  .nodeact .na-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;margin-bottom:8px}
+  .nodeact .na-name{font-family:var(--head);font-weight:600;font-size:14px;color:var(--ink)}
+  .nodeact .na-meta{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .nodeact .na-btns{display:flex;flex-wrap:wrap;gap:7px}
+  .nodeact .na-close{margin-left:auto;cursor:pointer;color:var(--muted);font-family:var(--mono);font-size:14px;line-height:1;background:none;border:none}
+  .hopchain{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:10px;font-family:var(--mono);font-size:11px}
+  .hop{display:flex;flex-direction:column;align-items:center;gap:1px;padding:4px 8px;border:1px solid var(--line);border-radius:7px;background:var(--panel)}
+  .hop.self{border-color:rgba(63,181,107,.5)} .hop.dest{border-color:rgba(245,185,66,.55)}
+  .hop .hn{color:var(--ink)} .hop .hs{color:var(--muted);font-size:9px}
+  .hoparrow{color:var(--mesh)}
+  .traceinfo{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:8px}
+  .traceinfo.err{color:#fb7185}
   footer{margin-top:16px;font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.6}
 </style>
 </head>
@@ -124,6 +138,27 @@
     </div>
     <div class="card">
       <div class="cap"><span class="t">Nodes</span><span class="c" id="tblcount"></span></div>
+      <div class="nodefilter">
+        <input class="tin" id="nf-search" placeholder="Search name / id / hw" style="flex:1;min-width:120px" title="Filter the node list">
+        <select class="tin" id="nf-role" title="Filter by node role"><option value="">All roles</option></select>
+        <select class="tin" id="nf-show" title="Filter by activity / attributes">
+          <option value="all">All nodes</option>
+          <option value="active">Active &lt;15m</option>
+          <option value="recent">Heard &lt;2h</option>
+          <option value="gps">Has GPS</option>
+          <option value="direct">Direct (0 hops)</option>
+          <option value="multi">Multi-hop</option>
+        </select>
+        <select class="tin" id="nf-sort" title="Sort the node list">
+          <option value="heard">Sort: Heard</option>
+          <option value="name">Sort: Name</option>
+          <option value="snr">Sort: SNR</option>
+          <option value="hops">Sort: Hops</option>
+          <option value="batt">Sort: Battery</option>
+        </select>
+        <button class="ctl" id="nf-reset" title="Clear filters">Reset</button>
+      </div>
+      <div class="nodeact" id="nodeact" hidden></div>
       <div class="tbl">
         <table>
           <thead><tr><th>Name</th><th>ID</th><th>HW</th><th>SNR</th><th>Hops</th><th>Batt</th><th>Heard</th></tr></thead>
@@ -225,12 +260,71 @@
     }).catch(function(){ veilInstall.textContent='⬇ Install meshtastic'; veilInstall.disabled=false; });
   });
 
+  // ---- Node filter / sort (client-side over the polled roster) ----
+  function nodeName(n){ return n.long_name||n.short_name||n.id||'—'; }
+  var nfState={search:'',role:'',show:'all',sort:'heard'};
+  function readFilters(){
+    nfState.search=(document.getElementById('nf-search').value||'').trim().toLowerCase();
+    nfState.role=document.getElementById('nf-role').value||'';
+    nfState.show=document.getElementById('nf-show').value||'all';
+    nfState.sort=document.getElementById('nf-sort').value||'heard';
+  }
+  function populateRoles(){
+    var sel=document.getElementById('nf-role'); if(!sel) return;
+    var cur=sel.value, roles={};
+    nodes.forEach(function(n){ if(n.role) roles[n.role]=1; });
+    var keys=Object.keys(roles).sort();
+    // Rebuild only when the role set changed, so we never clobber the open select.
+    if(sel._roleKey===keys.join(',')) return;
+    sel._roleKey=keys.join(',');
+    sel.innerHTML=['<option value="">All roles</option>'].concat(keys.map(function(r){
+      return '<option value="'+esc(r)+'"'+(r===cur?' selected':'')+'>'+esc(r)+'</option>'; })).join('');
+  }
+  function filterSortNodes(){
+    var now=Date.now()/1000, f=nfState;
+    var view=nodes.filter(function(n){
+      if(f.search){
+        var hay=((n.long_name||'')+' '+(n.short_name||'')+' '+(n.id||'')+' '+(n.hw_model||'')+' '+(n.role||'')).toLowerCase();
+        if(hay.indexOf(f.search)<0) return false;
+      }
+      if(f.role && n.role!==f.role) return false;
+      var age=n.last_heard?(now-n.last_heard):Infinity;
+      if(f.show==='active' && age>900) return false;
+      if(f.show==='recent' && age>7200) return false;
+      if(f.show==='gps' && (n.lat==null||n.lon==null)) return false;
+      if(f.show==='direct' && n.hops!==0) return false;
+      if(f.show==='multi' && !(n.hops>0)) return false;
+      return true;
+    });
+    var byName=function(a,b){ return nodeName(a).toLowerCase().localeCompare(nodeName(b).toLowerCase()); };
+    view.sort(function(a,b){
+      if(a.is_self!==b.is_self) return a.is_self?-1:1;   // self always first
+      if(f.sort==='name') return byName(a,b);
+      if(f.sort==='snr')  return ((b.snr==null?-999:b.snr)-(a.snr==null?-999:a.snr))||byName(a,b);
+      if(f.sort==='hops') return ((a.hops==null?999:a.hops)-(b.hops==null?999:b.hops))||byName(a,b);
+      if(f.sort==='batt') return ((b.battery==null?-1:b.battery)-(a.battery==null?-1:a.battery))||byName(a,b);
+      return ((b.last_heard||0)-(a.last_heard||0))||byName(a,b);
+    });
+    return view;
+  }
+
   function renderTable(){
     var tb=document.getElementById('tbody');
     document.getElementById('s-count').textContent=nodes.length;
-    document.getElementById('tblcount').textContent=nodes.length+' nodes';
-    if(!nodes.length){ tb.innerHTML='<tr><td colspan="7" class="empty">'+(running||mode==='synth'?'Waiting for nodes…':'Not connected')+'</td></tr>'; return; }
-    tb.innerHTML=nodes.map(function(n){
+    populateRoles();
+    if(!nodes.length){
+      document.getElementById('tblcount').textContent='';
+      tb.innerHTML='<tr><td colspan="7" class="empty">'+(running||mode==='synth'?'Waiting for nodes…':'Not connected')+'</td></tr>';
+      renderActions(); return;
+    }
+    var view=filterSortNodes();
+    document.getElementById('tblcount').textContent=(view.length===nodes.length)
+      ? (nodes.length+' nodes') : ('Showing '+view.length+' of '+nodes.length);
+    if(!view.length){
+      tb.innerHTML='<tr><td colspan="7" class="empty">No nodes match the filter.</td></tr>';
+      renderActions(); return;
+    }
+    tb.innerHTML=view.map(function(n){
       var nm=(n.long_name||n.short_name||n.id||'—')+(n.is_self?' <span class="pill" style="color:var(--live);border-color:rgba(63,181,107,.4)">self</span>':'')
         +(n.role&&n.role!=='CLIENT'?' <span class="pill">'+esc(n.role)+'</span>':'');
       var sel=(selectedId && n.id===selectedId)?' sel':'';
@@ -243,7 +337,106 @@
         +'<td>'+(n.battery!=null?n.battery+'%':'—')+'</td>'
         +'<td>'+ago(n.last_heard)+'</td>'
         +'</tr>'; }).join('');
+    renderActions();
   }
+
+  // ---- Per-node actions panel (shown when a row is selected) ----
+  function nodeById(id){ return nodes.filter(function(n){return n.id===id;})[0]||null; }
+  function renderActions(){
+    var box=document.getElementById('nodeact'); if(!box) return;
+    var n=selectedId?nodeById(selectedId):null;
+    if(!n){ box.hidden=true; box.innerHTML=''; return; }
+    box.hidden=false;
+    var meta=[];
+    if(n.role) meta.push(esc(n.role));
+    if(n.hw_model) meta.push(esc(n.hw_model));
+    if(n.snr!=null) meta.push('SNR '+n.snr);
+    if(n.hops!=null) meta.push(n.hops+' hop'+(n.hops===1?'':'s')+' away');
+    if(n.battery!=null) meta.push(n.battery+'% batt');
+    if(n.lat!=null&&n.lon!=null) meta.push('GPS');
+    var canTrace=(mode==='live' && running && !n.is_self && n.id);  // needs a USB node
+    box.innerHTML=''
+      +'<div class="na-head">'
+      +  '<span class="na-name">'+esc(nodeName(n))+'</span>'
+      +  '<span class="na-meta">'+esc(n.id||'')+(meta.length?' · '+meta.join(' · '):'')+'</span>'
+      +  '<button class="na-close" title="Close" onclick="clearSel()">&times;</button>'
+      +'</div>'
+      +'<div class="na-btns">'
+      +  '<button class="ctl" '+(canTrace?'':'disabled title="Connect a USB node to trace a route"')+' onclick="traceNode(\''+esc(n.id)+'\')">⇆ Trace route</button>'
+      +  '<button class="ctl" onclick="msgNode(\''+esc(n.id)+'\')">✎ Message</button>'
+      +  '<button class="ctl" onclick="focusNode(\''+esc(n.id)+'\')">◎ Focus on map</button>'
+      +  '<button class="ctl" onclick="copyNodeId(\''+esc(n.id)+'\',this)">⧉ Copy ID</button>'
+      +'</div>'
+      +'<div id="trace-out"></div>';
+  }
+  function clearSel(){ selectedId=null; renderTable(); draw(); }
+  window.clearSel=clearSel;
+  function focusNode(id){ selectedId=id; renderTable(); draw(); }
+  window.focusNode=focusNode;
+  function msgNode(id){
+    var to=document.getElementById('m-to'); if(to) to.value=id;
+    var t=document.getElementById('m-text'); if(t) t.focus();
+  }
+  window.msgNode=msgNode;
+  function copyNodeId(id,btn){
+    var done=function(){ if(btn){ var o=btn.textContent; btn.textContent='Copied'; setTimeout(function(){btn.textContent=o;},1200);} };
+    try{
+      if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(id).then(done,done); }
+      else{ var ta=document.createElement('textarea'); ta.value=id; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');}catch(e){} document.body.removeChild(ta); done(); }
+    }catch(e){ done(); }
+  }
+  window.copyNodeId=copyNodeId;
+
+  // Traceroute: fire the request, then poll for the reply (LoRa traceroute is
+  // slow — each hop adds airtime — so we wait up to ~40 s).
+  var _tracePoll=null;
+  function renderTrace(d){
+    var out=document.getElementById('trace-out'); if(!out) return;
+    if(d&&d.error){ out.innerHTML='<div class="traceinfo err">'+esc(d.error)+'</div>'; return; }
+    if(!d||d.none||(!d.ok&&d.inflight)){ out.innerHTML='<div class="traceinfo">Tracing… waiting for the mesh to reply.</div>'; return; }
+    if(!d.ok||!d.route){ out.innerHTML='<div class="traceinfo">No route reply (the node may be unreachable or busy).</div>'; return; }
+    var hops=d.route.map(function(h,i){
+      var cls='hop'+(i===0?' self':'')+(i===d.route.length-1?' dest':'');
+      return '<span class="'+cls+'"><span class="hn">'+esc(h.name||h.id||'?')+'</span>'
+        +'<span class="hs">'+(h.snr_db!=null?h.snr_db+' dB':(i===0?'origin':'·'))+'</span></span>';
+    }).join('<span class="hoparrow">→</span>');
+    var html='<div class="hopchain">'+hops+'</div>'
+      +'<div class="traceinfo">'+d.hops+' hop'+(d.hops===1?'':'s')+' · forward path'+(d.route_back?' (reply also traced back)':'')+'</div>';
+    out.innerHTML=html;
+  }
+  function traceNode(id){
+    var out=document.getElementById('trace-out'); if(out) out.innerHTML='<div class="traceinfo">Starting traceroute to '+esc(id)+'…</div>';
+    if(_tracePoll){ clearInterval(_tracePoll); _tracePoll=null; }
+    var t0=Date.now()/1000;
+    fetch('/api/net/mesh/traceroute',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})})
+      .then(function(r){return r.json();}).then(function(res){
+        if(!res||!res.ok){ renderTrace({error:(res&&res.error)||'traceroute failed'}); return; }
+        if(out) out.innerHTML='<div class="traceinfo">Tracing… LoRa traceroute can take 10–40 s.</div>';
+        var tries=0;
+        _tracePoll=setInterval(function(){
+          tries++;
+          fetch('/api/net/mesh/traceroute/result?id='+encodeURIComponent(id)).then(function(r){return r.json();}).then(function(d){
+            if(d&&d.ok&&(d.ts||0)>=t0){ clearInterval(_tracePoll); _tracePoll=null; renderTrace(d); return; }
+            if(d&&d.error){ clearInterval(_tracePoll); _tracePoll=null; renderTrace(d); return; }
+            if(tries>=20){ clearInterval(_tracePoll); _tracePoll=null;
+              renderTrace({ok:false}); }
+          }).catch(function(){});
+        },2000);
+      }).catch(function(){ renderTrace({error:'traceroute request failed'}); });
+  }
+  window.traceNode=traceNode;
+
+  // Wire the filter controls → re-render (no refetch).
+  ['nf-search','nf-role','nf-show','nf-sort'].forEach(function(id){
+    var el=document.getElementById(id); if(!el) return;
+    var ev=(id==='nf-search')?'input':'change';
+    el.addEventListener(ev,function(){ readFilters(); renderTable(); });
+  });
+  (function(){ var r=document.getElementById('nf-reset'); if(r) r.addEventListener('click',function(){
+    document.getElementById('nf-search').value=''; document.getElementById('nf-role').value='';
+    document.getElementById('nf-show').value='all'; document.getElementById('nf-sort').value='heard';
+    readFilters(); renderTable();
+  }); })();
   function renderMsgs(){
     var el=document.getElementById('msgs'); document.getElementById('s-msgs').textContent=msgs.length;
     document.getElementById('msgcap').textContent=msgs.length?(msgs.length+' messages'):'';
