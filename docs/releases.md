@@ -8,7 +8,6 @@
 *branch `docs/wardrive-comparison` · PR pending*
 
 - New [wardrivecomparison.md](wardrivecomparison.md): Huginn vs Piglet measured on the same Seeed XIAO ESP32-C5 (Huginn → Piglet → Huginn, 10 min each, Pi 5 `wlan0` as drift tracker). Huginn sweeps in ~5.3 s vs 9.7 s (1.8× more detections/min, plus BLE); Piglet hears slightly more per sweep; Huginn's scan-timing calibration; open issue with one channel-5 AP after `show_hidden`
-- Documents why Biscuit v1.4.16 (no USB console, BLE-app only, no SD) and Marauder v1.17.0 (DevKit image puts GPS on the C5's USB pins 13/14) couldn't be measured on the XIAO C5
 - Linked from the [docs index](README.md)
 
 #### fix(rf-waterfall): keep the scroll flowing on a slow sweep instead of freezing

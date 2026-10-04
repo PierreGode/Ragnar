@@ -36,7 +36,7 @@ browse than search.
 - [CYD firmware & flashing](cyd-firmware.md) — build and flash the ESP32 CYD companion node firmware
 - [WiFi Defense (WIDS)](wifi-defense.md) — passive 802.11 intrusion detection
 - [Wardriving](wardriving.md) — WiFi/BLE/cell logging with GPS recovery
-- [Wardrive firmware comparison](wardrivecomparison.md) — Huginn vs Piglet (plus Biscuit/Marauder notes) measured on one ESP32-C5
+- [Wardrive firmware comparison](wardrivecomparison.md) — Huginn vs Piglet measured on one ESP32-C5
 - [Diagnostics panel](diagnostics.md) — radios / power / GPS sky view + Starview observatory
 - [Cellular modem](cell.md) · [SDR / Sub-GHz](sdr-subghz.md) · [RF Waterfall](rf-waterfall.md) · [RF Waterfall — capability guide](rf-waterfall-guide.md) · [AirSnitch](airsnitch.md)
 

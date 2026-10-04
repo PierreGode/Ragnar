@@ -2,15 +2,12 @@
 
 Measured comparison of wardriving firmwares running on the **same Seeed XIAO
 ESP32-C5** (8 MB flash), in the same spot, on 2026-10-04. Everything here was
-measured on real hardware. Where a firmware couldn't be measured, this page
-says why instead of guessing.
+measured on real hardware.
 
-| Firmware | Version | Result |
-|---|---|---|
-| [HuginnESP](https://github.com/PierreGode/HuginnESP) | `main` (calibrated scan timing + hidden networks) | ✅ measured |
-| [Piglet](https://github.com/Hamspiced/piglet) | v2.63 (fork build with USB serial file sync), stock settings | ✅ measured |
-| Biscuit (DIY node, `biscuit_diy-xiao_c5`) | v1.4.16 | ⚠️ not measurable with this setup |
-| [ESP32 Marauder](https://github.com/justcallmeKoko/ESP32Marauder) | v1.17.0 (`esp32c5devkitc1`) | ❌ does not run usably on the XIAO C5 |
+| Firmware | Version |
+|---|---|
+| [HuginnESP](https://github.com/PierreGode/HuginnESP) | `main` (calibrated scan timing + hidden networks) |
+| [Piglet](https://github.com/Hamspiced/piglet) | v2.63 (fork build with USB serial file sync), stock settings |
 
 ## Summary
 
@@ -127,38 +124,6 @@ variation. One finding for later: even at 25 ms per channel, a 52-visit sweep
 takes 2.76 s, about **53 ms of fixed overhead per channel scan**. Trimming the
 C5 channel list (which revisits the busy channels) is the next lever, but it's
 a design choice and hasn't been done.
-
-## Biscuit — not measurable here
-
-- **Image:** `biscuit_diy-xiao_c5` v1.4.16 from the
-  [web flasher releases](https://github.com/CodeHedge/diy_node_web_flasher/releases)
-  (bootloader `0x2000`, partitions `0x8000`, app `0x10000`). Binaries only, no
-  source.
-- **Boots fine,** but after the ROM log it prints **nothing** on USB and
-  doesn't read from it (writes time out).
-- **Advertises over BLE** as **"Xiao Biscuit"**. GATT shows its status (`{"status":1,"battery":-1,"sd":false}`),
-  its configuration and two custom services, but **no scan data is sent
-  without commands** from the closed Biscuit Manager app.
-- **No logs either:** this board has no SD card (`sd: false`), so there's no
-  log to read afterwards.
-
-A fair measurement would need the app's BLE protocol (or Biscuit's GPS/SD
-board), which wasn't available.
-
-## Marauder — doesn't run usably on the XIAO C5
-
-- **No XIAO C5 build:** v1.17.0 has none; the closest is the ESP32-C5-DevKitC-1
-  image.
-- **That image cuts USB:** its GPS UART is on **GPIO 13/14**, and on the C5
-  those are the **native USB pins**. The DevKitC-1 has a separate USB-serial
-  chip, but on the XIAO USB is those pins. As soon as Marauder starts, the
-  board disappears from USB (it needs the BOOT button to be reflashed).
-- **`wardrive` needs GPS:** the command requires a detected GPS module. Without
-  one only `scanap` is available, and it reports each AP once, so per-sweep
-  metrics don't apply.
-
-Measuring it would need a Marauder build with a XIAO pin map (GPS on 12/11,
-like Piglet and Huginn), which isn't an official Marauder target.
 
 ## Open questions
 
