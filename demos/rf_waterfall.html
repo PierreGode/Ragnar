@@ -489,7 +489,7 @@
     // palette / resize / zoom keep what's on screen), hover values and scroll-back.
     this.hrows=[]; this.scrollBack=0;
     this.hwLo=null; this.hwHi=null; this.dz=false;   // what the radio sweeps vs. a display-only zoom
-    this.disp={auto:true,ref:-20,range:90};
+    this.disp={auto:false,ref:-50,range:15};   // default colour window: top (Ref) -50 dB, 15 dB deep (bottom -65)
     try{ var _d=JSON.parse(localStorage.getItem('rfwf.disp.'+cfg.short)||'null');
       if(_d&&isFinite(_d.ref)&&isFinite(_d.range)) this.disp={auto:!!_d.auto,ref:+_d.ref,range:+_d.range}; }catch(e){}
     this._liveQ=[]; this._acc=0; this._arrEma=0; this._lastPoll=0;   // de-jitter buffer for even live scroll
@@ -1897,7 +1897,7 @@
     var self=this;
     if(this._surveyOn||this._followOnly){ this.seq=0; this._liveQ.length=0; this._play=null; this._newestTs=null; this._rangeKnown=false;   // follow whatever owns the dongle
       if(this._poll) clearInterval(this._poll); this._poll=setInterval(function(){ self.livePoll(); },120); return; } this.seq=0; this.liveErr=null; this._fpsEma=null; this._lastRowT=0; this._liveStartT=Date.now(); this._lastFrameT=0;
-    this._liveQ.length=0; this._acc=0; this._arrEma=0; this._lastPoll=0; this._tsWin=[]; this._nom=0; this._play=null; this._newestTs=null; this._newestWall=0;
+    this._liveQ.length=0; this._acc=0; this._arrEma=0; this._lastPoll=0; this._tsWin=[]; this._nom=0; this._play=null; this._newestTs=null; this._newestWall=0; this._lastRealWall=null; this._fillAcc=0;
     var body={band:this.liveBand};
     if(!this.cfg.tuner){ body.lna=this.hw.lna; body.vga=this.hw.vga; body.amp=this.hw.amp?1:0; body.antenna=this.hw.antenna?1:0; if(this.hw.bin_hz) body.bin_hz=this.hw.bin_hz; }
     if(this.zoom){ body.lo_hz=Math.round(this.zoom[0]*1e6); body.hi_hz=Math.round(this.zoom[1]*1e6); }
@@ -1909,7 +1909,7 @@
         self._poll=setInterval(function(){ self.livePoll(); },120);
       }).catch(function(){ self.liveErr='Failed to start '+self.cfg.short; self.showVeil('Could not start '+self.cfg.short,self.liveErr); });
   };
-  Scope.prototype.stopLive=function(){ if(this._poll){clearInterval(this._poll);this._poll=null;} this._liveQ.length=0; this._acc=0; this._tsWin=[]; this._nom=0; this._play=null; this._newestTs=null; this._newestWall=0; if(this.devEl) this.devEl.textContent=this.cfg.dev; fetch(this.cfg.api.stop,{method:'POST'}).catch(function(){}); };
+  Scope.prototype.stopLive=function(){ if(this._poll){clearInterval(this._poll);this._poll=null;} this._liveQ.length=0; this._acc=0; this._tsWin=[]; this._nom=0; this._play=null; this._newestTs=null; this._newestWall=0; this._lastRealWall=null; this._fillAcc=0; if(this.devEl) this.devEl.textContent=this.cfg.dev; fetch(this.cfg.api.stop,{method:'POST'}).catch(function(){}); };
   Scope.prototype.STALL_MS=15000;   // silence this long = a real wedge, not a restart gap
   Scope.prototype.livePoll=function(){
     if(!running || this.mode!=='live' || this.decoding || this.replaying) return;
@@ -2063,6 +2063,27 @@
     this._cbarUI();
     var _nh=performance.now(); if(_nh-(this._histT||0)>400){ this._histT=_nh; this._histUI(); }
     if(this.marks.length && _nh-(this._mtT||0)>250){ this._mtT=_nh; this._markTable(); }
+  };
+
+  // Hold the last spectrum for one row: scroll the waterfall up and repaint the
+  // most recent line, without re-running any measurement/detection (the data is
+  // unchanged). Used to bridge producer gaps — a slow rtl_power sweep (~1/s), a
+  // bursty retune, a wide HackRF span — so the display keeps flowing at a steady
+  // rate instead of freezing between frames and then jumping to catch up.
+  Scope.prototype._holdRow=function(){
+    if(this.mode!=='live'||this.threeD||this.scrollBack>0||this._pend) return;
+    var p=this.shown, raw=this.row||p; if(!p||!p.length) return;
+    var N=p.length,f=this.fctx,_clo=this.rangeLo(),_chi=this.rangeHi();
+    f.drawImage(this.fall,0,0,this.W,this.H-this.STEP,0,this.STEP,this.W,this.H-this.STEP);
+    for(var c=0;c<N;c++){var x0=(c*this.W/N)|0,x1=((c+1)*this.W/N)|0;
+      f.fillStyle=color(p[c],_clo,_chi); f.fillRect(x0,0,(x1-x0)||1,this.STEP);}
+    // Record the held line in history (its own wall-clock time) so hrows stays
+    // 1:1 with the pixels on screen — the time grid, repaint, scroll-back and
+    // CSV export all read hrows, and would drift if the screen scrolled without
+    // it. Measurement/detection/noise-print are deliberately skipped: the data
+    // is unchanged, so only the real rows feed them.
+    this._histPush(raw,this.lo,this.hi,(typeof this.floor==='number')?this.floor:-110);
+    this._drawTimeGrid();
   };
 
   // ---- level calibration (dB offset -> dBm) --------------------------------
@@ -3506,7 +3527,7 @@
     scopes.forEach(function(s){ if(!s._liveQ||s._newestTs==null) return;
       var cut=s._newestTs-2.0;                        // drop what piled up while hidden
       while(s._liveQ.length && s._liveQ[0].t<cut) s._liveQ.shift();
-      s._play=s._newestTs-0.6; }); });
+      s._play=s._newestTs-0.6; s._lastRealWall=null; s._fillAcc=0; }); });
   function loop(now){ if(!running)return; var dt=Math.min(0.1,Math.max(0,(now-last)/1000));last=now;acc+=dt;var interval=1/HZ,did=0;
     while(acc>=interval&&did<4){ scopes.forEach(function(s){ if(s.mode==='synth'&&!s.decoding&&!s.replaying) s.synthStep(); }); acc-=interval;did++; }
     // Live scopes: release queued rows at ONE steady rate = the SDR's measured
@@ -3536,6 +3557,23 @@
       if(s._play<cap-MAXLAG) s._play=cap-MAXLAG;      // after a stall, skip, don't crawl
       var g=0;
       while(q.length && q[0].t<=s._play && g++<300){ var it=q.shift(); s.pushRow(it.power,it.lo,it.hi,it.floor); }
+      // Keep the flow constant across producer gaps. A fast engine (IQ, 16/s)
+      // always has rows buffered ahead, so q stays deep and this never fires; a
+      // slow or bursty one (rtl_power ~1/s, a wide HackRF sweep) drains the queue
+      // between frames and the playhead starves — the waterfall freezes, then
+      // jumps when the next frame lands. Instead hold the last line at the chosen
+      // scroll rate so it scrolls smoothly until real data resumes. Give up after
+      // a few seconds: a genuine stall should freeze (and let livePoll raise the
+      // veil), not scroll stale data forever.
+      var wnow=performance.now()/1000;
+      if(g>0){ s._lastRealWall=wnow; s._fillAcc=0; }
+      else if(q.length<2 && s.shown){
+        if(s._lastRealWall==null) s._lastRealWall=wnow;
+        if(wnow-s._lastRealWall<3.0){
+          s._fillAcc=(s._fillAcc||0)+dt; var fn=0;
+          while(s._fillAcc>=1/HZ && fn++<4){ s._fillAcc-=1/HZ; s._holdRow(); }
+        }
+      }
     });
     scopes.forEach(function(s){s.setRate(HZ);}); requestAnimationFrame(loop); }
 
