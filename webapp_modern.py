@@ -35,7 +35,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Tuple
 from contextlib import contextmanager
 from email.utils import format_datetime
-from flask import Flask, render_template, jsonify, request, send_from_directory, Response, make_response, g, session, redirect
+from flask import Flask, render_template, jsonify, request, send_from_directory, send_file, Response, make_response, g, session, redirect
 from flask_socketio import SocketIO, emit, disconnect
 try:
     from flask_cors import CORS  # type: ignore
@@ -932,6 +932,14 @@ def check_authentication():
         peer_scan_write = request.method == 'POST' and (
             path == '/api/mesh/scan/start'
             or path.startswith('/api/mesh/scan/cancel/'))
+        # Packet capture the "worker" role accepts, same shape as scan writes:
+        # start a bounded capture on this unit, and cancel one. Exact-path
+        # allowlisted (cancel by prefix + id); the capture itself is bounded in
+        # pcap_capture.py and the operator's own capture routes
+        # (/api/mesh/peer-capture/*) stay session-only.
+        peer_capture_write = request.method == 'POST' and (
+            path == '/api/mesh/capture/start'
+            or path.startswith('/api/mesh/capture/cancel/'))
         # The fleet-update fan-out: a peer's "Update mesh" lands here to run this
         # unit's own git update. Exact-path allowlisted like the control write, and
         # the handler only ever runs git_updater against this checkout — a peer
@@ -941,8 +949,8 @@ def check_authentication():
         # Exact-path allowlisted; the handler itself only ever writes into the
         # inbox (never a live path) and can be turned off (mesh_file_receive).
         peer_file_push = request.method == 'POST' and path == '/api/mesh/files/push'
-        if (peer_read or peer_control or peer_scan_write or peer_update
-                or peer_file_push) and _is_mesh_peer_request():
+        if (peer_read or peer_control or peer_scan_write or peer_capture_write
+                or peer_update or peer_file_push) and _is_mesh_peer_request():
             return
 
         # Share-only guest role. A device carrying the SHARE tag (tag:ragnar-share)
@@ -4750,6 +4758,21 @@ def _mesh_local_features():
         watchtower['reason'] = f'unavailable ({exc})'
     features['watchtower'] = watchtower
 
+    # Live packet capture — bounded tcpdump-to-pcap, pulled over the mesh. Unlike
+    # the Traffic analyzer (text stats only), this writes real .pcap files; the
+    # block reports what interfaces exist, whether a capture is running, and the
+    # recent captures so the node page can offer a Download for each.
+    capture = {'available': False, 'reason': 'Packet capture is unavailable (tcpdump not installed).'}
+    try:
+        cap = get_capture_manager()
+        if cap and cap.available():
+            capture = dict({'available': True}, **cap.summary())
+        elif cap:
+            capture['reason'] = cap.unavailable_reason() or capture['reason']
+    except Exception as exc:
+        capture['reason'] = f'unavailable ({exc})'
+    features['capture'] = capture
+
     # Mark which subsystems a mesh peer may start/stop remotely, and each one's
     # current running state, so a peer's popup can show a Start or a Stop button
     # that reflects reality. "External threat detection" maps to the continuous
@@ -5652,6 +5675,249 @@ def mesh_peer_control():
     except Exception as exc:
         logger.error(f"[mesh] peer-control {feature}/{action} on {node_id!r} failed: {exc}")
         return jsonify({'success': False, 'error': f'Mesh command failed: {exc}'}), 500
+
+
+# ============================================================================
+# Live packet capture (PCAP) over the mesh.
+#
+# Two layers, mirroring the scan-delegation split:
+#   * worker routes under /api/mesh/capture/* run ON this unit — the GETs are
+#     peer-readable (any tagged peer, relayed by the hub) and the two writes
+#     (start, cancel) are added to the peer-write allowlist in before_request,
+#     exactly like /api/mesh/scan/*;
+#   * operator routes under /api/mesh/peer-capture/* are session-only and relay
+#     to a chosen unit on the operator's behalf (the browser can't dial a peer).
+# The capture itself is strictly bounded in pcap_capture.py, so a remote start
+# can never run away with a peer's disk or CPU.
+# ============================================================================
+_capture_manager = None
+
+
+def get_capture_manager():
+    """The shared bounded-capture manager (lazy import; None if unavailable)."""
+    global _capture_manager
+    if _capture_manager is None:
+        try:
+            import pcap_capture
+            _capture_manager = pcap_capture.get_capture_manager()
+        except Exception as exc:
+            logger.debug(f"[mesh] capture manager unavailable: {exc}")
+            return None
+    return _capture_manager
+
+
+@app.route('/api/mesh/capture/start', methods=['POST'])
+def mesh_capture_start():
+    """Worker: start a bounded capture on THIS unit. Peer-write allowlisted
+    (relayed by the hub) and also reachable by the local operator."""
+    cap = get_capture_manager()
+    if not cap:
+        return jsonify({'success': False, 'error': 'Packet capture is unavailable on this unit.'}), 503
+    d = request.get_json(silent=True) or {}
+    res = cap.start(interface=d.get('interface'), seconds=d.get('seconds'),
+                    max_packets=d.get('max_packets'), max_bytes=d.get('max_bytes'),
+                    bpf=d.get('filter'), snaplen=d.get('snaplen'))
+    return jsonify(res), (200 if res.get('success') else 400)
+
+
+@app.route('/api/mesh/capture/cancel/<cid>', methods=['POST'])
+def mesh_capture_cancel(cid):
+    """Worker: stop a running capture early. Peer-write allowlisted."""
+    cap = get_capture_manager()
+    if not cap:
+        return jsonify({'success': False, 'error': 'Packet capture is unavailable.'}), 503
+    return jsonify(cap.cancel(cid))
+
+
+@app.route('/api/mesh/capture/status/<cid>', methods=['GET'])
+def mesh_capture_status(cid):
+    """Worker (peer-readable GET): one capture's live state."""
+    cap = get_capture_manager()
+    if not cap:
+        return jsonify({'success': False, 'error': 'Packet capture is unavailable.'}), 503
+    return jsonify(cap.status(cid))
+
+
+@app.route('/api/mesh/capture/list', methods=['GET'])
+def mesh_capture_list():
+    """Worker (peer-readable GET): interfaces + recent captures on this unit."""
+    cap = get_capture_manager()
+    if not cap:
+        return jsonify({'success': False, 'error': 'Packet capture is unavailable.'}), 503
+    return jsonify(cap.list())
+
+
+@app.route('/api/mesh/capture/download/<cid>', methods=['GET'])
+def mesh_capture_download(cid):
+    """Worker (peer-readable GET): stream a finished capture's .pcap. The hub
+    relays this to the operator's browser (see peer-capture/download)."""
+    cap = get_capture_manager()
+    if not cap:
+        return jsonify({'success': False, 'error': 'Packet capture is unavailable.'}), 503
+    path = cap.path_for(cid)
+    if not path:
+        return jsonify({'success': False, 'error': 'No downloadable capture for that id.'}), 404
+    return send_file(path, as_attachment=True, download_name=os.path.basename(path),
+                     mimetype='application/vnd.tcpdump.pcap')
+
+
+def _mesh_capture_resolve_peer(node_id):
+    """(self_bool, peer_node_or_None, error_or_None) for an operator capture
+    call aimed at `node_id` — same resolution the peer-control relay uses."""
+    state = mesh_manager.status()
+    tag = _mesh_tag()
+    self_node = state.get('self') or {}
+    if node_id and node_id == str(self_node.get('id', '')):
+        return True, None, None
+    peer = next((p for p in state.get('peers', [])
+                 if str(p.get('id', '')) == node_id and tag in p.get('tags', [])), None)
+    if not peer:
+        return False, None, 'No such tagged mesh unit — refresh and try again.'
+    return False, peer, None
+
+
+@app.route('/api/mesh/peer-capture/start', methods=['POST'])
+def mesh_peer_capture_start():
+    """Operator: start a capture on a chosen unit (self or a peer, relayed)."""
+    if not mesh_available or not _mesh_enabled():
+        return jsonify({'success': False, 'error': 'Mesh is not enabled on this unit.'}), 400
+    d = request.get_json(silent=True) or {}
+    node_id = (d.get('node_id') or '').strip()
+    body = {k: d.get(k) for k in ('interface', 'seconds', 'max_packets', 'max_bytes', 'filter', 'snaplen')}
+    try:
+        is_self, peer, err = _mesh_capture_resolve_peer(node_id)
+        if err:
+            return jsonify({'success': False, 'error': err}), 404
+        if is_self:
+            cap = get_capture_manager()
+            if not cap:
+                return jsonify({'success': False, 'error': 'Packet capture is unavailable on this unit.'}), 503
+            res = cap.start(interface=body.get('interface'), seconds=body.get('seconds'),
+                            max_packets=body.get('max_packets'), max_bytes=body.get('max_bytes'),
+                            bpf=body.get('filter'), snaplen=body.get('snaplen'))
+            return jsonify(res), (200 if res.get('success') else 400)
+        reply = mesh_manager.post_peer(peer, '/api/mesh/capture/start', body,
+                                       port=_mesh_node_port(), timeout=20)
+        if not reply.get('reachable', True) and reply.get('error'):
+            return jsonify({'success': False, 'error': reply.get('error')}), 502
+        reply.pop('reachable', None)
+        return jsonify(reply), (200 if reply.get('success') else 400)
+    except Exception as exc:
+        logger.error(f"[mesh] peer-capture start on {node_id!r} failed: {exc}")
+        return jsonify({'success': False, 'error': f'Capture command failed: {exc}'}), 500
+
+
+@app.route('/api/mesh/peer-capture/cancel', methods=['POST'])
+def mesh_peer_capture_cancel():
+    """Operator: stop a capture on a chosen unit."""
+    if not mesh_available or not _mesh_enabled():
+        return jsonify({'success': False, 'error': 'Mesh is not enabled on this unit.'}), 400
+    d = request.get_json(silent=True) or {}
+    node_id = (d.get('node_id') or '').strip()
+    cid = (d.get('id') or '').strip()
+    try:
+        is_self, peer, err = _mesh_capture_resolve_peer(node_id)
+        if err:
+            return jsonify({'success': False, 'error': err}), 404
+        if is_self:
+            cap = get_capture_manager()
+            return jsonify(cap.cancel(cid) if cap else {'success': False, 'error': 'unavailable'})
+        reply = mesh_manager.post_peer(peer, f'/api/mesh/capture/cancel/{cid}', {},
+                                       port=_mesh_node_port(), timeout=12)
+        reply.pop('reachable', None)
+        return jsonify(reply)
+    except Exception as exc:
+        logger.error(f"[mesh] peer-capture cancel on {node_id!r} failed: {exc}")
+        return jsonify({'success': False, 'error': f'Capture command failed: {exc}'}), 500
+
+
+@app.route('/api/mesh/peer-capture/status', methods=['GET'])
+def mesh_peer_capture_status():
+    """Operator: one capture's live state on a chosen unit."""
+    node_id = (request.args.get('node_id') or '').strip()
+    cid = (request.args.get('id') or '').strip()
+    try:
+        is_self, peer, err = _mesh_capture_resolve_peer(node_id)
+        if err:
+            return jsonify({'success': False, 'error': err}), 404
+        if is_self:
+            cap = get_capture_manager()
+            return jsonify(cap.status(cid) if cap else {'success': False, 'error': 'unavailable'})
+        reply = mesh_manager.poll_peer(peer, port=_mesh_node_port(), timeout=8,
+                                       path=f'/api/mesh/capture/status/{cid}')
+        reply.pop('reachable', None)
+        return jsonify(reply)
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/mesh/peer-capture/list', methods=['GET'])
+def mesh_peer_capture_list():
+    """Operator: interfaces + recent captures on a chosen unit."""
+    node_id = (request.args.get('node_id') or '').strip()
+    try:
+        is_self, peer, err = _mesh_capture_resolve_peer(node_id)
+        if err:
+            return jsonify({'success': False, 'error': err}), 404
+        if is_self:
+            cap = get_capture_manager()
+            return jsonify(cap.list() if cap else {'success': False, 'error': 'unavailable'})
+        reply = mesh_manager.poll_peer(peer, port=_mesh_node_port(), timeout=10,
+                                       path='/api/mesh/capture/list')
+        reply.pop('reachable', None)
+        return jsonify(reply)
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/mesh/peer-capture/download', methods=['GET'])
+def mesh_peer_capture_download():
+    """Operator: download a finished capture. For self, serve the file; for a
+    peer, stream it back over the tailnet (WireGuard) to the browser."""
+    node_id = (request.args.get('node_id') or '').strip()
+    cid = (request.args.get('id') or '').strip()
+    if not re.match(r'^[0-9a-fA-F]{1,16}$', cid or ''):
+        return jsonify({'success': False, 'error': 'Bad capture id.'}), 400
+    try:
+        is_self, peer, err = _mesh_capture_resolve_peer(node_id)
+        if err:
+            return jsonify({'success': False, 'error': err}), 404
+        if is_self:
+            cap = get_capture_manager()
+            path = cap.path_for(cid) if cap else None
+            if not path:
+                return jsonify({'success': False, 'error': 'No downloadable capture.'}), 404
+            return send_file(path, as_attachment=True, download_name=os.path.basename(path),
+                             mimetype='application/vnd.tcpdump.pcap')
+
+        # Peer: open the worker download over the tailnet and stream it through.
+        import urllib.request
+        path = f'/api/mesh/capture/download/{cid}'
+        url = mesh_manager.peer_url(peer, _mesh_node_port(), path)
+        headers = {'User-Agent': 'Ragnar-Mesh'}
+        headers.update(mesh_manager.auth_headers('GET', path))
+        req = urllib.request.Request(url, headers=headers)
+        resp = urllib.request.urlopen(req, timeout=30)
+        if getattr(resp, 'status', 200) != 200:
+            resp.close()
+            return jsonify({'success': False, 'error': f'Peer returned HTTP {resp.status}.'}), 502
+        fname = f'cap_{node_id[:8] or "peer"}_{cid}.pcap'
+
+        def _stream():
+            try:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                resp.close()
+
+        return Response(_stream(), mimetype='application/vnd.tcpdump.pcap',
+                        headers={'Content-Disposition': f'attachment; filename="{fname}"'})
+    except Exception as exc:
+        logger.error(f"[mesh] peer-capture download {cid!r} on {node_id!r} failed: {exc}")
+        return jsonify({'success': False, 'error': f'Capture download failed: {exc}'}), 502
 
 
 def _mesh_local_update() -> dict:

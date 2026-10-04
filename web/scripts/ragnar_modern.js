@@ -37321,6 +37321,7 @@ const _MESH_FEATURE_TITLE = {
     integrity: 'Network Integrity Monitor',
     watchtower: 'Watchtower',
     vulnerabilities: 'Vulnerabilities',
+    capture: 'Packet Capture',
 };
 
 function _meshSevBadge(sev) {
@@ -37595,6 +37596,139 @@ function meshCopyText(text, btn) {
 }
 window.meshCopyText = meshCopyText;
 
+// ── Live packet capture section (node page) ─────────────────────────────────
+// Unlike the Traffic Analyzer (stats only), this starts a bounded tcpdump-to-pcap
+// on the unit and lets the operator download the .pcap, pulled over the tailnet.
+function _meshCaptureSection(id, unit) {
+    const c = ((unit.findings || {}).features || {}).capture || {};
+    const inner = (!c.available)
+        ? `<p class="text-sm text-gray-500">${escapeHtml(c.reason || 'Packet capture is unavailable on this unit.')}</p>`
+        : _meshCaptureBody(id, c);
+    return `<div class="glass rounded-lg p-4 mb-3">
+        <h4 class="font-semibold mb-2">${escapeHtml(_MESH_FEATURE_TITLE.capture)}</h4>
+        ${inner}
+    </div>`;
+}
+
+function _meshCaptureBody(id, c) {
+    const ifaces = c.interfaces || [];
+    const def = c.default_interface || (ifaces[0] || '');
+    const lim = c.limits || {};
+    const maxS = lim.max_seconds || 300;
+    const maxMB = Math.round((lim.max_bytes || 0) / 1048576);
+    const opts = ifaces.length
+        ? ifaces.map(n => `<option value="${escapeHtml(n)}"${n === def ? ' selected' : ''}>${escapeHtml(n)}</option>`).join('')
+        : '<option value="">(no interfaces)</option>';
+    const running = !!c.running;
+    const btn = running
+        ? `<button onclick="meshCaptureCancel('${id}','${escapeHtml(c.active_id || '')}',this)"
+                   class="bg-red-600/80 hover:bg-red-600 text-white text-xs px-4 py-1.5 rounded transition-colors">Stop capture</button>`
+        : `<button onclick="meshCaptureStart('${id}',this)"
+                   class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-xs px-4 py-1.5 rounded transition-colors">Start capture</button>`;
+    const controls = `
+      <div class="flex flex-wrap items-end gap-2 mb-2">
+        <label class="text-[11px] text-gray-400">Interface
+          <select id="cap-iface" class="block mt-0.5 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm">${opts}</select></label>
+        <label class="text-[11px] text-gray-400">Seconds
+          <input id="cap-seconds" type="number" min="1" max="${maxS}" value="60" class="block mt-0.5 w-20 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm"></label>
+        <label class="text-[11px] text-gray-400">Max packets
+          <input id="cap-packets" type="number" min="0" placeholder="∞" class="block mt-0.5 w-24 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm"></label>
+        <label class="text-[11px] text-gray-400 flex-1" style="min-width:10rem">Filter (BPF, optional)
+          <input id="cap-filter" type="text" placeholder="e.g. tcp port 443" class="block mt-0.5 w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm font-mono"></label>
+        ${btn}
+      </div>
+      <p class="text-[10px] text-gray-500 mb-2">Bounded capture — stops at the time or packet limit${maxMB ? `, and never exceeds ${maxMB} MB / ${maxS}s` : ''}. The .pcap streams back over the tailnet.</p>
+      <div id="cap-out" class="mb-2"></div>`;
+    return controls + _meshCaptureList(id, c.recent || []);
+}
+
+function _meshCaptureList(id, recent) {
+    if (!recent.length) return '<p class="text-xs text-gray-500">No captures yet on this unit.</p>';
+    const rows = recent.map(r => {
+        const st = r.state || '';
+        const stCls = st === 'running' ? 'text-amber-300'
+            : st === 'error' ? 'text-red-300'
+            : st === 'done' ? 'text-green-300' : 'text-gray-400';
+        const canDl = (st === 'done' || st === 'canceled') && r.bytes > 0;
+        const dl = canDl
+            ? `<button onclick="meshCaptureDownload('${id}','${escapeHtml(r.id)}')" class="text-cyan-400 hover:text-cyan-300 underline">Download</button>`
+            : (st === 'running' ? '<span class="text-amber-300">capturing…</span>' : '<span class="text-gray-600">—</span>');
+        return `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-800/60 text-xs">
+            <div class="min-w-0">
+              <span class="font-mono text-gray-200">${escapeHtml(r.interface || '')}</span>
+              <span class="${stCls}">${escapeHtml(st)}</span>
+              <span class="text-gray-500">${r.packets || 0} pkts · ${escapeHtml(r.bytes_human || '0 B')} · ${r.elapsed || 0}s</span>
+              ${r.filter ? `<span class="text-gray-600 font-mono">[${escapeHtml(r.filter)}]</span>` : ''}
+              ${r.error ? `<span class="text-red-400 break-words">${escapeHtml(r.error)}</span>` : ''}
+            </div>
+            <div class="flex-shrink-0">${dl}</div>
+        </div>`;
+    }).join('');
+    return `<div class="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Recent captures</div>${rows}`;
+}
+
+async function meshCaptureStart(nodeId, btn) {
+    const g = id => document.getElementById(id);
+    const body = {
+        node_id: nodeId,
+        interface: (g('cap-iface') || {}).value || '',
+        seconds: parseInt((g('cap-seconds') || {}).value || '60', 10) || 60,
+        max_packets: parseInt((g('cap-packets') || {}).value || '0', 10) || 0,
+        filter: ((g('cap-filter') || {}).value || '').trim(),
+    };
+    const out = g('cap-out');
+    if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+    const res = await _meshApi('/api/mesh/peer-capture/start', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+    const d = res.data || {};
+    if (!res.ok || !d.success) {
+        if (out) out.innerHTML = `<div class="text-sm text-red-300 border border-red-800 rounded-lg p-3 bg-red-950/30">${escapeHtml(d.error || res.error || 'Capture failed to start')}</div>`;
+        if (btn) { btn.disabled = false; btn.textContent = 'Start capture'; }
+        return;
+    }
+    _meshCapturePollStart(nodeId, d.id || (d.capture || {}).id);
+}
+window.meshCaptureStart = meshCaptureStart;
+
+let _meshCapturePoll = null;
+function _meshCapturePollStart(nodeId, cid) {
+    if (_meshCapturePoll) { clearInterval(_meshCapturePoll); _meshCapturePoll = null; }
+    const out = document.getElementById('cap-out');
+    if (out) out.innerHTML = `<div class="text-sm text-amber-200">Capturing <span class="font-mono">${escapeHtml(cid || '')}</span>…</div>`;
+    let tries = 0;
+    _meshCapturePoll = setInterval(async () => {
+        tries++;
+        const res = await _meshApi(`/api/mesh/peer-capture/status?node_id=${encodeURIComponent(nodeId)}&id=${encodeURIComponent(cid)}`);
+        const cap = (res.data || {}).capture || null;
+        const box = document.getElementById('cap-out');
+        if (cap && box) {
+            box.innerHTML = `<div class="text-sm ${cap.state === 'running' ? 'text-amber-200' : 'text-gray-300'}">Capture ${escapeHtml(cap.state)} — ${cap.packets || 0} pkts · ${escapeHtml(cap.bytes_human || '0 B')} · ${cap.elapsed || 0}s${cap.error ? ` · <span class="text-red-400">${escapeHtml(cap.error)}</span>` : ''}</div>`;
+        }
+        if ((cap && cap.state !== 'running') || tries > 180) {
+            clearInterval(_meshCapturePoll); _meshCapturePoll = null;
+            refreshMesh(true);   // repopulate the recent list + reset the Start button
+        }
+    }, 2000);
+}
+
+async function meshCaptureCancel(nodeId, cid, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Stopping…'; }
+    await _meshApi('/api/mesh/peer-capture/cancel', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ node_id: nodeId, id: cid })
+    });
+    if (_meshCapturePoll) { clearInterval(_meshCapturePoll); _meshCapturePoll = null; }
+    setTimeout(() => refreshMesh(true), 800);
+}
+window.meshCaptureCancel = meshCaptureCancel;
+
+function meshCaptureDownload(nodeId, cid) {
+    window.open(`/api/mesh/peer-capture/download?node_id=${encodeURIComponent(nodeId)}&id=${encodeURIComponent(cid)}`, '_blank');
+}
+window.meshCaptureDownload = meshCaptureDownload;
+
 // Render the node page for one unit into #mesh-node-detail.
 function _meshRenderNodeDetail(id) {
     const el = document.getElementById('mesh-node-detail');
@@ -37663,6 +37797,10 @@ function _meshRenderNodeDetail(id) {
     // exactly one probe output box on the page at a time.
     const actionsBar = (!isSelf && st.reachable) ? _meshActionsBar(unit) : '';
 
+    // Packet capture works on this unit or any reachable peer (an unreachable
+    // one can't capture), driven through the operator capture relay.
+    const captureSection = (isSelf || st.reachable) ? _meshCaptureSection(id, unit) : '';
+
     const featureSections = ['traffic', 'threats', 'integrity', 'watchtower'].map(f => `
         <div class="glass rounded-lg p-4 mb-3">
             <h4 class="font-semibold mb-2">${escapeHtml(_MESH_FEATURE_TITLE[f])}</h4>
@@ -37693,6 +37831,7 @@ function _meshRenderNodeDetail(id) {
         </div>
         ${overview}
         ${actionsBar}
+        ${captureSection}
         ${featureSections}
         ${vulnSection}`;
 }
