@@ -32,9 +32,12 @@ from datetime import datetime, timezone
 logger = logging.getLogger("PigletSync")
 
 STATE_FILE = 'piglet_imports.json'
-# esp_reset_reason() values that mean the Piglet crashed rather than powered on
+# esp_reset_reason() values that mean the Piglet crashed rather than powered on.
+# Not 7 (ESP_RST_WDT, "other watchdog"): on the C3/C5/C6 USB-Serial/JTAG that
+# is also how a flash or `hard reset` from the host restarts the chip, so it
+# fired after every flash. Not 8 (deep-sleep wake): Piglet's long-press sleep.
 CRASH_RESETS = {4: 'a panic', 5: 'the interrupt watchdog', 6: 'the task watchdog',
-                7: 'a watchdog', 8: 'deep sleep wake', 9: 'a brownout'}
+                9: 'a brownout'}
 FAIL_RETRY_AFTER_S = 6 * 3600   # a file that failed waits this long before a retry
 FAIL_GIVE_UP = 3                # ...and is skipped for good after this many failed syncs
 MIN_VALID_EPOCH = 1420070400    # 2015: older last-write times mean "clock not set" 

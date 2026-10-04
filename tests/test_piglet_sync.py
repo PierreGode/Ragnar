@@ -231,3 +231,18 @@ def test_plug_watcher_syncs_once_per_plug_in(tmp_path, monkeypatch):
     enabled['v'] = False
     link.unlink(); w.tick(); link.symlink_to(dev); w.tick()
     assert len(runs) == 2                 # switched off: nothing
+
+
+def test_reset_reason_parsed_and_only_real_crashes_warn(caplog):
+    class Dev:
+        def __init__(self, rst): self.rst, self.out = rst, []
+        def write(self, d): self.out.append(f'@PH v2.63 ESP32-C5 38:44:BE:BA:16:84 rst={self.rst} up=12 sd=1\n'.encode())
+        def readline(self, t): return self.out.pop(0) if self.out else b''
+    import logging
+    for rst, warns in ((7, False), (8, False), (1, False), (4, True), (9, True)):
+        caplog.clear()
+        d = Dev(rst)
+        with caplog.at_level(logging.WARNING, logger='PigletSync'):
+            info = ps.PigletLink(d.write, d.readline).hello(1)
+        assert info['reset_reason'] == rst and info['uptime_s'] == 12 and info['sd']
+        assert any('last rebooted' in r.message for r in caplog.records) is warns

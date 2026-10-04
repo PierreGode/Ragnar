@@ -4,6 +4,14 @@
 
 ### 2026-10-04
 
+#### fix(wardriving): Piglet sync no longer reports a flash reset as a crash
+*branch `fix/piglet-reset-reason` · PR pending*
+
+- `piglet_sync.CRASH_RESETS` drops reason 7 (`ESP_RST_WDT`): on the C3/C5/C6 USB-Serial/JTAG a host flash or hard reset restarts the chip that way, so every freshly flashed Piglet was logged as *"last rebooted from a watchdog"*. Reason 8 (deep-sleep wake, Piglet's long-press sleep) is no longer counted either; panic, interrupt/task watchdog and brownout still warn
+- Test covers the parsing of `rst`/`up` and which reasons warn
+
+### 2026-10-04
+
 #### fix(rf-waterfall): keep the scroll flowing on a slow sweep instead of freezing
 *branch `fix/rf-waterfall-smooth-scroll` · PR pending*
 
