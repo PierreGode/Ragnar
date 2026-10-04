@@ -2,6 +2,17 @@
 
 ## Releases
 
+### 2026-10-05
+
+#### feat(mesh): live PCAP capture on the Ragnar fleet node page
+*branch `feature/mesh-pcap-capture` · PR pending*
+
+- New **Packet Capture** feature on a unit's node page, next to Traffic Analyzer / Integrity / Threats / Watchtower: start a **bounded** `tcpdump`-to-`.pcap` on any reachable unit (self or peer), pick interface / duration / packet cap / optional **BPF filter**, watch live progress (packets · bytes · elapsed), and **Download** the finished `.pcap` — the real frames for Wireshark, which the Traffic Analyzer (text stats only) never writes
+- New `pcap_capture.py` capture engine — strictly bounded (defaults 5 min / 100 MB / one capture at a time, oldest pruned), validates interface + BPF (no option/shell injection), runs `tcpdump` directly as root or via `sudo -n` otherwise. Selftest 10/10; live loopback capture verified (bounded stop, valid pcap, packet count)
+- Mesh plumbing mirrors scan delegation: **worker** routes on each unit (`POST /api/mesh/capture/start`, `cancel/<id>`; peer-readable `GET …/status/<id>`, `/list`, `/download/<id>`) with the two writes added to the exact-path **peer-write allowlist**; **operator** routes (`/api/mesh/peer-capture/*`, session-only) relay to the chosen unit and, for a peer, **stream the `.pcap` back over the tailnet** (WireGuard) straight to the browser. Trust boundary is the mesh tag, same as control/scans. A `capture` block was added to the mesh `features` payload so the node page shows interfaces + recent captures per unit
+- Docs: [mesh.md](mesh.md) *Live packet capture (PCAP)* section + security-model allowlist; README mesh line
+- Verified: `pcap_capture.selftest()` 10/10; live loopback capture (20-packet cap → valid pcap read back by tcpdump); capture card rendered against the real pruned Tailwind at desktop and phone (400px) widths (controls/rows wrap, no overflow)
+
 ### 2026-10-04
 
 #### feat(mesh): node filters + actions (trace the jumps) on both the Ragnar fleet and Meshtastic node lists

@@ -23,6 +23,7 @@ be logged into renders the mesh; so would any other.
 - [Fleet security findings](#fleet-security-findings)
   - [Mesh Health card](#mesh-health-card)
   - [Mesh Nodes list and the node page](#mesh-nodes-list-and-the-node-page)
+    - [Live packet capture (PCAP)](#live-packet-capture-pcap)
     - [Filtering and sorting the list](#filtering-and-sorting-the-list)
     - [Node actions: path, trace route, ping](#node-actions-path-trace-route-ping)
 - [Unit identity — the Viking army](#unit-identity--the-viking-army)
@@ -639,7 +640,7 @@ The gate is deliberately narrow:
 
 | Property | Rule |
 |---|---|
-| Methods | Any `GET` for reads, plus a short **exact-path** write allowlist: `POST /api/mesh/control`, the scan-delegation writes, and `POST /api/mesh/update` |
+| Methods | Any `GET` for reads, plus a short **exact-path** write allowlist: `POST /api/mesh/control`, the scan-delegation writes, the packet-capture writes (`/api/mesh/capture/start`, `cancel/<id>`), and `POST /api/mesh/update` |
 | Paths | `/api/mesh/*` for reads; each write is matched by **exact path** so `join`/`leave`/`serve`/`peer-control`/`update-all` stay session-only. The other ~290 routes stay session-gated |
 | Identity | Must carry `mesh_tag` (default `tag:ragnar-mesh`) |
 | Source | Must be a real tailnet address (100.64/10 or `fd7a:115c:a1e0::/48`) |
@@ -893,6 +894,31 @@ live running state. The command is relayed server-side over the tailnet; see
 [Remote scan control](#remote-scan-control) for the security model. Any tagged
 unit can drive any other — the trust boundary is the mesh tag, so the way to
 keep a unit from being actuated remotely is simply not to tag it into the mesh.
+
+#### Live packet capture (PCAP)
+
+The node page also runs a **bounded packet capture** on a unit and streams the
+`.pcap` back to you — the real frames for Wireshark, next to the Traffic
+Analyzer's live stats (which only reads tcpdump as text and writes no file). Pick
+an **interface** (the list comes from that unit's own NICs), a **duration**, an
+optional **packet cap** and an optional **BPF filter** (`tcp port 443`, `host
+10.0.0.5`, …), and press **Start capture**. Progress (packets / bytes / elapsed)
+updates live; when it finishes, **Download** pulls the file.
+
+Every capture is **strictly bounded** (`pcap_capture.py`): it stops on the first
+of its time limit, packet count, or a hard byte ceiling (defaults 5 min / 100 MB
+/ one capture at a time), so a remote start can never run away with a peer's disk
+or CPU. Captures are retained briefly on the capturing unit (oldest pruned) so
+they can be re-fetched.
+
+It follows the same model as scan delegation: a *worker* layer on each unit
+(`POST /api/mesh/capture/start`, `cancel/<id>`; peer-readable
+`GET …/status/<id>`, `/list`, `/download/<id>`) with the two writes on the
+exact-path peer allowlist, and an *operator* layer the browser talks to
+(`/api/mesh/peer-capture/*`, session-only) that relays to the chosen unit and —
+for a peer — streams the `.pcap` back over the tailnet (WireGuard). Because start
+is a tagged-peer write, the trust boundary is again the mesh tag: a unit you do
+not want captured from is one you do not tag into the mesh.
 
 #### Filtering and sorting the list
 
