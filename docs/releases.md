@@ -4,6 +4,13 @@
 
 ### 2026-10-05
 
+#### docs(roadmap): add a grounded next-level roadmap checklist
+*branch `docs/roadmap` · PR pending*
+
+- New [roadmap.md](roadmap.md): a prioritized, evidence-cited checklist of what would take Ragnar to the next level — engineering hygiene (no CI runs the 53 pytest files + 40 `selftest()` modules; mostly-unpinned `requirements.txt`; the `webapp_modern.py` / `network_diagnostics.py` / `ragnar_modern.js` monoliths), self-hardening (no login throttling or 2FA in `auth_manager.py`; no OpenAPI for ~499 routes), finishing half-done features, and two verified code gaps (OS/services/deep-scan never persisted to the DB; AlienVault OTX advertised but disabled)
+- Linked from the [docs index](README.md) Getting-started line
+- Docs only; no code or behaviour change
+
 #### feat(mesh): live PCAP capture on the Ragnar fleet node page
 *branch `feature/mesh-pcap-capture` · PR pending*
 

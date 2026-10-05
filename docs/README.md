@@ -8,7 +8,7 @@ browse than search.
 - [Updating Ragnar](updates.md) — updating from the web UI or the terminal
 - [Docker Guide](DOCKER.md) — headless web UI in a container
 - [AP Mode](RagnarAP.md) — getting the box onto a network
-- [Releases (per-PR log)](releases.md) · [Release Notes](RELEASE_NOTES.md) · [Upcoming](Upcoming.md)
+- [Releases (per-PR log)](releases.md) · [Release Notes](RELEASE_NOTES.md) · [Roadmap](roadmap.md) · [Upcoming](Upcoming.md)
 
 ## Core scanning & offense
 - [Scanning & Attacks](scanning-and-attacks.md) — the core discovery / assess / brute-force / file-steal loop
