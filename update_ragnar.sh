@@ -315,6 +315,27 @@ if ! command -v rtl_test >/dev/null 2>&1; then
         echo -e "  ${YELLOW}⚠${NC} Could not install rtl-sdr/rtl-433 — RTL-SDR features stay disabled until they're present"
     fi
 fi
+# Keep ModemManager off Espressif USB serial/JTAG devices (VID 303a): the ESP-SDR
+# node (RF Waterfall) and ESP32 GPS/wardrive nodes enumerate as a ttyACM "USB
+# JTAG/serial debug unit" that MM mistakes for a cellular modem and probes with
+# AT commands + DTR/RTS toggles — that resets the chip and wedges a running SDR
+# capture. Tag them ID_MM_DEVICE_IGNORE (real LTE modems keep working). Mirrors
+# install_ragnar.sh so update-only boxes get it too.
+_mm_esp=/etc/udev/rules.d/99-ragnar-espsdr.rules
+if ! grep -q "ID_MM_DEVICE_IGNORE" "$_mm_esp" 2>/dev/null; then
+    cat > "$_mm_esp" << 'EOF'
+# Ragnar: ModemManager must not probe Espressif USB serial/JTAG devices
+# (ESP-SDR, ESP32 GPS/wardrive nodes). AT-command probing wedges them.
+SUBSYSTEM=="tty", ACTION=="add", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"
+EOF
+    chmod 644 "$_mm_esp"
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules 2>/dev/null || true
+        udevadm trigger --subsystem-match=tty 2>/dev/null || true
+    fi
+    echo -e "  ${GREEN}✓${NC} ModemManager set to ignore Espressif serial devices (ESP-SDR / ESP32 nodes)"
+fi
 # uhubctl lets the SDR self-healer cut a USB port's 5 V for a few seconds — the
 # software equivalent of replugging a dongle that is stuck on the bus.
 if ! command -v uhubctl >/dev/null 2>&1; then

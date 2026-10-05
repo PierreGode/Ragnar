@@ -753,6 +753,26 @@ EOF
         log "WARNING" "rfkill not available - WiFi blocking status unknown"
     fi
 
+    # Keep ModemManager off Espressif USB serial/JTAG devices (VID 303a): the
+    # ESP-SDR node (RF Waterfall) and ESP32 GPS/wardrive nodes all enumerate as
+    # a ttyACM "USB JTAG/serial debug unit", which MM mistakes for a cellular
+    # modem and probes with AT commands + DTR/RTS toggles — that resets the chip
+    # and wedges a running SDR capture. Tag them ID_MM_DEVICE_IGNORE so MM leaves
+    # them alone (real LTE modems for the cellular-uplink feature keep working).
+    cat > /etc/udev/rules.d/99-ragnar-espsdr.rules << 'EOF'
+# Ragnar: ModemManager must not probe Espressif USB serial/JTAG devices
+# (ESP-SDR, ESP32 GPS/wardrive nodes). AT-command probing wedges them.
+SUBSYSTEM=="tty", ACTION=="add", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"
+# usb-device match too, so MM skips the whole device, not just the tty.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"
+EOF
+    chmod 644 /etc/udev/rules.d/99-ragnar-espsdr.rules
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules 2>/dev/null || true
+        udevadm trigger --subsystem-match=tty 2>/dev/null || true
+    fi
+    log "SUCCESS" "ModemManager set to ignore Espressif serial devices (ESP-SDR / ESP32 nodes)"
+
     # RTL-SDR dongles (RTL-SDR Blog V3/V4, Nooelec NESDR, RTL-SDR.com, and any
     # generic RTL2832U stick) drive the sub-GHz half of the RF Waterfall and the
     # ISM decoder in rtl_sdr.py. Two things stop a freshly-plugged dongle from
