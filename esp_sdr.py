@@ -142,6 +142,89 @@ def _fofs_supported(ident):
     return bool(ident) and str(ident.get("chip", "")).upper().startswith("S3")
 
 
+def _resample(power, lo_mhz, hi_mhz, g_lo, g_hi, m):
+    """Linear-interpolate power[] (over [lo,hi] MHz) onto m points over [g_lo,g_hi]."""
+    n = len(power)
+    span = hi_mhz - lo_mhz
+    gstep = (g_hi - g_lo) / m
+    out = [0.0] * m
+    for k in range(m):
+        x = (g_lo + (k + 0.5) * gstep - lo_mhz) / span * n - 0.5    # fractional bin
+        if x <= 0:
+            out[k] = power[0]
+        elif x >= n - 1:
+            out[k] = power[n - 1]
+        else:
+            i = int(x)
+            t = x - i
+            out[k] = power[i] * (1 - t) + power[i + 1] * t
+    return out
+
+
+def _xcorr_offset(a, a_lo, a_hi, b, b_lo, b_hi, max_khz=300.0, g_khz=25.0):
+    """Frequency offset (kHz) of spectrum `a` relative to reference `b`.
+
+    Both are resampled onto a common grid over their overlap and cross-correlated
+    (mean-removed, normalised). The lag of peak correlation is where `a` shows a
+    feature that `b` (the truth, e.g. a TCXO HackRF) has `offset` lower — i.e.
+    `offset = a_apparent − b_true`, the same convention as `_wifi_offset`. Returns
+    {offset_khz, corr, overlap_mhz} (`corr` is the peak coefficient, −1..1) or None.
+    """
+    c_lo = max(a_lo, b_lo) + 1.0
+    c_hi = min(a_hi, b_hi) - 1.0
+    if c_hi - c_lo < 20.0:
+        return None
+    m = int((c_hi - c_lo) * 1000.0 / g_khz)
+    if m < 32:
+        return None
+    ag = _resample(a, a_lo, a_hi, c_lo, c_hi, m)
+    bg = _resample(b, b_lo, b_hi, c_lo, c_hi, m)
+    # Equalise resolution: a cross-correlation shift is only unbiased when both
+    # spectra have the same effective bin width. Box-smooth both to the coarser
+    # radio's resolution (the HackRF's bins are wider than the ESP's).
+    a_bw = (a_hi - a_lo) / len(a) * 1000.0
+    b_bw = (b_hi - b_lo) / len(b) * 1000.0
+    w = int(round(max(a_bw, b_bw) / g_khz))
+    if w >= 2:
+        def _box(v, k):
+            h = k // 2
+            pre = [0.0]
+            for x in v:
+                pre.append(pre[-1] + x)
+            return [(pre[min(len(v), i + h + 1)] - pre[max(0, i - h)]) /
+                    (min(len(v), i + h + 1) - max(0, i - h)) for i in range(len(v))]
+        ag = _box(ag, w)
+        bg = _box(bg, w)
+    ma, mb = sum(ag) / m, sum(bg) / m
+    ag = [x - ma for x in ag]
+    bg = [x - mb for x in bg]
+    na = sum(x * x for x in ag) ** 0.5
+    nb = sum(x * x for x in bg) ** 0.5
+    if na == 0 or nb == 0:
+        return None
+    maxlag = int(max_khz / g_khz)
+    coeffs = {}
+    best_lag, best_c = 0, -2.0
+    for lag in range(-maxlag, maxlag + 1):
+        s = 0.0
+        lo_k = max(0, lag)
+        hi_k = min(m, m + lag)
+        for k in range(lo_k, hi_k):
+            s += ag[k] * bg[k - lag]
+        c = s / (na * nb)
+        coeffs[lag] = c
+        if c > best_c:
+            best_c, best_lag = c, lag
+    sub = float(best_lag)                               # parabolic sub-bin peak
+    if -maxlag < best_lag < maxlag:
+        y0, y1, y2 = coeffs[best_lag - 1], coeffs[best_lag], coeffs[best_lag + 1]
+        denom = y0 - 2 * y1 + y2
+        if denom != 0:
+            sub = best_lag + 0.5 * (y0 - y2) / denom
+    return {"offset_khz": sub * g_khz, "corr": round(best_c, 3),
+            "overlap_mhz": round(c_hi - c_lo, 1)}
+
+
 def _wifi_offset(power, lo_mhz, hi_mhz):
     """Median frequency offset (kHz) of the 2.4 GHz Wi-Fi channels in view.
 
@@ -764,6 +847,65 @@ class EspCapture:
         return {"ok": False, "error": "no clean 2.4 GHz Wi-Fi channel to lock onto — "
                 "needs ch 1/6/11 traffic; try again near an access point"}
 
+    def calibrate_vs_reference(self, ref_power, ref_lo, ref_hi, label="HackRF", settle=5.0):
+        """Calibrate FOFS against a TCXO reference spectrum of the same band.
+
+        `ref_power` is a reference radio's max-hold over [ref_lo, ref_hi] MHz (a
+        HackRF — accurate TCXO). We capture the ESP's own max-hold over the 2.4
+        band and cross-correlate the two band shapes: both radios see the same
+        ambient RF, so the lag that aligns them is the ESP's frequency error,
+        and overlapping-channel contamination cancels (it's in both). Robust and
+        signal-agnostic — far better than the ambient-Wi-Fi lock. Blocks ~`settle`
+        seconds while the ESP max-hold fills; restores the previous view after.
+        """
+        with self._lock:
+            supported = self._fofs_ok
+            saved = self._last_start
+            fofs = self._fofs
+            have_device = bool(self._identity) or bool(self._thread and self._thread.is_alive())
+        if serial is None or not have_device:
+            return {"ok": False, "error": "no ESP-SDR node detected"}
+        if not supported:
+            return {"ok": False, "error": "this ESP chip has no FOFS trim (S3/S31 only)"}
+        if not ref_power or ref_lo is None or ref_hi is None or (ref_hi - ref_lo) < 20:
+            return {"ok": False, "error": "HackRF reference capture too small"}
+        # Measure the ESP over the SAME window as the reference (a narrow ~40 MHz
+        # window gives both radios fine-enough resolution for an accurate lag; the
+        # full 80 MHz band's coarse HackRF bins bias the correlation low).
+        center = (ref_lo + ref_hi) / 2.0
+        half = min(40.0, (ref_hi - ref_lo) / 2.0)
+        r = self.start(band=None, lo_mhz=center - half, hi_mhz=center + half, fft_bins=2048)
+        if not r.get("ok"):
+            return {"ok": False, "error": r.get("error", "could not start measurement sweep")}
+        time.sleep(max(2.0, settle))
+        with self._lock:
+            mh = list(self._maxhold) if self._maxhold else None
+            lo, hi = self._lo_mhz, self._hi_mhz
+        xc = _xcorr_offset(mh, lo, hi, ref_power, ref_lo, ref_hi) if (mh and lo is not None) else None
+        result = None
+        if xc and xc["corr"] >= 0.5 and abs(xc["offset_khz"]) <= 150:
+            new_fofs = max(-_FOFS_LIMIT, min(_FOFS_LIMIT, int(round(fofs - xc["offset_khz"]))))
+            with self._lock:
+                self._fofs = new_fofs
+            _save_fofs(new_fofs)
+            result = {"ok": True, "offset_khz": round(xc["offset_khz"], 1), "corr": xc["corr"],
+                      "overlap_mhz": xc["overlap_mhz"], "old_fofs": fofs, "fofs_khz": new_fofs,
+                      "fofs_ppm": self._fofs_ppm(new_fofs), "ref": label, "ts": time.time()}
+            with self._lock:
+                self._trim = result
+        self.start(saved[0], lo_mhz=saved[1], hi_mhz=saved[2], fft_bins=saved[3])
+        if result:
+            return result
+        if xc and xc["corr"] < 0.5:
+            return {"ok": False, "corr": xc["corr"],
+                    "error": "weak correlation with the HackRF (%.2f) — not enough common signal; "
+                             "aim both at an active band and retry" % xc["corr"]}
+        if xc:
+            return {"ok": False, "offset_khz": round(xc["offset_khz"], 1),
+                    "error": "measured offset %+d kHz exceeds the crystal's range — check both radios "
+                             "are on 2.4 GHz" % int(xc["offset_khz"])}
+        return {"ok": False, "error": "could not correlate the ESP against the HackRF reference"}
+
 
 # --------------------------------------------------------------------------
 # Module-level singleton + detection cache the web routes drive
@@ -847,6 +989,10 @@ def set_fofs(khz):
 
 def auto_trim(settle=6.0):
     return _capture.auto_trim(settle=settle)
+
+
+def calibrate_vs_reference(ref_power, ref_lo, ref_hi, label="HackRF", settle=5.0):
+    return _capture.calibrate_vs_reference(ref_power, ref_lo, ref_hi, label=label, settle=settle)
 
 
 def trim_state():
@@ -938,6 +1084,24 @@ def selftest():
     wo2 = _wifi_offset(tr2, 2402.0, 2482.0)
     check("wifi offset not confident when channels disagree", wo2 and not wo2["confident"],
           "spread %.0f" % (wo2["spread_khz"] if wo2 else -1))
+
+    # Cross-correlation: a +60 kHz-shifted copy recovers the shift at high corr.
+    nb = 1600
+    rlo, rhi = 2420.0, 2460.0
+    rf = lambda i: rlo + (i + 0.5) * (rhi - rlo) / nb
+    def _spec(shift):
+        s = [-90.0] * nb
+        for i in range(nb):
+            for ctr in (2432.0, 2437.0, 2448.0):
+                d = abs(rf(i) - (ctr + shift))
+                if d <= 5:
+                    s[i] = max(s[i], -30.0 - max(0.0, (d - 3.0)) * 10.0)
+        return s
+    xc = _xcorr_offset(_spec(0.060), rlo, rhi, _spec(0.0), rlo, rhi)
+    check("xcorr recovers +60 kHz shift", xc and abs(xc["offset_khz"] - 60) < 25,
+          "%.0f kHz" % (xc["offset_khz"] if xc else 0))
+    check("xcorr high correlation", xc and xc["corr"] > 0.9, "corr %.2f" % (xc["corr"] if xc else 0))
+    check("xcorr None on noise", _xcorr_offset([-90.0] * nb, rlo, rhi, [-90.0] * 512, rlo, rhi) is None)
 
     ok_all = all(x["ok"] for x in results)
     return {"ok": ok_all, "checks": results,

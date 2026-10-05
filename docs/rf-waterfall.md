@@ -33,17 +33,24 @@ the Pi's USB, and the panel flips live.
   oscillator, so its LO sits a few ppm off and drifts with temperature. The
   panel's **Settings → Frequency trim** section corrects this at the LO via the
   firmware's `FOFS <kHz>` command (verified 1:1 in kHz). Set an offset by hand,
-  or hit **Auto-trim (Wi-Fi)**: it runs a high-resolution 2.4 GHz sweep and nulls
-  the drift against the 2.4 GHz Wi-Fi channel centres (ch 1/6/11 = 2412/2437/2462
-  MHz). Auto-trim only applies a correction when it is *confident* — two channels
-  (ch 6 and 11) agreeing within 40 kHz and inside the crystal's physical range
-  (~±100 kHz); in a congested 2.4 GHz environment it declines rather than
-  mis-calibrate, and you fall back to manual trim or a HackRF cross-reference.
-  The trim is uncalibrated against an absolute standard — it aligns the ESP's
-  axis to the Wi-Fi grid, which is itself only as good as the APs' own
-  oscillators (averaged across channels). The value persists across restarts
-  (`data/esp_sdr_fofs.json`). Backend: `esp_sdr.set_fofs` / `esp_sdr.auto_trim`,
-  exposed at `/api/net/esp/trim`.
+  or calibrate automatically two ways:
+  - **Auto-trim (Wi-Fi)** runs a high-resolution 2.4 GHz sweep and nulls the drift
+    against the 2.4 GHz Wi-Fi channel centres (ch 1/6/11 = 2412/2437/2462 MHz). It
+    only applies when *confident* — ch 6 and 11 agreeing within 40 kHz and inside
+    the crystal's physical range (~±100 kHz); in a congested 2.4 GHz environment
+    it declines rather than mis-calibrate. It's only as accurate as the APs' own
+    oscillators (averaged across channels).
+  - **vs HackRF** cross-references a connected **HackRF** (TCXO truth): both radios
+    sweep the same narrow ~40 MHz window around ch 6, and the ESP spectrum is
+    cross-correlated against the HackRF's (resolution-matched, sub-bin). Because
+    both see the same ambient RF, overlapping-channel contamination cancels — this
+    is the most accurate option (limited mainly by the HackRF's bin resolution over
+    the window, ~tens of kHz). Applies only on a strong correlation (≥0.5).
+
+  The trim is applied at the LO (`FOFS`) and persists across restarts
+  (`data/esp_sdr_fofs.json`, git-ignored, device-specific). Backend:
+  `esp_sdr.set_fofs` / `esp_sdr.auto_trim` / `esp_sdr.calibrate_vs_reference`, all
+  via `/api/net/esp/trim` (POST `{khz:N}` / `{auto:1}` / `{hackrf:1}`).
 - The node is auto-discovered on any Espressif serial port (env override
   `RAGNAR_ESP_SDR_PORT`). A capture left streaming by a crashed client is
   self-healed on the next probe (a `RELEASE` doubles as the stream stop byte).

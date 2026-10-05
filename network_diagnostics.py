@@ -27306,13 +27306,36 @@ def register_network_diagnostics(app, logger=None):
         if request.method == 'GET':
             return jsonify(esp_sdr.trim_state())
         data = request.get_json(silent=True) or {}
+        if data.get('hackrf'):
+            # Cross-reference the ESP against a TCXO HackRF: sweep the same 2.4 GHz
+            # band on the HackRF, build its max-hold, then correlate the ESP to it.
+            _log("net/esp/trim hackrf")
+            hk = sdr_spectrum.status()
+            if not (hk.get('detect') or {}).get('available'):
+                return jsonify({"ok": False, "error": "no HackRF detected — connect a HackRF "
+                                "(TCXO reference) to cross-calibrate the ESP"})
+            # A narrow ~40 MHz window (around Wi-Fi ch 6) gives the HackRF fine
+            # resolution so the cross-correlation lag is accurate; the full band
+            # is too coarse. Both radios measure this same window.
+            sdr_spectrum.start(lo_mhz=2420.0, hi_mhz=2460.0)
+            deadline = time.time() + 5.5                 # accumulate the HackRF max-hold
+            last = {}
+            while time.time() < deadline:
+                time.sleep(0.5)
+                last = sdr_spectrum.get_frames(0)
+            mh = last.get('max_hold')
+            bm = last.get('band_mhz')
+            sdr_spectrum.stop()
+            if not mh or not bm:
+                return jsonify({"ok": False, "error": "HackRF produced no spectrum — check the device"})
+            return jsonify(esp_sdr.calibrate_vs_reference(mh, bm[0], bm[1], label='HackRF'))
         if data.get('auto'):
             _log("net/esp/trim auto")
             return jsonify(esp_sdr.auto_trim())
         if 'khz' in data:
             _log(f"net/esp/trim khz={data.get('khz')}")
             return jsonify(esp_sdr.set_fofs(data.get('khz')))
-        return _bad('Pass {"auto":true} to auto-calibrate or {"khz":N} to set the trim')
+        return _bad('Pass {"hackrf":true}, {"auto":true}, or {"khz":N}')
 
     # ------------------------------------------------------------------
     # Sub-GHz true-RF power sweep / waterfall via an RTL-SDR (rtl_sdr.py).

@@ -666,8 +666,9 @@
           +(cfg.espTrim?'<fieldset class="dsec dtrim"><legend>Frequency trim (no TCXO)</legend>'
             +'<div class="drow"><label>Offset</label><input type="number" class="ftin" step="1" style="flex:0 0 76px;width:76px"><span>kHz</span><span class="ftppm" style="color:var(--muted);margin-left:auto"></span></div>'
             +'<div class="drow"><button class="mini ftauto" title="Lock the frequency axis to the 2.4 GHz Wi-Fi channel centres (ch 1/6/11). Takes about 7 seconds.">&#127760;&nbsp;Auto-trim (Wi-Fi)</button>'
+              +'<button class="mini fthk" title="Cross-reference against a connected HackRF (TCXO). Both radios sweep the same 2.4 GHz window and the ESP is aligned to the HackRF. The most accurate option. Takes about 12 seconds.">&#128225;&nbsp;vs HackRF</button>'
               +'<button class="mini ftzero" title="Clear the trim (FOFS 0)">Reset</button></div>'
-            +'<div class="dnote ftnote">The ESP32 has no TCXO: its LO sits a few ppm off and drifts with temperature. <b>Auto-trim</b> nulls it against the ever-present 2.4 GHz Wi-Fi carriers (needs ch 1/6/11 traffic), or set an offset by hand. Applied at the LO (<code>FOFS</code>).</div>'
+            +'<div class="dnote ftnote">The ESP32 has no TCXO: its LO sits a few ppm off and drifts with temperature. <b>Auto-trim</b> nulls it against the 2.4 GHz Wi-Fi carriers (needs ch 1/6/11 traffic); <b>vs HackRF</b> cross-references a connected HackRF (TCXO truth) for the most accurate lock; or set an offset by hand. Applied at the LO (<code>FOFS</code>).</div>'
             +'</fieldset>':'')
         +'</div>'
         +'<div class="recbar hidden"></div>'
@@ -1879,20 +1880,31 @@
   Scope.prototype.setupTrim=function(){
     var self=this, el=this.el;
     this.ftIn=el.querySelector('.ftin'); this.ftPpm=el.querySelector('.ftppm');
-    this.ftAuto=el.querySelector('.ftauto'); this.ftZero=el.querySelector('.ftzero');
+    this.ftAuto=el.querySelector('.ftauto'); this.ftHk=el.querySelector('.fthk'); this.ftZero=el.querySelector('.ftzero');
     this.ftNote=el.querySelector('.ftnote');
     if(this.ftIn) this.ftIn.addEventListener('change',function(){ self._trimPost({khz:parseInt(self.ftIn.value,10)||0}); });
     if(this.ftZero) this.ftZero.addEventListener('click',function(){ self._trimPost({khz:0}); });
     if(this.ftAuto) this.ftAuto.addEventListener('click',function(){
-      self.ftAuto.disabled=true; var old=self.ftAuto.innerHTML; self.ftAuto.innerHTML='&#8987;&nbsp;measuring… (~7 s)';
-      if(self.ftNote) self.ftNote.textContent='Measuring the 2.4 GHz Wi-Fi channel centres… keep it on the 2.4 band.';
-      fetch(self.cfg.api.trim,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auto:1})})
-        .then(function(r){return r.json();}).then(function(res){ self.ftAuto.disabled=false; self.ftAuto.innerHTML=old;
-          if(res&&res.ok){ self._trimShow(res); if(self.ftNote) self.ftNote.innerHTML='Locked to Wi-Fi ch '+((res.channels||[]).join('/'))+': was '+fmtSigned(res.offset_khz)+' kHz off, trim now <b>'+res.fofs_khz+' kHz</b> ('+fmtSigned(res.fofs_ppm)+' ppm).'; }
-          else if(self.ftNote) self.ftNote.textContent=(res&&res.error)||'Auto-trim failed.';
-          self.trimRefresh();
-        }).catch(function(){ self.ftAuto.disabled=false; self.ftAuto.innerHTML=old; if(self.ftNote) self.ftNote.textContent='Auto-trim request failed.'; }); });
+      self._trimRun(self.ftAuto,{auto:1},'measuring… (~7 s)','Measuring the 2.4 GHz Wi-Fi channel centres…','Wi-Fi'); });
+    if(this.ftHk) this.ftHk.addEventListener('click',function(){
+      self._trimRun(self.ftHk,{hackrf:1},'measuring… (~12 s)','Sweeping the HackRF, then the ESP, on the same 2.4 GHz window…','HackRF'); });
     this.trimRefresh();                       // show the persisted trim on load
+  };
+  // Run a calibration (auto-Wi-Fi or vs-HackRF): disable the button, POST, report.
+  Scope.prototype._trimRun=function(btn,body,busy,note,refName){
+    var self=this; btn.disabled=true; var old=btn.innerHTML; btn.innerHTML='&#8987;&nbsp;'+busy;
+    if(this.ftAuto&&btn!==this.ftAuto) this.ftAuto.disabled=true; if(this.ftHk&&btn!==this.ftHk) this.ftHk.disabled=true;
+    if(this.ftNote) this.ftNote.textContent=note;
+    fetch(this.cfg.api.trim,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+      .then(function(r){return r.json();}).then(function(res){
+        btn.disabled=false; btn.innerHTML=old; if(self.ftAuto) self.ftAuto.disabled=false; if(self.ftHk) self.ftHk.disabled=false;
+        if(res&&res.ok){ self._trimShow(res);
+          var how=(refName==='HackRF')?('HackRF (corr '+(res.corr!=null?res.corr:'?')+', '+(res.overlap_mhz||'?')+' MHz)'):('Wi-Fi ch '+((res.channels||[]).join('/')));
+          if(self.ftNote) self.ftNote.innerHTML='Locked to '+how+': was '+fmtSigned(res.offset_khz)+' kHz off, trim now <b>'+res.fofs_khz+' kHz</b> ('+fmtSigned(res.fofs_ppm)+' ppm).'; }
+        else if(self.ftNote) self.ftNote.textContent=(res&&res.error)||(refName+' calibration failed.');
+        self.trimRefresh();
+      }).catch(function(){ btn.disabled=false; btn.innerHTML=old; if(self.ftAuto) self.ftAuto.disabled=false; if(self.ftHk) self.ftHk.disabled=false;
+        if(self.ftNote) self.ftNote.textContent=refName+' calibration request failed.'; });
   };
   Scope.prototype._trimPost=function(body){ var self=this;
     fetch(this.cfg.api.trim,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
