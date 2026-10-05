@@ -29,6 +29,21 @@ the Pi's USB, and the panel flips live.
   tuning attempts are accepted 100–6000 MHz but reception is uncalibrated.
 - Levels are **dBFS** (0 = full scale), not calibrated dBm. The colour scale
   floors at −85 dBFS (just below the −84.3 dBFS quantisation floor).
+- **Frequency trim (no TCXO).** The ESP32 has no temperature-compensated
+  oscillator, so its LO sits a few ppm off and drifts with temperature. The
+  panel's **Settings → Frequency trim** section corrects this at the LO via the
+  firmware's `FOFS <kHz>` command (verified 1:1 in kHz). Set an offset by hand,
+  or hit **Auto-trim (Wi-Fi)**: it runs a high-resolution 2.4 GHz sweep and nulls
+  the drift against the 2.4 GHz Wi-Fi channel centres (ch 1/6/11 = 2412/2437/2462
+  MHz). Auto-trim only applies a correction when it is *confident* — two channels
+  (ch 6 and 11) agreeing within 40 kHz and inside the crystal's physical range
+  (~±100 kHz); in a congested 2.4 GHz environment it declines rather than
+  mis-calibrate, and you fall back to manual trim or a HackRF cross-reference.
+  The trim is uncalibrated against an absolute standard — it aligns the ESP's
+  axis to the Wi-Fi grid, which is itself only as good as the APs' own
+  oscillators (averaged across channels). The value persists across restarts
+  (`data/esp_sdr_fofs.json`). Backend: `esp_sdr.set_fofs` / `esp_sdr.auto_trim`,
+  exposed at `/api/net/esp/trim`.
 - The node is auto-discovered on any Espressif serial port (env override
   `RAGNAR_ESP_SDR_PORT`). A capture left streaming by a crashed client is
   self-healed on the next probe (a `RELEASE` doubles as the stream stop byte).

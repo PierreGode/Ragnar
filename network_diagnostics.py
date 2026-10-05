@@ -27298,6 +27298,22 @@ def register_network_diagnostics(app, logger=None):
         _log("net/esp/selftest")
         return jsonify(esp_sdr.selftest())
 
+    # Frequency trim (FOFS): the ESP32 has no TCXO, so its LO drifts a few ppm.
+    # GET reports the current trim; POST {auto:1} nulls it against the 2.4 GHz
+    # Wi-Fi channel centres; POST {khz:N} sets a manual LO offset in kHz.
+    @app.route('/api/net/esp/trim', methods=['GET', 'POST'])
+    def net_esp_trim():
+        if request.method == 'GET':
+            return jsonify(esp_sdr.trim_state())
+        data = request.get_json(silent=True) or {}
+        if data.get('auto'):
+            _log("net/esp/trim auto")
+            return jsonify(esp_sdr.auto_trim())
+        if 'khz' in data:
+            _log(f"net/esp/trim khz={data.get('khz')}")
+            return jsonify(esp_sdr.set_fofs(data.get('khz')))
+        return _bad('Pass {"auto":true} to auto-calibrate or {"khz":N} to set the trim')
+
     # ------------------------------------------------------------------
     # Sub-GHz true-RF power sweep / waterfall via an RTL-SDR (rtl_sdr.py).
     # The HackRF block above covers the 2.4/5/6 GHz Wi-Fi bands; this covers

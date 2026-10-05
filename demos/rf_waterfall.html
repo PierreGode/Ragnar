@@ -469,6 +469,7 @@
   function fmtTick(mhz,step){ if(mhz>=1000&&step>=1) return (mhz/1000).toFixed(Math.max(0,fDec(step/1000)))+'G'; return mhz.toFixed(fDec(step)); }
   function fmtSpan(lo,hi){var d=fDec(Math.max((hi-lo)/100,1e-6)); d=Math.max(d,(lo>=100?1:2)); return lo.toFixed(d)+'–'+hi.toFixed(d);}
   function nowHM(){var d=new Date();return String(d.getHours()).padStart(2,'0')+":"+String(d.getMinutes()).padStart(2,'0')+":"+String(d.getSeconds()).padStart(2,'0');}
+  function fmtSigned(v){ v=+v||0; return (v>=0?'+':'')+ (Math.abs(v)>=10?v.toFixed(0):v.toFixed(v%1?1:0)); }
 
   function Scope(cfg){
     var self=this;
@@ -662,6 +663,12 @@
             +'<div class="dnote">Opens in a spreadsheet, Python / MATLAB etc. Levels are in the units shown on screen (dBm once calibrated). The waterfall export covers the whole history (see <b>History</b>), resampled onto the current span.</div>'
           +'</fieldset>'
           +'<fieldset class="dsec dhw"><legend>Hardware</legend><div class="drow"><span class="tunergrp"></span></div></fieldset>'
+          +(cfg.espTrim?'<fieldset class="dsec dtrim"><legend>Frequency trim (no TCXO)</legend>'
+            +'<div class="drow"><label>Offset</label><input type="number" class="ftin" step="1" style="flex:0 0 76px;width:76px"><span>kHz</span><span class="ftppm" style="color:var(--muted);margin-left:auto"></span></div>'
+            +'<div class="drow"><button class="mini ftauto" title="Lock the frequency axis to the 2.4 GHz Wi-Fi channel centres (ch 1/6/11). Takes about 7 seconds.">&#127760;&nbsp;Auto-trim (Wi-Fi)</button>'
+              +'<button class="mini ftzero" title="Clear the trim (FOFS 0)">Reset</button></div>'
+            +'<div class="dnote ftnote">The ESP32 has no TCXO: its LO sits a few ppm off and drifts with temperature. <b>Auto-trim</b> nulls it against the ever-present 2.4 GHz Wi-Fi carriers (needs ch 1/6/11 traffic), or set an offset by hand. Applied at the LO (<code>FOFS</code>).</div>'
+            +'</fieldset>':'')
         +'</div>'
         +'<div class="recbar hidden"></div>'
         +'<div class="logwrap"><div class="logcap"><span class="logtitle">Signals</span><span class="logcount"></span></div>'
@@ -844,7 +851,9 @@
     // Settings drawer
     this.cfgBtn=el.querySelector('.cfgbtn'); this.drawer=el.querySelector('.drawer');
     this.cfgBtn.addEventListener('click',function(){ var open=self.drawer.hidden; self.drawer.hidden=!open;
-      self.cfgBtn.setAttribute('aria-expanded',open?'true':'false'); self.cfgBtn.setAttribute('aria-pressed',open?'true':'false'); });
+      self.cfgBtn.setAttribute('aria-expanded',open?'true':'false'); self.cfgBtn.setAttribute('aria-pressed',open?'true':'false');
+      if(open && self.cfg.espTrim) self.trimRefresh(); });
+    if(cfg.espTrim) this.setupTrim();
     this.dAuto=el.querySelector('.dauto'); this.dRef=el.querySelector('.dref'); this.dRefN=el.querySelector('.drefn');
     this.dRng=el.querySelector('.drng'); this.dRngN=el.querySelector('.drngn');
     this.dAuto.addEventListener('click',function(){ self.setDisplay({auto:!self.disp.auto}); });
@@ -1865,6 +1874,37 @@
       this.resize(); if(this.repaint) this.repaint();
       if(this.hi>this.lo && this.drawRuler) this.drawRuler();   // only with a valid range
       requestAnimationFrame(function(){ self.resize(); if(self.repaint) self.repaint(); }); }
+  };
+  // ---- ESP-SDR frequency trim (FOFS) ---------------------------------------
+  Scope.prototype.setupTrim=function(){
+    var self=this, el=this.el;
+    this.ftIn=el.querySelector('.ftin'); this.ftPpm=el.querySelector('.ftppm');
+    this.ftAuto=el.querySelector('.ftauto'); this.ftZero=el.querySelector('.ftzero');
+    this.ftNote=el.querySelector('.ftnote');
+    if(this.ftIn) this.ftIn.addEventListener('change',function(){ self._trimPost({khz:parseInt(self.ftIn.value,10)||0}); });
+    if(this.ftZero) this.ftZero.addEventListener('click',function(){ self._trimPost({khz:0}); });
+    if(this.ftAuto) this.ftAuto.addEventListener('click',function(){
+      self.ftAuto.disabled=true; var old=self.ftAuto.innerHTML; self.ftAuto.innerHTML='&#8987;&nbsp;measuring… (~7 s)';
+      if(self.ftNote) self.ftNote.textContent='Measuring the 2.4 GHz Wi-Fi channel centres… keep it on the 2.4 band.';
+      fetch(self.cfg.api.trim,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auto:1})})
+        .then(function(r){return r.json();}).then(function(res){ self.ftAuto.disabled=false; self.ftAuto.innerHTML=old;
+          if(res&&res.ok){ self._trimShow(res); if(self.ftNote) self.ftNote.innerHTML='Locked to Wi-Fi ch '+((res.channels||[]).join('/'))+': was '+fmtSigned(res.offset_khz)+' kHz off, trim now <b>'+res.fofs_khz+' kHz</b> ('+fmtSigned(res.fofs_ppm)+' ppm).'; }
+          else if(self.ftNote) self.ftNote.textContent=(res&&res.error)||'Auto-trim failed.';
+          self.trimRefresh();
+        }).catch(function(){ self.ftAuto.disabled=false; self.ftAuto.innerHTML=old; if(self.ftNote) self.ftNote.textContent='Auto-trim request failed.'; }); });
+    this.trimRefresh();                       // show the persisted trim on load
+  };
+  Scope.prototype._trimPost=function(body){ var self=this;
+    fetch(this.cfg.api.trim,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+      .then(function(r){return r.json();}).then(function(res){ if(res&&res.ok) self._trimShow(res); }).catch(function(){}); };
+  Scope.prototype.trimRefresh=function(){ var self=this;
+    fetch(this.cfg.api.trim).then(function(r){return r.json();}).then(function(st){ self._trimShow(st); }).catch(function(){}); };
+  Scope.prototype._trimShow=function(st){
+    if(!st) return;
+    var khz=(st.fofs_khz!=null)?st.fofs_khz:0, ppm=(st.fofs_ppm!=null)?st.fofs_ppm:0;
+    if(this.ftIn && document.activeElement!==this.ftIn) this.ftIn.value=khz;
+    if(this.ftPpm) this.ftPpm.textContent=fmtSigned(ppm)+' ppm';
+    if(this.ftAuto && st.supported===false){ this.ftAuto.disabled=true; this.ftAuto.title='This ESP chip has no FOFS trim (S3/S31 only)'; }
   };
   Scope.prototype.setMode=function(mode){
     if(mode!==this.mode) this._manualOverride=false;          // mode change -> auto takes over again
@@ -3487,8 +3527,8 @@
     var r=ESP_WIN[b]||ESP_WIN['2.4']; return wifiModel('2.4',r[0],r[1]); }
   var ESP_BANDS=[{id:'2.3',label:'2.3G'},{id:'2.4',label:'2.4G'},{id:'2.45',label:'2.45G'},{id:'2.6',label:'2.6G'}];
   var esp=new Scope({ name:"ESP-SDR", short:"ESP-SDR", dev:"ESP32 · on-chip FFT", rig:"rig-esp",
-    api:{status:'/api/net/esp/status',start:'/api/net/esp/start',stop:'/api/net/esp/stop',frames:'/api/net/esp/frames'},
-    synth:espSynth, synthDefault:'2.4', synthBands:true, decode:false, zwave:false, minSpan:1,
+    api:{status:'/api/net/esp/status',start:'/api/net/esp/start',stop:'/api/net/esp/stop',frames:'/api/net/esp/frames',trim:'/api/net/esp/trim'},
+    synth:espSynth, synthDefault:'2.4', synthBands:true, decode:false, zwave:false, minSpan:1, espTrim:true,
     hwLo:2200, hwHi:2700, tuneSpan:16,   // ESP32-S3: ~2.2-2.7 GHz usable; 16 MHz min capture window
     liveBands:ESP_BANDS, defaultBand:'2.4' });
   scopes.push(esp); stack.appendChild(esp.el);

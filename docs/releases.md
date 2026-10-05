@@ -4,6 +4,13 @@
 
 ### 2026-10-05
 
+#### feat(sdr): ESP-SDR frequency trim (FOFS) + Wi-Fi auto-calibration
+*branch `feature/esp-sdr-waterfall` · PR pending*
+
+- The ESP32 has no TCXO, so its LO drifts a few ppm with temperature. New **Frequency trim** control (ESP panel → Settings) corrects it at the LO via the firmware's `FOFS <kHz>` command — verified on real hardware to shift the spectrum **1:1 in kHz** (+FOFS → +kHz). Set an offset by hand (shows the ppm equivalent), or **Auto-trim (Wi-Fi)**
+- **Auto-trim** runs a high-res 2.4 GHz sweep and nulls the drift against the **2.4 GHz Wi-Fi channel centres** (ch 1/6/11). It is self-validating — it only applies a correction when **two channels agree within 40 kHz** and the result is inside the crystal's physical range (~±100 kHz); in a congested 2.4 GHz environment it **declines rather than mis-calibrate** and points you at manual trim or a HackRF cross-reference. Measured edges are sub-bin interpolated; the trim persists across restarts (`data/esp_sdr_fofs.json`, git-ignored)
+- New backend `esp_sdr.set_fofs` / `esp_sdr.auto_trim` / `esp_sdr.trim_state`, route `/api/net/esp/trim` (GET state · POST `{khz:N}` manual · POST `{auto:1}` calibrate); FOFS is sent on every capture start and is part of the start signature so a trim change re-applies live. `esp_sdr.selftest` 15/15 (adds Wi-Fi-offset estimator checks)
+
 #### feat(sdr): ESP-SDR as a third live RF Waterfall panel
 *branch `feature/esp-sdr-waterfall` · PR pending*
 

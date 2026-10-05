@@ -108,6 +108,107 @@ _STRIDE_UNITS = {
 _LEASE_TIMEOUT = 5.0                    # seconds to acquire the serial lease
 _CMD_TIMEOUT = 2.0                      # seconds to read a text reply
 
+# Frequency trim (FOFS). The ESP32 has no TCXO; its crystal runs a few ppm off
+# and drifts with temperature. The S3/S31 firmware accepts `FOFS <kHz>` — a PLL
+# offset applied at the LO (verified 1:1 in kHz: +FOFS shifts the spectrum up by
+# that many kHz). We null the drift against the ever-present 2.4 GHz Wi-Fi
+# channel centres (1/6/11 = 2412/2437/2462 MHz), which also tracks temperature.
+_WIFI_CH = {1: 2412.0, 6: 2437.0, 11: 2462.0}   # non-overlapping 2.4 GHz centres (MHz)
+_FOFS_LIMIT = 2000                      # clamp |FOFS| to +-2 MHz (crystal is <<100 kHz)
+_FOFS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "data", "esp_sdr_fofs.json")
+
+
+def _load_fofs():
+    """Last calibrated FOFS (kHz), persisted across restarts. 0 if unknown."""
+    try:
+        with open(_FOFS_FILE) as f:
+            return int(json.load(f).get("fofs_khz", 0))
+    except Exception:
+        return 0
+
+
+def _save_fofs(khz):
+    try:
+        os.makedirs(os.path.dirname(_FOFS_FILE), exist_ok=True)
+        with open(_FOFS_FILE, "w") as f:
+            json.dump({"fofs_khz": int(khz)}, f)
+    except Exception:
+        pass
+
+
+def _fofs_supported(ident):
+    """FOFS is implemented on the S3 and S31 burst firmware."""
+    return bool(ident) and str(ident.get("chip", "")).upper().startswith("S3")
+
+
+def _wifi_offset(power, lo_mhz, hi_mhz):
+    """Median frequency offset (kHz) of the 2.4 GHz Wi-Fi channels in view.
+
+    The whole spectrum shifts uniformly with crystal error, so each occupied
+    20 MHz channel's measured centre sits off its nominal centre by that error.
+    We take the midpoint of the channel's −18 dB edges (robust to asymmetric
+    traffic on a filled channel) and median across the channels present.
+    Returns {offset_khz, channels, n} or None if nothing usable is in view.
+    """
+    n = len(power)
+    if n < 16 or not (hi_mhz > lo_mhz):
+        return None
+    span = hi_mhz - lo_mhz
+    freq = lambda i: lo_mhz + (i + 0.5) * span / n
+    floor = sorted(power)[n // 5]                        # global 20th-pct noise floor
+    found = []
+    for ch, fc in _WIFI_CH.items():
+        if fc < lo_mhz + 12 or fc > hi_mhz - 12:        # whole +-11 MHz window must fit (skip edge channels)
+            continue
+        win = [i for i in range(n) if abs(freq(i) - fc) <= 11.0]
+        if len(win) < 8:
+            continue
+        peak = max(power[i] for i in win)
+        if peak - floor < 12:                           # channel not clearly occupied
+            continue
+        # -10 dB edges of the strong central plateau. On an AVERAGED spectrum the
+        # noise floor is low and stable, so a peak-relative threshold catches the
+        # channel's ~20 MHz occupancy while rejecting lower adjacent-channel
+        # bleed; its edges cross near +-10 MHz and the midpoint is the centre.
+        thr = peak - 10.0
+        wi = sorted(win)                                # ascending freq
+        # Interpolate the exact edge crossings for sub-bin centre precision.
+        left = right = None
+        for k in range(1, len(wi)):
+            if power[wi[k]] >= thr and power[wi[k - 1]] < thr:
+                p0, p1 = power[wi[k - 1]], power[wi[k]]
+                t = (thr - p0) / (p1 - p0) if p1 != p0 else 0.5
+                left = freq(wi[k - 1]) + t * (freq(wi[k]) - freq(wi[k - 1]))
+                break
+        for k in range(len(wi) - 2, -1, -1):
+            if power[wi[k]] >= thr and power[wi[k + 1]] < thr:
+                p0, p1 = power[wi[k]], power[wi[k + 1]]
+                t = (thr - p0) / (p1 - p0) if p1 != p0 else 0.5
+                right = freq(wi[k]) + t * (freq(wi[k + 1]) - freq(wi[k]))
+                break
+        if left is None or right is None:
+            continue
+        width = right - left
+        if not (15.0 <= width <= 24.0):                 # not a clean ~20 MHz channel (contaminated/partial)
+            continue
+        off = ((left + right) / 2.0 - fc) * 1000.0      # kHz
+        if abs(off) <= 250:                             # sanity: crystal error is < ~100 kHz
+            found.append((ch, off, round(width, 1)))
+    if not found:
+        return None
+    vals = sorted(o[1] for o in found)
+    spread = vals[-1] - vals[0]
+    median = vals[len(vals) // 2]
+    # Trust the measurement ONLY when at least two channels agree closely and the
+    # result is within the physical crystal limit (~+-100 kHz at 2.44 GHz / ~40
+    # ppm). A single channel can be skewed by an overlapping neighbour, so never
+    # apply a correction off one — congested 2.4 GHz is easily contaminated.
+    confident = (len(found) >= 2 and spread <= 40.0 and abs(median) <= 100.0)
+    return {"offset_khz": median, "channels": [o[0] for o in found],
+            "widths_mhz": [o[2] for o in found], "spread_khz": round(spread, 1),
+            "n": len(found), "confident": confident}
+
 
 # --------------------------------------------------------------------------
 # Low-level serial helpers
@@ -331,6 +432,10 @@ class EspCapture:
         self._identity = None           # last good _probe() result
         self._port_dev = None
         self._running = False
+        self._fofs = _load_fofs()       # frequency trim (kHz) sent on every start
+        self._fofs_ok = False           # does the connected chip support FOFS?
+        self._last_start = (_DEFAULT_BAND, None, None, None)  # for re-applying FOFS
+        self._trim = None               # last auto-trim result
 
     # -- config resolution -------------------------------------------------
     def _resolve(self, band, lo_mhz, hi_mhz):
@@ -366,8 +471,11 @@ class EspCapture:
             bins = _FFT_BINS
         if bins not in (256, 512, 1024, 2048):
             bins = _FFT_BINS
-        sig = (ident["port"], label, center, rate, bins)
+        # FOFS is part of the signature, so applying a new trim forces a restart.
+        sig = (ident["port"], label, center, rate, bins, self._fofs)
         with self._lock:
+            self._last_start = (band, lo_mhz, hi_mhz, fft_bins)
+            self._fofs_ok = _fofs_supported(ident)
             if self._thread and self._thread.is_alive():
                 if sig == self._sig:
                     return {"ok": True, "already": True, "band": label}
@@ -445,6 +553,8 @@ class EspCapture:
                 self._error = "ESP-SDR did not grant the serial lease"
                 return
             _drain_quiet(port)                   # settle any residual stream
+            if self._fofs_ok:                    # apply the frequency trim (ignored if unsupported)
+                _cmd(port, "FOFS %d" % self._fofs)
             _cmd(port, "FREQ %d" % self._center_mhz)
             _cmd(port, "BANDWIDTH 0")            # widest analog filter
             _cmd(port, "GAIN HARDWARE")          # hardware AGC
@@ -535,6 +645,17 @@ class EspCapture:
                 self._maxhold = [max(a, b) for a, b in zip(self._maxhold, ints)]
 
     # -- readers -----------------------------------------------------------
+    def _fofs_ppm(self, fofs=None):
+        """ppm equivalent of a FOFS (kHz) at the current centre (or 2442 MHz)."""
+        fofs = self._fofs if fofs is None else fofs
+        center = self._center_mhz or 2442
+        return round(fofs * 1000.0 / (center * 1e6) * 1e6, 2)
+
+    def trim_state(self):
+        with self._lock:
+            return {"fofs_khz": self._fofs, "fofs_ppm": self._fofs_ppm(),
+                    "supported": self._fofs_ok, "last": self._trim}
+
     def status(self):
         with self._lock:
             running = bool(self._thread and self._thread.is_alive())
@@ -543,7 +664,9 @@ class EspCapture:
                     "bins": self._bins, "center_mhz": self._center_mhz,
                     "rate_hz": self._fs, "rbw_hz": self._rbw_hz,
                     "band_mhz": [self._lo_mhz, self._hi_mhz] if self._lo_mhz else None,
-                    "floor_dbm": _FLOOR_DBFS, "error": self._error}
+                    "floor_dbm": _FLOOR_DBFS, "error": self._error,
+                    "fofs_khz": self._fofs, "fofs_ppm": self._fofs_ppm(),
+                    "fofs_supported": self._fofs_ok, "trim": self._trim}
 
     def get_frames(self, since=0):
         try:
@@ -558,7 +681,88 @@ class EspCapture:
                     "rbw_hz": self._rbw_hz, "detector": "peak",
                     "max_hold": list(self._maxhold) if self._maxhold else None,
                     "running": bool(self._thread and self._thread.is_alive()),
-                    "error": self._error}
+                    "error": self._error, "fofs_khz": self._fofs}
+
+    # -- frequency trim (FOFS) --------------------------------------------
+    def set_fofs(self, khz):
+        """Set the LO frequency trim (kHz) and re-apply it to a live capture."""
+        try:
+            khz = int(round(float(khz)))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "invalid FOFS value"}
+        khz = max(-_FOFS_LIMIT, min(_FOFS_LIMIT, khz))
+        with self._lock:
+            self._fofs = khz
+            running = bool(self._thread and self._thread.is_alive())
+            args = self._last_start
+        _save_fofs(khz)
+        if running:
+            # FOFS is in the start signature, so this restarts with the new trim.
+            self.start(args[0], lo_mhz=args[1], hi_mhz=args[2], fft_bins=args[3])
+        return {"ok": True, "fofs_khz": khz, "fofs_ppm": self._fofs_ppm(khz)}
+
+    def auto_trim(self, settle=6.0):
+        """Null the crystal drift against the 2.4 GHz Wi-Fi channel centres.
+
+        Reconfigures to a high-resolution full-band 2.4 GHz sweep, averages a few
+        seconds of spectra (a clean, stable noise floor — better than max-hold
+        for locating channel centres), measures the Wi-Fi channel-centre offset,
+        and applies the FOFS correction ONLY when the measurement is confident
+        (the channels agree and show a clean ~20 MHz shape). Then restores the
+        previous view. Blocks for ~`settle` seconds — it's a calibration action.
+        """
+        with self._lock:
+            supported = self._fofs_ok
+            saved = self._last_start
+            fofs = self._fofs
+            have_device = bool(self._identity) or bool(self._thread and self._thread.is_alive())
+        if serial is None or not have_device:
+            return {"ok": False, "error": "no ESP-SDR node detected"}
+        if not supported:
+            return {"ok": False, "error": "this ESP chip has no FOFS trim (S3/S31 only)"}
+        # High-res full-2.4-GHz measurement sweep (2048 bins = ~39 kHz/bin).
+        r = self.start(band="2.4", fft_bins=2048)
+        if not r.get("ok"):
+            return {"ok": False, "error": r.get("error", "could not start measurement sweep")}
+        time.sleep(max(2.0, settle))                    # accumulate so bursty channels fill
+        with self._lock:
+            lo, hi = self._lo_mhz, self._hi_mhz
+            mh = list(self._maxhold) if self._maxhold else None
+        # Max-hold fills a bursty channel's full 20 MHz; the peak-relative edge in
+        # _wifi_offset catches only each channel's strong plateau (so lower
+        # adjacent-channel bleed is excluded), and the width + agreement guards
+        # reject anything contaminated. See _wifi_offset.
+        meas = _wifi_offset(mh, lo, hi) if (mh and lo is not None) else None
+        result = None
+        if meas and meas.get("confident"):
+            new_fofs = max(-_FOFS_LIMIT, min(_FOFS_LIMIT, int(round(fofs - meas["offset_khz"]))))
+            with self._lock:
+                self._fofs = new_fofs
+            _save_fofs(new_fofs)
+            result = {"ok": True, "offset_khz": round(meas["offset_khz"], 1),
+                      "channels": meas["channels"], "widths_mhz": meas["widths_mhz"],
+                      "spread_khz": meas["spread_khz"], "old_fofs": fofs, "fofs_khz": new_fofs,
+                      "fofs_ppm": self._fofs_ppm(new_fofs), "ts": time.time()}
+            with self._lock:
+                self._trim = result
+        # Restore the previous view (carries the new FOFS via the start signature).
+        self.start(saved[0], lo_mhz=saved[1], hi_mhz=saved[2], fft_bins=saved[3])
+        if result:
+            return result
+        if meas:                                        # measured, but not confident enough to apply
+            chans = "/".join(str(c) for c in meas["channels"])
+            if meas["n"] < 2:
+                why = "only ch %s had a clean lock — need two agreeing channels (ch 6 and 11)" % chans
+            elif abs(meas["offset_khz"]) > 100:
+                why = "offset %+d kHz exceeds the crystal's physical range (likely a mis-read)" % int(meas["offset_khz"])
+            else:
+                why = "ch %s disagreed by %d kHz" % (chans, int(meas["spread_khz"]))
+            return {"ok": False, "offset_khz": round(meas["offset_khz"], 1),
+                    "spread_khz": meas["spread_khz"], "channels": meas["channels"],
+                    "error": "no confident Wi-Fi lock — %s. 2.4 GHz is too congested here; "
+                             "use manual trim or the HackRF reference." % why}
+        return {"ok": False, "error": "no clean 2.4 GHz Wi-Fi channel to lock onto — "
+                "needs ch 1/6/11 traffic; try again near an access point"}
 
 
 # --------------------------------------------------------------------------
@@ -637,6 +841,18 @@ def get_frames(since=0):
     return _capture.get_frames(since)
 
 
+def set_fofs(khz):
+    return _capture.set_fofs(khz)
+
+
+def auto_trim(settle=6.0):
+    return _capture.auto_trim(settle=settle)
+
+
+def trim_state():
+    return _capture.trim_state()
+
+
 # --------------------------------------------------------------------------
 # Self-test (pure decode / config checks — no hardware needed)
 # --------------------------------------------------------------------------
@@ -698,6 +914,30 @@ def selftest():
     check("narrow zoom -> 16 MS/s", r == 6, "rate=%d" % r)
     lbl, c, r = cap._resolve(None, 2400, 2460)                      # 60 MHz zoom
     check("wide zoom -> 80 MS/s", r == 0, "rate=%d" % r)
+
+    # Wi-Fi offset estimator: build a 2.4 band with ch6/ch11 shifted -30 kHz.
+    nb = 2048
+    tr = [-80.0] * nb
+    frq = lambda i: 2402.0 + (i + 0.5) * 80.0 / nb
+    for ctr in (2437.0 - 0.030, 2462.0 - 0.030):
+        for i in range(nb):
+            if abs(frq(i) - ctr) <= 10.0:
+                tr[i] = -20.0
+    wo = _wifi_offset(tr, 2402.0, 2482.0)
+    check("wifi offset detects shift", wo and abs(wo["offset_khz"] - (-30)) < 45,
+          "%.0f kHz" % (wo["offset_khz"] if wo else 0))
+    check("wifi offset confident when channels agree", wo and wo["confident"],
+          "spread %.0f" % (wo["spread_khz"] if wo else -1))
+    check("wifi offset None on empty band", _wifi_offset([-80.0] * nb, 2402.0, 2482.0) is None)
+    # disagreement -> not confident (won't apply)
+    tr2 = [-80.0] * nb
+    for ctr in (2437.0 - 0.030, 2462.0 + 0.090):
+        for i in range(nb):
+            if abs(frq(i) - ctr) <= 10.0:
+                tr2[i] = -20.0
+    wo2 = _wifi_offset(tr2, 2402.0, 2482.0)
+    check("wifi offset not confident when channels disagree", wo2 and not wo2["confident"],
+          "spread %.0f" % (wo2["spread_khz"] if wo2 else -1))
 
     ok_all = all(x["ok"] for x in results)
     return {"ok": ok_all, "checks": results,
