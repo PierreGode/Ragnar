@@ -34,6 +34,8 @@ MAX_SNAPLEN = 262144         # full frame (tcpdump's own default)
 DEFAULT_SECONDS = 60
 DEFAULT_SNAPLEN = 0          # 0 -> tcpdump default (full frame)
 MAX_KEEP = 8                 # retained .pcap files per unit (oldest pruned)
+DEFAULT_VIEW_LINES = 300     # packets decoded for the on-screen view
+MAX_VIEW_LINES = 2000
 _BPF_MAX = 512
 
 _IFACE_RE = re.compile(r'^[A-Za-z0-9._@:-]{1,32}$')
@@ -169,6 +171,47 @@ class CaptureManager:
                 return None
             p = rec.get('path')
             return p if (p and os.path.isfile(p)) else None
+
+    def view(self, cid, limit=None):
+        """Decode a finished capture to a packet list + a small summary, so the
+        result shows on screen (not only as a download). Reads the pcap with
+        `tcpdump -nr` — the file is one we wrote, addressed by id, never a
+        caller-supplied path."""
+        if not self.available():
+            return {'success': False, 'error': self.unavailable_reason()}
+        path = self.path_for(cid)
+        if not path:
+            return {'success': False, 'error': 'No readable capture for that id.'}
+        limit = _clamp(limit, DEFAULT_VIEW_LINES, 1, MAX_VIEW_LINES)
+        cmd = self._tcpdump_cmd(['-nr', path, '-c', str(limit)])
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            return {'success': False, 'error': 'Reading the capture timed out.'}
+        except Exception as exc:
+            return {'success': False, 'error': f'Could not read capture: {exc}'}
+        lines = [ln for ln in (proc.stdout or '').splitlines() if ln.strip()]
+        if not lines and proc.returncode not in (0, None):
+            err = (proc.stderr or '').strip().splitlines()
+            return {'success': False, 'error': (err[-1] if err else 'tcpdump could not read the file')[:200]}
+        protocols, src_counts = {}, {}
+        for ln in lines:
+            p = _classify_proto(ln)
+            protocols[p] = protocols.get(p, 0) + 1
+            m = _SRC_RE.search(ln)
+            if m:
+                src_counts[m.group(1)] = src_counts.get(m.group(1), 0) + 1
+        top_src = sorted(src_counts.items(), key=lambda kv: -kv[1])[:5]
+        with self._lock:
+            rec = self._caps.get(cid) or {}
+            total = rec.get('packets', 0)
+            bytes_ = rec.get('bytes', 0)
+            iface = rec.get('interface', '')
+        return {'success': True, 'id': cid, 'interface': iface,
+                'shown': len(lines), 'total': total,
+                'truncated': bool(total and len(lines) >= limit and len(lines) < total),
+                'bytes_human': _human_bytes(bytes_),
+                'protocols': protocols, 'top_src': top_src, 'lines': lines}
 
     # -- lifecycle ------------------------------------------------------------
     def _prune_locked(self):
@@ -338,6 +381,27 @@ def _parse_packets(stderr):
     return int(m.group(1)) if m else 0
 
 
+# Source host.port in a tcpdump -n line, e.g. "10.0.0.1.443 > 10.0.0.2.51000:".
+_SRC_RE = re.compile(r'(\d{1,3}(?:\.\d{1,3}){3}|[0-9a-fA-F:]+:[0-9a-fA-F:]*)\.\w+ > ')
+
+
+def _classify_proto(line):
+    """Rough protocol label for a tcpdump -n line, for the view's summary tally."""
+    if 'ARP,' in line or line[:4] == 'ARP ':
+        return 'ARP'
+    if 'ICMP6' in line:
+        return 'ICMPv6'
+    if ' ICMP ' in line or ': ICMP' in line:
+        return 'ICMP'
+    if 'Flags [' in line or ' tcp ' in line:
+        return 'TCP'
+    if re.search(r'\bUDP\b', line) or re.search(r'\.\d+ > \S+\.(?:53|67|68|123|5353|443)\b', line):
+        return 'UDP'
+    if 'IP6 ' in line:
+        return 'IPv6'
+    return 'Other'
+
+
 _manager = None
 _manager_lock = threading.Lock()
 
@@ -382,6 +446,12 @@ def selftest():
     check('parse packet count missing -> 0', _parse_packets(b'no match') == 0)
 
     check('human bytes', _human_bytes(1536) == '1.5 KB' and _human_bytes(0) == '0 B')
+
+    check('classify TCP', _classify_proto('12:00:00 IP 10.0.0.1.443 > 10.0.0.2.5100: Flags [P.], length 20') == 'TCP')
+    check('classify ARP', _classify_proto('12:00:00 ARP, Request who-has 10.0.0.1 tell 10.0.0.2') == 'ARP')
+    check('classify ICMP', _classify_proto('12:00:00 IP 10.0.0.1 > 10.0.0.2: ICMP echo request') == 'ICMP')
+    _m = _SRC_RE.search('12:00:00 IP 10.0.0.1.443 > 10.0.0.2.5100: Flags [P.]')
+    check('view src regex extracts source', _m and _m.group(1) == '10.0.0.1', _m and _m.group(1))
 
     passed = sum(1 for r in results if r['pass'])
     return {'pass': passed == len(results), 'passed': passed,

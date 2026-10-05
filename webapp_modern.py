@@ -5747,6 +5747,20 @@ def mesh_capture_list():
     return jsonify(cap.list())
 
 
+@app.route('/api/mesh/capture/view/<cid>', methods=['GET'])
+def mesh_capture_view(cid):
+    """Worker (peer-readable GET): decode a finished capture to a packet list +
+    summary, so the result shows on screen (not only as a download)."""
+    cap = get_capture_manager()
+    if not cap:
+        return jsonify({'success': False, 'error': 'Packet capture is unavailable.'}), 503
+    try:
+        limit = int(request.args.get('limit') or 0) or None
+    except (TypeError, ValueError):
+        limit = None
+    return jsonify(cap.view(cid, limit=limit))
+
+
 @app.route('/api/mesh/capture/download/<cid>', methods=['GET'])
 def mesh_capture_download(cid):
     """Worker (peer-readable GET): stream a finished capture's .pcap. The hub
@@ -5864,6 +5878,31 @@ def mesh_peer_capture_list():
             return jsonify(cap.list() if cap else {'success': False, 'error': 'unavailable'})
         reply = mesh_manager.poll_peer(peer, port=_mesh_node_port(), timeout=10,
                                        path='/api/mesh/capture/list')
+        reply.pop('reachable', None)
+        return jsonify(reply)
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/mesh/peer-capture/view', methods=['GET'])
+def mesh_peer_capture_view():
+    """Operator: decoded packet list + summary for a capture on a chosen unit."""
+    node_id = (request.args.get('node_id') or '').strip()
+    cid = (request.args.get('id') or '').strip()
+    limit = (request.args.get('limit') or '').strip()
+    try:
+        is_self, peer, err = _mesh_capture_resolve_peer(node_id)
+        if err:
+            return jsonify({'success': False, 'error': err}), 404
+        if is_self:
+            cap = get_capture_manager()
+            try:
+                lim = int(limit) or None
+            except ValueError:
+                lim = None
+            return jsonify(cap.view(cid, limit=lim) if cap else {'success': False, 'error': 'unavailable'})
+        path = f'/api/mesh/capture/view/{cid}' + (f'?limit={limit}' if limit else '')
+        reply = mesh_manager.poll_peer(peer, port=_mesh_node_port(), timeout=35, path=path)
         reply.pop('reachable', None)
         return jsonify(reply)
     except Exception as exc:
