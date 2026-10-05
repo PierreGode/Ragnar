@@ -37724,7 +37724,7 @@ function _meshCaptureBody(id, c) {
       </div>
       <p class="text-[10px] text-gray-500 mb-2">Bounded capture — stops at the time or packet limit${maxMB ? `, and never exceeds ${maxMB} MB / ${maxS}s` : ''}. The .pcap streams back over the tailnet.</p>
       <div id="cap-out" class="mb-2"></div>`;
-    return controls + _meshCaptureList(id, c.recent || []);
+    return controls + _meshCaptureList(id, c.recent || []) + '<div id="cap-view" class="mt-3"></div>';
 }
 
 function _meshCaptureList(id, recent) {
@@ -37734,9 +37734,10 @@ function _meshCaptureList(id, recent) {
         const stCls = st === 'running' ? 'text-amber-300'
             : st === 'error' ? 'text-red-300'
             : st === 'done' ? 'text-green-300' : 'text-gray-400';
-        const canDl = (st === 'done' || st === 'canceled') && r.bytes > 0;
-        const dl = canDl
-            ? `<button onclick="meshCaptureDownload('${id}','${escapeHtml(r.id)}')" class="text-cyan-400 hover:text-cyan-300 underline">Download</button>`
+        const hasFile = (st === 'done' || st === 'canceled') && r.bytes > 0;
+        const actions = hasFile
+            ? `<button onclick="meshCaptureView('${id}','${escapeHtml(r.id)}',this)" class="text-cyan-400 hover:text-cyan-300 underline">View</button>
+               <button onclick="meshCaptureDownload('${id}','${escapeHtml(r.id)}')" class="text-cyan-400 hover:text-cyan-300 underline">Download</button>`
             : (st === 'running' ? '<span class="text-amber-300">capturing…</span>' : '<span class="text-gray-600">—</span>');
         return `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-800/60 text-xs">
             <div class="min-w-0">
@@ -37746,7 +37747,7 @@ function _meshCaptureList(id, recent) {
               ${r.filter ? `<span class="text-gray-600 font-mono">[${escapeHtml(r.filter)}]</span>` : ''}
               ${r.error ? `<span class="text-red-400 break-words">${escapeHtml(r.error)}</span>` : ''}
             </div>
-            <div class="flex-shrink-0">${dl}</div>
+            <div class="flex-shrink-0 flex gap-3">${actions}</div>
         </div>`;
     }).join('');
     return `<div class="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Recent captures</div>${rows}`;
@@ -37813,6 +37814,63 @@ function meshCaptureDownload(nodeId, cid) {
     window.open(`/api/mesh/peer-capture/download?node_id=${encodeURIComponent(nodeId)}&id=${encodeURIComponent(cid)}`, '_blank');
 }
 window.meshCaptureDownload = meshCaptureDownload;
+
+// Decode a finished capture and show its packets on screen (not only download):
+// the hub reads the .pcap with tcpdump -nr over the tailnet and returns a packet
+// list + a small summary, which we render into #cap-view.
+const _MESH_PROTO_CLS = {
+    TCP: 'bg-sky-600/30 text-sky-200 border-sky-700',
+    UDP: 'bg-violet-600/30 text-violet-200 border-violet-700',
+    ICMP: 'bg-amber-600/30 text-amber-200 border-amber-700',
+    ICMPv6: 'bg-amber-600/30 text-amber-200 border-amber-700',
+    ARP: 'bg-emerald-600/30 text-emerald-200 border-emerald-700',
+    IPv6: 'bg-teal-600/30 text-teal-200 border-teal-700',
+    Other: 'bg-slate-600/30 text-slate-200 border-slate-600',
+};
+
+function _meshRenderCaptureView(d) {
+    if (!d || !d.success) {
+        return `<div class="text-sm text-red-300 border border-red-800 rounded-lg p-3 bg-red-950/30">
+            ${escapeHtml((d && d.error) || 'Could not read the capture.')}</div>`;
+    }
+    const protos = d.protocols || {};
+    const chips = Object.keys(protos).sort((a, b) => protos[b] - protos[a]).map(p =>
+        `<span class="text-[10px] px-1.5 py-0.5 rounded border ${_MESH_PROTO_CLS[p] || _MESH_PROTO_CLS.Other}">${escapeHtml(p)} ${protos[p]}</span>`).join(' ');
+    const top = (d.top_src || []).map(([ip, n]) =>
+        `<span class="font-mono text-gray-300">${escapeHtml(ip)}</span><span class="text-gray-500"> ×${n}</span>`).join(' · ');
+    const lines = (d.lines || []).map(l => escapeHtml(l)).join('\n');
+    const countLbl = d.truncated
+        ? `showing first ${d.shown} of ${d.total} packets`
+        : `${d.shown} packet${d.shown === 1 ? '' : 's'}`;
+    return `<div class="border border-slate-700 rounded-lg bg-slate-900/50 p-3">
+        <div class="flex items-center gap-2 mb-2 flex-wrap">
+            <span class="font-semibold text-sm">Packets</span>
+            <span class="text-[11px] text-gray-400">${escapeHtml(countLbl)} · ${escapeHtml(d.bytes_human || '')}</span>
+            <button onclick="meshCaptureViewClose()" class="ml-auto text-[11px] text-gray-400 hover:text-white">✕ Close</button>
+        </div>
+        ${chips ? `<div class="flex flex-wrap gap-1 mb-2">${chips}</div>` : ''}
+        ${top ? `<div class="text-[11px] text-gray-500 mb-2">Top sources: ${top}</div>` : ''}
+        <pre class="text-[11px] font-mono text-gray-200 bg-slate-950/60 border border-slate-800 rounded p-2 overflow-auto" style="max-height:20rem; white-space:pre">${lines || '(no packets)'}</pre>
+    </div>`;
+}
+
+async function meshCaptureView(nodeId, cid, btn) {
+    const box = document.getElementById('cap-view');
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Reading…'; }
+    if (box) box.innerHTML = '<div class="text-sm text-gray-400">Decoding capture…</div>';
+    const res = await _meshApi(`/api/mesh/peer-capture/view?node_id=${encodeURIComponent(nodeId)}&id=${encodeURIComponent(cid)}`);
+    if (box) box.innerHTML = _meshRenderCaptureView(res.data || { success: false, error: res.error || ('HTTP ' + res.status) });
+    if (box) { try { box.scrollIntoView({ block: 'nearest' }); } catch (e) {} }
+    if (btn) { btn.disabled = false; btn.textContent = orig || 'View'; }
+}
+window.meshCaptureView = meshCaptureView;
+
+function meshCaptureViewClose() {
+    const box = document.getElementById('cap-view');
+    if (box) box.innerHTML = '';
+}
+window.meshCaptureViewClose = meshCaptureViewClose;
 
 // Render the node page for one unit into #mesh-node-detail.
 function _meshRenderNodeDetail(id) {

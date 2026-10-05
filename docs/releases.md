@@ -4,6 +4,14 @@
 
 ### 2026-10-05
 
+#### feat(mesh): view PCAP capture contents on screen (not only download)
+*branch `feature/mesh-pcap-view` · PR pending*
+
+- Each finished capture on the node page now has a **View** button next to **Download**. View decodes the `.pcap` and shows its **packets on screen**: a summary header (packets shown / of total, byte size, a per-protocol tally as colour chips, and the top source addresses) over a scrollable monospace **packet list** — so you can see what was captured without opening Wireshark
+- The hub reads the file with `tcpdump -nr` over the tailnet (self or peer) and returns a bounded packet list (default 300, max 2000 lines) plus the summary; new `pcap_capture.view()` + rough protocol classifier
+- New routes: worker `GET /api/mesh/capture/view/<id>` (peer-readable) and operator `GET /api/mesh/peer-capture/view` (session-only, relays to the chosen unit)
+- Verified: `pcap_capture.selftest()` 14/14 (adds protocol-classifier + source-regex checks); live loopback `view()` (decoded 10 of 30 packets, protocol tally, top source, truncation flag); app imports with both view routes registered; view panel rendered against real Tailwind at desktop and phone (400px) widths
+
 #### feat(mesh): downloadable trace route / ping / diagnose results
 *branch `feature/mesh-probe-download` · PR pending*
 

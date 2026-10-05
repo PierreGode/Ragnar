@@ -903,7 +903,12 @@ Analyzer's live stats (which only reads tcpdump as text and writes no file). Pic
 an **interface** (the list comes from that unit's own NICs), a **duration**, an
 optional **packet cap** and an optional **BPF filter** (`tcp port 443`, `host
 10.0.0.5`, …), and press **Start capture**. Progress (packets / bytes / elapsed)
-updates live; when it finishes, **Download** pulls the file.
+updates live; when it finishes, each capture offers **View** and **Download**.
+**View** decodes the `.pcap` on screen — the hub reads it with `tcpdump -nr` over
+the tailnet and shows a **packet list** with a summary header (packets shown / of
+total, a per-protocol tally, and the top source addresses), so you can eyeball
+what was on the wire without leaving the page; **Download** pulls the raw file for
+Wireshark.
 
 Every capture is **strictly bounded** (`pcap_capture.py`): it stops on the first
 of its time limit, packet count, or a hard byte ceiling (defaults 5 min / 100 MB
@@ -913,12 +918,13 @@ they can be re-fetched.
 
 It follows the same model as scan delegation: a *worker* layer on each unit
 (`POST /api/mesh/capture/start`, `cancel/<id>`; peer-readable
-`GET …/status/<id>`, `/list`, `/download/<id>`) with the two writes on the
-exact-path peer allowlist, and an *operator* layer the browser talks to
+`GET …/status/<id>`, `/list`, `/view/<id>`, `/download/<id>`) with the two writes
+on the exact-path peer allowlist, and an *operator* layer the browser talks to
 (`/api/mesh/peer-capture/*`, session-only) that relays to the chosen unit and —
-for a peer — streams the `.pcap` back over the tailnet (WireGuard). Because start
-is a tagged-peer write, the trust boundary is again the mesh tag: a unit you do
-not want captured from is one you do not tag into the mesh.
+for a peer — streams the `.pcap` back (or relays the decoded view) over the
+tailnet (WireGuard). Because start is a tagged-peer write, the trust boundary is
+again the mesh tag: a unit you do not want captured from is one you do not tag
+into the mesh.
 
 #### Filtering and sorting the list
 
