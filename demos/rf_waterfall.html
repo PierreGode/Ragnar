@@ -242,6 +242,14 @@
   .recbar .rsp{color:var(--muted)}
   .scope-head .fsbtn{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:5px 11px;border-radius:6px;cursor:pointer;transition:border-color .15s,background .15s,color .15s;white-space:nowrap}
   .scope-head .fsbtn:hover{border-color:rgba(56,189,201,.5);color:var(--cyan);background:rgba(56,189,201,.08)}
+  /* collapse / expand — idle panels auto-collapse to a slim header row */
+  .scope-head .clpsbtn{font-family:var(--mono);font-size:13px;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:5px 9px;border-radius:6px;cursor:pointer;transition:border-color .15s,background .15s,color .15s;line-height:1}
+  .scope-head .clpsbtn:hover{border-color:rgba(56,189,201,.5);color:var(--cyan);background:rgba(56,189,201,.08)}
+  .scope-head .clpsbtn .chev{display:inline-block;transition:transform .18s}
+  .scope.collapsed .clpsbtn .chev{transform:rotate(-90deg)}
+  .scope.collapsed .scope-body{display:none}
+  .scope.collapsed .readout,.scope.collapsed .viewsel,.scope.collapsed .bandsel,.scope.collapsed .tunesel,.scope.collapsed .zwavesel{display:none}
+  .scope.collapsed .scope-head{border-bottom:0}
   .scope:fullscreen,.scope:-webkit-full-screen{width:100vw;height:100vh;border-radius:0;border:0;background:var(--ground);display:flex;flex-direction:column}
   .scope:fullscreen .scope-body,.scope:-webkit-full-screen .scope-body{flex:1 1 auto;min-height:0}
   .scope.is3d canvas.fall{height:546px}   /* 3D panel is 30% taller than the 420px 2D fall */
@@ -465,6 +473,7 @@
   function Scope(cfg){
     var self=this;
     this.cfg=cfg; this.mode='idle'; this.available=false; this.board=''; this.detErr='';
+    this._collapsed=false; this._manualOverride=false;   // collapse/expand state
     this.liveBand=cfg.defaultBand; this.synthBand=cfg.synthDefault;
     this.zoom=null; this.decoding=false;
     // Markers M1..M4. `this.marker` stays the ACTIVE marker's frequency so every
@@ -518,6 +527,7 @@
         +'<div class="stat dcstat" hidden><span class="k">SDR spike</span><span class="v dcv">&mdash;</span></div>'
         +'<div class="stat ovld" hidden title="The receiver front end is overloading. Levels are wrong and the display may show images and intermodulation that are not on the air. Lower the gain."><span class="k">Front end</span><span class="v ovldv">&mdash;</span></div>'
       +'</div>'
+      +'<button class="clpsbtn" title="Collapse this panel" aria-expanded="true"><span class="chev">&#9662;</span></button>'
       +'<button class="fsbtn" title="Expand this waterfall to full screen">&#9974;&nbsp;Full screen</button>'
       +'</div>'
       +'<div class="scope-body">'
@@ -709,6 +719,8 @@
     this.markTxt=el.querySelector('.marktxt'); this.zoomBtn=el.querySelector('.zoombtn'); this.resetBtn=el.querySelector('.resetbtn');
     this.snapBtn=el.querySelector('.snapbtn'); this.tunerGrp=el.querySelector('.tunergrp'); this.recBar=el.querySelector('.recbar');
     this.fsBtn=el.querySelector('.fsbtn');
+    this.clpsBtn=el.querySelector('.clpsbtn');
+    if(this.clpsBtn) this.clpsBtn.addEventListener('click',function(){ self._manualOverride=true; self.setCollapsed(!self._collapsed); });
     this.logTitle=el.querySelector('.logtitle'); this.logCount=el.querySelector('.logcount'); this.logList=el.querySelector('.loglist');
     this.fctx=this.fall.getContext('2d'); this.tctx=this.trace.getContext('2d');
     this.rigEl=document.getElementById(cfg.rig);
@@ -1841,7 +1853,22 @@
     if(this.decoding || this._iqPoll) return;   // decode / IQ capture own the dongle
     this.setMode(this.available?'live':(DEMO_ON?'synth':'idle'));
   };
+  // Collapse / expand the panel body. Idle panels auto-collapse to a slim row;
+  // active ones auto-expand. The header button overrides, and that override
+  // holds until the next real mode change (then auto takes over again).
+  Scope.prototype.setCollapsed=function(on){
+    on=!!on; if(on===this._collapsed) return;
+    this._collapsed=on; this.el.classList.toggle('collapsed',on);
+    if(this.clpsBtn){ this.clpsBtn.setAttribute('aria-expanded',on?'false':'true');
+      this.clpsBtn.title=on?'Expand this panel':'Collapse this panel'; }
+    if(!on){ var self=this;                 // re-measure the canvas now it's visible again
+      this.resize(); if(this.repaint) this.repaint();
+      if(this.hi>this.lo && this.drawRuler) this.drawRuler();   // only with a valid range
+      requestAnimationFrame(function(){ self.resize(); if(self.repaint) self.repaint(); }); }
+  };
   Scope.prototype.setMode=function(mode){
+    if(mode!==this.mode) this._manualOverride=false;          // mode change -> auto takes over again
+    if(!this._manualOverride) this.setCollapsed(mode==='idle'); // idle collapses, active expands
     if(mode===this.mode) return;
     if(this.mode==='live') this.stopLive();
     this.mode=mode; this._rangeKnown=false; this.zoom=null; this.resetBtn.disabled=true; this.resetCanvas();

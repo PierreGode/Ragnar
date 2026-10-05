@@ -156,10 +156,15 @@ def _sync_lease(port, timeout=_LEASE_TIMEOUT):
         while time.monotonic() < deadline:
             try:
                 # The leading newlines double as SPEC stop bytes, so this also
-                # ends a stream a crashed/killed client left running. A half-
-                # closed CDC endpoint can raise on read ("readiness but no
+                # ends a stream a crashed/killed client left running. flush()
+                # makes sure the stop byte goes out ahead of a big backlog. A
+                # half-closed CDC endpoint can raise on read ("readiness but no
                 # data"); keep nudging it until it drains and answers OK.
                 port.write(b"\n\nRELEASE\n")
+                try:
+                    port.flush()
+                except Exception:
+                    pass
                 if port.readline().strip() == b"OK":
                     return True
             except serial.SerialException:
@@ -213,7 +218,7 @@ def _probe_once(dev):
     port = None
     try:
         port = _open(dev, timeout=_CMD_TIMEOUT)
-        if not _sync_lease(port, timeout=2.0):
+        if not _sync_lease(port, timeout=3.0):
             return None
         _drain_quiet(port)                      # settle a just-stopped stream
         info = _cmd(port, "INFO")
@@ -221,7 +226,7 @@ def _probe_once(dev):
         if not _is_esp_sdr(info, caps):
             # Residual bytes from a wedged stream can spoil the first INFO; a
             # fresh lease sync + drain settles it, still on this same open port.
-            if not _sync_lease(port, timeout=2.0):
+            if not _sync_lease(port, timeout=3.0):
                 return None
             _drain_quiet(port)
             info = _cmd(port, "INFO")

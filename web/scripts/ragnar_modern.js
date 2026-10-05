@@ -2235,8 +2235,9 @@ function wifiSdrCheck() {
     box.innerHTML = '<span style="color:#9ca3af">🩺 Checking SDR — USB bus, drivers, tools, power…</span>';
     Promise.all([
         fetch('/api/net/rtl/diagnose').then(r => r.json()).catch(() => null),
-        fetch('/api/net/sdr/status').then(r => r.json()).catch(() => null)
-    ]).then(([d, hk]) => {
+        fetch('/api/net/sdr/status').then(r => r.json()).catch(() => null),
+        fetch('/api/net/esp/status').then(r => r.json()).catch(() => null)
+    ]).then(([d, hk, esp]) => {
         if (!d) { box.innerHTML = '<span style="color:#f87171">SDR check failed — the endpoint did not respond.</span>'; return; }
         const tone = { ok: ['#34d399', '✅'], no_usb: ['#fb7185', '⛔'], tools_missing: ['#fbbf24', '⚙️'],
                        dvb_held: ['#fbbf24', '🔒'], probe_timeout: ['#fbbf24', '⏱️'],
@@ -2267,6 +2268,11 @@ function wifiSdrCheck() {
         const hkline = hk && hk.detect
             ? `<div class="mt-2 text-xs" style="color:#9ca3af">HackRF (Wi-Fi bands): ${hk.detect.available ? '<span style="color:#34d399">detected</span>' : escapeHtml(String(hk.detect.error || 'not detected'))}</div>`
             : '';
+        const espline = esp && esp.detect
+            ? `<div class="mt-2 text-xs" style="color:#9ca3af">ESP-SDR (2.4 GHz): ${esp.detect.available
+                ? '<span style="color:#34d399">detected' + (esp.detect.model_name ? ' (' + escapeHtml(String(esp.detect.model_name)) + ')' : '') + '</span>'
+                : escapeHtml(String(esp.detect.error || 'not detected'))}</div>`
+            : '';
         // One-click fix button when the SDR check says the tools are missing or
         // the DVB-T driver is holding the dongle (both fixable from the server).
         const actLabel = (d.tools_installed === false)
@@ -2284,6 +2290,7 @@ function wifiSdrCheck() {
                  ${healLine}
                  <div class="mt-2 text-xs" style="color:#9ca3af">${facts}</div>
                  ${hkline}
+                 ${espline}
                </div>
                <button type="button" onclick="document.getElementById('wifi-sdr-diag').classList.add('hidden')" class="text-xs" style="color:#6b7280" title="Dismiss">✕</button>
              </div>`;

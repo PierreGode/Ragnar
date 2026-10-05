@@ -70,6 +70,14 @@ Each panel decides its own state every few seconds:
   metering, 915 MHz hoppers, Wi-Fi OFDM on ch 1/6/11) so the display stays alive.
 - **IDLE** — no radio and demo off: the panel shows a "connect a device" note.
 
+**Auto collapse / expand.** An **idle** panel automatically **collapses** to a
+slim header row so it stays out of the way; a panel that goes **live** (or
+synthetic) **expands** on its own. The chevron button (`▾`) in each panel header
+overrides this at any time, and your manual choice holds until that panel's state
+changes again — then the automatic behaviour takes over. So with three radios the
+page keeps only the active waterfalls open, and a dongle you plug in pops its
+panel open by itself.
+
 ## Band presets + manual tune
 
 
