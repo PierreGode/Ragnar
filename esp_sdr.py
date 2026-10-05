@@ -353,7 +353,10 @@ class EspCapture:
     def start(self, band=_DEFAULT_BAND, lo_mhz=None, hi_mhz=None, fft_bins=None):
         if serial is None:
             return {"ok": False, "error": "pyserial not installed (%s)" % _SERIAL_ERR}
-        ident = self._identity if self._running else _probe_first()
+        # On a retune (zoom/band change) we were just streaming from this node,
+        # so reuse the known identity and skip a full re-probe — that keeps the
+        # restart fast. Only discover from scratch when we don't know the device.
+        ident = self._identity or _probe_first()
         if not ident:
             return {"ok": False, "error": "no ESP-SDR node detected"}
         label, center, rate = self._resolve(band, lo_mhz, hi_mhz)
@@ -403,7 +406,7 @@ class EspCapture:
         if t and t.is_alive() and t is not threading.current_thread():
             self._lock.release()
             try:
-                t.join(timeout=3)
+                t.join(timeout=4)
             finally:
                 self._lock.acquire()
         self._thread = None
@@ -470,12 +473,15 @@ class EspCapture:
         finally:
             if port is not None:
                 try:
-                    port.write(b"\n")             # immediate SPEC stop byte
-                    # RELEASE-until-OK also stops the stream and releases the
-                    # lease regardless of how much backlog is still queued;
-                    # then flush residual so the device is left clean & idle.
-                    _sync_lease(port, timeout=3.0)
-                    _drain_quiet(port)
+                    # Clean stop: a short lease sync writes the stop byte and
+                    # waits for OK, so the SPEC stream is *confirmed* stopped (an
+                    # unverified stop occasionally left it streaming -> wedged).
+                    # 1 s is plenty for an idle/ending stream (~0.6 s typical) and
+                    # keeps the thread exiting well inside stop()'s join window, so
+                    # the exclusive port lock frees promptly for a fast retune.
+                    # Anything left over is settled by the next start's own sync.
+                    _sync_lease(port, timeout=1.0)
+                    _drain_quiet(port, max_time=0.3)
                 except Exception:
                     pass
                 try:
@@ -598,12 +604,14 @@ def detect():
                 "bands": sorted(BANDS.keys()), "range_mhz": ident.get("range_mhz")}
     ident = _probe_first()
     if not ident:
+        _capture._identity = None   # device gone: don't let start() reuse a dead port
         ports = _esp_ports()
         if not ports:
             err = "No Espressif serial device found on USB"
         else:
             err = "Espressif device present but not running ESP-SDR firmware"
         return {"available": False, "error": err, "ports_seen": ports}
+    _capture._identity = ident      # keep the known device fresh for fast retunes
     return {"available": True, "port": ident["port"],
             "model_name": ident.get("chip", "ESP-SDR"),
             "board": ident.get("chip", "ESP-SDR"),
