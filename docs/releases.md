@@ -4,6 +4,13 @@
 
 ### 2026-10-05
 
+#### feat(mesh): downloadable trace route / ping / diagnose results
+*branch `feature/mesh-probe-download` · PR pending*
+
+- Each **Trace route**, **Ping** and **Diagnose** result on a unit's node page now has a **⬇ Download** link alongside the on-page display — it saves the result as a plain-text report (parsed summary plus, for trace/ping, the raw `traceroute`/`ping` output). Built client-side from the result already in the browser (Blob + `<a download>`), so there is no re-run and no server round-trip; filenames are `trace_<target>_<ts>.txt` / `ping_…` / `diagnose_…`
+- No backend change — the probe/diagnose endpoints already return everything the report needs
+- Verified: report builders against mock trace/ping/diagnose payloads (hop table, loss/RTT, category/hint/error); results render with the Download link at desktop width
+
 #### feat(mesh): live PCAP capture on the Ragnar fleet node page
 *branch `feature/mesh-pcap-capture` · PR pending*
 

@@ -958,6 +958,12 @@ works however you reached this UI):
 For an **unreachable** node the same **Trace route** and **Ping** buttons appear
 next to **Diagnose** on its banner, so you can see exactly where the path dies.
 
+Every **Trace route**, **Ping** and **Diagnose** result shows on the page *and*
+carries a **⬇ Download** link that saves the same result as a plain-text report
+(the parsed summary plus, for trace/ping, the raw `traceroute`/`ping` output).
+It is built client-side from the result already in the browser — no re-run and no
+server round-trip — so you can attach a probe to a ticket without retyping it.
+
 The probe endpoint is `POST /api/mesh/probe` (`{ip, kind: "trace"|"ping"}`),
 session-gated like the other operator actions. The target is **pinned to the known
 mesh roster** server-side — a probe only runs against an address this unit already

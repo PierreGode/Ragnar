@@ -37508,11 +37508,93 @@ function _meshActionsBar(unit) {
 
 // Draw a traceroute result as a hop list — the "jumps" between this unit and the
 // peer. A relayed tailnet path or a dead hop shows up plainly here.
+// The last probe/diagnose results, kept so the on-page "Download" can save the
+// same data the box is showing as a text report (no re-run, no server round-trip).
+let _meshProbeResult = null;   // last trace/ping shown in .mesh-probe-out
+let _meshDiagResult = null;    // last diagnose shown in .mesh-diag-out
+
+function _meshSafeName(s) {
+    return String(s || 'result').replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 48) || 'result';
+}
+function _meshStamp() {
+    return new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+}
+// Trigger a client-side text download. This runs in the real Ragnar web app (not
+// a sandboxed artifact), so a Blob + <a download> saves straight to the browser.
+function _meshDownloadText(filename, text) {
+    try {
+        const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = filename; a.style.display = 'none';
+        document.body.appendChild(a); a.click();
+        setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 500);
+    } catch (e) {
+        if (typeof showNotification === 'function') showNotification('Download failed: ' + e, 'error');
+    }
+}
+
+function _meshTraceReport(d) {
+    const n = d.hop_count != null ? d.hop_count : (d.hops || []).filter(h => h.ip).length;
+    const lines = ['Ragnar mesh — traceroute',
+        'Target: ' + (d.target || ''),
+        'Generated: ' + new Date().toISOString(),
+        'Hops: ' + n, '',
+        'HOP  ADDRESS'.padEnd(46) + 'RTT'];
+    (d.hops || []).forEach(h => {
+        const ip = h.ip || '* no reply';
+        const rtt = h.rtt_ms != null ? h.rtt_ms.toFixed(1) + ' ms' : '';
+        lines.push(String(h.hop).padEnd(5) + ip.padEnd(41) + rtt);
+    });
+    if (d.raw) lines.push('', '--- raw ---', d.raw);
+    return lines.join('\n') + '\n';
+}
+function _meshPingReport(d) {
+    const lines = ['Ragnar mesh — ping',
+        'Target: ' + (d.target || ''),
+        'Generated: ' + new Date().toISOString(), ''];
+    if (d.received != null) lines.push(`${d.received}/${d.transmitted} replies, ${d.loss_pct}% loss`);
+    if (d.rtt_avg != null) lines.push(`rtt min/avg/max = ${d.rtt_min}/${d.rtt_avg}/${d.rtt_max} ms`);
+    if (d.raw) lines.push('', '--- raw ---', d.raw);
+    return lines.join('\n') + '\n';
+}
+function _meshDiagReport(r, url) {
+    const lines = ['Ragnar mesh — connection diagnose',
+        'Target: ' + (r.url || url || ''),
+        'Generated: ' + new Date().toISOString(), '',
+        'Category: ' + (r.category || ''),
+        'Status: ' + (r.status != null ? r.status : '—'),
+        'Detail: ' + (r.hint || '')];
+    if (r.error) lines.push('Error: ' + r.error);
+    return lines.join('\n') + '\n';
+}
+
+function meshProbeDownload() {
+    const p = _meshProbeResult;
+    if (!p) return;
+    const text = p.kind === 'ping' ? _meshPingReport(p.data) : _meshTraceReport(p.data);
+    _meshDownloadText(`${p.kind}_${_meshSafeName(p.data.target || p.ip)}_${_meshStamp()}.txt`, text);
+}
+window.meshProbeDownload = meshProbeDownload;
+
+function meshDiagDownload() {
+    const p = _meshDiagResult;
+    if (!p) return;
+    _meshDownloadText(`diagnose_${_meshSafeName(p.ip)}_${_meshStamp()}.txt`, _meshDiagReport(p.result, p.url));
+}
+window.meshDiagDownload = meshDiagDownload;
+
+// Small inline "Download" link used in each result header.
+function _meshDownloadLink(fn) {
+    return `<button onclick="${fn}" class="ml-auto text-[11px] text-cyan-400 hover:text-cyan-300 underline flex-shrink-0">⬇ Download</button>`;
+}
+
 function _meshRenderTrace(d) {
     const hops = d.hops || [];
     if (!hops.length) {
         return `<div class="text-sm text-amber-200 border border-amber-800 rounded-lg p-3 bg-amber-950/30">
-            No hops returned.${d.raw ? `<pre class="mt-2 text-[11px] font-mono text-amber-100/80 whitespace-pre-wrap overflow-x-auto">${escapeHtml(d.raw)}</pre>` : ''}</div>`;
+            <div class="flex items-center gap-2 mb-1 flex-wrap"><span>No hops returned.</span>${_meshDownloadLink('meshProbeDownload()')}</div>
+            ${d.raw ? `<pre class="mt-1 text-[11px] font-mono text-amber-100/80 whitespace-pre-wrap overflow-x-auto">${escapeHtml(d.raw)}</pre>` : ''}</div>`;
     }
     const rows = hops.map(h => `
         <div class="flex items-center gap-3 py-1 border-b border-slate-800/60 text-xs">
@@ -37526,6 +37608,7 @@ function _meshRenderTrace(d) {
         <div class="flex items-center gap-2 mb-2 flex-wrap">
             <span class="font-semibold">Route to <span class="font-mono">${escapeHtml(d.target)}</span></span>
             <span class="text-[11px] px-2 py-0.5 rounded border ${hopBadge}">${n} hop${n === 1 ? '' : 's'}</span>
+            ${_meshDownloadLink('meshProbeDownload()')}
         </div>
         ${rows}
     </div>`;
@@ -37540,6 +37623,7 @@ function _meshRenderPing(d) {
         <div class="flex items-center gap-2 mb-1">
             <span class="w-2.5 h-2.5 rounded-full ${ok ? 'bg-green-400' : 'bg-amber-400'}"></span>
             <span class="font-semibold">Ping <span class="font-mono">${escapeHtml(d.target)}</span></span>
+            ${_meshDownloadLink('meshProbeDownload()')}
         </div>
         <div class="opacity-90 text-xs">
             ${d.received != null ? `${d.received}/${d.transmitted} replies · ${loss}% loss` : 'No summary parsed.'}
@@ -37568,6 +37652,7 @@ async function meshProbe(ip, kind, btn) {
         const msg = d.error || res.error || ('HTTP ' + res.status);
         if (box) box.innerHTML = `<div class="text-sm text-red-300 border border-red-800 rounded-lg p-3 bg-red-950/30">${escapeHtml(msg)}</div>`;
     } else if (box) {
+        _meshProbeResult = { kind, ip, data: d };   // for the result's Download link
         box.innerHTML = kind === 'ping' ? _meshRenderPing(d) : _meshRenderTrace(d);
     }
     if (btn) { btn.disabled = false; btn.textContent = orig; }
@@ -39127,12 +39212,14 @@ async function meshDiagnose(ip, port, btn) {
         const tone = good
             ? 'border-green-800 bg-green-950/30 text-green-200'
             : 'border-amber-800 bg-amber-950/30 text-amber-100';
+        _meshDiagResult = { ip, port, url: r.url || url, result: r };   // for Download
         if (box) {
             box.innerHTML = `<div class="text-sm border rounded-lg p-3 ${tone}">
                 <div class="flex items-center gap-2 mb-1">
                     <span class="w-2.5 h-2.5 rounded-full ${good ? 'bg-green-400' : 'bg-amber-400'}"></span>
                     <span class="font-semibold">${escapeHtml(meta[0])}</span>
                     ${r.status ? `<span class="text-[11px] opacity-70">HTTP ${escapeHtml(String(r.status))}</span>` : ''}
+                    ${_meshDownloadLink('meshDiagDownload()')}
                 </div>
                 <div class="opacity-90">${escapeHtml(r.hint || meta[1] || r.error || 'No detail.')}</div>
                 <div class="mt-2 text-[11px] font-mono opacity-60">probed ${escapeHtml(r.url || url)}${r.error ? ' · ' + escapeHtml(r.error) : ''}</div>
