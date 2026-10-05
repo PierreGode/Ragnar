@@ -495,7 +495,7 @@
     // palette / resize / zoom keep what's on screen), hover values and scroll-back.
     this.hrows=[]; this.scrollBack=0;
     this.hwLo=null; this.hwHi=null; this.dz=false;   // what the radio sweeps vs. a display-only zoom
-    this.disp={auto:false,ref:-50,range:15};   // default colour window: top (Ref) -50 dB, 15 dB deep (bottom -65)
+    this.disp={auto:false,ref:5,range:35};   // default colour window: top (Ref) +5 dB, 35 dB deep (bottom -30)
     try{ var _d=JSON.parse(localStorage.getItem('rfwf.disp.'+cfg.short)||'null');
       if(_d&&isFinite(_d.ref)&&isFinite(_d.range)) this.disp={auto:!!_d.auto,ref:+_d.ref,range:+_d.range}; }catch(e){}
     this._liveQ=[]; this._acc=0; this._arrEma=0; this._lastPoll=0;   // de-jitter buffer for even live scroll
