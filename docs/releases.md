@@ -4,6 +4,14 @@
 
 ### 2026-10-05
 
+#### feat(mesh): PCAP view as a collapsible box inline on each capture row
+*branch `feature/mesh-pcap-view-collapsible` · PR pending*
+
+- The on-screen PCAP **View** is now a **collapsible box on the capture's own row** (▸ View / ▾ Hide / ✕ Close) instead of a single panel at the bottom of the list. The packets expand **in place**, so nothing scrolls away or navigates off-page — much better on a phone
+- Open panels **survive the background mesh refresh**: each expanded capture's decoded packets are cached client-side (`_meshCaptureOpen`), so a periodic re-render keeps them open instead of collapsing them. Switching to another node clears the set
+- **Named per Ragnar unit**: the view header reads *Packets · <Viking name>* and a downloaded capture saves as `<Viking-name>_<id>.pcap` (falling back to label / Tailscale short name), instead of a raw node id — resolved server-side from the unit's reported identity
+- Verified: the list renders with one row expanded inline at phone (400px) width — summary header (with the unit name), protocol chips, top sources and the scrollable packet list all sit between the rows, no page overflow; app imports with the naming helper present
+
 #### feat(mesh): view PCAP capture contents on screen (not only download)
 *branch `feature/mesh-pcap-view` · PR pending*
 

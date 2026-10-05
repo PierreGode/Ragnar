@@ -5909,10 +5909,27 @@ def mesh_peer_capture_view():
         return jsonify({'success': False, 'error': str(exc)}), 500
 
 
+def _mesh_capture_name_for(node_id, is_self, peer):
+    """A download-safe Ragnar unit name for a capture file — the unit's Viking
+    name (then label / Tailscale short name), so a saved .pcap reads
+    `Bjorn-Ironside_<id>.pcap` instead of a raw node id."""
+    if is_self:
+        name = (_mesh_viking_name() or shared_data.config.get('mesh_site_label')
+                or _mesh_unit_name() or 'this-unit')
+    else:
+        with _mesh_lock:
+            h = dict((_mesh_peer_health or {}).get(node_id) or {})
+        name = (h.get('viking_name') or h.get('label') or (peer or {}).get('short_name')
+                or (peer or {}).get('hostname') or 'unit')
+    name = re.sub(r'[^A-Za-z0-9._-]+', '-', str(name)).strip('-')
+    return name[:40] or 'unit'
+
+
 @app.route('/api/mesh/peer-capture/download', methods=['GET'])
 def mesh_peer_capture_download():
     """Operator: download a finished capture. For self, serve the file; for a
-    peer, stream it back over the tailnet (WireGuard) to the browser."""
+    peer, stream it back over the tailnet (WireGuard) to the browser. The saved
+    file is named after the Ragnar unit it came from."""
     node_id = (request.args.get('node_id') or '').strip()
     cid = (request.args.get('id') or '').strip()
     if not re.match(r'^[0-9a-fA-F]{1,16}$', cid or ''):
@@ -5921,12 +5938,13 @@ def mesh_peer_capture_download():
         is_self, peer, err = _mesh_capture_resolve_peer(node_id)
         if err:
             return jsonify({'success': False, 'error': err}), 404
+        name = _mesh_capture_name_for(node_id, is_self, peer)
         if is_self:
             cap = get_capture_manager()
             path = cap.path_for(cid) if cap else None
             if not path:
                 return jsonify({'success': False, 'error': 'No downloadable capture.'}), 404
-            return send_file(path, as_attachment=True, download_name=os.path.basename(path),
+            return send_file(path, as_attachment=True, download_name=f'{name}_{cid}.pcap',
                              mimetype='application/vnd.tcpdump.pcap')
 
         # Peer: open the worker download over the tailnet and stream it through.
@@ -5940,7 +5958,7 @@ def mesh_peer_capture_download():
         if getattr(resp, 'status', 200) != 200:
             resp.close()
             return jsonify({'success': False, 'error': f'Peer returned HTTP {resp.status}.'}), 502
-        fname = f'cap_{node_id[:8] or "peer"}_{cid}.pcap'
+        fname = f'{name}_{cid}.pcap'
 
         def _stream():
             try:
