@@ -307,14 +307,6 @@
     <div class="grp"><a href="/aprs" class="ctl" id="aprslink" title="APRS — ham packet positions &amp; messages (off-air + APRS-IS Internet)">&#128225;&nbsp;APRS</a></div>
     <div class="grp"><button class="ctl" id="play" aria-pressed="true">&#10074;&#10074;&nbsp;Pause</button></div>
     <div class="grp">
-      <span class="lbl">Scroll</span>
-      <div class="seg" id="speed" role="group" aria-label="Scroll rate">
-        <button data-hz="5" aria-pressed="false">Slow</button>
-        <button data-hz="12" aria-pressed="true">Normal</button>
-        <button data-hz="24" aria-pressed="false">Fast</button>
-      </div>
-    </div>
-    <div class="grp">
       <span class="lbl">Palette</span>
       <div class="seg" id="palette" role="group" aria-label="Waterfall colour palette"></div>
     </div>
@@ -452,6 +444,10 @@
         if(chans.length && Math.random()<0.15)
           bump(row,lo,hi,chans[(Math.random()*chans.length)|0]+w,w*0.8,-60);}};}
 
+  // HZ: internal default row rate for the no-hardware synthetic demo, and the
+  // fallback fill rate when a live panel's measured data rate isn't known yet.
+  // Live waterfalls follow the rate their data actually arrives (genlock below),
+  // so there is no user scroll-rate control.
   var running=true, HZ=12, DEMO_ON=false, OVERLAYS={};
   var reduce=window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   function fmtF(mhz){return (mhz>=1000)?(mhz/1000).toFixed(mhz%1000?2:0)+"G":(mhz>=100?mhz.toFixed(1):mhz.toFixed(2));}
@@ -3518,12 +3514,6 @@
     playBtn.innerHTML=on?'&#10074;&#10074;&nbsp;Pause':'&#9654;&nbsp;Play';
     scopes.forEach(function(s){s.setRate(on?HZ:0);}); if(on){last=performance.now();requestAnimationFrame(loop);} }
   playBtn.addEventListener('click',function(){ setRunning(!running); });
-  var speedSeg=document.getElementById('speed');
-  speedSeg.addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;
-    HZ=parseFloat(b.getAttribute('data-hz'));
-    speedSeg.querySelectorAll('button').forEach(function(x){x.setAttribute('aria-pressed','false');});
-    b.setAttribute('aria-pressed','true'); scopes.forEach(function(s){s.setRate(running?HZ:0);}); });
-
   // Palette selector — built from PALETTES/PALETTE_ORDER (Aurora default). Switching
   // recolours new rows going forward and repaints the legend; the saved choice is
   // restored on load. Old rows already on the canvas keep their colours until they
@@ -3575,17 +3565,19 @@
       // always has rows buffered ahead, so q stays deep and this never fires; a
       // slow or bursty one (rtl_power ~1/s, a wide HackRF sweep) drains the queue
       // between frames and the playhead starves — the waterfall freezes, then
-      // jumps when the next frame lands. Instead hold the last line at the chosen
-      // scroll rate so it scrolls smoothly until real data resumes. Give up after
-      // a few seconds: a genuine stall should freeze (and let livePoll raise the
-      // veil), not scroll stale data forever.
+      // jumps when the next frame lands. Instead hold the last line and scroll it
+      // at THIS panel's own measured data rate (s._nom) so it keeps following the
+      // rate the data actually comes — a fast engine barely ever fills, a ~1/s
+      // sweep fills at ~1/s. Give up after a few seconds: a genuine stall should
+      // freeze (and let livePoll raise the veil), not scroll stale data forever.
       var wnow=performance.now()/1000;
       if(g>0){ s._lastRealWall=wnow; s._fillAcc=0; }
       else if(q.length<2 && s.shown){
         if(s._lastRealWall==null) s._lastRealWall=wnow;
         if(wnow-s._lastRealWall<3.0){
+          var fillHz=(s._nom&&s._nom>0.2)?s._nom:HZ;   // follow the measured data rate
           s._fillAcc=(s._fillAcc||0)+dt; var fn=0;
-          while(s._fillAcc>=1/HZ && fn++<4){ s._fillAcc-=1/HZ; s._holdRow(); }
+          while(s._fillAcc>=1/fillHz && fn++<4){ s._fillAcc-=1/fillHz; s._holdRow(); }
         }
       }
     });

@@ -12,6 +12,7 @@
 - New routes `/api/net/esp/{status,start,stop,frames,selftest}` mirror the HackRF endpoints; the page gate (`_any_sdr_present`) serves the page when only an ESP node is attached
 - Unlike the sweeping HackRF, the ESP captures one fixed FFT **window** (centre = band, span = sample rate 16/40/80 MHz); a narrower zoom drops to a lower sample rate for finer resolution (down to ~31 kHz/bin). Presets `2.3G · 2.4G · 2.45G · 2.6G`
 - The node is **auto-discovered** on any Espressif serial port (env override `RAGNAR_ESP_SDR_PORT`), and coexists with other ESP32s on the bus (e.g. a GPS node) — it only claims a port that answers the ESP-SDR handshake. A capture left streaming by a crashed/killed client is **self-healed** on the next probe (a `RELEASE` doubles as the `SPEC` stop byte, and the half-closed CDC read is tolerated)
+- Removed the manual **Scroll rate** control (Slow/Normal/Fast) from the page. Every waterfall now simply **follows the rate its data arrives**: live rows are genlocked to their producer timestamp (unchanged), and the slow-sweep hold-fill now scrolls at the panel's own *measured* rate (`s._nom`) instead of a fixed pick — a fast engine scrolls fast, a ~1/s `rtl_power` sweep scrolls at ~1/s. Applies to all panels (RTL/HackRF/ESP)
 - Verified on real hardware (ESP32-S3 on `/dev/ttyACM1`): `esp_sdr.selftest` 11/11, live 2.4 GHz capture showing real on-air energy, zoom tuning to 16 MS/s, clean stop/detect, and self-recovery after a `SIGKILL` mid-stream
 
 #### feat(mesh): PCAP view as a collapsible box inline on each capture row

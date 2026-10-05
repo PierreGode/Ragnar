@@ -131,13 +131,14 @@ network timing jitters.
 smooth scroll — the `rtl_power` sweep updates only ~1×/s, and a wide span retunes
 between frames — the buffer empties between frames. Rather than let the picture
 freeze and then jump when the next frame lands, the page **holds the last line**,
-scrolling it at the **Scroll rate** you pick (Slow / Normal / Fast = 5 / 12 / 24
-rows a second) until real data resumes. New spectrum still appears at the
-engine's true rate, and **Rows/s** still reports that true rate — the hold only
-keeps the waterfall flowing instead of stalling. A fast engine (IQ, ~16/s) always
-has rows buffered ahead, so the hold never engages. A *genuine* stall (the tab
-was backgrounded, or the backend wedged) stops the hold after a few seconds and
-the panel shows its "waiting" veil rather than scrolling stale data forever.
+scrolling it at **that panel's own measured data rate** until real data resumes.
+There is no manual scroll-rate control: every waterfall simply follows the rate
+its data actually arrives — a fast engine scrolls fast, a ~1/s sweep scrolls at
+~1/s. New spectrum still appears at the engine's true rate, and **Rows/s** still
+reports it. A fast engine (IQ ~16/s, ESP-SDR ~50/s) always has rows buffered
+ahead, so the hold never engages. A *genuine* stall (the tab was backgrounded, or
+the backend wedged) stops the hold after a few seconds and the panel shows its
+"waiting" veil rather than scrolling stale data forever.
 
 - **IQ FFT (real-time)** — for any span that fits a **single RTL-SDR tune**
   (≤ `rtl_sdr._IQ_MAX_SPAN_HZ`, ~2.8 MHz: zooms, manual tunes, Z-Wave regions,
