@@ -871,6 +871,7 @@
     this.rbwEl=el.querySelector('.rbwv'); this.detEl=el.querySelector('.detv');
     this.fallWrap=el.querySelector('.fall-wrap'); this.dRes=el.querySelector('.dres'); this.dHw=el.querySelector('.dhw');
     this.hw={lna:24,vga:20,amp:false,antenna:false,bin_hz:0};          // HackRF: page-held, sent on start
+    this.espGain=null; this.espBins=512;                               // ESP-SDR: null gain = hardware AGC
     try{ var _h=JSON.parse(localStorage.getItem('rfwf.hw.'+cfg.short)||'null'); if(_h) for(var _k in this.hw) if(_k in _h) this.hw[_k]=_h[_k]; }catch(e){}
     this.rtlSet=null;                                                    // RTL: server-held settings
     this.buildResolution(); this.buildHardware(); this.buildChannels(); this.buildTrigger(); this.buildSetups();
@@ -1879,6 +1880,10 @@
       if(this.hi>this.lo && this.drawRuler) this.drawRuler();   // only with a valid range
       requestAnimationFrame(function(){ self.resize(); if(self.repaint) self.repaint(); }); }
   };
+  // Apply an ESP gain / FFT-bins change: restart the live capture (fast retune).
+  Scope.prototype.espReconfig=function(){
+    if(this.mode==='live'){ this.stopLive(); this._rangeKnown=false; this.resetCanvas(); this.startLive(); }
+  };
   // ---- ESP-SDR frequency trim (FOFS) ---------------------------------------
   Scope.prototype.setupTrim=function(){
     var self=this, el=this.el;
@@ -1978,7 +1983,8 @@
       if(this._poll) clearInterval(this._poll); this._poll=setInterval(function(){ self.livePoll(); },120); return; } this.seq=0; this.liveErr=null; this._fpsEma=null; this._lastRowT=0; this._liveStartT=Date.now(); this._lastFrameT=0;
     this._liveQ.length=0; this._acc=0; this._arrEma=0; this._lastPoll=0; this._tsWin=[]; this._nom=0; this._play=null; this._newestTs=null; this._newestWall=0; this._lastRealWall=null; this._fillAcc=0;
     var body={band:this.liveBand};
-    if(!this.cfg.tuner){ body.lna=this.hw.lna; body.vga=this.hw.vga; body.amp=this.hw.amp?1:0; body.antenna=this.hw.antenna?1:0; if(this.hw.bin_hz) body.bin_hz=this.hw.bin_hz; }
+    if(this.cfg.espTrim){ body.gain=(this.espGain==null)?'hardware':this.espGain; body.fft_bins=this.espBins; }
+    else if(!this.cfg.tuner){ body.lna=this.hw.lna; body.vga=this.hw.vga; body.amp=this.hw.amp?1:0; body.antenna=this.hw.antenna?1:0; if(this.hw.bin_hz) body.bin_hz=this.hw.bin_hz; }
     if(this.zoom){ body.lo_hz=Math.round(this.zoom[0]*1e6); body.hi_hz=Math.round(this.zoom[1]*1e6); }
     else if(this.zwave){ body.lo_hz=this.zwave.lo_hz; body.hi_hz=this.zwave.hi_hz; body.label=this.zwave.sweepLabel; }
     fetch(this.cfg.api.start,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
@@ -2787,6 +2793,15 @@
       det.addEventListener('change',function(){ self.det=det.value; self.rtlApply({detector:det.value}); self.repaint(); });
       var hdc=g.querySelector('.rhdc');
       hdc.addEventListener('change',function(){ self.rtlApply({hide_dc:hdc.checked?1:0}); });
+    } else if(this.cfg.espTrim){
+      // ESP-SDR: resolution = FFT bins over the capture window (RBW = sample rate / bins).
+      g.insertAdjacentHTML('beforeend',
+        '<div class="drow"><label>FFT bins</label><select class="ebins">'
+          +[256,512,1024,2048].map(function(n){return '<option value="'+n+'">'+n+'</option>';}).join('')+'</select>'
+          +'<span class="ebwnote dnote"></span></div>'
+        +'<div class="dnote">More bins = finer frequency resolution (<b>RBW = sample rate ÷ bins</b>) at a lower frame rate. The capture <b>span</b> (sample rate) follows the band / zoom. Changing bins briefly restarts the capture.</div>');
+      var eb=g.querySelector('.ebins'); eb.value=String(this.espBins||512);
+      eb.addEventListener('change',function(){ self.espBins=+eb.value; self.espReconfig(); });
     } else {
       g.insertAdjacentHTML('beforeend',
         '<div class="drow"><label>RBW</label><select class="rhb"><option value="0">Auto</option>'
@@ -2834,6 +2849,20 @@
       d.addEventListener('change',function(){ self.rtlApply({direct:d.value}); });
       c.addEventListener('change',function(){ if(c.value==='custom'){ cc.hidden=false; cc.focus(); return; } cc.hidden=true; self.rtlApply({conv_hz:+c.value}); });
       cc.addEventListener('change',function(){ if(isFinite(+cc.value)) self.rtlApply({conv_hz:Math.round(+cc.value*1e6)}); });
+    } else if(this.cfg.espTrim){
+      // ESP-SDR: hardware AGC by default, or a manual gain index (0..max from LIMITS).
+      g.insertAdjacentHTML('beforeend',
+        '<div class="drow"><label>Gain</label><button class="mini eagc" aria-pressed="true" title="Hardware automatic gain control (default)">Auto&nbsp;(AGC)</button>'
+          +'<input type="range" class="egain" min="0" max="82" step="1" value="40" disabled><span class="egainn dnote"></span></div>'
+        +'<div class="dnote">The ESP32 uses <b>hardware AGC</b> by default. Switch to <b>manual</b> to pin a fixed gain index (0 = minimum, higher = more sensitive but overloads on strong signals). Changing it briefly restarts the capture.</div>');
+      var agc=g.querySelector('.eagc'), eg=g.querySelector('.egain'), egn=g.querySelector('.egainn');
+      var lim=this._espGainLimits||[0,82,1]; eg.min=lim[0]; eg.max=lim[1]; eg.step=lim[2]||1;
+      function espGainUI(){ var hw=(self.espGain==null); agc.setAttribute('aria-pressed',hw?'true':'false'); agc.textContent=hw?'Auto (AGC)':'Manual';
+        eg.disabled=hw; egn.textContent=hw?'':('index '+self.espGain); if(!hw) eg.value=self.espGain; }
+      agc.addEventListener('click',function(){ self.espGain=(self.espGain==null)?(+eg.value||40):null; espGainUI(); self.espReconfig(); });
+      eg.addEventListener('input',function(){ egn.textContent='index '+eg.value; });
+      eg.addEventListener('change',function(){ self.espGain=+eg.value; espGainUI(); self.espReconfig(); });
+      this._espGainUI=espGainUI; espGainUI();
     } else {
       g.insertAdjacentHTML('beforeend',
         '<div class="drow"><label>LNA gain</label><input type="range" class="hlna" min="0" max="40" step="8"><span class="hlnan"></span><span>dB</span></div>'

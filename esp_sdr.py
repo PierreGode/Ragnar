@@ -137,6 +137,21 @@ def _save_fofs(khz):
         pass
 
 
+def _parse_gain(gain, limits):
+    """Normalise a gain request: None/'hardware'/'auto' -> None (AGC); else a
+    clamped manual index int."""
+    if gain is None:
+        return None
+    if isinstance(gain, str) and gain.strip().lower() in ("", "hardware", "auto", "agc", "hw"):
+        return None
+    try:
+        g = int(round(float(gain)))
+    except (TypeError, ValueError):
+        return None
+    lo, hi = (limits[0], limits[1]) if limits and len(limits) >= 2 else (0, 82)
+    return max(lo, min(hi, g))
+
+
 def _fofs_supported(ident):
     """FOFS is implemented on the S3 and S31 burst firmware."""
     return bool(ident) and str(ident.get("chip", "")).upper().startswith("S3")
@@ -517,8 +532,10 @@ class EspCapture:
         self._running = False
         self._fofs = _load_fofs()       # frequency trim (kHz) sent on every start
         self._fofs_ok = False           # does the connected chip support FOFS?
-        self._last_start = (_DEFAULT_BAND, None, None, None)  # for re-applying FOFS
+        self._last_start = (_DEFAULT_BAND, None, None, None, None)  # for re-applying FOFS
         self._trim = None               # last auto-trim result
+        self._gain = None               # None = hardware AGC; int = manual gain index
+        self._gain_limits = [0, 82, 1]  # [min, max, step] gain indices (from LIMITS?)
 
     # -- config resolution -------------------------------------------------
     def _resolve(self, band, lo_mhz, hi_mhz):
@@ -538,7 +555,7 @@ class EspCapture:
         return band, center, rate
 
     # -- lifecycle ---------------------------------------------------------
-    def start(self, band=_DEFAULT_BAND, lo_mhz=None, hi_mhz=None, fft_bins=None):
+    def start(self, band=_DEFAULT_BAND, lo_mhz=None, hi_mhz=None, fft_bins=None, gain="__keep__"):
         if serial is None:
             return {"ok": False, "error": "pyserial not installed (%s)" % _SERIAL_ERR}
         # On a retune (zoom/band change) we were just streaming from this node,
@@ -547,6 +564,14 @@ class EspCapture:
         ident = self._identity or _probe_first()
         if not ident:
             return {"ok": False, "error": "no ESP-SDR node detected"}
+        if gain != "__keep__":                          # None = hardware AGC; int = manual index
+            self._gain = _parse_gain(gain, self._gain_limits)
+        try:
+            lims = (ident.get("limits") or {}).get("gain")
+            if lims and len(lims) >= 3:
+                self._gain_limits = [int(lims[0]), int(lims[1]), int(lims[2])]
+        except Exception:
+            pass
         label, center, rate = self._resolve(band, lo_mhz, hi_mhz)
         try:
             bins = int(fft_bins) if fft_bins else _FFT_BINS
@@ -555,9 +580,9 @@ class EspCapture:
         if bins not in (256, 512, 1024, 2048):
             bins = _FFT_BINS
         # FOFS is part of the signature, so applying a new trim forces a restart.
-        sig = (ident["port"], label, center, rate, bins, self._fofs)
+        sig = (ident["port"], label, center, rate, bins, self._fofs, self._gain)
         with self._lock:
-            self._last_start = (band, lo_mhz, hi_mhz, fft_bins)
+            self._last_start = (band, lo_mhz, hi_mhz, fft_bins, self._gain)
             self._fofs_ok = _fofs_supported(ident)
             if self._thread and self._thread.is_alive():
                 if sig == self._sig:
@@ -640,7 +665,10 @@ class EspCapture:
                 _cmd(port, "FOFS %d" % self._fofs)
             _cmd(port, "FREQ %d" % self._center_mhz)
             _cmd(port, "BANDWIDTH 0")            # widest analog filter
-            _cmd(port, "GAIN HARDWARE")          # hardware AGC
+            if self._gain is None:
+                _cmd(port, "GAIN HARDWARE")      # hardware AGC (default)
+            else:
+                _cmd(port, "GAIN MANUAL %d" % self._gain)
             stride, units = self._profile_for(port, self._rate_code, self._bins)
             try:
                 port.reset_input_buffer()
@@ -749,7 +777,9 @@ class EspCapture:
                     "band_mhz": [self._lo_mhz, self._hi_mhz] if self._lo_mhz else None,
                     "floor_dbm": _FLOOR_DBFS, "error": self._error,
                     "fofs_khz": self._fofs, "fofs_ppm": self._fofs_ppm(),
-                    "fofs_supported": self._fofs_ok, "trim": self._trim}
+                    "fofs_supported": self._fofs_ok, "trim": self._trim,
+                    "gain": self._gain, "gain_hardware": self._gain is None,
+                    "gain_limits": self._gain_limits, "fft_bins": self._bins}
 
     def get_frames(self, since=0):
         try:
@@ -965,8 +995,8 @@ def detect():
             "info": ident.get("info")}
 
 
-def start(band=_DEFAULT_BAND, lo_mhz=None, hi_mhz=None, fft_bins=None):
-    return _capture.start(band=band, lo_mhz=lo_mhz, hi_mhz=hi_mhz, fft_bins=fft_bins)
+def start(band=_DEFAULT_BAND, lo_mhz=None, hi_mhz=None, fft_bins=None, gain="__keep__"):
+    return _capture.start(band=band, lo_mhz=lo_mhz, hi_mhz=hi_mhz, fft_bins=fft_bins, gain=gain)
 
 
 def stop():

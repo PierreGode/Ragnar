@@ -4,6 +4,14 @@
 
 ### 2026-10-05
 
+#### fix(sdr): real Gain + FFT-bins controls for the ESP panel (were HackRF no-ops)
+*branch `feature/esp-sdr-waterfall` · PR pending*
+
+- The ESP panel was built on the HackRF template, so its **Hardware** section showed HackRF **LNA/VGA/amp/antenna** sliders and its **Resolution** section a `hackrf_sweep` **RBW** dropdown — all **dead** (the ESP backend ignored `lna/vga/amp/antenna/bin_hz`). Replaced with the ESP's real controls:
+  - **Gain**: Auto (hardware AGC, default) or a manual gain index (0..max from the firmware's `LIMITS?`), sent as `GAIN HARDWARE` / `GAIN MANUAL <i>`. Verified on hardware: index 10 → ~−66 dBFS, 82 → ~−16 dBFS
+  - **FFT bins**: 256 / 512 / 1024 / 2048 (RBW = sample rate ÷ bins); the capture span still follows the band/zoom
+- Both apply live via the fast retune. Backend `esp_sdr.start(gain=…, fft_bins=…)`, exposed in `/status` (`gain`, `gain_hardware`, `gain_limits`, `fft_bins`); the ESP panel no longer sends HackRF params. `esp_sdr.selftest` 18/18
+
 #### feat(sdr): ESP-SDR frequency trim (FOFS) + Wi-Fi auto-calibration
 *branch `feature/esp-sdr-waterfall` · PR pending*
 

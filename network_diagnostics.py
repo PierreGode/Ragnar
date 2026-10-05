@@ -27277,8 +27277,11 @@ def register_network_diagnostics(app, logger=None):
         if lo_mhz is None and band not in esp_sdr.BANDS:
             return _bad('Invalid band')
         _log(f"net/esp/start band={band} zoom={lo_mhz}:{hi_mhz}")
+        kw = {}
+        if 'gain' in data:          # None/'hardware' = AGC; int = manual index
+            kw['gain'] = data.get('gain')
         return jsonify(esp_sdr.start(band=band, lo_mhz=lo_mhz, hi_mhz=hi_mhz,
-                                     fft_bins=data.get('fft_bins')))
+                                     fft_bins=data.get('fft_bins'), **kw))
 
     @app.route('/api/net/esp/stop', methods=['POST'])
     def net_esp_stop():
