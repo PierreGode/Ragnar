@@ -1,15 +1,37 @@
 # RF Waterfall page
 
-A dedicated full-screen page that stacks two true-RF **waterfalls** — an RTL-SDR
-sub-GHz/broadcast panel (24 MHz–1.7 GHz) over a HackRF panel (1 MHz–6 GHz) —
-each scrolling a power-over-frequency heatmap, with band-scope presets and a
-free-frequency manual tune.
+A dedicated full-screen page that stacks true-RF **waterfalls** — an RTL-SDR
+sub-GHz/broadcast panel (24 MHz–1.7 GHz), a HackRF panel (1 MHz–6 GHz) and an
+ESP-SDR panel (ESP32, ~2.2–2.7 GHz) — each scrolling a power-over-frequency
+heatmap, with band-scope presets and a free-frequency manual tune.
 
 - Page: `demos/rf_waterfall.html`
 - Route: `GET /rf-waterfall` (alias `GET /demo/rf-waterfall`), login required
-- Backends: `sdr_spectrum.py` (HackRF, `hackrf_sweep`) and `rtl_sdr.py`
-  (RTL-SDR, real-time `rtl_sdr` IQ FFT with an `rtl_power` fallback), exposed at
-  `/api/net/sdr/*` and `/api/net/rtl/*`.
+- Backends: `sdr_spectrum.py` (HackRF, `hackrf_sweep`), `rtl_sdr.py`
+  (RTL-SDR, real-time `rtl_sdr` IQ FFT with an `rtl_power` fallback) and
+  `esp_sdr.py` (ESP-SDR, on-chip FFT spectra over native USB), exposed at
+  `/api/net/sdr/*`, `/api/net/rtl/*` and `/api/net/esp/*`.
+
+### ESP-SDR panel (ESP32 on-chip FFT)
+
+[ESP-SDR](https://espargos.net/espsdr/) turns an ESP32 into a receive-only SDR
+by tapping the Wi-Fi radio's raw I/Q through an undocumented debug path; the
+firmware folds it into **on-chip FFT power spectra** streamed over the chip's
+native USB serial link. Flash an ESP32 with the ESP-SDR firmware, plug it into
+the Pi's USB, and the panel flips live.
+
+- Unlike the HackRF (which *sweeps* a wide range) the ESP captures one fixed FFT
+  **window** at a time — centre = the band's centre frequency, span = the sample
+  rate (16/40/80 MHz). A narrower zoom drops to a lower sample rate for finer
+  resolution (down to ~31 kHz/bin at 16 MS/s, 512 bins).
+- On an **ESP32-S3** the usable band is ~2.2–2.7 GHz (the 2.4 GHz ISM band, where
+  it sees Wi-Fi, Bluetooth, microwave ovens, drones and jammers); software
+  tuning attempts are accepted 100–6000 MHz but reception is uncalibrated.
+- Levels are **dBFS** (0 = full scale), not calibrated dBm. The colour scale
+  floors at −85 dBFS (just below the −84.3 dBFS quantisation floor).
+- The node is auto-discovered on any Espressif serial port (env override
+  `RAGNAR_ESP_SDR_PORT`). A capture left streaming by a crashed client is
+  self-healed on the next probe (a `RELEASE` doubles as the stream stop byte).
 
 **On this page.** Reading the display:
 [engine](#sub-ghz-engine-real-time-iq-fft-vs-rtl_power-sweep) ·
@@ -41,7 +63,7 @@ The bar this is all measured against: the
 Each panel decides its own state every few seconds:
 
 - **LIVE** — its radio is detected: the page starts a sweep and streams real
-  frames (`/api/net/{sdr,rtl}/power? frames`). Plug a radio in and the panel
+  frames (`/api/net/{sdr,rtl,esp}/…/frames`). Plug a radio in and the panel
   flips to live on its own; unplug it and it drops back.
 - **SYNTHETIC** — no radio, but the **RF Waterfall demo** toggle is on: the panel
   models that band's real occupants (433.92 MHz TPMS/remote bursts, 868 MHz
@@ -57,8 +79,11 @@ Each panel has a row of **band-scope presets** and a **Manual tune** box:
   otherwise. Both radios carry the same broadcast/ISM scopes —
   `AM · SW · FM · Air · 27 · 40 · 315 · 433 · 868 · 915` — and the HackRF panel
   adds the Wi-Fi bands `2.4G · 5G · 6G` (it reaches 1 MHz–6 GHz, so it can sweep
-  everything the RTL-SDR can). The band tables live in `rtl_sdr.RTL_BANDS` and
-  `sdr_spectrum.BANDS`; keep them and the page's `SUBGHZ_BANDS`/`BAND_MHZ` in sync.
+  everything the RTL-SDR can). The ESP-SDR panel carries its own 2.4 GHz-centred
+  presets (`2.3G · 2.4G · 2.45G · 2.6G`), each a single FFT window not a sweep.
+  The band tables live in `rtl_sdr.RTL_BANDS`, `sdr_spectrum.BANDS` and
+  `esp_sdr.BANDS`; keep them and the page's `SUBGHZ_BANDS`/`BAND_MHZ`/`ESP_WIN`
+  in sync.
 - **Manual tune** (the `Tune ___ MHz ± ___ Go` box) sweeps an arbitrary window
   centred on any frequency the dongle can reach, reusing the zoom path
   (`lo_hz`/`hi_hz`). Hardware reach is clamped per panel:

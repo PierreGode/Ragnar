@@ -56,6 +56,7 @@ import report_common
 import bt_scanner
 import sdr_spectrum
 import rtl_sdr
+import esp_sdr
 import sigmf_analyzer
 import adsb
 import meshtastic_node
@@ -27246,6 +27247,56 @@ def register_network_diagnostics(app, logger=None):
     def net_sdr_selftest():
         _log("net/sdr/selftest")
         return jsonify(sdr_spectrum.selftest())
+
+    # ------------------------------------------------------------------
+    # True-RF spectrum / waterfall via an ESP-SDR node (esp_sdr.py).
+    # An ESP32 running the ESP-SDR firmware (espargos.net/espsdr) streams
+    # on-chip FFT power spectra over its native USB serial link. Same
+    # receive-only, frame-ring shape as the HackRF/RTL sweeps, so the RF
+    # Waterfall page streams it through the identical consumer. On an
+    # ESP32-S3 the useful band is ~2.2-2.7 GHz (the 2.4 GHz ISM band).
+    # ------------------------------------------------------------------
+    @app.route('/api/net/esp/status', methods=['GET'])
+    def net_esp_status():
+        _log("net/esp/status")
+        return jsonify(esp_sdr.status())
+
+    @app.route('/api/net/esp/start', methods=['POST'])
+    def net_esp_start():
+        data = request.get_json(silent=True) or {}
+        band = (data.get('band') or '2.4').strip()
+        # Optional zoom span (Hz) -> MHz. A valid span sets centre + sample rate
+        # and overrides the named band, so skip band validation when present.
+        lo_mhz = hi_mhz = None
+        try:
+            if data.get('lo_hz') is not None and data.get('hi_hz') is not None:
+                lo_mhz = float(data['lo_hz']) / 1e6
+                hi_mhz = float(data['hi_hz']) / 1e6
+        except (TypeError, ValueError):
+            return _bad('Invalid zoom span')
+        if lo_mhz is None and band not in esp_sdr.BANDS:
+            return _bad('Invalid band')
+        _log(f"net/esp/start band={band} zoom={lo_mhz}:{hi_mhz}")
+        return jsonify(esp_sdr.start(band=band, lo_mhz=lo_mhz, hi_mhz=hi_mhz,
+                                     fft_bins=data.get('fft_bins')))
+
+    @app.route('/api/net/esp/stop', methods=['POST'])
+    def net_esp_stop():
+        _log("net/esp/stop")
+        return jsonify(esp_sdr.stop())
+
+    @app.route('/api/net/esp/frames', methods=['GET'])
+    def net_esp_frames():
+        try:
+            since = int(request.args.get('since', 0))
+        except (TypeError, ValueError):
+            return _bad('Invalid since')
+        return jsonify(esp_sdr.get_frames(since=since))
+
+    @app.route('/api/net/esp/selftest', methods=['GET'])
+    def net_esp_selftest():
+        _log("net/esp/selftest")
+        return jsonify(esp_sdr.selftest())
 
     # ------------------------------------------------------------------
     # Sub-GHz true-RF power sweep / waterfall via an RTL-SDR (rtl_sdr.py).

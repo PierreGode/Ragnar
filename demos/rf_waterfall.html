@@ -294,6 +294,7 @@
     <div class="rigs">
       <div class="rig"><b>RTL-SDR</b> · 24&nbsp;MHz–1.7&nbsp;GHz <span class="tag idle" id="rig-rtl">detecting…</span></div>
       <div class="rig"><b>HackRF&nbsp;One</b> · 1&nbsp;MHz–6&nbsp;GHz <span class="tag idle" id="rig-hackrf">detecting…</span></div>
+      <div class="rig"><b>ESP-SDR</b> · 2.2–2.7&nbsp;GHz <span class="tag idle" id="rig-esp">detecting…</span></div>
     </div>
   </header>
 
@@ -3455,6 +3456,19 @@
     hwLo:1, hwHi:6000, tuneSpan:20,   // HackRF One: 1 MHz-6 GHz (sweeps every mesh/LoRa overlay band too)
     liveBands:SUBGHZ_BANDS.concat([{id:'2.4',label:'2.4G'},{id:'5',label:'5G'},{id:'6',label:'6G'}]), defaultBand:'2.4' });
   scopes.push(hackrf); stack.appendChild(hackrf.el);
+  // ESP-SDR: an ESP32 running the ESP-SDR firmware streams on-chip FFT spectra
+  // over native USB. One fixed FFT window at a time (centre=band, span=sample
+  // rate) rather than a sweep — on an ESP32-S3 the usable band is ~2.2-2.7 GHz.
+  var ESP_WIN={ '2.3':[2280,2320], '2.4':[2402,2482], '2.45':[2430,2470], '2.6':[2580,2620] };
+  function espSynth(b,lo,hi){ if(lo!=null&&hi!=null) return wifiModel('2.4',lo,hi);
+    var r=ESP_WIN[b]||ESP_WIN['2.4']; return wifiModel('2.4',r[0],r[1]); }
+  var ESP_BANDS=[{id:'2.3',label:'2.3G'},{id:'2.4',label:'2.4G'},{id:'2.45',label:'2.45G'},{id:'2.6',label:'2.6G'}];
+  var esp=new Scope({ name:"ESP-SDR", short:"ESP-SDR", dev:"ESP32 · on-chip FFT", rig:"rig-esp",
+    api:{status:'/api/net/esp/status',start:'/api/net/esp/start',stop:'/api/net/esp/stop',frames:'/api/net/esp/frames'},
+    synth:espSynth, synthDefault:'2.4', synthBands:true, decode:false, zwave:false, minSpan:1,
+    hwLo:2200, hwHi:2700, tuneSpan:16,   // ESP32-S3: ~2.2-2.7 GHz usable; 16 MHz min capture window
+    liveBands:ESP_BANDS, defaultBand:'2.4' });
+  scopes.push(esp); stack.appendChild(esp.el);
   window.RFWF={scopes:scopes};   // console/debug handle on the panels
   // ---- keyboard shortcuts (act on the panel last pointed at) ---------------
   var activeScope=scopes[0];
