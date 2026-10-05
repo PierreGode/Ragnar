@@ -245,7 +245,7 @@
   /* collapse / expand — idle panels auto-collapse to a slim header row */
   .scope-head .clpsbtn{font-family:var(--mono);font-size:13px;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:5px 9px;border-radius:6px;cursor:pointer;transition:border-color .15s,background .15s,color .15s;line-height:1}
   .scope-head .clpsbtn:hover{border-color:rgba(56,189,201,.5);color:var(--cyan);background:rgba(56,189,201,.08)}
-  .scope-head .flashbtn{text-decoration:none;display:inline-flex;align-items:center}
+  .scope-head .flashbtn{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:5px 11px;border-radius:6px;cursor:pointer;transition:border-color .15s,background .15s,color .15s;white-space:nowrap;text-decoration:none;display:inline-flex;align-items:center}
   .scope-head .flashbtn:hover{border-color:rgba(234,179,8,.6);color:#eab308;background:rgba(234,179,8,.08)}
   .scope-head .clpsbtn .chev{display:inline-block;transition:transform .18s}
   .scope.collapsed .clpsbtn .chev{transform:rotate(-90deg)}
@@ -530,7 +530,7 @@
         +'<div class="stat dcstat" hidden><span class="k">SDR spike</span><span class="v dcv">&mdash;</span></div>'
         +'<div class="stat ovld" hidden title="The receiver front end is overloading. Levels are wrong and the display may show images and intermodulation that are not on the air. Lower the gain."><span class="k">Front end</span><span class="v ovldv">&mdash;</span></div>'
       +'</div>'
-      +(cfg.espTrim?'<a class="fsbtn flashbtn" href="https://espargos.net/espsdr/app/flash.html" target="_blank" rel="noopener" title="Flash the ESP-SDR firmware onto an ESP32 from your browser (Web Serial — connect the ESP32 to the device running this browser)">&#9889;&nbsp;Flash ESP32</a>':'')
+      +(cfg.espTrim?'<a class="flashbtn" href="https://espargos.net/espsdr/app/flash.html" target="_blank" rel="noopener" title="Flash the ESP-SDR firmware onto an ESP32 from your browser (Web Serial — connect the ESP32 to the device running this browser)">&#9889;&nbsp;Flash ESP32</a>':'')
       +'<button class="clpsbtn" title="Collapse this panel" aria-expanded="true"><span class="chev">&#9662;</span></button>'
       +'<button class="fsbtn" title="Expand this waterfall to full screen">&#9974;&nbsp;Full screen</button>'
       +'</div>'
