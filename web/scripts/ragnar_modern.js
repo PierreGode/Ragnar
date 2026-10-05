@@ -37724,8 +37724,13 @@ function _meshCaptureBody(id, c) {
       </div>
       <p class="text-[10px] text-gray-500 mb-2">Bounded capture — stops at the time or packet limit${maxMB ? `, and never exceeds ${maxMB} MB / ${maxS}s` : ''}. The .pcap streams back over the tailnet.</p>
       <div id="cap-out" class="mb-2"></div>`;
-    return controls + _meshCaptureList(id, c.recent || []) + '<div id="cap-view" class="mt-3"></div>';
+    return controls + _meshCaptureList(id, c.recent || []);
 }
+
+// Which captures are expanded inline, cid -> last view payload. Kept so a
+// background mesh refresh re-renders the list with open panels still open (and
+// their already-fetched packets intact), instead of collapsing them.
+let _meshCaptureOpen = {};
 
 function _meshCaptureList(id, recent) {
     if (!recent.length) return '<p class="text-xs text-gray-500">No captures yet on this unit.</p>';
@@ -37735,19 +37740,26 @@ function _meshCaptureList(id, recent) {
             : st === 'error' ? 'text-red-300'
             : st === 'done' ? 'text-green-300' : 'text-gray-400';
         const hasFile = (st === 'done' || st === 'canceled') && r.bytes > 0;
+        const open = hasFile && Object.prototype.hasOwnProperty.call(_meshCaptureOpen, r.id);
         const actions = hasFile
-            ? `<button onclick="meshCaptureView('${id}','${escapeHtml(r.id)}',this)" class="text-cyan-400 hover:text-cyan-300 underline">View</button>
+            ? `<button onclick="meshCaptureView('${id}','${escapeHtml(r.id)}',this)" class="text-cyan-400 hover:text-cyan-300 underline whitespace-nowrap">${open ? '▾ Hide' : '▸ View'}</button>
                <button onclick="meshCaptureDownload('${id}','${escapeHtml(r.id)}')" class="text-cyan-400 hover:text-cyan-300 underline">Download</button>`
             : (st === 'running' ? '<span class="text-amber-300">capturing…</span>' : '<span class="text-gray-600">—</span>');
-        return `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-800/60 text-xs">
-            <div class="min-w-0">
-              <span class="font-mono text-gray-200">${escapeHtml(r.interface || '')}</span>
-              <span class="${stCls}">${escapeHtml(st)}</span>
-              <span class="text-gray-500">${r.packets || 0} pkts · ${escapeHtml(r.bytes_human || '0 B')} · ${r.elapsed || 0}s</span>
-              ${r.filter ? `<span class="text-gray-600 font-mono">[${escapeHtml(r.filter)}]</span>` : ''}
-              ${r.error ? `<span class="text-red-400 break-words">${escapeHtml(r.error)}</span>` : ''}
+        // Collapsible detail lives on the row itself, so the packets expand in
+        // place (phone-friendly) and open panels survive a background re-render.
+        const detail = `<div id="cap-detail-${escapeHtml(r.id)}" class="${open ? 'mt-2' : 'hidden'}">${open ? _meshRenderCaptureView(_meshCaptureOpen[r.id], id, r.id) : ''}</div>`;
+        return `<div class="py-1 border-b border-slate-800/60">
+            <div class="flex items-center justify-between gap-3 text-xs">
+              <div class="min-w-0">
+                <span class="font-mono text-gray-200">${escapeHtml(r.interface || '')}</span>
+                <span class="${stCls}">${escapeHtml(st)}</span>
+                <span class="text-gray-500">${r.packets || 0} pkts · ${escapeHtml(r.bytes_human || '0 B')} · ${r.elapsed || 0}s</span>
+                ${r.filter ? `<span class="text-gray-600 font-mono">[${escapeHtml(r.filter)}]</span>` : ''}
+                ${r.error ? `<span class="text-red-400 break-words">${escapeHtml(r.error)}</span>` : ''}
+              </div>
+              <div class="flex-shrink-0 flex gap-3">${actions}</div>
             </div>
-            <div class="flex-shrink-0 flex gap-3">${actions}</div>
+            ${detail}
         </div>`;
     }).join('');
     return `<div class="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Recent captures</div>${rows}`;
@@ -37817,7 +37829,7 @@ window.meshCaptureDownload = meshCaptureDownload;
 
 // Decode a finished capture and show its packets on screen (not only download):
 // the hub reads the .pcap with tcpdump -nr over the tailnet and returns a packet
-// list + a small summary, which we render into #cap-view.
+// list + a small summary, rendered into the capture row's own collapsible box.
 const _MESH_PROTO_CLS = {
     TCP: 'bg-sky-600/30 text-sky-200 border-sky-700',
     UDP: 'bg-violet-600/30 text-violet-200 border-violet-700',
@@ -37828,10 +37840,11 @@ const _MESH_PROTO_CLS = {
     Other: 'bg-slate-600/30 text-slate-200 border-slate-600',
 };
 
-function _meshRenderCaptureView(d) {
+function _meshRenderCaptureView(d, nodeId, cid) {
+    const closeBtn = `<button onclick="meshCaptureView('${nodeId}','${cid}')" class="ml-auto text-[11px] text-gray-400 hover:text-white">✕ Close</button>`;
     if (!d || !d.success) {
         return `<div class="text-sm text-red-300 border border-red-800 rounded-lg p-3 bg-red-950/30">
-            ${escapeHtml((d && d.error) || 'Could not read the capture.')}</div>`;
+            <div class="flex items-center gap-2"><span>${escapeHtml((d && d.error) || 'Could not read the capture.')}</span>${closeBtn}</div></div>`;
     }
     const protos = d.protocols || {};
     const chips = Object.keys(protos).sort((a, b) => protos[b] - protos[a]).map(p =>
@@ -37846,7 +37859,7 @@ function _meshRenderCaptureView(d) {
         <div class="flex items-center gap-2 mb-2 flex-wrap">
             <span class="font-semibold text-sm">Packets</span>
             <span class="text-[11px] text-gray-400">${escapeHtml(countLbl)} · ${escapeHtml(d.bytes_human || '')}</span>
-            <button onclick="meshCaptureViewClose()" class="ml-auto text-[11px] text-gray-400 hover:text-white">✕ Close</button>
+            ${closeBtn}
         </div>
         ${chips ? `<div class="flex flex-wrap gap-1 mb-2">${chips}</div>` : ''}
         ${top ? `<div class="text-[11px] text-gray-500 mb-2">Top sources: ${top}</div>` : ''}
@@ -37854,23 +37867,27 @@ function _meshRenderCaptureView(d) {
     </div>`;
 }
 
+// Toggle a capture's inline collapsible view. Open → fetch + render the packets
+// into the row's own detail box; already open → collapse. The open set is kept in
+// _meshCaptureOpen so a background refresh keeps it expanded.
 async function meshCaptureView(nodeId, cid, btn) {
-    const box = document.getElementById('cap-view');
-    const orig = btn ? btn.textContent : '';
+    let detail = document.getElementById('cap-detail-' + cid);
+    if (Object.prototype.hasOwnProperty.call(_meshCaptureOpen, cid)) {
+        delete _meshCaptureOpen[cid];
+        if (detail) { detail.classList.add('hidden'); detail.classList.remove('mt-2'); detail.innerHTML = ''; }
+        if (btn) btn.textContent = '▸ View';
+        return;
+    }
     if (btn) { btn.disabled = true; btn.textContent = 'Reading…'; }
-    if (box) box.innerHTML = '<div class="text-sm text-gray-400">Decoding capture…</div>';
+    if (detail) { detail.classList.remove('hidden'); detail.classList.add('mt-2'); detail.innerHTML = '<div class="text-xs text-gray-400">Decoding capture…</div>'; }
     const res = await _meshApi(`/api/mesh/peer-capture/view?node_id=${encodeURIComponent(nodeId)}&id=${encodeURIComponent(cid)}`);
-    if (box) box.innerHTML = _meshRenderCaptureView(res.data || { success: false, error: res.error || ('HTTP ' + res.status) });
-    if (box) { try { box.scrollIntoView({ block: 'nearest' }); } catch (e) {} }
-    if (btn) { btn.disabled = false; btn.textContent = orig || 'View'; }
+    const d = res.data || { success: false, error: res.error || ('HTTP ' + res.status) };
+    _meshCaptureOpen[cid] = d;
+    detail = document.getElementById('cap-detail-' + cid);
+    if (detail) { detail.classList.remove('hidden'); detail.classList.add('mt-2'); detail.innerHTML = _meshRenderCaptureView(d, nodeId, cid); }
+    if (btn) { btn.disabled = false; btn.textContent = '▾ Hide'; }
 }
 window.meshCaptureView = meshCaptureView;
-
-function meshCaptureViewClose() {
-    const box = document.getElementById('cap-view');
-    if (box) box.innerHTML = '';
-}
-window.meshCaptureViewClose = meshCaptureViewClose;
 
 // Render the node page for one unit into #mesh-node-detail.
 function _meshRenderNodeDetail(id) {
@@ -37993,6 +38010,7 @@ function _meshApplyMeshView() {
 
 function meshOpenNode(id) {
     _meshOpenNodeId = id;
+    _meshCaptureOpen = {};   // fresh node → no stale expanded capture views
     _meshRenderNodeDetail(id);
     _meshApplyMeshView();
     try { window.scrollTo(0, 0); } catch (e) {}
