@@ -37855,9 +37855,11 @@ function _meshRenderCaptureView(d, nodeId, cid) {
     const countLbl = d.truncated
         ? `showing first ${d.shown} of ${d.total} packets`
         : `${d.shown} packet${d.shown === 1 ? '' : 's'}`;
+    const unit = (typeof _meshFindNode === 'function') ? _meshFindNode(nodeId) : null;
+    const uname = unit ? meshUnitTitle(unit) : '';
     return `<div class="border border-slate-700 rounded-lg bg-slate-900/50 p-3">
         <div class="flex items-center gap-2 mb-2 flex-wrap">
-            <span class="font-semibold text-sm">Packets</span>
+            <span class="font-semibold text-sm">Packets${uname ? ' · ' + escapeHtml(uname) : ''}</span>
             <span class="text-[11px] text-gray-400">${escapeHtml(countLbl)} · ${escapeHtml(d.bytes_human || '')}</span>
             ${closeBtn}
         </div>

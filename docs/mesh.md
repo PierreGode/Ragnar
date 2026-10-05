@@ -911,7 +911,9 @@ the tailnet and shows a **packet list** with a summary header (packets shown / o
 total, a per-protocol tally, and the top source addresses), so you can eyeball
 what was on the wire without leaving the page. Open panels survive the background
 mesh refresh (the fetched packets are cached per row), and **Download** pulls the
-raw file for Wireshark.
+raw file for Wireshark. Both are **named after the Ragnar unit** — the view header
+reads *Packets · <Viking name>* and the saved file is `<Viking-name>_<id>.pcap`
+(falling back to the site label or Tailscale short name).
 
 Every capture is **strictly bounded** (`pcap_capture.py`): it stops on the first
 of its time limit, packet count, or a hard byte ceiling (defaults 5 min / 100 MB
