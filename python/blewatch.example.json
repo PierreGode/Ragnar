@@ -1,0 +1,17 @@
+{
+  "_comment": "blewatch config. trusted_devices may be a bare list of addresses or a map addr -> {name, services, mitm}. All addresses are case-insensitive, MSB-first (aa:bb:cc:dd:ee:ff).",
+  "trusted_devices": {
+    "c0:11:ec:70:00:01": {"name": "Front Door Lock", "mitm": true},
+    "be:ac:00:00:00:aa": {"name": "Lobby Beacon"}
+  },
+  "beacon_baseline": [
+    {"uuid": "000102030405060708090a0b0c0d0e0f", "addr": "be:ac:00:00:00:aa"}
+  ],
+  "trusted_services": ["180f", "fe2c"],
+  "adv_flood_window_s": 10.0, "adv_flood_count": 60,
+  "advertiser_flood_window_s": 10.0, "advertiser_flood_count": 25,
+  "rpa_window_s": 10.0, "rpa_count": 40,
+  "clone_flap_window_s": 15.0, "clone_flap_count": 4,
+  "connect_window_s": 10.0,
+  "terminate_window_s": 20.0, "terminate_count": 4
+}

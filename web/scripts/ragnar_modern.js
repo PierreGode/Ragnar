@@ -9908,6 +9908,78 @@ async function runFtpWatch() {
     }
 }
 
+// ---- BLE Watch (Bluetooth Low Energy attack monitor, external sniffer) -----
+const _BLE_VERDICT_STYLE = {
+    clean:               ['bg-green-950/40 border-green-900 text-green-400', '✓ No clone, spoof, flood or connection abuse seen'],
+    observed:            ['bg-slate-800 border-slate-700 text-slate-300', '— BLE activity observed; nothing anomalous'],
+    suspicious:          ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Suspicious — RPA churn / vendor-shape anomaly'],
+    'attack-indicator':  ['bg-red-950/60 border-red-800 text-red-300', '🛑 Attack indicator — clone, beacon spoof, advertising flood / BLE-spam, hijack attempt or pairing downgrade'],
+    impersonation:       ['bg-red-950/60 border-red-800 text-red-300', '🛑 IMPERSONATION — two radios sharing one address, or two centrals racing a connection (connection MITM)'],
+    unknown:             ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _BLE_SEV_STYLE = {
+    critical: 'text-red-300', high: 'text-red-300', medium: 'text-amber-300',
+    low: 'text-gray-400', info: 'text-gray-500',
+};
+async function runBleWatch() {
+    const out = document.getElementById('blewatch-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const devEl = document.getElementById('blewatch-device');
+    const device = devEl && devEl.value ? devEl.value.trim() : '';
+    const secsEl = document.getElementById('blewatch-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Capturing the BLE link layer via the sniffer…</p>';
+    try {
+        const qs = '?seconds=' + encodeURIComponent(secs)
+            + (device ? '&device=' + encodeURIComponent(device) : '');
+        const d = await fetchAPI('/api/net/ble-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            // Device-gated: no sniffer is a normal state, not a red error.
+            const cls = (d && (d.missing_hw || d.missing_tool))
+                ? 'bg-slate-800 border border-slate-700 text-slate-300'
+                : 'text-red-400';
+            if (d && (d.missing_hw || d.missing_tool)) {
+                out.innerHTML = '<div class="px-3 py-2 rounded ' + cls + ' text-sm">🔌 '
+                    + escapeHtml(msg) + '</div>';
+            } else {
+                out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + '</p>';
+            }
+            return;
+        }
+        const [cls, label] = _BLE_VERDICT_STYLE[d.verdict] || _BLE_VERDICT_STYLE.unknown;
+        const devs = (d.devices || []).slice(0, 6).join(', ') || '—';
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Source: ${escapeHtml(d.device || '—')} · ${d.seconds}s · ${d.packet_count || 0} PDUs · devices: ${escapeHtml(devs)}</p>`;
+        const findings = (d.findings || []).filter(f => ['critical', 'high', 'medium', 'low'].includes((f.severity || '').toLowerCase()));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Class</th><th class="px-2 py-1">What</th><th class="px-2 py-1">Address</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_BLE_SEV_STYLE[(f.severity || '').toLowerCase()] || 'text-gray-400'}">${escapeHtml((f.severity || '').toLowerCase())}</td>
+                    <td class="px-2 py-1 font-mono ${_BLE_SEV_STYLE[(f.severity || '').toLowerCase()] || 'text-gray-300'}">${escapeHtml((f.code || '').replace(/^BLE-/, ''))}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.klass || '')}</td>
+                    <td class="px-2 py-1 text-gray-300 whitespace-normal">${escapeHtml((f.detail && f.detail.text) || f.name || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.src || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
 // ---- SR-MPLS Watch (MPLS / SR-MPLS / SRv6 label & segment manipulation) -----
 const _SRM_VERDICT_STYLE = {
     clean:                 ['bg-green-950/40 border-green-900 text-green-400', '✓ No label/segment injection, reserved-label, TTL-expiry or SR control-plane anomaly'],
@@ -11229,7 +11301,7 @@ async function runRoutingSelftest() {
             : 'Scapy: <span class="text-amber-300">not installed</span> — end-to-end leg skipped';
         if (instBtn) instBtn.classList.toggle('hidden', !!d.scapy_available);
 
-        const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory)', ssh: 'SSH Watch (regreSSHion / Terrapin)', telnet: 'Telnet Watch (CVE-2026-24061 / 32746)', ftp: 'FTP Watch (ProFTPD mod_copy / quoted verb)', smtp: 'SMTP Watch (Exim expansion / SNI / AUTH b64)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
+        const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory)', ssh: 'SSH Watch (regreSSHion / Terrapin)', telnet: 'Telnet Watch (CVE-2026-24061 / 32746)', ftp: 'FTP Watch (ProFTPD mod_copy / quoted verb)', smtp: 'SMTP Watch (Exim expansion / SNI / AUTH b64)', ble: 'BLE Watch (Bluetooth LE clone/spoof/MITM)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
                         arp: 'ARP Poisoning (incl. HSRP/VRRP virtual-MAC awareness)', dns: 'DNS Doctor (poison parser / anchors / ASN)',
                         mac: 'MAC Watch (spoof / vendor-OUI / randomization / HSRP-VRRP virtual-MAC)', dhcp: 'DHCP Guardian (rogue server / starvation)',
                         lacp: 'LACP Watch (802.1AX LAG-hijack / flapping)', rpc: 'RPC/NetLogon Watch (Zerologon / DCSync / WinRM)',

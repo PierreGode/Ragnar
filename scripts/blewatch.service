@@ -1,0 +1,51 @@
+[Unit]
+# Ragnar blewatch — dedicated passive Bluetooth Low Energy attack monitor.
+# OPT-IN. The RX is done by an external nRF/Bluefruit LE sniffer over USB; this
+# service only parses what the sniffer's extcap helper captures. It never
+# transmits a BLE packet. Needs the Nordic nRF Sniffer extcap helper installed
+# (ships with the nRF Sniffer for Bluetooth LE Wireshark plugin).
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin blemon
+#   sudo usermod -aG dialout blemon            # serial access to the sniffer
+#   sudo mkdir -p /var/log/blewatch && sudo chown blemon:blemon /var/log/blewatch
+#   sudo install -Dm644 python/blewatch.example.json /etc/ragnar/blewatch.json
+#   sudo cp scripts/blewatch.service /etc/systemd/system/
+#   sudoedit /etc/systemd/system/blewatch.service   # set RAGNAR_BLE_SNIFFER
+#   sudo systemctl enable --now blewatch
+#   journalctl -u blewatch -f
+Description=Ragnar blewatch passive BLE attack monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=blemon
+Group=blemon
+WorkingDirectory=/home/ragnar/Ragnar/python
+# Autodetect by default; pin a stable /dev/serial/by-id/... path for reliability.
+Environment=RAGNAR_BLE_SNIFFER=
+ExecStartPre=/bin/mkdir -p /var/log/blewatch
+ExecStart=/usr/bin/python3 /home/ragnar/Ragnar/python/blewatch.py \
+    --seconds 86400 -c /etc/ragnar/blewatch.json \
+    --jsonl /var/log/blewatch/alerts.jsonl
+Restart=on-failure
+RestartSec=5
+
+# --- least privilege: parse only (the sniffer does the RX over USB serial) ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log/blewatch
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+LockPersonality=yes
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

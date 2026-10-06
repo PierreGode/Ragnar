@@ -2,6 +2,17 @@
 
 ## Releases
 
+### 2026-10-06
+
+#### feat(ble): BLE Watch — passive Bluetooth Low Energy attack monitor
+*branch `feature/blewatch-ble-sniffer` · PR pending*
+
+- New passive, **detection-only** BLE monitor (`python/blewatch.py`), the Bluetooth counterpart to the Wi-Fi WIDS / ND spoofing watchers. The RX is done by an **external nRF / Adafruit [Bluefruit LE Sniffer](https://www.adafruit.com/product/2269)** over USB; Ragnar only parses the captured BLE Link-Layer PDUs with a hand-rolled raw-byte parser (no dissector). 16 stable `BLE-0xx` findings across two layers:
+  - **Advertising:** device/beacon **clones** (`BLE-001`), **two radios sharing one address** (`BLE-002`), **public-address reuse across names** (`BLE-003`), **RPA rotation storms** (`BLE-004`), **beacon spoof** (`BLE-005`), per-AdvA + advertiser **floods** (`BLE-006/007`), **BLE-spam tooling** signatures — Flipper / "Sour Apple" / Fast-Pair / Swift-Pair (`BLE-013`), vendor-shape mismatch (`BLE-015`), **GATT service masquerade** (`BLE-016`), malformed PDUs (`BLE-014`)
+  - **Connection** (when the sniffer follows a link): **CONNECT_IND hijack** (`BLE-008`) and **race / MITM** (`BLE-009`), **LL_VERSION_IND swap** (`BLE-010`), **Just-Works pairing downgrade** (`BLE-011`), **forced re-pair storm** (`BLE-012`)
+- **Both paths:** a standalone binary (`--self-test` · `--replay` pcap · `--list-devices` · opt-in least-privilege `scripts/blewatch.service`) and an in-app **BLE Watch** card (Network → Diagnostics → Passive · wireless). Device-gated — with no sniffer attached it says so plainly instead of pretending to listen. HIGH/CRITICAL findings reach Watchtower; the detector self-test joins **validate detectors**. Route `/api/net/ble-watch`, CLI `ble-watch`.
+- Reads classic pcap DLT **256** (`BLUETOOTH_LE_LL_WITH_PHDR`) and **251** (`BLUETOOTH_LE_LL`) fully; Nordic **272** best-effort (**unvalidated on hardware** — no sniffer on the dev box). `blewatch --self-test` **19/19**. Docs: [docs/blewatch.md](blewatch.md).
+
 ### 2026-10-05
 
 #### fix(sdr): real Gain + FFT-bins controls for the ESP panel (were HackRF no-ops)
