@@ -1,0 +1,5 @@
+REM RagnarScripts test payload - echoes a greeting into the focused terminal (Linux/macOS)
+REM Harmless demo: types one echo command, nothing is executed beyond it.
+DELAY 1000
+STRING echo "Hello from RagnarScripts"
+ENTER

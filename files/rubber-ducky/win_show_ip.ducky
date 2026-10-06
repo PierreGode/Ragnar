@@ -1,0 +1,10 @@
+REM RagnarScripts test payload - opens a Windows command prompt and shows IP config
+REM Read-only recon demo (ipconfig), safe to run on your own test host.
+DELAY 1000
+GUI r
+DELAY 500
+STRING cmd
+ENTER
+DELAY 1000
+STRING ipconfig /all
+ENTER
