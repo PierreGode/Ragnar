@@ -2,9 +2,14 @@
 
 `blewatch` (`python/blewatch.py`) is the **BLE counterpart to Ragnar's Wi-Fi /
 Neighbor-Discovery spoofing watchers**. Where those tap a NIC, BLE is captured by
-an **external sniffer** — an [Adafruit Bluefruit LE Sniffer](https://www.adafruit.com/product/2269)
-(nRF51822) or any nRF-Sniffer device — and blewatch only **parses** the captured
-BLE Link-Layer PDUs.
+an **external sniffer** and blewatch only **parses** the captured BLE Link-Layer
+PDUs. **Both nRF Sniffer generations are supported:**
+- **nRF51** — [Adafruit Bluefruit LE Sniffer](https://www.adafruit.com/product/2269) (nRF51822)
+- **nRF52** — nRF52840 Dongle / DK, or any nRF52-based nRF Sniffer
+
+The vendor extcap emits the same BLE Link-Layer PDU for both, so the parser and
+every finding are identical across them; only the device autodetect and the
+capture quality differ (see [Hardware reality](#hardware-reality)).
 
 **Detection only** — it never transmits a BLE packet or scans; the sniffer does
 the RX. **Passive:** field extraction is a hand-rolled **raw-byte parser** over
@@ -101,9 +106,18 @@ detectors** (`do_routing_selftest`). The standalone `blewatch.service`
 
 ## Hardware reality
 
-The nRF51822 / Bluefruit LE Sniffer follows **one** connection at a time and
-drops packets on busy advertising channels, so the **advertising-layer** findings
-(`BLE-001`–`BLE-007`, `BLE-013`–`BLE-016`) are solid on it while the
-**connection-layer** findings (`BLE-008`–`BLE-012`) are best-effort. For reliable
-multi-connection capture, an nRF52-based sniffer or Ubertooth is the upgrade —
-the parser and codes are unchanged; only the capture front end differs.
+Both generations run the **same parser and codes** — the difference is capture
+quality:
+
+- **nRF51** (Bluefruit LE Sniffer) follows **one** connection at a time and drops
+  packets on busy advertising channels. The **advertising-layer** findings
+  (`BLE-001`–`BLE-007`, `BLE-013`–`BLE-016`) are solid on it; the
+  **connection-layer** findings (`BLE-008`–`BLE-012`) are best-effort.
+- **nRF52** (nRF52840 Dongle/DK) is the better radio — more memory, follows
+  connections more reliably and keeps up on busy channels, so the
+  connection-layer findings are far more dependable. Prefer it if you have one.
+- An **Ubertooth** is an alternative for heavy connection-following; again the
+  parser and codes are unchanged, only the capture front end differs.
+
+blewatch autodetects either over USB (`--list-devices` shows what it found);
+`$RAGNAR_BLE_SNIFFER` pins a specific `/dev/serial/by-id/...` path.

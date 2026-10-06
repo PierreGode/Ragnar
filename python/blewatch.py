@@ -2,8 +2,11 @@
 """blewatch.py — passive Bluetooth Low Energy attack monitor (Ragnar).
 
 The BLE counterpart to the Wi-Fi/ND spoofing watchers: a passive reader of the
-BLE link layer captured by an external sniffer (Adafruit Bluefruit LE Sniffer /
-nRF51822, or any nRF-Sniffer device feeding a pcap). It flags advertising-layer
+BLE link layer captured by an external sniffer. Both nRF Sniffer generations are
+supported — nRF51 (Adafruit Bluefruit LE Sniffer / nRF51822) and nRF52 (nRF52840
+Dongle/DK, or any nRF52-based nRF Sniffer) — since the parser works on the BLE
+Link-Layer PDU the vendor extcap emits, which is identical across both. It flags
+advertising-layer
 impersonation (beacon/device clones, two radios sharing one address), rogue-AdvA
 beacon spoofing, advertising floods / BLE-spam tooling, and connection-layer
 abuse it can see when the sniffer follows a link (CONNECT_IND races, version /
@@ -686,9 +689,12 @@ def find_sniffer():
     if env:
         return env if os.path.exists(env) else None
     import glob
-    for pat in ('/dev/serial/by-id/*Sniffer*', '/dev/serial/by-id/*nRF*',
-                '/dev/serial/by-id/*Segger*', '/dev/serial/by-id/*Bluefruit*'):
-        hits = glob.glob(pat)
+    # Match both sniffer generations by their USB by-id strings:
+    #   nRF51 — Adafruit Bluefruit LE Sniffer (CP210x), SEGGER (nRF51 DK)
+    #   nRF52 — nRF52840 Dongle / USB, nRF52 DK (SEGGER J-Link), Makerdiary etc.
+    for pat in ('*Sniffer*', '*nRF*', '*nRF52*', '*Nordic*', '*Segger*', '*J-Link*',
+                '*Bluefruit*', '*Adafruit*'):
+        hits = glob.glob('/dev/serial/by-id/*' + pat.strip('*') + '*')
         if hits:
             return sorted(hits)[0]
     # Fall back to a bare CDC-ACM port only if exactly one is present.
@@ -767,7 +773,7 @@ def main(argv=None):
         return blewatch_selftest.run(verbose=True)
     if args.list_devices:
         dev = find_sniffer()
-        print(dev or '(no nRF/Bluefruit LE sniffer found)')
+        print(dev or '(no nRF51/nRF52 LE sniffer found)')
         return 0 if dev else 1
 
     cfg = {}
