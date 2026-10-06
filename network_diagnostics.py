@@ -24744,6 +24744,167 @@ def _smtp_selftest():
             'scenarios': [{'name': c['name'], 'pass': c['pass']} for c in r['scenarios']]}
 
 
+# ==========================================================================
+# BLE Watch — passive Bluetooth Low Energy attack monitor (vendored blewatch.py)
+# ==========================================================================
+# Unlike the on-the-wire watchers, BLE is not captured off a NIC: the RX is done
+# by an external nRF/Bluefruit LE sniffer over USB and blewatch.py only parses the
+# captured BLE Link-Layer PDUs. So do_ble_watch is device-gated — with no sniffer
+# attached it reports that cleanly rather than pretending to listen. It reuses the
+# python/blewatch.py module directly (same engine the standalone + self-test use).
+_BLE_PY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+_BLE_SEV_TO_GUARD = {'critical': 'CRITICAL', 'high': 'HIGH', 'medium': 'MEDIUM',
+                     'low': 'LOW', 'info': 'INFO'}
+_BLE_SEV_RANK = {'info': 0, 'low': 1, 'medium': 2, 'high': 3, 'critical': 4}
+# Impersonation / hijack / downgrade / spam are active attacks; identity reuse and
+# churn/flood are exposure; the vendor-shape mismatch is posture.
+_BLE_KLASS = {
+    'BLE-001': 'ATTACK', 'BLE-002': 'ATTACK', 'BLE-003': 'EXPOSURE',
+    'BLE-004': 'EXPOSURE', 'BLE-005': 'ATTACK', 'BLE-006': 'EXPOSURE',
+    'BLE-007': 'EXPOSURE', 'BLE-008': 'ATTACK', 'BLE-009': 'ATTACK',
+    'BLE-010': 'ATTACK', 'BLE-011': 'ATTACK', 'BLE-012': 'ATTACK',
+    'BLE-013': 'ATTACK', 'BLE-014': 'EXPOSURE', 'BLE-015': 'POSTURE',
+    'BLE-016': 'ATTACK',
+}
+
+
+def _ble_module():
+    if _BLE_PY_DIR not in sys.path:
+        sys.path.insert(0, _BLE_PY_DIR)
+    import blewatch
+    return blewatch
+
+
+def _ble_verdict(alerts):
+    """clean < observed < suspicious < attack-indicator < impersonation. A critical
+    means two radios shared one address or two centrals raced a connection — the
+    strongest in-band evidence of a BLE identity attack."""
+    sev = {a.get('severity') for a in alerts}
+    if 'critical' in sev:
+        return 'impersonation'
+    if 'high' in sev:
+        return 'attack-indicator'
+    if sev & {'medium', 'low'}:
+        return 'suspicious'
+    return 'observed' if alerts else 'clean'
+
+
+def _ble_normalize(alert, blewatch):
+    """blewatch alert (merged, multi-code) -> one guard finding per evidence code,
+    the shape _guard_emit_jsonl / Watchtower expects."""
+    out = []
+    for ev in alert.get('evidence', []):
+        code = ev['code']
+        out.append({'code': code,
+                    'name': (blewatch.CODES.get(code) or (None, code))[1],
+                    'severity': _BLE_SEV_TO_GUARD.get(ev['severity'], 'MEDIUM'),
+                    'klass': _BLE_KLASS.get(code, 'EXPOSURE'),
+                    'src': alert.get('adva'), 'cves': [],
+                    'detail': {'pdu': alert.get('pdu'), 'inita': alert.get('inita'),
+                               'channel': alert.get('channel'), 'rssi': alert.get('rssi'),
+                               'text': ev['detail']}})
+    return out
+
+
+def do_ble_watch(device=None, seconds=20, replay=None, config=None, quick=False):
+    """Passive BLE attack monitor (detection-only, never transmits). Reads the BLE
+    link layer from an external nRF/Bluefruit LE sniffer (or a --replay pcap) and
+    flags advertising-layer impersonation (device/beacon clones, two radios sharing
+    an address), advertising floods / BLE-spam tooling, and the connection-layer
+    abuse the sniffer can see when it follows a link (CONNECT_IND races, version
+    swaps, Just-Works pairing downgrade, forced re-pair storms). Device-gated: with
+    no sniffer attached it says so rather than pretending to listen."""
+    try:
+        blewatch = _ble_module()
+    except Exception as e:
+        return {'success': False, 'module': 'ble_watch',
+                'error': 'blewatch module unavailable: %s' % e}
+    seconds = _clamp_int(seconds, 20, 5, 120)
+    cfg = {}
+    if isinstance(config, dict):
+        cfg = config
+    elif isinstance(config, str) and config:
+        try:
+            with open(config) as f:
+                cfg = json.load(f)
+        except (OSError, ValueError) as e:
+            return {'success': False, 'module': 'ble_watch',
+                    'error': 'bad config: %s' % e}
+
+    alerts = []
+    guard = blewatch.BleWatch(cfg, emit=alerts.append)
+    source = None
+    if replay:
+        if not os.path.exists(replay):
+            return {'success': False, 'module': 'ble_watch',
+                    'error': 'replay pcap not found: %s' % replay}
+        source = 'replay:' + os.path.basename(replay)
+        try:
+            blewatch.run_replay(replay, guard)
+        except Exception as e:
+            return {'success': False, 'module': 'ble_watch',
+                    'error': 'replay failed: %s: %s' % (type(e).__name__, e)}
+    else:
+        dev = device or blewatch.find_sniffer()
+        if not dev:
+            return {'success': False, 'module': 'ble_watch', 'missing_hw': True,
+                    'error': 'No BLE sniffer detected. Attach an nRF/Bluefruit LE '
+                             'Sniffer (set $RAGNAR_BLE_SNIFFER or pick a device), or '
+                             'replay a capture.'}
+        source = dev
+        try:
+            blewatch.run_live(dev, guard, seconds)
+        except RuntimeError as e:          # extcap helper missing etc.
+            return {'success': False, 'module': 'ble_watch', 'device': dev,
+                    'missing_tool': 'nrf_sniffer_ble', 'error': str(e)}
+        except Exception as e:
+            return {'success': False, 'module': 'ble_watch', 'device': dev,
+                    'error': 'capture failed: %s: %s' % (type(e).__name__, e)}
+
+    findings = []
+    for a in alerts:
+        findings.extend(_ble_normalize(a, blewatch))
+    verdict = _ble_verdict(alerts)
+    reasons, seen = [], set()
+    for a in sorted(alerts, key=lambda x: _BLE_SEV_RANK.get(x.get('severity'), 0),
+                    reverse=True):
+        for code in a['codes']:
+            if code in seen:
+                continue
+            seen.add(code)
+            reasons.append('%s: %s' % (code, a['summary']))
+        if len(reasons) >= 8:
+            break
+    if not reasons:
+        reasons = ['BLE link activity observed; no clone, spoof, flood or connection '
+                   'abuse seen'] if guard.frames else \
+                  ['No BLE PDUs captured (sniffer idle or out of range)']
+    by_sev = {}
+    for a in alerts:
+        by_sev[a['severity']] = by_sev.get(a['severity'], 0) + 1
+    result = {'success': True, 'module': 'ble_watch', 'device': source,
+              'seconds': seconds, 'verdict': verdict, 'reasons': reasons,
+              'findings': findings,
+              'devices': sorted({a['adva'] for a in alerts if a.get('adva')}),
+              'alerts': len(alerts), 'by_severity': by_sev,
+              'packet_count': guard.frames}
+    hi = [f for f in findings if f['severity'] in ('HIGH', 'CRITICAL')]
+    if not quick and hi:
+        _guard_emit_jsonl('ble_watch', {'device': source, 'findings': hi})
+    return result
+
+
+def _ble_selftest():
+    """Adapt blewatch_selftest.selftest() to the aggregator's scenarios shape. The
+    decode + detect path is pure-Python (own pcap reader + BLE LL parser), so the
+    suite runs offline: no radio, no root, no Scapy."""
+    _ble_module()                                  # put python/ on sys.path
+    import blewatch_selftest
+    r = blewatch_selftest.selftest()
+    return {'success': r['success'],
+            'scenarios': [{'name': c['name'], 'pass': c['pass']} for c in r['scenarios']]}
+
+
 def do_routing_selftest():
     """Run the IGMP / OSPF / BGP detector self-tests and report a combined result
     plus whether Scapy is available for the end-to-end packet-crafting leg. Drives
@@ -24763,7 +24924,7 @@ def do_routing_selftest():
               'bfd': _bfd_selftest(), 'ptp': _ptp_selftest(),
               'srmpls': _srmpls_selftest(), 'ipsec': _ipsec_selftest(),
               'dns_passive': _dns_passive_selftest(), 'ftp': _ftp_selftest(),
-              'smtp': _smtp_selftest(),
+              'smtp': _smtp_selftest(), 'ble': _ble_selftest(),
               'ospf': _ospf_selftest(), 'bgp': _bgp_selftest(),
               'arp': _arp_selftest(), 'dns': _dns_selftest(),
               'mac': _mac_selftest(), 'dhcp': _dhcp_selftest(),
@@ -26617,6 +26778,16 @@ def register_network_diagnostics(app, logger=None):
                  if p.isdigit()][:8]
         _log(f"net/ftp-watch iface={iface or 'default-route'} secs={secs}")
         return jsonify(do_ftp_watch(interface=iface, seconds=secs, ports=ports or None))
+
+    @app.route('/api/net/ble-watch', methods=['GET'])
+    def net_ble_watch():
+        # Passive BLE monitor via an external nRF/Bluefruit LE sniffer (device-gated).
+        device = (request.args.get('device') or '').strip() or None
+        if device is not None and not re.fullmatch(r'[\w./:+-]{1,128}', device):
+            return _bad('Invalid device')
+        secs = _clamp_int(request.args.get('seconds'), 20, 5, 120)
+        _log(f"net/ble-watch device={device or 'autodetect'} secs={secs}")
+        return jsonify(do_ble_watch(device=device, seconds=secs))
 
     @app.route('/api/net/srmpls-watch', methods=['GET'])
     def net_srmpls_watch():
@@ -29373,6 +29544,13 @@ def _cli(argv=None):
     fw_.add_argument('--ports', default='21', help='FTP control ports (default 21)')
     fw_.add_argument('--json', action='store_true', help='emit JSON')
 
+    bw_ = sub.add_parser('ble-watch',
+                         help='passive BLE attack monitor (needs an nRF/Bluefruit LE sniffer)')
+    bw_.add_argument('--device', '-i', default=None, help='sniffer serial device (default: autodetect)')
+    bw_.add_argument('--replay', default=None, help='replay a BLE pcap instead of a live sniffer')
+    bw_.add_argument('--seconds', '-s', type=int, default=20, help='capture window (5-120)')
+    bw_.add_argument('--json', action='store_true', help='emit JSON')
+
     dwst = sub.add_parser('dns-passive-selftest',
                           help='self-test the passive DNS detectors (no root)')
     dwst.add_argument('--json', action='store_true', help='emit JSON')
@@ -30057,6 +30235,20 @@ def _cli(argv=None):
             print(f"FTP Watch [{r['interface']}] {r['seconds']}s: {r['verdict'].upper()}  "
                   f"({r['packet_count']} frames, {r['sessions']} session(s), "
                   f"{len(r['findings'])} finding(s))")
+            for x in r.get('reasons', []):
+                print(f"  {x}")
+        return 0 if r.get('success') else 1
+
+    if args.cmd == 'ble-watch':
+        r = do_ble_watch(device=args.device, seconds=args.seconds, replay=args.replay)
+        if args.json:
+            print(json.dumps(r, indent=2))
+        elif not r.get('success'):
+            print(f"error: {r.get('error')}")
+        else:
+            print(f"BLE Watch [{r['device']}] {r['seconds']}s: {r['verdict'].upper()}  "
+                  f"({r['packet_count']} PDUs, {len(r['devices'])} device(s), "
+                  f"{r['alerts']} alert(s))")
             for x in r.get('reasons', []):
                 print(f"  {x}")
         return 0 if r.get('success') else 1

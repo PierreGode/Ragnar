@@ -2163,6 +2163,19 @@
                             </div>
                             <div id="ftpwatch-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
                         </div>
+                        <h3 class="md:col-span-2 text-xs font-semibold uppercase tracking-wider text-gray-400">Passive · wireless</h3>
+                        <!-- BLE Watch (Bluetooth Low Energy attack monitor) -->
+                        <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
+                            <h3 class="text-lg font-semibold mb-1">BLE Watch <span class="text-xs font-normal text-gray-500">(passive · Bluetooth Low Energy · external sniffer)</span></h3>
+                            <p class="text-xs text-amber-300/90 mb-2">Passive Bluetooth Low Energy attack monitor — <strong>detection-only</strong>, it never transmits a BLE packet. The RX is done by an <strong>external nRF / Adafruit Bluefruit LE sniffer</strong> over USB; Ragnar only parses the captured link layer, so this card is <strong>device-gated</strong> — with no sniffer attached it says so rather than pretending to listen. Flags advertising-layer <strong>impersonation</strong> (device &amp; iBeacon/Eddystone clones, two radios sharing one address, public-address reuse across names), <strong>beacon spoofing</strong> and <strong>GATT service masquerade</strong>, <strong>advertising floods</strong> and <strong>BLE-spam tooling</strong> (Flipper / "Sour Apple" / Fast-Pair / Swift-Pair signatures, RPA rotation storms), and the <strong>connection-layer</strong> abuse the sniffer can see when it follows a link: <strong>CONNECT_IND races</strong> (connection MITM), <strong>LL_VERSION_IND swaps</strong>, <strong>Just-Works pairing downgrade</strong> and <strong>forced re-pair storms</strong>.</p>
+                            <p class="text-sm text-gray-400 mb-3">Captures with the Nordic nRF Sniffer extcap helper and feeds the BLE Link-Layer PDUs through a hand-rolled raw-byte parser (no dissector). <strong>Both sniffer generations are supported</strong> — <strong>nRF51</strong> (Adafruit Bluefruit LE Sniffer) and <strong>nRF52</strong> (nRF52840 Dongle/DK) — same parser and findings for each; blewatch autodetects either over USB. <strong>Caveat:</strong> the nRF51 follows <em>one</em> connection at a time and drops packets on busy advertising channels, so on it the advertising-layer findings are solid while the connection-layer findings are best-effort; an nRF52 is the better radio for the connection-layer checks. Only <strong>HIGH/CRITICAL</strong> findings reach Watchtower. Baseline trusted devices, beacon UUIDs and protected services in <span class="font-mono">python/blewatch.example.json</span>.</p>
+                            <div class="flex flex-wrap items-center gap-2">
+                                <input id="blewatch-device" type="text" placeholder="Sniffer device (auto)" title="nRF/Bluefruit LE sniffer serial device — leave blank to autodetect" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                                <input id="blewatch-secs" type="number" min="5" max="120" value="20" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                                <button onclick="runBleWatch()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan BLE</button>
+                            </div>
+                            <div id="blewatch-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
+                        </div>
                         <h3 class="md:col-span-2 text-xs font-semibold uppercase tracking-wider text-gray-400">Passive · routing &amp; VPN</h3>
                         <!-- BGP Path Watch -->
                         <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
