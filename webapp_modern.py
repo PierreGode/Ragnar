@@ -2160,6 +2160,7 @@ _NI_CRITICAL = {
     'rogue-redirect', 'rogue-ra', 'rogue-irdp',                         # ipv6/icmp
     'cdpwn',                                                            # cdp (Armis CDPwn CVE exploit shape)
     'autokey-exploit',                                                 # ntp (CVE-2014-9295 crypto_recv overflow signature)
+    'crash-exploit',                                                   # ntp (oversize CVE-2016-9312 / mode-6 count overrun CVE-2019-6444/6443)
     'lag-hijack',                                                      # lacp (aggregation takeover: identity manip + member disruption)
     'zerologon', 'dcsync', 'credential-exposure',                     # rpc-netlogon (CVE-2020-1472 chain / DCSync / DPAPI backup-key / WinRM basic)
     'failover-manipulation',                                           # bfd (forged teardown / forced AdminDown / illegal state regression -> induced reconvergence)

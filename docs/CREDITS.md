@@ -14,8 +14,8 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **227 CVEs detected from the wire.** 268 distinct CVE IDs are named across Ragnar's
-  code; 227 of them a passive detector actually identifies. The rest are named, not detected:
+- **230 CVEs detected from the wire.** 271 distinct CVE IDs are named across Ragnar's
+  code; 230 of them a passive detector actually identifies. The rest are named, not detected:
   32 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
@@ -178,6 +178,10 @@ behind them is Solarflere's work.
   Liebert power cards: RomPager **Misfortune Cookie** banners (CVE-2014-9222, Liebert MPH rack
   PDUs) and the oversized-HTTP-method request that overflows Liebert RDU101 / IS-UNITY cards
   (CVE-2025-41426).
+- **The time plane, both halves** — **NTP Watch v11** adds the ntpd oversize-datagram crash
+  (CVE-2016-9312) and the ntpsec mode-6 `count` overrun (CVE-2019-6444 / CVE-2019-6443), and
+  now watches NTP over IPv6; **PTP Watch v4** extends PTP into **SyncE**'s ESMC control
+  channel, which earlier treated SyncE as invisible to a tap.
 
 _(Counts reflect the detector code as of September 2026 and grow as new modules land.)_
 

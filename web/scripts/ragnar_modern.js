@@ -7403,7 +7403,7 @@ const _NETINT_STYLE = {
 // else non-clean — a suspicious finding (amber). Mirrors the server's _ni_rank so the
 // chips colour every scanner's verdicts without enumerating them all.
 const _NETINT_CLEAN = new Set(['clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a', 'no-traffic', 'disabled', 'not-applicable', 'randomization', 'fhrp', 'observed']);
-const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'responder-challenge', 'krb-recon', 'eternalblue-probe', 'krb-rc4md4', 'smbghost-exploit', 'smb-reflection', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn', 'autokey-exploit', 'auth-bypass', 'lag-hijack', 'zerologon', 'dcsync', 'credential-exposure', 'failover-manipulation', 'segment-injection', 'modcopy-exploited', 'payload-queued', 'exploit', 'attack']);
+const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'responder-challenge', 'krb-recon', 'eternalblue-probe', 'krb-rc4md4', 'smbghost-exploit', 'smb-reflection', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn', 'autokey-exploit', 'crash-exploit', 'auth-bypass', 'lag-hijack', 'zerologon', 'dcsync', 'credential-exposure', 'failover-manipulation', 'segment-injection', 'modcopy-exploited', 'payload-queued', 'exploit', 'attack']);
 function _netintRank(verdict) {
     const v = verdict || 'unknown';
     if (_NETINT_CLEAN.has(v)) return 0;
@@ -8595,6 +8595,7 @@ const _NTP_VERDICT_STYLE = {
     'time-injection': ['bg-red-950/60 border-red-800 text-red-300', '🛑 NTP time injection — a source is serving a skewed clock'],
     autokey:          ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ NTP Autokey extension field on the wire — deprecated (CVE-2014-9295 surface)'],
     'autokey-exploit':['bg-red-950/60 border-red-800 text-red-300', '🛑 Malformed NTP Autokey EF — crypto_recv() overflow signature (CVE-2014-9295 RCE)'],
+    'crash-exploit':  ['bg-red-950/60 border-red-800 text-red-300', '🛑 NTP crash / overrun shape — oversize datagram (CVE-2016-9312) or mode-6 count overrun (CVE-2019-6444/6443)'],
     'auth-bypass':    ['bg-red-950/60 border-red-800 text-red-300', '🛑 NTP crypto-NAK auth bypass — symmetric-association clock steering (CVE-2015-7871)'],
     unknown:          ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
