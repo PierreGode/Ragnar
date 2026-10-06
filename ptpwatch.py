@@ -234,7 +234,7 @@ class PtpMsg:
     tlvs: List[Tlv] = field(default_factory=list)
     tlv_end: int = 0            # body offset after the last well-formed TLV
     tlv_truncated: bool = False  # a TLV declared more bytes than arrived
-    wire_len: int = 0            # PTP bytes actually present (for CVE-2021-3570 over-read)
+    wire_len: int = 0           # PTP bytes actually present in the frame
 
     # ---- derived helpers -------------------------------------------------
     @property
@@ -340,12 +340,12 @@ def parse_ptp(buf: bytes, *, strict: bool = False) -> PtpMsg:
         sequence_id=sequence_id, control_field=control_field,
         log_interval=log_interval,
     )
+    msg.wire_len = len(buf)
 
     # Body is parsed on a best-effort basis against the DECLARED length,
     # clamped to what actually arrived. A declared/actual mismatch is a
     # finding (A09), not a parse abort.
     body = buf[HEADER_LEN:min(len(buf), max(msg_length, HEADER_LEN))]
-    msg.wire_len = len(buf)          # PTP bytes actually present (CVE-2021-3570)
     try:
         _parse_body(msg, body)
     except (struct.error, IndexError, ValueError) as exc:
@@ -629,6 +629,189 @@ def _read_pcapng(fh):
 
 
 # ---------------------------------------------------------------------------
+# SyncE / ESMC -- ITU-T G.8264 (Class S)
+# ---------------------------------------------------------------------------
+#
+# Frequency transfer in SyncE is a physical-layer function and is invisible to
+# a packet tap. ESMC, the protocol that advertises WHICH clock quality is being
+# distributed, is an ordinary slow-protocol frame and is entirely visible. That
+# distinction is why SyncE is in scope here at all.
+#
+# Layout verified against tshark's dissector, not recalled:
+#   dst 01:80:C2:00:00:02, EtherType 0x8809, slow subtype 0x0A (OSSP),
+#   ITU-T OUI 00-19-A7, ITU subtype 0x0001, then
+#   [version:4 | event:1 | reserved:3][reserved:3 bytes][TLVs]
+# TLV: type(1) length(2) value -- and the LENGTH FIELD INCLUDES THE 3-BYTE
+# HEADER. A QL TLV declares 0x0004 for one byte of value; the extended QL TLV
+# declares 0x0014 for seventeen. Reading length as value-only shifts the whole
+# chain.
+
+ETHERTYPE_SLOW = 0x8809
+MAC_SLOW_PROTOCOLS = b"\x01\x80\xc2\x00\x00\x02"
+SLOW_SUBTYPE_OSSP = 0x0A
+SLOW_SUBTYPE_LACP = 0x01          # lacpwatch territory; never touched here
+OUI_ITU_T = b"\x00\x19\xa7"
+ITU_SUBTYPE_ESMC = 0x0001
+ESMC_VERSION = 1
+ESMC_TLV_HEADER = 3               # type(1) + length(2), counted in the length
+
+TLV_ESMC_QL = 0x01
+TLV_ESMC_EXT_QL = 0x02
+ESMC_QL_TLV_LEN = 0x0004          # 3 header + 1 value
+ESMC_EXT_QL_TLV_LEN = 0x0014      # 3 header + 17 value
+
+# G.8264 caps ESMC at 10 PDUs/s; information PDUs are ~1/s and an event PDU is
+# sent immediately on a QL change.
+ESMC_MAX_PDU_RATE = 10.0
+
+# SSM codes are option-dependent and the option is NOT carried on the wire, so
+# any rule that needs the table must be declaration-armed (see --ql-option).
+SSM_OPTION_1 = {0x2: "PRC", 0x4: "SSU-A", 0x8: "SSU-B", 0xB: "EEC1/SEC",
+                0xF: "DNU"}
+SSM_OPTION_2 = {0x0: "STU", 0x1: "PRS", 0x4: "TNC", 0x7: "ST2", 0xA: "ST3/EEC2",
+                0xD: "ST3E", 0xE: "PROV", 0xF: "DUS"}
+SSM_TABLES = {1: SSM_OPTION_1, 2: SSM_OPTION_2}
+
+# Enhanced SSM codes, verified: 0x20 PRTC, 0x21 ePRTC, 0xFF "no enhanced code"
+# (fall back to the legacy QL). 0xFF must never be treated as a real value.
+ESSM_PRTC = 0x20
+ESSM_EPRTC = 0x21
+ESSM_NONE = 0xFF
+ESSM_NAMES = {ESSM_PRTC: "PRTC", ESSM_EPRTC: "ePRTC"}
+
+# Primary-grade assertions, per option. S09 compares against the declared set.
+SSM_PRIMARY = {1: {0x2}, 2: {0x1}}
+ESSM_PRIMARY = {ESSM_PRTC, ESSM_EPRTC}
+# "do not use" codes -- 0xF in both options
+SSM_DO_NOT_USE = {0xF}
+
+
+class EsmcParseError(Exception):
+    """Malformed ESMC PDU."""
+
+
+@dataclass
+class EsmcPdu:
+    version: int
+    event: bool
+    ssm: Optional[int] = None
+    essm: Optional[int] = None
+    synce_clock_id: Optional[bytes] = None
+    mixed_eec: bool = False
+    partial_chain: bool = False
+    cascaded_eeec: Optional[int] = None
+    cascaded_eec: Optional[int] = None
+    tlvs: List[Tlv] = field(default_factory=list)
+    malformed: List[str] = field(default_factory=list)
+    src_mac: Optional[bytes] = None
+    dst_mac: Optional[bytes] = None
+    vlan_tagged: bool = False
+
+    # -- adapters so Class S findings flow through the same Emitter ---------
+    transport: str = "esmc"
+    domain: int = 0
+    src_ip: Optional[str] = None
+    major_sdo_id: int = 0
+
+    @property
+    def is_gptp(self) -> bool:
+        return False
+
+    @property
+    def port_identity(self) -> Tuple[bytes, int]:
+        return (self.src_mac or b"\x00" * 6, 0)
+
+
+def parse_esmc(buf: bytes, *, src_mac=None, dst_mac=None,
+               vlan_tagged: bool = False) -> EsmcPdu:
+    """Parse an ESMC PDU from the slow-protocol payload (subtype byte first).
+
+    Structural damage is RECORDED on the PDU rather than raised, so the
+    malformed-ESMC code can report what was wrong instead of the frame simply
+    vanishing.
+    """
+    if len(buf) < 4 or buf[0] != SLOW_SUBTYPE_OSSP:
+        raise EsmcParseError("not an OSSP slow protocol")
+    if buf[1:4] != OUI_ITU_T:
+        raise EsmcParseError("not ITU-T OUI")
+    if len(buf) < 10:
+        raise EsmcParseError("runt ESMC header")
+    if struct.unpack_from("!H", buf, 4)[0] != ITU_SUBTYPE_ESMC:
+        raise EsmcParseError("not ESMC ITU subtype")
+
+    flags = buf[6]
+    pdu = EsmcPdu(version=(flags >> 4) & 0x0F, event=bool(flags & 0x08),
+                  src_mac=src_mac, dst_mac=dst_mac, vlan_tagged=vlan_tagged)
+    if pdu.version != ESMC_VERSION:
+        pdu.malformed.append(f"version {pdu.version} (expected {ESMC_VERSION})")
+
+    off, n, guard = 10, len(buf), 0
+    while off + ESMC_TLV_HEADER <= n and guard < 32:
+        guard += 1
+        ttype = buf[off]
+        tlen = struct.unpack_from("!H", buf, off + 1)[0]
+        if ttype == 0 and tlen == 0:
+            break                       # frame padding, not a TLV
+        if tlen < ESMC_TLV_HEADER:
+            pdu.malformed.append(f"TLV 0x{ttype:02x} length {tlen} < header")
+            break
+        if off + tlen > n:
+            pdu.malformed.append(f"TLV 0x{ttype:02x} overruns frame "
+                                 f"({tlen} declared, {n - off} available)")
+            break
+        value = buf[off + ESMC_TLV_HEADER:off + tlen]
+        pdu.tlvs.append(Tlv(ttype, tlen, value))
+        if ttype == TLV_ESMC_QL:
+            if tlen != ESMC_QL_TLV_LEN:
+                pdu.malformed.append(f"QL TLV length {tlen} "
+                                     f"(expected {ESMC_QL_TLV_LEN})")
+            elif value:
+                pdu.ssm = value[0] & 0x0F
+        elif ttype == TLV_ESMC_EXT_QL:
+            if tlen != ESMC_EXT_QL_TLV_LEN:
+                pdu.malformed.append(f"extended QL TLV length {tlen} "
+                                     f"(expected {ESMC_EXT_QL_TLV_LEN})")
+            elif len(value) >= 12:
+                pdu.essm = value[0]
+                pdu.synce_clock_id = value[1:9]
+                pdu.mixed_eec = bool(value[9] & 0x01)
+                pdu.partial_chain = bool(value[9] & 0x02)
+                pdu.cascaded_eeec = value[10]
+                pdu.cascaded_eec = value[11]
+        off += tlen
+
+    if pdu.ssm is None:
+        pdu.malformed.append("no mandatory QL TLV")
+    return pdu
+
+
+def decode_slow_protocol(buf: bytes, linktype: int = 1):
+    """Return (payload, src_mac, dst_mac, vlan_tagged) for an ITU-T OSSP slow
+    protocol frame, else None. Non-ITU OUIs and LACP are other people's
+    traffic and are passed over silently, never alerted on."""
+    if linktype != LINKTYPE_ETHERNET or len(buf) < 15:
+        return None
+    dst_mac, src_mac = buf[0:6], buf[6:12]
+    off = 12
+    etype = struct.unpack_from("!H", buf, off)[0]
+    off += 2
+    vlan = False
+    hops = 0
+    while etype in (0x8100, 0x88A8) and hops < 3:
+        if len(buf) < off + 4:
+            return None
+        etype = struct.unpack_from("!H", buf, off + 2)[0]
+        off += 4
+        vlan = True
+        hops += 1
+    if etype != ETHERTYPE_SLOW or len(buf) < off + 4:
+        return None
+    if buf[off] != SLOW_SUBTYPE_OSSP or buf[off + 1:off + 4] != OUI_ITU_T:
+        return None
+    return (buf[off:], src_mac, dst_mac, vlan)
+
+
+# ---------------------------------------------------------------------------
 # Finding registry
 # ---------------------------------------------------------------------------
 
@@ -667,10 +850,10 @@ class CodeSpec:
     cvss: Optional[float] = None     # that CVE's CVSS v3.1 base score
 
 
-def _c(code, sev, conf, kl, cat, title, rationale, armed_by=None, gptp_masked=False,
-       cve=None, cvss=None):
-    return CodeSpec(code, sev, conf, kl, cat, title, rationale, armed_by, gptp_masked,
-                    cve, cvss)
+def _c(code, sev, conf, kl, cat, title, rationale, armed_by=None,
+       gptp_masked=False, cve=None, cvss=None):
+    return CodeSpec(code, sev, conf, kl, cat, title, rationale, armed_by,
+                    gptp_masked, cve, cvss)
 
 
 FINDINGS: Dict[str, CodeSpec] = {s.code: s for s in [
@@ -835,6 +1018,100 @@ FINDINGS: Dict[str, CodeSpec] = {s.code: s for s in [
        "Unicast cancellation not attributable to either party",
        "CANCEL_UNICAST_TRANSMISSION kills a slave's time source outright, with no "
        "timestamp forgery required. A forged cancel is clean denial of timing."),
+    # -- Class S: SyncE / ESMC (ITU-T G.8264) ------------------------------
+    _c("PTP-S01", Severity.MEDIUM, Confidence.CONFIRMED, Klass.ATTACK, "synce",
+       "Malformed ESMC PDU",
+       "Wrong version, a missing mandatory QL TLV, a TLV chain overrunning the "
+       "frame, or a QL/extended-QL TLV of the wrong declared length. Note the "
+       "ESMC TLV length field includes its own 3-byte header, so a QL TLV "
+       "declares 4 for one byte of value."),
+    _c("PTP-S02", Severity.HIGH, Confidence.CONFIRMED, Klass.ATTACK, "synce",
+       "ESMC quality level changed without the event flag set",
+       "G.8264 requires an event PDU the moment the advertised QL changes. A "
+       "changed QL arriving in an information PDU contradicts the protocol and "
+       "is how an injected QL slips past a receiver watching for event PDUs."),
+    _c("PTP-S03", Severity.LOW, Confidence.POSSIBLE, Klass.ATTACK, "synce",
+       "ESMC event flag set with no quality-level change",
+       "An event PDU asserts that the QL just changed. Repeated event PDUs "
+       "carrying the same QL are either a confused implementation or an "
+       "attempt to churn downstream selection."),
+    _c("PTP-S04", Severity.HIGH, Confidence.CONFIRMED, Klass.ATTACK, "synce",
+       "ESMC PDU rate exceeds the G.8264 ceiling",
+       "G.8264 caps ESMC at 10 PDUs per second. Exceeding the standard's own "
+       "hard limit is a flood, measured on CLOCK_MONOTONIC so it never depends "
+       "on the sensor's wall clock."),
+    _c("PTP-S05", Severity.HIGH, Confidence.PROBABLE, Klass.ATTACK, "synce",
+       "More than two ESMC speakers on one link",
+       "ESMC is a per-link protocol, so a tap legitimately sees exactly two "
+       "sources, one per end. A third source MAC is an injector."),
+    _c("PTP-S06", Severity.LOW, Confidence.POSSIBLE, Klass.ATTACK, "synce",
+       "VLAN-tagged ESMC frame",
+       "Slow protocols are untagged by definition. A tagged ESMC frame has "
+       "either traversed something it should not have, or was injected from a "
+       "tagged segment."),
+    _c("PTP-S07", Severity.HIGH, Confidence.CONFIRMED, Klass.ATTACK, "synce",
+       "Extended QL TLV contradicts the legacy QL TLV",
+       "A PDU claiming PRTC or ePRTC in the extended TLV while the legacy SSM "
+       "says do-not-use, or vice versa, contradicts itself. The 0xFF enhanced "
+       "code means no enhanced value and is correctly ignored."),
+    _c("PTP-S08", Severity.LOW, Confidence.POSSIBLE, Klass.POSTURE, "synce",
+       "ESMC quality level flapping",
+       "Five or more QL changes from one source inside a minute. A fixed "
+       "threshold, not a learned one -- it reports instability, which may be a "
+       "failing upstream reference rather than an attack."),
+    _c("PTP-S09", Severity.CRITICAL, Confidence.CONFIRMED, Klass.ATTACK, "synce",
+       "Primary-grade clock quality from an undeclared source",
+       "Disarmed by default. With the legitimate SyncE sources declared, any "
+       "other MAC advertising PRC, PRS, PRTC or ePRTC is claiming to be the "
+       "network's frequency reference. The ESMC analogue of PTP-B05.",
+       armed_by="synce_sources"),
+    _c("PTP-S10", Severity.MEDIUM, Confidence.CONFIRMED, Klass.ATTACK, "synce",
+       "SSM code undefined in the declared network option",
+       "Disarmed by default. SSM codes mean different things in G.781 option 1 "
+       "and option 2, and the option is NOT carried on the wire -- 0x4 is "
+       "SSU-A in option 1 and TNC in option 2. Only once the option is "
+       "declared can an undefined code be called invalid.",
+       armed_by="ql_option"),
+
+    # -- Class V: CVE-attributed signatures --------------------------------
+    # These take precedence over the generic malformed-message code (A09):
+    # when a packet matches a known CVE signature, the operator gets the CVE,
+    # not "malformed". A09 still catches everything these do not.
+    _c("PTP-V01", Severity.CRITICAL, Confidence.CONFIRMED, Klass.ATTACK, "cve",
+       "linuxptp forwarding over-read (CVE-2021-3570)",
+       "ptp4l failed to validate messageLength against the bytes actually "
+       "received before forwarding a message between ports, allowing an "
+       "information leak, crash or potentially remote code execution. The wire "
+       "signature is a PTP message declaring more bytes than arrived. Affects "
+       "linuxptp before 3.1.1, 2.0.1, 1.9.3, 1.8.1, 1.7.1, 1.6.1 and 1.5.1.",
+       cve="CVE-2021-3570", cvss=8.8),
+    _c("PTP-V02", Severity.HIGH, Confidence.PROBABLE, Klass.ATTACK, "cve",
+       "linuxptp one-step Sync length abuse (CVE-2021-3571)",
+       "A crafted one-step Sync causes an information leak or crash when ptp4l "
+       "runs as a transparent clock on a little-endian architecture -- the "
+       "underlying defect is a wrong length computed for the one-step follow-up. "
+       "The wire signature is a one-step Sync whose declared length exceeds its "
+       "fixed body without a well-formed TLV chain accounting for the excess. "
+       "Affects linuxptp before 3.1.1 and 2.0.1.",
+       cve="CVE-2021-3571", cvss=7.1),
+    _c("PTP-V03", Severity.HIGH, Confidence.PROBABLE, Klass.ATTACK, "cve",
+       "gPTP peer-delay requester flood disabling sync (CVE-2024-42861)",
+       "An 802.1AS port receiving Pdelay_Req from more than one peer clockID "
+       "disables its own time synchronization function. Since 802.1AS links are "
+       "point-to-point, exactly two requesters are normal -- one per end. A "
+       "THIRD distinct requesting clockIdentity on one link is the attack. Note "
+       "upstream linuxptp disputes this as a vulnerability; it is a property of "
+       "the 802.1AS standard rather than an implementation bug, so patching "
+       "does not retire the signature.",
+       cve="CVE-2024-42861", cvss=7.5),
+    _c("PTP-V04", Severity.MEDIUM, Confidence.PROBABLE, Klass.ATTACK, "cve",
+       "Arista EOS PTP agent restart via invalid TLV (CVE-2021-28510)",
+       "A PTP management or signaling message carrying an invalid TLV restarts "
+       "the EOS PTP agent; repeated restarts make PTP unavailable and degrade "
+       "every downstream clock. The wire signature is a management or signaling "
+       "message whose TLV chain is truncated or overruns the declared length.",
+       cve="CVE-2021-28510", cvss=5.3),
+
     # -- Class H: gPTP / IEEE 802.1AS specific -----------------------------
     _c("PTP-H01", Severity.HIGH, Confidence.CONFIRMED, Klass.ATTACK, "gptp",
        "End-to-end delay mechanism inside a gPTP domain",
@@ -886,49 +1163,10 @@ FINDINGS: Dict[str, CodeSpec] = {s.code: s for s in [
        "DISARMED until both halves of a negotiation have been seen on this tap. On "
        "a passive tap that joined mid-session, never having seen the grant is not "
        "evidence it was never sent.", armed_by="_negotiation_seen"),
-
-    # -- Class V: CVE-attributed signatures --------------------------------
-    # These take precedence over the generic malformed-message code (A09): when a
-    # packet matches a known CVE signature the operator gets the CVE, not a generic
-    # "malformed message". A09 still catches everything these do not (see
-    # _check_cve_signatures + the precedence guard in feed()).
-    _c("PTP-V01", Severity.CRITICAL, Confidence.CONFIRMED, Klass.ATTACK, "cve",
-       "linuxptp forwarding over-read (CVE-2021-3570)",
-       "ptp4l failed to validate messageLength against the bytes actually received "
-       "before forwarding a message between ports, allowing an information leak, "
-       "crash or potentially remote code execution. The wire signature is a PTP "
-       "message declaring more bytes than arrived. Affects linuxptp before 3.1.1, "
-       "2.0.1, 1.9.3, 1.8.1, 1.7.1, 1.6.1 and 1.5.1.",
-       cve="CVE-2021-3570", cvss=8.8),
-    _c("PTP-V02", Severity.HIGH, Confidence.PROBABLE, Klass.ATTACK, "cve",
-       "linuxptp one-step Sync length abuse (CVE-2021-3571)",
-       "A crafted one-step Sync causes an information leak or crash when ptp4l runs "
-       "as a transparent clock on a little-endian architecture -- the underlying "
-       "defect is a wrong length computed for the one-step follow-up. The wire "
-       "signature is a one-step Sync whose declared length exceeds its fixed body "
-       "without a well-formed TLV chain accounting for the excess. Affects linuxptp "
-       "before 3.1.1 and 2.0.1.",
-       cve="CVE-2021-3571", cvss=7.1),
-    _c("PTP-V03", Severity.HIGH, Confidence.PROBABLE, Klass.ATTACK, "cve",
-       "gPTP peer-delay requester flood disabling sync (CVE-2024-42861)",
-       "An 802.1AS port receiving Pdelay_Req from more than one peer clockID "
-       "disables its own time synchronization function. Since 802.1AS links are "
-       "point-to-point, exactly two requesters are normal -- one per end. A THIRD "
-       "distinct requesting clockIdentity on one link is the attack. Note upstream "
-       "linuxptp disputes this as a vulnerability; it is a property of the 802.1AS "
-       "standard rather than an implementation bug, so patching does not retire the "
-       "signature.",
-       cve="CVE-2024-42861", cvss=7.5),
-    _c("PTP-V04", Severity.MEDIUM, Confidence.PROBABLE, Klass.ATTACK, "cve",
-       "Arista EOS PTP agent restart via invalid TLV (CVE-2021-28510)",
-       "A PTP management or signaling message carrying an invalid TLV restarts the "
-       "EOS PTP agent; repeated restarts make PTP unavailable and degrade every "
-       "downstream clock. The wire signature is a management or signaling message "
-       "whose TLV chain is truncated or overruns the declared length.",
-       cve="CVE-2021-28510", cvss=5.3),
 ]}
 
-assert len(FINDINGS) == 46, f"registry drift: {len(FINDINGS)} codes"
+assert len(FINDINGS) == 56, f"registry drift: {len(FINDINGS)} codes"
+CVE_CODES = {c: s for c, s in FINDINGS.items() if s.cve}
 
 
 # ---------------------------------------------------------------------------
@@ -944,6 +1182,10 @@ class Config:
     domain: Optional[int] = None
     grandmasters: Tuple[str, ...] = ()
     mgmt_stations: Tuple[str, ...] = ()   # authorised NMS sources; arms D04
+    synce_sources: Tuple[str, ...] = ()   # legitimate SyncE sources; arms S09
+    ql_option: Optional[int] = None       # G.781 option 1 or 2; arms S10
+    esmc_flap_threshold: int = 5
+    esmc_flap_window: float = 60.0
     profile: str = "auto"            # auto | g8275.1 | g8275.2 | 8021as
 
     # thresholds, all with an in-band or physical justification
@@ -979,6 +1221,10 @@ class Config:
             return bool(self.grandmasters)
         if spec.armed_by == "mgmt_stations":
             return bool(self.mgmt_stations)
+        if spec.armed_by == "synce_sources":
+            return bool(self.synce_sources)
+        if spec.armed_by == "ql_option":
+            return self.ql_option in SSM_TABLES
         if spec.armed_by == "domain":
             return self.domain is not None
         if spec.armed_by == "_negotiation_seen":
@@ -1006,13 +1252,13 @@ class Finding:
             "class": spec.klass.value,
             "category": spec.category,
             "title": spec.title,
+            "cve": spec.cve,
+            "cvss": spec.cvss,
             "transport": self.transport,
             "domain": self.domain,
             "port_identity": self.port_identity,
             "src": self.src,
             "detail": self.detail,
-            "cve": spec.cve,
-            "cvss": spec.cvss,
         }
 
 
@@ -1226,8 +1472,15 @@ class PtpEngine:
         self.capped = 0
         # (requesting_identity, requesting_port, sequenceId) -> responder set
         self.pdelay_responders: Dict[Tuple[bytes, int, int], set] = {}
-        # distinct gPTP Pdelay_Req requester clockIdentities (CVE-2024-42861 / V03)
         self.pdelay_requesters: set = set()
+        # ESMC / Class S
+        self.esmc_speakers: set = set()
+        self.esmc_last_ql: Dict[bytes, Tuple[Optional[int], Optional[int]]] = {}
+        self.esmc_rate: Dict[bytes, List[float]] = {}
+        self.esmc_flaps: Dict[bytes, List[float]] = {}
+        self.esmc_pdus = 0
+        self.declared_synce = {s.lower().replace("-", ":")
+                               for s in cfg.synce_sources}
         self.gptp_seen = False
         self.declared_gms = {g.lower().replace(":", "").replace(".", "")
                              for g in cfg.grandmasters}
@@ -1284,8 +1537,6 @@ class PtpEngine:
             self.unicast_peers.add(pids)
 
         self._check_transparent_clock_evidence(msg)
-        # CVE signatures take precedence over the generic malformed code (A09): when a
-        # CVE claims the packet, A09 stays quiet so the operator gets the CVE.
         if not self._check_cve_signatures(msg, ts, mono):
             self._check_lengths(msg, ts)
         self._check_correction(msg, ts)
@@ -1325,11 +1576,67 @@ class PtpEngine:
         elif len(self.ports_by_clock.get(msg.clock_identity, ())) > 1:
             self.tc_evidence = "multi-port-clockIdentity"
 
-    # -- A09 ---------------------------------------------------------------
+
+    # -- Class S: SyncE / ESMC (ITU-T G.8264) ------------------------------
+    _c("PTP-S01", Severity.MEDIUM, Confidence.CONFIRMED, Klass.ATTACK, "synce",
+       "Malformed ESMC PDU",
+       "Wrong version, a missing mandatory QL TLV, a TLV chain overrunning the "
+       "frame, or a QL/extended-QL TLV of the wrong declared length. Note the "
+       "ESMC TLV length field includes its own 3-byte header, so a QL TLV "
+       "declares 4 for one byte of value."),
+    _c("PTP-S02", Severity.HIGH, Confidence.CONFIRMED, Klass.ATTACK, "synce",
+       "ESMC quality level changed without the event flag set",
+       "G.8264 requires an event PDU the moment the advertised QL changes. A "
+       "changed QL arriving in an information PDU contradicts the protocol and "
+       "is how an injected QL slips past a receiver watching for event PDUs."),
+    _c("PTP-S03", Severity.LOW, Confidence.POSSIBLE, Klass.ATTACK, "synce",
+       "ESMC event flag set with no quality-level change",
+       "An event PDU asserts that the QL just changed. Repeated event PDUs "
+       "carrying the same QL are either a confused implementation or an "
+       "attempt to churn downstream selection."),
+    _c("PTP-S04", Severity.HIGH, Confidence.CONFIRMED, Klass.ATTACK, "synce",
+       "ESMC PDU rate exceeds the G.8264 ceiling",
+       "G.8264 caps ESMC at 10 PDUs per second. Exceeding the standard's own "
+       "hard limit is a flood, measured on CLOCK_MONOTONIC so it never depends "
+       "on the sensor's wall clock."),
+    _c("PTP-S05", Severity.HIGH, Confidence.PROBABLE, Klass.ATTACK, "synce",
+       "More than two ESMC speakers on one link",
+       "ESMC is a per-link protocol, so a tap legitimately sees exactly two "
+       "sources, one per end. A third source MAC is an injector."),
+    _c("PTP-S06", Severity.LOW, Confidence.POSSIBLE, Klass.ATTACK, "synce",
+       "VLAN-tagged ESMC frame",
+       "Slow protocols are untagged by definition. A tagged ESMC frame has "
+       "either traversed something it should not have, or was injected from a "
+       "tagged segment."),
+    _c("PTP-S07", Severity.HIGH, Confidence.CONFIRMED, Klass.ATTACK, "synce",
+       "Extended QL TLV contradicts the legacy QL TLV",
+       "A PDU claiming PRTC or ePRTC in the extended TLV while the legacy SSM "
+       "says do-not-use, or vice versa, contradicts itself. The 0xFF enhanced "
+       "code means no enhanced value and is correctly ignored."),
+    _c("PTP-S08", Severity.LOW, Confidence.POSSIBLE, Klass.POSTURE, "synce",
+       "ESMC quality level flapping",
+       "Five or more QL changes from one source inside a minute. A fixed "
+       "threshold, not a learned one -- it reports instability, which may be a "
+       "failing upstream reference rather than an attack."),
+    _c("PTP-S09", Severity.CRITICAL, Confidence.CONFIRMED, Klass.ATTACK, "synce",
+       "Primary-grade clock quality from an undeclared source",
+       "Disarmed by default. With the legitimate SyncE sources declared, any "
+       "other MAC advertising PRC, PRS, PRTC or ePRTC is claiming to be the "
+       "network's frequency reference. The ESMC analogue of PTP-B05.",
+       armed_by="synce_sources"),
+    _c("PTP-S10", Severity.MEDIUM, Confidence.CONFIRMED, Klass.ATTACK, "synce",
+       "SSM code undefined in the declared network option",
+       "Disarmed by default. SSM codes mean different things in G.781 option 1 "
+       "and option 2, and the option is NOT carried on the wire -- 0x4 is "
+       "SSU-A in option 1 and TNC in option 2. Only once the option is "
+       "declared can an undefined code be called invalid.",
+       armed_by="ql_option"),
+
+    # -- Class V: CVE-attributed signatures --------------------------------
     def _check_cve_signatures(self, msg: PtpMsg, ts: float, mono: float) -> bool:
         """Return True if a CVE signature claimed this packet, so the generic
         malformed-message code (A09) stays quiet and the operator gets the CVE
-        rather than a shrug. (Ported from PTP Watch v3, Class V.)"""
+        rather than a shrug."""
         claimed = False
 
         # V01 / CVE-2021-3570 -- declared length exceeds what actually arrived.
@@ -1364,10 +1671,7 @@ class PtpEngine:
 
         # V03 / CVE-2024-42861 -- 802.1AS links are point-to-point, so exactly
         # two peer-delay requesters are normal (one per end). A third distinct
-        # requesting clockIdentity disables the port's sync function. Stateful,
-        # and deliberately does NOT set `claimed` (a Pdelay_Req is fixed-length
-        # and never trips A09). Bounded by the engine's max_clocks discipline via
-        # feed(), so this set cannot grow before an identity is even admitted.
+        # requesting clockIdentity disables the port's sync function.
         if msg.is_gptp and msg.msg_type == MsgType.PDELAY_REQ:
             self.pdelay_requesters.add(msg.clock_identity)
             if len(self.pdelay_requesters) > 2:
@@ -1396,9 +1700,9 @@ class PtpEngine:
                             "effect": "PTP agent restart on affected EOS versions"},
                            (msg.msg_type,))
                 claimed = True
-
         return claimed
 
+    # -- A09 ---------------------------------------------------------------
     def _check_lengths(self, msg: PtpMsg, ts: float) -> None:
         want = FIXED_MSG_LEN.get(msg.msg_type)
         if want is not None and msg.msg_length < want:
@@ -1900,6 +2204,104 @@ class PtpEngine:
                        if self.transports else "unknown")
         self._expire_sync_pending(probe, ts, mono)
 
+
+    # -- Class S: SyncE / ESMC ---------------------------------------------
+    def feed_esmc(self, pdu: EsmcPdu, ts: float, mono: float) -> None:
+        """One ESMC PDU. Separate entry point from feed(): ESMC is a different
+        protocol on a different EtherType that happens to describe the same
+        timing plane, not a PTP message."""
+        self.esmc_pdus += 1
+        mac = pdu.src_mac or b"\x00" * 6
+
+        if pdu.malformed:
+            self._emit("PTP-S01", pdu, ts, {"problems": pdu.malformed,
+                                            "ssm": pdu.ssm,
+                                            "version": pdu.version},
+                       (tuple(pdu.malformed),))
+
+        if pdu.vlan_tagged:
+            self._emit("PTP-S06", pdu, ts,
+                       {"note": "slow protocols are untagged by definition"})
+
+        # S05 -- ESMC is per-link; a tap sees one speaker per end, never three
+        if mac not in self.esmc_speakers:
+            if len(self.esmc_speakers) >= self.cfg.max_clocks:
+                self.capped += 1
+            else:
+                self.esmc_speakers.add(mac)
+        if len(self.esmc_speakers) > 2:
+            self._emit("PTP-S05", pdu, ts,
+                       {"speakers": sorted(m.hex(":") for m in self.esmc_speakers),
+                        "expected_max": 2}, ())
+
+        # S04 -- G.8264's own 10 PDU/s ceiling, on CLOCK_MONOTONIC
+        hist = self.esmc_rate.setdefault(mac, [])
+        hist.append(mono)
+        while hist and hist[0] < mono - 1.0:
+            hist.pop(0)
+        if len(hist) > ESMC_MAX_PDU_RATE:
+            self._emit("PTP-S04", pdu, ts,
+                       {"pdus_last_second": len(hist),
+                        "ceiling": ESMC_MAX_PDU_RATE})
+
+        # S07 -- the two QL TLVs in one PDU contradicting each other
+        if pdu.essm is not None and pdu.essm != ESSM_NONE and pdu.ssm is not None:
+            enhanced_primary = pdu.essm in ESSM_PRIMARY
+            legacy_dnu = pdu.ssm in SSM_DO_NOT_USE
+            legacy_primary = pdu.ssm in (SSM_PRIMARY[1] | SSM_PRIMARY[2])
+            if enhanced_primary and (legacy_dnu or not legacy_primary):
+                self._emit("PTP-S07", pdu, ts,
+                           {"enhanced": ESSM_NAMES.get(pdu.essm, hex(pdu.essm)),
+                            "legacy_ssm": hex(pdu.ssm),
+                            "reason": "extended TLV asserts a primary reference "
+                                      "that the legacy QL does not support"})
+
+        # S09 -- primary-grade assertion from an undeclared source
+        asserts_primary = (pdu.ssm in (SSM_PRIMARY[1] | SSM_PRIMARY[2])
+                           if pdu.ssm is not None else False)
+        if pdu.essm in ESSM_PRIMARY:
+            asserts_primary = True
+        if asserts_primary and mac.hex(":").lower() not in self.declared_synce:
+            self._emit("PTP-S09", pdu, ts,
+                       {"source": mac.hex(":"),
+                        "ssm": hex(pdu.ssm) if pdu.ssm is not None else None,
+                        "enhanced": ESSM_NAMES.get(pdu.essm or -1),
+                        "declared": sorted(self.declared_synce)},
+                       (mac,))
+
+        # S10 -- undefined code, decidable only once the option is declared
+        table = SSM_TABLES.get(self.cfg.ql_option or 0)
+        if table is not None and pdu.ssm is not None and pdu.ssm not in table:
+            self._emit("PTP-S10", pdu, ts,
+                       {"ssm": hex(pdu.ssm), "option": self.cfg.ql_option,
+                        "defined_codes": sorted(hex(k) for k in table)},
+                       (pdu.ssm,))
+
+        # S02 / S03 / S08 -- change semantics against this source's own history
+        prev = self.esmc_last_ql.get(mac)
+        now = (pdu.ssm, pdu.essm if pdu.essm != ESSM_NONE else None)
+        if prev is not None:
+            changed = prev != now
+            if changed and not pdu.event:
+                self._emit("PTP-S02", pdu, ts,
+                           {"previous_ssm": hex(prev[0]) if prev[0] is not None else None,
+                            "ssm": hex(pdu.ssm) if pdu.ssm is not None else None,
+                            "event_flag": False})
+            if pdu.event and not changed:
+                self._emit("PTP-S03", pdu, ts,
+                           {"ssm": hex(pdu.ssm) if pdu.ssm is not None else None,
+                            "event_flag": True})
+            if changed:
+                flaps = self.esmc_flaps.setdefault(mac, [])
+                flaps.append(mono)
+                while flaps and flaps[0] < mono - self.cfg.esmc_flap_window:
+                    flaps.pop(0)
+                if len(flaps) >= self.cfg.esmc_flap_threshold:
+                    self._emit("PTP-S08", pdu, ts,
+                               {"changes": len(flaps),
+                                "window_s": self.cfg.esmc_flap_window})
+        self.esmc_last_ql[mac] = now
+
     # -- end of capture ----------------------------------------------------
     def finalize(self, ts: float) -> None:
         """Posture findings that can only be decided once, at the end."""
@@ -1936,11 +2338,19 @@ def run_pcap(path: str, cfg: Config, emitter: Emitter) -> PtpEngine:
     eng = PtpEngine(cfg, emitter)
     base = None
     for ts, frame, linktype in read_pcap(path):
-        ctx = decode_frame(frame, linktype)
-        if ctx is None:
-            continue
         if base is None:
             base = ts
+        ctx = decode_frame(frame, linktype)
+        if ctx is None:
+            slow = decode_slow_protocol(frame, linktype)
+            if slow is not None:
+                try:
+                    pdu = parse_esmc(slow[0], src_mac=slow[1], dst_mac=slow[2],
+                                     vlan_tagged=slow[3])
+                except EsmcParseError:
+                    continue
+                eng.feed_esmc(pdu, ts, ts - base)
+            continue
         try:
             msg = parse_ptp(ctx["payload"])
         except ParseError:
@@ -2067,6 +2477,16 @@ def run_live(iface: str, cfg: Config, emitter: Emitter,
                     break
                 frames += 1
                 ctx = decode_frame(frame, LINKTYPE_ETHERNET)
+                if ctx is None:
+                    slow = decode_slow_protocol(frame, LINKTYPE_ETHERNET)
+                    if slow is not None:
+                        try:
+                            eng.feed_esmc(
+                                parse_esmc(slow[0], src_mac=slow[1],
+                                           dst_mac=slow[2], vlan_tagged=slow[3]),
+                                now, mono)
+                        except EsmcParseError:
+                            pass
                 if ctx is not None:
                     try:
                         msg = parse_ptp(ctx["payload"])
@@ -2139,6 +2559,48 @@ SCENARIO_MUTATIONS = [
      "                    if grant.log_interval != req.log_interval or \\\n"
      "                            grant.duration > req.duration:",
      "                    if False:"),
+    ("S02 unflagged QL change ignored", "ptpwatch.py",
+     "            if changed and not pdu.event:", "            if False:"),
+    ("S04 rate ceiling raised past the G.8264 limit", "ptpwatch.py",
+     "ESMC_MAX_PDU_RATE = 10.0", "ESMC_MAX_PDU_RATE = 10000.0"),
+    ("S05 per-link speaker limit removed", "ptpwatch.py",
+     "        if len(self.esmc_speakers) > 2:", "        if False:"),
+    ("S07 enhanced/legacy contradiction check disabled", "ptpwatch.py",
+     "            if enhanced_primary and (legacy_dnu or not legacy_primary):",
+     "            if False:"),
+    ("S09 fires for declared sources too", "ptpwatch.py",
+     "        if asserts_primary and mac.hex(\":\").lower() not in self.declared_synce:",
+     "        if asserts_primary:"),
+    ("S10 option table ignored", "ptpwatch.py",
+     "        if table is not None and pdu.ssm is not None and pdu.ssm not in table:",
+     "        if table is not None and pdu.ssm is not None:"),
+    ("ESMC TLV length read as value-only (shifts the whole chain)", "ptpwatch.py",
+     "ESMC_TLV_HEADER = 3               # type(1) + length(2), counted in the length",
+     "ESMC_TLV_HEADER = 0"),
+    ("LACP no longer ignored (lacpwatch overlap)", "ptpwatch.py",
+     "    if buf[off] != SLOW_SUBTYPE_OSSP or buf[off + 1:off + 4] != OUI_ITU_T:",
+     "    if False:"),
+    ("V01 over-read check inverted", "ptpwatch.py",
+     "        if msg.msg_length > msg.wire_len:",
+     "        if msg.msg_length < msg.wire_len:"),
+    ("V02 one-step gate dropped (fires on two-step too)", "ptpwatch.py",
+     "        if msg.msg_type == MsgType.SYNC and not msg.two_step:",
+     "        if msg.msg_type == MsgType.SYNC:"),
+    ("V03 point-to-point limit set to 1 (fires on every normal link)",
+     "ptpwatch.py",
+     "            if len(self.pdelay_requesters) > 2:",
+     "            if len(self.pdelay_requesters) > 1:"),
+    ("V03 gPTP scoping removed", "ptpwatch.py",
+     "        if msg.is_gptp and msg.msg_type == MsgType.PDELAY_REQ:",
+     "        if msg.msg_type == MsgType.PDELAY_REQ:"),
+    ("V04 invalid-TLV check disabled", "ptpwatch.py",
+     "            bad = msg.tlv_truncated or any(", "            bad = False and any("),
+    ("CVE precedence removed (operator gets A09 instead of the CVE)",
+     "ptpwatch.py",
+     "        if not self._check_cve_signatures(msg, ts, mono):\n"
+     "            self._check_lengths(msg, ts)",
+     "        self._check_cve_signatures(msg, ts, mono)\n"
+     "        self._check_lengths(msg, ts)"),
     ("H01 permits the end-to-end mechanism in gPTP", "ptpwatch.py",
      "        if msg.msg_type in E2E_TYPES:", "        if False:"),
     ("H02 second pdelay responder ignored", "ptpwatch.py",
@@ -2171,6 +2633,10 @@ SCENARIO_MUTATIONS = [
 ]
 
 CONFORMANCE_MUTATIONS = [
+    ("CVE attribution stripped from the emitted JSON", "ptpwatch.py",
+     '            "cve": spec.cve,', '            "cve": None,'),
+    ("a below-bar CVE sneaks in without being a named exception", "ptpwatch.py",
+     'cve="CVE-2021-3570", cvss=8.8', 'cve="CVE-2021-3570", cvss=3.1'),
     ("correctionField 48.16 scaling dropped (the classic trap)", "ptpwatch.py",
      "ONE_SECOND_SCALED = 1_000_000_000 << SUBNS_SHIFT",
      "ONE_SECOND_SCALED = 1_000_000_000"),
@@ -2245,8 +2711,8 @@ DOCS_MUTATIONS: List[Tuple] = [
      "Unicast grant does not match its request",
      "Unicast grant mismatch detected"),
     ("README total code count drifts", "README.md",
-     "42 codes: 11 critical, 15 high, 13 medium, 3 low",
-     "43 codes: 11 critical, 15 high, 13 medium, 3 low"),
+     "56 codes: 13 critical, 21 high, 16 medium, 6 low",
+     "57 codes: 13 critical, 21 high, 16 medium, 6 low"),
     ("README claims a dark rule is always on", "README.md",
      "| `PTP-B05` | critical | confirmed | attack | `--grandmaster` |",
      "| `PTP-B05` | critical | confirmed | attack | always on |"),
@@ -2267,7 +2733,20 @@ DOCS_MUTATIONS: List[Tuple] = [
     ("README version drifts from the module", "README.md",
      "Version `0.1.0-dev`", "Version `0.2.0`"),
     ("README publishes a tier result that is not real", "README.md",
-     "| 656/656 |", "| 700/700 |", ["ptpwatch_readme_verify.py"]),
+     "| 910/910 |", "| 999/999 |", ["ptpwatch_readme_verify.py"]),
+    ("README restores the retired SyncE rejection", "README.md",
+     "- **White Rabbit** \u2014 its sub-nanosecond extensions depend on hardware state the",
+     "- **SyncE** \u2014 rejected, an L1 visibility black hole, and White Rabbit state the"),
+    ("README drops the ESMC TLV-length trap", "README.md",
+     "includes its own 3-byte header", "is the value length"),
+    ("README hides the missing ESMC live-speaker validation", "README.md",
+     "does not prove interoperability", "fully proves interoperability"),
+    ("README misstates a CVE identifier", "README.md",
+     "| `PTP-V03` | CVE-2024-42861 |", "| `PTP-V03` | CVE-2024-99999 |"),
+    ("README drops the below-bar exception justification", "README.md",
+     "deliberate, named exception", "obvious inclusion"),
+    ("README hides the upstream dispute on CVE-2024-42861", "README.md",
+     "upstream linuxptp disputes", "everyone agrees about"),
     ("README misstates the gPTP destination address", "README.md",
      "`01:80:C2:00:00:0E` for **every** message type",
      "`01:1B:19:00:00:00` for **every** message type"),
@@ -2410,6 +2889,12 @@ def build_argparser():
     ap.add_argument("--mgmt-station", action="append", default=[], metavar="ADDR",
                     help="authorized management/NMS source (IP or MAC); "
                          "arms PTP-D04. Repeatable.")
+    ap.add_argument("--synce-source", action="append", default=[], metavar="MAC",
+                    help="legitimate SyncE/ESMC source MAC; arms PTP-S09. "
+                         "Repeatable.")
+    ap.add_argument("--ql-option", type=int, choices=[1, 2], default=None,
+                    help="G.781 network option for SSM code validation; "
+                         "arms PTP-S10. The option is not carried on the wire.")
     ap.add_argument("--profile", default="auto",
                     choices=["auto", "g8275.1", "g8275.2", "8021as"])
     ap.add_argument("--rate-tolerance", type=float, default=3.0)
@@ -2441,7 +2926,9 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     cfg = Config(iface=args.iface, pcap=args.pcap, domain=args.domain,
                  grandmasters=tuple(args.grandmaster),
-                 mgmt_stations=tuple(args.mgmt_station), profile=args.profile,
+                 mgmt_stations=tuple(args.mgmt_station),
+                 synce_sources=tuple(args.synce_source),
+                 ql_option=args.ql_option, profile=args.profile,
                  rate_tolerance=args.rate_tolerance,
                  dedup_window=args.dedup_window,
                  promisc=not args.no_promisc,
@@ -2458,13 +2945,14 @@ def main(argv=None) -> int:
         return 0
     for f in em.sink:
         print(json.dumps(f.to_dict()), flush=True)
-    print(f"ptpwatch: {eng.msgs} PTP messages, {len(em.sink)} findings, "
-          f"{em.suppressed} deduped", file=sys.stderr)
+    print(f"ptpwatch: {eng.msgs} PTP messages, {eng.esmc_pdus} ESMC PDUs, "
+          f"{len(em.sink)} findings, {em.suppressed} deduped", file=sys.stderr)
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 
 # ===========================================================================
@@ -2577,9 +3065,16 @@ def _ptp_emit_watchtower(result):
 # --- capture ----------------------------------------------------------------
 # See the module-header BPF note. `vlan`-tagged PTP is handled by decode_frame's
 # own tag walk, so no `vlan` primitive is needed here (it would shift offsets).
+# v4 Class S: SyncE ESMC = slow protocol 0x8809 subtype 0x0A (ITU-T OSSP), plain or
+# behind one 802.1Q/802.1ad tag (PTP-S06 flags the tagged form). Raw byte offsets,
+# not the `vlan` primitive, so the clauses after it are not shifted; LACP (subtype
+# 0x01) shares the EtherType and stays excluded.
 _PTP_BPF = ("ether proto 0x88f7 or udp port 319 or udp port 320 or "
             "(ip6 and (ip6[6] = 0 or ip6[6] = 43 or ip6[6] = 44 or "
-            "ip6[6] = 51 or ip6[6] = 60))")
+            "ip6[6] = 51 or ip6[6] = 60)) or "
+            "(ether[12:2] = 0x8809 and ether[14] = 0x0a) or "
+            "((ether[12:2] = 0x8100 or ether[12:2] = 0x88a8) and "
+            "ether[16:2] = 0x8809 and ether[18] = 0x0a)")
 
 
 def _ptp_capture_pcap(interface, seconds):
@@ -2821,13 +3316,14 @@ def selftest():
                          {"code": "PTP-E03", "severity": "low", "class": "posture"}])
     check("verdict-time-manipulation", v == _PTP_CRITICAL_VERDICT, v)
 
-    # 5. Registry integrity: 46 codes after the Class V (CVE) additions.
+    # 5. Registry integrity: 56 codes after the v3 Class V (CVE) and v4 Class S
+    #    (SyncE / ESMC) additions.
     sev = {}
     for spec in FINDINGS.values():
         sev[spec.severity.value] = sev.get(spec.severity.value, 0) + 1
-    reg_ok = (len(FINDINGS) == 46 and sev.get("critical") == 12
-              and sev.get("high") == 17)
-    check("registry-46-codes", reg_ok, "%d codes %s" % (len(FINDINGS), sev))
+    reg_ok = (len(FINDINGS) == 56 and sev.get("critical") == 13
+              and sev.get("high") == 21)
+    check("registry-56-codes", reg_ok, "%d codes %s" % (len(FINDINGS), sev))
 
     # 5b. Class V CVE detectors (ported from PTP Watch v3).
     # V01 / CVE-2021-3570: declared messageLength exceeds the bytes that arrived.
@@ -2874,9 +3370,66 @@ def selftest():
             r = _sp.run(["python3", _conf], stdout=_sp.PIPE, stderr=_sp.STDOUT,
                         timeout=120)
             out = r.stdout.decode("utf-8", "replace")
-            check("engine-conformance-tier", r.returncode == 0 and "656/656" in out,
+            _m = __import__("re").search(r"(\d+)/(\d+)\s*$", out.strip())
+            check("engine-conformance-tier", r.returncode == 0 and bool(_m)
+                  and _m.group(1) == _m.group(2),
                   out.strip().splitlines()[-1] if out.strip() else "no output")
     except Exception as e:
         check("engine-conformance-tier", True, "skipped: %s" % type(e).__name__)
+
+    # 6. v4 Class S — SyncE / ESMC (slow protocol 0x8809, ITU-T OSSP subtype 0x0A).
+    def _esmc(ql, *, event=False, vlan=False, src=b"\x02\x00\x00\x00\x00\x51"):
+        body = (bytes([SLOW_SUBTYPE_OSSP]) + OUI_ITU_T + struct.pack("!H", ITU_SUBTYPE_ESMC)
+                + bytes([(1 << 4) | (0x08 if event else 0)]) + bytes(3)
+                + struct.pack("!BH", TLV_ESMC_QL, 0x0004) + bytes([ql & 0x0F]))
+        fr = MAC_SLOW_PROTOCOLS + src + (b"\x81\x00\x00\x64" if vlan else b"") + b"\x88\x09" + body
+        return fr + bytes(max(0, 64 - len(fr)))
+
+    def _esmc_codes(frames):
+        cfg = Config()
+        em = Emitter(cfg)
+        eng = PtpEngine(cfg, em)
+        for i, fr in enumerate(frames):
+            slow = decode_slow_protocol(fr, LINKTYPE_ETHERNET)
+            if slow is None:
+                continue
+            try:
+                pdu = parse_esmc(slow[0], src_mac=slow[1], dst_mac=slow[2], vlan_tagged=slow[3])
+            except EsmcParseError:
+                continue
+            eng.feed_esmc(pdu, float(i), float(i))
+        eng.finalize(float(len(frames)))
+        return {f.code for f in em.sink}
+
+    clean = _esmc_codes([_esmc(0x2) for _ in range(5)])
+    check("esmc-steady-ql-silent", not clean, sorted(clean))
+
+    # End to end through the adapter's own capture filter + run_pcap: a QL change
+    # without the event flag (S02) and a VLAN-tagged ESMC frame (S06) arrive; an
+    # LACP frame on the same EtherType (subtype 0x01) must be filtered out.
+    try:
+        import shutil as _sh
+        if _sh.which("tcpdump"):
+            lacp = MAC_SLOW_PROTOCOLS + b"\x02\x00\x00\x00\x00\x52\x88\x09\x01\x01" + bytes(108)
+            frames = [_esmc(0x2), _esmc(0xF), _esmc(0xF, vlan=True), lacp]
+            d = _ptp_tempfile.mkdtemp(prefix="ptp-esmc-")
+            src, dst = _ptp_os.path.join(d, "in.pcap"), _ptp_os.path.join(d, "out.pcap")
+            with open(src, "wb") as fh:
+                fh.write(struct.pack("<IHHiIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
+                for i, fr in enumerate(frames):
+                    fh.write(struct.pack("<IIII", 1000 + i, 0, len(fr), len(fr)) + fr)
+            _ptp_subprocess.run(["tcpdump", "-nn", "-r", src, "-w", dst, _PTP_BPF],
+                                stdout=_ptp_subprocess.PIPE, stderr=_ptp_subprocess.PIPE,
+                                timeout=20)
+            kept = sum(1 for _ in read_pcap(dst)) if _ptp_os.path.exists(dst) else 0
+            em = Emitter(Config())
+            run_pcap(dst, Config(), em)
+            codes = {f.code for f in em.sink}
+            _sh.rmtree(d, ignore_errors=True)
+            check("esmc-bpf-replay-s02-s06-no-lacp",
+                  kept == 3 and {"PTP-S02", "PTP-S06"} <= codes,
+                  "%d frames kept, codes %s" % (kept, sorted(codes)))
+    except Exception as e:
+        check("esmc-bpf-replay-s02-s06-no-lacp", False, "%s: %s" % (type(e).__name__, e))
 
     return {"success": all(s["pass"] for s in scen), "scenarios": scen}

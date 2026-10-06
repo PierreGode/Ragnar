@@ -13,10 +13,21 @@
 - **Both paths:** a standalone binary (`--self-test` · `--replay` pcap · `--list-devices` · opt-in least-privilege `scripts/blewatch.service`) and an in-app **BLE Watch** card (Network → Diagnostics → Passive · wireless). Device-gated — with no sniffer attached it says so plainly instead of pretending to listen. HIGH/CRITICAL findings reach Watchtower; the detector self-test joins **validate detectors**. Route `/api/net/ble-watch`, CLI `ble-watch`.
 - Reads classic pcap DLT **256** (`BLUETOOTH_LE_LL_WITH_PHDR`) and **251** (`BLUETOOTH_LE_LL`) fully; Nordic **272** best-effort (**unvalidated on hardware** — no sniffer on the dev box). `blewatch --self-test` **19/19**. Docs: [docs/blewatch.md](blewatch.md).
 
+#### [#920](https://github.com/PierreGode/Ragnar/pull/920) — feat(net): NTP Watch v11 + PTP Watch v4 (SyncE / ESMC)
+*branch `feature/ntp-v11-ptp-v4`*
+
+- **NTP Watch v11** (in-app `_ntp_analyze`): new critical verdict **`crash-exploit`** for an **oversize NTP datagram** (> 1500 bytes, CVE-2016-9312 — the v6 deferral, now read from tcpdump's true length) and a **mode-6 `count` overrun** past the 468-octet spec maximum or the datagram (CVE-2019-6444 / CVE-2019-6443, ntpsec)
+- **Dual-stack**: the NTP parser was IPv4-only and silently skipped every IPv6 packet; IPv6 is now parsed, NTP behind an IPv6 extension header is captured (shared EH clause), and a `::1` / `::ffff:127.x` source is caught by the loopback ACL-bypass rule (CVE-2014-9298 / 9751)
+- **False-positive fix**: Autokey EF parsing now runs only on modes 1–5 (as upstream) — a normal full-size `ntpq` response was raising a false critical `autokey-exploit`; Autokey length checks use the true wire length, not the 512-byte snaplen
+- **PTP Watch v4**: re-vendored engine + the Ragnar adapter; new **Class S** (SyncE / ESMC, G.8264, `PTP-S01`…`S10`, no CVEs exist), registry 46 → 56; capture filter admits ESMC (plain or VLAN-tagged, LACP excluded). Same findings as upstream on all six of the author's captures
+- Self-tests: NTP 40 → 55, PTP 12 → 14; all 47 Detector Self-Test suites green from the web path. Author tiers on the Pi 5: PTP scenarios 106/106, conformance 910/910, self-verify 79/79, ESMC cross-check 0 mismatches
+- CVE index 271 named / 230 detected; the index generator now skips a placeholder ID (CVE-2024-99999) used only in ptpwatch's own mutation-test fixtures
+- **Docs:** [nettools.md](nettools.md) "NTP Watch" + "PTP Watch", [CVE.md](CVE.md), [CREDITS.md](CREDITS.md), [README (root)](../README.md)
+
 ### 2026-10-05
 
-#### fix(sdr): real Gain + FFT-bins controls for the ESP panel (were HackRF no-ops)
-*branch `feature/esp-sdr-waterfall` · PR pending*
+#### [#919](https://github.com/PierreGode/Ragnar/pull/919) — fix(sdr): real Gain + FFT-bins controls for the ESP panel (were HackRF no-ops)
+*branch `feature/esp-sdr-waterfall`*
 
 - The ESP panel was built on the HackRF template, so its **Hardware** section showed HackRF **LNA/VGA/amp/antenna** sliders and its **Resolution** section a `hackrf_sweep` **RBW** dropdown — all **dead** (the ESP backend ignored `lna/vga/amp/antenna/bin_hz`). Replaced with the ESP's real controls:
   - **Gain**: Auto (hardware AGC, default) or a manual gain index (0..max from the firmware's `LIMITS?`), sent as `GAIN HARDWARE` / `GAIN MANUAL <i>`. Verified on hardware: index 10 → ~−66 dBFS, 82 → ~−16 dBFS
