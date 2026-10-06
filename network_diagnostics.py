@@ -7456,15 +7456,32 @@ _NTP_EF_VALUE_START = 20        # first octet of the value payload
 _NTP_AUTOKEY_OPCODES = {1: 'ASSOC', 2: 'CERT', 3: 'COOKIE', 4: 'AUTO', 5: 'LEAP',
                         6: 'SIGN', 7: 'IFF', 8: 'GQ', 9: 'MV'}
 
+# NTP Watch v11: a datagram beyond any legitimate NTP length (RN18, CVE-2016-9312)
+# and a mode-6 control header whose `count` overruns the spec maximum or the
+# datagram (RN19, CVE-2019-6444 / CVE-2019-6443 — ntpsec process_control()).
+_NTP_MAX_LEN = 1500             # clears NTS + Autokey; a bound near 48 would alarm on NTS
+_NTP_CTL_HEADER_LEN = 12
+_NTP_CTL_MAX_DATA_LEN = 468     # ntp_control.h: largest conformant data section
+_NTP_CTL_OFF_COUNT = 10         # u16 data count in the mode-6 header
+
 _NTP_HDR_RE = re.compile(r'^(\d+\.\d+)\s+IP6?\b')
+# `ADDR.port > ADDR.port: [udp sum ok] NTPvN, Mode, length L` — IPv4 and IPv6
+# (tcpdump prints the v6 form on the header line, with `[udp sum ok]` under -v).
 _NTP_SRC_RE = re.compile(
-    r'(\d+\.\d+\.\d+\.\d+)\.(\d+)\s*>\s*(\d+\.\d+\.\d+\.\d+)\.(\d+):\s*'
+    r'([0-9A-Fa-f:.]+?)\.(\d+)\s*>\s*([0-9A-Fa-f:.]+?)\.(\d+):\s*(?:\[[^\]]*\]\s*)?'
     r'NTPv(\d+),\s*([^,]+?),\s*length\s+(\d+)')
+# IPv6 behind an extension header: `ADDR > ADDR: DSTOPT (padn) 123 > 123: NTPv4, ...`
+# (fragment: `frag (id:0|56) 123 > 123: ...`). Admitted by the extension-header clause.
+_NTP_SRC_EH_RE = re.compile(
+    r'([0-9A-Fa-f:]+:[0-9A-Fa-f:.]*)\s*>\s*([0-9A-Fa-f:]+:[0-9A-Fa-f:.]*):\s.*?'
+    r'(\d+)\s*>\s*(\d+):\s*(?:\[[^\]]*\]\s*)?NTPv(\d+),\s*([^,]+?),\s*length\s+(\d+)')
+_NTP_BPF = 'udp port 123 or (ip6 and (ip6[6] = 0 or ip6[6] = 43 or ip6[6] = 44 or ' \
+           'ip6[6] = 51 or ip6[6] = 60))'
 # tcpdump -x hex-dump line: `\t0x0010:  4500 004c 0000 4000 ...`
 _NTP_HEX_RE = re.compile(r'^\s*0x[0-9a-fA-F]+:\s+((?:[0-9a-fA-F]{2,4}\s*)+)')
 
 
-def _parse_autokey_ef(payload):
+def _parse_autokey_ef(payload, wire_len=None):
     """Inspect raw NTP payload bytes for an Autokey (crypto) extension field.
 
     Detects the network-reachable attack surface of CVE-2014-9295 — the ntpd
@@ -7473,11 +7490,14 @@ def _parse_autokey_ef(payload):
     Works directly on the wire bytes so it is independent of any dissector
     recognising Autokey opcodes. Returns (present, info, reasons); a non-empty
     ``reasons`` list means the EF is malformed in the way an exploit packet is.
-    Ported from the standalone ntpwatch _parse_autokey_ef."""
+    Ported from the standalone ntpwatch _parse_autokey_ef. `wire_len` is the true
+    NTP length when the capture snaplen truncated `payload`: the length checks are
+    judged against the wire, never against the bytes the snaplen happened to keep."""
     try:
         if payload is None or len(payload) < _NTP_HEADER_LEN:
             return (False, None, [])
-        remaining = len(payload) - _NTP_HEADER_LEN
+        total = wire_len if (wire_len and wire_len > len(payload)) else len(payload)
+        remaining = total - _NTP_HEADER_LEN
         # Trailing region is a MAC (or nothing) -> symmetric-key auth, not Autokey.
         if remaining in _NTP_MAC_SIZES:
             return (False, None, [])
@@ -7486,6 +7506,9 @@ def _parse_autokey_ef(payload):
             return (True, {'ef_len': None, 'region': remaining},
                     ['ef_region_undersized'])
         ef = payload[_NTP_HEADER_LEN:]
+        ef_wire = total - _NTP_HEADER_LEN
+        if len(ef) < 4:
+            return (True, {'ef_len': None, 'region': remaining}, [])
         ef_type = struct.unpack_from('!H', ef, 0)[0]
         ef_len = struct.unpack_from('!H', ef, _NTP_EF_OFF_LEN)[0]
         opcode = ef_type & 0x3F
@@ -7500,14 +7523,14 @@ def _parse_autokey_ef(payload):
             reasons.append('ef_len_below_floor')
         if ef_len % 4 != 0:
             reasons.append('ef_len_misaligned')
-        if ef_len > len(ef):
+        if ef_len > ef_wire:
             reasons.append('ef_len_exceeds_packet')
         # Value-length overflow: the copy length crypto_recv() trusts. A value that
         # cannot fit the declared EF (or the wire bytes) is the exploit signature.
         if len(ef) >= _NTP_EF_VALUE_START:
             vallen = struct.unpack_from('!I', ef, _NTP_EF_OFF_VALLEN)[0]
             info['value_len'] = vallen
-            wire_budget = len(ef) - _NTP_EF_VALUE_START
+            wire_budget = ef_wire - _NTP_EF_VALUE_START
             if vallen > wire_budget or (ef_len >= _NTP_EF_VALUE_START
                                         and vallen > ef_len - _NTP_EF_VALUE_START):
                 reasons.append('value_length_overflow')
@@ -7543,9 +7566,24 @@ def _ntp_payload_from_block(block_lines):
             return None
         udp_off = ihl
     elif ver == 6:
-        if len(data) < 48 or data[6] != 17:  # next-header 17 = UDP (no ext hdrs)
+        if len(data) < 48:
             return None
-        udp_off = 40
+        nh, off = data[6], 40
+        for _ in range(8):                      # bounded extension-header walk
+            if nh == 17:
+                break
+            if nh not in (0, 43, 44, 51, 60):
+                return None
+            if nh == 44 and len(data) >= off + 4 and \
+                    (struct.unpack_from('!H', data, off + 2)[0] >> 3) != 0:
+                return None                     # non-first fragment: no UDP header
+            ln = _ipv6_ext_len(data, off, nh)
+            if ln is None:
+                return None
+            nh, off = data[off], off + ln
+        if nh != 17 or len(data) < off + 8:
+            return None
+        udp_off = off
     else:
         return None
     return data[udp_off + 8:]  # skip the 8-byte UDP header
@@ -7584,12 +7622,17 @@ def _parse_ntp_capture(output):
             continue
         text = '\n'.join(block)
         sm = _NTP_SRC_RE.search(text)
-        if not sm:
-            continue  # not a decodable NTP packet (or truncated non-NTP)
-        rec = {'rx_epoch': rx_epoch, 'src': sm.group(1), 'sport': int(sm.group(2)),
-               'dst': sm.group(3), 'dport': int(sm.group(4)),
+        if sm:
+            src, sport, dst, dport = sm.group(1), sm.group(2), sm.group(3), sm.group(4)
+        else:
+            sm = _NTP_SRC_EH_RE.search(text)
+            if not sm:
+                continue  # not a decodable NTP packet (or truncated non-NTP)
+            src, dst, sport, dport = sm.group(1), sm.group(2), sm.group(3), sm.group(4)
+        rec = {'rx_epoch': rx_epoch, 'src': src, 'sport': int(sport),
+               'dst': dst, 'dport': int(dport),
                'ver': int(sm.group(5)), 'mode': sm.group(6).strip(),
-               'ntp_len': int(sm.group(7)),
+               'ntp_len': int(sm.group(7)), 'ctl_count': None, 'mode_num': None,
                'stratum': None, 'sdesc': '', 'refid': '', 'disp': 0.0,
                'leap': None, 'xmit_unix': None, 'offset': None, 'origin': None,
                'autokey': False, 'autokey_info': None, 'autokey_reasons': [],
@@ -7600,8 +7643,25 @@ def _parse_ntp_capture(output):
         # signature); fall back to the tcpdump-reported length so EF *presence* is
         # still surfaced even when the hex was truncated by the capture snaplen.
         payload = _ntp_payload_from_block(block)
-        if payload is not None:
-            present, info, ak_reasons = _parse_autokey_ef(payload)
+        if payload:
+            rec['mode_num'] = payload[0] & 0x07
+        # Mode-6 control header `count` (RN19): from the wire bytes, else tcpdump's
+        # decoded `Count=` field. The datagram length is tcpdump's NTP length.
+        if payload is not None and len(payload) >= _NTP_CTL_HEADER_LEN and rec['mode_num'] == 6:
+            rec['ctl_count'] = struct.unpack_from('!H', payload, _NTP_CTL_OFF_COUNT)[0]
+        elif rec['mode'] == 'Control Message':
+            cm = re.search(r'\bCount=(\d+)', text)
+            if cm:
+                rec['ctl_count'] = int(cm.group(1))
+        # Autokey extension fields live only in modes 1-5 (v11): the bytes after a
+        # mode-6/7 header are control/private data, never an extension field — a
+        # 468-octet ntpq response must not read as a malformed Autokey EF.
+        ak_mode = (rec['mode_num'] in (1, 2, 3, 4, 5)) if rec['mode_num'] is not None \
+            else rec['mode'] not in _NTP_CONTROL_MODES
+        if not ak_mode:
+            pass
+        elif payload is not None:
+            present, info, ak_reasons = _parse_autokey_ef(payload, rec['ntp_len'])
             rec['autokey'] = present
             rec['autokey_info'] = info
             rec['autokey_reasons'] = ak_reasons
@@ -7618,10 +7678,12 @@ def _parse_ntp_capture(output):
         # wire bytes when present, else from tcpdump's reported NTP length; a trailer
         # of 4 is unambiguous (a real extension field is >= 28 bytes).
         mac_trailer = None
-        if payload is not None and len(payload) >= _NTP_HEADER_LEN:
-            mac_trailer = len(payload) - _NTP_HEADER_LEN
-        elif rec['ntp_len'] is not None:
+        if rec['ntp_len'] is not None:
             mac_trailer = rec['ntp_len'] - _NTP_HEADER_LEN
+        elif payload is not None and len(payload) >= _NTP_HEADER_LEN:
+            mac_trailer = len(payload) - _NTP_HEADER_LEN
+        if not ak_mode:
+            mac_trailer = None
         if mac_trailer in _NTP_MAC_SIZES and mac_trailer > 0:
             rec['mac_len'] = mac_trailer
             rec['crypto_nak'] = (mac_trailer == _NTP_CRYPTO_NAK_LEN)
@@ -7772,7 +7834,7 @@ def _ntp_analyze(records, seconds, baseline, learn=True, threshold=None):
         known = dict(baseline['servers'])
         had_baseline = True
 
-    PRIORITY = ['auth-bypass', 'autokey-exploit', 'time-injection', 'rogue-server',
+    PRIORITY = ['auth-bypass', 'autokey-exploit', 'crash-exploit', 'time-injection', 'rogue-server',
                 'kod', 'stratum-spoof', 'broadcast', 'recon', 'autokey', 'anomaly',
                 'clean']
     verdict = 'clean'
@@ -7907,15 +7969,52 @@ def _ntp_analyze(records, seconds, baseline, learn=True, threshold=None):
     # real interface bypassed `restrict` ACLs — letting an attacker read or rewrite
     # ntpd runtime state via mode 6/7. Loopback traffic never crosses a segment, so a
     # captured loopback SOURCE is spoofed by construction (zero false positives).
-    # (Matches NTP Watch v6 RN15.) NOTE: the in-app NTP parser is IPv4-only, so this
-    # catches 127.0.0.0/8; the ::1 form is deferred with the rest of IPv6 NTP.
-    loopback_srcs = sorted({r['src'] for r in records if r['src'].startswith('127.')})
+    # (Matches NTP Watch v11 RN15: 127.0.0.0/8, ::1 and IPv4-mapped ::ffff:127.x.)
+    def _is_loopback(a):
+        try:
+            ip = ipaddress.ip_address(a)
+        except ValueError:
+            return False
+        mapped = getattr(ip, 'ipv4_mapped', None)
+        return ip.is_loopback or bool(mapped and mapped.is_loopback)
+    loopback_srcs = sorted({r['src'] for r in records if _is_loopback(r['src'])})
     for src in loopback_srcs:
         bump('auth-bypass')
         reasons.append(
             f"NTP packet with a loopback source address {src} on the segment — "
             f"loopback never crosses a wire, so this is spoofed to bypass ntpd "
             f"restrict/ACL rules and reach mode 6/7 (CVE-2014-9298 / CVE-2014-9751)")
+
+    # --- crash-exploit: oversize datagram (RN18) / mode-6 count overrun (RN19) ---
+    # RN18 measures the UDP payload (tcpdump's NTP length), so the bound is the same
+    # over IPv4 and IPv6. A datagram beyond the path MTU arrives fragmented and only
+    # its first fragment matches, so this sees an oversize datagram delivered intact.
+    for r in records:
+        if (r.get('ntp_len') or 0) > _NTP_MAX_LEN:
+            bump('crash-exploit')
+            reasons.append(
+                f"Oversize NTP datagram from {r['src']} ({r['ntp_len']} bytes, mode "
+                f"{r['mode']}) — larger than any legitimate NTP message (bound "
+                f"{_NTP_MAX_LEN}); remote-crash vector against ntpd < 4.2.8p9 (CVE-2016-9312)")
+            break
+    # RN19: zero-FP by construction — a conformant control packet, request or
+    # response, cannot declare more data than the spec maximum or than it carries.
+    for r in records:
+        cnt = r.get('ctl_count')
+        if cnt is None:
+            continue
+        why = []
+        if cnt > _NTP_CTL_MAX_DATA_LEN:
+            why.append(f"exceeds the {_NTP_CTL_MAX_DATA_LEN}-octet spec maximum")
+        if r.get('ntp_len') is not None and _NTP_CTL_HEADER_LEN + cnt > r['ntp_len']:
+            why.append(f"exceeds the {r['ntp_len']}-byte datagram")
+        if why:
+            bump('crash-exploit')
+            reasons.append(
+                f"NTP mode 6 control packet from {r['src']} declares count={cnt}, which "
+                f"{' and '.join(why)} — the out-of-bounds read in ntpsec < 1.1.3 "
+                f"process_control() / ctl_getitem() (CVE-2019-6444 / CVE-2019-6443)")
+            break
 
     # --- recon: mode 6 control / mode 7 private-monlist ---
     # Split the two non-standard modes: mode 6 (ntpq control) is recon, while mode
@@ -8111,7 +8210,7 @@ def _ntp_capture(interface, seconds):
         return '', 'tcpdump is not installed. Click Install to add it.'
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface,
                 '-nn', '-tt', '-v', '-x', '-s', '512', '-c', '20000',
-                'udp port 123'],
+                _NTP_BPF],
                timeout=seconds + 8)
     out = res['out']
     if not out and res['err'] and ('permission' in res['err'].lower()
@@ -8404,6 +8503,101 @@ def _ntp_selftest():
     ak_case('ntp-autokey-none', bytes(48), False, False)
     # Region too big for a MAC but too small for a valid EF -> broken EF.
     ak_case('ntp-autokey-undersized', bytes(48) + bytes(12), True, True)
+
+    # --- NTP Watch v11: RN18 oversize, RN19 mode-6 count overrun, dual-stack, ::1 ---
+    def ctl_block(src, count, ntp_len, rx=BASE, dst='192.168.1.50'):
+        return "\n".join([
+            f"{rx:.6f} IP (tos 0x0, ttl 64, id 1, offset 0, flags [none], "
+            f"proto UDP (17), length {ntp_len + 28})",
+            f"    {src}.40000 > {dst}.123: NTPv2, Control Message, length {ntp_len}",
+            "\tLeap indicator:  (0), Response, OK, Last, OpCode=2",
+            f"\tSequence=1, Status=0, Assoc.=0, Offset=0, Count={count}"])
+
+    def v6_block(src, mode='Server', dst='2001:db8::50', rx=BASE):
+        ntp_secs = rx + _NTP_UNIX_DELTA
+        return "\n".join([
+            f"{rx:.6f} IP6 (hlim 64, next-header UDP (17) payload length: 56) "
+            f"{src}.123 > {dst}.123: [udp sum ok] NTPv4, {mode}, length 48",
+            "\tLeap indicator:  (0), Stratum 2 (secondary reference), poll 6 (64s), precision -20",
+            "\tRoot Delay: 0.000000, Root dispersion: 0.020000, Reference-ID: 17.253.14.125",
+            f"\t  Reference Timestamp:  {ntp_secs - 60:.9f} (2026-05-28T20:00:00Z)",
+            f"\t  Originator Timestamp: {ntp_secs - 1:.9f} (2026-05-28T20:26:39Z)",
+            f"\t  Receive Timestamp:    {ntp_secs:.9f} (2026-05-28T20:26:40Z)",
+            f"\t  Transmit Timestamp:   {ntp_secs:.9f} (2026-05-28T20:26:40Z)"])
+
+    base6 = {'servers': {'2001:db8::1': {'stratum': 2, 'refid': '17.253.14.125',
+                                          'broadcast': False}}}
+    r6 = run('ntp-ipv6-server-parsed', v6_block('2001:db8::1'), 15, base6, 'clean')
+    scenarios[-1]['pass'] = scenarios[-1]['pass'] and r6['server_count'] == 1
+    run('ntp-ipv6-loopback-source', v6_block('::1', mode='Client'), 15, base6, 'auth-bypass')
+    run('ntp-oversize-rn18', block('10.0.0.1', ntp_len=2000), 15, base, 'crash-exploit')
+    # At the bound is not oversize: 1500 bytes is a large but legitimate NTS/Autokey
+    # message (it reads as an extension field, never as the RN18 crash vector).
+    run('ntp-oversize-at-bound-not-crash', block('10.0.0.1', ntp_len=1500), 15, base, 'autokey')
+    r19 = run('ntp-ctl-count-overrun-rn19', ctl_block('10.0.0.9', 584, 32), 15, base, 'crash-exploit')
+    scenarios[-1]['pass'] = scenarios[-1]['pass'] and any(
+        'CVE-2019-6444' in x for x in r19['reasons'])
+    run('ntp-ctl-count-exceeds-datagram', ctl_block('10.0.0.9', 100, 40), 15, base, 'crash-exploit')
+    # FP guards: a full-size conformant ntpq response (count 468 in a 480-byte
+    # datagram) is recon only — never an overrun, never an Autokey EF.
+    run('ntp-ctl-count-468-is-recon', ctl_block('10.0.0.9', 468, 480), 15, base, 'recon')
+    run('ntp-ctl-count-zero-is-recon', ctl_block('10.0.0.9', 0, 12), 15, base, 'recon')
+
+    # Autokey on a snaplen-truncated payload: a large well-formed EF judged against
+    # the wire length is not malformed; against the truncated bytes it would be.
+    big = bytearray(952)
+    struct.pack_into('!H', big, 0, 0x0002)
+    struct.pack_into('!H', big, _NTP_EF_OFF_LEN, 952)
+    struct.pack_into('!I', big, _NTP_EF_OFF_VALLEN, 900)
+    trunc = (bytes(48) + bytes(big))[:484]
+    pres, _i, why = _parse_autokey_ef(trunc, 1000)
+    scenarios.append({'name': 'ntp-autokey-truncated-uses-wire-len',
+                      'expect': 'present, not malformed', 'got': f'present={pres},reasons={why}',
+                      'pass': pres and not why})
+    pres2, _i2, why2 = _parse_autokey_ef(trunc)
+    scenarios.append({'name': 'ntp-autokey-truncated-without-wire-len-would-misfire',
+                      'expect': 'malformed (the bug the wire length fixes)',
+                      'got': f'reasons={why2}', 'pass': bool(why2)})
+
+    # v11 end-to-end through the real capture flags + filter: IPv6, ::1, NTP behind
+    # an extension header, an oversize datagram, a count overrun, and a conformant
+    # full-size mode-6 response that must stay free of Autokey/overrun findings.
+    try:
+        import tempfile as _tf
+        from scapy.all import (Ether as _E, IP as _IP, IPv6 as _IP6, UDP as _U, Raw as _R,
+                               IPv6ExtHdrDestOpt as _DO, wrpcap as _w)
+        if _have('tcpdump'):
+            n48 = bytes([0x24, 2, 6, 0xec]) + bytes(44)
+            ctl = lambda c, d: bytes([0x16, 0x82]) + struct.pack('!HHHHH', 1, 0, 0, 0, c) + d
+            pk = [_E() / _IP6(src='2001:db8::1', dst='2001:db8::2') / _U(sport=123, dport=123) / _R(n48),
+                  _E() / _IP6(src='::1', dst='2001:db8::2') / _U(sport=123, dport=123) / _R(n48),
+                  _E() / _IP6(src='2001:db8::66', dst='2001:db8::2') / _DO() / _U(sport=123, dport=123) / _R(n48),
+                  _E() / _IP(src='10.9.9.9', dst='10.0.0.2') / _U(sport=40000, dport=123) / _R(ctl(584, b'A' * 20)),
+                  _E() / _IP(src='10.0.0.1', dst='10.9.9.8') / _U(sport=123, dport=40000) / _R(ctl(468, bytes(468))),
+                  _E() / _IP(src='10.9.9.7', dst='10.0.0.2') / _U(sport=40000, dport=123) / _R(bytes([0x1b]) + bytes(1999))]
+            with _tf.NamedTemporaryFile(suffix='.pcap', delete=False) as tf:
+                pth = tf.name
+            _w(pth, pk)
+            out = _run(['tcpdump', '-nn', '-tt', '-v', '-x', '-s', '512', '-r', pth, _NTP_BPF],
+                       timeout=15)['out']
+            os.remove(pth)
+            recs = _parse_ntp_capture(out)
+            by = {r['src']: r for r in recs}
+            res = _ntp_analyze(recs, 15, {}, learn=False)
+            txt = ' '.join(res['reasons'])
+            checks = {
+                'ipv6 + ext-header parsed': {'2001:db8::1', '::1', '2001:db8::66'} <= set(by),
+                '::1 -> auth-bypass reason': 'loopback source address ::1' in txt,
+                'RN18 oversize': 'CVE-2016-9312' in txt and by.get('10.9.9.7', {}).get('ntp_len') == 2000,
+                'RN19 count 584': 'count=584' in txt and 'CVE-2019-6444' in txt,
+                '468 response clean': by.get('10.0.0.1', {}).get('ctl_count') == 468
+                and not by['10.0.0.1']['autokey'] and 'count=468' not in txt,
+            }
+            for k, v in checks.items():
+                scenarios.append({'name': 'ntp-v11-e2e: ' + k, 'expect': True, 'got': v, 'pass': bool(v)})
+    except Exception as e:
+        scenarios.append({'name': 'ntp-v11-e2e', 'expect': 'ran', 'got': f'{type(e).__name__}: {e}',
+                          'pass': False})
 
     # Optional Scapy end-to-end: craft a real NTP reply -> pcap -> tcpdump -> parse.
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}

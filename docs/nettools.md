@@ -851,8 +851,8 @@ per-packet Unix timestamp via `-tt`) is parsed and classified:
   address** (`127.0.0.0/8`) on the segment. Loopback never crosses a wire, so this is
   spoofed to look local and **bypass `ntpd` `restrict`/ACL rules** to reach mode 6/7
   (**CVE-2014-9298 / CVE-2014-9751**) — a zero-false-positive `auth-bypass` by
-  construction. (The IPv6 `::1` form is deferred with the rest of IPv6 NTP; the in-app
-  parser is IPv4-only.)
+  construction. *(v11:)* the IPv6 `::1` source and an IPv4-mapped `::ffff:127.x` are caught
+  too.
 - **Anomaly** — an implausible **root dispersion**, a **leap-alarm** (unsynchronized)
   source, a **reference-ID loop** (refid equals the source's own address), a server
   reporting **Stratum 16** (unsynchronized) or a **reserved stratum > 16** (malformed),
@@ -892,10 +892,34 @@ per-packet Unix timestamp via `-tt`) is parsed and classified:
   and the first packet of a symmetric exchange legitimately carry a zero origin, so
   those never false-positive.
 
-> **Deferred (in-app):** the oversized mode-6/7 control datagram (**CVE-2016-9312**) is
-> *not* flagged in-app — the passive capture uses a small snaplen and does not reassemble
-> fragments, and a >1500-byte datagram collides with the extension-field heuristic. The
-> standalone NTP Watch daemon (RN18) catches an oversize datagram delivered intact.
+- **Crash / overrun shapes *(new in v11)*** — verdict **`crash-exploit`** (critical):
+  - an **oversize NTP datagram** — a UDP payload over 1,500 bytes, larger than any
+    legitimate NTP message, NTS and Autokey included: the ntpd < 4.2.8p9 remote-crash
+    vector (**CVE-2016-9312**). It is measured on tcpdump's reported NTP length, so the
+    512-byte capture snaplen does not hide it. A datagram beyond the path MTU arrives
+    fragmented and only its first fragment matches, so this sees an oversize datagram
+    delivered intact (jumbo / virtual segments), not a fragmented one.
+  - a **mode-6 control header whose `count`** exceeds the 468-octet spec maximum **or** the
+    datagram itself — the out-of-bounds read in ntpsec < 1.1.3 `process_control()` /
+    `ctl_getitem()` (**CVE-2019-6444 / CVE-2019-6443**). Zero false positives by
+    construction: a conformant request or response cannot declare more data than it
+    carries (a real full-size `ntpq` response is exactly 468 and is reported as recon
+    only).
+- **Dual-stack *(new in v11)*** — IPv6 NTP is parsed and classified like IPv4 (earlier
+  builds silently skipped every v6 packet), and the capture filter adds the shared IPv6
+  extension-header clause, so NTP behind a Destination-Options, Routing or first-fragment
+  header — which plain `udp port 123` drops — still reaches the classifier.
+- **Fix *(v11)*:** the Autokey extension-field check now runs only on modes 1–5, as
+  upstream does. The bytes after a mode-6/7 header are control or private data, so a normal
+  full-size `ntpq` status response was previously misread as a **malformed Autokey EF**
+  (a false critical `autokey-exploit`). The length checks also use the true wire length,
+  not the snaplen-truncated bytes.
+
+> **Not covered (from the v11 evaluation):** CVE-2021-22212 (weak keys never on the wire),
+> CVE-2019-6442 / 6445 (need an authenticated attacker), CVE-2023-4012 (needs per-association
+> request/response state), CVE-2016-9310 (score and description unpinned), CVE-2020-13817
+> (wire-indistinguishable) and CVE-2016-7428 (poll-interval changes are routine). The
+> standalone module's opt-in `--probe` mode transmits and is not part of Ragnar.
 
 The **first scan learns** the trusted time source(s) + their stratum into
 `data/ntp_watch.json`; after a legitimate NTP change, click **Trust current** to
@@ -916,7 +940,7 @@ python3 network_diagnostics.py ntp-selftest    # self-test the detectors, no roo
 ```
 
 `ntp-selftest` drives the real parser + classifier with synthetic captures (clean /
-time-injection / rogue-server / kod / stratum-spoof / broadcast / recon / anomaly /
+time-injection / rogue-server / kod / stratum-spoof / broadcast / recon / anomaly / v11 crash-exploit (oversize, count overrun), IPv6, ::1, the 468-byte ntpq false-positive guard /
 parse), and — when [Scapy](https://scapy.net) is installed — crafts a real NTP
 server reply into a pcap and parses it back through `tcpdump`, exercising the
 capture→parse path end to end.
@@ -2441,7 +2465,7 @@ slaved to it. All three transports are parsed **unconditionally**: **Annex F** (
 Ethernet, EtherType `0x88F7`), **Annex D** (UDP/IPv4, `224.0.1.129` / `224.0.0.107`, ports
 `319` event / `320` general) and **Annex E** (UDP/IPv6, `ff0X::181` / `ff02::6B`). PTP
 advertises no prefixes and correlates with no route family, so dual-stack is packet-layer
-plumbing with **no IPv6-specific finding codes** — the same 46 codes fire regardless of L3.
+plumbing with **no IPv6-specific finding codes** — the same 56 codes fire regardless of L3.
 
 Two design constraints shape every rule. First, **no rule consults the sensor's wall
 clock** — a sensor monitoring a timing plane under attack may itself be slewed or targeted,
@@ -2477,6 +2501,19 @@ card **verdict**:
   point-to-point 802.1AS link disables the port's sync (**CVE-2024-42861**, stateful);
   **`PTP-V04`** Arista EOS agent restart — a management/signaling message with a truncated or
   overrunning TLV (**CVE-2021-28510**).
+- **SyncE / ESMC *(new in v4)*** — a **Class S** of ten codes. SyncE distributes *frequency*
+  at the physical layer, which a tap cannot see, but its control protocol **ESMC** (ITU-T
+  G.8264, slow protocol EtherType `0x8809`, subtype `0x0A`, to `01:80:C2:00:00:02`) is on the
+  wire. Always on: **`PTP-S01`** malformed ESMC PDU, **`S02`** quality level changed without
+  the event flag (high), **`S03`** event flag with no QL change, **`S04`** PDU rate over the
+  G.8264 ceiling (high), **`S05`** more than two ESMC speakers on one link (high), **`S06`**
+  VLAN-tagged ESMC frame, **`S07`** extended-QL TLV contradicting the legacy QL TLV (high),
+  **`S08`** QL flapping (posture). Two ship dark because they need site policy that is not on
+  the wire — **`S09`** primary-grade quality from an undeclared source and **`S10`** an SSM
+  code undefined in the declared G.781 network option (the in-app scan does not arm them).
+  **No ESMC or SyncE CVEs exist** (the author's sweep across IOS XR/XE, Junos, Nokia, linuxptp
+  and synce4l found none), so Class S is protocol-violation and posture detection. LACP shares
+  EtherType `0x8809` (subtype `0x01`) and is never alerted on.
 
 **gPTP / IEEE 802.1AS** (`majorSdoId == 1`) gets eight peer-delay-specific codes on top of
 the generic set (the two `clockClass`-derived rules are masked for it, since 802.1AS uses
@@ -2492,8 +2529,9 @@ reader are all hand-rolled (no Scapy; Scapy has no PTP dissector at any shipping
 > **Deployment note.** A full core SPAN into a USB NIC on a Pi Zero 2W will saturate the
 > adapter — mirror a VLAN or apply an ACL to the mirror session; do not mirror a busy trunk
 > wholesale. The snapshot capture is next-header-qualified (Annex F `0x88F7` + UDP `319/320`
-> + an `ip6[6]` extension-header clause), never a blanket `ip6`, so the ext-header'd Annex E
-> evasion case reaches userspace without flooding the Pi.
+> + an `ip6[6]` extension-header clause + ESMC — slow protocol `0x8809` subtype `0x0A`, plain
+> or behind one VLAN tag, matched by byte offset so LACP is excluded), never a blanket `ip6`,
+> so the ext-header'd Annex E evasion case reaches userspace without flooding the Pi.
 
 > **Watchtower feed.** HIGH/CRITICAL PTP findings (grandmaster takeover, time injection,
 > management WRITE, unicast-cancel forgery, gPTP peer-delay denial) are appended as

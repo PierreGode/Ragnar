@@ -10,8 +10,8 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **268** distinct CVE IDs
-- **227** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **271** distinct CVE IDs
+- **230** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
 - **32** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
@@ -30,10 +30,10 @@ detector works is in [nettools.md](nettools.md).
 | 2013 | 3 |
 | 2014 | 7 |
 | 2015 | 9 |
-| 2016 | 5 |
+| 2016 | 6 |
 | 2017 | 6 |
 | 2018 | 8 |
-| 2019 | 11 |
+| 2019 | 13 |
 | 2020 | 21 |
 | 2021 | 14 |
 | 2022 | 19 |
@@ -71,7 +71,7 @@ detector works is in [nettools.md](nettools.md).
 | LDAP Watch | 3 |
 | Liebert Guard | 2 |
 | MikroTik Guard | 16 |
-| NTP Watch | 12 |
+| NTP Watch | 15 |
 | OSPF Watch | 9 |
 | PTP Watch | 4 |
 | Relay / Coercion Watch | 2 |
@@ -127,6 +127,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2016-2183](https://nvd.nist.gov/vuln/detail/CVE-2016-2183) | SWEET32 | detected | IPsec / IKE Watch, SSH Watch, TLS Watch | — |
 | [CVE-2016-7431](https://nvd.nist.gov/vuln/detail/CVE-2016-7431) |  | detected | NTP Watch | — |
 | [CVE-2016-8610](https://nvd.nist.gov/vuln/detail/CVE-2016-8610) | SSL Death Alert | detected | TLS Watch | — |
+| [CVE-2016-9312](https://nvd.nist.gov/vuln/detail/CVE-2016-9312) |  | detected | NTP Watch | — |
 | [CVE-2017-0144](https://nvd.nist.gov/vuln/detail/CVE-2017-0144) | EternalBlue | detected | SMB / Kerberos Watch | — |
 | [CVE-2017-0781](https://nvd.nist.gov/vuln/detail/CVE-2017-0781) | BlueBorne | active check | BLE Pentest (active) | — |
 | [CVE-2017-0782](https://nvd.nist.gov/vuln/detail/CVE-2017-0782) | BlueBorne | active check | BLE Pentest (active) | — |
@@ -146,6 +147,8 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2019-3979](https://nvd.nist.gov/vuln/detail/CVE-2019-3979) |  | detected | MikroTik Guard | — |
 | [CVE-2019-5608](https://nvd.nist.gov/vuln/detail/CVE-2019-5608) | Fragmented IGMP/MLD membership | detected | IGMP / MLD Watch | — |
 | [CVE-2019-6111](https://nvd.nist.gov/vuln/detail/CVE-2019-6111) | OpenSSH scp file overwrite | context only | Telnet Watch | — |
+| [CVE-2019-6443](https://nvd.nist.gov/vuln/detail/CVE-2019-6443) |  | detected | NTP Watch | — |
+| [CVE-2019-6444](https://nvd.nist.gov/vuln/detail/CVE-2019-6444) |  | detected | NTP Watch | — |
 | [CVE-2019-7282](https://nvd.nist.gov/vuln/detail/CVE-2019-7282) | netkit rcp dot-name | detected | Telnet Watch | — |
 | [CVE-2019-7283](https://nvd.nist.gov/vuln/detail/CVE-2019-7283) | netkit rcp unrequested file | detected | Telnet Watch | — |
 | [CVE-2019-10149](https://nvd.nist.gov/vuln/detail/CVE-2019-10149) | Exim ${...} expansion RCE | detected | SMTP Watch | — |

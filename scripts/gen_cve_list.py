@@ -99,6 +99,9 @@ ND_PREFIXES = [
 # OpenSSH scp bug named as the "twin" of the netkit rcp CVE Telnet Watch detects,
 # and the Ripple20 IPv6 bug APC Guard names only to state it does not apply to APC.
 CONTEXT_CVES = {'CVE-2019-6111', 'CVE-2020-11897'}
+# Deliberately wrong IDs inside a vendored module's own mutation-test fixtures
+# (ptpwatch v4's README bite list swaps CVE-2024-42861 for this). Never a detection.
+IGNORED_CVES = {'CVE-2024-99999'}
 # Per-CVE owner overrides where a shared helper names another vendor's CVE.
 CVE_OWNER_OVERRIDE = {'CVE-2021-0254': 'Juniper Guard'}
 # Owners (or owner+CVE) whose mention is context/reference, not a detection.
@@ -248,6 +251,8 @@ def collect():
                 cur = nxt[i] if l.startswith('#') else owner
             for m in CVE_RE.finditer(l):
                 cve = m.group(0)
+                if cve in IGNORED_CVES:
+                    continue
                 mentions[cve].append(l)
                 if path in MENTION_ONLY:
                     if path == 'web/index_modern.html':
