@@ -242,6 +242,16 @@
   .recbar .rsp{color:var(--muted)}
   .scope-head .fsbtn{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:5px 11px;border-radius:6px;cursor:pointer;transition:border-color .15s,background .15s,color .15s;white-space:nowrap}
   .scope-head .fsbtn:hover{border-color:rgba(56,189,201,.5);color:var(--cyan);background:rgba(56,189,201,.08)}
+  /* collapse / expand — idle panels auto-collapse to a slim header row */
+  .scope-head .clpsbtn{font-family:var(--mono);font-size:13px;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:5px 9px;border-radius:6px;cursor:pointer;transition:border-color .15s,background .15s,color .15s;line-height:1}
+  .scope-head .clpsbtn:hover{border-color:rgba(56,189,201,.5);color:var(--cyan);background:rgba(56,189,201,.08)}
+  .scope-head .flashbtn{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:5px 11px;border-radius:6px;cursor:pointer;transition:border-color .15s,background .15s,color .15s;white-space:nowrap;text-decoration:none;display:inline-flex;align-items:center}
+  .scope-head .flashbtn:hover{border-color:rgba(234,179,8,.6);color:#eab308;background:rgba(234,179,8,.08)}
+  .scope-head .clpsbtn .chev{display:inline-block;transition:transform .18s}
+  .scope.collapsed .clpsbtn .chev{transform:rotate(-90deg)}
+  .scope.collapsed .scope-body{display:none}
+  .scope.collapsed .readout,.scope.collapsed .viewsel,.scope.collapsed .bandsel,.scope.collapsed .tunesel,.scope.collapsed .zwavesel{display:none}
+  .scope.collapsed .scope-head{border-bottom:0}
   .scope:fullscreen,.scope:-webkit-full-screen{width:100vw;height:100vh;border-radius:0;border:0;background:var(--ground);display:flex;flex-direction:column}
   .scope:fullscreen .scope-body,.scope:-webkit-full-screen .scope-body{flex:1 1 auto;min-height:0}
   .scope.is3d canvas.fall{height:546px}   /* 3D panel is 30% taller than the 420px 2D fall */
@@ -294,6 +304,7 @@
     <div class="rigs">
       <div class="rig"><b>RTL-SDR</b> · 24&nbsp;MHz–1.7&nbsp;GHz <span class="tag idle" id="rig-rtl">detecting…</span></div>
       <div class="rig"><b>HackRF&nbsp;One</b> · 1&nbsp;MHz–6&nbsp;GHz <span class="tag idle" id="rig-hackrf">detecting…</span></div>
+      <div class="rig"><b>ESP-SDR</b> · 2.2–2.7&nbsp;GHz <span class="tag idle" id="rig-esp">detecting…</span></div>
     </div>
   </header>
 
@@ -305,14 +316,6 @@
     <div class="grp"><a href="/vor-radial" class="ctl" id="vorlink" title="VOR Radial — decode a VOR nav beacon's bearing (108–118 MHz)">&#127760;&nbsp;VOR Radial</a></div>
     <div class="grp"><a href="/aprs" class="ctl" id="aprslink" title="APRS — ham packet positions &amp; messages (off-air + APRS-IS Internet)">&#128225;&nbsp;APRS</a></div>
     <div class="grp"><button class="ctl" id="play" aria-pressed="true">&#10074;&#10074;&nbsp;Pause</button></div>
-    <div class="grp">
-      <span class="lbl">Scroll</span>
-      <div class="seg" id="speed" role="group" aria-label="Scroll rate">
-        <button data-hz="5" aria-pressed="false">Slow</button>
-        <button data-hz="12" aria-pressed="true">Normal</button>
-        <button data-hz="24" aria-pressed="false">Fast</button>
-      </div>
-    </div>
     <div class="grp">
       <span class="lbl">Palette</span>
       <div class="seg" id="palette" role="group" aria-label="Waterfall colour palette"></div>
@@ -451,6 +454,10 @@
         if(chans.length && Math.random()<0.15)
           bump(row,lo,hi,chans[(Math.random()*chans.length)|0]+w,w*0.8,-60);}};}
 
+  // HZ: internal default row rate for the no-hardware synthetic demo, and the
+  // fallback fill rate when a live panel's measured data rate isn't known yet.
+  // Live waterfalls follow the rate their data actually arrives (genlock below),
+  // so there is no user scroll-rate control.
   var running=true, HZ=12, DEMO_ON=false, OVERLAYS={};
   var reduce=window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   function fmtF(mhz){return (mhz>=1000)?(mhz/1000).toFixed(mhz%1000?2:0)+"G":(mhz>=100?mhz.toFixed(1):mhz.toFixed(2));}
@@ -464,10 +471,12 @@
   function fmtTick(mhz,step){ if(mhz>=1000&&step>=1) return (mhz/1000).toFixed(Math.max(0,fDec(step/1000)))+'G'; return mhz.toFixed(fDec(step)); }
   function fmtSpan(lo,hi){var d=fDec(Math.max((hi-lo)/100,1e-6)); d=Math.max(d,(lo>=100?1:2)); return lo.toFixed(d)+'–'+hi.toFixed(d);}
   function nowHM(){var d=new Date();return String(d.getHours()).padStart(2,'0')+":"+String(d.getMinutes()).padStart(2,'0')+":"+String(d.getSeconds()).padStart(2,'0');}
+  function fmtSigned(v){ v=+v||0; return (v>=0?'+':'')+ (Math.abs(v)>=10?v.toFixed(0):v.toFixed(v%1?1:0)); }
 
   function Scope(cfg){
     var self=this;
     this.cfg=cfg; this.mode='idle'; this.available=false; this.board=''; this.detErr='';
+    this._collapsed=false; this._manualOverride=false;   // collapse/expand state
     this.liveBand=cfg.defaultBand; this.synthBand=cfg.synthDefault;
     this.zoom=null; this.decoding=false;
     // Markers M1..M4. `this.marker` stays the ACTIVE marker's frequency so every
@@ -489,7 +498,7 @@
     // palette / resize / zoom keep what's on screen), hover values and scroll-back.
     this.hrows=[]; this.scrollBack=0;
     this.hwLo=null; this.hwHi=null; this.dz=false;   // what the radio sweeps vs. a display-only zoom
-    this.disp={auto:false,ref:-50,range:15};   // default colour window: top (Ref) -50 dB, 15 dB deep (bottom -65)
+    this.disp={auto:false,ref:5,range:35};   // default colour window: top (Ref) +5 dB, 35 dB deep (bottom -30)
     try{ var _d=JSON.parse(localStorage.getItem('rfwf.disp.'+cfg.short)||'null');
       if(_d&&isFinite(_d.ref)&&isFinite(_d.range)) this.disp={auto:!!_d.auto,ref:+_d.ref,range:+_d.range}; }catch(e){}
     this._liveQ=[]; this._acc=0; this._arrEma=0; this._lastPoll=0;   // de-jitter buffer for even live scroll
@@ -521,6 +530,8 @@
         +'<div class="stat dcstat" hidden><span class="k">SDR spike</span><span class="v dcv">&mdash;</span></div>'
         +'<div class="stat ovld" hidden title="The receiver front end is overloading. Levels are wrong and the display may show images and intermodulation that are not on the air. Lower the gain."><span class="k">Front end</span><span class="v ovldv">&mdash;</span></div>'
       +'</div>'
+      +(cfg.espTrim?'<a class="flashbtn" href="https://espargos.net/espsdr/app/flash.html" target="_blank" rel="noopener" title="Flash the ESP-SDR firmware onto an ESP32 from your browser (Web Serial — connect the ESP32 to the device running this browser)">&#9889;&nbsp;Flash ESP32</a>':'')
+      +'<button class="clpsbtn" title="Collapse this panel" aria-expanded="true"><span class="chev">&#9662;</span></button>'
       +'<button class="fsbtn" title="Expand this waterfall to full screen">&#9974;&nbsp;Full screen</button>'
       +'</div>'
       +'<div class="scope-body">'
@@ -655,6 +666,13 @@
             +'<div class="dnote">Opens in a spreadsheet, Python / MATLAB etc. Levels are in the units shown on screen (dBm once calibrated). The waterfall export covers the whole history (see <b>History</b>), resampled onto the current span.</div>'
           +'</fieldset>'
           +'<fieldset class="dsec dhw"><legend>Hardware</legend><div class="drow"><span class="tunergrp"></span></div></fieldset>'
+          +(cfg.espTrim?'<fieldset class="dsec dtrim"><legend>Frequency trim (no TCXO)</legend>'
+            +'<div class="drow"><label>Offset</label><input type="number" class="ftin" step="1" style="flex:0 0 76px;width:76px"><span>kHz</span><span class="ftppm" style="color:var(--muted);margin-left:auto"></span></div>'
+            +'<div class="drow"><button class="mini ftauto" title="Lock the frequency axis to the 2.4 GHz Wi-Fi channel centres (ch 1/6/11). Takes about 7 seconds.">&#127760;&nbsp;Auto-trim (Wi-Fi)</button>'
+              +'<button class="mini fthk" title="Cross-reference against a connected HackRF (TCXO). Both radios sweep the same 2.4 GHz window and the ESP is aligned to the HackRF. The most accurate option. Takes about 12 seconds.">&#128225;&nbsp;vs HackRF</button>'
+              +'<button class="mini ftzero" title="Clear the trim (FOFS 0)">Reset</button></div>'
+            +'<div class="dnote ftnote">The ESP32 has no TCXO: its LO sits a few ppm off and drifts with temperature. <b>Auto-trim</b> nulls it against the 2.4 GHz Wi-Fi carriers (needs ch 1/6/11 traffic); <b>vs HackRF</b> cross-references a connected HackRF (TCXO truth) for the most accurate lock; or set an offset by hand. Applied at the LO (<code>FOFS</code>).</div>'
+            +'</fieldset>':'')
         +'</div>'
         +'<div class="recbar hidden"></div>'
         +'<div class="logwrap"><div class="logcap"><span class="logtitle">Signals</span><span class="logcount"></span></div>'
@@ -712,6 +730,8 @@
     this.markTxt=el.querySelector('.marktxt'); this.zoomBtn=el.querySelector('.zoombtn'); this.resetBtn=el.querySelector('.resetbtn');
     this.snapBtn=el.querySelector('.snapbtn'); this.tunerGrp=el.querySelector('.tunergrp'); this.recBar=el.querySelector('.recbar');
     this.fsBtn=el.querySelector('.fsbtn');
+    this.clpsBtn=el.querySelector('.clpsbtn');
+    if(this.clpsBtn) this.clpsBtn.addEventListener('click',function(){ self._manualOverride=true; self.setCollapsed(!self._collapsed); });
     this.logTitle=el.querySelector('.logtitle'); this.logCount=el.querySelector('.logcount'); this.logList=el.querySelector('.loglist');
     this.fctx=this.fall.getContext('2d'); this.tctx=this.trace.getContext('2d');
     this.rigEl=document.getElementById(cfg.rig);
@@ -835,7 +855,9 @@
     // Settings drawer
     this.cfgBtn=el.querySelector('.cfgbtn'); this.drawer=el.querySelector('.drawer');
     this.cfgBtn.addEventListener('click',function(){ var open=self.drawer.hidden; self.drawer.hidden=!open;
-      self.cfgBtn.setAttribute('aria-expanded',open?'true':'false'); self.cfgBtn.setAttribute('aria-pressed',open?'true':'false'); });
+      self.cfgBtn.setAttribute('aria-expanded',open?'true':'false'); self.cfgBtn.setAttribute('aria-pressed',open?'true':'false');
+      if(open && self.cfg.espTrim) self.trimRefresh(); });
+    if(cfg.espTrim) this.setupTrim();
     this.dAuto=el.querySelector('.dauto'); this.dRef=el.querySelector('.dref'); this.dRefN=el.querySelector('.drefn');
     this.dRng=el.querySelector('.drng'); this.dRngN=el.querySelector('.drngn');
     this.dAuto.addEventListener('click',function(){ self.setDisplay({auto:!self.disp.auto}); });
@@ -849,6 +871,7 @@
     this.rbwEl=el.querySelector('.rbwv'); this.detEl=el.querySelector('.detv');
     this.fallWrap=el.querySelector('.fall-wrap'); this.dRes=el.querySelector('.dres'); this.dHw=el.querySelector('.dhw');
     this.hw={lna:24,vga:20,amp:false,antenna:false,bin_hz:0};          // HackRF: page-held, sent on start
+    this.espGain=null; this.espBins=512;                               // ESP-SDR: null gain = hardware AGC
     try{ var _h=JSON.parse(localStorage.getItem('rfwf.hw.'+cfg.short)||'null'); if(_h) for(var _k in this.hw) if(_k in _h) this.hw[_k]=_h[_k]; }catch(e){}
     this.rtlSet=null;                                                    // RTL: server-held settings
     this.buildResolution(); this.buildHardware(); this.buildChannels(); this.buildTrigger(); this.buildSetups();
@@ -1844,7 +1867,68 @@
     if(this.decoding || this._iqPoll) return;   // decode / IQ capture own the dongle
     this.setMode(this.available?'live':(DEMO_ON?'synth':'idle'));
   };
+  // Collapse / expand the panel body. Idle panels auto-collapse to a slim row;
+  // active ones auto-expand. The header button overrides, and that override
+  // holds until the next real mode change (then auto takes over again).
+  Scope.prototype.setCollapsed=function(on){
+    on=!!on; if(on===this._collapsed) return;
+    this._collapsed=on; this.el.classList.toggle('collapsed',on);
+    if(this.clpsBtn){ this.clpsBtn.setAttribute('aria-expanded',on?'false':'true');
+      this.clpsBtn.title=on?'Expand this panel':'Collapse this panel'; }
+    if(!on){ var self=this;                 // re-measure the canvas now it's visible again
+      this.resize(); if(this.repaint) this.repaint();
+      if(this.hi>this.lo && this.drawRuler) this.drawRuler();   // only with a valid range
+      requestAnimationFrame(function(){ self.resize(); if(self.repaint) self.repaint(); }); }
+  };
+  // Apply an ESP gain / FFT-bins change: restart the live capture (fast retune).
+  Scope.prototype.espReconfig=function(){
+    if(this.mode==='live'){ this.stopLive(); this._rangeKnown=false; this.resetCanvas(); this.startLive(); }
+  };
+  // ---- ESP-SDR frequency trim (FOFS) ---------------------------------------
+  Scope.prototype.setupTrim=function(){
+    var self=this, el=this.el;
+    this.ftIn=el.querySelector('.ftin'); this.ftPpm=el.querySelector('.ftppm');
+    this.ftAuto=el.querySelector('.ftauto'); this.ftHk=el.querySelector('.fthk'); this.ftZero=el.querySelector('.ftzero');
+    this.ftNote=el.querySelector('.ftnote');
+    if(this.ftIn) this.ftIn.addEventListener('change',function(){ self._trimPost({khz:parseInt(self.ftIn.value,10)||0}); });
+    if(this.ftZero) this.ftZero.addEventListener('click',function(){ self._trimPost({khz:0}); });
+    if(this.ftAuto) this.ftAuto.addEventListener('click',function(){
+      self._trimRun(self.ftAuto,{auto:1},'measuring… (~7 s)','Measuring the 2.4 GHz Wi-Fi channel centres…','Wi-Fi'); });
+    if(this.ftHk) this.ftHk.addEventListener('click',function(){
+      self._trimRun(self.ftHk,{hackrf:1},'measuring… (~12 s)','Sweeping the HackRF, then the ESP, on the same 2.4 GHz window…','HackRF'); });
+    this.trimRefresh();                       // show the persisted trim on load
+  };
+  // Run a calibration (auto-Wi-Fi or vs-HackRF): disable the button, POST, report.
+  Scope.prototype._trimRun=function(btn,body,busy,note,refName){
+    var self=this; btn.disabled=true; var old=btn.innerHTML; btn.innerHTML='&#8987;&nbsp;'+busy;
+    if(this.ftAuto&&btn!==this.ftAuto) this.ftAuto.disabled=true; if(this.ftHk&&btn!==this.ftHk) this.ftHk.disabled=true;
+    if(this.ftNote) this.ftNote.textContent=note;
+    fetch(this.cfg.api.trim,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+      .then(function(r){return r.json();}).then(function(res){
+        btn.disabled=false; btn.innerHTML=old; if(self.ftAuto) self.ftAuto.disabled=false; if(self.ftHk) self.ftHk.disabled=false;
+        if(res&&res.ok){ self._trimShow(res);
+          var how=(refName==='HackRF')?('HackRF (corr '+(res.corr!=null?res.corr:'?')+', '+(res.overlap_mhz||'?')+' MHz)'):('Wi-Fi ch '+((res.channels||[]).join('/')));
+          if(self.ftNote) self.ftNote.innerHTML='Locked to '+how+': was '+fmtSigned(res.offset_khz)+' kHz off, trim now <b>'+res.fofs_khz+' kHz</b> ('+fmtSigned(res.fofs_ppm)+' ppm).'; }
+        else if(self.ftNote) self.ftNote.textContent=(res&&res.error)||(refName+' calibration failed.');
+        self.trimRefresh();
+      }).catch(function(){ btn.disabled=false; btn.innerHTML=old; if(self.ftAuto) self.ftAuto.disabled=false; if(self.ftHk) self.ftHk.disabled=false;
+        if(self.ftNote) self.ftNote.textContent=refName+' calibration request failed.'; });
+  };
+  Scope.prototype._trimPost=function(body){ var self=this;
+    fetch(this.cfg.api.trim,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+      .then(function(r){return r.json();}).then(function(res){ if(res&&res.ok) self._trimShow(res); }).catch(function(){}); };
+  Scope.prototype.trimRefresh=function(){ var self=this;
+    fetch(this.cfg.api.trim).then(function(r){return r.json();}).then(function(st){ self._trimShow(st); }).catch(function(){}); };
+  Scope.prototype._trimShow=function(st){
+    if(!st) return;
+    var khz=(st.fofs_khz!=null)?st.fofs_khz:0, ppm=(st.fofs_ppm!=null)?st.fofs_ppm:0;
+    if(this.ftIn && document.activeElement!==this.ftIn) this.ftIn.value=khz;
+    if(this.ftPpm) this.ftPpm.textContent=fmtSigned(ppm)+' ppm';
+    if(this.ftAuto && st.supported===false){ this.ftAuto.disabled=true; this.ftAuto.title='This ESP chip has no FOFS trim (S3/S31 only)'; }
+  };
   Scope.prototype.setMode=function(mode){
+    if(mode!==this.mode) this._manualOverride=false;          // mode change -> auto takes over again
+    if(!this._manualOverride) this.setCollapsed(mode==='idle'); // idle collapses, active expands
     if(mode===this.mode) return;
     if(this.mode==='live') this.stopLive();
     this.mode=mode; this._rangeKnown=false; this.zoom=null; this.resetBtn.disabled=true; this.resetCanvas();
@@ -1899,7 +1983,8 @@
       if(this._poll) clearInterval(this._poll); this._poll=setInterval(function(){ self.livePoll(); },120); return; } this.seq=0; this.liveErr=null; this._fpsEma=null; this._lastRowT=0; this._liveStartT=Date.now(); this._lastFrameT=0;
     this._liveQ.length=0; this._acc=0; this._arrEma=0; this._lastPoll=0; this._tsWin=[]; this._nom=0; this._play=null; this._newestTs=null; this._newestWall=0; this._lastRealWall=null; this._fillAcc=0;
     var body={band:this.liveBand};
-    if(!this.cfg.tuner){ body.lna=this.hw.lna; body.vga=this.hw.vga; body.amp=this.hw.amp?1:0; body.antenna=this.hw.antenna?1:0; if(this.hw.bin_hz) body.bin_hz=this.hw.bin_hz; }
+    if(this.cfg.espTrim){ body.gain=(this.espGain==null)?'hardware':this.espGain; body.fft_bins=this.espBins; }
+    else if(!this.cfg.tuner){ body.lna=this.hw.lna; body.vga=this.hw.vga; body.amp=this.hw.amp?1:0; body.antenna=this.hw.antenna?1:0; if(this.hw.bin_hz) body.bin_hz=this.hw.bin_hz; }
     if(this.zoom){ body.lo_hz=Math.round(this.zoom[0]*1e6); body.hi_hz=Math.round(this.zoom[1]*1e6); }
     else if(this.zwave){ body.lo_hz=this.zwave.lo_hz; body.hi_hz=this.zwave.hi_hz; body.label=this.zwave.sweepLabel; }
     fetch(this.cfg.api.start,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
@@ -2708,6 +2793,15 @@
       det.addEventListener('change',function(){ self.det=det.value; self.rtlApply({detector:det.value}); self.repaint(); });
       var hdc=g.querySelector('.rhdc');
       hdc.addEventListener('change',function(){ self.rtlApply({hide_dc:hdc.checked?1:0}); });
+    } else if(this.cfg.espTrim){
+      // ESP-SDR: resolution = FFT bins over the capture window (RBW = sample rate / bins).
+      g.insertAdjacentHTML('beforeend',
+        '<div class="drow"><label>FFT bins</label><select class="ebins">'
+          +[256,512,1024,2048].map(function(n){return '<option value="'+n+'">'+n+'</option>';}).join('')+'</select>'
+          +'<span class="ebwnote dnote"></span></div>'
+        +'<div class="dnote">More bins = finer frequency resolution (<b>RBW = sample rate ÷ bins</b>) at a lower frame rate. The capture <b>span</b> (sample rate) follows the band / zoom. Changing bins briefly restarts the capture.</div>');
+      var eb=g.querySelector('.ebins'); eb.value=String(this.espBins||512);
+      eb.addEventListener('change',function(){ self.espBins=+eb.value; self.espReconfig(); });
     } else {
       g.insertAdjacentHTML('beforeend',
         '<div class="drow"><label>RBW</label><select class="rhb"><option value="0">Auto</option>'
@@ -2755,6 +2849,20 @@
       d.addEventListener('change',function(){ self.rtlApply({direct:d.value}); });
       c.addEventListener('change',function(){ if(c.value==='custom'){ cc.hidden=false; cc.focus(); return; } cc.hidden=true; self.rtlApply({conv_hz:+c.value}); });
       cc.addEventListener('change',function(){ if(isFinite(+cc.value)) self.rtlApply({conv_hz:Math.round(+cc.value*1e6)}); });
+    } else if(this.cfg.espTrim){
+      // ESP-SDR: hardware AGC by default, or a manual gain index (0..max from LIMITS).
+      g.insertAdjacentHTML('beforeend',
+        '<div class="drow"><label>Gain</label><button class="mini eagc" aria-pressed="true" title="Hardware automatic gain control (default)">Auto&nbsp;(AGC)</button>'
+          +'<input type="range" class="egain" min="0" max="82" step="1" value="40" disabled><span class="egainn dnote"></span></div>'
+        +'<div class="dnote">The ESP32 uses <b>hardware AGC</b> by default. Switch to <b>manual</b> to pin a fixed gain index (0 = minimum, higher = more sensitive but overloads on strong signals). Changing it briefly restarts the capture.</div>');
+      var agc=g.querySelector('.eagc'), eg=g.querySelector('.egain'), egn=g.querySelector('.egainn');
+      var lim=this._espGainLimits||[0,82,1]; eg.min=lim[0]; eg.max=lim[1]; eg.step=lim[2]||1;
+      function espGainUI(){ var hw=(self.espGain==null); agc.setAttribute('aria-pressed',hw?'true':'false'); agc.textContent=hw?'Auto (AGC)':'Manual';
+        eg.disabled=hw; egn.textContent=hw?'':('index '+self.espGain); if(!hw) eg.value=self.espGain; }
+      agc.addEventListener('click',function(){ self.espGain=(self.espGain==null)?(+eg.value||40):null; espGainUI(); self.espReconfig(); });
+      eg.addEventListener('input',function(){ egn.textContent='index '+eg.value; });
+      eg.addEventListener('change',function(){ self.espGain=+eg.value; espGainUI(); self.espReconfig(); });
+      this._espGainUI=espGainUI; espGainUI();
     } else {
       g.insertAdjacentHTML('beforeend',
         '<div class="drow"><label>LNA gain</label><input type="range" class="hlna" min="0" max="40" step="8"><span class="hlnan"></span><span>dB</span></div>'
@@ -3455,6 +3563,19 @@
     hwLo:1, hwHi:6000, tuneSpan:20,   // HackRF One: 1 MHz-6 GHz (sweeps every mesh/LoRa overlay band too)
     liveBands:SUBGHZ_BANDS.concat([{id:'2.4',label:'2.4G'},{id:'5',label:'5G'},{id:'6',label:'6G'}]), defaultBand:'2.4' });
   scopes.push(hackrf); stack.appendChild(hackrf.el);
+  // ESP-SDR: an ESP32 running the ESP-SDR firmware streams on-chip FFT spectra
+  // over native USB. One fixed FFT window at a time (centre=band, span=sample
+  // rate) rather than a sweep — on an ESP32-S3 the usable band is ~2.2-2.7 GHz.
+  var ESP_WIN={ '2.3':[2280,2320], '2.4':[2402,2482], '2.45':[2430,2470], '2.6':[2580,2620] };
+  function espSynth(b,lo,hi){ if(lo!=null&&hi!=null) return wifiModel('2.4',lo,hi);
+    var r=ESP_WIN[b]||ESP_WIN['2.4']; return wifiModel('2.4',r[0],r[1]); }
+  var ESP_BANDS=[{id:'2.3',label:'2.3G'},{id:'2.4',label:'2.4G'},{id:'2.45',label:'2.45G'},{id:'2.6',label:'2.6G'}];
+  var esp=new Scope({ name:"ESP-SDR", short:"ESP-SDR", dev:"ESP32 · on-chip FFT", rig:"rig-esp",
+    api:{status:'/api/net/esp/status',start:'/api/net/esp/start',stop:'/api/net/esp/stop',frames:'/api/net/esp/frames',trim:'/api/net/esp/trim'},
+    synth:espSynth, synthDefault:'2.4', synthBands:true, decode:false, zwave:false, minSpan:1, espTrim:true,
+    hwLo:2200, hwHi:2700, tuneSpan:16,   // ESP32-S3: ~2.2-2.7 GHz usable; 16 MHz min capture window
+    liveBands:ESP_BANDS, defaultBand:'2.4' });
+  scopes.push(esp); stack.appendChild(esp.el);
   window.RFWF={scopes:scopes};   // console/debug handle on the panels
   // ---- keyboard shortcuts (act on the panel last pointed at) ---------------
   var activeScope=scopes[0];
@@ -3504,12 +3625,6 @@
     playBtn.innerHTML=on?'&#10074;&#10074;&nbsp;Pause':'&#9654;&nbsp;Play';
     scopes.forEach(function(s){s.setRate(on?HZ:0);}); if(on){last=performance.now();requestAnimationFrame(loop);} }
   playBtn.addEventListener('click',function(){ setRunning(!running); });
-  var speedSeg=document.getElementById('speed');
-  speedSeg.addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;
-    HZ=parseFloat(b.getAttribute('data-hz'));
-    speedSeg.querySelectorAll('button').forEach(function(x){x.setAttribute('aria-pressed','false');});
-    b.setAttribute('aria-pressed','true'); scopes.forEach(function(s){s.setRate(running?HZ:0);}); });
-
   // Palette selector — built from PALETTES/PALETTE_ORDER (Aurora default). Switching
   // recolours new rows going forward and repaints the legend; the saved choice is
   // restored on load. Old rows already on the canvas keep their colours until they
@@ -3561,17 +3676,19 @@
       // always has rows buffered ahead, so q stays deep and this never fires; a
       // slow or bursty one (rtl_power ~1/s, a wide HackRF sweep) drains the queue
       // between frames and the playhead starves — the waterfall freezes, then
-      // jumps when the next frame lands. Instead hold the last line at the chosen
-      // scroll rate so it scrolls smoothly until real data resumes. Give up after
-      // a few seconds: a genuine stall should freeze (and let livePoll raise the
-      // veil), not scroll stale data forever.
+      // jumps when the next frame lands. Instead hold the last line and scroll it
+      // at THIS panel's own measured data rate (s._nom) so it keeps following the
+      // rate the data actually comes — a fast engine barely ever fills, a ~1/s
+      // sweep fills at ~1/s. Give up after a few seconds: a genuine stall should
+      // freeze (and let livePoll raise the veil), not scroll stale data forever.
       var wnow=performance.now()/1000;
       if(g>0){ s._lastRealWall=wnow; s._fillAcc=0; }
       else if(q.length<2 && s.shown){
         if(s._lastRealWall==null) s._lastRealWall=wnow;
         if(wnow-s._lastRealWall<3.0){
+          var fillHz=(s._nom&&s._nom>0.2)?s._nom:HZ;   // follow the measured data rate
           s._fillAcc=(s._fillAcc||0)+dt; var fn=0;
-          while(s._fillAcc>=1/HZ && fn++<4){ s._fillAcc-=1/HZ; s._holdRow(); }
+          while(s._fillAcc>=1/fillHz && fn++<4){ s._fillAcc-=1/fillHz; s._holdRow(); }
         }
       }
     });

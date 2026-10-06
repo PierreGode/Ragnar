@@ -4,6 +4,37 @@
 
 ### 2026-10-05
 
+#### fix(sdr): real Gain + FFT-bins controls for the ESP panel (were HackRF no-ops)
+*branch `feature/esp-sdr-waterfall` · PR pending*
+
+- The ESP panel was built on the HackRF template, so its **Hardware** section showed HackRF **LNA/VGA/amp/antenna** sliders and its **Resolution** section a `hackrf_sweep` **RBW** dropdown — all **dead** (the ESP backend ignored `lna/vga/amp/antenna/bin_hz`). Replaced with the ESP's real controls:
+  - **Gain**: Auto (hardware AGC, default) or a manual gain index (0..max from the firmware's `LIMITS?`), sent as `GAIN HARDWARE` / `GAIN MANUAL <i>`. Verified on hardware: index 10 → ~−66 dBFS, 82 → ~−16 dBFS
+  - **FFT bins**: 256 / 512 / 1024 / 2048 (RBW = sample rate ÷ bins); the capture span still follows the band/zoom
+- Both apply live via the fast retune. Backend `esp_sdr.start(gain=…, fft_bins=…)`, exposed in `/status` (`gain`, `gain_hardware`, `gain_limits`, `fft_bins`); the ESP panel no longer sends HackRF params. `esp_sdr.selftest` 18/18
+
+#### feat(sdr): ESP-SDR frequency trim (FOFS) + Wi-Fi auto-calibration
+*branch `feature/esp-sdr-waterfall` · PR pending*
+
+- The ESP32 has no TCXO, so its LO drifts a few ppm with temperature. New **Frequency trim** control (ESP panel → Settings) corrects it at the LO via the firmware's `FOFS <kHz>` command — verified on real hardware to shift the spectrum **1:1 in kHz** (+FOFS → +kHz). Set an offset by hand (shows the ppm equivalent), or **Auto-trim (Wi-Fi)**
+- **Auto-trim** runs a high-res 2.4 GHz sweep and nulls the drift against the **2.4 GHz Wi-Fi channel centres** (ch 1/6/11). It is self-validating — it only applies a correction when **two channels agree within 40 kHz** and the result is inside the crystal's physical range (~±100 kHz); in a congested 2.4 GHz environment it **declines rather than mis-calibrate** and points you at manual trim or a HackRF cross-reference. Measured edges are sub-bin interpolated; the trim persists across restarts (`data/esp_sdr_fofs.json`, git-ignored)
+- **vs HackRF** cross-reference — the most accurate trim: both radios sweep the same narrow ~40 MHz window (around Wi-Fi ch 6) and the ESP spectrum is **cross-correlated against the HackRF's** (resolution-matched, sub-bin peak). Both see the same ambient RF, so overlapping-channel contamination cancels — it works where the ambient-Wi-Fi lock can't. Applies only on a strong correlation (≥0.5). Validated synthetically (recovers a known shift; accurate on a narrow window where the full band is too coarse)
+- New backend `esp_sdr.set_fofs` / `auto_trim` / `calibrate_vs_reference` / `trim_state`, route `/api/net/esp/trim` (GET state · POST `{khz:N}` manual · `{auto:1}` Wi-Fi · `{hackrf:1}` HackRF cross-ref); FOFS is sent on every capture start and is part of the start signature so a trim change re-applies live. `esp_sdr.selftest` 18/18 (adds Wi-Fi-offset + cross-correlation checks)
+
+#### feat(sdr): ESP-SDR as a third live RF Waterfall panel
+*branch `feature/esp-sdr-waterfall` · PR pending*
+
+- The **RF Waterfall** page (`/rf-waterfall`) now stacks a third live panel: an **[ESP-SDR](https://espargos.net/espsdr/) node** — any ESP32 flashed with the ESP-SDR firmware — streaming **on-chip FFT power spectra** over its native USB serial link, no dedicated SDR hardware needed. On an **ESP32-S3** it covers the 2.4 GHz ISM band (~2.2–2.7 GHz usable): Wi-Fi, Bluetooth, microwave ovens, drones, jammers
+- New backend `esp_sdr.py` speaks the firmware's `SPEC` protocol (newline commands + binary `SPC1` frames), decodes each frame to **dBFS** the way ESP-WebSDR does (`code/mult − 84.3`, with the fftshift + I/Q-axis-flip bin order), max-holds to a steady ~50 rows/s (near the browser's refresh ceiling — the ESP computes FFTs on a fixed window at hundreds/s, so unlike the sweeping HackRF/RTL it scrolls fast) and hands the web layer the **same frame contract** (`power[]` + `band_mhz` + `floor_dbm`) the HackRF/RTL panels use. Receive-only
+- New routes `/api/net/esp/{status,start,stop,frames,selftest}` mirror the HackRF endpoints; the page gate (`_any_sdr_present`) serves the page when only an ESP node is attached
+- Unlike the sweeping HackRF, the ESP captures one fixed FFT **window** (centre = band, span = sample rate 16/40/80 MHz); a narrower zoom drops to a lower sample rate for finer resolution (down to ~31 kHz/bin). Presets `2.3G · 2.4G · 2.45G · 2.6G`
+- The node is **auto-discovered** on any Espressif serial port (env override `RAGNAR_ESP_SDR_PORT`), and coexists with other ESP32s on the bus (e.g. a GPS node) — it only claims a port that answers the ESP-SDR handshake. A capture left streaming by a crashed/killed client is **self-healed** on the next probe (a `RELEASE` doubles as the `SPEC` stop byte, and the half-closed CDC read is tolerated)
+- Removed the manual **Scroll rate** control (Slow/Normal/Fast) from the page. Every waterfall now simply **follows the rate its data arrives**: live rows are genlocked to their producer timestamp (unchanged), and the slow-sweep hold-fill now scrolls at the panel's own *measured* rate (`s._nom`) instead of a fixed pick — a fast engine scrolls fast, a ~1/s `rtl_power` sweep scrolls at ~1/s. Applies to all panels (RTL/HackRF/ESP)
+- **Auto collapse / expand** of the three panels: an idle panel collapses to a slim header row and an active (live/synthetic) one expands, automatically. A chevron button in each panel header overrides it, and the manual choice holds until that panel's state next changes. The **SDR check** panel (Wi-Fi Analyzer) now also reports the ESP-SDR line alongside RTL-SDR and HackRF
+- Hardened ESP-SDR self-recovery: `flush()` the SPEC stop byte ahead of the backlog during lease sync, so a device left streaming by a killed client (even after a long capture) is reclaimed on the next probe in well under a second
+- **Root-cause fix for the real instability:** ModemManager was probing the ESP32's `ttyACM` "USB JTAG/serial debug unit" with AT commands + DTR/RTS toggles (it looks like a cellular modem), which reset the chip and wedged captures at random. Install/update now drop a udev rule (`99-ragnar-espsdr.rules`) tagging all Espressif devices (VID `303a` — ESP-SDR *and* the ESP32 GPS/wardrive nodes) `ID_MM_DEVICE_IGNORE`, so MM leaves them alone; real LTE modems for the cellular-uplink feature are unaffected. The device now stays rock-solid across detection polls
+- A **⚡ Flash ESP32** button in the ESP panel header links to the ESP-SDR browser flasher (`espargos.net/espsdr/app/flash.html`, Web Serial) — visible even when the panel is collapsed, so a blank/undetected board can be flashed in a click
+- Verified on real hardware (ESP32-S3 on `/dev/ttyACM1`): `esp_sdr.selftest` 11/11, live 2.4 GHz capture showing real on-air energy, zoom tuning to 16 MS/s, clean stop/detect, and self-recovery after a `SIGKILL` mid-stream
+
 #### feat(mesh): PCAP view as a collapsible box inline on each capture row
 *branch `feature/mesh-pcap-view-collapsible` · PR pending*
 

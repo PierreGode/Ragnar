@@ -56,6 +56,7 @@ import report_common
 import bt_scanner
 import sdr_spectrum
 import rtl_sdr
+import esp_sdr
 import sigmf_analyzer
 import adsb
 import meshtastic_node
@@ -27246,6 +27247,98 @@ def register_network_diagnostics(app, logger=None):
     def net_sdr_selftest():
         _log("net/sdr/selftest")
         return jsonify(sdr_spectrum.selftest())
+
+    # ------------------------------------------------------------------
+    # True-RF spectrum / waterfall via an ESP-SDR node (esp_sdr.py).
+    # An ESP32 running the ESP-SDR firmware (espargos.net/espsdr) streams
+    # on-chip FFT power spectra over its native USB serial link. Same
+    # receive-only, frame-ring shape as the HackRF/RTL sweeps, so the RF
+    # Waterfall page streams it through the identical consumer. On an
+    # ESP32-S3 the useful band is ~2.2-2.7 GHz (the 2.4 GHz ISM band).
+    # ------------------------------------------------------------------
+    @app.route('/api/net/esp/status', methods=['GET'])
+    def net_esp_status():
+        _log("net/esp/status")
+        return jsonify(esp_sdr.status())
+
+    @app.route('/api/net/esp/start', methods=['POST'])
+    def net_esp_start():
+        data = request.get_json(silent=True) or {}
+        band = (data.get('band') or '2.4').strip()
+        # Optional zoom span (Hz) -> MHz. A valid span sets centre + sample rate
+        # and overrides the named band, so skip band validation when present.
+        lo_mhz = hi_mhz = None
+        try:
+            if data.get('lo_hz') is not None and data.get('hi_hz') is not None:
+                lo_mhz = float(data['lo_hz']) / 1e6
+                hi_mhz = float(data['hi_hz']) / 1e6
+        except (TypeError, ValueError):
+            return _bad('Invalid zoom span')
+        if lo_mhz is None and band not in esp_sdr.BANDS:
+            return _bad('Invalid band')
+        _log(f"net/esp/start band={band} zoom={lo_mhz}:{hi_mhz}")
+        kw = {}
+        if 'gain' in data:          # None/'hardware' = AGC; int = manual index
+            kw['gain'] = data.get('gain')
+        return jsonify(esp_sdr.start(band=band, lo_mhz=lo_mhz, hi_mhz=hi_mhz,
+                                     fft_bins=data.get('fft_bins'), **kw))
+
+    @app.route('/api/net/esp/stop', methods=['POST'])
+    def net_esp_stop():
+        _log("net/esp/stop")
+        return jsonify(esp_sdr.stop())
+
+    @app.route('/api/net/esp/frames', methods=['GET'])
+    def net_esp_frames():
+        try:
+            since = int(request.args.get('since', 0))
+        except (TypeError, ValueError):
+            return _bad('Invalid since')
+        return jsonify(esp_sdr.get_frames(since=since))
+
+    @app.route('/api/net/esp/selftest', methods=['GET'])
+    def net_esp_selftest():
+        _log("net/esp/selftest")
+        return jsonify(esp_sdr.selftest())
+
+    # Frequency trim (FOFS): the ESP32 has no TCXO, so its LO drifts a few ppm.
+    # GET reports the current trim; POST {auto:1} nulls it against the 2.4 GHz
+    # Wi-Fi channel centres; POST {khz:N} sets a manual LO offset in kHz.
+    @app.route('/api/net/esp/trim', methods=['GET', 'POST'])
+    def net_esp_trim():
+        if request.method == 'GET':
+            return jsonify(esp_sdr.trim_state())
+        data = request.get_json(silent=True) or {}
+        if data.get('hackrf'):
+            # Cross-reference the ESP against a TCXO HackRF: sweep the same 2.4 GHz
+            # band on the HackRF, build its max-hold, then correlate the ESP to it.
+            _log("net/esp/trim hackrf")
+            hk = sdr_spectrum.status()
+            if not (hk.get('detect') or {}).get('available'):
+                return jsonify({"ok": False, "error": "no HackRF detected — connect a HackRF "
+                                "(TCXO reference) to cross-calibrate the ESP"})
+            # A narrow ~40 MHz window (around Wi-Fi ch 6) gives the HackRF fine
+            # resolution so the cross-correlation lag is accurate; the full band
+            # is too coarse. Both radios measure this same window.
+            sdr_spectrum.start(lo_mhz=2420.0, hi_mhz=2460.0)
+            deadline = time.time() + 5.5                 # accumulate the HackRF max-hold
+            last = {}
+            while time.time() < deadline:
+                time.sleep(0.5)
+                last = sdr_spectrum.get_frames(0)
+            mh = last.get('max_hold')
+            bm = last.get('band_mhz')
+            sdr_spectrum.stop()
+            if not mh or not bm:
+                return jsonify({"ok": False, "error": "HackRF produced no spectrum — check the device"})
+            return jsonify(esp_sdr.calibrate_vs_reference(mh, bm[0], bm[1], label='HackRF'))
+        if data.get('auto'):
+            _log("net/esp/trim auto")
+            return jsonify(esp_sdr.auto_trim())
+        if 'khz' in data:
+            _log(f"net/esp/trim khz={data.get('khz')}")
+            return jsonify(esp_sdr.set_fofs(data.get('khz')))
+        return _bad('Pass {"hackrf":true}, {"auto":true}, or {"khz":N}')
 
     # ------------------------------------------------------------------
     # Sub-GHz true-RF power sweep / waterfall via an RTL-SDR (rtl_sdr.py).

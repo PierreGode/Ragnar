@@ -10552,10 +10552,10 @@ def wifi_config_alt():
 
 
 def _any_sdr_present():
-    """True if a HackRF or RTL-SDR is currently detected. Uses each backend's
-    status() (which reports from cache while a capture streams, so this never
-    knocks a running sweep off the USB bus). Best-effort — any probe error
-    reads as 'not present'."""
+    """True if a HackRF, RTL-SDR or ESP-SDR is currently detected. Uses each
+    backend's status() (which reports from cache while a capture streams, so
+    this never knocks a running sweep off the USB bus). Best-effort — any probe
+    error reads as 'not present'."""
     try:
         import sdr_spectrum
         if bool((sdr_spectrum.status().get('detect') or {}).get('available')):
@@ -10565,6 +10565,12 @@ def _any_sdr_present():
     try:
         import rtl_sdr
         if bool((rtl_sdr.status().get('detect') or {}).get('available')):
+            return True
+    except Exception:
+        pass
+    try:
+        import esp_sdr
+        if bool((esp_sdr.status().get('detect') or {}).get('available')):
             return True
     except Exception:
         pass
