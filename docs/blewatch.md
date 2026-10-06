@@ -97,7 +97,7 @@ first sighting.
 
 ## In Ragnar (web)
 
-**Network → Diagnostics → Passive · wireless → BLE Watch.** The card is
+**Network → Diagnostics → L2 tab → Passive · Bluetooth LE → BLE Watch.** The card is
 **device-gated**: with no sniffer attached it says so plainly (not a red error)
 rather than pretending to listen. HIGH/CRITICAL findings reach
 [Watchtower](watchtower.md); the detector self-test is part of **validate
