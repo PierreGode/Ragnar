@@ -2,10 +2,17 @@
 
 ## Releases
 
+### 2026-10-07
+
+#### fix(ble): BLE Watch card missing from L2 after #921
+*branch `fix/blewatch-card-l2`*
+
+- The BLE Watch card shipped in #921 still sat in the **L7** panel: the commit moving it to **L2** landed on another branch and missed the merge. It now lives at **Network → Diagnostics → L2 Data Link → Passive · Bluetooth LE**, the L2 description mentions it and the L2 layer badge counts it (13 → 14).
+
 ### 2026-10-06
 
-#### feat(ble): BLE Watch — passive Bluetooth Low Energy attack monitor
-*branch `feature/blewatch-ble-sniffer` · PR pending*
+#### [#921](https://github.com/PierreGode/Ragnar/pull/921) — feat(ble): BLE Watch — passive Bluetooth Low Energy attack monitor
+*branch `feature/blewatch-ble-sniffer`*
 
 - New passive, **detection-only** BLE monitor (`python/blewatch.py`), the Bluetooth counterpart to the Wi-Fi WIDS / ND spoofing watchers. The RX is done by an **external nRF Sniffer over USB — both generations supported: nRF51** (Adafruit [Bluefruit LE Sniffer](https://www.adafruit.com/product/2269)) **and nRF52** (nRF52840 Dongle/DK); Ragnar only parses the captured BLE Link-Layer PDUs with a hand-rolled raw-byte parser (no dissector), and the PDU is identical across both so parser and findings are shared. 16 stable `BLE-0xx` findings across two layers:
   - **Advertising:** device/beacon **clones** (`BLE-001`), **two radios sharing one address** (`BLE-002`), **public-address reuse across names** (`BLE-003`), **RPA rotation storms** (`BLE-004`), **beacon spoof** (`BLE-005`), per-AdvA + advertiser **floods** (`BLE-006/007`), **BLE-spam tooling** signatures — Flipper / "Sour Apple" / Fast-Pair / Swift-Pair (`BLE-013`), vendor-shape mismatch (`BLE-015`), **GATT service masquerade** (`BLE-016`), malformed PDUs (`BLE-014`)
