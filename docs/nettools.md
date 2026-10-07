@@ -2514,7 +2514,7 @@ card **verdict**:
   **No ESMC or SyncE CVEs exist** (the author's sweep across IOS XR/XE, Junos, Nokia, linuxptp
   and synce4l found none), so Class S is protocol-violation and posture detection. LACP shares
   EtherType `0x8809` (subtype `0x01`) and is never alerted on.
-- **ITU-T telecom profiles *(new in v5)*** — a **Class P** of ten posture codes comparing the
+- **ITU-T telecom profiles *(new in v6)*** — a **Class P** of ten posture codes comparing the
   traffic with a **declared** profile, picked from the card's **Profile** list (API
   `profile=g8275.1 | g8275.2 | g8265.1 | 8021as`). They stay **off** until you pick one,
   because nothing in a PTP frame says which profile a domain is meant to follow:
@@ -2537,7 +2537,7 @@ card **verdict**:
   were checked against shipping implementations (Juniper, IP Infusion OcNOS, linuxptp), and
   967 frames of real `ptp4l` G.8275.1 traffic read clean under `g8275.1`.
 
-**gPTP / IEEE 802.1AS** (`majorSdoId 1`, and *(new in v5)* `majorSdoId 2` — the 802.1AS-2020
+**gPTP / IEEE 802.1AS** (`majorSdoId 1`, and *(new in v6)* `majorSdoId 2` — the 802.1AS-2020
 **Common Mean Link Delay Service**, a link-level peer-delay service shared across gPTP
 domains) gets eight peer-delay-specific codes on top of the generic set. The peer-delay and
 transport rules (`PTP-H01`, `PTP-H02`, `PTP-H08`, `PTP-V03`) now watch both, so the strongest

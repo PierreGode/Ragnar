@@ -4,13 +4,13 @@
 
 ### 2026-10-07
 
-#### [#924](https://github.com/PierreGode/Ragnar/pull/924) — feat(net): PTP Watch v5 — ITU-T telecom profiles + CMLDS
+#### [#924](https://github.com/PierreGode/Ragnar/pull/924) — feat(net): PTP Watch v6 — ITU-T telecom profiles + CMLDS
 *branch `feature/ptp-watch-v5`*
 
-- Re-vendored **ptpwatch v5** with the Ragnar adapter re-appended; registry 56 → **66** codes
+- Re-vendored **ptpwatch v6** with the Ragnar adapter re-appended; registry 56 → **66** codes
 - New **Class P** (`PTP-P01`…`P11`, no P07): conformance against a declared ITU-T profile — **G.8275.1**, **G.8275.2**, **G.8265.1** (domain range, transport, multicast vs unicast, peer-delay, priority1, clockClass traceability, G.8275.1 destinations, G.8265.1 correctionField / stepsRemoved). Off until a profile is picked: new **Profile** list on the PTP Watch card and `profile=` on `GET /api/net/ptp-watch` (unknown values rejected)
 - gPTP peer-delay rules (`PTP-H01/H02/H08/V03`) now also watch **CMLDS** (`majorSdoId 2`, 802.1AS-2020)
-- Same findings as upstream v5 on all six of the author's captures, with and without a profile; author tiers on the Pi 5: scenarios 139/139, conformance 1115/1115, self-verify 94/94, ESMC cross-check 0 mismatches; in-app PTP self-test 14 → 19, all 48 Detector Self-Test suites green from the web path
+- Same findings as upstream v6 on all six of the author's captures, with and without a profile; author tiers on the Pi 5: scenarios 139/139, conformance 1115/1115, self-verify 94/94, ESMC cross-check 0 mismatches; in-app PTP self-test 14 → 19, all 48 Detector Self-Test suites green from the web path
 - No new CVEs (index unchanged at 271 / 230); the PTP card's stale "42 finding codes" now reads 66
 - **Docs:** [nettools.md](nettools.md) "PTP Watch"
 

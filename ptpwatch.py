@@ -3483,7 +3483,7 @@ def _ptp_capture_pcap(interface, seconds):
     return path, None
 
 
-# v5 Class P: ITU-T telecom profile conformance is dark until a profile is
+# v6 Class P: ITU-T telecom profile conformance is dark until a profile is
 # declared, because nothing in a PTP frame says which profile a domain follows.
 PTP_PROFILES = ("auto", "g8265.1", "g8275.1", "g8275.2", "8021as")
 
@@ -3696,7 +3696,7 @@ def selftest():
     check("verdict-time-manipulation", v == _PTP_CRITICAL_VERDICT, v)
 
     # 5. Registry integrity: 66 codes after the v3 Class V (CVE), v4 Class S
-    #    (SyncE / ESMC) and v5 Class P (ITU-T telecom profile) additions.
+    #    (SyncE / ESMC) and v6 Class P (ITU-T telecom profile) additions.
     sev = {}
     for spec in FINDINGS.values():
         sev[spec.severity.value] = sev.get(spec.severity.value, 0) + 1
@@ -3756,7 +3756,7 @@ def selftest():
     except Exception as e:
         check("engine-conformance-tier", True, "skipped: %s" % type(e).__name__)
 
-    # 5c. v5 Class P — ITU-T telecom profile conformance. A G.8275.1 Announce in
+    # 5c. v6 Class P — ITU-T telecom profile conformance. A G.8275.1 Announce in
     #     domain 0 is out of range only once the profile is declared; with no
     #     profile Class P stays dark; a conformant G.8275.1 Announce (domain 24,
     #     priority1 128, time/frequency traceable) stays clean under it.
