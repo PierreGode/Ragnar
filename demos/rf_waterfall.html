@@ -2905,6 +2905,9 @@
         r.querySelector('.rwin').value=t.window; r.querySelector('.rbins').value=String(t.bins);
         var dsel=r.querySelector('.rdet'); if(dsel && t.detector){ dsel.value=t.detector; this.det=t.detector; }
         var hdc=r.querySelector('.rhdc'); if(hdc) hdc.checked=(t.hide_dc===undefined)?true:!!t.hide_dc; } }
+    } else if(this.cfg.espTrim){
+      // ESP-SDR has its own Gain control (.eagc/.egain), not HackRF's .hlna/.hvga — refresh via the stored updater.
+      if(this._espGainUI) this._espGainUI();
     } else { var h=this.hw;
       g.querySelector('.hlna').value=h.lna; g.querySelector('.hlnan').textContent=h.lna; g.querySelector('.hvga').value=h.vga; g.querySelector('.hvgan').textContent=h.vga;
       pr(g.querySelector('.hamp'),!!h.amp); pr(g.querySelector('.hant'),!!h.antenna); }
