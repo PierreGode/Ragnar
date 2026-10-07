@@ -84,6 +84,61 @@ def smp_pairing_req(conn_aa, authreq):
     return ll_data(conn_aa, 0x02, body)
 
 
+def nordic_record(ll, proto=3, pid=0x02, channel=37, rssi=60, flags=0x01):
+    """One DLT 272 record as SnifferAPI/Pcap.py stores it: board id + UART
+    header + BLE header (len 10, flags, channel, rssi, evt ctr, timestamp) + LL
+    (the hardware padding byte already removed by the extcap)."""
+    ble = bytes([10, flags, channel, rssi]) + struct.pack('<HI', 1, 1000) + ll
+    if proto == 1:
+        hdr = bytes([6, len(ble), 1, 0, 0, pid])
+    else:
+        hdr = struct.pack('<H', len(ble)) + bytes([proto, 0, 0, pid])
+    return b'\x00' + hdr + ble
+
+
+def nordic_decoder_roundtrip(ll):
+    """Feed a raw UART packet (with the hardware padding byte) through Nordic's
+    vendored SnifferAPI.Packet, store it as the extcap does and check our parser
+    recovers the LL PDU. None when the vendored copy can't be imported."""
+    import os
+    d = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nrf_sniffer')
+    try:
+        if d not in sys.path:
+            sys.path.insert(0, d)
+        from SnifferAPI import Packet as NP
+    except Exception:
+        return None
+    ok = True
+    for proto, pid in ((1, 0x06), (2, 0x06), (3, 0x02), (3, 0x06)):
+        raw = nordic_record(ll[:6] + b'\x00' + ll[6:], proto, pid)[1:]
+        pk = NP.Packet(list(raw))
+        if not (pk.valid and pk.OK):
+            return False
+        meta, out = b.strip_to_ll(b.DLT_NORDIC_BLE, bytes([0] + pk.getList()))
+        ok &= out == ll
+    return ok
+
+
+def replay_272_pcap():
+    """Write a DLT 272 pcap like the extcap and replay it: one AdvA advertising
+    two identities in the same instant must alert."""
+    import os
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix='.pcap')
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            f.write(struct.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 0xffff, b.DLT_NORDIC_BLE))
+            for i, name in enumerate(('Lock-A', 'Lock-B', 'Lock-A', 'Lock-B')):
+                rec = nordic_record(ll_adv(b.ADV_IND, 'c0:ff:ee:00:00:02', ad(name_ad(name))))
+                f.write(struct.pack('<IIII', 1, i * 1000, len(rec), len(rec)) + rec)
+        al = []
+        g = b.BleWatch({}, emit=al.append)
+        b.run_replay(path, g)
+        return g.frames == 4 and bool(al)
+    finally:
+        os.remove(path)
+
+
 def feed(guard, ll, ts, channel=37):
     return guard.process_frame(b.DLT_BLE_LL_PHDR, phdr(channel) + ll, ts)
 
@@ -240,6 +295,33 @@ def _run_checks(verbose):
     esp_boot = b'ets Jun  8 2016 00:22:57\r\nrst:0x1 (POWERON_RESET)\r\nOK\r\n'
     h.ck('ESP32 boot log is neither', b.parse_friend_ati(esp_boot) is None
          and b.parse_sniffer_reply(esp_boot) == (False, None))
+    # Protocol v2 (Bluefruit LE Sniffer V2 firmware) / v3 (nRF52) headers carry a
+    # 16-bit payload length in bytes 0-1, not a header length.
+    h.ck('PING_RESP protocol v2 (Bluefruit V2 fw) identified + version',
+         b.parse_sniffer_reply(b.slip_encode(bytes([2, 0, 2, 1, 0, b.SNIFFER_PING_RESP,
+                                                    0x10, 0x05]))) == (True, 0x0510))
+    h.ck('protocol v3 frame identified',
+         b.parse_sniffer_reply(b.slip_encode(bytes([0, 0, 3, 1, 0, 0x1E]))) == (True, None))
+
+    # ---- DLT 272: the record nrf_sniffer_ble.py writes ---------------------
+    ll = ll_adv(b.ADV_IND, 'a1:b2:c3:d4:e5:f6', ad(name_ad('Thermo')))
+    ok272 = True
+    for proto, pid in ((2, 0x06), (3, 0x02)):
+        meta, out = b.strip_to_ll(b.DLT_NORDIC_BLE, nordic_record(ll, proto, pid, 38, 61))
+        ok272 &= out == ll and meta['channel'] == 38 and meta['rssi'] == -61 and meta['crc_ok']
+    h.ck('DLT 272 v2/v3 record -> LL PDU + channel/RSSI/CRC', ok272)
+    h.ck('DLT 272 non-packet event (PING_RESP) ignored',
+         b.strip_to_ll(b.DLT_NORDIC_BLE, b'\x00' + bytes([2, 0, 2, 1, 0, 0x0E, 1, 2]))
+         == (None, None))
+    nordic = nordic_decoder_roundtrip(ll)
+    if nordic is not None:                        # vendored SnifferAPI importable
+        h.ck("DLT 272 matches Nordic's own decoder (vendored SnifferAPI)", nordic)
+    h.ck('DLT 272 pcap replay end-to-end', replay_272_pcap())
+    h.ck('extcap interface is PORT-VERSION on the real tty',
+         b.extcap_capture_cmd('/x/nrf_sniffer_ble.py', '/dev/null', '/tmp/p.pcap', 460800)[4:]
+         == ['--capture', '--extcap-interface', '/dev/null-' + b.EXTCAP_PROTO_VERSION,
+             '--fifo', '/tmp/p.pcap', '--scan-follow-rsp', '--baudrate', '460800'])
+
     cands = [{'path': '/dev/ttyUSB0', 'kind': 'bluefruit-friend'},
              {'path': '/dev/ttyUSB1', 'kind': 'unknown'}]
     h.ck('Friend alone is never picked as the sniffer',

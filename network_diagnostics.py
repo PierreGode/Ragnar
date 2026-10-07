@@ -25445,10 +25445,13 @@ def do_ble_watch(device=None, seconds=20, replay=None, config=None, quick=False)
                         for c in candidates]}
         source = dev
         try:
-            blewatch.run_live(dev, guard, seconds)
-        except RuntimeError as e:          # extcap helper missing etc.
-            return {'success': False, 'module': 'ble_watch', 'device': dev,
-                    'missing_tool': 'nrf_sniffer_ble', 'error': str(e)}
+            blewatch.run_live(dev, guard, seconds,
+                              baud=blewatch.sniffer_baud(candidates, dev))
+        except RuntimeError as e:          # helper missing / capture stopped
+            r = {'success': False, 'module': 'ble_watch', 'device': dev, 'error': str(e)}
+            if blewatch.find_extcap() is None:
+                r['missing_tool'] = 'nrf_sniffer_ble'
+            return r
         except Exception as e:
             return {'success': False, 'module': 'ble_watch', 'device': dev,
                     'error': 'capture failed: %s: %s' % (type(e).__name__, e)}

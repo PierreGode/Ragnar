@@ -7,7 +7,7 @@ PDUs. **Both nRF Sniffer generations are supported:**
 - **nRF51** — [Adafruit Bluefruit LE Sniffer](https://www.adafruit.com/product/2269) (nRF51822)
 - **nRF52** — nRF52840 Dongle / DK, or any nRF52-based nRF Sniffer
 
-The vendor extcap emits the same BLE Link-Layer PDU for both, so the parser and
+The bundled Nordic extcap emits the same BLE Link-Layer PDU for both, so the parser and
 every finding are identical across them; only the device autodetect and the
 capture quality differ (see [Hardware reality](#hardware-reality)).
 
@@ -28,11 +28,11 @@ evidence).
 | downgrade / session attacks | **Just-Works pairing downgrade** (`BLE-011`), **version swap** (`BLE-010`), **forced re-pair** (`BLE-012`) |
 
 - **Test floor:** Raspberry Pi Zero 2 W (parse/replay path; the sniffer is USB).
-- **Self-test:** 27/27 (`python3 python/blewatch.py --self-test`), including the
-  sniffer-detection probe logic.
-- **Deps:** Python 3.8+ (stdlib only). Live capture needs the **Nordic nRF
-  Sniffer for Bluetooth LE** extcap helper (`nrf_sniffer_ble.py`); the
-  parse/replay path needs nothing.
+- **Self-test:** 34/34 (`python3 python/blewatch.py --self-test`), including the
+  sniffer-detection probe and a DLT-272 cross-check against Nordic's own decoder.
+- **Deps:** Python 3.8+. The parse/replay path is stdlib only. Live capture uses
+  the **bundled** Nordic nRF Sniffer extcap (`python/nrf_sniffer/`) with
+  `pyserial` + `psutil`, both already in Ragnar's requirements. Nothing to install.
 
 ## Findings (stable codes)
 
@@ -64,13 +64,14 @@ down to a BLE Link-Layer PDU:
 |---|---|---|
 | 251 | `LINKTYPE_BLUETOOTH_LE_LL` | bare LE LL PDU (starts at the Access Address) |
 | 256 | `LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR` | 10-byte BLE pseudo-header (channel/RSSI/CRC) + PDU — the canonical Wireshark BLE link type |
-| 272 | `LINKTYPE_NORDIC_BLE` | Nordic sniffer header + PDU — parsed **best-effort** |
+| 272 | `LINKTYPE_NORDIC_BLE` | what the nRF Sniffer extcap writes: board id + UART header + BLE header (flags/channel/RSSI) + PDU, protocol v1–v3 |
 
-> **Hardware-validation note.** The 256/251 paths are fully exercised by the
-> self-test. The Nordic (272) header layout is version-dependent and is parsed
-> best-effort; it is **unvalidated against a real sniffer** on the dev box (none
-> attached). If a live capture mis-parses, capture to a pcap in Wireshark with
-> the nRF Sniffer plugin (DLT 256) and use `--replay`.
+> **Validation note.** 256/251 are exercised by the self-test. 272 follows
+> Nordic's `sniffer_uart_protocol.txt` and the self-test cross-checks it against
+> the bundled `SnifferAPI.Packet` decoder for protocol v1, v2 and v3. The full
+> live path (probe → bundled extcap → DLT-272 pcap → findings) was run against an
+> emulated sniffer on a pty. It has **not yet been run against a physical
+> sniffer** on the dev box.
 
 ## Usage
 
@@ -168,14 +169,28 @@ reports it as a Friend instead of saying "no sniffer". To turn it into a sniffer
 The simpler route is a real Bluefruit LE Sniffer (#2269) or an **nRF52840
 dongle** running nRF Sniffer. Keep the Friend for something else.
 
-### Live capture needs the Nordic extcap
+### Live capture: bundled Nordic extcap
 
-Live capture drives Nordic's `nrf_sniffer_ble.py` Wireshark extcap. Unzip
-the nRF Sniffer release's `extcap/` folder into `~/.config/wireshark/extcap/` (or
-the system extcap directory, e.g. `/usr/lib/aarch64-linux-gnu/wireshark/extcap/`
-on a Pi) and `pip install -r requirements.txt` from that folder. Without it the
-card says the helper is missing, and `--replay` of a Wireshark capture still
-works.
+Live capture drives Nordic's **nRF Sniffer for Bluetooth LE 4.1.1** extcap
+(`nrf_sniffer_ble.py` + `SnifferAPI/`, MIT licence, `LICENSE.txt` alongside).
+It is bundled in `python/nrf_sniffer/`, so no Wireshark plugin install is
+needed. It records `seconds` of traffic to a temporary DLT-272 pcap, which
+blewatch then replays through the detectors.
+
+- **Works with both firmware generations:** 4.1.1 drives the Bluefruit LE
+  Sniffer's **V2** firmware (nRF51, 460 800 baud) and the V3+ nRF52 builds
+  (1 000 000 baud). Nordic's older V2-era extcap (`nrf_sniffer.py`) is
+  **Python 2 only**, which is why it isn't used.
+- **Ragnar change:** the helper splits its interface argument `PORT-VERSION` on
+  `-`, which breaks on `/dev/serial/by-id/...` paths (the problem Adafruit's
+  guide warns about). The bundled copy uses `rsplit('-', 1)`, and blewatch
+  always passes the real tty (`/dev/ttyUSB0-4.1`).
+- **Baud rate:** the one the probe found is passed with `--baudrate`, skipping
+  the helper's slow rate discovery. `--scan-follow-rsp` is on, so scan
+  responses (device names) are captured too.
+- **If a capture fails:** the card shows the helper's exit reason, and Nordic's
+  own log is at `/tmp/logs/log.txt`. `$RAGNAR_NRF_EXTCAP` points blewatch at a
+  different extcap copy.
 
 `$RAGNAR_BLE_SNIFFER` pins a specific `/dev/serial/by-id/...` path and skips
 detection.
