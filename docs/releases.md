@@ -4,6 +4,11 @@
 
 ### 2026-10-07
 
+#### feat(sdr): RF Waterfall always visible in Signal Intelligence
+*branch `feature/rf-waterfall-always-visible`*
+
+- The **RF Waterfall page** button in Signal Intelligence → RF tools used to hide until a HackRF or RTL-SDR was detected (and `/rf-waterfall` 404'd without one). The page now collapses the panel of any radio that isn't connected, so the button is **always shown** and the route is **always served**. The button tooltip lists the live radios and now counts the **ESP-SDR** too (it was missing). The demo toggle now only controls the synthetic feed. ADS-B / Pager / VOR keep their RTL-SDR gating.
+
 #### [#924](https://github.com/PierreGode/Ragnar/pull/924) — feat(net): PTP Watch v6 — ITU-T telecom profiles + CMLDS
 *branch `feature/ptp-watch-v5`*
 

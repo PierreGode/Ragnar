@@ -2138,6 +2138,10 @@ function _wifiRtlCheck() {
         _wifiState.rtlAvailable = !!det.available;
         _wifiRfwfShow();
     }).catch(() => {});
+    fetch('/api/net/esp/status').then(r => r.json()).then(st => {
+        _wifiState.espAvailable = !!(st && st.detect && st.detect.available);
+        _wifiRfwfShow();
+    }).catch(() => {});
     // Meshtastic companion node (separate USB device) gates the Mesh Nodes button.
     fetch('/api/net/mesh/status').then(r => r.json()).then(st => {
         _wifiState.meshAvailable = !!(st && st.detect && st.detect.available);
@@ -2150,16 +2154,20 @@ function _wifiRfwfShow() {
     if (!btn) return;
     const hackrf = !!(_wifiState.sdr && _wifiState.sdr.available);
     const rtl = !!_wifiState.rtlAvailable;
+    const esp = !!_wifiState.espAvailable;
     const demo = !!_wifiState.rfwfDemo;
-    const show = hackrf || rtl || demo;
-    btn.classList.toggle('hidden', !show);
-    btn.classList.toggle('inline-flex', show);
+    // Always offer the waterfall: the page collapses the panel of any radio
+    // that isn't connected instead of the button hiding here.
+    btn.classList.remove('hidden');
+    btn.classList.add('inline-flex');
     const bits = [];
     if (hackrf) bits.push('HackRF');
     if (rtl) bits.push('RTL-SDR');
+    if (esp) bits.push('ESP-SDR');
     btn.title = bits.length
         ? 'Open the RF Waterfall page — live: ' + bits.join(' + ')
-        : 'Open the RF Waterfall page (synthetic demo — connect a HackRF or RTL-SDR for true RF)';
+        : (demo ? 'Open the RF Waterfall page (synthetic demo — connect an RTL-SDR, HackRF or ESP-SDR for true RF)'
+                : 'Open the RF Waterfall page (no SDR connected — panels stay collapsed until a radio is plugged in)');
     // Signal Analyzer works offline on recorded SigMF captures (no live SDR
     // needed) — always offer it; the page itself guides you if no capture exists.
     const analyzer = document.getElementById('wifi-analyzer-btn');

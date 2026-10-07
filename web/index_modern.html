@@ -3225,10 +3225,10 @@
                         <span id="wifi-zb-status" class="text-xs text-amber-500/70"></span>
                         <span id="wifi-scan-status" class="text-xs text-gray-500"></span>
                     </div>
-                    <!-- Other RF tools: each opens its own page (all link back to Signal Intelligence). Each appears as its radio is detected, or with the RF Waterfall demo toggle on. -->
+                    <!-- Other RF tools: each opens its own page (all link back to Signal Intelligence). RF Waterfall is always shown (its page collapses absent radios); the rest appear as their radio is detected, or with the RF Waterfall demo toggle on. -->
                     <div class="flex flex-wrap items-center gap-4 mt-4 pt-3 border-t border-slate-700">
                         <span class="text-xs uppercase tracking-wider text-gray-500 mr-1 self-center">🧰 RF tools</span>
-                        <a href="/rf-waterfall" id="wifi-rfwf-btn" title="Open the full-screen RF Waterfall page — true-RF sub-GHz (RTL-SDR) + Wi-Fi bands (HackRF), stacked" class="hidden items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded text-sm font-semibold">
+                        <a href="/rf-waterfall" id="wifi-rfwf-btn" title="Open the full-screen RF Waterfall page — RTL-SDR, HackRF and ESP-SDR panels, stacked" class="inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded text-sm font-semibold">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
                             RF Waterfall page
                         </a>
@@ -3257,7 +3257,7 @@
                             APRS
                         </a>
                         <button type="button" onclick="wifiSdrCheck()" id="wifi-sdr-check" title="Diagnose why an SDR (HackRF / RTL-SDR) isn't detected — checks the USB bus, drivers, tools and power, and tells you the fix" class="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-600 text-gray-100 px-3 py-2 rounded text-sm font-semibold border border-slate-600">🩺 SDR check</button>
-                        <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none" title="Keep the RF Waterfall page reachable even with no SDR connected — it shows a synthetic feed, and each panel flips to true RF automatically when its radio (HackRF / RTL-SDR) is plugged in"><input type="checkbox" id="wifi-rfwf-demo" class="accent-indigo-500"> <span class="text-indigo-300">🌊 RF Waterfall demo</span></label>
+                        <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none" title="Show a synthetic feed on the RF Waterfall panels (and the ADS-B / Pager / VOR tools) when no SDR is connected — each panel flips to true RF automatically when its radio (HackRF / RTL-SDR / ESP-SDR) is plugged in"><input type="checkbox" id="wifi-rfwf-demo" class="accent-indigo-500"> <span class="text-indigo-300">🌊 RF Waterfall demo</span></label>
                     </div>
                     <div id="wifi-sdr-diag" class="hidden mt-3 rounded-lg border border-slate-700 bg-slate-900/60 p-3 text-sm"></div>
                 </div>
@@ -9449,7 +9449,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261007-ptp-v6"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261007-rfwf-visible"></script>
 
 
 
