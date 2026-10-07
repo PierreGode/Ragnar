@@ -9741,7 +9741,9 @@ async function runPtpWatch() {
     out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing PTP (Annex F 0x88F7 · Annex D+E UDP 319/320)…</p>';
     try {
         _fillIfaceSel('ptpwatch-iface');
-        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const profEl = document.getElementById('ptpwatch-profile');
+        const prof = profEl && profEl.value ? profEl.value : 'auto';
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '') + '&profile=' + encodeURIComponent(prof);
         const d = await fetchAPI('/api/net/ptp-watch' + qs);
         if (!d || d.success === false) {
             const msg = (d && d.error) || 'failed';
@@ -9753,7 +9755,8 @@ async function runPtpWatch() {
         const [cls, label] = _PTP_VERDICT_STYLE[d.verdict] || _PTP_VERDICT_STYLE.unknown;
         const transports = (d.transports || []).join(', ') || '—';
         let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
-        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · clocks: ${d.clocks || 0} · transports: ${escapeHtml(transports)}</p>`;
+        const profLabel = (d.profile && d.profile !== 'auto') ? ` · profile: ${escapeHtml(d.profile)}` : ' · no profile declared (telecom checks off)';
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · clocks: ${d.clocks || 0} · transports: ${escapeHtml(transports)}${profLabel}</p>`;
         const findings = (d.findings || []).filter(f => ['critical', 'high', 'medium'].includes((f.severity || '').toLowerCase()));
         if (findings.length) {
             html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +

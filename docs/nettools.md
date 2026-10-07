@@ -2465,7 +2465,7 @@ slaved to it. All three transports are parsed **unconditionally**: **Annex F** (
 Ethernet, EtherType `0x88F7`), **Annex D** (UDP/IPv4, `224.0.1.129` / `224.0.0.107`, ports
 `319` event / `320` general) and **Annex E** (UDP/IPv6, `ff0X::181` / `ff02::6B`). PTP
 advertises no prefixes and correlates with no route family, so dual-stack is packet-layer
-plumbing with **no IPv6-specific finding codes** — the same 56 codes fire regardless of L3.
+plumbing with **no IPv6-specific finding codes** — the same 66 codes fire regardless of L3.
 
 Two design constraints shape every rule. First, **no rule consults the sensor's wall
 clock** — a sensor monitoring a timing plane under attack may itself be slewed or targeted,
@@ -2514,9 +2514,35 @@ card **verdict**:
   **No ESMC or SyncE CVEs exist** (the author's sweep across IOS XR/XE, Junos, Nokia, linuxptp
   and synce4l found none), so Class S is protocol-violation and posture detection. LACP shares
   EtherType `0x8809` (subtype `0x01`) and is never alerted on.
+- **ITU-T telecom profiles *(new in v5)*** — a **Class P** of ten posture codes comparing the
+  traffic with a **declared** profile, picked from the card's **Profile** list (API
+  `profile=g8275.1 | g8275.2 | g8265.1 | 8021as`). They stay **off** until you pick one,
+  because nothing in a PTP frame says which profile a domain is meant to follow:
 
-**gPTP / IEEE 802.1AS** (`majorSdoId == 1`) gets eight peer-delay-specific codes on top of
-the generic set (the two `clockClass`-derived rules are masked for it, since 802.1AS uses
+  | | G.8265.1 | G.8275.1 | G.8275.2 |
+  |---|---|---|---|
+  | Purpose | frequency | full timing support | partial timing support |
+  | Domain range (default) | 4–23 (4) | 24–43 (24) | 44–63 (44) |
+  | Transport | unicast UDP | Ethernet | unicast UDP |
+  | priority1 | not pinned | 128 | 128 |
+
+  **`PTP-P01`** domain outside the profile's range, **`P02`** transport foreign to it (high),
+  **`P03`** multicast Sync/Announce in a unicast profile (high), **`P04`** unicast negotiation
+  in a multicast-only profile, **`P05`** peer-delay in a telecom profile, **`P06`** priority1
+  not pinned to the profile value, **`P08`** a primary-reference clockClass with no
+  traceability asserted (high, a self-contradiction), **`P09`** a destination outside the
+  G.8275.1 address pair, and **`P10`/`P11`** non-zero `correctionField` / `stepsRemoved`
+  under G.8265.1. P07, P12 and P13 were cut upstream for lack of verifiable ground truth
+  (permitted clockClass sets, grant-duration ranges, Interface Rate TLV). The table values
+  were checked against shipping implementations (Juniper, IP Infusion OcNOS, linuxptp), and
+  967 frames of real `ptp4l` G.8275.1 traffic read clean under `g8275.1`.
+
+**gPTP / IEEE 802.1AS** (`majorSdoId 1`, and *(new in v5)* `majorSdoId 2` — the 802.1AS-2020
+**Common Mean Link Delay Service**, a link-level peer-delay service shared across gPTP
+domains) gets eight peer-delay-specific codes on top of the generic set. The peer-delay and
+transport rules (`PTP-H01`, `PTP-H02`, `PTP-H08`, `PTP-V03`) now watch both, so the strongest
+denial-of-timing rules are no longer blind to CMLDS; the Announce / Follow_Up / Signaling
+rules stay instance-only, since CMLDS never carries those messages (the two `clockClass`-derived rules are masked for it, since 802.1AS uses
 248 for non-GM-capable and weighs BMCA differently). The headline is **multiple peer-delay
 responders on one link** (`PTP-H02`): because 802.1AS mandates point-to-point, a single
 injected `Pdelay_Resp` sets `asCapable=FALSE` and stops timing on that port — a complete
@@ -2524,7 +2550,7 @@ injected `Pdelay_Resp` sets `asCapable=FALSE` and stops timing on that port — 
 (missing TLV, a length that contradicts `stepsRemoved`, a repeated `clockIdentity` loop).
 The engine is pure-Python — the Ethernet/IPv4/IPv6/UDP decode, the PTP parser and the pcap
 reader are all hand-rolled (no Scapy; Scapy has no PTP dissector at any shipping version).
-**API:** `GET /api/net/ptp-watch` (query: `interface`, `seconds`).
+**API:** `GET /api/net/ptp-watch` (query: `interface`, `seconds`, `profile` — default `auto`, none declared).
 
 > **Deployment note.** A full core SPAN into a USB NIC on a Pi Zero 2W will saturate the
 > adapter — mirror a VLAN or apply an ACL to the mirror session; do not mirror a busy trunk

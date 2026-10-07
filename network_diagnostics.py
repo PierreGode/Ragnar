@@ -26754,8 +26754,11 @@ def register_network_diagnostics(app, logger=None):
             return _bad('Invalid interface')
         iface = iface or _capture_iface()
         secs = _clamp_int(request.args.get('seconds'), 20, 8, 60)
-        _log(f"net/ptp-watch iface={iface or 'default-route'} secs={secs}")
-        return jsonify(do_ptp_watch(interface=iface, seconds=secs))
+        profile = (request.args.get('profile') or 'auto').strip().lower()
+        if profile not in ptpwatch.PTP_PROFILES:
+            return _bad('Unknown PTP profile')
+        _log(f"net/ptp-watch iface={iface or 'default-route'} secs={secs} profile={profile}")
+        return jsonify(do_ptp_watch(interface=iface, seconds=secs, profile=profile))
 
     @app.route('/api/net/smtp-watch', methods=['GET'])
     def net_smtp_watch():
