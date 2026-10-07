@@ -12,6 +12,7 @@
 - New verdict `plc-abuse` pages in the Network Integrity Monitor (`learning` counts as clean); HIGH/MEDIUM findings feed **Watchtower** (`modbus_watch`); added to the background rotation, `GET /api/net/modbus-watch`, `GET/POST /api/net/modbus-baseline` and CLI `modbus-watch` (with `--pcap` replay)
 - **4 new CVEs** (index 271 → **275** named / 230 → **234** detected): CVE-2021-22779 (ModiPwn), and CVE-2019-14462 / CVE-2019-14463 / CVE-2024-10918 (libmodbus framing, flagged as a trigger only)
 - Detector Self-Test: new `modbus` suite 30/30, including Scapy pcap replays over IPv4, IPv6 and IPv6 with an extension header. Upstream verifier 32/32. Checked on live sockets in a sealed network namespace: the learning scan stays clean, the attack scan reads `plc-abuse` on both families, and the learned master stays quiet
+- Updated **module visibility matrix** with the Modbus Watch tile (L7, on-path unicast tier C): `docs/ragnar_osi_visibility_matrix.jpg` and the per-layer web crops in `web/images/osi/` re-cut (band edges unchanged), image cache-bust bumped
 - **Docs:** [nettools.md](nettools.md) "Modbus Watch", [watchtower.md](watchtower.md), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md)
 
 #### [#925](https://github.com/PierreGode/Ragnar/pull/925) — feat(sdr): RF Waterfall always visible in Signal Intelligence
