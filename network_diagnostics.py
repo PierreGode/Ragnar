@@ -24745,6 +24745,578 @@ def _smtp_selftest():
 
 
 # ==========================================================================
+# Modbus Watch — passive Modbus/TCP posture monitor (vendored python/modbuswatch/)
+# ==========================================================================
+# Adapts the vendored modbuswatch package: a passive reader of Modbus/TCP (tcp/502)
+# that answers the question that matters on an OT segment — who is talking to the
+# PLCs and what are they telling them to do. Modbus has no authentication, so most of
+# it is posture: a write (or any function code) from a master outside the learned
+# baseline (MBW-001/004), FC8 Force Listen Only that silently drops a slave off the
+# bus (MBW-002) or a restart / clear-counters (MBW-003), Schneider UMAS (FC90)
+# activity (MBW-010) and the ModiPwn read-then-reconfigure sequence (MBW-011,
+# CVE-2021-22779), Read-Device-ID enumeration bursts (MBW-020), unit-ID sweeps
+# (MBW-021), and Modbus outside a declared OT subnet / plain 502 to a host that also
+# speaks Modbus Security on 802 (MBW-040/041). The CVE layer is thin and honest:
+# MBW-030 flags malformed MBAP/PDU framing — the libmodbus over-read / over-reply
+# class (CVE-2019-14462, CVE-2019-14463, CVE-2024-10918) — as a TRIGGER only; it
+# cannot confirm the server runs libmodbus. Dual-stack, including the IPv6
+# extension-header walk to the TCP header. Modbus RTU/serial is out of scope (no
+# passive wire tap); 802 is TLS and only its presence is recorded.
+#
+# The master baseline is learn-then-arm: the first Modbus ADU seen starts a learning
+# window (default one hour, across scans and the background rotation); masters seen
+# in it are trusted per (slave, unit). It persists in data/modbus_watch.json so the
+# window spans scans. "Arm now" ends learning early; "Re-learn" forgets it.
+_MODBUS_PY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+_MODBUS_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'data', 'modbus_watch.json')
+_modbus_lock = threading.Lock()
+_MODBUS_LEARN_S = 3600.0
+_MODBUS_MAX_PROFILES = 2048
+_MODBUS_MAX_MASTERS = 64
+_MODBUS_SEV_RANK = {'info': 0, 'low': 1, 'medium': 2, 'high': 3}
+_MODBUS_SEV_TO_GUARD = {'high': 'HIGH', 'medium': 'MEDIUM', 'low': 'LOW', 'info': 'INFO'}
+# Codes that name a CVE. MBW-030 is trigger detection for the libmodbus framing
+# class; MBW-011 tracks the published ModiPwn chain over UMAS.
+_MODBUS_CVES = {'MBW-030': ['CVE-2019-14462', 'CVE-2019-14463', 'CVE-2024-10918'],
+                'MBW-011': ['CVE-2021-22779']}
+# Capture filter: Modbus/TCP and Modbus Security, plus IPv6 whose first next-header
+# is NOT TCP/UDP/ICMPv6 — i.e. an extension-header chain (or a fragment), which a
+# plain `tcp port 502` can never match in libpcap. The sensor walks the chain and
+# its own port gate drops anything that is not Modbus.
+_MODBUS_BPF = ('tcp port 502 or tcp port 802 or '
+               '(ip6 and not ip6 proto 6 and not ip6 proto 17 and not ip6 proto 58)')
+
+
+def _modbus_import():
+    """Import the vendored modbuswatch package (python/ must be on sys.path; the
+    package uses relative imports so its findings/state modules never collide with
+    dns_doctor_passive's). Returns (findings, state, parser). The sensor module needs
+    scapy and is imported separately, only when a pcap is replayed."""
+    if _MODBUS_PY_DIR not in sys.path:
+        sys.path.insert(0, _MODBUS_PY_DIR)
+    from modbuswatch import findings as _f, state as _s, parser as _p
+    return _f, _s, _p
+
+
+def _modbus_af(family):
+    import socket as _sock
+    return 6 if family == _sock.AF_INET6 else 4
+
+
+def _modbus_family(af):
+    import socket as _sock
+    return _sock.AF_INET6 if int(af) == 6 else _sock.AF_INET
+
+
+def _modbus_parse_subnets(specs):
+    """['10.20.0.0/24', ...] -> (clean string list, [(family, ip_network)]). Invalid
+    entries are dropped; at most 16 are kept."""
+    import ipaddress
+    clean, nets = [], []
+    for s in (specs or [])[:16]:
+        try:
+            net = ipaddress.ip_network(str(s).strip(), strict=False)
+        except ValueError:
+            continue
+        clean.append(str(net))
+        nets.append((_modbus_family(net.version), net))
+    return clean, nets
+
+
+def _modbus_load():
+    try:
+        with open(_MODBUS_STATE_PATH) as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _modbus_save(d):
+    try:
+        os.makedirs(os.path.dirname(_MODBUS_STATE_PATH), exist_ok=True)
+        tmp = _MODBUS_STATE_PATH + '.tmp'
+        with open(tmp, 'w') as fh:
+            json.dump(d, fh, indent=1)
+        os.replace(tmp, _MODBUS_STATE_PATH)
+    except OSError:
+        pass
+
+
+def _modbus_baseline_from(state_mod, d, window_s):
+    """Rebuild a vendored Baseline from the persisted JSON state."""
+    bl = state_mod.Baseline(window_s=window_s)
+    bl.armed_at = d.get('armed_at')
+    for p in d.get('profiles') or []:
+        try:
+            slot = (_modbus_family(p['af']), str(p['slave']), int(p['unit']))
+        except (KeyError, TypeError, ValueError):
+            continue
+        bl.profiles[slot] = state_mod.SlaveProfile(
+            masters_seen=set(p.get('masters') or []),
+            fcs_seen=set(int(x) for x in p.get('fcs') or []),
+            first_seen=float(p.get('first_seen') or 0.0))
+    return bl
+
+
+def _modbus_baseline_to(bl, security_hosts, ot_clean):
+    profiles = []
+    for (fam, slave, unit), prof in list(bl.profiles.items())[:_MODBUS_MAX_PROFILES]:
+        profiles.append({'af': _modbus_af(fam), 'slave': slave, 'unit': unit,
+                         'masters': sorted(prof.masters_seen)[:_MODBUS_MAX_MASTERS],
+                         'fcs': sorted(prof.fcs_seen),
+                         'first_seen': prof.first_seen})
+    return {'armed_at': bl.armed_at, 'window_s': bl.window_s, 'profiles': profiles,
+            'security_hosts': sorted([_modbus_af(f), h] for f, h in security_hosts),
+            'ot_subnets': ot_clean}
+
+
+def _modbus_summarize(engine, findings_mod):
+    """Collapse the engine's per-ADU findings into one row per (code, family, master,
+    slave, unit) with a count — the engine emits on every matching request."""
+    rows = {}
+    for f in engine.findings:
+        title, klass, sev, conf = findings_mod.REGISTRY[f.code]
+        k = (f.code, f.key.family, f.key.src, f.key.dst, f.key.unit_id)
+        r = rows.get(k)
+        if r is None:
+            rows[k] = {'code': f.code, 'name': title, 'klass': klass, 'severity': sev,
+                       'confidence': conf, 'af': 'v%d' % _modbus_af(f.key.family),
+                       'master': f.key.src, 'slave': f.key.dst, 'unit': f.key.unit_id,
+                       'detail': f.detail, 'cves': list(_MODBUS_CVES.get(f.code, [])),
+                       'count': 1, 'first_ts': f.ts}
+        else:
+            r['count'] += 1
+    return sorted(rows.values(), key=lambda r: (-_MODBUS_SEV_RANK.get(r['severity'], 0),
+                                                r['code'], r['slave'], r['master']))
+
+
+def _modbus_verdict(findings, adus, learning):
+    """clean < learning < exposure < suspicious < plc-abuse. A high finding is an
+    observed action against a PLC (off-baseline write, Force Listen Only, the ModiPwn
+    sequence); medium is a trigger or unusual-but-possibly-legitimate activity
+    (malformed framing, UMAS, restart, an unlearned master reading)."""
+    sev = {f['severity'] for f in findings}
+    if 'high' in sev:
+        return 'plc-abuse'
+    if 'medium' in sev:
+        return 'suspicious'
+    if sev:
+        return 'exposure'
+    if adus and learning:
+        return 'learning'
+    return 'clean'
+
+
+def _modbus_normalize(f):
+    """modbuswatch summary row -> the guard finding shape _guard_emit_jsonl expects."""
+    return {'code': f['code'], 'name': f['name'],
+            'severity': _MODBUS_SEV_TO_GUARD.get(f['severity'], 'MEDIUM'),
+            'klass': 'ATTACK' if f['klass'] == 'abuse' else 'EXPOSURE',
+            'src': f['master'], 'cves': list(f.get('cves') or []),
+            'detail': {'slave': f['slave'], 'unit': f['unit'], 'af': f['af'],
+                       'confidence': f['confidence'], 'count': f['count'],
+                       'text': f['detail']}}
+
+
+def _modbus_analyze(pcap, ot_subnets=None, learn_seconds=None, persist=True):
+    """Replay a pcap through the vendored sensor + engine with the persisted (or, when
+    persist=False, a fresh) baseline. Returns (summary rows, stats dict)."""
+    F, S, _P = _modbus_import()
+    from modbuswatch import sensor as _sensor
+    from scapy.utils import PcapReader
+    d = _modbus_load() if persist else {}
+    window = float(learn_seconds if learn_seconds is not None
+                   else d.get('window_s') or _MODBUS_LEARN_S)
+    if ot_subnets is None:
+        ot_clean, ot_nets = _modbus_parse_subnets(d.get('ot_subnets') or [])
+    else:
+        ot_clean, ot_nets = _modbus_parse_subnets(ot_subnets)
+    bl = _modbus_baseline_from(S, d, window)
+    sec_hosts = set()
+    for af, host in d.get('security_hosts') or []:
+        sec_hosts.add((_modbus_family(af), str(host)))
+    eng = F.Engine(baseline=bl, ot_subnets=ot_nets, security_hosts=sec_hosts)
+    counts = {'frames': 0, 'adus': 0}
+    _feed = eng.feed
+
+    def _counting_feed(*a, **k):
+        counts['adus'] += 1
+        return _feed(*a, **k)
+    eng.feed = _counting_feed
+    last_ts = None
+    with PcapReader(pcap) as rd:
+        for pkt in rd:
+            counts['frames'] += 1
+            try:
+                last_ts = float(pkt.time)
+                _sensor.process_packet(pkt, eng)
+            except Exception:
+                continue          # one malformed frame must never kill the scan
+    rows = _modbus_summarize(eng, F)
+    now = last_ts if last_ts is not None else time.time()
+    learning = bl.armed_at is not None and bl.learning(now)
+    stats = {'adus': counts['adus'], 'frames': counts['frames'],
+             'learning': learning,
+             'learning_ends': (bl.armed_at + bl.window_s) if bl.armed_at is not None else None,
+             'slaves': len(bl.profiles),
+             'masters': sorted({m for p in bl.profiles.values() for m in p.masters_seen}),
+             'security_hosts': sorted(h for _f, h in eng.security_hosts),
+             'ot_subnets': ot_clean}
+    if persist:
+        _modbus_save(_modbus_baseline_to(bl, eng.security_hosts, ot_clean))
+    return rows, stats
+
+
+def do_modbus_watch(interface=None, seconds=20, ot_subnets=None, learn_seconds=None,
+                    pcap=None, persist=True, quick=False):
+    """Passive Modbus/TCP posture scan (detection-only, never transmits). Learns which
+    masters talk to each PLC, then flags off-baseline writes and function codes, FC8
+    Force Listen Only / restart, UMAS + the ModiPwn sequence (CVE-2021-22779),
+    enumeration and unit-ID sweeps, malformed framing (libmodbus CVE-2019-14462 /
+    CVE-2019-14463 / CVE-2024-10918 trigger) and cleartext-segment posture.
+    Dual-stack. `ot_subnets` (list) is saved for later scans when given; `pcap`
+    replays a file instead of capturing."""
+    if not _have_scapy():
+        return {'success': False, 'error': 'Modbus Watch needs the Python scapy module '
+                '(pip install scapy).'}
+    iface = None
+    tmp = None
+    if pcap:
+        if not os.path.isfile(pcap):
+            return {'success': False, 'error': 'pcap not found: %s' % pcap}
+        seconds = 0
+    else:
+        iface = interface if _valid_iface(interface or '') else _capture_iface()
+        if not iface:
+            return {'success': False, 'error': 'no interface to capture on'}
+        seconds = _clamp_int(seconds, 20, 5, 60)
+        if not _have('tcpdump'):
+            return {'success': False, 'interface': iface,
+                    'error': 'tcpdump is not installed. Click Install to add it.',
+                    'missing_tool': 'tcpdump'}
+        import tempfile
+        fd, tmp = tempfile.mkstemp(suffix='.pcap')
+        os.close(fd)
+        # Full snaplen: MBW-030 compares the MBAP length field with the bytes that
+        # actually arrived, so a truncated segment would read as malformed framing.
+        res = _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-p',
+                    '-s', '65535', '-c', '20000', '-w', tmp, _MODBUS_BPF],
+                   timeout=seconds + 8)
+        if (os.path.getsize(tmp) <= 24 and res['err'] and any(
+                k in res['err'].lower() for k in ('permission', "couldn't",
+                                                  'no such device', 'syntax error'))):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return {'success': False, 'interface': iface, 'error': res['err'].strip()[:200]}
+        pcap = tmp
+    try:
+        with _modbus_lock:
+            rows, st = _modbus_analyze(pcap, ot_subnets=ot_subnets,
+                                       learn_seconds=learn_seconds, persist=persist)
+    except Exception as e:
+        return {'success': False, 'interface': iface,
+                'error': 'modbus analysis failed: %s: %s' % (type(e).__name__, e)}
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    verdict = _modbus_verdict(rows, st['adus'], st['learning'])
+    reasons = []
+    for f in rows:
+        if f['severity'] == 'info' and len(rows) > 1:
+            continue
+        reasons.append('%s: %s — %s %s → %s unit %s (%s×)' % (
+            f['code'], f['name'], f['af'], f['master'], f['slave'], f['unit'], f['count']))
+        if len(reasons) >= 8:
+            break
+    if not reasons:
+        if not st['adus']:
+            reasons = ['No Modbus/TCP traffic seen on this segment (tcp/502)']
+        elif st['learning']:
+            reasons = ['Learning the master baseline — %d slave/unit pair(s), %d master(s) '
+                       'so far; off-baseline writes alert once the window closes'
+                       % (st['slaves'], len(st['masters']))]
+        else:
+            reasons = ['Modbus/TCP observed; every request came from a learned master and '
+                       'no abuse, sweep or malformed framing was seen']
+    by_sev = {}
+    for f in rows:
+        by_sev[f['severity']] = by_sev.get(f['severity'], 0) + 1
+    result = {'success': True, 'module': 'modbus_watch', 'interface': iface,
+              'seconds': seconds, 'verdict': verdict, 'reasons': reasons,
+              'findings': rows, 'by_severity': by_sev,
+              'adus': st['adus'], 'packet_count': st['frames'],
+              'learning': st['learning'], 'learning_ends': st['learning_ends'],
+              'slaves': st['slaves'], 'masters': st['masters'],
+              'security_hosts': st['security_hosts'], 'ot_subnets': st['ot_subnets']}
+    # HIGH and MEDIUM reach Watchtower: both are observed actions or triggers on a
+    # PLC segment. Low/info posture (enumeration, cleartext segment) stays in the card.
+    alerts = [_modbus_normalize(f) for f in rows if f['severity'] in ('high', 'medium')]
+    if not quick and persist and alerts:
+        _guard_emit_jsonl('modbus_watch', {'interface': iface, 'findings': alerts})
+    return result
+
+
+def do_modbus_baseline(action='get', ot_subnets=None):
+    """Manage the learned Modbus master baseline. 'arm' ends the learning window now
+    (keeps what was learned); 'reset' forgets it so the next Modbus seen starts a new
+    window; 'config' saves the declared OT subnet list (enables MBW-040)."""
+    with _modbus_lock:
+        d = _modbus_load()
+        if action == 'reset':
+            d = {'ot_subnets': d.get('ot_subnets') or [],
+                 'window_s': d.get('window_s') or _MODBUS_LEARN_S}
+            _modbus_save(d)
+        elif action == 'arm':
+            d['armed_at'] = time.time() - float(d.get('window_s') or _MODBUS_LEARN_S)
+            _modbus_save(d)
+        elif action == 'config':
+            d['ot_subnets'] = _modbus_parse_subnets(ot_subnets or [])[0]
+            _modbus_save(d)
+        armed_at = d.get('armed_at')
+        window = float(d.get('window_s') or _MODBUS_LEARN_S)
+        return {'success': True, 'action': action,
+                'learning': armed_at is None or (time.time() - armed_at) < window,
+                'learning_ends': (armed_at + window) if armed_at is not None else None,
+                'slaves': len(d.get('profiles') or []),
+                'masters': sorted({m for p in d.get('profiles') or []
+                                   for m in p.get('masters') or []}),
+                'ot_subnets': d.get('ot_subnets') or []}
+
+
+def _modbus_selftest():
+    """Offline scenarios over the vendored parser + engine (no scapy, no root), plus
+    a Scapy end-to-end leg that writes IPv4, IPv6 and IPv6-behind-an-extension-header
+    pcaps and replays them through do_modbus_watch's own pcap path."""
+    import socket as _sock
+    import struct as _st
+    scenarios = []
+
+    def check(name, cond):
+        scenarios.append({'name': name, 'pass': bool(cond)})
+
+    try:
+        F, S, P = _modbus_import()
+    except Exception as e:
+        return {'success': False, 'scenarios': [
+            {'name': 'modbuswatch import failed: %s' % e, 'pass': False}]}
+
+    def adu(unit, pdu, txn=1, length=None, proto=0):
+        ln = len(pdu) + 1 if length is None else length
+        return _st.pack('>HHHB', txn, proto, ln, unit) + pdu
+
+    def eng(window=0.0, learned=(), **kw):
+        bl = S.Baseline(window_s=window)
+        for fam, src, dst, unit in learned:
+            bl.observe(S.FlowKey(fam, src, dst, unit), 3, now=0.0)
+        bl.armed_at = 0.0
+        return F.Engine(baseline=bl, **kw)
+
+    def codes(e):
+        return {f.code for f in e.findings}
+
+    V4, V6 = _sock.AF_INET, _sock.AF_INET6
+    M, A, PLC = '10.20.0.5', '10.20.0.99', '10.20.0.20'
+    read = _st.pack('>BHH', 3, 0, 5)
+    coil = _st.pack('>BHH', 5, 0, 0xFF00)
+
+    # Registry + severity split (11 codes: 3 high / 4 medium / 3 low / 1 info).
+    reg = F.REGISTRY
+    split = {}
+    for v in reg.values():
+        split[v[2]] = split.get(v[2], 0) + 1
+    check('registry: 11 codes, 3 high / 4 medium / 3 low / 1 info',
+          len(reg) == 11 and split == {'high': 3, 'medium': 4, 'low': 3, 'info': 1})
+
+    # Parser: framing cross-checks (MBW-030 is load-bearing in parse()).
+    a = P.parse(adu(1, read))
+    check('parser: well-formed FC3 read decodes clean',
+          a is not None and a.malformed is None and a.function_code == 3)
+    check('parser: MBAP length > bytes present is malformed (CVE-2024-10918 shape)',
+          (P.parse(adu(1, read, length=30)) or P.Adu(0, 0, 0, 0, 0, False)).malformed)
+    check('parser: protocol id != 0 is malformed',
+          (P.parse(adu(1, read, proto=7)) or P.Adu(0, 0, 0, 0, 0, False)).malformed)
+    bad16 = _st.pack('>BHHB', 16, 0, 2, 9) + b'\x00' * 9      # qty 2 -> 4 bytes, says 9
+    check('parser: FC16 byte_count != 2*quantity is malformed (CVE-2019-14462/14463)',
+          P.parse(adu(1, bad16)).malformed)
+    bad15 = _st.pack('>BHHB', 15, 0, 10, 2) + b'\x00'         # 10 coils -> 2 bytes, 1 sent
+    check('parser: FC15 trailing data short of byte_count is malformed',
+          P.parse(adu(1, bad15)).malformed)
+    ok16 = _st.pack('>BHHB', 16, 0, 2, 4) + b'\x00\x01\x00\x02'
+    check('parser: conformant FC16 write is NOT malformed (FP guard)',
+          P.parse(adu(1, ok16)).malformed is None)
+    check('parser: short segment (< MBAP+FC) is skipped, not flagged',
+          P.parse(b'\x00\x01\x00') is None)
+
+    # Engine: baseline / abuse.
+    e = eng(learned=[(V4, M, PLC, 1)])
+    e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(adu(1, coil)), now=10.0)
+    e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(adu(1, read)), now=10.0)
+    check('engine: learned master reading + writing raises nothing (FP guard)',
+          not e.findings)
+    e = eng(learned=[(V4, M, PLC, 1)])
+    e.feed(S.FlowKey(V4, A, PLC, 1), P.parse(adu(1, coil)), now=10.0)
+    check('engine: write from an unlearned master -> MBW-001', codes(e) == {'MBW-001'})
+    e = eng(learned=[(V4, M, PLC, 1)])
+    e.feed(S.FlowKey(V4, A, PLC, 1), P.parse(adu(1, read)), now=10.0)
+    check('engine: read from an unlearned master -> MBW-004', codes(e) == {'MBW-004'})
+    e = eng(window=3600.0)
+    e.feed(S.FlowKey(V4, A, PLC, 1), P.parse(adu(1, coil)), now=10.0)
+    check('engine: no off-baseline alert while the learning window is open',
+          not e.findings)
+    e = eng(learned=[(V4, M, PLC, 1)])
+    e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(adu(1, _st.pack('>BHH', 8, 4, 0))), now=10.0)
+    check('engine: FC8 sub 0x0004 Force Listen Only -> MBW-002', 'MBW-002' in codes(e))
+    e = eng(learned=[(V4, M, PLC, 1)])
+    e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(adu(1, _st.pack('>BHH', 8, 1, 0))), now=10.0)
+    check('engine: FC8 restart-comm -> MBW-003', codes(e) == {'MBW-003'})
+    e = eng(learned=[(V4, M, PLC, 1)])
+    e.feed(S.FlowKey(V4, M, PLC, 1),
+           P.parse(adu(1, _st.pack('>BHH', 8, 4, 0)), is_response=True), now=10.0)
+    check('engine: an FC8 RESPONSE is not an attack (direction guard)', not e.findings)
+
+    # Enumeration / sweeps.
+    mei = _st.pack('>BBBB', 43, 0x0E, 1, 0)
+    e = eng(learned=[(V4, M, PLC, 1)])
+    for i in range(2):
+        e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(adu(1, mei)), now=10.0 + i)
+    two = codes(e)
+    e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(adu(1, mei)), now=12.0)
+    check('engine: 3 Read-Device-ID in 10 s -> MBW-020 (2 do not)',
+          'MBW-020' not in two and 'MBW-020' in codes(e))
+    e = eng(learned=[(V4, M, PLC, u) for u in range(1, 10)])
+    for u in range(1, 8):
+        e.feed(S.FlowKey(V4, M, PLC, u), P.parse(adu(u, read)), now=10.0)
+    seven = codes(e)
+    e.feed(S.FlowKey(V4, M, PLC, 8), P.parse(adu(8, read)), now=10.5)
+    check('engine: 8 unit IDs in 10 s -> MBW-021 (7 do not)',
+          'MBW-021' not in seven and 'MBW-021' in codes(e))
+
+    # UMAS / ModiPwn.
+    def umas(sub):
+        return adu(1, bytes([90, sub]) + b'\x00\x00')
+    e = eng(learned=[(V4, M, PLC, 1)])
+    e.feed(S.FlowKey(V4, A, PLC, 1), P.parse(umas(0x20)), now=10.0)
+    e.feed(S.FlowKey(V4, A, PLC, 1), P.parse(umas(0x23)), now=12.0)
+    check('engine: UMAS read primitive then write within 30 s -> MBW-010 + MBW-011',
+          {'MBW-010', 'MBW-011'} <= codes(e))
+    e = eng(learned=[(V4, M, PLC, 1)])
+    e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(umas(0x23)), now=10.0)
+    check('engine: UMAS write with no preceding read -> MBW-010 only, no MBW-011',
+          codes(e) == {'MBW-010'})
+    e = eng(learned=[(V4, M, PLC, 1)])
+    e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(umas(0x20)), now=10.0)
+    e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(umas(0x23)), now=100.0)
+    check('engine: UMAS read and write 90 s apart -> no MBW-011', 'MBW-011' not in codes(e))
+
+    # Posture.
+    _c, ot = _modbus_parse_subnets(['10.20.0.0/24'])
+    e = eng(learned=[(V4, '192.168.1.5', '192.168.1.20', 1)], ot_subnets=ot)
+    e.feed(S.FlowKey(V4, '192.168.1.5', '192.168.1.20', 1), P.parse(adu(1, read)), now=10.0)
+    check('engine: Modbus outside the declared OT subnet -> MBW-040', codes(e) == {'MBW-040'})
+    e = eng(learned=[(V4, M, PLC, 1)], ot_subnets=ot)
+    e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(adu(1, read)), now=10.0)
+    check('engine: Modbus inside the declared OT subnet -> no MBW-040', not e.findings)
+    e = eng(learned=[(V4, M, PLC, 1)], security_hosts={(V4, PLC)})
+    e.feed(S.FlowKey(V4, M, PLC, 1), P.parse(adu(1, read)), now=10.0)
+    check('engine: plain 502 to a host seen on 802 -> MBW-041', codes(e) == {'MBW-041'})
+
+    # Malformed framing + dual-stack.
+    e = eng(learned=[(V4, M, PLC, 1)])
+    e.feed(S.FlowKey(V4, A, PLC, 1), P.parse(adu(1, coil, proto=7)), now=10.0)
+    check('engine: malformed framing -> MBW-030 only (abuse checks suppressed)',
+          codes(e) == {'MBW-030'})
+    e = eng(learned=[(V6, '2001:db8::5', '2001:db8::20', 1)])
+    e.feed(S.FlowKey(V6, '2001:db8::99', '2001:db8::20', 1), P.parse(adu(1, coil)), now=10.0)
+    e.feed(S.FlowKey(V4, '2001:db8::5', '2001:db8::20', 1), P.parse(adu(1, coil)), now=10.0)
+    check('engine: IPv6 off-baseline write -> MBW-001, and a v6 master is not trusted '
+          'on v4 (families tracked apart)',
+          [f.code for f in e.findings] == ['MBW-001', 'MBW-001']
+          and {f.key.family for f in e.findings} == {V4, V6})
+
+    # Adapter: baseline persistence + verdict ladder.
+    bl = S.Baseline(window_s=60.0)
+    bl.observe(S.FlowKey(V6, '2001:db8::5', '2001:db8::20', 3), 16, now=1.0)
+    bl.armed_at = 1.0
+    d = json.loads(json.dumps(_modbus_baseline_to(bl, {(V4, PLC)}, ['10.20.0.0/24'])))
+    bl2 = _modbus_baseline_from(S, d, 60.0)
+    check('adapter: baseline survives a JSON round-trip (family, master, unit, 802 host)',
+          bl2.is_known_master(S.FlowKey(V6, '2001:db8::5', '2001:db8::20', 3))
+          and not bl2.is_known_master(S.FlowKey(V4, '2001:db8::5', '2001:db8::20', 3))
+          and d['security_hosts'] == [[4, PLC]] and bl2.armed_at == 1.0)
+    check('adapter: verdict ladder clean/learning/exposure/suspicious/plc-abuse',
+          _modbus_verdict([], 0, False) == 'clean'
+          and _modbus_verdict([], 5, True) == 'learning'
+          and _modbus_verdict([{'severity': 'low'}], 5, False) == 'exposure'
+          and _modbus_verdict([{'severity': 'medium'}], 5, False) == 'suspicious'
+          and _modbus_verdict([{'severity': 'high'}, {'severity': 'low'}], 5, False)
+          == 'plc-abuse')
+
+    # Scapy end-to-end: pcap -> do_modbus_watch (fresh, non-persisted baseline).
+    e2e = {'ran': False, 'reason': 'scapy not installed'}
+    if _have_scapy():
+        import tempfile
+        try:
+            from scapy.all import Ether, IP, IPv6, TCP, wrpcap
+            from scapy.layers.inet6 import IPv6ExtHdrDestOpt
+            legs = [('IPv4', lambda s, d_: IP(src=s, dst=d_), M, A, PLC),
+                    ('IPv6', lambda s, d_: IPv6(src=s, dst=d_),
+                     '2001:db8::5', '2001:db8::99', '2001:db8::20'),
+                    ('IPv6 + Destination-Options header',
+                     lambda s, d_: IPv6(src=s, dst=d_) / IPv6ExtHdrDestOpt(),
+                     '2001:db8::5', '2001:db8::99', '2001:db8::20')]
+            ok_all = True
+            for label, l3, master, attacker, plc in legs:
+                pkts = []
+
+                def put(src, dst, sport, dport, payload, t):
+                    p = Ether() / l3(src, dst) / TCP(sport=sport, dport=dport,
+                                                       flags='PA') / payload
+                    p.time = t
+                    pkts.append(p)
+                for i in range(4):          # learning: legit poll + reply
+                    put(master, plc, 40000, 502, adu(1, read, txn=i), 1000.0 + i)
+                    put(plc, master, 502, 40000,
+                        adu(1, _st.pack('>BB', 3, 10) + b'\x00' * 10, txn=i), 1000.2 + i)
+                put(attacker, plc, 41000, 502, adu(1, coil, txn=50), 1010.0)
+                put(attacker, plc, 41000, 502, adu(1, _st.pack('>BHH', 8, 4, 0), txn=51),
+                    1010.5)
+                put(master, plc, 40000, 502, adu(1, read, txn=52), 1011.0)
+                fd, path = tempfile.mkstemp(suffix='.pcap')
+                os.close(fd)
+                try:
+                    wrpcap(path, pkts)
+                    r = do_modbus_watch(pcap=path, persist=False, learn_seconds=5.0)
+                finally:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                got = {f['code'] for f in r.get('findings') or []}
+                fam_ok = all(f['af'] == ('v4' if label == 'IPv4' else 'v6')
+                             for f in r.get('findings') or [])
+                ok = (r.get('success') and r.get('verdict') == 'plc-abuse'
+                      and got == {'MBW-001', 'MBW-002', 'MBW-004'} and fam_ok
+                      and r.get('adus') == 11)
+                check('e2e %s pcap: off-baseline write + Force Listen Only -> plc-abuse '
+                      '(learned master stays quiet)' % label, ok)
+                ok_all = ok_all and ok
+            e2e = {'ran': True, 'pass': ok_all, 'scenarios_run': len(legs)}
+        except Exception as ex:
+            check('e2e pcap leg raised %s: %s' % (type(ex).__name__, ex), False)
+            e2e = {'ran': True, 'pass': False}
+    return {'success': all(s['pass'] for s in scenarios), 'scenarios': scenarios,
+            'scapy': e2e}
+
+
+# ==========================================================================
 # BLE Watch — passive Bluetooth Low Energy attack monitor (vendored blewatch.py)
 # ==========================================================================
 # Unlike the on-the-wire watchers, BLE is not captured off a NIC: the RX is done
@@ -24924,7 +25496,8 @@ def do_routing_selftest():
               'bfd': _bfd_selftest(), 'ptp': _ptp_selftest(),
               'srmpls': _srmpls_selftest(), 'ipsec': _ipsec_selftest(),
               'dns_passive': _dns_passive_selftest(), 'ftp': _ftp_selftest(),
-              'smtp': _smtp_selftest(), 'ble': _ble_selftest(),
+              'smtp': _smtp_selftest(), 'modbus': _modbus_selftest(),
+              'ble': _ble_selftest(),
               'ospf': _ospf_selftest(), 'bgp': _bgp_selftest(),
               'arp': _arp_selftest(), 'dns': _dns_selftest(),
               'mac': _mac_selftest(), 'dhcp': _dhcp_selftest(),
@@ -26781,6 +27354,32 @@ def register_network_diagnostics(app, logger=None):
                  if p.isdigit()][:8]
         _log(f"net/ftp-watch iface={iface or 'default-route'} secs={secs}")
         return jsonify(do_ftp_watch(interface=iface, seconds=secs, ports=ports or None))
+
+    @app.route('/api/net/modbus-watch', methods=['GET'])
+    def net_modbus_watch():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        iface = iface or _capture_iface()
+        secs = _clamp_int(request.args.get('seconds'), 20, 5, 60)
+        ot = None
+        if 'ot' in request.args:            # present (even empty) = save this list
+            ot = [s for s in re.split(r'[,\s]+', request.args.get('ot') or '') if s][:16]
+            if not all(re.fullmatch(r'[0-9A-Fa-f:.]+(/\d{1,3})?', s) for s in ot):
+                return _bad('Invalid OT subnet (use CIDR, e.g. 10.20.0.0/24)')
+        _log(f"net/modbus-watch iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_modbus_watch(interface=iface, seconds=secs, ot_subnets=ot))
+
+    @app.route('/api/net/modbus-baseline', methods=['GET', 'POST'])
+    def net_modbus_baseline():
+        action, ot = 'get', None
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            action = data.get('action') if data.get('action') in ('arm', 'reset', 'config') \
+                else 'get'
+            ot = [str(s) for s in (data.get('ot') or [])][:16]
+        _log(f"net/modbus-baseline {action}")
+        return jsonify(do_modbus_baseline(action, ot_subnets=ot))
 
     @app.route('/api/net/ble-watch', methods=['GET'])
     def net_ble_watch():
@@ -29547,6 +30146,19 @@ def _cli(argv=None):
     fw_.add_argument('--ports', default='21', help='FTP control ports (default 21)')
     fw_.add_argument('--json', action='store_true', help='emit JSON')
 
+    mw_ = sub.add_parser('modbus-watch',
+                         help='passive Modbus/TCP posture scan (off-baseline writes, '
+                              'FC8 listen-only, UMAS/ModiPwn, libmodbus framing)')
+    mw_.add_argument('--iface', '-i', default=None, help='interface (default: route)')
+    mw_.add_argument('--seconds', '-s', type=int, default=20, help='capture window (5-60)')
+    mw_.add_argument('--pcap', default=None,
+                     help='replay a pcap instead of capturing (fresh baseline, not saved)')
+    mw_.add_argument('--learn', type=float, default=None,
+                     help='learning window seconds for --pcap (default 3600)')
+    mw_.add_argument('--ot-subnet', action='append', default=None,
+                     help='declared OT subnet (enables MBW-040); repeatable')
+    mw_.add_argument('--json', action='store_true', help='emit JSON')
+
     bw_ = sub.add_parser('ble-watch',
                          help='passive BLE attack monitor (needs an nRF/Bluefruit LE sniffer)')
     bw_.add_argument('--device', '-i', default=None, help='sniffer serial device (default: autodetect)')
@@ -30225,6 +30837,23 @@ def _cli(argv=None):
                   f"({r['packet_count']} frames, {len(r['findings'])} finding(s))")
             for x in r.get('reasons', []):
                 print(f"  {x}")
+        return 0 if r.get('success') else 1
+
+    if args.cmd == 'modbus-watch':
+        r = do_modbus_watch(interface=args.iface, seconds=args.seconds,
+                            ot_subnets=args.ot_subnet, pcap=args.pcap,
+                            learn_seconds=args.learn, persist=not args.pcap)
+        if args.json:
+            print(json.dumps(r, indent=2))
+        elif not r.get('success'):
+            print(f"error: {r.get('error')}")
+        else:
+            print(f"verdict: {r['verdict']}  ({r['adus']} Modbus ADUs, "
+                  f"{r['slaves']} slave/unit pairs, learning={r['learning']})")
+            for f in r['findings']:
+                print(f"  [{f['code']}] {f['severity'].upper():6} {f['name']} | {f['af']} "
+                      f"{f['master']} -> {f['slave']} unit {f['unit']} x{f['count']} "
+                      f"| {f['detail']}" + (f"  {' '.join(f['cves'])}" if f['cves'] else ''))
         return 0 if r.get('success') else 1
 
     if args.cmd == 'ftp-watch':

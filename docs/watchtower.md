@@ -90,6 +90,14 @@ KEV) lands as **critical**; the expansion *attempt*, a malformed SNI / client-ce
 (**CVE-2019-15846**), an overlong EHLO/HELO line (**CVE-2019-16928**) and an AUTH base64
 token of length 4n+3 (**CVE-2018-6789**, KEV) as **high**. Banner version ranges are low-confidence posture and stay out of the feed.
 
+[`modbus_watch`](nettools.md#modbus-watch) (Modbus Watch) appends its **HIGH** and
+**MEDIUM** findings to `/var/log/ragnar/modbus_watch.jsonl` (deduplicated per code + master).
+A write from a master outside the learned baseline, FC8 **Force Listen Only** and the
+**ModiPwn** UMAS sequence (**CVE-2021-22779**) land as **high**. An unlearned master's other
+requests, FC8 restart / clear-counters, UMAS activity and malformed MBAP/PDU framing (the
+libmodbus trigger, **CVE-2019-14462** / **CVE-2019-14463** / **CVE-2024-10918**) land as
+**medium**. Enumeration, unit-ID sweeps and cleartext-segment posture stay in the card.
+
 [`ftp_watch`](nettools.md#ftp-watch) (FTP Watch) appends its **HIGH/CRITICAL** ProFTPD
 findings to `/var/log/ragnar/ftp_watch.jsonl` (deduplicated per code + server) — a
 pre-authentication or anonymous **mod_copy** copy the server accepted or completed

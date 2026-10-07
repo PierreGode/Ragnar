@@ -171,6 +171,11 @@ DEFAULT_SOURCES = {
     # (CVE-2018-6789, KEV) — do_smtp_watch.
     'smtp_watch':    {'label': 'SMTP Watch (Exim expansion / SNI / AUTH b64)',
                       'paths': ['/var/log/ragnar/smtp_watch.jsonl']},
+    # Modbus/TCP posture: off-baseline writes, FC8 Force Listen Only / restart, UMAS
+    # + the ModiPwn sequence (CVE-2021-22779) and malformed MBAP/PDU framing — the
+    # libmodbus trigger (CVE-2019-14462/14463, CVE-2024-10918) — do_modbus_watch.
+    'modbus_watch':  {'label': 'Modbus Watch (PLC write / listen-only / UMAS)',
+                      'paths': ['/var/log/ragnar/modbus_watch.jsonl']},
     # MPLS / SR-MPLS / SRv6 label & segment manipulation (do_sr_mpls_watch): a label
     # or SRH on a customer-facing port (label-injection / VRF-hopping), reserved /
     # implicit-null labels forwarded, TTL-expired frames forwarded, SRv6 path

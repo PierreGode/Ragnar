@@ -10,8 +10,8 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **271** distinct CVE IDs
-- **230** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **275** distinct CVE IDs
+- **234** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
 - **32** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
@@ -33,12 +33,12 @@ detector works is in [nettools.md](nettools.md).
 | 2016 | 6 |
 | 2017 | 6 |
 | 2018 | 8 |
-| 2019 | 13 |
+| 2019 | 15 |
 | 2020 | 21 |
-| 2021 | 14 |
+| 2021 | 15 |
 | 2022 | 19 |
 | 2023 | 36 |
-| 2024 | 47 |
+| 2024 | 48 |
 | 2025 | 34 |
 | 2026 | 36 |
 
@@ -71,6 +71,7 @@ detector works is in [nettools.md](nettools.md).
 | LDAP Watch | 3 |
 | Liebert Guard | 2 |
 | MikroTik Guard | 16 |
+| Modbus Watch | 4 |
 | NTP Watch | 15 |
 | OSPF Watch | 9 |
 | PTP Watch | 4 |
@@ -153,6 +154,8 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2019-7283](https://nvd.nist.gov/vuln/detail/CVE-2019-7283) | netkit rcp unrequested file | detected | Telnet Watch | — |
 | [CVE-2019-10149](https://nvd.nist.gov/vuln/detail/CVE-2019-10149) | Exim ${...} expansion RCE | detected | SMTP Watch | — |
 | [CVE-2019-12815](https://nvd.nist.gov/vuln/detail/CVE-2019-12815) | ProFTPD mod_copy Limit bypass | detected | FTP Watch | — |
+| [CVE-2019-14462](https://nvd.nist.gov/vuln/detail/CVE-2019-14462) | libmodbus FC15/16 count OOB read | detected | Modbus Watch | — |
+| [CVE-2019-14463](https://nvd.nist.gov/vuln/detail/CVE-2019-14463) | libmodbus FC15/16 count OOB read | detected | Modbus Watch | — |
 | [CVE-2019-15846](https://nvd.nist.gov/vuln/detail/CVE-2019-15846) | Exim SNI/cert-DN RCE | detected | SMTP Watch | — |
 | [CVE-2019-16928](https://nvd.nist.gov/vuln/detail/CVE-2019-16928) | Exim overlong EHLO overflow | detected | SMTP Watch | — |
 | [CVE-2020-0796](https://nvd.nist.gov/vuln/detail/CVE-2020-0796) | SMBGhost | detected | SMB / Kerberos Watch | — |
@@ -184,6 +187,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2021-1678](https://nvd.nist.gov/vuln/detail/CVE-2021-1678) | Print spooler RPC relay (IRemoteWinSpool) | detected | RPC / NetLogon Watch | — |
 | [CVE-2021-3570](https://nvd.nist.gov/vuln/detail/CVE-2021-3570) |  | detected | PTP Watch | — |
 | [CVE-2021-3571](https://nvd.nist.gov/vuln/detail/CVE-2021-3571) |  | detected | PTP Watch | — |
+| [CVE-2021-22779](https://nvd.nist.gov/vuln/detail/CVE-2021-22779) | ModiPwn (Modicon UMAS auth bypass) | detected | Modbus Watch | — |
 | [CVE-2021-25220](https://nvd.nist.gov/vuln/detail/CVE-2021-25220) | MaginotDNS | detected | DNS Watch | — |
 | [CVE-2021-28510](https://nvd.nist.gov/vuln/detail/CVE-2021-28510) |  | detected | PTP Watch | — |
 | [CVE-2021-31166](https://nvd.nist.gov/vuln/detail/CVE-2021-31166) | HTTP.sys Accept-Encoding | detected | RPC / NetLogon Watch | — |
@@ -250,6 +254,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2024-5872](https://nvd.nist.gov/vuln/detail/CVE-2024-5872) |  | detected | Arista Guard | — |
 | [CVE-2024-6387](https://nvd.nist.gov/vuln/detail/CVE-2024-6387) | regreSSHion | detected | Arista Guard, SSH Watch | — |
 | [CVE-2024-6409](https://nvd.nist.gov/vuln/detail/CVE-2024-6409) |  | detected | Arista Guard | — |
+| [CVE-2024-10918](https://nvd.nist.gov/vuln/detail/CVE-2024-10918) | libmodbus over-length reply | detected | Modbus Watch | — |
 | [CVE-2024-20259](https://nvd.nist.gov/vuln/detail/CVE-2024-20259) |  | detected | Cisco Guard | — |
 | [CVE-2024-20307](https://nvd.nist.gov/vuln/detail/CVE-2024-20307) |  | detected | Cisco Guard | — |
 | [CVE-2024-20308](https://nvd.nist.gov/vuln/detail/CVE-2024-20308) |  | detected | Cisco Guard | — |

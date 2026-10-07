@@ -49,6 +49,7 @@ matrix to zoom (`/web/images/osi/`).
 | [DNS Watch (passive)](#dns-watch) | Diagnostics · L7 | `GET /api/net/dns-watch` |
 | [NTP Watch](#ntp-watch) | Diagnostics · L7 | `GET /api/net/ntp-watch`, `POST /api/net/ntp-baseline` |
 | [SNMP Watch](#snmp-watch) | Diagnostics · L7 | `GET /api/net/snmp-watch`, `POST /api/net/snmp-baseline` |
+| [Modbus Watch](#modbus-watch) | Diagnostics · L7 | `GET /api/net/modbus-watch`, `GET/POST /api/net/modbus-baseline` |
 | [SMB Watch](#smb-watch) | Diagnostics · L7 | `GET /api/net/smb-watch`, `POST /api/net/smb-baseline` |
 | [LDAP Watch](#ldap-watch) | Diagnostics · L7 | `GET /api/net/ldap-watch` |
 | [RPC / NetLogon Watch](#rpc--netlogon-watch) | Diagnostics · L7 | `GET /api/net/rpc-watch` |
@@ -143,7 +144,7 @@ capture path.
 
 ### Detector Self-Test
 A one-click **Run self-test** that validates the IGMP, **IPv6 first-hop**, **NDP**, **RA Guard**,
-**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB) and
+**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **Modbus Watch** (PLC writes / Force Listen Only / UMAS / libmodbus framing), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB) and
 **path-asymmetry / OWD** engine — by running each classifier against crafted attack
 captures (no root, no external network) and reports per-suite pass/fail. With Scapy
 installed it also runs the end-to-end packet-crafting leg for the capture-based
@@ -1029,6 +1030,72 @@ ifAdminStatus / …), and the community-reuse correlator — see
 
 - Endpoint: `GET /api/net/snmp-watch` `{interface, seconds}`,
   `POST /api/net/snmp-baseline` `{action: reset}` · binary: `tcpdump`
+
+### Modbus Watch
+A **passive** Modbus/TCP posture monitor for OT / PLC segments. It is **detection-only** and
+never sends a Modbus request. Modbus/TCP (`tcp/502`) has no authentication and no
+encryption, so any host that can reach a PLC can write its coils and registers. Most of
+what matters is therefore posture: **who is talking to the PLCs and what are they telling
+them to do**. The CVE layer is small and says plainly what it can and cannot show.
+
+**Learn, then arm.** The first Modbus ADU seen starts a **learning window** (one hour by
+default). During it, every master that sends a request is recorded per slave address and
+unit ID, separately for IPv4 and IPv6. When the window closes, requests from any other
+master alert. The baseline is kept in `data/modbus_watch.json`, so the window spans
+manual scans and the background rotation. **Arm now** ends learning early and keeps what
+was learned. **Re-learn** forgets the baseline after a legitimate SCADA/HMI change.
+
+Eleven finding codes (`MBW-nnn`):
+
+| Code | Finding | Severity |
+|------|---------|----------|
+| `MBW-001` | Write (FC5/6/15/16/21/22/23) from a master outside the baseline | high |
+| `MBW-002` | FC8 sub-function 4 **Force Listen Only**: the slave silently stops answering | high |
+| `MBW-003` | FC8 restart communications / clear counters | medium |
+| `MBW-004` | Any other function code from a master outside the baseline | medium |
+| `MBW-010` | Schneider **UMAS** (FC90) activity | medium |
+| `MBW-011` | **ModiPwn** read-primitive then write/reconfigure over UMAS within 30 s (**CVE-2021-22779**) | high |
+| `MBW-020` | Read Device Identification (FC43/MEI 14) burst: 3 or more in 10 s | low |
+| `MBW-021` | Unit-ID sweep: one source hitting 8 or more unit IDs on one host in 10 s | low |
+| `MBW-030` | Malformed MBAP/PDU framing (libmodbus trigger: **CVE-2019-14462**, **CVE-2019-14463**, **CVE-2024-10918**) | medium |
+| `MBW-040` | Modbus outside the declared OT subnet(s) | low |
+| `MBW-041` | Plain `502` to a host also seen on Modbus Security (`802`/TLS) | info |
+
+`MBW-030` compares the MBAP length field with the bytes that actually arrived, and an FC15/FC16
+byte count with its quantity and its trailing data. This is the input shape of the
+libmodbus out-of-bounds reads and over-length reply. It is a **trigger** finding: it shows
+the packet, but it cannot confirm the PLC runs libmodbus. A malformed ADU is not used for
+the abuse checks. `MBW-040` only runs once you declare OT subnet(s) in the card or with
+`--ot-subnet`; the list is saved with the baseline. Modbus Security on `802` is TLS, so
+only its presence is recorded.
+
+**Dual-stack.** IPv4 and IPv6 are tracked separately end to end: a master learned on IPv6 is
+not trusted on IPv4. The sensor walks IPv6 extension headers to reach the TCP header. The
+capture filter admits IPv6 whose first next-header is not TCP, UDP or ICMPv6, because a
+plain `tcp port 502` filter can never match a segment behind an extension header. Capture is
+at full snaplen so a truncated segment is never misread as malformed framing.
+
+Verdicts: `clean` < `learning` (Modbus seen, baseline still being built) < `exposure`
+(low/info only) < `suspicious` (a medium finding) < **`plc-abuse`** (a high finding; pages
+in the [Network Integrity Monitor](#-network-integrity-monitor)). HIGH and MEDIUM findings
+feed [Watchtower](watchtower.md). The card and the API collapse the engine's per-request
+findings into one row per code, master, slave and unit, with a count.
+
+Out of scope: **Modbus RTU/serial**, which a network tap cannot see. Upstream's sealed
+network-namespace lab (tier 5) is not shipped. On a namespace with a working IPv6 stack its
+IPv6 leg runs over `::1`, so the "attacker" and the learned master share one address and
+`MBW-001` cannot fire. The Detector Self-Test covers that case instead by replaying IPv4,
+IPv6 and IPv6-with-extension-header pcaps with distinct master and attacker addresses.
+
+- Endpoint: `GET /api/net/modbus-watch` `{interface, seconds, ot}` (`ot` = comma-separated
+  CIDRs; when present, even empty, it replaces the saved list) ·
+  `GET/POST /api/net/modbus-baseline` `{action: arm|reset|config, ot: [...]}` · binary:
+  `tcpdump` · Python: `scapy`
+- CLI: `python3 network_diagnostics.py modbus-watch [--iface I] [--seconds N]
+  [--ot-subnet CIDR ...] [--pcap FILE [--learn S]] [--json]` (`--pcap` replays a file
+  against a fresh baseline and does not save it)
+- Vendored engine: `python/modbuswatch/` (Solarflere): `parser`, `state`, `findings`,
+  `sensor`, plus the standalone `modbuswatch.py` entrypoint
 
 ### Cert Watch
 Internal networks are full of TLS services — router/switch admin UIs, NAS boxes,
