@@ -48,7 +48,8 @@ FILE_OWNERS = {
     'python/liebert_guard_scapy_selftest.py': 'Liebert Guard',
     'actions/ble_pentest.py': 'BLE Pentest (active)',
 }
-FILE_PREFIX_OWNERS = {'python/dns_doctor_passive/': 'DNS Watch'}
+FILE_PREFIX_OWNERS = {'python/dns_doctor_passive/': 'DNS Watch',
+                      'python/modbuswatch/': 'Modbus Watch'}
 # Files that only mention CVEs already owned elsewhere (labels, help text).
 MENTION_ONLY = {'webapp_modern.py', 'watchtower.py', 'web/scripts/ragnar_modern.js',
                 'web/index_modern.html'}
@@ -88,6 +89,7 @@ ND_PREFIXES = [
     ('_snmp', 'SNMP Watch'),
     ('_FTP', 'FTP Watch'), ('_ftp', 'FTP Watch'), ('do_ftp', 'FTP Watch'),
     ('_SMTP', 'SMTP Watch'), ('_smtp', 'SMTP Watch'), ('do_smtp', 'SMTP Watch'),
+    ('_MODBUS', 'Modbus Watch'), ('_modbus', 'Modbus Watch'), ('do_modbus', 'Modbus Watch'),
     ('_RELAY', 'Relay / Coercion Watch'), ('_relay', 'Relay / Coercion Watch'),
     ('_parse_relay', 'Relay / Coercion Watch'), ('do_relay', 'Relay / Coercion Watch'),
     ('_ND_DNSSL', 'ICMP Watch'), ('_ISIS', 'IS-IS Watch'), ('_CFM', 'Cisco Guard'),
@@ -133,6 +135,8 @@ NAMES = {
     'CVE-2015-3306': 'ProFTPD mod_copy pre-auth copy',
     'CVE-2019-12815': 'ProFTPD mod_copy Limit bypass',
     'CVE-2023-51713': 'ProFTPD make_ftp_cmd OOB read',
+    'CVE-2019-14462': 'libmodbus FC15/16 count OOB read', 'CVE-2019-14463': 'libmodbus FC15/16 count OOB read',
+    'CVE-2024-10918': 'libmodbus over-length reply', 'CVE-2021-22779': 'ModiPwn (Modicon UMAS auth bypass)',
     'CVE-2015-4000': 'Logjam', 'CVE-2015-5434': 'MPLS VRF hopping (Comware)',
     'CVE-2015-8087': 'MPLS VRF hopping (Huawei)', 'CVE-2015-7704': "NTP Kiss-o'-Death spoof",
     'CVE-2015-7705': "NTP Kiss-o'-Death spoof", 'CVE-2015-7871': 'NTP crypto-NAK auth bypass',

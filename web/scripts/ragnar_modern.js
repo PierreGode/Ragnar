@@ -1507,6 +1507,8 @@ function showNetworkSubtab(name, layer) {
         _macWatchFillIfaces();
         _ntpFillIfaces();
         _snmpFillIfaces();
+        _fillIfaceSel('modbus-iface');
+        _modbusLoadBaseline();
         _certFillIfaces();
         _tlsFillIfaces();
         _lldpFillIfaces();
@@ -7410,8 +7412,8 @@ const _NETINT_STYLE = {
 // A verdict is clean/informational, an active attack (critical, red), or — anything
 // else non-clean — a suspicious finding (amber). Mirrors the server's _ni_rank so the
 // chips colour every scanner's verdicts without enumerating them all.
-const _NETINT_CLEAN = new Set(['clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a', 'no-traffic', 'disabled', 'not-applicable', 'randomization', 'fhrp', 'observed']);
-const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'responder-challenge', 'krb-recon', 'eternalblue-probe', 'krb-rc4md4', 'smbghost-exploit', 'smb-reflection', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn', 'autokey-exploit', 'crash-exploit', 'auth-bypass', 'lag-hijack', 'zerologon', 'dcsync', 'credential-exposure', 'failover-manipulation', 'segment-injection', 'modcopy-exploited', 'payload-queued', 'exploit', 'attack']);
+const _NETINT_CLEAN = new Set(['clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a', 'no-traffic', 'disabled', 'not-applicable', 'randomization', 'fhrp', 'observed', 'learning']);
+const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'responder-challenge', 'krb-recon', 'eternalblue-probe', 'krb-rc4md4', 'smbghost-exploit', 'smb-reflection', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn', 'autokey-exploit', 'crash-exploit', 'auth-bypass', 'lag-hijack', 'zerologon', 'dcsync', 'credential-exposure', 'failover-manipulation', 'segment-injection', 'modcopy-exploited', 'payload-queued', 'plc-abuse', 'exploit', 'attack']);
 function _netintRank(verdict) {
     const v = verdict || 'unknown';
     if (_NETINT_CLEAN.has(v)) return 0;
@@ -9920,6 +9922,106 @@ async function runFtpWatch() {
     }
 }
 
+// ---- Modbus Watch (Modbus/TCP posture: PLC writes / listen-only / UMAS) ----
+const _MODBUS_VERDICT_STYLE = {
+    clean:       ['bg-green-950/40 border-green-900 text-green-400', '✓ No off-baseline write, listen-only, UMAS, sweep or malformed framing seen'],
+    learning:    ['bg-slate-800 border-slate-700 text-slate-300', 'ℹ Learning — recording which masters talk to each PLC; off-baseline alerts start when the window closes'],
+    exposure:    ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Exposure — device enumeration, a unit-ID sweep or cleartext Modbus where it should not be'],
+    suspicious:  ['bg-orange-950/50 border-orange-800 text-orange-300', '⚠ Suspicious — an unlearned master, UMAS activity, a restart / clear-counters, or malformed framing (libmodbus CVE trigger)'],
+    'plc-abuse': ['bg-red-950/60 border-red-800 text-red-300', '🛑 PLC ABUSE — a write from an unlearned master, Force Listen Only, or the ModiPwn UMAS sequence (CVE-2021-22779)'],
+    unknown:     ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _MODBUS_SEV_STYLE = {
+    high: 'text-red-300', medium: 'text-amber-300', low: 'text-gray-400', info: 'text-gray-500',
+};
+function _modbusLearnLine(d) {
+    if (d.learning_ends == null) return 'baseline: waiting for the first Modbus traffic';
+    const t = new Date(d.learning_ends * 1000);
+    return d.learning
+        ? 'baseline: learning until ' + t.toLocaleString()
+        : 'baseline: armed (learned ' + (d.slaves || 0) + ' slave/unit pair' + ((d.slaves || 0) === 1 ? '' : 's') + ')';
+}
+async function _modbusLoadBaseline() {
+    const el = document.getElementById('modbus-ot');
+    const st = document.getElementById('modbus-baseline');
+    try {
+        const d = await fetchAPI('/api/net/modbus-baseline');
+        if (!d || d.success === false) return;
+        if (el && !el.dataset.touched) el.value = (d.ot_subnets || []).join(', ');
+        if (st) st.textContent = _modbusLearnLine(d) + (d.masters && d.masters.length ? ' · masters: ' + d.masters.slice(0, 8).join(', ') : '');
+    } catch (e) { /* card still works without the status line */ }
+}
+async function modbusBaseline(action) {
+    if (action === 'reset' && !confirm('Forget the learned Modbus masters? The next Modbus traffic starts a new learning window.')) return;
+    try {
+        await postAPI('/api/net/modbus-baseline', { action: action });
+        addConsoleMessage(action === 'arm' ? 'Modbus baseline armed — off-baseline masters alert from now on' : 'Modbus baseline reset — re-learning masters', 'info');
+        await _modbusLoadBaseline();
+    } catch (e) {
+        addConsoleMessage('Modbus baseline update failed: ' + e.message, 'error');
+    }
+}
+async function runModbusWatch() {
+    const out = document.getElementById('modbus-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('modbus-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('modbus-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    const otEl = document.getElementById('modbus-ot');
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing Modbus/TCP (tcp/502)…</p>';
+    try {
+        _fillIfaceSel('modbus-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs)
+            + (iface ? '&interface=' + encodeURIComponent(iface) : '')
+            // Only send the OT list once the user edited it: an empty field before the
+            // saved list has loaded must not wipe the stored subnets.
+            + (otEl && otEl.dataset.touched ? '&ot=' + encodeURIComponent(otEl.value.trim()) : '');
+        const d = await fetchAPI('/api/net/modbus-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runModbusWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _MODBUS_VERDICT_STYLE[d.verdict] || _MODBUS_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · Modbus ADUs: ${d.adus || 0} · ${escapeHtml(_modbusLearnLine(d))}${(d.ot_subnets || []).length ? ' · OT: ' + escapeHtml(d.ot_subnets.join(', ')) : ''}</p>`;
+        const findings = d.findings || [];
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">What</th><th class="px-2 py-1">Master → PLC</th><th class="px-2 py-1">Unit</th><th class="px-2 py-1">#</th><th class="px-2 py-1">CVE</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => {
+                    const sc = _MODBUS_SEV_STYLE[f.severity] || 'text-gray-400';
+                    return `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${sc}">${escapeHtml(f.severity || '')}</td>
+                    <td class="px-2 py-1 font-mono ${sc}">${escapeHtml(f.code || '')}</td>
+                    <td class="px-2 py-1 text-gray-300 whitespace-normal" style="min-width:14rem">${escapeHtml(f.name || '')}<span class="block text-gray-500">${escapeHtml(f.detail || '')}</span></td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.af)} ${escapeHtml(f.master)} → ${escapeHtml(f.slave)}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${f.unit}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${f.count}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400 whitespace-normal" style="min-width:8rem">${escapeHtml((f.cves || []).join(' '))}</td>
+                </tr>`; }).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+        _modbusLoadBaseline();
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
 // ---- BLE Watch (Bluetooth Low Energy attack monitor, external sniffer) -----
 const _BLE_VERDICT_STYLE = {
     clean:               ['bg-green-950/40 border-green-900 text-green-400', '✓ No clone, spoof, flood or connection abuse seen'],
@@ -11319,6 +11421,7 @@ async function runRoutingSelftest() {
                         lacp: 'LACP Watch (802.1AX LAG-hijack / flapping)', rpc: 'RPC/NetLogon Watch (Zerologon / DCSync / WinRM)',
                         bfd: 'BFD Watch (failover manipulation)', ptp: 'PTP Watch (IEEE-1588 grandmaster takeover)', srmpls: 'SR-MPLS Watch (MPLS segment injection)', ipsec: 'IPsec/IKE Watch (D(HE)at / weak-DH / SWEET32)',
                         dns_passive: 'DNS Watch (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS / SAD DNS)',
+                        modbus: 'Modbus Watch (PLC write / listen-only / UMAS / libmodbus framing)',
                         cisco_guard: 'Cisco Guard (IOS/IOS-XE/NX-OS CVEs)', juniper_guard: 'Juniper Guard (J-Web/SSR/Space CVEs)', arista_guard: 'Arista Guard (EOS CVEs)', comware_guard: 'Comware Guard (VRF-hop / MPLS CVEs)',
                         mikrotik_guard: 'MikroTik Guard (RouterOS CVEs)', aruba_guard: 'Aruba Guard (ArubaOS PAPI CVEs)', apc_guard: 'APC Guard (NMC Ripple20)', liebert_guard: 'Liebert Guard (RomPager / RDU101)', dell_guard: 'Dell Guard (OS10 SmartFabric CVE)',
                         bgp_speaker: 'BGP Speaker (codec/FSM/RIB)', path_asymmetry: 'Path Asymmetry (OWD)' };
@@ -11329,7 +11432,7 @@ async function runRoutingSelftest() {
             '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
             '<tr class="text-left text-gray-500"><th class="px-2 py-1">Scanner</th><th class="px-2 py-1">Scenarios</th><th class="px-2 py-1">End-to-end</th><th class="px-2 py-1">Result</th></tr>' +
             '</thead><tbody>';
-        const order = ['igmp', 'ipv6', 'ndp', 'raguard', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'ssh', 'telnet', 'stp', 'smb', 'relay', 'ldap', 'dtp', 'cdp', 'vtp', 'eigrp', 'isis', 'fhrp', 'ospf', 'arp', 'mac', 'dhcp', 'dns', 'bgp', 'lacp', 'rpc', 'bfd', 'ptp', 'srmpls', 'ipsec', 'dns_passive', 'ftp', 'smtp', 'cisco_guard', 'juniper_guard', 'arista_guard', 'comware_guard', 'mikrotik_guard', 'aruba_guard', 'apc_guard', 'liebert_guard', 'dell_guard', 'bgp_speaker', 'path_asymmetry'];
+        const order = ['igmp', 'ipv6', 'ndp', 'raguard', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'ssh', 'telnet', 'stp', 'smb', 'relay', 'ldap', 'dtp', 'cdp', 'vtp', 'eigrp', 'isis', 'fhrp', 'ospf', 'arp', 'mac', 'dhcp', 'dns', 'bgp', 'lacp', 'rpc', 'bfd', 'ptp', 'srmpls', 'ipsec', 'dns_passive', 'ftp', 'smtp', 'modbus', 'cisco_guard', 'juniper_guard', 'arista_guard', 'comware_guard', 'mikrotik_guard', 'aruba_guard', 'apc_guard', 'liebert_guard', 'dell_guard', 'bgp_speaker', 'path_asymmetry'];
         // Append any suite the backend returned that isn't in the preferred order,
         // so a newly-wired detector can never again be counted toward pass/fail yet
         // stay invisible in the table.

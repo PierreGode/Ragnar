@@ -2146,7 +2146,8 @@ _NI_CLEAN = {'clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a',
              'no-traffic', 'disabled', 'not-applicable',
              'randomization',       # mac: privacy-MAC inventory is benign, not an alert
              'fhrp',                # mac: HSRP/VRRP/GLBP virtual-MAC inventory is expected
-             'observed'}            # guards: a vendor device seen, no CVE-relevant finding
+             'observed',            # guards: a vendor device seen, no CVE-relevant finding
+             'learning'}            # modbus: master baseline still being learned
 _NI_CRITICAL = {
     'hijacked', 'spoofed', 'rogue', 'starvation', 'compromised',        # dns/arp/dhcp
     'root-hijack', 'bpdu-flood',                                        # stp
@@ -2166,6 +2167,7 @@ _NI_CRITICAL = {
     'failover-manipulation',                                           # bfd (forged teardown / forced AdminDown / illegal state regression -> induced reconvergence)
     'segment-injection',                                               # sr-mpls (MPLS/SRH on a customer-facing port = label-injection / VRF-hopping primitive)
     'attack',                                                          # vendor guards: an exploitation primitive observed on the wire
+    'plc-abuse',                                                       # modbus (off-baseline write / Force Listen Only / ModiPwn sequence)
 }
 
 
@@ -2273,6 +2275,7 @@ def _net_integrity_check_once():
         ('dns_passive', 'DNS', lambda: watch(nd.do_dns_watch, interface=cap_iface)),
         ('ftp', 'FTP', lambda: watch(nd.do_ftp_watch, interface=cap_iface)),
         ('smtp', 'SMTP', lambda: watch(nd.do_smtp_watch, interface=cap_iface)),
+        ('modbus', 'Modbus', lambda: watch(nd.do_modbus_watch, interface=cap_iface)),
     ]
 
     # LAN-only vendor switch/router guards: only auto-run when a genuine wired
