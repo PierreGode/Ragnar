@@ -708,6 +708,29 @@ SNIFFER_BAUDS = (1000000, 460800)        # nRF Sniffer v3+ default, then v1/v2 (
 FRIEND_BAUD = 9600
 VID_SILABS, VID_NORDIC, VID_SEGGER = '10c4', '1915', '1366'
 _NRF_NAME_HINTS = ('sniffer', 'nrf', 'nordic', 'segger', 'j-link', 'bluefruit', 'adafruit')
+# Nordic USB IDs of an nRF52 that is NOT running nRF Sniffer. Recognised from
+# sysfs alone, so the port is never opened. nRF52840 dongles (Nordic PCA10059 and
+# the USB-A clones) often ship with the Connectivity firmware that nRF Connect
+# for Desktop flashes. An nRF Sniffer build enumerates as "nRF Sniffer" instead.
+NORDIC_OTHER_FW = {'c00a': 'connectivity', '521f': 'bootloader'}
+
+
+def nordic_firmware_role(usb):
+    """'connectivity' | 'bootloader' for a Nordic-VID nRF52 running something
+    other than nRF Sniffer, else None."""
+    if (usb or {}).get('vid') != VID_NORDIC:
+        return None
+    role = NORDIC_OTHER_FW.get((usb.get('pid') or '').lower())
+    if role:
+        return role
+    prod = (usb.get('product') or '').lower()
+    if 'sniffer' in prod:
+        return None
+    if 'connectivity' in prod:
+        return 'connectivity'
+    if 'dfu' in prod or 'bootloader' in prod:
+        return 'bootloader'
+    return None
 
 
 def slip_encode(data):
@@ -851,7 +874,9 @@ def _probe(path, baud, payload, wait):
 
 def probe_port(path, acm=False):
     """Identify what firmware answers on a serial port.
-    -> {'kind': 'nrf-sniffer'|'bluefruit-friend'|'unknown'|'busy'|'error', ...}"""
+    -> {'kind': 'nrf-sniffer'|'bluefruit-friend'|'unknown'|'busy'|'error', ...}
+    (detect_sniffers/check_port add 'nrf-other-fw', 'claimed' and 'skipped'
+    without opening the port.)"""
     try:
         import serial  # noqa: F401
     except ImportError:
@@ -894,6 +919,18 @@ def _verdict_note(c):
                 'Sniffer (nRF51) firmware flashed over SWD (pads 3V/GND/SWCLK/SWDIO) — the '
                 'DFU button / CMD-DAT switch cannot change that. See docs/blewatch.md.'
                 % (' ' + c['firmware'] if c.get('firmware') else ''))
+    if k == 'nrf-other-fw':
+        how = ('flash sniffer_nrf52840dongle_nrf52840_4.1.1.hex from Nordic\'s nRF Sniffer '
+               'for Bluetooth LE 4.1.1 package with nRF Connect Programmer; '
+               'on a board whose reset button does not start the bootloader, flash it '
+               'over the SWD pads (SWDCLK/SWDIO) instead. See docs/blewatch.md.')
+        if c.get('role') == 'bootloader':
+            return ('nRF52 in its DFU bootloader (USB 1915:521f), ready to be flashed: '
+                    + how)
+        return ('nRF52 running Nordic\'s Connectivity firmware (USB 1915:c00a, the image '
+                'nRF Connect for Desktop installs), NOT nRF Sniffer. Press the dongle\'s '
+                'RESET button: the LED pulses red and it re-appears as 1915:521f '
+                '"Open DFU Bootloader". Then ' + how)
     if k == 'claimed':
         return 'held by %s; not probed' % c.get('owner')
     if k == 'busy':
@@ -931,6 +968,8 @@ def detect_sniffers(probe=True):
         if 'sniffer' in name and (usb.get('vid') == VID_NORDIC or 'nrf' in name):
             c['kind'] = 'nrf-sniffer'                # nRF52 dongle flashed with nRF Sniffer
             c['by_name'] = True
+        elif nordic_firmware_role(usb):
+            c.update(kind='nrf-other-fw', role=nordic_firmware_role(usb))
         elif real in claimed:
             c.update(kind='claimed', owner=claimed[real])
         elif not (nrfish or usb.get('vid') == VID_SILABS):
@@ -941,8 +980,8 @@ def detect_sniffers(probe=True):
             c['kind'] = 'unknown'
         c['note'] = _verdict_note(c)
         out.append(c)
-    rank = {'nrf-sniffer': 0, 'bluefruit-friend': 1, 'unknown': 2, 'busy': 3,
-            'error': 4, 'claimed': 5, 'skipped': 6}
+    rank = {'nrf-sniffer': 0, 'bluefruit-friend': 1, 'nrf-other-fw': 1, 'unknown': 2,
+            'busy': 3, 'error': 4, 'claimed': 5, 'skipped': 6}
     out.sort(key=lambda c: rank.get(c['kind'], 9))
     return out
 
@@ -956,6 +995,8 @@ def check_port(path):
     c = {'path': path, 'tty': real, 'usb': _usb_info(real) if os.path.exists(real) else {}}
     if not os.path.exists(real):
         c.update(kind='error', note='no such device (unplugged?)')
+    elif nordic_firmware_role(c['usb']):
+        c.update(kind='nrf-other-fw', role=nordic_firmware_role(c['usb']))
     else:
         claimed = _claimed_ports()
         if real in claimed:
@@ -964,6 +1005,10 @@ def check_port(path):
             c.update(probe_port(real, acm=os.path.basename(real).startswith('ttyACM')))
     c['note'] = _verdict_note(c)
     return c
+
+
+# Verdicts on a user-chosen port that stop a capture before it starts.
+NOT_CAPTURABLE = ('bluefruit-friend', 'nrf-other-fw', 'error', 'claimed', 'busy')
 
 
 def sniffer_baud(candidates, path):
@@ -1157,7 +1202,7 @@ def main(argv=None):
                 c['path'] == dev and c['kind'] == 'nrf-sniffer' for c in cands):
             chosen = check_port(dev)                 # -i / $RAGNAR_BLE_SNIFFER skip autodetect
             cands = [chosen]
-            if chosen['kind'] in ('bluefruit-friend', 'error', 'claimed', 'busy'):
+            if chosen['kind'] in NOT_CAPTURABLE:
                 sys.stderr.write('error: %s: %s\n' % (dev, chosen['note']))
                 return 2
         if not dev:

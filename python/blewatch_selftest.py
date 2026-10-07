@@ -326,6 +326,17 @@ def _run_checks(verbose):
              {'path': '/dev/ttyUSB1', 'kind': 'unknown'}]
     h.ck('Friend alone is never picked as the sniffer',
          b.find_sniffer(candidates=cands) is None)
+    conn = {'vid': '1915', 'pid': 'c00a', 'product': 'nRF52 Connectivity'}
+    h.ck('nRF52 Connectivity firmware (1915:c00a) named, not probed',
+         b.nordic_firmware_role(conn) == 'connectivity'
+         and b.nordic_firmware_role({'vid': '1915', 'pid': '521f'}) == 'bootloader'
+         and b.nordic_firmware_role({'vid': '1915', 'pid': '522a',
+                                     'product': 'nRF Sniffer for Bluetooth LE'}) is None
+         and b.nordic_firmware_role({'vid': '10c4', 'pid': 'ea60'}) is None
+         and 'Connectivity' in b._verdict_note({'kind': 'nrf-other-fw', 'role': 'connectivity'})
+         and 'nrf-other-fw' in b.NOT_CAPTURABLE)
+    h.ck('nRF52 with other firmware is never picked as the sniffer',
+         b.find_sniffer(candidates=[{'path': '/dev/ttyACM0', 'kind': 'nrf-other-fw'}]) is None)
     h.ck('sniffer picked by firmware, not by name',
          b.find_sniffer(candidates=cands + [{'path': '/dev/ttyUSB2', 'kind': 'nrf-sniffer'}])
          == '/dev/ttyUSB2')

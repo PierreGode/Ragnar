@@ -10059,7 +10059,7 @@ async function runBleWatch() {
             if (d && (d.missing_hw || d.missing_tool)) {
                 // Per-port diagnosis: which firmware answered on each USB serial port
                 // (a Bluefruit LE Friend looks identical to the Sniffer by USB name).
-                const kindStyle = { 'bluefruit-friend': 'text-amber-300', 'nrf-sniffer': 'text-green-400' };
+                const kindStyle = { 'bluefruit-friend': 'text-amber-300', 'nrf-other-fw': 'text-amber-300', 'nrf-sniffer': 'text-green-400' };
                 const ports = (d.candidates || []).map(c =>
                     '<li class="break-words"><span class="font-mono ' + (kindStyle[c.kind] || 'text-gray-300') + '">'
                     + escapeHtml(c.path) + '</span> <span class="text-gray-500">(' + escapeHtml(c.usb || '') + ')</span><br>'

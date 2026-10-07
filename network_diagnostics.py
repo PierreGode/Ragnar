@@ -25428,11 +25428,18 @@ def do_ble_watch(device=None, seconds=20, replay=None, config=None, quick=False)
             # a port that just didn't answer is still tried, since it's their call.
             chosen = blewatch.check_port(dev)
             candidates = [chosen]
-            if chosen['kind'] in ('bluefruit-friend', 'error', 'claimed', 'busy'):
+            if chosen['kind'] in blewatch.NOT_CAPTURABLE:
                 dev = None
         if not dev:
             friend = next((c for c in candidates if c['kind'] == 'bluefruit-friend'), None)
-            if friend:
+            nrf52 = next((c for c in candidates if c['kind'] == 'nrf-other-fw'), None)
+            if nrf52:
+                msg = ('%s is an nRF52 but it is not running nRF Sniffer firmware (%s). '
+                       'This is a firmware problem, not a hardware one: the board can sniff '
+                       'once the nRF52840 dongle sniffer hex is flashed. Steps below.'
+                       % (nrf52['path'], 'DFU bootloader' if nrf52.get('role') == 'bootloader'
+                          else 'it runs Nordic\'s Connectivity firmware'))
+            elif friend:
                 msg = ('%s is a Bluefruit LE Friend, not a sniffer. It runs Adafruit\'s '
                        'AT-command firmware, which never streams BLE packets, and no '
                        'switch or button position changes that. Flash the Nordic nRF '
