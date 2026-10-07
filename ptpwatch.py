@@ -138,6 +138,14 @@ CLOCKID_ALL_ONES = b"\xff" * 8
 # gPTP / 802.1AS is keyed off majorSdoId == 1. Parsed with the generic codes,
 # clockClass-derived rules masked, plus the 802.1AS-specific codes below.
 SDOID_GPTP = 1
+# 802.1AS-2020 added the Common Mean Link Delay Service, a link-level
+# peer-delay service shared across gPTP domains. Its Pdelay messages carry
+# majorSdoId 2, NOT 1 (IEEE 802.1 WG: "CMLDS uses majorSdoId=0x2, instead of
+# 0x1 for instance-specific"). Keying Class H on == 1 alone made every
+# peer-delay rule blind to CMLDS traffic -- including H02 and V03, which are
+# the two denial-of-timing rules that matter most on a gPTP link.
+SDOID_CMLDS = 2
+SDOID_8021AS = frozenset({SDOID_GPTP, SDOID_CMLDS})
 
 # TLV types, verified against tshark's dissector rather than recalled.
 # 0x0008 is PATH_TRACE, NOT a security TLV -- getting that wrong silently marks
@@ -243,7 +251,21 @@ class PtpMsg:
 
     @property
     def is_gptp(self) -> bool:
+        """Instance-specific gPTP (majorSdoId 1). Announce, Sync and Follow_Up
+        live here; CMLDS never carries them."""
         return self.major_sdo_id == SDOID_GPTP
+
+    @property
+    def is_cmlds(self) -> bool:
+        """802.1AS-2020 Common Mean Link Delay Service (majorSdoId 2).
+        Peer-delay only, shared across the domains on a link."""
+        return self.major_sdo_id == SDOID_CMLDS
+
+    @property
+    def is_8021as(self) -> bool:
+        """Either 802.1AS flavour. This is the correct gate for anything about
+        the peer-delay mechanism or the transport, which both share."""
+        return self.major_sdo_id in SDOID_8021AS
 
     @property
     def two_step(self) -> bool:
@@ -276,6 +298,22 @@ class PtpMsg:
     @property
     def ptp_timescale(self) -> bool:
         return bool(self.flags & FLAG_PTP_TIMESCALE)
+
+    @property
+    def time_traceable(self) -> bool:
+        return bool(self.flags & FLAG_TIME_TRACEABLE)
+
+    @property
+    def freq_traceable(self) -> bool:
+        return bool(self.flags & FLAG_FREQ_TRACEABLE)
+
+    @property
+    def dst_is_multicast(self) -> bool:
+        if self.dst_ip:
+            d = self.dst_ip
+            return d.startswith("224.") or d.startswith("239.") \
+                or d.lower().startswith("ff")
+        return bool(self.dst_mac and self.dst_mac[0] & 0x01)
 
     @property
     def correction_ns(self) -> float:
@@ -812,6 +850,67 @@ def decode_slow_protocol(buf: bytes, linktype: int = 1):
 
 
 # ---------------------------------------------------------------------------
+# ITU-T telecom profiles (Class P)
+# ---------------------------------------------------------------------------
+#
+# Every value below was verified against a shipping implementation or a vendor
+# specification during the build. Three preflight codes were CUT because their
+# ground truth could not be established the same way -- see README.
+#
+# Verified: G.8275.2 domain range 44-63 default 44, priority1 fixed at 128 and
+# not user-configurable, unicast transport (Juniper). G.8275.1 domain 24,
+# priority1 128, logAnnounceInterval -3, logSyncInterval -4,
+# logMinDelayReqInterval -4, end-to-end delay mechanism (IP Infusion OcNOS).
+# G.8265.1 domain 4, unicast, hybrid_e2e (linuxptp 4.0 shipped config).
+
+PROFILE_AUTO = "auto"
+PROFILE_8265_1 = "g8265.1"
+PROFILE_8275_1 = "g8275.1"
+PROFILE_8275_2 = "g8275.2"
+
+
+@dataclass(frozen=True)
+class TelecomProfile:
+    name: str
+    domain_range: Tuple[int, int]
+    domain_default: int
+    transports: frozenset          # which annexes the profile permits
+    multicast: bool                # does the profile distribute by multicast
+    peer_delay: bool               # is the peer-delay mechanism permitted
+    priority1: Optional[int]       # pinned value, or None if not pinned
+    dst_macs: Optional[frozenset]  # permitted L2 destinations, Annex F only
+    unicast_negotiation: bool      # are unicast negotiation TLVs expected
+
+
+TELECOM_PROFILES: Dict[str, TelecomProfile] = {
+    PROFILE_8265_1: TelecomProfile(
+        name="G.8265.1", domain_range=(4, 23), domain_default=4,
+        # Frequency profile: unicast over IP. Both address families parse; the
+        # preflight's caution holds -- IPv6 is NOT flagged as foreign here.
+        transports=frozenset({"annexD", "annexE"}),
+        multicast=False, peer_delay=False, priority1=None, dst_macs=None,
+        unicast_negotiation=True),
+    PROFILE_8275_1: TelecomProfile(
+        name="G.8275.1", domain_range=(24, 43), domain_default=24,
+        transports=frozenset({"annexF"}),
+        multicast=True, peer_delay=False, priority1=128,
+        dst_macs=frozenset({MAC_PTP_PRIMARY, MAC_PTP_PDELAY}),
+        unicast_negotiation=False),
+    PROFILE_8275_2: TelecomProfile(
+        name="G.8275.2", domain_range=(44, 63), domain_default=44,
+        transports=frozenset({"annexD", "annexE"}),
+        multicast=False, peer_delay=False, priority1=128, dst_macs=None,
+        unicast_negotiation=True),
+}
+
+UNICAST_NEGOTIATION_TLVS = frozenset({TLV_REQUEST_UNICAST, TLV_GRANT_UNICAST,
+                                      TLV_CANCEL_UNICAST,
+                                      TLV_ACK_CANCEL_UNICAST})
+PEER_DELAY_TYPES = frozenset({MsgType.PDELAY_REQ, MsgType.PDELAY_RESP,
+                              MsgType.PDELAY_RESP_FOLLOW_UP})
+
+
+# ---------------------------------------------------------------------------
 # Finding registry
 # ---------------------------------------------------------------------------
 
@@ -1018,6 +1117,73 @@ FINDINGS: Dict[str, CodeSpec] = {s.code: s for s in [
        "Unicast cancellation not attributable to either party",
        "CANCEL_UNICAST_TRANSMISSION kills a slave's time source outright, with no "
        "timestamp forgery required. A forged cancel is clean denial of timing."),
+    # -- Class P: ITU-T telecom profile posture ----------------------------
+    # All of Class P is dark until --profile declares which profile applies.
+    # Default-on conformance checking stays rejected: without a declaration
+    # there is no way to know which profile a capture is supposed to follow.
+    _c("PTP-P01", Severity.MEDIUM, Confidence.CONFIRMED, Klass.POSTURE, "profile",
+       "PTP domain outside the declared profile's range",
+       "Each telecom profile owns a domain range: G.8265.1 uses 4-23, "
+       "G.8275.1 24-43, G.8275.2 44-63. Traffic outside the declared "
+       "profile's range is either misconfigured or not the profile it claims.",
+       armed_by="profile"),
+    _c("PTP-P02", Severity.HIGH, Confidence.CONFIRMED, Klass.POSTURE, "profile",
+       "Transport foreign to the declared profile",
+       "G.8275.1 is Ethernet-only; the two unicast profiles run over UDP. "
+       "Both address families are accepted for the UDP profiles -- IPv6 is "
+       "never flagged as foreign.",
+       armed_by="profile"),
+    _c("PTP-P03", Severity.HIGH, Confidence.CONFIRMED, Klass.POSTURE, "profile",
+       "Multicast Sync or Announce in a unicast profile",
+       "G.8265.1 and G.8275.2 distribute by unicast. Keys on Sync and Announce "
+       "only: hybrid end-to-end operation makes unicast Delay_Req traffic "
+       "entirely normal, so delay messages are not evidence either way.",
+       armed_by="profile"),
+    _c("PTP-P04", Severity.MEDIUM, Confidence.CONFIRMED, Klass.POSTURE, "profile",
+       "Unicast negotiation in a multicast-only profile",
+       "G.8275.1 has no unicast negotiation. REQUEST/GRANT/CANCEL TLVs in a "
+       "declared G.8275.1 domain are foreign to the profile.",
+       armed_by="profile"),
+    _c("PTP-P05", Severity.MEDIUM, Confidence.CONFIRMED, Klass.POSTURE, "profile",
+       "Peer-delay mechanism in a telecom profile",
+       "All three telecom profiles use the end-to-end delay mechanism. "
+       "Peer-delay messages indicate equipment running a different profile on "
+       "the same segment.",
+       armed_by="profile"),
+    _c("PTP-P06", Severity.MEDIUM, Confidence.CONFIRMED, Klass.POSTURE, "profile",
+       "priority1 not pinned to the profile value",
+       "G.8275.1 and G.8275.2 pin priority1 at 128 and vendors expose it as "
+       "non-configurable. A different value means the clock is not following "
+       "the profile's selection rules.",
+       armed_by="profile"),
+    _c("PTP-P08", Severity.HIGH, Confidence.CONFIRMED, Klass.ATTACK, "profile",
+       "Primary-reference clockClass without traceability asserted",
+       "clockClass 6 means locked to a primary reference, which by definition "
+       "makes time and frequency traceable. Asserting 6 with timeTraceable or "
+       "frequencyTraceable clear is self-contradictory -- this is the one "
+       "Class P rule that holds without knowing the profile's full clockClass "
+       "table.",
+       armed_by="profile"),
+    _c("PTP-P09", Severity.MEDIUM, Confidence.CONFIRMED, Klass.POSTURE, "profile",
+       "Destination address outside the G.8275.1 permitted pair",
+       "G.8275.1 permits only 01:1B:19:00:00:00 and 01:80:C2:00:00:0E. Any "
+       "other destination is outside the profile.",
+       armed_by="profile"),
+    _c("PTP-P10", Severity.MEDIUM, Confidence.PROBABLE, Klass.POSTURE, "profile",
+       "Non-zero correctionField in G.8265.1",
+       "G.8265.1 is a frequency profile with no transparent clocks in the "
+       "chain, so residence-time accumulation has nothing to come from. Note "
+       "this is also PTP-B03's disarm condition: a non-zero correction "
+       "legitimately disarms the identity check, and here it is itself the "
+       "finding. Both are correct; B03 goes quiet and P10 speaks.",
+       armed_by="profile"),
+    _c("PTP-P11", Severity.MEDIUM, Confidence.CONFIRMED, Klass.POSTURE, "profile",
+       "Non-zero stepsRemoved in G.8265.1",
+       "G.8265.1 servers are reached directly by unicast with no boundary "
+       "clocks between, so a non-zero stepsRemoved contradicts the profile's "
+       "topology.",
+       armed_by="profile"),
+
     # -- Class S: SyncE / ESMC (ITU-T G.8264) ------------------------------
     _c("PTP-S01", Severity.MEDIUM, Confidence.CONFIRMED, Klass.ATTACK, "synce",
        "Malformed ESMC PDU",
@@ -1165,7 +1331,7 @@ FINDINGS: Dict[str, CodeSpec] = {s.code: s for s in [
        "evidence it was never sent.", armed_by="_negotiation_seen"),
 ]}
 
-assert len(FINDINGS) == 56, f"registry drift: {len(FINDINGS)} codes"
+assert len(FINDINGS) == 66, f"registry drift: {len(FINDINGS)} codes"
 CVE_CODES = {c: s for c, s in FINDINGS.items() if s.cve}
 
 
@@ -1186,7 +1352,7 @@ class Config:
     ql_option: Optional[int] = None       # G.781 option 1 or 2; arms S10
     esmc_flap_threshold: int = 5
     esmc_flap_window: float = 60.0
-    profile: str = "auto"            # auto | g8275.1 | g8275.2 | 8021as
+    profile: str = PROFILE_AUTO      # auto | g8265.1 | g8275.1 | g8275.2 | 8021as
 
     # thresholds, all with an in-band or physical justification
     correction_max: int = CORRECTION_MAX_ABS
@@ -1225,6 +1391,8 @@ class Config:
             return bool(self.synce_sources)
         if spec.armed_by == "ql_option":
             return self.ql_option in SSM_TABLES
+        if spec.armed_by == "profile":
+            return self.profile in TELECOM_PROFILES
         if spec.armed_by == "domain":
             return self.domain is not None
         if spec.armed_by == "_negotiation_seen":
@@ -1470,6 +1638,7 @@ class PtpEngine:
 
         self.clock_addrs: Dict[bytes, set] = {}
         self.capped = 0
+        self.profile: Optional[TelecomProfile] = TELECOM_PROFILES.get(cfg.profile)
         # (requesting_identity, requesting_port, sequenceId) -> responder set
         self.pdelay_responders: Dict[Tuple[bytes, int, int], set] = {}
         self.pdelay_requesters: set = set()
@@ -1497,7 +1666,7 @@ class PtpEngine:
     def _emit(self, code: str, msg: "PtpMsg", ts: float, detail: Dict,
               dedup_extra: Tuple = ()) -> None:
         spec = FINDINGS[code]
-        if spec.gptp_masked and msg.is_gptp:
+        if spec.gptp_masked and msg.is_8021as:
             return
         if not self.cfg.armed(spec, self):
             return
@@ -1559,9 +1728,12 @@ class PtpEngine:
         if msg.msg_type == MsgType.SYNC and msg.unicast:
             self._check_unicast_sync(msg, ts, mono, pids)
 
-        if msg.is_gptp:
+        if msg.is_8021as:
             self.gptp_seen = True
             self._check_gptp(msg, ts, mono)
+
+        if self.profile is not None:
+            self._check_profile(msg, ts)
 
     # -- B03 gate ----------------------------------------------------------
     def _check_transparent_clock_evidence(self, msg: PtpMsg) -> None:
@@ -1576,6 +1748,73 @@ class PtpEngine:
         elif len(self.ports_by_clock.get(msg.clock_identity, ())) > 1:
             self.tc_evidence = "multi-port-clockIdentity"
 
+
+    # -- Class P: ITU-T telecom profile posture ----------------------------
+    # All of Class P is dark until --profile declares which profile applies.
+    # Default-on conformance checking stays rejected: without a declaration
+    # there is no way to know which profile a capture is supposed to follow.
+    _c("PTP-P01", Severity.MEDIUM, Confidence.CONFIRMED, Klass.POSTURE, "profile",
+       "PTP domain outside the declared profile's range",
+       "Each telecom profile owns a domain range: G.8265.1 uses 4-23, "
+       "G.8275.1 24-43, G.8275.2 44-63. Traffic outside the declared "
+       "profile's range is either misconfigured or not the profile it claims.",
+       armed_by="profile"),
+    _c("PTP-P02", Severity.HIGH, Confidence.CONFIRMED, Klass.POSTURE, "profile",
+       "Transport foreign to the declared profile",
+       "G.8275.1 is Ethernet-only; the two unicast profiles run over UDP. "
+       "Both address families are accepted for the UDP profiles -- IPv6 is "
+       "never flagged as foreign.",
+       armed_by="profile"),
+    _c("PTP-P03", Severity.HIGH, Confidence.CONFIRMED, Klass.POSTURE, "profile",
+       "Multicast Sync or Announce in a unicast profile",
+       "G.8265.1 and G.8275.2 distribute by unicast. Keys on Sync and Announce "
+       "only: hybrid end-to-end operation makes unicast Delay_Req traffic "
+       "entirely normal, so delay messages are not evidence either way.",
+       armed_by="profile"),
+    _c("PTP-P04", Severity.MEDIUM, Confidence.CONFIRMED, Klass.POSTURE, "profile",
+       "Unicast negotiation in a multicast-only profile",
+       "G.8275.1 has no unicast negotiation. REQUEST/GRANT/CANCEL TLVs in a "
+       "declared G.8275.1 domain are foreign to the profile.",
+       armed_by="profile"),
+    _c("PTP-P05", Severity.MEDIUM, Confidence.CONFIRMED, Klass.POSTURE, "profile",
+       "Peer-delay mechanism in a telecom profile",
+       "All three telecom profiles use the end-to-end delay mechanism. "
+       "Peer-delay messages indicate equipment running a different profile on "
+       "the same segment.",
+       armed_by="profile"),
+    _c("PTP-P06", Severity.MEDIUM, Confidence.CONFIRMED, Klass.POSTURE, "profile",
+       "priority1 not pinned to the profile value",
+       "G.8275.1 and G.8275.2 pin priority1 at 128 and vendors expose it as "
+       "non-configurable. A different value means the clock is not following "
+       "the profile's selection rules.",
+       armed_by="profile"),
+    _c("PTP-P08", Severity.HIGH, Confidence.CONFIRMED, Klass.ATTACK, "profile",
+       "Primary-reference clockClass without traceability asserted",
+       "clockClass 6 means locked to a primary reference, which by definition "
+       "makes time and frequency traceable. Asserting 6 with timeTraceable or "
+       "frequencyTraceable clear is self-contradictory -- this is the one "
+       "Class P rule that holds without knowing the profile's full clockClass "
+       "table.",
+       armed_by="profile"),
+    _c("PTP-P09", Severity.MEDIUM, Confidence.CONFIRMED, Klass.POSTURE, "profile",
+       "Destination address outside the G.8275.1 permitted pair",
+       "G.8275.1 permits only 01:1B:19:00:00:00 and 01:80:C2:00:00:0E. Any "
+       "other destination is outside the profile.",
+       armed_by="profile"),
+    _c("PTP-P10", Severity.MEDIUM, Confidence.PROBABLE, Klass.POSTURE, "profile",
+       "Non-zero correctionField in G.8265.1",
+       "G.8265.1 is a frequency profile with no transparent clocks in the "
+       "chain, so residence-time accumulation has nothing to come from. Note "
+       "this is also PTP-B03's disarm condition: a non-zero correction "
+       "legitimately disarms the identity check, and here it is itself the "
+       "finding. Both are correct; B03 goes quiet and P10 speaks.",
+       armed_by="profile"),
+    _c("PTP-P11", Severity.MEDIUM, Confidence.CONFIRMED, Klass.POSTURE, "profile",
+       "Non-zero stepsRemoved in G.8265.1",
+       "G.8265.1 servers are reached directly by unicast with no boundary "
+       "clocks between, so a non-zero stepsRemoved contradicts the profile's "
+       "topology.",
+       armed_by="profile"),
 
     # -- Class S: SyncE / ESMC (ITU-T G.8264) ------------------------------
     _c("PTP-S01", Severity.MEDIUM, Confidence.CONFIRMED, Klass.ATTACK, "synce",
@@ -1672,7 +1911,7 @@ class PtpEngine:
         # V03 / CVE-2024-42861 -- 802.1AS links are point-to-point, so exactly
         # two peer-delay requesters are normal (one per end). A third distinct
         # requesting clockIdentity disables the port's sync function.
-        if msg.is_gptp and msg.msg_type == MsgType.PDELAY_REQ:
+        if msg.is_8021as and msg.msg_type == MsgType.PDELAY_REQ:
             self.pdelay_requesters.add(msg.clock_identity)
             if len(self.pdelay_requesters) > 2:
                 self._emit("PTP-V03", msg, ts,
@@ -1680,6 +1919,7 @@ class PtpEngine:
                             "requesters": sorted(c.hex() for c in
                                                  self.pdelay_requesters),
                             "expected_max": 2,
+                            "service": "CMLDS" if msg.is_cmlds else "gPTP instance",
                             "effect": "receiving port disables its time "
                                       "synchronization function"},
                            ())
@@ -2098,12 +2338,16 @@ class PtpEngine:
                                                  msg.requesting_port or 0),
                             "sequence_id": msg.sequence_id,
                             "responders": sorted(pid_str(*r) for r in responders),
+                            "service": "CMLDS" if msg.is_cmlds else "gPTP instance",
                             "effect": "requester sets asCapable FALSE; timing "
                                       "stops on this port"},
                            (key[0], key[2]))
             if len(self.pdelay_responders) > self.cfg.max_sync_pending:
                 self.pdelay_responders.clear()
                 self.capped += 1
+
+        if msg.is_cmlds:
+            return      # CMLDS is peer-delay only; nothing below applies
 
         if msg.msg_type == MsgType.ANNOUNCE:
             self._check_gptp_announce(msg, ts)
@@ -2204,6 +2448,88 @@ class PtpEngine:
                        if self.transports else "unknown")
         self._expire_sync_pending(probe, ts, mono)
 
+
+
+    # -- Class P: telecom profile posture ----------------------------------
+    def _check_profile(self, msg: PtpMsg, ts: float) -> None:
+        """Compare observed traffic against the DECLARED profile. Dark unless
+        --profile names one, because nothing on the wire says which profile a
+        domain is supposed to be following."""
+        prof = self.profile
+        if prof is None or msg.is_8021as:
+            return
+
+        lo, hi = prof.domain_range
+        if not (lo <= msg.domain <= hi):
+            self._emit("PTP-P01", msg, ts,
+                       {"domain": msg.domain, "profile": prof.name,
+                        "permitted_range": [lo, hi]}, (msg.domain,))
+
+        if msg.transport not in prof.transports:
+            self._emit("PTP-P02", msg, ts,
+                       {"transport": msg.transport, "profile": prof.name,
+                        "permitted": sorted(prof.transports)},
+                       (msg.transport,))
+
+        # P03 keys on Sync/Announce ONLY. Hybrid end-to-end operation sends
+        # delay traffic unicast while distributing by multicast elsewhere, so
+        # Delay_Req direction proves nothing about the profile.
+        if not prof.multicast and msg.msg_type in (MsgType.SYNC, MsgType.ANNOUNCE) \
+                and msg.dst_is_multicast:
+            self._emit("PTP-P03", msg, ts,
+                       {"message_type": msg.msg_type, "profile": prof.name,
+                        "destination": msg.dst_ip or (msg.dst_mac or b"").hex(":")},
+                       (msg.msg_type,))
+
+        if not prof.unicast_negotiation:
+            for tlv in msg.tlvs:
+                if tlv.tlv_type in UNICAST_NEGOTIATION_TLVS:
+                    self._emit("PTP-P04", msg, ts,
+                               {"tlv_type": hex(tlv.tlv_type),
+                                "profile": prof.name},
+                               (tlv.tlv_type,))
+                    break
+
+        if not prof.peer_delay and msg.msg_type in PEER_DELAY_TYPES:
+            self._emit("PTP-P05", msg, ts,
+                       {"message_type": msg.msg_type, "profile": prof.name,
+                        "expected_mechanism": "end-to-end"},
+                       (msg.msg_type,))
+
+        if msg.msg_type == MsgType.ANNOUNCE:
+            if prof.priority1 is not None and msg.priority1 is not None \
+                    and msg.priority1 != prof.priority1:
+                self._emit("PTP-P06", msg, ts,
+                           {"priority1": msg.priority1, "profile": prof.name,
+                            "expected": prof.priority1}, (msg.priority1,))
+
+            # P08 is a self-contradiction and needs no clockClass table.
+            if msg.clock_class == CLOCKCLASS_PRIMARY_PTP and \
+                    not (msg.time_traceable and msg.freq_traceable):
+                self._emit("PTP-P08", msg, ts,
+                           {"clock_class": msg.clock_class,
+                            "time_traceable": msg.time_traceable,
+                            "frequency_traceable": msg.freq_traceable})
+
+            if prof is TELECOM_PROFILES[PROFILE_8265_1] and msg.steps_removed:
+                self._emit("PTP-P11", msg, ts,
+                           {"steps_removed": msg.steps_removed,
+                            "profile": prof.name})
+
+        if prof.dst_macs is not None and msg.transport == "annexF" \
+                and msg.dst_mac is not None and msg.dst_mac not in prof.dst_macs:
+            self._emit("PTP-P09", msg, ts,
+                       {"destination": msg.dst_mac.hex(":"),
+                        "profile": prof.name,
+                        "permitted": sorted(m.hex(":") for m in prof.dst_macs)},
+                       (msg.dst_mac,))
+
+        if prof is TELECOM_PROFILES[PROFILE_8265_1] and msg.correction != 0:
+            self._emit("PTP-P10", msg, ts,
+                       {"correction_scaled": msg.correction,
+                        "correction_ns": msg.correction_ns,
+                        "profile": prof.name,
+                        "note": "also disarms PTP-B03 for this segment"})
 
     # -- Class S: SyncE / ESMC ---------------------------------------------
     def feed_esmc(self, pdu: EsmcPdu, ts: float, mono: float) -> None:
@@ -2553,12 +2879,33 @@ SCENARIO_MUTATIONS = [
      "                    source.lower() not in declared:",
      "                    source.lower() not in ():"),
     ("gPTP masking disabled", "ptpwatch.py",
-     "        if spec.gptp_masked and msg.is_gptp:\n            return",
+     "        if spec.gptp_masked and msg.is_8021as:\n            return",
      "        if False:\n            return"),
     ("G01 grant/request comparison inverted", "ptpwatch.py",
      "                    if grant.log_interval != req.log_interval or \\\n"
      "                            grant.duration > req.duration:",
      "                    if False:"),
+    ("P01 domain range check inverted", "ptpwatch.py",
+     "        if not (lo <= msg.domain <= hi):", "        if (lo <= msg.domain <= hi):"),
+    ("P03 keys on delay traffic too (breaks hybrid e2e)", "ptpwatch.py",
+     "        if not prof.multicast and msg.msg_type in (MsgType.SYNC, MsgType.ANNOUNCE) \\",
+     "        if not prof.multicast and msg.msg_type in (MsgType.SYNC, MsgType.DELAY_REQ) \\"),
+    ("P06 priority1 pin ignored", "ptpwatch.py",
+     "                    and msg.priority1 != prof.priority1:",
+     "                    and msg.priority1 == prof.priority1:"),
+    ("P08 fires without the traceability contradiction", "ptpwatch.py",
+     "                    not (msg.time_traceable and msg.freq_traceable):",
+     "                    (msg.time_traceable and msg.freq_traceable):"),
+    ("P09 permitted destination pair widened", "ptpwatch.py",
+     "                and msg.dst_mac is not None and msg.dst_mac not in prof.dst_macs:",
+     "                and msg.dst_mac is not None and False:"),
+    ("Class P applied to gPTP traffic", "ptpwatch.py",
+     "        if prof is None or msg.is_8021as:", "        if prof is None:"),
+    ("G.8275.2 stops accepting IPv6 (P02 flags it foreign)", "ptpwatch.py",
+     '        transports=frozenset({"annexD", "annexE"}),\n'
+     '        multicast=False, peer_delay=False, priority1=128, dst_macs=None,',
+     '        transports=frozenset({"annexD"}),\n'
+     '        multicast=False, peer_delay=False, priority1=128, dst_macs=None,'),
     ("S02 unflagged QL change ignored", "ptpwatch.py",
      "            if changed and not pdu.event:", "            if False:"),
     ("S04 rate ceiling raised past the G.8264 limit", "ptpwatch.py",
@@ -2591,7 +2938,7 @@ SCENARIO_MUTATIONS = [
      "            if len(self.pdelay_requesters) > 2:",
      "            if len(self.pdelay_requesters) > 1:"),
     ("V03 gPTP scoping removed", "ptpwatch.py",
-     "        if msg.is_gptp and msg.msg_type == MsgType.PDELAY_REQ:",
+     "        if msg.is_8021as and msg.msg_type == MsgType.PDELAY_REQ:",
      "        if msg.msg_type == MsgType.PDELAY_REQ:"),
     ("V04 invalid-TLV check disabled", "ptpwatch.py",
      "            bad = msg.tlv_truncated or any(", "            bad = False and any("),
@@ -2613,7 +2960,13 @@ SCENARIO_MUTATIONS = [
     ("H07 stop-sending sentinel not recognised", "ptpwatch.py",
      "INTERVAL_STOP_SENDING = 127", "INTERVAL_STOP_SENDING = 99"),
     ("gPTP keyed off the wrong sdoId", "ptpwatch.py",
-     "SDOID_GPTP = 1", "SDOID_GPTP = 3"),
+     "SDOID_CMLDS = 2", "SDOID_CMLDS = 7"),
+    ("CMLDS peer-delay falls through Class H again", "ptpwatch.py",
+     "        if msg.is_8021as:\n            self.gptp_seen = True",
+     "        if msg.is_gptp:\n            self.gptp_seen = True"),
+    ("V03 blind to CMLDS requesters", "ptpwatch.py",
+     "        if msg.is_8021as and msg.msg_type == MsgType.PDELAY_REQ:",
+     "        if msg.is_gptp and msg.msg_type == MsgType.PDELAY_REQ:"),
     ("A09 reverts to exact-length matching (breaks every TLV-bearing message)",
      "ptpwatch.py",
      "        if want is not None and msg.msg_length < want:",
@@ -2633,6 +2986,12 @@ SCENARIO_MUTATIONS = [
 ]
 
 CONFORMANCE_MUTATIONS = [
+    ("Class P armed without a declaration", "ptpwatch.py",
+     '        if spec.armed_by == "profile":\n            return self.profile in TELECOM_PROFILES',
+     '        if spec.armed_by == "profile":\n            return True'),
+    ("telecom profile domain ranges overlap", "ptpwatch.py",
+     "name=\"G.8275.1\", domain_range=(24, 43), domain_default=24,",
+     "name=\"G.8275.1\", domain_range=(4, 43), domain_default=24,"),
     ("CVE attribution stripped from the emitted JSON", "ptpwatch.py",
      '            "cve": spec.cve,', '            "cve": None,'),
     ("a below-bar CVE sneaks in without being a named exception", "ptpwatch.py",
@@ -2711,8 +3070,8 @@ DOCS_MUTATIONS: List[Tuple] = [
      "Unicast grant does not match its request",
      "Unicast grant mismatch detected"),
     ("README total code count drifts", "README.md",
-     "56 codes: 13 critical, 21 high, 16 medium, 6 low",
-     "57 codes: 13 critical, 21 high, 16 medium, 6 low"),
+     "66 codes: 13 critical, 24 high, 23 medium, 6 low",
+     "67 codes: 13 critical, 24 high, 23 medium, 6 low"),
     ("README claims a dark rule is always on", "README.md",
      "| `PTP-B05` | critical | confirmed | attack | `--grandmaster` |",
      "| `PTP-B05` | critical | confirmed | attack | always on |"),
@@ -2733,7 +3092,18 @@ DOCS_MUTATIONS: List[Tuple] = [
     ("README version drifts from the module", "README.md",
      "Version `0.1.0-dev`", "Version `0.2.0`"),
     ("README publishes a tier result that is not real", "README.md",
-     "| 910/910 |", "| 999/999 |", ["ptpwatch_readme_verify.py"]),
+     "| 1115/1115 |", "| 1200/1200 |", ["ptpwatch_readme_verify.py"]),
+    ("README misstates a profile domain range", "README.md",
+     "| Domain range (default) | 4\u201323 (4) | 24\u201343 (24) | 44\u201363 (44) |",
+     "| Domain range (default) | 4\u201323 (4) | 24\u201343 (24) | 44\u201399 (44) |"),
+    ("README drops a cut code's justification", "README.md",
+     "- **P13, Interface Rate TLV changing mid-session.**",
+     "- **P13 was built as specified.**"),
+    ("README loses the P10/B03 ordering note", "README.md",
+     "disarms `PTP-B03`", "has nothing to do with `PTP-B03`"),
+    ("README drops the CMLDS sdoId", "README.md",
+     "**`majorSdoId 2` is the Common Mean Link Delay",
+     "**`majorSdoId 9` is the Common Mean Link Delay"),
     ("README restores the retired SyncE rejection", "README.md",
      "- **White Rabbit** \u2014 its sub-nanosecond extensions depend on hardware state the",
      "- **SyncE** \u2014 rejected, an L1 visibility black hole, and White Rabbit state the"),
@@ -2896,7 +3266,8 @@ def build_argparser():
                     help="G.781 network option for SSM code validation; "
                          "arms PTP-S10. The option is not carried on the wire.")
     ap.add_argument("--profile", default="auto",
-                    choices=["auto", "g8275.1", "g8275.2", "8021as"])
+                    choices=["auto", "g8265.1", "g8275.1", "g8275.2", "8021as"],
+                    help="declared ITU-T telecom profile; arms Class P")
     ap.add_argument("--rate-tolerance", type=float, default=3.0)
     ap.add_argument("--dedup-window", type=float, default=60.0)
     ap.add_argument("--no-promisc", action="store_true",
@@ -2952,7 +3323,6 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 
 
 # ===========================================================================
@@ -3113,8 +3483,13 @@ def _ptp_capture_pcap(interface, seconds):
     return path, None
 
 
+# v6 Class P: ITU-T telecom profile conformance is dark until a profile is
+# declared, because nothing in a PTP frame says which profile a domain follows.
+PTP_PROFILES = ("auto", "g8265.1", "g8275.1", "g8275.2", "8021as")
+
+
 def do_ptp_watch(interface=None, seconds=20, grandmasters=None,
-                 mgmt_stations=None, domain=None):
+                 mgmt_stations=None, domain=None, profile=None):
     """Passive IEEE-1588 / PTPv2 / gPTP timing-plane scan (detection-only). One
     tcpdump snapshot on `interface`, replayed through the streaming PtpEngine;
     reports grandmaster takeover / identity conflict, time injection
@@ -3125,6 +3500,10 @@ def do_ptp_watch(interface=None, seconds=20, grandmasters=None,
     findings to Watchtower. Never transmits a PTP frame."""
     if not interface:
         return {"success": False, "error": "no interface specified"}
+    profile = (profile or "auto").strip().lower()
+    if profile not in PTP_PROFILES:
+        return {"success": False, "error": "unknown profile (use one of: %s)"
+                % ", ".join(PTP_PROFILES)}
     seconds = max(8, min(int(seconds or 20), 60))
     path, err = _ptp_capture_pcap(interface, seconds)
     if err:
@@ -3133,7 +3512,7 @@ def do_ptp_watch(interface=None, seconds=20, grandmasters=None,
     cfg = Config(
         grandmasters=tuple(grandmasters or ()),
         mgmt_stations=tuple(mgmt_stations or ()),
-        domain=domain)
+        domain=domain, profile=profile)
     emitter = Emitter(cfg)
     try:
         eng = run_pcap(path, cfg, emitter)
@@ -3180,7 +3559,7 @@ def do_ptp_watch(interface=None, seconds=20, grandmasters=None,
     result = {
         "success": True, "interface": interface, "seconds": seconds,
         "verdict": verdict, "reasons": reasons,
-        "findings": findings,
+        "findings": findings, "profile": profile,
         "clocks": clocks, "transports": transports,
         "by_severity": by_sev,
     }
@@ -3262,8 +3641,8 @@ def selftest():
     def check(name, ok, detail=""):
         scen.append({"name": name, "pass": bool(ok), "detail": str(detail)})
 
-    def run(frames):
-        cfg = Config()
+    def run(frames, cfg=None):
+        cfg = cfg or Config()
         em = Emitter(cfg)
         eng = PtpEngine(cfg, em)
         base = None
@@ -3316,14 +3695,14 @@ def selftest():
                          {"code": "PTP-E03", "severity": "low", "class": "posture"}])
     check("verdict-time-manipulation", v == _PTP_CRITICAL_VERDICT, v)
 
-    # 5. Registry integrity: 56 codes after the v3 Class V (CVE) and v4 Class S
-    #    (SyncE / ESMC) additions.
+    # 5. Registry integrity: 66 codes after the v3 Class V (CVE), v4 Class S
+    #    (SyncE / ESMC) and v6 Class P (ITU-T telecom profile) additions.
     sev = {}
     for spec in FINDINGS.values():
         sev[spec.severity.value] = sev.get(spec.severity.value, 0) + 1
-    reg_ok = (len(FINDINGS) == 56 and sev.get("critical") == 13
-              and sev.get("high") == 21)
-    check("registry-56-codes", reg_ok, "%d codes %s" % (len(FINDINGS), sev))
+    reg_ok = (len(FINDINGS) == 66 and sev.get("critical") == 13
+              and sev.get("high") == 24)
+    check("registry-66-codes", reg_ok, "%d codes %s" % (len(FINDINGS), sev))
 
     # 5b. Class V CVE detectors (ported from PTP Watch v3).
     # V01 / CVE-2021-3570: declared messageLength exceeds the bytes that arrived.
@@ -3376,6 +3755,28 @@ def selftest():
                   out.strip().splitlines()[-1] if out.strip() else "no output")
     except Exception as e:
         check("engine-conformance-tier", True, "skipped: %s" % type(e).__name__)
+
+    # 5c. v6 Class P — ITU-T telecom profile conformance. A G.8275.1 Announce in
+    #     domain 0 is out of range only once the profile is declared; with no
+    #     profile Class P stays dark; a conformant G.8275.1 Announce (domain 24,
+    #     priority1 128, time/frequency traceable) stays clean under it.
+    wrong = [_ptp_annexf_frame(_ptp_build_announce(s)) for s in range(1, 4)]
+    good = [_ptp_annexf_frame(_ptp_build_announce(s, domain=24, flags=0x0030))
+            for s in range(1, 4)]
+    p_dark, _ = run(wrong)
+    check("profile-dark-without-declaration",
+          not any(c.startswith("PTP-P") for c in p_dark), sorted(p_dark))
+    p_on, _ = run(wrong, Config(profile="g8275.1"))
+    check("profile-g8275.1-domain-out-of-range", "PTP-P01" in p_on, sorted(p_on))
+    p_ok, _ = run(good, Config(profile="g8275.1"))
+    check("profile-g8275.1-conformant-clean",
+          not any(c.startswith("PTP-P") for c in p_ok), sorted(p_ok))
+    p_wrong, _ = run(good, Config(profile="g8275.2"))
+    check("profile-mismatch-flags-transport",
+          "PTP-P02" in p_wrong, sorted(p_wrong))
+    bad = do_ptp_watch(interface="lo", seconds=8, profile="g9999")
+    check("profile-rejects-unknown", bad.get("success") is False
+          and "unknown profile" in bad.get("error", ""), bad.get("error"))
 
     # 6. v4 Class S — SyncE / ESMC (slow protocol 0x8809, ITU-T OSSP subtype 0x0A).
     def _esmc(ql, *, event=False, vlan=False, src=b"\x02\x00\x00\x00\x00\x51"):

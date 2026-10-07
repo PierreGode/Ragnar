@@ -4,12 +4,22 @@
 
 ### 2026-10-07
 
-#### fix(sdr): RF Waterfall went all-black after the ESP gain controls
+#### [#924](https://github.com/PierreGode/Ragnar/pull/924) — feat(net): PTP Watch v6 — ITU-T telecom profiles + CMLDS
+*branch `feature/ptp-watch-v5`*
+
+- Re-vendored **ptpwatch v6** with the Ragnar adapter re-appended; registry 56 → **66** codes
+- New **Class P** (`PTP-P01`…`P11`, no P07): conformance against a declared ITU-T profile — **G.8275.1**, **G.8275.2**, **G.8265.1** (domain range, transport, multicast vs unicast, peer-delay, priority1, clockClass traceability, G.8275.1 destinations, G.8265.1 correctionField / stepsRemoved). Off until a profile is picked: new **Profile** list on the PTP Watch card and `profile=` on `GET /api/net/ptp-watch` (unknown values rejected)
+- gPTP peer-delay rules (`PTP-H01/H02/H08/V03`) now also watch **CMLDS** (`majorSdoId 2`, 802.1AS-2020)
+- Same findings as upstream v6 on all six of the author's captures, with and without a profile; author tiers on the Pi 5: scenarios 139/139, conformance 1115/1115, self-verify 94/94, ESMC cross-check 0 mismatches; in-app PTP self-test 14 → 19, all 48 Detector Self-Test suites green from the web path
+- No new CVEs (index unchanged at 271 / 230); the PTP card's stale "42 finding codes" now reads 66
+- **Docs:** [nettools.md](nettools.md) "PTP Watch"
+
+#### [#923](https://github.com/PierreGode/Ragnar/pull/923) — fix(sdr): RF Waterfall went all-black after the ESP gain controls
 *branch `fix/rf-waterfall-esp-gain-hwui`*
 
 - The ESP-SDR real **Gain** / **FFT-bins** controls gave the ESP panel its own `espTrim` branch in `buildHardware`/`buildResolution` (creating `.eagc`/`.egain`/`.ebins`), but `_hwUI` was never given a matching branch — it still ran the HackRF path and did `querySelector('.hlna').value = …` on an element the ESP panel no longer has. That **threw inside the ESP scope's constructor**, aborting start-up before the polling loop and `window.RFWF` were set up, so **all three waterfalls (RTL / HackRF / ESP) went black with no readings**. Added the missing `espTrim` branch to `_hwUI` so the ESP panel refreshes its own gain UI instead of touching HackRF-only elements. Gain and FFT-bins controls work; the page runs again.
 
-#### fix(ble): BLE Watch card missing from L2 after #921
+#### [#922](https://github.com/PierreGode/Ragnar/pull/922) — fix(ble): BLE Watch card missing from L2 after #921
 *branch `fix/blewatch-card-l2`*
 
 - The BLE Watch card shipped in #921 still sat in the **L7** panel: the commit moving it to **L2** landed on another branch and missed the merge. It now lives at **Network → Diagnostics → L2 Data Link → Passive · Bluetooth LE**, the L2 description mentions it and the L2 layer badge counts it (13 → 14).
