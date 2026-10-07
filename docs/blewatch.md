@@ -150,6 +150,12 @@ another Ragnar component holds (GPS, CYD, Meshtastic, via `serial_claims`).
 During a live capture blewatch holds the port itself, so those components leave
 it alone.
 
+A port typed into the card's **device** field (or passed with `-i` /
+`$RAGNAR_BLE_SNIFFER`) bypasses autodetect but is **still checked** before
+capture. A Friend, a missing port, or a port held by another component stops
+with that reason. A port that simply doesn't answer is still tried, because the
+user chose it.
+
 ### "It only shows up as a CP210x" — Friend vs Sniffer
 
 Check the silkscreen. A board labelled **"Bluefruit LE Friend"** is Adafruit's

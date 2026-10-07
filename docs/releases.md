@@ -14,6 +14,7 @@
   - the helper was handed a `/dev/serial/by-id/…` path, which its `split('-')` can't parse; blewatch now passes `PORT-VERSION` on the real tty, and the bundled copy uses `rsplit` as Adafruit's guide advises
   - the helper was **re-discovering the baud rate** itself; the probe's rate is now passed in
 - A failed capture now reports why (exit reason, plus Nordic's log path) instead of silently returning nothing. An unplugged port is caught up front.
+- **A port typed into the device field is now checked too.** Previously a manually chosen port skipped detection and went straight to capture. That is how a field report with a Bluefruit LE **Friend** on `/dev/ttyUSB0` ended in "extcap helper not found" instead of "this is a Friend, not a sniffer". The device field, `-i` and `$RAGNAR_BLE_SNIFFER` now get the same firmware check.
 - Self-test 27 → **34/34**: v2/v3 ping replies, DLT-272 v2/v3 records, a **cross-check against Nordic's own `SnifferAPI.Packet` decoder** for v1–v3, a DLT-272 pcap replay, and the extcap command line. The full live path (probe → bundled extcap → pcap → findings) was also run against an emulated v3 sniffer on a pty: 312 frames parsed, findings raised. Not yet run against a physical sniffer. Docs: [blewatch — live capture](blewatch.md#live-capture-bundled-nordic-extcap).
 
 #### fix(ble): find the Bluefruit LE Sniffer by firmware, and name a Bluefruit LE Friend

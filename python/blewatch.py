@@ -947,6 +947,25 @@ def detect_sniffers(probe=True):
     return out
 
 
+def check_port(path):
+    """Diagnose one user-chosen port (the card's device field, -i, or
+    $RAGNAR_BLE_SNIFFER). Unlike autodetect it probes whatever bridge it is, since
+    the user picked it. A port another Ragnar component holds is still not
+    touched."""
+    real = os.path.realpath(path)
+    c = {'path': path, 'tty': real, 'usb': _usb_info(real) if os.path.exists(real) else {}}
+    if not os.path.exists(real):
+        c.update(kind='error', note='no such device (unplugged?)')
+    else:
+        claimed = _claimed_ports()
+        if real in claimed:
+            c.update(kind='claimed', owner=claimed[real])
+        else:
+            c.update(probe_port(real, acm=os.path.basename(real).startswith('ttyACM')))
+    c['note'] = _verdict_note(c)
+    return c
+
+
 def sniffer_baud(candidates, path):
     """Baud rate the probe found the sniffer answering at, or None."""
     for c in candidates or ():
@@ -1134,6 +1153,13 @@ def main(argv=None):
     else:
         cands = [] if args.device else detect_sniffers(probe=not args.no_probe)
         dev = args.device or find_sniffer(candidates=cands)
+        if dev and not args.no_probe and not any(
+                c['path'] == dev and c['kind'] == 'nrf-sniffer' for c in cands):
+            chosen = check_port(dev)                 # -i / $RAGNAR_BLE_SNIFFER skip autodetect
+            cands = [chosen]
+            if chosen['kind'] in ('bluefruit-friend', 'error', 'claimed', 'busy'):
+                sys.stderr.write('error: %s: %s\n' % (dev, chosen['note']))
+                return 2
         if not dev:
             sys.stderr.write('error: no BLE sniffer found (set $RAGNAR_BLE_SNIFFER, pass '
                              '-i, or use --replay).\n')

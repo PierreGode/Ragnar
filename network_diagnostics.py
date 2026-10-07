@@ -25421,6 +25421,15 @@ def do_ble_watch(device=None, seconds=20, replay=None, config=None, quick=False)
         # look-alike Bluefruit LE Friend both enumerate as a plain CP210x bridge.
         candidates = [] if device else blewatch.detect_sniffers(probe=True)
         dev = device or blewatch.find_sniffer(candidates=candidates)
+        if dev and not any(c['path'] == dev and c['kind'] == 'nrf-sniffer'
+                           for c in candidates):
+            # User-chosen port (device field / $RAGNAR_BLE_SNIFFER) skipped
+            # autodetect, so check it now. A Friend or a missing port stops here;
+            # a port that just didn't answer is still tried, since it's their call.
+            chosen = blewatch.check_port(dev)
+            candidates = [chosen]
+            if chosen['kind'] in ('bluefruit-friend', 'error', 'claimed', 'busy'):
+                dev = None
         if not dev:
             friend = next((c for c in candidates if c['kind'] == 'bluefruit-friend'), None)
             if friend:
@@ -25429,6 +25438,9 @@ def do_ble_watch(device=None, seconds=20, replay=None, config=None, quick=False)
                        'switch or button position changes that. Flash the Nordic nRF '
                        'Sniffer (nRF51) firmware over SWD, or use a Bluefruit LE Sniffer '
                        '(#2269) or an nRF52840 dongle running nRF Sniffer.' % friend['path'])
+            elif device or os.environ.get('RAGNAR_BLE_SNIFFER'):
+                c = candidates[0] if candidates else {}
+                msg = 'Cannot capture on %s: %s' % (c.get('path', device), c.get('note', ''))
             elif candidates:
                 msg = ('No BLE sniffer detected. No serial port answered the nRF Sniffer '
                        'protocol. Ports checked are listed below.')
