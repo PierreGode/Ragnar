@@ -10057,8 +10057,17 @@ async function runBleWatch() {
                 ? 'bg-slate-800 border border-slate-700 text-slate-300'
                 : 'text-red-400';
             if (d && (d.missing_hw || d.missing_tool)) {
+                // Per-port diagnosis: which firmware answered on each USB serial port
+                // (a Bluefruit LE Friend looks identical to the Sniffer by USB name).
+                const kindStyle = { 'bluefruit-friend': 'text-amber-300', 'nrf-sniffer': 'text-green-400' };
+                const ports = (d.candidates || []).map(c =>
+                    '<li class="break-words"><span class="font-mono ' + (kindStyle[c.kind] || 'text-gray-300') + '">'
+                    + escapeHtml(c.path) + '</span> <span class="text-gray-500">(' + escapeHtml(c.usb || '') + ')</span><br>'
+                    + '<span class="text-gray-400">' + escapeHtml(c.note || c.kind) + '</span></li>').join('');
                 out.innerHTML = '<div class="px-3 py-2 rounded ' + cls + ' text-sm">🔌 '
-                    + escapeHtml(msg) + '</div>';
+                    + escapeHtml(msg)
+                    + (ports ? '<ul class="mt-2 space-y-1 text-xs">' + ports + '</ul>' : '')
+                    + '</div>';
             } else {
                 out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + '</p>';
             }

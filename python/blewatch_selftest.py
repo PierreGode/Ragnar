@@ -222,6 +222,32 @@ def _run_checks(verbose):
     feed(g, ll_adv(b.ADV_IND, 'ba:d0:00:00:00:16', ad(uuid16_ad(0x180F), name_ad('fake'))), 1)
     h.ck('BLE-016 protected service from untrusted AdvA', 'BLE-016' in _codes(al))
 
+    # ---- sniffer detection (firmware probe, no hardware) ------------------
+    raw = bytes([0x00, 0xAB, 0xBC, 0xCD, 0x7F])
+    h.ck('SLIP round-trip with escaped bytes', b.slip_frames(b.slip_encode(raw)) == [raw])
+    h.ck('PING_REQ wire bytes',
+         b.sniffer_ping_packet(1) == bytes([0xAB, 6, 0, 1, 1, 0, 0x0D, 0xBC]))
+    # PING_RESP carrying fw 0x04AB (escaped on the wire), after line noise
+    resp = b'\x00\xff' + b.slip_encode(bytes([6, 2, 1, 1, 0, b.SNIFFER_PING_RESP, 0xAB, 0x04]))
+    h.ck('nRF Sniffer PING_RESP identified + version',
+         b.parse_sniffer_reply(resp) == (True, 0x04AB))
+    friend = (b'ATI\r\nBLEFRIEND32\r\nnRF51822 QFACA10\r\n4BEC0DC8C5BB9C3B\r\n'
+              b'0.6.7\r\n0.6.7\r\nSep 17 2015\r\nS110 8.0.0, 0.2\r\nOK\r\n')
+    fi = b.parse_friend_ati(friend)
+    h.ck('Bluefruit LE Friend ATI identified',
+         bool(fi) and fi['board'] == 'BLEFRIEND32' and fi.get('firmware') == '0.6.7')
+    h.ck('Friend AT reply is not a sniffer', b.parse_sniffer_reply(friend) == (False, None))
+    esp_boot = b'ets Jun  8 2016 00:22:57\r\nrst:0x1 (POWERON_RESET)\r\nOK\r\n'
+    h.ck('ESP32 boot log is neither', b.parse_friend_ati(esp_boot) is None
+         and b.parse_sniffer_reply(esp_boot) == (False, None))
+    cands = [{'path': '/dev/ttyUSB0', 'kind': 'bluefruit-friend'},
+             {'path': '/dev/ttyUSB1', 'kind': 'unknown'}]
+    h.ck('Friend alone is never picked as the sniffer',
+         b.find_sniffer(candidates=cands) is None)
+    h.ck('sniffer picked by firmware, not by name',
+         b.find_sniffer(candidates=cands + [{'path': '/dev/ttyUSB2', 'kind': 'nrf-sniffer'}])
+         == '/dev/ttyUSB2')
+
     # ---- negative controls ------------------------------------------------
     g, al = _w({'trusted_services': ['fff0']})
     feed(g, ll_adv(b.ADV_IND, 'd0:0d:00:00:00:fe', ad(name_ad('Thermo'), uuid16_ad(0x181A))), 1)
