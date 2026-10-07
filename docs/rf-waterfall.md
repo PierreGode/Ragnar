@@ -1111,13 +1111,15 @@ Frequencies are written with Hz precision; levels in the on-screen units.
 ## The button and the toggle (WiFi Spectrum Analyzer)
 
 
-- **"RF Waterfall page" button** — appears in the analyzer's controls once a
-  HackRF *and/or* RTL-SDR is detected (or while the demo toggle is on), and
-  opens the page in a new tab.
-- **"🌊 RF Waterfall demo" toggle** — a config switch (`sdr_demo`). On: the page
-  is always reachable and fills empty panels with the synthetic feed; each panel
-  still flips to live automatically when its radio is connected. Off: the page is
-  served only when a radio is present (otherwise `/rf-waterfall` 404s).
+- **"RF Waterfall page" button** — always shown in Signal Intelligence → RF
+  tools, radio or not, and opens the page. Its tooltip lists the radios that are
+  live (HackRF / RTL-SDR / ESP-SDR). The page itself collapses the panel of any
+  radio that isn't connected, so there is nothing to hide up front.
+- **"🌊 RF Waterfall demo" toggle** — a config switch (`sdr_demo`). On: empty
+  panels fill with the synthetic feed (and the ADS-B / Pager / VOR buttons show
+  without an RTL-SDR); each panel still flips to live automatically when its
+  radio is connected. Off: an absent radio's panel stays collapsed. Either way
+  `/rf-waterfall` is always served.
 
 Env `RAGNAR_SDR_DEMO=1` forces the demo on without touching config.
 
