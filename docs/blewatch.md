@@ -142,6 +142,7 @@ by-id `usb-Silicon_Labs_CP2104_…`), as do its look-alike, the Bluefruit LE
 | SLIP-framed **PING_RESP** of the Nordic nRF Sniffer UART protocol (tried at 1 000 000 then 460 800 baud) | **nRF Sniffer** — used for capture; the firmware version is shown |
 | `ATI` at 9600 baud → `BLEFRIEND…` / `nRF51822 …` / `OK` | **Bluefruit LE Friend**, which is **not a sniffer** (see below) |
 | nothing | unknown CP210x device: wrong firmware, an ESP32/GPS, or a Friend in DAT mode |
+| Nordic USB ID `1915:c00a` / `1915:521f` (read from sysfs, port not opened) | **nRF52 with other firmware**: Connectivity firmware or the DFU bootloader. **Not a sniffer yet** (see below) |
 
 An nRF52840 dongle flashed with nRF Sniffer announces itself as "nRF Sniffer"
 over USB and is accepted by name. The probe only writes those two read-only
@@ -174,6 +175,31 @@ reports it as a Friend instead of saying "no sniffer". To turn it into a sniffer
 
 The simpler route is a real Bluefruit LE Sniffer (#2269) or an **nRF52840
 dongle** running nRF Sniffer. Keep the Friend for something else.
+
+### nRF52840 dongle shows up as "nRF52 Connectivity"
+
+The dongle is fine, but it's running the wrong firmware. `1915:c00a` /
+`…nRF52_Connectivity…` is Nordic's **Connectivity** firmware, the image nRF
+Connect for Desktop's Bluetooth app installs. Many nRF52840 USB dongles,
+including USB-A clones of Nordic's PCA10059, ship with it. It never streams sniffed
+packets. An nRF52840 running nRF Sniffer enumerates as **"nRF Sniffer for
+Bluetooth LE"** instead, and Ragnar picks it up by itself.
+
+To flash nRF Sniffer onto it:
+
+1. Download **nRF Sniffer for Bluetooth LE 4.1.1** from Nordic. The image is
+   `hex/sniffer_nrf52840dongle_nrf52840_4.1.1.hex`.
+2. Press the dongle's **RESET** button (sideways on Nordic's own dongle; P0.18
+   on the clones). The LED pulses red and the dongle re-enumerates as
+   `1915:521f` "Open DFU Bootloader". Ragnar reports that state too.
+3. Flash the hex with **nRF Connect Programmer**: select the dongle, add the
+   file, then click **Write**.
+4. Re-plug the dongle and run BLE Watch with the device field empty.
+
+If RESET doesn't bring up `1915:521f`, the board has no Nordic DFU bootloader.
+Flash the same hex over the **SWD** pads (SWDCLK/SWDIO/GND/3.3V) with a J-Link
+or another SWD probe (`nrfjprog --program … --chiperase -f NRF52 --reset`).
+Ragnar never flashes the dongle itself.
 
 ### Live capture: bundled Nordic extcap
 

@@ -2,6 +2,15 @@
 
 ## Releases
 
+### 2026-10-08
+
+#### fix(ble): name an nRF52840 dongle that isn't running nRF Sniffer, and say how to flash it
+*branch `fix/blewatch-nrf52-connectivity`*
+
+- **Field report:** a USB-A nRF52840 dongle came back as "No BLE sniffer detected … `usb-Nordic_Semiconductor_nRF52_Connectivity` (1915:c00a) did not answer as an nRF Sniffer". The hardware is fine, but the dongle runs Nordic's **Connectivity** firmware (the image nRF Connect for Desktop installs), not nRF Sniffer.
+- blewatch now recognises Nordic USB IDs **1915:c00a** (Connectivity) and **1915:521f** (Open DFU bootloader) from sysfs, without opening the port. The card says which one it found and how to fix it: press RESET → bootloader (red LED pulses, 1915:521f) → flash `sniffer_nrf52840dongle_nrf52840_4.1.1.hex` with nRF Connect Programmer, or over the SWD pads on a clone without that bootloader. A port with that firmware typed into the device field stops with the same reason. Ragnar flashes nothing itself.
+- Self-test 34 → **36/36**. Docs: [blewatch — nRF52 dongle](blewatch.md#nrf52840-dongle-shows-up-as-nrf52-connectivity).
+
 ### 2026-10-07
 
 #### fix(ble): live capture works out of the box: bundled nRF Sniffer extcap + correct Nordic parsing
