@@ -4,6 +4,11 @@
 
 ### 2026-10-07
 
+#### fix(sdr): RF Waterfall went all-black after the ESP gain controls
+*branch `fix/rf-waterfall-esp-gain-hwui`*
+
+- The ESP-SDR real **Gain** / **FFT-bins** controls gave the ESP panel its own `espTrim` branch in `buildHardware`/`buildResolution` (creating `.eagc`/`.egain`/`.ebins`), but `_hwUI` was never given a matching branch — it still ran the HackRF path and did `querySelector('.hlna').value = …` on an element the ESP panel no longer has. That **threw inside the ESP scope's constructor**, aborting start-up before the polling loop and `window.RFWF` were set up, so **all three waterfalls (RTL / HackRF / ESP) went black with no readings**. Added the missing `espTrim` branch to `_hwUI` so the ESP panel refreshes its own gain UI instead of touching HackRF-only elements. Gain and FFT-bins controls work; the page runs again.
+
 #### fix(ble): BLE Watch card missing from L2 after #921
 *branch `fix/blewatch-card-l2`*
 
