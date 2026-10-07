@@ -22,11 +22,11 @@ single alert (highest severity + evidence).
 Capture link types understood (pcap DLT):
   * 251  LINKTYPE_BLUETOOTH_LE_LL             (bare LE LL PDU)
   * 256  LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR   (10-byte BLE pseudo-header + PDU)
-  * 272  LINKTYPE_NORDIC_BLE                  (Nordic sniffer header + PDU) *
+  * 272  LINKTYPE_NORDIC_BLE                  (nRF Sniffer extcap output) *
 
-* The Nordic (272) header layout is version-dependent and is parsed best-effort;
-  it is UNVALIDATED against real hardware on this box (no sniffer attached). The
-  256/251 paths are the canonical Wireshark BLE link types and are fully tested.
+* 272 follows Nordic's documented layout and is cross-checked in the self-test
+  against the vendored SnifferAPI's own packet decoder (python/nrf_sniffer). It
+  has not yet been run against a live sniffer on this box.
 
 See docs/blewatch.md.
 """
@@ -171,18 +171,27 @@ def strip_to_ll(dlt, frame):
             meta['crc_ok'] = bool(flags & 0x0800)
         return meta, frame[10:]
     if dlt == DLT_NORDIC_BLE:
-        # Best-effort (version-dependent, UNVALIDATED on hardware): board(1),
-        # header_len(1), then header_len bytes [flags, channel, rssi, ...].
-        if len(frame) < 3:
+        # What nrf_sniffer_ble.py writes (SnifferAPI/Pcap.py: [board_id] + the
+        # UART packet, its padding byte already removed): board(1), the 6-byte
+        # UART header (sniffer_header), then for EVENT_PACKET_ADV (0x02) /
+        # EVENT_PACKET_DATA (0x06): ble_hdr_len(=10), flags, channel index,
+        # RSSI (positive, means -dBm), event counter LE16, timestamp LE32, then
+        # the LL PDU (AA, header, payload, CRC). LE Coded PHY adds a coding
+        # indicator byte after the AA, which is dropped here.
+        h = sniffer_header(frame[1:])
+        if not h or h[2] not in (0x02, 0x06):
             return None, None
-        hlen = frame[1]
-        if len(frame) < 2 + hlen or hlen < 3:
+        p = frame[7:]
+        if len(p) < 1 or p[0] < 9 or len(p) < p[0] + 6:
             return None, None
-        hdr = frame[2:2 + hlen]
-        meta['crc_ok'] = bool(hdr[0] & 0x01)
-        meta['channel'] = hdr[1]
-        meta['rssi'] = -hdr[2]
-        return meta, frame[2 + hlen:]
+        flags, phy = p[1], (p[1] >> 4) & 7
+        meta['crc_ok'] = bool(flags & 0x01)
+        meta['channel'] = p[2]
+        meta['rssi'] = -p[3]
+        ll = p[p[0]:]
+        if phy == 2:                               # LE Coded: strip the CI byte
+            ll = ll[:4] + ll[5:]
+        return meta, ll
     return None, None
 
 
@@ -740,20 +749,41 @@ def sniffer_ping_packet(counter=1):
                               SNIFFER_PING_REQ]))
 
 
+def sniffer_header(f):
+    """Decode the 6-byte nRF Sniffer UART header (doc/sniffer_uart_protocol.txt)
+    -> (proto, payload_len, packet_id) or None. Protocol v1 is
+    [hdr_len=6, payload_len, proto, counter LE16, id]. From v2 on, which covers
+    the Bluefruit LE Sniffer's V2 firmware and every nRF52 build, bytes 0-1 are
+    payload_len LE16. Both lay out proto/counter/id the same way."""
+    if len(f) < 6:
+        return None
+    proto = f[2]
+    if proto == 1:
+        if f[0] != 6:
+            return None
+        plen = f[1]
+    elif proto in (2, 3):
+        plen = f[0] | (f[1] << 8)
+    else:
+        return None
+    if len(f) != 6 + plen:
+        return None
+    return proto, plen, f[5]
+
+
 def parse_sniffer_reply(buf):
-    """-> (is_sniffer, firmware_version|None). Any well-formed sniffer-protocol frame
-    counts (a scanning sniffer also streams EVENT_PACKETs); a PING_RESP adds the
-    firmware version."""
+    """-> (is_sniffer, firmware_version|None). Like Nordic's own port discovery,
+    any well-formed sniffer-protocol frame counts (a scanning sniffer also streams
+    EVENT_PACKETs). A pre-v3 PING_RESP carries the firmware version LE16."""
     seen, version = False, None
     for f in slip_frames(buf):
-        if len(f) < 6:
-            continue
-        hdr_len, plen, proto = f[0], f[1], f[2]
-        if not (5 <= hdr_len <= 8 and 1 <= proto <= 3 and len(f) >= hdr_len + plen):
+        h = sniffer_header(f)
+        if not h:
             continue
         seen = True
-        if f[5] == SNIFFER_PING_RESP and plen >= 2:
-            version = struct.unpack_from('<H', f, hdr_len)[0]
+        proto, plen, pid = h
+        if pid == SNIFFER_PING_RESP and proto < 3 and plen >= 2:
+            version = struct.unpack_from('<H', f, 6)[0]
     return seen, version
 
 
@@ -917,6 +947,33 @@ def detect_sniffers(probe=True):
     return out
 
 
+def check_port(path):
+    """Diagnose one user-chosen port (the card's device field, -i, or
+    $RAGNAR_BLE_SNIFFER). Unlike autodetect it probes whatever bridge it is, since
+    the user picked it. A port another Ragnar component holds is still not
+    touched."""
+    real = os.path.realpath(path)
+    c = {'path': path, 'tty': real, 'usb': _usb_info(real) if os.path.exists(real) else {}}
+    if not os.path.exists(real):
+        c.update(kind='error', note='no such device (unplugged?)')
+    else:
+        claimed = _claimed_ports()
+        if real in claimed:
+            c.update(kind='claimed', owner=claimed[real])
+        else:
+            c.update(probe_port(real, acm=os.path.basename(real).startswith('ttyACM')))
+    c['note'] = _verdict_note(c)
+    return c
+
+
+def sniffer_baud(candidates, path):
+    """Baud rate the probe found the sniffer answering at, or None."""
+    for c in candidates or ():
+        if c.get('path') == path:
+            return c.get('baud')
+    return None
+
+
 def find_sniffer(probe=True, candidates=None):
     """Path of the first port running nRF Sniffer firmware, or None.
     $RAGNAR_BLE_SNIFFER pins a device and skips detection."""
@@ -929,58 +986,77 @@ def find_sniffer(probe=True, candidates=None):
     return None
 
 
-def _extcap_interface(helper, device):
-    """The extcap names interfaces after the port but may suffix them (e.g.
-    '/dev/ttyUSB0-4.1'); ask it and match on the real tty, else pass the port."""
-    import subprocess
-    want = {device, os.path.realpath(device)}
-    try:
-        out = subprocess.run(_extcap_cmd(helper) + ['--extcap-interfaces'],
-                             capture_output=True, text=True, timeout=15).stdout
-    except Exception:
-        return device
-    for line in out.splitlines():
-        if not line.startswith('interface'):
-            continue
-        val = line.split('{value=', 1)[-1].split('}', 1)[0]
-        for w in want:
-            if val == w or val.startswith(w + '-'):
-                return val
-    return device
+# Nordic's nRF Sniffer extcap (MIT) is vendored in python/nrf_sniffer, so live
+# capture needs no Wireshark plugin install. $RAGNAR_NRF_EXTCAP points at another
+# copy. The 4.1.1 extcap drives V2 (Bluefruit LE Sniffer / nRF51) and V3+ (nRF52)
+# firmware. Nordic's older V2-era extcap is Python 2 only.
+VENDORED_EXTCAP = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'nrf_sniffer', 'nrf_sniffer_ble.py')
+EXTCAP_PROTO_VERSION = '4.1'        # "PORT-VERSION" interface suffix -> protocol v3
+_EXTCAP_EXIT = {1: 'bad arguments', 2: 'sniffer not found on that port',
+                3: 'could not open the capture file', 4: 'internal error'}
 
 
-def _extcap_cmd(helper):
-    return [sys.executable, helper] if helper.endswith('.py') else [helper]
-
-
-def run_live(device, guard, seconds, fifo=None):
-    """Drive the Nordic nRF Sniffer extcap to a temp pcap and replay it. Requires
-    the vendor extcap helper (nrf_sniffer_ble.py) on PATH / in common locations.
-    UNVALIDATED on this box (no sniffer); the parser path is what the self-test
-    exercises."""
+def find_extcap():
+    """Path of the nRF Sniffer extcap helper, or None."""
     import shutil
-    import subprocess
-    import tempfile
-    helper = None
+    env = os.environ.get('RAGNAR_NRF_EXTCAP')
+    if env:
+        return env if os.path.exists(env) else None
+    if os.path.exists(VENDORED_EXTCAP):
+        return VENDORED_EXTCAP
     for cand in ('nrf_sniffer_ble.py', 'nrf_sniffer_ble'):
-        helper = shutil.which(cand) or helper
+        hit = shutil.which(cand)
+        if hit:
+            return hit
     for p in (os.path.expanduser('~/.config/wireshark/extcap/nrf_sniffer_ble.py'),
               os.path.expanduser('~/.local/lib/wireshark/extcap/nrf_sniffer_ble.py'),
               '/usr/lib/aarch64-linux-gnu/wireshark/extcap/nrf_sniffer_ble.py',
               '/usr/lib/arm-linux-gnueabihf/wireshark/extcap/nrf_sniffer_ble.py',
               '/usr/lib/x86_64-linux-gnu/wireshark/extcap/nrf_sniffer_ble.py',
               '/usr/lib/wireshark/extcap/nrf_sniffer_ble.py'):
-        if not helper and os.path.exists(p):
-            helper = p
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _extcap_cmd(helper):
+    # -W ignore: Nordic's regexes trip Python 3.12+ SyntaxWarnings on stderr.
+    return [sys.executable, '-W', 'ignore', helper] if helper.endswith('.py') else [helper]
+
+
+def extcap_capture_cmd(helper, device, pcap, baud=None):
+    """The extcap wants '--extcap-interface PORT-VERSION' and splits it on '-'.
+    Pass the real tty (/dev/ttyUSB0), never a /dev/serial/by-id path, which is
+    full of dashes. A known baud rate skips its slow rate discovery."""
+    cmd = _extcap_cmd(helper) + [
+        '--capture', '--extcap-interface',
+        '%s-%s' % (os.path.realpath(device), EXTCAP_PROTO_VERSION),
+        '--fifo', pcap, '--scan-follow-rsp']
+    if baud in SNIFFER_BAUDS:
+        cmd += ['--baudrate', str(baud)]
+    return cmd
+
+
+def run_live(device, guard, seconds, baud=None):
+    """Capture `seconds` of BLE with the nRF Sniffer extcap into a temp pcap
+    (DLT 272) and replay it through the guard. Raises RuntimeError with a
+    readable reason when the helper is missing or the capture fails."""
+    import subprocess
+    import tempfile
+    helper = find_extcap()
     if not helper:
-        raise RuntimeError('nRF Sniffer extcap helper not found; capture a pcap with '
-                           'Wireshark + nRF Sniffer and use --replay')
+        raise RuntimeError('nRF Sniffer extcap helper not found (python/nrf_sniffer is '
+                           'missing from this install); capture a pcap with Wireshark + '
+                           'nRF Sniffer and use --replay')
+    if not os.path.exists(os.path.realpath(device)):
+        raise RuntimeError('sniffer port %s is not present (unplugged?)' % device)
     fd, pcap = tempfile.mkstemp(suffix='.pcap')
     os.close(fd)
-    cmd = _extcap_cmd(helper) + ['--capture', '--extcap-interface',
-                                 _extcap_interface(helper, device), '--fifo', pcap]
-    sys.stderr.write('blewatch: %s on %s for %ds (extcap)\n' % (os.path.basename(helper),
-                     device, seconds))
+    errlog = tempfile.TemporaryFile()
+    cmd = extcap_capture_cmd(helper, device, pcap, baud)
+    sys.stderr.write('blewatch: %s on %s for %ds\n' % (os.path.basename(helper),
+                     os.path.realpath(device), seconds))
     claims = None
     try:                                     # tell other Ragnar components the port is ours
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -990,21 +1066,31 @@ def run_live(device, guard, seconds, fifo=None):
         claims.register('ble-watch', lambda: device)
     except Exception:
         claims = None
-    proc = subprocess.Popen(cmd)
+    rc = None
     try:
-        proc.wait(timeout=seconds)
-    except subprocess.TimeoutExpired:
-        proc.terminate()
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=errlog)
         try:
-            proc.wait(timeout=5)
+            rc = proc.wait(timeout=seconds)          # exited early = it failed
         except subprocess.TimeoutExpired:
-            proc.kill()
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        before = guard.frames
+        run_replay(pcap, guard)
+        if rc not in (None, 0) and guard.frames == before:
+            errlog.seek(0)
+            tail = errlog.read()[-300:].decode('utf-8', 'replace').strip()
+            raise RuntimeError('nRF Sniffer capture on %s stopped (exit %s: %s)%s. '
+                               'Details in /tmp/logs/log.txt (Nordic extcap log).' % (
+                                   os.path.realpath(device), rc,
+                                   _EXTCAP_EXIT.get(rc, 'unknown'),
+                                   (': ' + tail.splitlines()[-1]) if tail else ''))
     finally:
         if claims:
             claims.unregister('ble-watch')
-    try:
-        run_replay(pcap, guard)
-    finally:
+        errlog.close()
         try:
             os.remove(pcap)
         except OSError:
@@ -1065,13 +1151,21 @@ def main(argv=None):
     if args.replay:
         run_replay(args.replay, guard)
     else:
-        dev = args.device or find_sniffer(probe=not args.no_probe)
+        cands = [] if args.device else detect_sniffers(probe=not args.no_probe)
+        dev = args.device or find_sniffer(candidates=cands)
+        if dev and not args.no_probe and not any(
+                c['path'] == dev and c['kind'] == 'nrf-sniffer' for c in cands):
+            chosen = check_port(dev)                 # -i / $RAGNAR_BLE_SNIFFER skip autodetect
+            cands = [chosen]
+            if chosen['kind'] in ('bluefruit-friend', 'error', 'claimed', 'busy'):
+                sys.stderr.write('error: %s: %s\n' % (dev, chosen['note']))
+                return 2
         if not dev:
             sys.stderr.write('error: no BLE sniffer found (set $RAGNAR_BLE_SNIFFER, pass '
                              '-i, or use --replay).\n')
             return 2
         try:
-            run_live(dev, guard, args.seconds)
+            run_live(dev, guard, args.seconds, baud=sniffer_baud(cands, dev))
         except KeyboardInterrupt:
             pass
         except RuntimeError as e:

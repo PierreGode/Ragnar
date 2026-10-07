@@ -4,6 +4,19 @@
 
 ### 2026-10-07
 
+#### fix(ble): live capture works out of the box: bundled nRF Sniffer extcap + correct Nordic parsing
+*branch `fix/blewatch-live-capture`*
+
+- **"nRF Sniffer extcap helper not found" is gone:** Nordic's **nRF Sniffer for Bluetooth LE 4.1.1** extcap (MIT) is now bundled in `python/nrf_sniffer/`. Its deps (`pyserial`, `psutil`) are already in Ragnar's requirements, so there is nothing to install. 4.1.1 drives both the Bluefruit LE Sniffer's **V2** firmware (nRF51, 460 800 baud) and nRF52 builds. Nordic's V2-era extcap is Python 2 only.
+- **Four bugs that would have broken a real sniffer, found by checking against Nordic's protocol spec and source:**
+  - the sniffer probe rejected **protocol v2/v3** replies; from v2 on, bytes 0–1 are a 16-bit payload length, so the Bluefruit V2 firmware went unrecognised
+  - the **DLT-272** parser read the wrong offsets; it now follows the documented board + UART header + BLE header layout, including LE Coded
+  - the helper was handed a `/dev/serial/by-id/…` path, which its `split('-')` can't parse; blewatch now passes `PORT-VERSION` on the real tty, and the bundled copy uses `rsplit` as Adafruit's guide advises
+  - the helper was **re-discovering the baud rate** itself; the probe's rate is now passed in
+- A failed capture now reports why (exit reason, plus Nordic's log path) instead of silently returning nothing. An unplugged port is caught up front.
+- **A port typed into the device field is now checked too.** Previously a manually chosen port skipped detection and went straight to capture. That is how a field report with a Bluefruit LE **Friend** on `/dev/ttyUSB0` ended in "extcap helper not found" instead of "this is a Friend, not a sniffer". The device field, `-i` and `$RAGNAR_BLE_SNIFFER` now get the same firmware check.
+- Self-test 27 → **34/34**: v2/v3 ping replies, DLT-272 v2/v3 records, a **cross-check against Nordic's own `SnifferAPI.Packet` decoder** for v1–v3, a DLT-272 pcap replay, and the extcap command line. The full live path (probe → bundled extcap → pcap → findings) was also run against an emulated v3 sniffer on a pty: 312 frames parsed, findings raised. Not yet run against a physical sniffer. Docs: [blewatch — live capture](blewatch.md#live-capture-bundled-nordic-extcap).
+
 #### fix(ble): find the Bluefruit LE Sniffer by firmware, and name a Bluefruit LE Friend
 *branch `fix/blewatch-sniffer-detect`*
 
