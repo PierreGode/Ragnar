@@ -4,6 +4,14 @@
 
 ### 2026-10-07
 
+#### fix(ble): find the Bluefruit LE Sniffer by firmware, and name a Bluefruit LE Friend
+*branch `fix/blewatch-sniffer-detect`*
+
+- **Autodetect never found a real Adafruit Bluefruit LE Sniffer (#2269).** It matched USB names (`*Sniffer*`, `*Adafruit*`, …), but the board enumerates only as a plain **Silicon Labs CP210x** bridge. blewatch now asks each CP210x / Nordic / SEGGER port what firmware it runs: a SLIP **PING** in the Nordic nRF Sniffer UART protocol (1M, then 460 800 baud, which covers nRF51 and nRF52), then `ATI` at 9600.
+- A **Bluefruit LE Friend** (same nRF51822 board, AT-command firmware) is now named as such instead of "no sniffer", with the fix: flash nRF Sniffer over SWD; switch and DFU-button positions can't change it. The BLE Watch card lists every USB serial port and what answered on it. `blewatch --list-devices` prints the same table (`--no-probe` = names only).
+- The probe skips ports other Ragnar components hold (`serial_claims`), and live capture now claims its port. Extcap lookup adds the Pi's `aarch64`/`armhf` Wireshark paths and resolves the extcap's own interface name.
+- Self-test 19 → **27/27** (SLIP codec, PING_RESP/version, Friend `ATI`, an ESP32 boot log as a negative control, firmware-not-name selection). The probe was also checked against emulated sniffer, Friend and silent devices on ptys. Not yet validated on a flashed sniffer. Docs: [blewatch — which board, and how to plug it in](blewatch.md#which-board-and-how-to-plug-it-in).
+
 #### [#926](https://github.com/PierreGode/Ragnar/pull/926) — feat(net): Modbus Watch — passive Modbus/TCP posture monitor
 *branch `feature/modbus-watch`*
 

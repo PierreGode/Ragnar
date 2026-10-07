@@ -682,24 +682,275 @@ def run_replay(path, guard):
             continue                                 # one bad frame never kills the run
 
 
-def find_sniffer():
-    """Best-effort locate an attached nRF/Bluefruit LE sniffer serial device.
-    Returns a device path or None. Honours $RAGNAR_BLE_SNIFFER."""
+# ---- sniffer detection -------------------------------------------------------
+# A USB name is NOT enough to find a sniffer. The Adafruit Bluefruit LE Sniffer
+# (#2269) enumerates only as a Silicon Labs CP210x USB-UART bridge — exactly like
+# its look-alike, the Bluefruit LE *Friend* (same nRF51822 board, AT-command
+# firmware), and like countless ESP32 boards. So candidates are identified by the
+# firmware that answers on the port:
+#   * nRF Sniffer firmware (nRF51 + nRF52) speaks Nordic's SLIP-framed UART
+#     protocol — a PING_REQ gets a PING_RESP carrying the firmware version.
+#   * Bluefruit LE Friend firmware answers "ATI" at 9600 baud (CMD mode only).
+# Probing only writes those two harmless requests; it never flashes or switches
+# modes. Ports another Ragnar component holds (serial_claims) are skipped.
+SLIP_START, SLIP_END, SLIP_ESC = 0xAB, 0xBC, 0xCD
+SNIFFER_PING_REQ, SNIFFER_PING_RESP = 0x0D, 0x0E
+SNIFFER_BAUDS = (1000000, 460800)        # nRF Sniffer v3+ default, then v1/v2 (nRF51)
+FRIEND_BAUD = 9600
+VID_SILABS, VID_NORDIC, VID_SEGGER = '10c4', '1915', '1366'
+_NRF_NAME_HINTS = ('sniffer', 'nrf', 'nordic', 'segger', 'j-link', 'bluefruit', 'adafruit')
+
+
+def slip_encode(data):
+    out = bytearray([SLIP_START])
+    for c in data:
+        if c in (SLIP_START, SLIP_END, SLIP_ESC):
+            out += bytes([SLIP_ESC, c + 1])
+        else:
+            out.append(c)
+    out.append(SLIP_END)
+    return bytes(out)
+
+
+def slip_frames(buf):
+    """Decode every complete SLIP frame in buf (bytes) -> list of bytes."""
+    frames, cur, esc = [], None, False
+    for c in bytearray(buf):
+        if c == SLIP_START:
+            cur, esc = bytearray(), False
+        elif cur is None:
+            continue
+        elif c == SLIP_END:
+            frames.append(bytes(cur))
+            cur = None
+        elif esc:
+            cur.append(c - 1)
+            esc = False
+        elif c == SLIP_ESC:
+            esc = True
+        else:
+            cur.append(c)
+    return frames
+
+
+def sniffer_ping_packet(counter=1):
+    """PING_REQ in the nRF Sniffer UART protocol: header [hdr_len=6, payload_len,
+    proto_ver=1, counter LE16, packet id] + empty payload, SLIP-framed."""
+    return slip_encode(bytes([6, 0, 1, counter & 0xFF, (counter >> 8) & 0xFF,
+                              SNIFFER_PING_REQ]))
+
+
+def parse_sniffer_reply(buf):
+    """-> (is_sniffer, firmware_version|None). Any well-formed sniffer-protocol frame
+    counts (a scanning sniffer also streams EVENT_PACKETs); a PING_RESP adds the
+    firmware version."""
+    seen, version = False, None
+    for f in slip_frames(buf):
+        if len(f) < 6:
+            continue
+        hdr_len, plen, proto = f[0], f[1], f[2]
+        if not (5 <= hdr_len <= 8 and 1 <= proto <= 3 and len(f) >= hdr_len + plen):
+            continue
+        seen = True
+        if f[5] == SNIFFER_PING_RESP and plen >= 2:
+            version = struct.unpack_from('<H', f, hdr_len)[0]
+    return seen, version
+
+
+def parse_friend_ati(text):
+    """Bluefruit LE Friend 'ATI' reply -> dict or None. The reply is a few lines
+    (board, chip, serial, firmware, ...) ending in OK."""
+    if isinstance(text, bytes):
+        text = text.decode('ascii', 'replace')
+    lines = [l.strip() for l in text.replace('\r', '\n').split('\n') if l.strip()]
+    lines = [l for l in lines if l.upper() != 'ATI']          # local echo
+    if 'OK' not in lines:
+        return None
+    body = lines[:lines.index('OK')]
+    if not body or not any('BLUEFRUIT' in l.upper() or 'BLEFRIEND' in l.upper()
+                           or 'NRF51' in l.upper() for l in body):
+        return None
+    info = {'board': body[0]}
+    if len(body) > 1:
+        info['chip'] = body[1]
+    for l in body[2:]:
+        if l[:1].isdigit() and '.' in l:
+            info['firmware'] = l
+            break
+    return info
+
+
+def _usb_info(tty):
+    """sysfs USB identity for /dev/ttyUSBx|ttyACMx -> {vid,pid,manufacturer,product,serial}."""
+    info = {}
+    base = os.path.realpath('/sys/class/tty/%s/device' % os.path.basename(tty))
+    d = base
+    for _ in range(6):                               # walk up to the USB device node
+        if os.path.exists(os.path.join(d, 'idVendor')):
+            for key, fn in (('vid', 'idVendor'), ('pid', 'idProduct'),
+                            ('manufacturer', 'manufacturer'), ('product', 'product'),
+                            ('serial', 'serial')):
+                try:
+                    with open(os.path.join(d, fn)) as fh:
+                        info[key] = fh.read().strip()
+                except OSError:
+                    pass
+            break
+        d = os.path.dirname(d)
+    return info
+
+
+def _probe(path, baud, payload, wait):
+    """Open, write payload, collect bytes for `wait` seconds. Raises on open failure."""
+    import serial
+    ser = serial.Serial()
+    ser.port, ser.baudrate, ser.timeout = path, baud, 0.05
+    ser.write_timeout, ser.rtscts, ser.dsrdtr = 0.5, False, False
+    ser.exclusive = True                             # back off if someone holds it
+    ser.open()
+    try:
+        ser.reset_input_buffer()
+        ser.write(payload)
+        buf, end = bytearray(), time.time() + wait
+        while time.time() < end:
+            buf += ser.read(512)
+        return bytes(buf)
+    finally:
+        ser.close()
+
+
+def probe_port(path, acm=False):
+    """Identify what firmware answers on a serial port.
+    -> {'kind': 'nrf-sniffer'|'bluefruit-friend'|'unknown'|'busy'|'error', ...}"""
+    try:
+        import serial  # noqa: F401
+    except ImportError:
+        return {'kind': 'unknown', 'note': 'pyserial not installed; cannot probe'}
+    try:
+        for baud in ((SNIFFER_BAUDS[0],) if acm else SNIFFER_BAUDS):
+            ok, ver = parse_sniffer_reply(_probe(path, baud, sniffer_ping_packet(), 0.35))
+            if ok:
+                return {'kind': 'nrf-sniffer', 'baud': baud, 'firmware': ver}
+        friend = parse_friend_ati(_probe(path, FRIEND_BAUD, b'\r\nATI\r\n', 0.6))
+        if friend:
+            return dict(friend, kind='bluefruit-friend', baud=FRIEND_BAUD)
+    except Exception as e:                           # SerialException, OSError, ...
+        msg = str(e)
+        if 'lock' in msg.lower() or 'busy' in msg.lower():
+            return {'kind': 'busy', 'note': 'port is held by another program'}
+        return {'kind': 'error', 'note': msg[:160]}
+    return {'kind': 'unknown'}
+
+
+def _claimed_ports():
+    try:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if root not in sys.path:
+            sys.path.append(root)
+        import serial_claims
+        return serial_claims.claims(exclude_owner='ble-watch')
+    except Exception:
+        return {}
+
+
+def _verdict_note(c):
+    k = c.get('kind')
+    if k == 'nrf-sniffer':
+        fw = c.get('firmware')
+        return 'nRF Sniffer firmware answered%s' % (' (fw %d)' % fw if fw is not None else '')
+    if k == 'bluefruit-friend':
+        return ('Bluefruit LE Friend (AT-command firmware%s), NOT a sniffer: same nRF51822 '
+                'board as the Sniffer but it never streams packets. It needs the Nordic nRF '
+                'Sniffer (nRF51) firmware flashed over SWD (pads 3V/GND/SWCLK/SWDIO) — the '
+                'DFU button / CMD-DAT switch cannot change that. See docs/blewatch.md.'
+                % (' ' + c['firmware'] if c.get('firmware') else ''))
+    if k == 'claimed':
+        return 'held by %s; not probed' % c.get('owner')
+    if k == 'busy':
+        return 'port busy (another program has it open); not probed'
+    if k == 'skipped':
+        return 'not an nRF / CP210x bridge; not probed'
+    if k == 'error':
+        return 'could not open: %s' % c.get('note', '')
+    usb = c.get('usb') or {}
+    if usb.get('vid') == VID_SILABS:
+        return ('CP210x bridge did not answer as an nRF Sniffer (no SLIP ping reply at '
+                '1M/460800 baud) or as a Bluefruit Friend in CMD mode. Wrong firmware, or a '
+                'different CP210x device (ESP32 board, GPS, ...).')
+    return 'did not answer as an nRF Sniffer'
+
+
+def detect_sniffers(probe=True):
+    """Every candidate serial port with a diagnosis, best first. A port is only
+    called a sniffer when its firmware answers the sniffer protocol — or, without
+    probing, when its USB name says so outright (nRF52 'nRF Sniffer' dongles)."""
+    import glob
+    byid = {}
+    for p in glob.glob('/dev/serial/by-id/*'):
+        byid.setdefault(os.path.realpath(p), p)
+    ports = sorted(set(glob.glob('/dev/ttyUSB*') + glob.glob('/dev/ttyACM*')))
+    claimed = _claimed_ports() if probe else {}
+    out = []
+    for dev in ports:
+        real = os.path.realpath(dev)
+        link = byid.get(real)
+        usb = _usb_info(dev)
+        name = ' '.join([link or '', usb.get('manufacturer', ''), usb.get('product', '')]).lower()
+        c = {'path': link or dev, 'tty': dev, 'usb': usb}
+        nrfish = usb.get('vid') in (VID_NORDIC, VID_SEGGER) or any(h in name for h in _NRF_NAME_HINTS)
+        if 'sniffer' in name and (usb.get('vid') == VID_NORDIC or 'nrf' in name):
+            c['kind'] = 'nrf-sniffer'                # nRF52 dongle flashed with nRF Sniffer
+            c['by_name'] = True
+        elif real in claimed:
+            c.update(kind='claimed', owner=claimed[real])
+        elif not (nrfish or usb.get('vid') == VID_SILABS):
+            c['kind'] = 'skipped'
+        elif probe:
+            c.update(probe_port(dev, acm=dev.startswith('/dev/ttyACM')))
+        else:
+            c['kind'] = 'unknown'
+        c['note'] = _verdict_note(c)
+        out.append(c)
+    rank = {'nrf-sniffer': 0, 'bluefruit-friend': 1, 'unknown': 2, 'busy': 3,
+            'error': 4, 'claimed': 5, 'skipped': 6}
+    out.sort(key=lambda c: rank.get(c['kind'], 9))
+    return out
+
+
+def find_sniffer(probe=True, candidates=None):
+    """Path of the first port running nRF Sniffer firmware, or None.
+    $RAGNAR_BLE_SNIFFER pins a device and skips detection."""
     env = os.environ.get('RAGNAR_BLE_SNIFFER')
     if env:
         return env if os.path.exists(env) else None
-    import glob
-    # Match both sniffer generations by their USB by-id strings:
-    #   nRF51 — Adafruit Bluefruit LE Sniffer (CP210x), SEGGER (nRF51 DK)
-    #   nRF52 — nRF52840 Dongle / USB, nRF52 DK (SEGGER J-Link), Makerdiary etc.
-    for pat in ('*Sniffer*', '*nRF*', '*nRF52*', '*Nordic*', '*Segger*', '*J-Link*',
-                '*Bluefruit*', '*Adafruit*'):
-        hits = glob.glob('/dev/serial/by-id/*' + pat.strip('*') + '*')
-        if hits:
-            return sorted(hits)[0]
-    # Fall back to a bare CDC-ACM port only if exactly one is present.
-    acm = sorted(glob.glob('/dev/ttyACM*'))
-    return acm[0] if len(acm) == 1 else None
+    for c in (candidates if candidates is not None else detect_sniffers(probe)):
+        if c['kind'] == 'nrf-sniffer':
+            return c['path']
+    return None
+
+
+def _extcap_interface(helper, device):
+    """The extcap names interfaces after the port but may suffix them (e.g.
+    '/dev/ttyUSB0-4.1'); ask it and match on the real tty, else pass the port."""
+    import subprocess
+    want = {device, os.path.realpath(device)}
+    try:
+        out = subprocess.run(_extcap_cmd(helper) + ['--extcap-interfaces'],
+                             capture_output=True, text=True, timeout=15).stdout
+    except Exception:
+        return device
+    for line in out.splitlines():
+        if not line.startswith('interface'):
+            continue
+        val = line.split('{value=', 1)[-1].split('}', 1)[0]
+        for w in want:
+            if val == w or val.startswith(w + '-'):
+                return val
+    return device
+
+
+def _extcap_cmd(helper):
+    return [sys.executable, helper] if helper.endswith('.py') else [helper]
 
 
 def run_live(device, guard, seconds, fifo=None):
@@ -713,8 +964,11 @@ def run_live(device, guard, seconds, fifo=None):
     helper = None
     for cand in ('nrf_sniffer_ble.py', 'nrf_sniffer_ble'):
         helper = shutil.which(cand) or helper
-    for p in ('/usr/lib/x86_64-linux-gnu/wireshark/extcap/nrf_sniffer_ble.py',
-              os.path.expanduser('~/.config/wireshark/extcap/nrf_sniffer_ble.py'),
+    for p in (os.path.expanduser('~/.config/wireshark/extcap/nrf_sniffer_ble.py'),
+              os.path.expanduser('~/.local/lib/wireshark/extcap/nrf_sniffer_ble.py'),
+              '/usr/lib/aarch64-linux-gnu/wireshark/extcap/nrf_sniffer_ble.py',
+              '/usr/lib/arm-linux-gnueabihf/wireshark/extcap/nrf_sniffer_ble.py',
+              '/usr/lib/x86_64-linux-gnu/wireshark/extcap/nrf_sniffer_ble.py',
               '/usr/lib/wireshark/extcap/nrf_sniffer_ble.py'):
         if not helper and os.path.exists(p):
             helper = p
@@ -723,9 +977,19 @@ def run_live(device, guard, seconds, fifo=None):
                            'Wireshark + nRF Sniffer and use --replay')
     fd, pcap = tempfile.mkstemp(suffix='.pcap')
     os.close(fd)
-    cmd = [helper, '--capture', '--extcap-interface', device, '--fifo', pcap]
+    cmd = _extcap_cmd(helper) + ['--capture', '--extcap-interface',
+                                 _extcap_interface(helper, device), '--fifo', pcap]
     sys.stderr.write('blewatch: %s on %s for %ds (extcap)\n' % (os.path.basename(helper),
                      device, seconds))
+    claims = None
+    try:                                     # tell other Ragnar components the port is ours
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if root not in sys.path:
+            sys.path.append(root)
+        import serial_claims as claims
+        claims.register('ble-watch', lambda: device)
+    except Exception:
+        claims = None
     proc = subprocess.Popen(cmd)
     try:
         proc.wait(timeout=seconds)
@@ -735,6 +999,9 @@ def run_live(device, guard, seconds, fifo=None):
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+    finally:
+        if claims:
+            claims.unregister('ble-watch')
     try:
         run_replay(pcap, guard)
     finally:
@@ -764,7 +1031,10 @@ def main(argv=None):
     ap.add_argument('-c', '--config', help='JSON config (trusted_devices/beacons + thresholds)')
     ap.add_argument('--jsonl', '-o', help="JSON-lines output path ('-' = stdout)")
     ap.add_argument('--echo', action='store_true', help='echo alerts to stderr')
-    ap.add_argument('--list-devices', action='store_true', help='print the autodetected sniffer')
+    ap.add_argument('--list-devices', action='store_true',
+                    help='list serial ports and what firmware answers on each')
+    ap.add_argument('--no-probe', action='store_true',
+                    help='identify by USB name only; never open a port')
     ap.add_argument('--self-test', action='store_true')
     args = ap.parse_args(argv)
 
@@ -772,8 +1042,17 @@ def main(argv=None):
         import blewatch_selftest
         return blewatch_selftest.run(verbose=True)
     if args.list_devices:
-        dev = find_sniffer()
-        print(dev or '(no nRF51/nRF52 LE sniffer found)')
+        cands = detect_sniffers(probe=not args.no_probe)
+        for c in cands:
+            usb = c.get('usb') or {}
+            print('%-8s %s  [%s:%s %s]\n         %s' % (
+                c['kind'] if c['kind'] != 'nrf-sniffer' else 'SNIFFER', c['path'],
+                usb.get('vid', '?'), usb.get('pid', '?'),
+                ' '.join(x for x in (usb.get('manufacturer'), usb.get('product')) if x),
+                c['note']))
+        dev = find_sniffer(candidates=cands)
+        print(('-> using %s' % dev) if dev else
+              ('(no nRF51/nRF52 LE sniffer found%s)' % ('' if cands else '; no USB serial ports')))
         return 0 if dev else 1
 
     cfg = {}
@@ -786,7 +1065,7 @@ def main(argv=None):
     if args.replay:
         run_replay(args.replay, guard)
     else:
-        dev = args.device or find_sniffer()
+        dev = args.device or find_sniffer(probe=not args.no_probe)
         if not dev:
             sys.stderr.write('error: no BLE sniffer found (set $RAGNAR_BLE_SNIFFER, pass '
                              '-i, or use --replay).\n')

@@ -28,7 +28,8 @@ evidence).
 | downgrade / session attacks | **Just-Works pairing downgrade** (`BLE-011`), **version swap** (`BLE-010`), **forced re-pair** (`BLE-012`) |
 
 - **Test floor:** Raspberry Pi Zero 2 W (parse/replay path; the sniffer is USB).
-- **Self-test:** 19/19 (`python3 python/blewatch.py --self-test`).
+- **Self-test:** 27/27 (`python3 python/blewatch.py --self-test`), including the
+  sniffer-detection probe logic.
 - **Deps:** Python 3.8+ (stdlib only). Live capture needs the **Nordic nRF
   Sniffer for Bluetooth LE** extcap helper (`nrf_sniffer_ble.py`); the
   parse/replay path needs nothing.
@@ -77,7 +78,8 @@ down to a BLE Link-Layer PDU:
 # Offline self-test (no radio, no root, no Scapy)
 python3 python/blewatch.py --self-test
 
-# Which sniffer did we find? ($RAGNAR_BLE_SNIFFER overrides autodetect)
+# What is plugged in? Lists every USB serial port and the firmware answering on it
+# ($RAGNAR_BLE_SNIFFER overrides autodetect; --no-probe = never open a port)
 python3 python/blewatch.py --list-devices
 
 # Replay a capture taken in Wireshark + nRF Sniffer
@@ -119,5 +121,61 @@ quality:
 - An **Ubertooth** is an alternative for heavy connection-following; again the
   parser and codes are unchanged, only the capture front end differs.
 
-blewatch autodetects either over USB (`--list-devices` shows what it found);
-`$RAGNAR_BLE_SNIFFER` pins a specific `/dev/serial/by-id/...` path.
+## Which board, and how to plug it in
+
+**Plug the sniffer in normally. Don't hold any button, and switch position doesn't
+matter.** Sniffer firmware ignores the CMD/DAT switch, which only affects the
+Friend firmware. The DFU button is for Friend over-the-air updates, so don't hold
+it either.
+
+### Detection is by firmware, not USB name
+
+The Adafruit **Bluefruit LE Sniffer** (#2269) has no USB identity of its own. It
+enumerates only as a **Silicon Labs CP210x USB-to-UART bridge** (`/dev/ttyUSB0`,
+by-id `usb-Silicon_Labs_CP2104_…`), as do its look-alike, the Bluefruit LE
+**Friend**, and many ESP32 boards. So blewatch asks each candidate port
+(CP210x, Nordic `1915:*` and SEGGER `1366:*` devices) what firmware it runs:
+
+| Answer on the port | Verdict |
+|---|---|
+| SLIP-framed **PING_RESP** of the Nordic nRF Sniffer UART protocol (tried at 1 000 000 then 460 800 baud) | **nRF Sniffer** — used for capture; the firmware version is shown |
+| `ATI` at 9600 baud → `BLEFRIEND…` / `nRF51822 …` / `OK` | **Bluefruit LE Friend**, which is **not a sniffer** (see below) |
+| nothing | unknown CP210x device: wrong firmware, an ESP32/GPS, or a Friend in DAT mode |
+
+An nRF52840 dongle flashed with nRF Sniffer announces itself as "nRF Sniffer"
+over USB and is accepted by name. The probe only writes those two read-only
+requests. It never flashes anything or changes modes, and it skips ports that
+another Ragnar component holds (GPS, CYD, Meshtastic, via `serial_claims`).
+During a live capture blewatch holds the port itself, so those components leave
+it alone.
+
+### "It only shows up as a CP210x" — Friend vs Sniffer
+
+Check the silkscreen. A board labelled **"Bluefruit LE Friend"** is Adafruit's
+AT-command UART module. It has the same nRF51822 hardware as the Sniffer, but its
+firmware never streams packets, whatever the switch or button position. Ragnar
+reports it as a Friend instead of saying "no sniffer". To turn it into a sniffer:
+
+1. You can't do it with the DFU button or the Bluefruit app. The sniffer image
+   replaces the bootloader and SoftDevice, so it must be flashed over **SWD**.
+2. Wire a J-Link (or another nRF51-capable SWD probe) to the four pads on the
+   back: **3V, GND, SWCLK, SWDIO**.
+3. Fully erase the chip (`nrfjprog --eraseall -f NRF51`, or OpenOCD
+   `nrf51 mass_erase`), then flash the **nRF51** sniffer hex. Use the Nordic
+   nRF Sniffer release that Adafruit's sniffer guide links; newer Nordic
+   releases target nRF52 boards.
+
+The simpler route is a real Bluefruit LE Sniffer (#2269) or an **nRF52840
+dongle** running nRF Sniffer. Keep the Friend for something else.
+
+### Live capture needs the Nordic extcap
+
+Live capture drives Nordic's `nrf_sniffer_ble.py` Wireshark extcap. Unzip
+the nRF Sniffer release's `extcap/` folder into `~/.config/wireshark/extcap/` (or
+the system extcap directory, e.g. `/usr/lib/aarch64-linux-gnu/wireshark/extcap/`
+on a Pi) and `pip install -r requirements.txt` from that folder. Without it the
+card says the helper is missing, and `--replay` of a Wireshark capture still
+works.
+
+`$RAGNAR_BLE_SNIFFER` pins a specific `/dev/serial/by-id/...` path and skips
+detection.

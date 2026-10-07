@@ -25417,12 +25417,32 @@ def do_ble_watch(device=None, seconds=20, replay=None, config=None, quick=False)
             return {'success': False, 'module': 'ble_watch',
                     'error': 'replay failed: %s: %s' % (type(e).__name__, e)}
     else:
-        dev = device or blewatch.find_sniffer()
+        # Identify by firmware, not USB name: the Bluefruit LE Sniffer and its
+        # look-alike Bluefruit LE Friend both enumerate as a plain CP210x bridge.
+        candidates = [] if device else blewatch.detect_sniffers(probe=True)
+        dev = device or blewatch.find_sniffer(candidates=candidates)
         if not dev:
+            friend = next((c for c in candidates if c['kind'] == 'bluefruit-friend'), None)
+            if friend:
+                msg = ('%s is a Bluefruit LE Friend, not a sniffer. It runs Adafruit\'s '
+                       'AT-command firmware, which never streams BLE packets, and no '
+                       'switch or button position changes that. Flash the Nordic nRF '
+                       'Sniffer (nRF51) firmware over SWD, or use a Bluefruit LE Sniffer '
+                       '(#2269) or an nRF52840 dongle running nRF Sniffer.' % friend['path'])
+            elif candidates:
+                msg = ('No BLE sniffer detected. No serial port answered the nRF Sniffer '
+                       'protocol. Ports checked are listed below.')
+            else:
+                msg = ('No BLE sniffer detected and no USB serial ports present. Attach '
+                       'an nRF51/nRF52 sniffer (set $RAGNAR_BLE_SNIFFER or pick a '
+                       'device), or replay a capture.')
             return {'success': False, 'module': 'ble_watch', 'missing_hw': True,
-                    'error': 'No BLE sniffer detected. Attach an nRF/Bluefruit LE '
-                             'Sniffer (set $RAGNAR_BLE_SNIFFER or pick a device), or '
-                             'replay a capture.'}
+                    'error': msg, 'candidates': [
+                        {'path': c['path'], 'kind': c['kind'], 'note': c['note'],
+                         'usb': ('%s:%s %s' % (c['usb'].get('vid', '?'),
+                                               c['usb'].get('pid', '?'),
+                                               c['usb'].get('product', ''))).strip()}
+                        for c in candidates]}
         source = dev
         try:
             blewatch.run_live(dev, guard, seconds)
