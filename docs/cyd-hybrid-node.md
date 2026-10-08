@@ -72,6 +72,18 @@ The transport is chosen at compile time (`CYD_TRANSPORT_SERIAL` in `config.h`):
   the bridge hands it back. If your CYD uses some other bridge chip, or shares
   a chip type with another device, set the port explicitly.
 
+  **Listening is not owning.** A newly opened port, auto-detected *or*
+  configured, gets nothing written to it until a CYD frame arrives (a CYD
+  sends one every sync cycle, ≤ ~13 s; the bridge waits up to 30 s). Until then
+  the bridge's claim is **soft** (`cyd-probe` in `serial_claims.py`). Anyone
+  who reserves the port with `serial_claims.take()` (BLE Watch probing a
+  Bluefruit sniffer, the Meshtastic link opening a Heltec) gets it within
+  ~0.1 s, and the bridge leaves it alone for 60 s. Only a port a CYD has
+  answered on is held hard (`cyd`). So enabling the bridge with no CYD plugged
+  in no longer blocks other CP210x/CH340 devices. A configured port that stays
+  silent is released and retried every 60 s, and one in use by another
+  component isn't opened at all.
+
 - **WiFi (`=0`) — legacy, limited.** The node joins WiFi and calls the REST API
   below, authenticated by a Bearer device token, provisioned via the on-device
   captive portal. This predates the cabled console and only carries **status +

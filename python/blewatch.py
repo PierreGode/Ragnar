@@ -897,15 +897,50 @@ def probe_port(path, acm=False):
     return {'kind': 'unknown'}
 
 
-def _claimed_ports():
+CLAIM_OWNER = 'ble-watch'
+
+
+def _claims_module():
+    """Ragnar's serial_claims registry, or None outside Ragnar."""
     try:
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         if root not in sys.path:
             sys.path.append(root)
         import serial_claims
-        return serial_claims.claims(exclude_owner='ble-watch')
+        return serial_claims
+    except Exception:
+        return None
+
+
+def _claimed_ports():
+    """Ports another component holds for real. Soft holders (the CYD bridge
+    listening for a CYD that may not be there) are left out: _probe_held()
+    asks them to hand the port back."""
+    sc = _claims_module()
+    if not sc:
+        return {}
+    try:
+        return sc.claims(exclude_owner=(CLAIM_OWNER,) + tuple(sc.SOFT_OWNERS))
     except Exception:
         return {}
+
+
+def _probe_held(dev, acm):
+    """probe_port() with the port reserved for blewatch for the duration, so
+    no other component reads it mid-probe and soft holders hand it back first."""
+    sc = _claims_module()
+    if sc:
+        try:
+            held = sc.take(dev, CLAIM_OWNER, wait=3.0)
+        except Exception:
+            held = None
+        if held:
+            return {'kind': 'claimed', 'owner': held}
+    try:
+        return probe_port(dev, acm=acm)
+    finally:
+        if sc:
+            sc.release(dev, CLAIM_OWNER)
 
 
 def _verdict_note(c):
@@ -975,7 +1010,7 @@ def detect_sniffers(probe=True):
         elif not (nrfish or usb.get('vid') == VID_SILABS):
             c['kind'] = 'skipped'
         elif probe:
-            c.update(probe_port(dev, acm=dev.startswith('/dev/ttyACM')))
+            c.update(_probe_held(dev, dev.startswith('/dev/ttyACM')))
         else:
             c['kind'] = 'unknown'
         c['note'] = _verdict_note(c)
@@ -1002,7 +1037,7 @@ def check_port(path):
         if real in claimed:
             c.update(kind='claimed', owner=claimed[real])
         else:
-            c.update(probe_port(real, acm=os.path.basename(real).startswith('ttyACM')))
+            c.update(_probe_held(real, os.path.basename(real).startswith('ttyACM')))
     c['note'] = _verdict_note(c)
     return c
 
@@ -1096,21 +1131,17 @@ def run_live(device, guard, seconds, baud=None):
                            'nRF Sniffer and use --replay')
     if not os.path.exists(os.path.realpath(device)):
         raise RuntimeError('sniffer port %s is not present (unplugged?)' % device)
+    claims = _claims_module()                # tell other Ragnar components the port is ours
+    if claims:
+        held = claims.take(device, CLAIM_OWNER, wait=5.0)
+        if held:
+            raise RuntimeError('sniffer port %s is in use by %s' % (device, held))
     fd, pcap = tempfile.mkstemp(suffix='.pcap')
     os.close(fd)
     errlog = tempfile.TemporaryFile()
     cmd = extcap_capture_cmd(helper, device, pcap, baud)
     sys.stderr.write('blewatch: %s on %s for %ds\n' % (os.path.basename(helper),
                      os.path.realpath(device), seconds))
-    claims = None
-    try:                                     # tell other Ragnar components the port is ours
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if root not in sys.path:
-            sys.path.append(root)
-        import serial_claims as claims
-        claims.register('ble-watch', lambda: device)
-    except Exception:
-        claims = None
     rc = None
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=errlog)
@@ -1134,7 +1165,7 @@ def run_live(device, guard, seconds, baud=None):
                                    (': ' + tail.splitlines()[-1]) if tail else ''))
     finally:
         if claims:
-            claims.unregister('ble-watch')
+            claims.release(device, CLAIM_OWNER)
         errlog.close()
         try:
             os.remove(pcap)

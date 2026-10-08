@@ -147,7 +147,10 @@ by-id `usb-Silicon_Labs_CP2104_…`), as do its look-alike, the Bluefruit LE
 An nRF52840 dongle flashed with nRF Sniffer announces itself as "nRF Sniffer"
 over USB and is accepted by name. The probe only writes those two read-only
 requests. It never flashes anything or changes modes, and it skips ports that
-another Ragnar component holds (GPS, CYD, Meshtastic, via `serial_claims`).
+another Ragnar component holds (GPS, CYD, Meshtastic, via `serial_claims`). A
+CYD bridge only *listening* on a port, with no CYD answering, hands it over:
+blewatch reserves each port for the probe and for the capture
+(`serial_claims.take()`), so no other reader splits the byte stream.
 During a live capture blewatch holds the port itself, so those components leave
 it alone.
 

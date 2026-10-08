@@ -3662,7 +3662,10 @@ _cyd_bridge = cyd_serial_bridge.CydSerialBridge(
 )
 try:
     import serial_claims
-    serial_claims.register('cyd', lambda: getattr(shared_data, 'cyd_serial_active_port', None))
+    # Hard claim only once a CYD has answered; while the bridge is still
+    # listening the claim is soft, so a sniffer / Meshtastic node is handed back.
+    serial_claims.register(cyd_serial_bridge.CLAIM_OWNER, lambda: _cyd_bridge.held_port(True))
+    serial_claims.register(cyd_serial_bridge.PROBE_OWNER, lambda: _cyd_bridge.held_port(False))
 except Exception as _claims_exc:  # pragma: no cover - never block startup
     logger.debug(f"[cyd] serial claim registration failed: {_claims_exc}")
 try:
