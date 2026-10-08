@@ -118,11 +118,17 @@ _NOT_MESH_VIDS = {0x1546, 0x067B}
 _GPS_WORDS = ('gps', 'gnss', 'u-blox', 'ublox', 'nmea')
 
 
-def _foreign_ports(allow_wardrive_companions=False):
-    """Ports other Ragnar components hold (see serial_claims.py)."""
+def _foreign_ports(allow_wardrive_companions=False, allow_soft=False):
+    """Ports other Ragnar components hold (see serial_claims.py).
+    ``allow_soft`` leaves out soft holders (a CYD bridge still listening for a
+    CYD), which hand the port back once connect() reserves it."""
     try:
         import serial_claims
-        excl = ('meshtastic', 'wardrive-companions') if allow_wardrive_companions else 'meshtastic'
+        excl = ('meshtastic',)
+        if allow_wardrive_companions:
+            excl += ('wardrive-companions',)
+        if allow_soft:
+            excl += tuple(serial_claims.SOFT_OWNERS)
         return serial_claims.claims(exclude_owner=excl)
     except Exception:
         return {}
@@ -165,7 +171,7 @@ def pick_serial_port():
     non-blacklisted port - a u-blox GPS included), this only considers
     Meshtastic USB chips that no other component holds, and refuses to guess
     when several qualify (a Heltec and a HuginnESP are both ESP32-S3)."""
-    cands, skipped = classify_mesh_candidates(_list_usb_serial(), _foreign_ports())
+    cands, skipped = classify_mesh_candidates(_list_usb_serial(), _foreign_ports(allow_soft=True))
     if len(cands) == 1:
         return cands[0], None
     if not cands:
@@ -435,10 +441,10 @@ class MeshLink:
                 if not port:
                     return {"ok": False, "error": err}
             real = os.path.realpath(port)
-            # GPS / CYD ports are never taken. A wardriving companion listener
-            # yields: reserve the port, then give its USB monitor a moment to
-            # drop it before we open.
-            hard = _foreign_ports(allow_wardrive_companions=True)
+            # GPS / CYD ports are never taken. A wardriving companion listener,
+            # or a CYD bridge still listening for a CYD that isn't there, yields:
+            # reserve the port, then give it a moment to drop it before we open.
+            hard = _foreign_ports(allow_wardrive_companions=True, allow_soft=True)
             if real in hard:
                 return {"ok": False, "error": "%s is in use by %s" % (port, hard[real])}
             with self._lock:

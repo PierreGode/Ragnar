@@ -15,9 +15,18 @@ Providers are polled live, so there is no stale state to release on crash.
 
 import os
 import threading
+import time
 
 _lock = threading.Lock()
 _providers = {}
+_reservations = {}   # realpath -> owner, set by take() / reserve()
+
+# Soft holders open a port only to find out whether it is theirs. The CYD bridge
+# listens on every free CP210x/CH340 for a first CYD frame, so it would otherwise
+# sit on a Bluefruit sniffer or a Heltec Meshtastic node with no CYD attached.
+# They hand the port back as soon as anyone else reserves it, so a picker must
+# not treat them as owners: it calls take() and waits for the hand-back.
+SOFT_OWNERS = ('cyd-probe',)
 
 
 def register(owner, provider):
@@ -29,6 +38,41 @@ def register(owner, provider):
 def unregister(owner):
     with _lock:
         _providers.pop(owner, None)
+
+
+def reserve(port, owner):
+    """Mark ``port`` as owner's from now on (shows up in claims())."""
+    with _lock:
+        _reservations[_real(port)] = owner
+
+
+def release(port, owner):
+    """Drop owner's reservation of ``port`` (no-op if someone else holds it)."""
+    real = _real(port)
+    with _lock:
+        if _reservations.get(real) == owner:
+            del _reservations[real]
+
+
+def take(port, owner, wait=5.0):
+    """Reserve ``port`` for ``owner``, waiting up to ``wait`` s for soft holders
+    (SOFT_OWNERS) to hand it back. -> None once the port is owner's alone, else
+    the owner still holding it (and no reservation is left behind). Pair with
+    release()."""
+    real = _real(port)
+    hard = claims(exclude_owner=(owner,) + SOFT_OWNERS).get(real)
+    if hard:
+        return hard
+    reserve(real, owner)
+    end = time.time() + wait
+    while True:
+        held = claims(exclude_owner=owner).get(real)
+        if not held:
+            return None
+        if time.time() >= end:
+            release(real, owner)
+            return held
+        time.sleep(0.1)
 
 
 def _real(p):
@@ -52,7 +96,11 @@ def claims(exclude_owner=None):
 
     with _lock:
         items = list(_providers.items())
+        reserved = list(_reservations.items())
     out = {}
+    for real, owner in reserved:
+        if not _excluded(owner):
+            out.setdefault(real, owner)
     for owner, fn in items:
         if _excluded(owner):
             continue

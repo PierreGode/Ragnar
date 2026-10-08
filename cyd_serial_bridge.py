@@ -52,6 +52,14 @@ _NOT_CYD_HINTS = ('prolific', 'pl2303')
 # An explicitly configured port is the operator's assertion and is trusted.
 IDENTIFY_S = 30.0
 NOT_CYD_BACKOFF_S = 600.0
+# A configured port is identified the same way, since it may be a sniffer or a
+# Meshtastic node by now. When nothing answers it is retried sooner, and a port
+# another component reserves is handed back and left alone for YIELD_BACKOFF_S.
+CONFIGURED_RETRY_S = 60.0
+YIELD_BACKOFF_S = 60.0
+# serial_claims owners: 'cyd' = a port a CYD has answered on (hard), 'cyd-probe'
+# = a port still being listened to (soft: handed back on request).
+CLAIM_OWNER, PROBE_OWNER = 'cyd', 'cyd-probe'
 _CYD_FRAME_TYPES = frozenset(('in', 'ac', 'wr', 'mr', 'wsr', 'wc'))
 
 
@@ -71,7 +79,8 @@ def _foreign_ports():
     must still be able to take one the monitor grabbed first."""
     try:
         import serial_claims
-        return serial_claims.claimed(exclude_owner=('cyd', 'wardrive-companions'))
+        return serial_claims.claimed(exclude_owner=(CLAIM_OWNER, PROBE_OWNER,
+                                                    'wardrive-companions'))
     except Exception:
         return set()
 
@@ -174,11 +183,18 @@ class CydSerialBridge:
     def stop(self):
         self._stop.set()
 
+    def held_port(self, identified):
+        """The open port if its CYD has (identified=True) / hasn't yet
+        (identified=False) answered, else None. Feeds serial_claims."""
+        port = self.port if self.connected else None
+        return port if port and bool(self._identified) == bool(identified) else None
+
     def status(self):
         cfg = self._configured_port()
         return {
             'enabled': bool(self._safe_enabled()),
             'port': self.port,                 # the port actually open (None if not)
+            'identified': bool(self._identified and self.connected),
             'configured_port': cfg,            # the override, or None = auto-detect USB
             'connected': self.connected,
             'last_rx': int(self.last_rx) if self.last_rx else None,
@@ -221,6 +237,21 @@ class CydSerialBridge:
             now = time.time()
             self._not_cyd = {k: v for k, v in self._not_cyd.items() if v > now}
             port = configured or detect_port(exclude=_foreign_ports() | set(self._not_cyd))
+            if configured:
+                real = os.path.realpath(configured)
+                held = None
+                try:
+                    import serial_claims
+                    held = serial_claims.claims(exclude_owner=(
+                        CLAIM_OWNER, PROBE_OWNER, 'wardrive-companions')).get(real)
+                except Exception:
+                    pass
+                if held or real in self._not_cyd:
+                    self._teardown('configured port %s %s' % (configured, (
+                        'is in use by %s' % held) if held else
+                        'gave no CYD answer recently; retrying shortly'))
+                    time.sleep(2.0)
+                    continue
             if not port:
                 ignored = ', '.join(sorted(self._not_cyd))
                 self._teardown('no port (set one, or plug in a USB CYD)' + (
@@ -234,8 +265,10 @@ class CydSerialBridge:
                 self._teardown(f'open failed: {exc}')
                 time.sleep(2.0)
                 continue
+            # Every port, configured or not, must prove it's a CYD before the
+            # bridge writes to it or holds it hard (see IDENTIFY_S).
+            self._identified = False
             self.port, self.connected, self.last_error = port, True, None
-            self._identified = bool(configured)   # explicit port: trusted; auto: prove it
             self._publish(port)          # let others (e.g. GPS probe) avoid this port
             try:
                 self._session(ser)
@@ -309,12 +342,19 @@ class CydSerialBridge:
             cfg = self._configured_port()
             if cfg and cfg != opened_on:
                 break
-            # An auto-detected port that another component has since reserved
-            # (e.g. the Meshtastic link pinned to it) is not ours - hand it back.
-            if not cfg and time.time() >= next_claim_check:
-                next_claim_check = time.time() + 2.0
-                if os.path.realpath(opened_on or '') in _foreign_ports():
-                    self.last_error = 'port reserved by another device (set the CYD port explicitly)'
+            # A port another component has since reserved (the Meshtastic link,
+            # a BLE Watch sniffer probe) is handed back: always while no CYD has
+            # answered on it, and for an auto-detected port even after.
+            if (not cfg or not self._identified) and time.time() >= next_claim_check:
+                next_claim_check = time.time() + (0.1 if not self._identified else 2.0)
+                real = os.path.realpath(opened_on or '')
+                if real in _foreign_ports():
+                    if not self._identified:
+                        self._not_cyd[real] = time.time() + YIELD_BACKOFF_S
+                    self.last_error = ('%s handed to another component (no CYD had answered '
+                                       'on it)' % opened_on if not self._identified else
+                                       'port reserved by another device (set the CYD port '
+                                       'explicitly)')
                     break
             # ── inbound: drain available bytes, split on newline ──────────────
             try:
@@ -335,11 +375,17 @@ class CydSerialBridge:
             if not self._identified:
                 if now >= identify_deadline:
                     real = os.path.realpath(opened_on or '')
-                    self._not_cyd[real] = now + NOT_CYD_BACKOFF_S
-                    self.last_error = ('no CYD answered on %s within %ds - not a CYD? '
-                                       'Ignoring it for %d min (set the CYD port explicitly '
-                                       'to force it)' % (opened_on, int(IDENTIFY_S),
-                                                         int(NOT_CYD_BACKOFF_S // 60)))
+                    if cfg:
+                        self._not_cyd[real] = now + CONFIGURED_RETRY_S
+                        self.last_error = ('no CYD answered on the configured port %s within '
+                                           '%ds (CYD off or unplugged?); retrying in %ds'
+                                           % (opened_on, int(IDENTIFY_S), int(CONFIGURED_RETRY_S)))
+                    else:
+                        self._not_cyd[real] = now + NOT_CYD_BACKOFF_S
+                        self.last_error = ('no CYD answered on %s within %ds - not a CYD? '
+                                           'Ignoring it for %d min (set the CYD port explicitly '
+                                           'to force it)' % (opened_on, int(IDENTIFY_S),
+                                                             int(NOT_CYD_BACKOFF_S // 60)))
                     break
                 time.sleep(0.05)
                 continue                  # silent: nothing is written until identified

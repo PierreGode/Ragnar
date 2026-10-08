@@ -4,6 +4,14 @@
 
 ### 2026-10-08
 
+#### fix(serial): the CYD bridge no longer holds sniffer / Meshtastic ports when no CYD is connected
+*branch `fix/cyd-serial-hog`*
+
+- **Field report:** with the CYD USB-serial bridge enabled but no CYD plugged in, the Bluefruit LE Sniffer (gen 1) and a Meshtastic node showed as "held by cyd". Scanning only worked after releasing the port. Cause: the bridge opens every free CP210x/CH340 to listen for a CYD, and it published that port as a **hard** claim the moment it opened it. A configured port was also trusted outright and written to, whatever was on it.
+- The claim is now **soft** (`cyd-probe`) until a CYD frame arrives. The new `serial_claims.take()` reserves a port and waits for soft holders. The bridge hands the port back within ~0.1 s and leaves it alone for 60 s. BLE Watch takes each port for its probe and capture. The Meshtastic picker and connect treat a soft hold as free. Only a port a CYD has answered on is held hard (`cyd`).
+- **Configured ports are identified too:** nothing is written until a CYD answers. A silent port is released and retried every 60 s, and a port in use elsewhere isn't opened. The CYD status gains `identified`.
+- New `tests/test_cyd_soft_claim.py`: hand-back, silent configured port, a real CYD keeping its port, and `take()` vs hard holders. The 163 related tests pass. Docs: [CYD hybrid node](cyd-hybrid-node.md), [blewatch](blewatch.md).
+
 #### fix(ble): name an nRF52840 dongle that isn't running nRF Sniffer, and say how to flash it
 *branch `fix/blewatch-nrf52-connectivity`*
 
