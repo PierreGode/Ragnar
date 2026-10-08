@@ -4,6 +4,15 @@
 
 ### 2026-10-08
 
+#### [#931](https://github.com/PierreGode/Ragnar/pull/931) — feat(os): Ragnar OS — a prebuilt Raspberry Pi image
+*branch `feature/ragnar-os`*
+
+- **New:** flash-and-go image. Raspberry Pi OS (64-bit) Lite with Ragnar preinstalled, enabled, and headless-by-default — one arm64 image for Pi Zero 2 W, 3, 4, 5 and CM4/CM5. Built with pi-gen; everything lives under `os-image/` (`build.sh`, `config`, `stage-ragnar/`, `os-list.json`, `ragnar.conf.example`).
+- **Installer:** `install_ragnar.sh` gains `--unattended` (answer every prompt from `RAGNAR_*` env vars) and `--image-build` (unattended + build-safe: enable units only, never start a service, touch a live kernel, or reboot — for use in a chroot). New env knobs: `RAGNAR_PROFILE`, `RAGNAR_DISPLAY`, `RAGNAR_INSTALL_ALL_DISPLAYS`, `RAGNAR_INSTALL_ADVANCED`, `RAGNAR_INSTALL_PISUGAR`, `RAGNAR_REBOOT`, `RAGNAR_FORCE_PI`. Interactive behaviour is unchanged.
+- **Per-device first boot:** `scripts/ragnar-firstboot.sh` + `ragnar-firstboot.service` run once before `ragnar.service` — unique SSH host keys + TLS cert, optional `/boot/firmware/ragnar.conf` (hostname, display), optional mesh join — then self-disable.
+- **CI:** `.github/workflows/build-os-image.yml` builds the image on an `os-v*` tag and attaches `RagnarOS-*.img.xz` (+ `.sha256`) to the Release.
+- **Docs:** [Ragnar OS image](ragnar-os.md), [README (root)](../README.md), [docs index](README.md).
+
 #### fix(serial): the CYD bridge no longer holds sniffer / Meshtastic ports when no CYD is connected
 *branch `fix/cyd-serial-hog`*
 

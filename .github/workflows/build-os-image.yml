@@ -1,0 +1,89 @@
+name: Build Ragnar OS image
+
+# Builds the "Ragnar OS" Raspberry Pi image (64-bit Lite + Ragnar preinstalled)
+# with pi-gen and attaches ragnar-os-<ver>-arm64.img.xz to a GitHub Release.
+#
+# Triggers:
+#   * push of a tag matching os-v*   (e.g. os-v1.0.0)  -> builds + creates release
+#   * manual run (workflow_dispatch) -> builds, uploads a workflow artifact only
+#
+# The build runs pi-gen natively on the ubuntu-latest runner via os-image/build.sh
+# (PIGEN_NATIVE=1); pi-gen installs its own build dependencies through apt.
+
+on:
+  push:
+    tags:
+      - 'os-v*'
+  workflow_dispatch:
+    inputs:
+      ragnar_branch:
+        description: 'Ragnar branch to bake into the image'
+        required: false
+        default: 'main'
+
+permissions:
+  contents: write   # needed to create a release / upload release assets
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out Ragnar
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          # pi-gen needs ~10 GB; the hosted runner ships with a lot of unused
+          # toolchains. Reclaim space before the build.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Install pi-gen build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            coreutils quilt parted qemu-user-static debootstrap zerofree zip \
+            dosfstools libarchive-tools libcap2-bin grep rsync xz-utils file \
+            git curl bc gpg pigz xxd arch-test
+
+      - name: Determine Ragnar branch
+        id: vars
+        run: |
+          BR="${{ github.event.inputs.ragnar_branch }}"
+          [ -z "$BR" ] && BR="main"
+          echo "branch=$BR" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        run: |
+          sudo PIGEN_NATIVE=1 \
+            RAGNAR_REPO_URL="https://github.com/${{ github.repository }}.git" \
+            RAGNAR_REPO_BRANCH="${{ steps.vars.outputs.branch }}" \
+            ./os-image/build.sh
+
+      - name: Locate built image
+        id: img
+        run: |
+          IMG="$(ls os-image/.pi-gen/deploy/*.img.xz | head -1)"
+          echo "path=$IMG" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$IMG")" >> "$GITHUB_OUTPUT"
+          sha256sum "$IMG" | tee "$IMG.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ragnar-os-image
+          path: |
+            ${{ steps.img.outputs.path }}
+            ${{ steps.img.outputs.path }}.sha256
+          retention-days: 14
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/os-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.img.outputs.path }}
+            ${{ steps.img.outputs.path }}.sha256
+          generate_release_notes: true

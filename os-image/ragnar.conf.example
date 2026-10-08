@@ -1,0 +1,24 @@
+# Ragnar OS first-boot config — OPTIONAL.
+#
+# Copy this file to the FAT "boot" partition of a freshly flashed card, rename
+# it to exactly  ragnar.conf , and edit the values. It is read ONCE, on the
+# first boot, by scripts/ragnar-firstboot.sh, then ignored.
+#
+# You do NOT need this file: the image boots headless with the web UI on port
+# 8000, and raises its own Wi-Fi ("Ragnar" / ragnarconnect) for onboarding.
+# Use it only to set a hostname or light up an attached screen unattended.
+
+# Device hostname (also the mDNS name, so http://<hostname>.local:8000 works).
+#hostname=ragnar-01
+
+# Enable an attached display and select its driver. Omit for headless (default).
+# Supported driver ids (same as Config -> Display in the web UI):
+#   e-Paper : epd2in13 epd2in13_V2 epd2in13_V3 epd2in13_V4 epd2in13b_V4
+#             epd2in7 epd2in7_V2 epd2in9_V2 epd3in7 epd4in26
+#   TFT/OLED: gc9a01 st7735s ili9486 whisplay ssd1306 lcd1602
+#   LED     : max7219_8panel max7219_4panel
+#display=epd2in13_V4
+
+# To join the Tailscale mesh unattended, instead drop a separate file named
+# ragnar-mesh.conf on the boot partition (see docs/mesh.md). Keep that key out
+# of this file.
