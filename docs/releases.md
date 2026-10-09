@@ -2,6 +2,19 @@
 
 ## Releases
 
+### 2026-10-09
+
+#### [#932](https://github.com/PierreGode/Ragnar/pull/932) — feat(net): LLDP Watch — passive 802.1AB parser-CVE monitor + visibility matrix
+*branch `feature/lldp-watch`*
+
+- **New in-app watcher** (Diagnostics → L2, next to CDP Watch): vendored Solarflere `lldpwatch` engine (`python/lldpwatch*.py`) behind `do_lldp_watch`. Passive and detection-only: tcpdump captures to a pcap (promiscuous, inbound only, 802.1Q/QinQ-aware nested BPF) and a pure-Python TLV walk processes it.
+- **26 finding codes, 20 new CVEs.** Class A (13 structural codes, vendor-agnostic) catches the malformed-frame shapes behind lldpd CVE-2015-8011/8012/2020-27827, Cisco CVE-2018-0395/2021-34703/2023-20089/2024-20294/2026-20010, Juniper l2cpd CVE-2018-0007/2020-1641/2021-0277/2023-36849/2024-21618, OVS CVE-2022-4337/4338, Aruba CVE-2020-7121/2021-34618, FortiSwitch CVE-2021-26111, PAN-OS CVE-2025-0116 and SonicWall CVE-2021-20024. This includes the dual-stack (IPv4 + IPv6) Management Address checks. Class B (11 codes) screens advertised software; these are notes, not verdicts. Class C covers LLDP flood, plus forged neighbour once you click **Trust current**.
+- **Verdicts:** `no-traffic`/`clean` < `observed` < `exposure` < `suspicious` < `attack`. All are existing tokens, so no new paging sets were needed. Wired into the Net Integrity rotation (`lldp`), Watchtower (`lldp_watch` source, MEDIUM and above), routes `/api/net/lldp-watch` + `/api/net/lldp-baseline`, and the CLI `lldp-watch [--pcap]`.
+- **Self-test:** new `lldp` suite with 37 scenarios. It also runs the module's 1767-check conformance and 262-check scapy cross-check out of process. Validated live: the conformance attack pcap replayed with `tcpreplay` over a sealed-netns veth fired 23 codes.
+- **CVE index:** 275 → 295 named, 234 → 254 detected (`docs/CVE.md` regenerated). CREDITS and README updated.
+- **Visibility matrix:** new master image with the **LLDP Watch** tile in L2. `matrix_full` and the L7…L1 crops were re-cut (band edges unchanged), and the image cache-bust is now `?v=20261009-lldp`.
+- **Docs:** [nettools.md › LLDP Watch](nettools.md#lldp-watch), [watchtower.md](watchtower.md), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md).
+
 ### 2026-10-08
 
 #### [#931](https://github.com/PierreGode/Ragnar/pull/931) — feat(os): Ragnar OS — a prebuilt Raspberry Pi image

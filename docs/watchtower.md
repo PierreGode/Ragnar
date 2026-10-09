@@ -98,6 +98,15 @@ requests, FC8 restart / clear-counters, UMAS activity and malformed MBAP/PDU fra
 libmodbus trigger, **CVE-2019-14462** / **CVE-2019-14463** / **CVE-2024-10918**) land as
 **medium**. Enumeration, unit-ID sweeps and cleartext-segment posture stay in the card.
 
+[`lldp_watch`](nettools.md#lldp-watch) (LLDP Watch) appends its **MEDIUM** and higher
+findings to `/var/log/ragnar/lldp_watch.jsonl` (deduplicated per code + source MAC).
+Malformed-TLV CVE shapes land as **critical**: a TLV length past the frame, and an
+oversized or family-mismatched Management Address (lldpd **CVE-2015-8011**). Illegal fixed
+lengths, missing or out-of-order mandatory TLVs, malformed Chassis/Port IDs, oversized
+strings, malformed org-specific TLVs (OVS **CVE-2022-4337** / **CVE-2022-4338**), an LLDP
+flood and a forged neighbour land as **high**. Reserved TLV types, duplicates and data
+after End-of-LLDPDU land as **medium**. Vulnerable-family screening notes stay in the card.
+
 [`ftp_watch`](nettools.md#ftp-watch) (FTP Watch) appends its **HIGH/CRITICAL** ProFTPD
 findings to `/var/log/ragnar/ftp_watch.jsonl` (deduplicated per code + server) — a
 pre-authentication or anonymous **mod_copy** copy the server accepted or completed

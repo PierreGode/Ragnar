@@ -100,6 +100,7 @@ matrix to zoom (`/web/images/osi/`).
 | [STP/BPDU Watch](#stpbpdu-watch) | Diagnostics · L2 | `GET /api/net/stp-watch`, `POST /api/net/stp-baseline` |
 | [DTP Watch](#dtp-watch) | Diagnostics · L2 | `GET /api/net/dtp-watch`, `POST /api/net/dtp-baseline` |
 | [CDP Watch](#cdp-watch) | Diagnostics · L2 | `GET /api/net/cdp-watch`, `POST /api/net/cdp-baseline` |
+| [LLDP Watch](#lldp-watch) | Diagnostics · L2 | `GET /api/net/lldp-watch`, `GET/POST /api/net/lldp-baseline` |
 | [VTP Watch](#vtp-watch) | Diagnostics · L2 | `GET /api/net/vtp-watch`, `POST /api/net/vtp-baseline` |
 | [IS-IS Watch](#is-is-watch) | Diagnostics · L2 | `GET /api/net/isis-watch`, `POST /api/net/isis-baseline` |
 | [PTP Watch](#ptp-watch) | Diagnostics · L2 | `GET /api/net/ptp-watch` |
@@ -144,7 +145,7 @@ capture path.
 
 ### Detector Self-Test
 A one-click **Run self-test** that validates the IGMP, **IPv6 first-hop**, **NDP**, **RA Guard**,
-**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **Modbus Watch** (PLC writes / Force Listen Only / UMAS / libmodbus framing), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB) and
+**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **LLDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **Modbus Watch** (PLC writes / Force Listen Only / UMAS / libmodbus framing), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB) and
 **path-asymmetry / OWD** engine — by running each classifier against crafted attack
 captures (no root, no external network) and reports per-suite pass/fail. With Scapy
 installed it also runs the end-to-end packet-crafting leg for the capture-based
@@ -2377,6 +2378,95 @@ spoof / fake-phone VoIP-hop / cdp-enabled leak / flood / field-parse), and — w
 [Scapy](https://scapy.net) is installed — crafts a real CDP frame into a pcap and
 parses it back through `tcpdump -e`, exercising the capture→parse path end to end.
 **API:** `GET /api/net/cdp-watch`, `POST /api/net/cdp-baseline`.
+
+### LLDP Watch
+A **passive** IEEE 802.1AB (LLDP) security monitor. It is **detection-only** and never sends
+an LLDP frame. LLDP (EtherType `0x88CC`, link-local group MACs `01:80:c2:00:00:0e` / `:03` /
+`:00`) is never forwarded past the first hop, so it sees only the directly attached link. That
+is where the threat sits: one crafted, unauthenticated frame from a host on the same port
+crashes or reloads the neighbour's LLDP parser. This is separate from
+[Switch Discovery](#switch-discovery-lldp--cdpv1v2--edp--fdp), which reads neighbours from `lldpctl`.
+
+**CVE backbone: 20 LLDP parser CVEs across eight implementation families.**
+
+| Family | CVEs |
+|--------|------|
+| lldpd (also Ruckus APs, whose stack is lldpd-derived) | **CVE-2015-8011** (`lldp_decode` oversized Management Address overflow), **CVE-2015-8012**, **CVE-2020-27827** |
+| Cisco FXOS / NX-OS / IOS / IOS-XE / ACI / UCS | **CVE-2018-0395**, **CVE-2021-34703**, **CVE-2023-20089**, **CVE-2024-20294**, **CVE-2026-20010** |
+| Juniper `l2cpd` | **CVE-2018-0007**, **CVE-2020-1641**, **CVE-2021-0277**, **CVE-2023-36849**, **CVE-2024-21618** |
+| Open vSwitch | **CVE-2020-27827**, **CVE-2022-4337**, **CVE-2022-4338** (Auto Attach TLV, 9.8) |
+| HPE Aruba AOS-CX / Instant (and Siemens SCALANCE W1750D) | **CVE-2020-7121**, **CVE-2021-34618** |
+| Fortinet FortiSwitch `lldpmedd` | **CVE-2021-26111** |
+| Palo Alto PAN-OS | **CVE-2025-0116** |
+| SonicWall SWS | **CVE-2021-20024** |
+
+Juniper's `l2cpd` also drives STP/RSTP/MSTP, MVRP, ERP and LACP, so an LLDP crash there
+reinitialises spanning tree and flaps aggregation.
+
+There are 26 finding codes (`LLDP-nnn`) in three classes. There is **no disclosure-posture
+class**: a neighbour advertising its name and version over LLDP is how the protocol works.
+
+- **Class A: structural (13 codes, vendor-agnostic, no baseline).** This is where detection
+  happens. The malformed frame looks the same whichever stack it targets.
+  - `LLDP-040` *critical*: a TLV length past the end of the frame.
+  - `LLDP-041`: an illegal fixed length (End / TTL / System Capabilities), or a stray header octet.
+  - `LLDP-042` / `LLDP-043`: mandatory Chassis ID / Port ID / TTL missing, or out of order.
+  - `LLDP-044`: duplicated singleton TLV.
+  - `LLDP-045` *critical*: malformed Management Address: an oversized or overrunning address
+    string, an IPv4/IPv6 family-vs-length mismatch, a truncated tail, or an oversized OID.
+  - `LLDP-046` / `LLDP-047`: a Chassis / Port ID whose subtype disagrees with its length,
+    including v4/v6 network-address subtypes.
+  - `LLDP-050`: a string TLV over the 255-octet ceiling (the 9-bit length field allows 511).
+  - `LLDP-051`: a wrong-size fixed-length org-specific TLV (802.1 / 802.3 / LLDP-MED), an
+    oversized MED inventory string, or a short org TLV. The OVS Auto Attach CVEs live here.
+  - `LLDP-052`: reserved TLV types 9–126.
+  - `LLDP-053`: non-zero data after End-of-LLDPDU.
+  - `LLDP-054`: no End TLV.
+
+  All-zero Ethernet padding and a trailing 4-octet FCS stay silent.
+- **Class B: screening (11 codes, `LLDP-020`..`030`).** The cleartext System Name /
+  Description is matched against the family table above. These are **notes, never a
+  vulnerability verdict**: an advertised version string cannot show patch state, because
+  vendors backport fixes without changing it.
+- **Class C: abuse.** `LLDP-048` trips on a frame-rate or distinct-source flood. It is the
+  only signal for the memory-leak CVEs (CVE-2020-27827, CVE-2023-20089, CVE-2021-26111),
+  which have no single-frame shape. `LLDP-049` (forged neighbour) needs a baseline: it is
+  **off** until you click **Trust current**, which trusts the neighbours from the last scan
+  (kept in `data/lldp_watch.json`). **Reset** turns it off again.
+
+The capture runs `tcpdump` to a pcap and walks raw frames, with no scapy on this path. It is
+promiscuous because the LLDP group MACs are multicasts the host never joins. It is
+**inbound only**, so this unit's own `lldpd` adverts are not screened. Snaplen is full so
+`LLDP-040` sees every byte. The BPF admits untagged, 802.1Q and QinQ LLDP. Its nested form
+is deliberate: the flat `vlan and vlan` form does not match QinQ in libpcap.
+
+Verdicts: `no-traffic` / `clean` < `observed` (screening notes only; listed, does not page)
+< `exposure` (a low finding) < `suspicious` (a medium finding) < **`attack`** (high/critical:
+a malformed-frame CVE shape, a flood or a forged neighbour; pages in the
+[Network Integrity Monitor](#-network-integrity-monitor)). MEDIUM and above feed
+[Watchtower](watchtower.md). The card collapses repeats into one row per code and source MAC,
+with a count, and lists each neighbour: name, description, port, management address (IPv6
+bracketed), VLAN tags and trust.
+
+**Out of scope:** LLDP-MED voice-VLAN hopping and E911/PoE semantics (VoIP-adjacent and
+baseline-dependent), and SDN topology poisoning (a controller problem). A MED TLV with a
+structural defect still fires Class A. Two CVEs filed against lldpd are not LLDP and are
+deliberately not named here: CVE-2023-41910 (lldpd's **CDP** decoder) and CVE-2021-43612
+(its **SONMP** decoder).
+
+- Endpoint: `GET /api/net/lldp-watch` `{interface, seconds}` ·
+  `GET/POST /api/net/lldp-baseline` `{action: trust|reset}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py lldp-watch [--iface I] [--seconds N] [--pcap FILE]
+  [--json]` (`--pcap` replays a file; the baseline is not used or saved)
+- Self-test: suite `lldp` (37 scenarios). It covers every malformed fixture per code, the
+  benign FP set, screening, flood, the forged-neighbour baseline, dual-stack, and the
+  module's own **1767-check conformance** and **262-check scapy cross-check** tiers, run
+  out-of-process.
+- Vendored engine (Solarflere): `python/lldpwatch.py`, `lldpwatch_frames.py`,
+  `lldpwatch_conformance.py`, `lldpwatch_scapy_xcheck.py`. Validated live by replaying the
+  conformance attack pcap with `tcpreplay` over a veth pair in a sealed netns: 23 codes
+  fire. `LLDP-025` / `026` need an operator version floor, and `LLDP-049` needs a trusted
+  baseline. Real switch hardware is not yet validated.
 
 ### VTP Watch
 A **passive** bomb / rogue-server scanner for Cisco's **VLAN Trunking Protocol**

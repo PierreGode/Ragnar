@@ -2248,6 +2248,7 @@ def _net_integrity_check_once():
         ('stp', 'STP', lambda: watch(nd.do_stp_watch, interface=cap_iface)),
         ('dtp', 'DTP', lambda: watch(nd.do_dtp_watch, interface=cap_iface)),
         ('cdp', 'CDP', lambda: watch(nd.do_cdp_watch, interface=cap_iface)),
+        ('lldp', 'LLDP', lambda: watch(nd.do_lldp_watch, interface=cap_iface)),
         ('vtp', 'VTP', lambda: watch(nd.do_vtp_watch, interface=cap_iface)),
         ('igmp', 'IGMP', lambda: watch(nd.do_igmp_watch, interface=cap_iface)),
         ('ipv6', 'IPv6', lambda: watch(nd.do_ipv6_watch, interface=cap_iface)),

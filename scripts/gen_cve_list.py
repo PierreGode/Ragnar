@@ -46,6 +46,10 @@ FILE_OWNERS = {
     'python/test_liebert_guard.py': 'Liebert Guard',
     'python/liebert_guard_conformance.py': 'Liebert Guard',
     'python/liebert_guard_scapy_selftest.py': 'Liebert Guard',
+    'python/lldpwatch.py': 'LLDP Watch',
+    'python/lldpwatch_frames.py': 'LLDP Watch',
+    'python/lldpwatch_conformance.py': 'LLDP Watch',
+    'python/lldpwatch_scapy_xcheck.py': 'LLDP Watch',
     'actions/ble_pentest.py': 'BLE Pentest (active)',
 }
 FILE_PREFIX_OWNERS = {'python/dns_doctor_passive/': 'DNS Watch',
@@ -90,6 +94,7 @@ ND_PREFIXES = [
     ('_FTP', 'FTP Watch'), ('_ftp', 'FTP Watch'), ('do_ftp', 'FTP Watch'),
     ('_SMTP', 'SMTP Watch'), ('_smtp', 'SMTP Watch'), ('do_smtp', 'SMTP Watch'),
     ('_MODBUS', 'Modbus Watch'), ('_modbus', 'Modbus Watch'), ('do_modbus', 'Modbus Watch'),
+    ('_LLDP', 'LLDP Watch'), ('_lldp', 'LLDP Watch'), ('do_lldp', 'LLDP Watch'),
     ('_RELAY', 'Relay / Coercion Watch'), ('_relay', 'Relay / Coercion Watch'),
     ('_parse_relay', 'Relay / Coercion Watch'), ('do_relay', 'Relay / Coercion Watch'),
     ('_ND_DNSSL', 'ICMP Watch'), ('_ISIS', 'IS-IS Watch'), ('_CFM', 'Cisco Guard'),
@@ -103,7 +108,8 @@ ND_PREFIXES = [
 CONTEXT_CVES = {'CVE-2019-6111', 'CVE-2020-11897'}
 # Deliberately wrong IDs inside a vendored module's own mutation-test fixtures
 # (ptpwatch v4's README bite list swaps CVE-2024-42861 for this). Never a detection.
-IGNORED_CVES = {'CVE-2024-99999'}
+IGNORED_CVES = {'CVE-2024-99999',
+                'CVE-9999-0001'}   # lldpwatch conformance: operator extra_families fixture
 # Per-CVE owner overrides where a shared helper names another vendor's CVE.
 CVE_OWNER_OVERRIDE = {'CVE-2021-0254': 'Juniper Guard'}
 # Owners (or owner+CVE) whose mention is context/reference, not a detection.
@@ -115,6 +121,8 @@ CONTEXT_OWNERS = {'BGP Path Watch:advisory', 'OSPF Watch:advisory', 'SR-MPLS Wat
 NAMES = {
     'CVE-2002-20001': 'D(HE)at', 'CVE-2022-40735': 'D(HE)at', 'CVE-2024-41996': 'D(HE)at',
     'CVE-2003-0001': 'Etherleak',
+    'CVE-2015-8011': 'lldpd lldp_decode Management Address overflow',
+    'CVE-2022-4338': 'Open vSwitch LLDP Auto Attach integer underflow',
     'CVE-2014-9222': 'Misfortune Cookie', 'CVE-2025-41426': 'Liebert RDU101 / IS-UNITY HTTP method overflow',
     'CVE-2020-11896': 'Ripple20 IPv4 tunnelling RCE', 'CVE-2020-11897': 'Ripple20 IPv6 OOB write (not APC)',
     'CVE-2020-11898': 'Ripple20 ICMPv4 heap leak', 'CVE-2020-11899': 'Ripple20 IPv6 OOB read',
