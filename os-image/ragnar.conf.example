@@ -12,6 +12,9 @@
 #hostname=ragnar-01
 
 # Enable an attached display and select its driver. Omit for headless (default).
+# You can also pick the display without this file: the Wi-Fi onboarding portal
+# (the "Ragnar" AP page) has a screen dropdown, and the web UI's Config ->
+# Display switches it later. Setting it here just makes it unattended.
 # Supported driver ids (same as Config -> Display in the web UI):
 #   e-Paper : epd2in13 epd2in13_V2 epd2in13_V3 epd2in13_V4 epd2in13b_V4
 #             epd2in7 epd2in7_V2 epd2in9_V2 epd3in7 epd4in26

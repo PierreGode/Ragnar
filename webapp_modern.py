@@ -10999,12 +10999,25 @@ def _apply_config_update(data):
             changed = ', '.join(sorted(restart_keys_changed))
             response['restart_required'] = True
             response['restart_reason'] = changed
-            response['message'] = f'{changed} changed - restarting Ragnar service...'
-            def _delayed_restart():
-                time.sleep(2)  # Give the response time to reach the client
-                logger.info(f"Restarting Ragnar service for config change: {changed}")
-                subprocess.Popen(['systemctl', 'restart', 'ragnar.service'])
-            threading.Thread(target=_delayed_restart, daemon=True).start()
+            if 'epd_type' in restart_keys_changed:
+                # A changed display driver must switch the service onto the
+                # DISPLAY entrypoint (Ragnar.py), not just restart — on a box
+                # running the headless entrypoint a plain restart would come
+                # back up headless with the panel dark. _apply_display_mode
+                # rewrites the unit and schedules its own detached restart.
+                new_epd = shared_data.config.get('epd_type')
+                ok, dmsg = _apply_display_mode('display', new_epd, validate=False)
+                response['message'] = (
+                    f'Display set to {new_epd} — switching to display mode…'
+                    if ok else f'Could not switch to display mode: {dmsg}')
+                # Any other restart-bound keys are covered by the same restart.
+            else:
+                response['message'] = f'{changed} changed - restarting Ragnar service...'
+                def _delayed_restart():
+                    time.sleep(2)  # Give the response time to reach the client
+                    logger.info(f"Restarting Ragnar service for config change: {changed}")
+                    subprocess.Popen(['systemctl', 'restart', 'ragnar.service'])
+                threading.Thread(target=_delayed_restart, daemon=True).start()
         else:
             logger.debug("Config saved with no restart-bound change — applying live")
 
@@ -20390,6 +20403,66 @@ def get_wifi_networks():
             'known': []
         }), 500
 
+# Display drivers that may be requested from the portal / web UI. Mirrors the
+# captive-portal dropdown and docs/ragnar-os ragnar.conf list. Used to validate
+# an operator-supplied value before it reaches set_display_mode.sh.
+_VALID_DISPLAY_DRIVERS = {
+    'epd2in13', 'epd2in13_V2', 'epd2in13_V3', 'epd2in13_V4', 'epd2in13b_V4',
+    'epd2in7', 'epd2in7_V2', 'epd2in9_V2', 'epd3in7', 'epd4in26',
+    'gc9a01', 'st7735s', 'ili9486', 'ili9488', 'whisplay', 'ssd1306', 'lcd1602',
+    'max7219_4panel', 'max7219_8panel',
+}
+
+DISPLAY_MODE_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'scripts', 'set_display_mode.sh')
+
+
+def _apply_display_mode(mode, epd_type=None, validate=True):
+    """Switch ragnar.service between 'headless' and 'display' mode out-of-band.
+
+    Runs the shared helper (scripts/set_display_mode.sh) with --no-restart, then
+    schedules a DETACHED restart via a transient systemd timer. The timer is
+    owned by PID 1, outside ragnar.service's cgroup, so it survives this very
+    service being stopped — letting the current HTTP request return first.
+
+    `validate` strict-checks epd_type against the portal dropdown's known set
+    (use for untrusted operator input). The web UI passes a value already
+    normalised by resolve_epd_type, so it validates only the character set to
+    bar shell/path tricks, not the exact membership. Returns (ok, message).
+    """
+    if mode not in ('headless', 'display'):
+        return False, 'invalid display mode'
+    cmd = ['bash', DISPLAY_MODE_SCRIPT, mode]
+    if mode == 'display':
+        if not epd_type:
+            return False, 'no display driver given'
+        if validate and epd_type not in _VALID_DISPLAY_DRIVERS:
+            return False, f'unknown display driver: {epd_type!r}'
+        if not re.fullmatch(r'[A-Za-z0-9_]+', epd_type):
+            return False, f'invalid display driver name: {epd_type!r}'
+        cmd.append(epd_type)
+    cmd.append('--no-restart')
+    try:
+        subprocess.run(cmd, timeout=30, check=False)
+    except Exception as e:
+        logger.error(f"set_display_mode.sh failed: {e}")
+        return False, str(e)
+    # Detached restart so this request can finish before the service bounces.
+    try:
+        subprocess.Popen(
+            ['systemd-run', '--on-active=3', '--timer-property=AccuracySec=200ms',
+             'systemctl', 'restart', 'ragnar.service'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        try:
+            subprocess.Popen(['systemctl', 'restart', '--no-block', 'ragnar.service'],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            logger.warning(f"Could not schedule service restart after display switch: {e}")
+    logger.info(f"Display mode -> {mode} ({epd_type or 'n/a'}); service restart scheduled")
+    return True, 'display mode switching'
+
+
 @app.route('/api/wifi/connect', methods=['POST'])
 def connect_wifi():
     """Connect to a Wi-Fi network"""
@@ -20402,6 +20475,11 @@ def connect_wifi():
         password = data.get('password')
         priority = data.get('priority', 1)
         save_network = data.get('save', True)
+        # Optional: enable an attached display as part of onboarding (from the
+        # captive portal's "Attached display" dropdown). 'headless'/empty = leave
+        # as-is. Applied only after a successful connect, so the screen comes up
+        # showing the real IP — and restarts the service out-of-band (below).
+        req_display = (data.get('display') or 'headless').strip()
         
         wifi_manager = getattr(shared_data, 'ragnar_instance', None)
         if not wifi_manager or not hasattr(wifi_manager, 'wifi_manager'):
@@ -20427,6 +20505,16 @@ def connect_wifi():
             message = 'Connected successfully'
             if is_ap_client_request():
                 message = 'Connected successfully! Ragnar will now use this network. You can disconnect from this AP.'
+
+            # Enable the chosen display now that we're online. This restarts the
+            # service (out-of-band) into display mode, so the panel shows the
+            # connected IP. Only switch if a real driver was requested.
+            if req_display and req_display != 'headless':
+                ok, dmsg = _apply_display_mode('display', req_display)
+                if ok:
+                    message += ' Your display will show the IP once it restarts.'
+                else:
+                    logger.warning(f"Display enable requested but failed: {dmsg}")
         else:
             logger.error(f"API: Failed to connect to {ssid}")
             message = 'Connection failed. Please check the password and try again.'

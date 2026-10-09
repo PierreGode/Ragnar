@@ -416,6 +416,38 @@
                 <p id="passwordHint" class="text-xs text-gray-400 mt-2" style="display: none;"></p>
             </div>
 
+            <div class="form-group">
+                <label for="displaySelect">🖥️ Attached display (optional)</label>
+                <select id="displaySelect">
+                    <option value="headless" selected>Headless — no screen (default)</option>
+                    <optgroup label="e-Paper (Waveshare)">
+                        <option value="epd2in13_V4">e-Paper 2.13" V4</option>
+                        <option value="epd2in13_V3">e-Paper 2.13" V3</option>
+                        <option value="epd2in13_V2">e-Paper 2.13" V2</option>
+                        <option value="epd2in13">e-Paper 2.13"</option>
+                        <option value="epd2in13b_V4">e-Paper 2.13" B/V4 (3-colour)</option>
+                        <option value="epd2in7">e-Paper 2.7"</option>
+                        <option value="epd2in7_V2">e-Paper 2.7" V2</option>
+                        <option value="epd2in9_V2">e-Paper 2.9" V2</option>
+                        <option value="epd3in7">e-Paper 3.7"</option>
+                        <option value="epd4in26">e-Paper 4.26"</option>
+                    </optgroup>
+                    <optgroup label="TFT / OLED">
+                        <option value="gc9a01">GC9A01 1.28" round TFT</option>
+                        <option value="st7735s">ST7735S TFT</option>
+                        <option value="ili9486">ILI9486 3.5" TFT</option>
+                        <option value="whisplay">Whisplay HAT</option>
+                        <option value="ssd1306">SSD1306 0.96" OLED</option>
+                        <option value="lcd1602">LCD1602 character LCD</option>
+                    </optgroup>
+                    <optgroup label="LED matrix">
+                        <option value="max7219_8panel">MAX7219 8-panel</option>
+                        <option value="max7219_4panel">MAX7219 4-panel</option>
+                    </optgroup>
+                </select>
+                <p class="text-xs text-gray-400 mt-2">Pick your screen to see the IP on the display after connecting. Leave as Headless for web-only.</p>
+            </div>
+
             <button type="submit" class="btn" id="connectBtn">
                 <span id="connectBtnText">Connect to WiFi</span>
             </button>
@@ -436,6 +468,7 @@
         const passwordHint = document.getElementById('passwordHint');
         const connectBtn = document.getElementById('connectBtn');
         const connectBtnText = document.getElementById('connectBtnText');
+        const displaySelect = document.getElementById('displaySelect');
         const exitApBtn = document.getElementById('exitApBtn');
         const exitApBtnText = document.getElementById('exitApBtnText');
         const refreshBtn = document.getElementById('refreshBtn');
@@ -627,12 +660,13 @@
             showStatus('📤 Sending WiFi credentials to Ragnar...', 'info');
 
             try {
+                const display = displaySelect ? displaySelect.value : 'headless';
                 const response = await fetch('/api/wifi/connect', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({ ssid, password }),
+                    body: JSON.stringify({ ssid, password, display }),
                     // Short timeout - if AP shuts down, we won't get a response
                     signal: AbortSignal.timeout(5000)
                 });

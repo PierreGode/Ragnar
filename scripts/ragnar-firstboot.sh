@@ -114,58 +114,14 @@ fi
 # whose pins drive a built-in panel). Enabling a screen means: record the driver
 # in Ragnar's config AND switch the systemd unit off the headless entrypoint.
 if [ -n "$CONF_DISPLAY" ]; then
-    log "Enabling display driver '$CONF_DISPLAY'"
-
-    # Record the driver in shared_config.json (what the running service reads).
-    CONF_JSON="$RAGNAR_PATH/config/shared_config.json"
-    mkdir -p "$(dirname "$CONF_JSON")"
-    python3 - "$CONF_JSON" "$CONF_DISPLAY" <<'PY' 2>/dev/null || log "Could not write shared_config.json"
-import json, os, sys
-path, driver = sys.argv[1], sys.argv[2]
-cfg = {}
-if os.path.exists(path):
-    try:
-        with open(path) as f:
-            cfg = json.load(f)
-    except Exception:
-        cfg = {}
-cfg['epd_type'] = driver
-with open(path, 'w') as f:
-    json.dump(cfg, f, indent=4)
-PY
-    # Mirror into shared.py's default too (used if the JSON is ever regenerated).
-    [ -f "$RAGNAR_PATH/shared.py" ] && \
-        sed -i "s/\"epd_type\": \"[^\"]*\"/\"epd_type\": \"$CONF_DISPLAY\"/" "$RAGNAR_PATH/shared.py" 2>/dev/null || true
-    chown -R "$RAGNAR_USER:$RAGNAR_USER" "$RAGNAR_PATH/config" 2>/dev/null || true
-
-    # Rewrite the unit to the display entrypoint. Mirrors install_ragnar.sh's
-    # setup_services display path: Ragnar.py, no RAGNAR_HEADLESS, wipe the panel
-    # once on start. Kept deliberately small and self-contained.
-    UNIT="/etc/systemd/system/ragnar.service"
-    if [ -f "$UNIT" ]; then
-        cat > "$UNIT" <<EOF
-[Unit]
-Description=ragnar Service
-After=network.target
-
-[Service]
-ExecStartPre=-/bin/bash -c '/home/ragnar/Ragnar/kill_port_8000.sh; ip link set mon0 down >/dev/null 2>&1; iw dev mon0 del >/dev/null 2>&1; systemctl stop pwnagotchi 2>/dev/null; systemctl stop bettercap 2>/dev/null; true'
-ExecStartPre=-/usr/bin/python3 -OO /home/ragnar/Ragnar/wipe_epd.py
-ExecStart=/usr/bin/python3 -OO /home/ragnar/Ragnar/Ragnar.py
-WorkingDirectory=/home/ragnar/Ragnar
-StandardOutput=inherit
-StandardError=inherit
-Restart=always
-RestartSec=3
-User=root
-TimeoutStopSec=5
-KillMode=mixed
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        systemctl daemon-reload 2>/dev/null || true
-        log "Switched ragnar.service to display mode (Ragnar.py)"
+    # Delegate to the shared mode-switch helper (same code the web UI and the AP
+    # onboarding portal use). We run before ragnar.service has started, so no
+    # restart is needed — the chosen mode is live on first start.
+    if [ -f "$RAGNAR_PATH/scripts/set_display_mode.sh" ]; then
+        bash "$RAGNAR_PATH/scripts/set_display_mode.sh" display "$CONF_DISPLAY" --no-restart \
+            || log "Could not switch to display mode for '$CONF_DISPLAY'"
+    else
+        log "set_display_mode.sh missing — cannot enable display '$CONF_DISPLAY'"
     fi
 fi
 
