@@ -634,6 +634,7 @@ function epdTypeToSizeKey(epd_type) {
 
 const displaySelectOptions = {
     epd_type: [
+        { value: 'headless', label: 'Headless — no screen (web UI only)' },
         { value: 'auto', label: 'Auto-detect' },
         { value: '2in13', label: '2.13" e-Paper (122x250)' },
         { value: '2in7', label: '2.7" e-Paper (176x264)' },
@@ -24023,9 +24024,13 @@ function displayConfigForm(config) {
                 
                 if (Array.isArray(selectOptions)) {
                     let selectedValue = typeof value === 'boolean' ? String(value) : (value ?? '');
-                    // For epd_type, map driver name to size key so the dropdown matches
+                    // For epd_type, map driver name to size key so the dropdown matches.
+                    // When the service is actually running headless (display_enabled
+                    // is false), show "Headless" regardless of the remembered driver.
                     if (key === 'epd_type') {
-                        selectedValue = epdTypeToSizeKey(selectedValue);
+                        selectedValue = (config.display_enabled === false)
+                            ? 'headless'
+                            : epdTypeToSizeKey(selectedValue);
                     }
                     // For screen_reversed, normalize legacy boolean values to rotation angles
                     if (key === 'screen_reversed') {

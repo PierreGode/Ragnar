@@ -10819,7 +10819,12 @@ def get_status():
 def get_config():
     """Get current configuration"""
     try:
-        return jsonify(shared_data.config)
+        cfg = dict(shared_data.config)
+        # Reflect the ACTUAL running mode (which entrypoint the service booted)
+        # so the Display selector can show "Headless" vs a driver accurately,
+        # regardless of what epd_type is stored. Computed, never persisted here.
+        cfg['display_enabled'] = not bool(getattr(shared_data, 'headless_mode', False))
+        return jsonify(cfg)
     except Exception as e:
         logger.error(f"Error getting config: {e}")
         return jsonify({'error': str(e)}), 500
@@ -10879,10 +10884,19 @@ def _apply_config_update(data):
         # where the config stores a driver ("epd2in13_V4"), so comparing the raw
         # value would read as a change on every save.
         restart_keys_changed = set()
+        headless_requested = False
         if epd_type_present:
-            from shared import resolve_epd_type
-            raw_epd = data['epd_type']
-            data['epd_type'] = resolve_epd_type(raw_epd, shared_data.config.get('epd_type'))
+            raw_epd = str(data['epd_type']).strip().lower()
+            if raw_epd in ('headless', 'none', ''):
+                # Switch OFF any display — back to the headless entrypoint. Keep
+                # the stored driver so re-enabling remembers it; just drop the
+                # key from this update so it isn't treated as a driver change.
+                headless_requested = True
+                epd_type_present = False
+                data.pop('epd_type', None)
+            else:
+                from shared import resolve_epd_type
+                data['epd_type'] = resolve_epd_type(data['epd_type'], shared_data.config.get('epd_type'))
         for key in CONFIG_RESTART_REQUIRED_KEYS:
             if key in data and data[key] != shared_data.config.get(key):
                 restart_keys_changed.add(key)
@@ -10995,7 +11009,17 @@ def _apply_config_update(data):
 
         # Only a key whose value is bound at process start, and that actually
         # CHANGED, is worth a restart. Everything else applies live.
-        if restart_keys_changed:
+        if headless_requested:
+            # Only bounce if we're actually in display mode now.
+            if not bool(getattr(shared_data, 'headless_mode', False)):
+                response['restart_required'] = True
+                response['restart_reason'] = 'display disabled'
+                ok, dmsg = _apply_display_mode('headless')
+                response['message'] = ('Switching to headless mode…'
+                                       if ok else f'Could not switch to headless: {dmsg}')
+            else:
+                response['message'] = 'Already headless — no display to disable.'
+        elif restart_keys_changed:
             changed = ', '.join(sorted(restart_keys_changed))
             response['restart_required'] = True
             response['restart_reason'] = changed
