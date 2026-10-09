@@ -79,7 +79,7 @@ sed -i \
     "$CHROOT_SCRIPT"
 echo "    baking repo into image: $(grep -m1 REPO_URL= "$CHROOT_SCRIPT")"
 echo "                            $(grep -m1 REPO_BRANCH= "$CHROOT_SCRIPT")"
-echo "    advanced scanners:      $(grep -m1 'RAGNAR_INSTALL_ADVANCED=' "$CHROOT_SCRIPT" | tr -d ' \\')"
+echo "    advanced scanners:      $(grep -m1 '^RAGNAR_INSTALL_ADVANCED=' "$CHROOT_SCRIPT" | tr -d ' \\')"
 
 # Only our stage should export an image; stage2 provides the base rootfs only.
 touch "$PIGEN_DIR/stage2/SKIP_IMAGES"
