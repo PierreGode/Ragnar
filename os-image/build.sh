@@ -59,6 +59,20 @@ rm -rf "$PIGEN_DIR/stage-ragnar"
 cp -a "$HERE/stage-ragnar" "$PIGEN_DIR/stage-ragnar"
 cp -a "$HERE/config" "$PIGEN_DIR/config"
 
+# The docker build path (build-docker.sh) only forwards GIT_HASH into the build
+# container, and pi-gen feeds the chroot script in over stdin — so our RAGNAR_*
+# env never reaches the clone step. Bake the resolved repo URL/branch straight
+# into the copied chroot script's defaults instead, so whatever we clone is
+# exactly what was requested regardless of build path. (Only the gitignored copy
+# under .pi-gen is edited; the committed script keeps its upstream/main default.)
+CHROOT_SCRIPT="$PIGEN_DIR/stage-ragnar/00-ragnar/01-run-chroot.sh"
+sed -i \
+    -e "s#RAGNAR_REPO_URL:-[^}\"]*#RAGNAR_REPO_URL:-${RAGNAR_REPO_URL}#" \
+    -e "s#RAGNAR_REPO_BRANCH:-[^}\"]*#RAGNAR_REPO_BRANCH:-${RAGNAR_REPO_BRANCH}#" \
+    "$CHROOT_SCRIPT"
+echo "    baking repo into image: $(grep -m1 REPO_URL= "$CHROOT_SCRIPT")"
+echo "                            $(grep -m1 REPO_BRANCH= "$CHROOT_SCRIPT")"
+
 # Only our stage should export an image; stage2 provides the base rootfs only.
 touch "$PIGEN_DIR/stage2/SKIP_IMAGES"
 # Don't let pi-gen build the desktop stages even if present.
