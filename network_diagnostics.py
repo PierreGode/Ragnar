@@ -25798,6 +25798,80 @@ def _ble_normalize(alert, blewatch):
     return out
 
 
+# Trusted-device baseline for BLE Watch (data/ble_watch.json). Unlike the IGMP/
+# NDP "reset then re-learn on next scan" model, BLE is device-gated (each learn
+# needs a sniffer capture), so the web controls manage an explicit trust LIST:
+# "Trust current" MERGES the advertisers seen in the last scan into it, "Clear
+# list" empties it. do_ble_watch loads it so trusted devices suppress clone /
+# service-masquerade findings and anchor the clone-identity baseline.
+_BLE_WATCH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'data', 'ble_watch.json')
+_ble_watch_lock = threading.Lock()
+
+
+def _ble_watch_load():
+    try:
+        with open(_BLE_WATCH_PATH) as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _ble_watch_save(d):
+    try:
+        os.makedirs(os.path.dirname(_BLE_WATCH_PATH), exist_ok=True)
+        tmp = _BLE_WATCH_PATH + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(d, f, indent=2)
+        os.replace(tmp, _BLE_WATCH_PATH)
+    except OSError:
+        pass
+
+
+def do_ble_baseline(action='get', devices=None):
+    """Manage the BLE Watch trusted-device list (data/ble_watch.json).
+
+    action='get'   -> return the current trusted_devices.
+    action='trust' -> merge `devices` ({addr: {name, services}} or [addr,...])
+                      into trusted_devices (what "Trust current" sends from the
+                      last scan's seen devices). Additive and idempotent.
+    action='clear' -> empty the trusted-device list.
+    """
+    with _ble_watch_lock:
+        base = _ble_watch_load()
+        trusted = base.get('trusted_devices')
+        if not isinstance(trusted, dict):
+            # Normalise a bare-list baseline to the dict shape we persist.
+            trusted = {str(a).lower(): {} for a in trusted} if isinstance(trusted, list) else {}
+        if action == 'clear':
+            base['trusted_devices'] = {}
+            _ble_watch_save(base)
+            return {'success': True, 'cleared': True, 'trusted_devices': {}, 'count': 0}
+        if action == 'trust':
+            added = 0
+            items = devices.items() if isinstance(devices, dict) else \
+                ((str(a), {}) for a in (devices or []))
+            for addr, meta in items:
+                akey = str(addr).strip().lower()
+                if not re.fullmatch(r'[0-9a-f:]{2,32}', akey):
+                    continue
+                meta = meta if isinstance(meta, dict) else {}
+                entry = {}
+                if meta.get('name'):
+                    entry['name'] = str(meta['name'])[:64]
+                if isinstance(meta.get('services'), list):
+                    entry['services'] = [str(s)[:40] for s in meta['services'][:32]]
+                if akey not in trusted:
+                    added += 1
+                trusted[akey] = entry
+            base['trusted_devices'] = trusted
+            _ble_watch_save(base)
+            return {'success': True, 'trusted': True, 'added': added,
+                    'count': len(trusted), 'trusted_devices': trusted}
+        return {'success': True, 'trusted_devices': trusted, 'count': len(trusted)}
+
+
 def do_ble_watch(device=None, seconds=20, replay=None, config=None, quick=False):
     """Passive BLE attack monitor (detection-only, never transmits). Reads the BLE
     link layer from an external nRF/Bluefruit LE sniffer (or a --replay pcap) and
@@ -25822,6 +25896,10 @@ def do_ble_watch(device=None, seconds=20, replay=None, config=None, quick=False)
         except (OSError, ValueError) as e:
             return {'success': False, 'module': 'ble_watch',
                     'error': 'bad config: %s' % e}
+    else:
+        # No explicit config: use the persisted trusted-device baseline so
+        # "Trust current" devices suppress clone / masquerade findings.
+        cfg = _ble_watch_load()
 
     alerts = []
     guard = blewatch.BleWatch(cfg, emit=alerts.append)
@@ -25920,6 +25998,10 @@ def do_ble_watch(device=None, seconds=20, replay=None, config=None, quick=False)
               'seconds': seconds, 'verdict': verdict, 'reasons': reasons,
               'findings': findings,
               'devices': sorted({a['adva'] for a in alerts if a.get('adva')}),
+              # Every advertiser seen this run (addr -> {name, services}), so the
+              # web "Trust current" control can persist exactly what's on the air.
+              'seen': guard.seen_devices(),
+              'trusted_count': len(getattr(guard, 'trusted', {}) or {}),
               'alerts': len(alerts), 'by_severity': by_sev,
               'packet_count': guard.frames}
     hi = [f for f in findings if f['severity'] in ('HIGH', 'CRITICAL')]
@@ -27872,6 +27954,18 @@ def register_network_diagnostics(app, logger=None):
         secs = _clamp_int(request.args.get('seconds'), 20, 5, 120)
         _log(f"net/ble-watch device={device or 'autodetect'} secs={secs}")
         return jsonify(do_ble_watch(device=device, seconds=secs))
+
+    @app.route('/api/net/ble-watch/baseline', methods=['GET', 'POST'])
+    def net_ble_baseline():
+        # Manage the BLE Watch trusted-device list: "Trust current" (merge the
+        # last scan's seen devices) and "Clear list" (empty it).
+        action, devices = 'get', None
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            action = data.get('action') if data.get('action') in ('trust', 'clear') else 'get'
+            devices = data.get('devices')
+        _log(f"net/ble-watch/baseline {action}")
+        return jsonify(do_ble_baseline(action, devices))
 
     @app.route('/api/net/srmpls-watch', methods=['GET'])
     def net_srmpls_watch():

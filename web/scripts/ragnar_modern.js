@@ -10173,10 +10173,14 @@ async function runBleWatch() {
             }
             return;
         }
+        // Remember the advertisers seen this scan so "Trust current" can persist
+        // them (addr -> {name, services}); keep it on window across handlers.
+        window._bleLastSeen = (d && d.seen && typeof d.seen === 'object') ? d.seen : {};
+        const seenCount = Object.keys(window._bleLastSeen).length;
         const [cls, label] = _BLE_VERDICT_STYLE[d.verdict] || _BLE_VERDICT_STYLE.unknown;
         const devs = (d.devices || []).slice(0, 6).join(', ') || '—';
         let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
-        html += `<p class="text-xs text-gray-500 mb-2">Source: ${escapeHtml(d.device || '—')} · ${d.seconds}s · ${d.packet_count || 0} PDUs · devices: ${escapeHtml(devs)}</p>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Source: ${escapeHtml(d.device || '—')} · ${d.seconds}s · ${d.packet_count || 0} PDUs · ${seenCount} advertiser${seenCount === 1 ? '' : 's'} seen · ${d.trusted_count || 0} trusted · flagged: ${escapeHtml(devs)}</p>`;
         const findings = (d.findings || []).filter(f => ['critical', 'high', 'medium', 'low'].includes((f.severity || '').toLowerCase()));
         if (findings.length) {
             html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
@@ -10200,6 +10204,52 @@ async function runBleWatch() {
         out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
     } finally {
         _ndBusy(btn, false);
+    }
+}
+
+// Add the advertisers from the last scan to the BLE trusted-device list, so
+// they stop being flagged as clones/masquerades. Uses window._bleLastSeen,
+// populated by runBleWatch (so run a scan first).
+async function bleTrustCurrent() {
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const seen = window._bleLastSeen || {};
+    if (!Object.keys(seen).length) {
+        showNotification('Run a BLE scan first — nothing seen to trust yet', 'info');
+        return;
+    }
+    _ndBusy(btn, true, 'Saving…');
+    try {
+        const d = await postAPI('/api/net/ble-watch/baseline', { action: 'trust', devices: seen });
+        if (d && d.success) {
+            showNotification(`Trusted ${d.added || 0} new device${d.added === 1 ? '' : 's'} (${d.count || 0} total) — re-scan to confirm they're no longer flagged`, 'success');
+        } else {
+            showNotification('Could not update the trusted list', 'error');
+        }
+    } catch (e) {
+        showNotification('Trust current failed: ' + e.message, 'error');
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// Empty the BLE trusted-device list and clear the on-screen results.
+async function bleClearList() {
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    _ndBusy(btn, true, 'Clearing…');
+    try {
+        const d = await postAPI('/api/net/ble-watch/baseline', { action: 'clear' });
+        if (d && d.success) {
+            showNotification('Trusted-device list cleared', 'success');
+        } else {
+            showNotification('Could not clear the trusted list', 'error');
+        }
+    } catch (e) {
+        showNotification('Clear list failed: ' + e.message, 'error');
+    } finally {
+        _ndBusy(btn, false);
+        window._bleLastSeen = {};
+        const out = document.getElementById('blewatch-results');
+        if (out) { out.innerHTML = ''; out.classList.add('hidden'); }
     }
 }
 
