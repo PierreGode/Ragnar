@@ -2254,6 +2254,38 @@ class WiFiManager:
                 self.logger.warning(f"Saved profile {p['name']!r} error: {e}")
         return False
 
+    def _rescan_and_wait(self, ssid, timeout=25):
+        """Trigger a Wi-Fi rescan and wait (up to timeout) for `ssid` to show up.
+
+        Called right after leaving AP mode: NetworkManager has just reclaimed
+        wlan0 and has no scan results yet, so an immediate connect by SSID fails
+        with "No network with SSID found". nmcli may refuse a rescan that comes
+        too soon after the previous one ("Scanning not allowed immediately..."),
+        so we loop and tolerate that. Returns True once the SSID is visible.
+        """
+        iface = getattr(self, 'ap_interface', None) or 'wlan0'
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                subprocess.run(['sudo', 'nmcli', 'dev', 'wifi', 'rescan', 'ifname', iface],
+                               capture_output=True, timeout=15)
+            except Exception:
+                pass
+            try:
+                r = subprocess.run(['nmcli', '-t', '-f', 'SSID', 'dev', 'wifi', 'list',
+                                    'ifname', iface],
+                                   capture_output=True, text=True, timeout=15)
+                if ssid and any(line.strip() == ssid for line in r.stdout.splitlines()):
+                    self.logger.info(f"Post-AP rescan: '{ssid}' is now visible")
+                    return True
+            except Exception:
+                pass
+            time.sleep(3)
+        self.logger.warning(
+            f"Post-AP rescan: '{ssid}' not seen within {timeout}s; "
+            "trying the connect anyway (a saved profile can still auto-join)")
+        return False
+
     def connect_to_network(self, ssid, password=None):
         """Connect to a specific Wi-Fi network - NEVER deletes existing system profiles"""
         try:
@@ -2268,6 +2300,11 @@ class WiFiManager:
                 self.logger.info("Stopping AP mode before connecting to WiFi network...")
                 self.stop_ap_mode()
                 time.sleep(2)  # Give system time to clean up AP mode
+                # NetworkManager has just taken wlan0 back from hostapd and has
+                # NOT scanned the airwaves yet, so `nmcli dev wifi connect <ssid>`
+                # fails with "No network with SSID found" even for a network in
+                # range. Force a rescan and wait for the target SSID to appear.
+                self._rescan_and_wait(ssid, timeout=25)
             
             # IMPORTANT: NEVER delete existing NetworkManager profiles!
             # Check if a connection profile already exists

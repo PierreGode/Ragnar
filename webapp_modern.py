@@ -20441,7 +20441,7 @@ DISPLAY_MODE_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'scripts', 'set_display_mode.sh')
 
 
-def _apply_display_mode(mode, epd_type=None, validate=True):
+def _apply_display_mode(mode, epd_type=None, validate=True, restart=True):
     """Switch ragnar.service between 'headless' and 'display' mode out-of-band.
 
     Runs the shared helper (scripts/set_display_mode.sh) with --no-restart, then
@@ -20471,6 +20471,12 @@ def _apply_display_mode(mode, epd_type=None, validate=True):
     except Exception as e:
         logger.error(f"set_display_mode.sh failed: {e}")
         return False, str(e)
+    if not restart:
+        # Persist-only: the unit + config are rewritten, but the service is not
+        # bounced. The new mode takes effect on the next start/reboot. Used when
+        # the caller is mid-flow (e.g. onboarding) and will restart/reboot later.
+        logger.info(f"Display mode -> {mode} ({epd_type or 'n/a'}); persisted, no restart")
+        return True, 'display mode persisted'
     # Detached restart so this request can finish before the service bounces.
     try:
         subprocess.Popen(
@@ -20485,6 +20491,34 @@ def _apply_display_mode(mode, epd_type=None, validate=True):
             logger.warning(f"Could not schedule service restart after display switch: {e}")
     logger.info(f"Display mode -> {mode} ({epd_type or 'n/a'}); service restart scheduled")
     return True, 'display mode switching'
+
+
+def _save_wifi_profile(ssid, password=None):
+    """Persist a NetworkManager Wi-Fi profile (autoconnect) BEFORE the live
+    connect attempt, so a flaky single-radio AP->client hand-off never loses the
+    operator's credentials — a reboot then auto-joins. Idempotent.
+    """
+    try:
+        exists = subprocess.run(['nmcli', '-t', '-f', 'NAME', 'con', 'show', ssid],
+                                capture_output=True, text=True, timeout=15).returncode == 0
+        if exists:
+            if password:
+                subprocess.run(['sudo', 'nmcli', 'con', 'modify', ssid,
+                                'wifi-sec.key-mgmt', 'wpa-psk', 'wifi-sec.psk', password],
+                               capture_output=True, timeout=15)
+            subprocess.run(['sudo', 'nmcli', 'con', 'modify', ssid,
+                            'connection.autoconnect', 'yes'], capture_output=True, timeout=15)
+        else:
+            cmd = ['sudo', 'nmcli', 'con', 'add', 'type', 'wifi', 'con-name', ssid,
+                   'ssid', ssid, 'connection.autoconnect', 'yes']
+            if password:
+                cmd += ['wifi-sec.key-mgmt', 'wpa-psk', 'wifi-sec.psk', password]
+            subprocess.run(cmd, capture_output=True, timeout=15)
+        logger.info(f"Saved Wi-Fi profile for '{ssid}' (autoconnect) before live connect")
+        return True
+    except Exception as e:
+        logger.warning(f"Could not pre-save Wi-Fi profile '{ssid}': {e}")
+        return False
 
 
 @app.route('/api/wifi/connect', methods=['POST'])
@@ -20504,19 +20538,28 @@ def connect_wifi():
         # as-is. Applied only after a successful connect, so the screen comes up
         # showing the real IP — and restarts the service out-of-band (below).
         req_display = (data.get('display') or 'headless').strip()
-        
+
         wifi_manager = getattr(shared_data, 'ragnar_instance', None)
         if not wifi_manager or not hasattr(wifi_manager, 'wifi_manager'):
             return jsonify({'success': False, 'error': 'Wi-Fi manager not available'}), 503
-        
+
         # Log the connection attempt
         logger.info(f"API: Attempting to connect to WiFi network: {ssid}")
-        
+
         # Check if currently in AP mode
         was_in_ap_mode = wifi_manager.wifi_manager.ap_mode_active
         if was_in_ap_mode:
             logger.info(f"API: Currently in AP mode, will stop AP before connecting to {ssid}")
-        
+
+        # Persist BEFORE the live attempt so nothing is lost if the (single-radio)
+        # AP->client hand-off flakes: a reboot alone then joins Wi-Fi and comes up
+        # in display mode. 1) save the Wi-Fi profile (autoconnect); 2) persist the
+        # display choice without restarting yet (we're mid-request).
+        _save_wifi_profile(ssid, password)
+        want_display = bool(req_display and req_display != 'headless')
+        if want_display:
+            _apply_display_mode('display', req_display, restart=False)
+
         # Try to connect
         success = wifi_manager.wifi_manager.connect_to_network(ssid, password)
         
@@ -20530,21 +20573,36 @@ def connect_wifi():
             if is_ap_client_request():
                 message = 'Connected successfully! Ragnar will now use this network. You can disconnect from this AP.'
 
-            # Enable the chosen display now that we're online. This restarts the
-            # service (out-of-band) into display mode, so the panel shows the
-            # connected IP. Only switch if a real driver was requested.
-            if req_display and req_display != 'headless':
+            # We're online — if a display was requested, bounce into display mode
+            # (out-of-band) so the panel shows the connected IP.
+            if want_display:
                 ok, dmsg = _apply_display_mode('display', req_display)
                 if ok:
                     message += ' Your display will show the IP once it restarts.'
                 else:
                     logger.warning(f"Display enable requested but failed: {dmsg}")
         else:
-            logger.error(f"API: Failed to connect to {ssid}")
-            message = 'Connection failed. Please check the password and try again.'
-            if was_in_ap_mode:
-                message += ' Note: AP mode was stopped to attempt connection.'
-        
+            logger.error(f"API: Failed to connect to {ssid} (live). Credentials are saved; rebooting to let NetworkManager auto-join.")
+            # The live hand-off failed, but the Wi-Fi profile (and display choice)
+            # are already persisted. A reboot frees wlan0 of any AP leftovers and
+            # NetworkManager auto-connects the saved profile, coming up in the
+            # chosen mode. Schedule it detached so this response returns first.
+            message = ('Saved. The AP will close and Ragnar will reboot to join '
+                       f'"{ssid}"' + (' and start your display' if want_display else '') +
+                       '. Give it ~1 minute, then reach it at http://ragnar.local:8000'
+                       + (' or read the IP off the screen.' if want_display else '.'))
+            try:
+                subprocess.Popen(
+                    ['systemd-run', '--on-active=5', '--timer-property=AccuracySec=200ms',
+                     'systemctl', 'reboot'],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # A reboot is the recovery path, so report success to the portal.
+                success = True
+            except Exception as e:
+                logger.error(f"Could not schedule reboot after saving Wi-Fi: {e}")
+                message = (f'Saved "{ssid}", but could not auto-reboot. Power-cycle '
+                           'Ragnar and it will join the network on boot.')
+
         return jsonify({
             'success': success,
             'message': message
