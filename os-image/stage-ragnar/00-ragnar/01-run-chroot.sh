@@ -73,13 +73,12 @@ rm -f "$RAGNAR_PATH/certs/ragnar.key" "$RAGNAR_PATH/certs/ragnar.crt" 2>/dev/nul
 # ── Branding (MOTD) ─────────────────────────────────────────────────────────
 cat > /etc/motd <<'MOTD'
 
- ____      _    ____ _   _    _    ____
-|  _ \    / \  / ___| \ | |  / \  |  _ \
-| |_) |  / _ \| |  _|  \| | / _ \ | |_) |
-|  _ <  / ___ \ |_| | |\  |/ ___ \|  _ <
-|_| \_\/_/   \_\____|_| \_/_/   \_\_| \_\
-
-        Ragnar OS for Raspberry Pi
+ ____                               ___  ____
+|  _ \ __ _  __ _ _ __   __ _ _ __ / _ \/ ___|
+| |_) / _` |/ _` | '_ \ / _` | '__| | | \___ \
+|  _ < (_| | (_| | | | | (_| | |  | |_| |___) |
+|_| \_\__,_|\__, |_| |_|\__,_|_|   \___/|____/
+            |___/        for Raspberry Pi
 
   Web UI:  http://<this-device-ip>:8000   (https on :8000 too)
   No network yet? Join Wi-Fi "Ragnar" (pass: ragnarconnect),
