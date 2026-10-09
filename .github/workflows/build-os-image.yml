@@ -92,6 +92,9 @@ jobs:
       - name: Locate built image
         id: img
         run: |
+          # The build ran under sudo, so deploy/ is root-owned; hand it back to
+          # the runner user so the checksum (and upload) can write/read it.
+          sudo chown -R "$(id -u):$(id -g)" os-image/.pi-gen/deploy
           IMG="$(ls os-image/.pi-gen/deploy/*.img.xz | head -1)"
           echo "path=$IMG" >> "$GITHUB_OUTPUT"
           echo "name=$(basename "$IMG")" >> "$GITHUB_OUTPUT"
