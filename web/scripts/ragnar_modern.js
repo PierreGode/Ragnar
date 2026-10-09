@@ -10221,7 +10221,12 @@ async function bleTrustCurrent() {
     try {
         const d = await postAPI('/api/net/ble-watch/baseline', { action: 'trust', devices: seen });
         if (d && d.success) {
-            showNotification(`Trusted ${d.added || 0} new device${d.added === 1 ? '' : 's'} (${d.count || 0} total) — re-scan to confirm they're no longer flagged`, 'success');
+            const skipped = d.skipped_rotating || 0;
+            let msg = `Trusted ${d.added || 0} new device${d.added === 1 ? '' : 's'} (${d.count || 0} total) — re-scan to confirm they're no longer flagged`;
+            if (skipped) {
+                msg += `. Skipped ${skipped} rotating private address${skipped === 1 ? '' : 'es'} (phones/watches reshuffle their MAC every ~15 min, so they can't be trusted by address)`;
+            }
+            showNotification(msg, skipped ? 'info' : 'success');
         } else {
             showNotification('Could not update the trusted list', 'error');
         }

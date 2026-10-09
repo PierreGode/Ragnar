@@ -505,7 +505,8 @@ class BleWatch:
         # --- BLE-001 / BLE-002 clone & impersonation --------------------------
         prev = self._adv.get(akey)
         if prev is None:
-            self._adv[akey] = {'hash': phash, 'ident': ident, 'flaps': deque()}
+            self._adv[akey] = {'hash': phash, 'ident': ident, 'flaps': deque(),
+                               'rpa_class': rpa_class}
         else:
             if phash != prev['hash']:
                 fl = prev['flaps']
@@ -680,12 +681,15 @@ class BleWatch:
         return alert
 
     def seen_devices(self):
-        """Every advertiser observed this run, as addr -> {name, services}.
+        """Every advertiser observed this run, as addr -> {name, services, rpa_class}.
 
         Used by the web "Trust current" control to persist the devices on the
         air right now into the trusted baseline (data/ble_watch.json), in the
         exact shape trusted_devices expects, so later scans measure clones
-        against their learned name/service identity.
+        against their learned name/service identity. `rpa_class` lets the caller
+        skip rotating private addresses (resolvable/non-resolvable): those change
+        every ~15 min, so trusting them by address is futile and would grow the
+        list without bound. Only 'public' and 'static' addresses are stable.
         """
         out = {}
         for addr, rec in self._adv.items():
@@ -694,7 +698,8 @@ class BleWatch:
                 name, svcs = ident
             else:
                 name, svcs = None, ()
-            out[addr] = {'name': name, 'services': list(svcs)}
+            out[addr] = {'name': name, 'services': list(svcs),
+                         'rpa_class': rec.get('rpa_class', 'random')}
         return out
 
 
