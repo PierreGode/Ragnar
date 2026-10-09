@@ -98,6 +98,12 @@ advertised name no longer matches its baseline, or a connection to it requesting
 Just-Works where the baseline required MITM protection, is flagged even on the
 first sighting.
 
+In the web UI the trusted-device list lives in `data/ble_watch.json` and is
+managed from the BLE Watch panel: **Trust current** adds every advertiser seen
+in the last scan (address + name/services) to the list so they stop being
+flagged as clones or GATT masquerades, and **Clear list** empties it. The scan
+loads this list automatically, so no config path has to be passed on the web.
+
 ## In Ragnar (web)
 
 **Network → Diagnostics → L2 tab → Passive · Bluetooth LE → BLE Watch.** The card is

@@ -4,6 +4,14 @@
 
 ### 2026-10-09
 
+#### [#933](https://github.com/PierreGode/Ragnar/pull/933) — feat(ble): BLE Watch "Trust current" + "Clear list" controls
+*branch `feature/blewatch-list-controls`*
+
+- **Two new buttons on the BLE Watch panel** (Diagnostics → L2). **Trust current** adds the advertisers seen in the last scan to a persisted trusted-device list; **Clear list** empties it and clears the on-screen results.
+- Unlike the reset-then-relearn model of the other watchers, BLE is device-gated (each learn needs a sniffer capture), so the list is **additive**: `do_ble_watch` now returns every advertiser seen (`seen`: addr → name/services) and the web control persists exactly those into `data/ble_watch.json` in the `trusted_devices` shape the engine expects (name anchors the clone baseline; the addr suppresses GATT-masquerade flags).
+- `do_ble_watch` loads `data/ble_watch.json` by default, so trusted devices immediately stop being flagged as clones/masquerades. New engine accessor `BleWatch.seen_devices()`; new route `/api/net/ble-watch/baseline` (GET/POST `trust`|`clear`).
+- Docs: [blewatch](blewatch.md).
+
 #### [#932](https://github.com/PierreGode/Ragnar/pull/932) — feat(net): LLDP Watch — passive 802.1AB parser-CVE monitor + visibility matrix
 *branch `feature/lldp-watch`*
 

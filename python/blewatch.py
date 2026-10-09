@@ -679,6 +679,24 @@ class BleWatch:
         self.emit(alert)
         return alert
 
+    def seen_devices(self):
+        """Every advertiser observed this run, as addr -> {name, services}.
+
+        Used by the web "Trust current" control to persist the devices on the
+        air right now into the trusted baseline (data/ble_watch.json), in the
+        exact shape trusted_devices expects, so later scans measure clones
+        against their learned name/service identity.
+        """
+        out = {}
+        for addr, rec in self._adv.items():
+            ident = rec.get('ident')
+            if isinstance(ident, tuple) and len(ident) == 2:
+                name, svcs = ident
+            else:
+                name, svcs = None, ()
+            out[addr] = {'name': name, 'services': list(svcs)}
+        return out
+
 
 # ===========================================================================
 # Capture front ends
