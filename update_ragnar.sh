@@ -890,6 +890,30 @@ if [ -f "$(dirname "$0")/cellular_uplink.py" ]; then
     fi
 fi
 
+echo -e "${BLUE}Step 6.98: Letting NetworkManager own wlan0...${NC}"
+# The legacy wlan stack (dhcpcd, standalone wpa_supplicant.service, hostapd,
+# dnsmasq) fights NetworkManager for wlan0 when left enabled — on a fresh image
+# it leaves the interface down after the AP portal's hand-off to client mode.
+# Disable them so only NM drives the radio; hostapd/dnsmasq are started on
+# demand by Ragnar's WiFi manager for AP mode. Idempotent and a no-op where NM
+# has already won. Mirrors install_ragnar.sh.
+if systemctl list-unit-files NetworkManager.service >/dev/null 2>&1; then
+    _changed=false
+    for _unit in dhcpcd wpa_supplicant hostapd dnsmasq; do
+        if systemctl is-enabled "$_unit" >/dev/null 2>&1; then
+            systemctl stop "$_unit" 2>/dev/null || true
+            systemctl disable "$_unit" 2>/dev/null || true
+            _changed=true
+        fi
+    done
+    systemctl unmask hostapd 2>/dev/null || true
+    if [ "$_changed" = true ]; then
+        echo -e "  ${GREEN}✓${NC} Disabled legacy wlan services — NetworkManager now owns wlan0"
+    else
+        echo -e "  ${GREEN}✓${NC} NetworkManager already owns wlan0 — nothing to do"
+    fi
+fi
+
 echo -e "${BLUE}Step 7: Starting ragnar service...${NC}"
 systemctl start ragnar.service
 

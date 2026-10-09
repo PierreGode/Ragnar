@@ -1776,7 +1776,25 @@ EOF
     # Enable and start NetworkManager
     systemctl enable NetworkManager
     [ "$IMAGE_BUILD" = true ] || systemctl start NetworkManager
-    
+
+    # Let NetworkManager own wlan0. The legacy wlan stack (dhcpcd, the
+    # standalone wpa_supplicant.service, hostapd, dnsmasq) is enabled by its
+    # Debian package defaults, and on a NetworkManager system every one of them
+    # fights NM for wlan0. On a live box NM has usually already won, so this is
+    # a no-op; but on a fresh image they all start at boot, hostapd/dhcpcd seize
+    # wlan0 for the AP, and the portal's hand-off to client mode leaves the
+    # interface administratively down ("wlan0 down"). Disable them so only NM
+    # drives the radio. hostapd/dnsmasq are started on demand by Ragnar's WiFi
+    # manager for AP mode, so they are only unmasked, never left enabled.
+    if systemctl list-unit-files NetworkManager.service >/dev/null 2>&1; then
+        for _unit in dhcpcd wpa_supplicant hostapd dnsmasq; do
+            [ "$IMAGE_BUILD" = true ] || systemctl stop "$_unit" 2>/dev/null || true
+            systemctl disable "$_unit" 2>/dev/null || true
+        done
+        systemctl unmask hostapd 2>/dev/null || true
+        log "INFO" "Legacy wlan services disabled — NetworkManager owns wlan0 (hostapd/dnsmasq start on demand for AP mode)"
+    fi
+
     # Configure NetworkManager for WiFi management priority
     cat > /etc/NetworkManager/conf.d/99-ragnar-wifi.conf << EOF
 [main]
