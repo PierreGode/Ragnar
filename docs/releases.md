@@ -4,6 +4,18 @@
 
 ### 2026-10-08
 
+#### [#931](https://github.com/PierreGode/Ragnar/pull/931) — feat(os): Ragnar OS — a prebuilt Raspberry Pi image
+*branch `feature/ragnar-os`*
+
+- **New:** flash-and-go image. Raspberry Pi OS (64-bit) Lite with Ragnar preinstalled, enabled, and headless-by-default — one arm64 image for Pi Zero 2 W, 3, 4, 5 and CM4/CM5. Built with pi-gen; everything lives under `os-image/` (`build.sh`, `config`, `stage-ragnar/`, `os-list.json`, `ragnar.conf.example`).
+- **Installer:** `install_ragnar.sh` gains `--unattended` (answer every prompt from `RAGNAR_*` env vars) and `--image-build` (unattended + build-safe: enable units only, never start a service, touch a live kernel, or reboot — for use in a chroot). New env knobs: `RAGNAR_PROFILE`, `RAGNAR_DISPLAY`, `RAGNAR_INSTALL_ALL_DISPLAYS`, `RAGNAR_INSTALL_ADVANCED`, `RAGNAR_INSTALL_PISUGAR`, `RAGNAR_REBOOT`, `RAGNAR_FORCE_PI`. Interactive behaviour is unchanged.
+- **Per-device first boot:** `scripts/ragnar-firstboot.sh` + `ragnar-firstboot.service` run once before `ragnar.service` — unique SSH host keys + TLS cert, optional `/boot/firmware/ragnar.conf` (hostname, display), optional mesh join — then self-disable.
+- **CI:** `.github/workflows/build-os-image.yml` builds the image on an `os-v*` tag (and attaches `RagnarOS-*.img.xz` + `.sha256` to the Release), on every push to the `feature/ragnar-os` branch (artifact only), or on demand via **Run workflow**. Only a tag publishes a release; the baked Ragnar ref auto-follows whatever ref the run is on. Validated end-to-end with a native arm64 build on a Pi 5 (image intact, installer's `--image-build` guards all fired).
+- **Pick your display during setup:** the Wi-Fi onboarding portal (the "Ragnar" AP page) now has an **Attached display** dropdown — choose your screen while entering Wi-Fi and, once connected, the panel shows the device's IP (no more hunting the network for it). A new `scripts/set_display_mode.sh` is the single source of truth that switches `ragnar.service` between the headless (`headlessRagnar.py`) and display (`Ragnar.py`) entrypoints; `ragnar-firstboot.sh` (via `ragnar.conf`), the portal, and the web UI's Config → Display all use it, so selecting a screen anywhere actually lights it up instead of dead-ending. Headless stays the default everywhere. The web UI's Display dropdown gains a **Headless** option so you can switch *back* too (both directions), and `/api/config` reports the live mode so the dropdown reflects reality. This is also the path for a box brought up on **Ethernet** that skips the portal entirely: reach it at `http://ragnar.local:8000` (avahi/mDNS is baked in) → Config → Display.
+- **Batteries included:** the image now bakes the advanced scanners (Nuclei, Nikto, SQLMap, OWASP ZAP) in by default so everything Ragnar can do works offline on first boot; a board without the RAM to run them still boots (the runtime RAM gate idles them). Build with `RAGNAR_INSTALL_ADVANCED=no ./os-image/build.sh` for a smaller image that installs them on demand from the web UI.
+- **First-boot Wi-Fi fix:** on a fresh image the legacy wlan stack (`dhcpcd`, standalone `wpa_supplicant.service`, `hostapd`, `dnsmasq`) is enabled by its Debian package defaults and fights NetworkManager for `wlan0` — the AP portal came up but joining a network left the interface down (`wlan0 down`). The installer (and `update_ragnar.sh`, idempotently) now disables those units so NetworkManager owns `wlan0`; `hostapd`/`dnsmasq` stay unmasked and are started on demand for AP mode.
+- **Docs:** [Ragnar OS image](ragnar-os.md), [README (root)](../README.md), [docs index](README.md).
+
 #### fix(serial): the CYD bridge no longer holds sniffer / Meshtastic ports when no CYD is connected
 *branch `fix/cyd-serial-hog`*
 

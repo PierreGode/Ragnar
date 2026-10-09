@@ -1,0 +1,119 @@
+name: Build Ragnar OS image
+
+# Builds the "Ragnar OS" Raspberry Pi image (64-bit Lite + Ragnar preinstalled)
+# with pi-gen and attaches ragnar-os-<ver>-arm64.img.xz to a GitHub Release.
+#
+# Triggers:
+#   * push of a tag matching os-v*     (e.g. os-v1.0.0) -> builds + creates release
+#   * push to the feature/ragnar-os branch              -> builds, artifact only
+#   * manual run (workflow_dispatch) on any branch       -> builds, artifact only
+#
+# Only a tag push ever creates a release; branch pushes and manual runs are
+# artifact-only, so you can build-and-verify from this branch (and, once it's
+# merged, validate main by hitting "Run workflow") without publishing anything.
+# The ref baked into the image auto-follows the ref the run is on — override it
+# with the manual input — so a feature-branch build tests that branch, a tag
+# build tests the tag, and a main dispatch tests main.
+#
+# Note on main: a push trigger for main is deliberately omitted so a 45-minute
+# image build does not fire on every unrelated commit to the default branch.
+# After merge, use the manual "Run workflow" button to validate main on demand,
+# or push an os-v* tag to build + release it.
+#
+# The build runs on a NATIVE arm64 runner (ubuntu-24.04-arm) via the pi-gen
+# Docker path — the same flow validated locally on a Pi 5. Building arm64 on a
+# native arm64 host avoids qemu emulation entirely (an x86 runner would have to
+# emulate every arm64 binary in the chroot, which is far slower and would likely
+# exceed the timeout), and the pi-gen build container installs its own deps.
+#
+# If arm64 hosted runners are ever unavailable for this repo, switch runs-on to
+# ubuntu-latest and register binfmt first (docker/setup-qemu-action@v3), then
+# this same Docker build path works under emulation — just much slower.
+
+on:
+  push:
+    tags:
+      - 'os-v*'
+    branches:
+      - feature/ragnar-os
+  workflow_dispatch:
+    inputs:
+      ragnar_branch:
+        description: 'Ragnar branch to bake into the image (blank = the ref this run is on)'
+        required: false
+        default: ''
+
+# A newer push to the same ref supersedes an in-flight build (these runs are long).
+concurrency:
+  group: ragnar-os-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write   # needed to create a release / upload release assets
+
+jobs:
+  build:
+    # Native arm64 runner: the image is arm64, so this avoids qemu emulation.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Check out Ragnar
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          # pi-gen needs ~10 GB; the hosted runner ships with a lot of unused
+          # toolchains. Reclaim space before the build.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      # No apt step: the pi-gen Docker container installs its own build deps.
+      # Docker itself is preinstalled on GitHub-hosted runners.
+
+      - name: Determine Ragnar branch
+        id: vars
+        run: |
+          # Manual input wins; otherwise bake whatever ref this run is on
+          # (a branch name for a branch push, the tag name for an os-v* tag),
+          # so the image always matches the code that triggered the build.
+          BR="${{ github.event.inputs.ragnar_branch }}"
+          [ -z "$BR" ] && BR="${{ github.ref_name }}"
+          [ -z "$BR" ] && BR="main"
+          echo "Baking Ragnar ref: $BR"
+          echo "branch=$BR" >> "$GITHUB_OUTPUT"
+
+      - name: Build image (pi-gen Docker path, native arm64)
+        run: |
+          sudo RAGNAR_REPO_URL="https://github.com/${{ github.repository }}.git" \
+            RAGNAR_REPO_BRANCH="${{ steps.vars.outputs.branch }}" \
+            ./os-image/build.sh
+
+      - name: Locate built image
+        id: img
+        run: |
+          # The build ran under sudo, so deploy/ is root-owned; hand it back to
+          # the runner user so the checksum (and upload) can write/read it.
+          sudo chown -R "$(id -u):$(id -g)" os-image/.pi-gen/deploy
+          IMG="$(ls os-image/.pi-gen/deploy/*.img.xz | head -1)"
+          echo "path=$IMG" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$IMG")" >> "$GITHUB_OUTPUT"
+          sha256sum "$IMG" | tee "$IMG.sha256"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ragnar-os-image
+          path: |
+            ${{ steps.img.outputs.path }}
+            ${{ steps.img.outputs.path }}.sha256
+          retention-days: 14
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/os-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.img.outputs.path }}
+            ${{ steps.img.outputs.path }}.sha256
+          generate_release_notes: true

@@ -292,3 +292,6 @@ certs/
 
 # Console scripts — seeded at runtime, user-editable (never overwrite on update)
 data/console_scripts/
+
+# Ragnar OS image build (pi-gen checkout + deploy artifacts)
+os-image/.pi-gen/

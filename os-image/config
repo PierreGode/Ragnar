@@ -1,0 +1,38 @@
+# pi-gen configuration for the Ragnar OS image.
+# Sourced by pi-gen (and by os-image/build.sh via CONFIG_FILE). See pi-gen docs.
+
+# Image identity ---------------------------------------------------------------
+IMG_NAME="RagnarOS"
+# Shown in /etc/rpi-issue and Raspberry Pi Imager.
+PI_GEN_RELEASE="Ragnar OS for Raspberry Pi"
+
+# Base OS ----------------------------------------------------------------------
+# Raspberry Pi OS (64-bit) Lite. The codename is left to the pinned pi-gen
+# branch (PIGEN_REF in build.sh) so config and stage scripts can never disagree
+# about the release; uncomment RELEASE only to override a branch that supports
+# it. arm64 covers Pi Zero 2 W, 3, 4, 5, CM4/CM5.
+#RELEASE="bookworm"
+ARCH="arm64"
+
+# Stages: 0+1 bootstrap, 2 = Lite rootfs, then our Ragnar layer. No desktop
+# (stages 3/4/5 are intentionally excluded) — this is a headless appliance.
+STAGE_LIST="stage0 stage1 stage2 stage-ragnar"
+
+# First-boot / access ----------------------------------------------------------
+TARGET_HOSTNAME="ragnar"
+# SSH available; credentials and Wi-Fi are set by the user in Raspberry Pi
+# Imager (or a userconf/custom.toml on the boot partition). No default login is
+# baked in — Raspberry Pi OS no longer permits pi/raspberry.
+ENABLE_SSH=1
+# Keyboard/locale/timezone defaults (overridable in Imager).
+LOCALE_DEFAULT="en_US.UTF-8"
+KEYBOARD_KEYMAP="us"
+KEYBOARD_LAYOUT="English (US)"
+TIMEZONE_DEFAULT="Etc/UTC"
+
+# Output -----------------------------------------------------------------------
+# Compress the released image; .img.xz is what Imager and `xz -d` both accept.
+DEPLOY_COMPRESSION="xz"
+COMPRESSION_LEVEL=6
+# One .img.xz, no NOOBS bundle.
+DEPLOY_ZIP=0

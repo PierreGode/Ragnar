@@ -10819,7 +10819,12 @@ def get_status():
 def get_config():
     """Get current configuration"""
     try:
-        return jsonify(shared_data.config)
+        cfg = dict(shared_data.config)
+        # Reflect the ACTUAL running mode (which entrypoint the service booted)
+        # so the Display selector can show "Headless" vs a driver accurately,
+        # regardless of what epd_type is stored. Computed, never persisted here.
+        cfg['display_enabled'] = not bool(getattr(shared_data, 'headless_mode', False))
+        return jsonify(cfg)
     except Exception as e:
         logger.error(f"Error getting config: {e}")
         return jsonify({'error': str(e)}), 500
@@ -10879,10 +10884,19 @@ def _apply_config_update(data):
         # where the config stores a driver ("epd2in13_V4"), so comparing the raw
         # value would read as a change on every save.
         restart_keys_changed = set()
+        headless_requested = False
         if epd_type_present:
-            from shared import resolve_epd_type
-            raw_epd = data['epd_type']
-            data['epd_type'] = resolve_epd_type(raw_epd, shared_data.config.get('epd_type'))
+            raw_epd = str(data['epd_type']).strip().lower()
+            if raw_epd in ('headless', 'none', ''):
+                # Switch OFF any display — back to the headless entrypoint. Keep
+                # the stored driver so re-enabling remembers it; just drop the
+                # key from this update so it isn't treated as a driver change.
+                headless_requested = True
+                epd_type_present = False
+                data.pop('epd_type', None)
+            else:
+                from shared import resolve_epd_type
+                data['epd_type'] = resolve_epd_type(data['epd_type'], shared_data.config.get('epd_type'))
         for key in CONFIG_RESTART_REQUIRED_KEYS:
             if key in data and data[key] != shared_data.config.get(key):
                 restart_keys_changed.add(key)
@@ -10995,16 +11009,39 @@ def _apply_config_update(data):
 
         # Only a key whose value is bound at process start, and that actually
         # CHANGED, is worth a restart. Everything else applies live.
-        if restart_keys_changed:
+        if headless_requested:
+            # Only bounce if we're actually in display mode now.
+            if not bool(getattr(shared_data, 'headless_mode', False)):
+                response['restart_required'] = True
+                response['restart_reason'] = 'display disabled'
+                ok, dmsg = _apply_display_mode('headless')
+                response['message'] = ('Switching to headless mode…'
+                                       if ok else f'Could not switch to headless: {dmsg}')
+            else:
+                response['message'] = 'Already headless — no display to disable.'
+        elif restart_keys_changed:
             changed = ', '.join(sorted(restart_keys_changed))
             response['restart_required'] = True
             response['restart_reason'] = changed
-            response['message'] = f'{changed} changed - restarting Ragnar service...'
-            def _delayed_restart():
-                time.sleep(2)  # Give the response time to reach the client
-                logger.info(f"Restarting Ragnar service for config change: {changed}")
-                subprocess.Popen(['systemctl', 'restart', 'ragnar.service'])
-            threading.Thread(target=_delayed_restart, daemon=True).start()
+            if 'epd_type' in restart_keys_changed:
+                # A changed display driver must switch the service onto the
+                # DISPLAY entrypoint (Ragnar.py), not just restart — on a box
+                # running the headless entrypoint a plain restart would come
+                # back up headless with the panel dark. _apply_display_mode
+                # rewrites the unit and schedules its own detached restart.
+                new_epd = shared_data.config.get('epd_type')
+                ok, dmsg = _apply_display_mode('display', new_epd, validate=False)
+                response['message'] = (
+                    f'Display set to {new_epd} — switching to display mode…'
+                    if ok else f'Could not switch to display mode: {dmsg}')
+                # Any other restart-bound keys are covered by the same restart.
+            else:
+                response['message'] = f'{changed} changed - restarting Ragnar service...'
+                def _delayed_restart():
+                    time.sleep(2)  # Give the response time to reach the client
+                    logger.info(f"Restarting Ragnar service for config change: {changed}")
+                    subprocess.Popen(['systemctl', 'restart', 'ragnar.service'])
+                threading.Thread(target=_delayed_restart, daemon=True).start()
         else:
             logger.debug("Config saved with no restart-bound change — applying live")
 
@@ -20390,6 +20427,100 @@ def get_wifi_networks():
             'known': []
         }), 500
 
+# Display drivers that may be requested from the portal / web UI. Mirrors the
+# captive-portal dropdown and docs/ragnar-os ragnar.conf list. Used to validate
+# an operator-supplied value before it reaches set_display_mode.sh.
+_VALID_DISPLAY_DRIVERS = {
+    'epd2in13', 'epd2in13_V2', 'epd2in13_V3', 'epd2in13_V4', 'epd2in13b_V4',
+    'epd2in7', 'epd2in7_V2', 'epd2in9_V2', 'epd3in7', 'epd4in26',
+    'gc9a01', 'st7735s', 'ili9486', 'ili9488', 'whisplay', 'ssd1306', 'lcd1602',
+    'max7219_4panel', 'max7219_8panel',
+}
+
+DISPLAY_MODE_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'scripts', 'set_display_mode.sh')
+
+
+def _apply_display_mode(mode, epd_type=None, validate=True, restart=True):
+    """Switch ragnar.service between 'headless' and 'display' mode out-of-band.
+
+    Runs the shared helper (scripts/set_display_mode.sh) with --no-restart, then
+    schedules a DETACHED restart via a transient systemd timer. The timer is
+    owned by PID 1, outside ragnar.service's cgroup, so it survives this very
+    service being stopped — letting the current HTTP request return first.
+
+    `validate` strict-checks epd_type against the portal dropdown's known set
+    (use for untrusted operator input). The web UI passes a value already
+    normalised by resolve_epd_type, so it validates only the character set to
+    bar shell/path tricks, not the exact membership. Returns (ok, message).
+    """
+    if mode not in ('headless', 'display'):
+        return False, 'invalid display mode'
+    cmd = ['bash', DISPLAY_MODE_SCRIPT, mode]
+    if mode == 'display':
+        if not epd_type:
+            return False, 'no display driver given'
+        if validate and epd_type not in _VALID_DISPLAY_DRIVERS:
+            return False, f'unknown display driver: {epd_type!r}'
+        if not re.fullmatch(r'[A-Za-z0-9_]+', epd_type):
+            return False, f'invalid display driver name: {epd_type!r}'
+        cmd.append(epd_type)
+    cmd.append('--no-restart')
+    try:
+        subprocess.run(cmd, timeout=30, check=False)
+    except Exception as e:
+        logger.error(f"set_display_mode.sh failed: {e}")
+        return False, str(e)
+    if not restart:
+        # Persist-only: the unit + config are rewritten, but the service is not
+        # bounced. The new mode takes effect on the next start/reboot. Used when
+        # the caller is mid-flow (e.g. onboarding) and will restart/reboot later.
+        logger.info(f"Display mode -> {mode} ({epd_type or 'n/a'}); persisted, no restart")
+        return True, 'display mode persisted'
+    # Detached restart so this request can finish before the service bounces.
+    try:
+        subprocess.Popen(
+            ['systemd-run', '--on-active=3', '--timer-property=AccuracySec=200ms',
+             'systemctl', 'restart', 'ragnar.service'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        try:
+            subprocess.Popen(['systemctl', 'restart', '--no-block', 'ragnar.service'],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            logger.warning(f"Could not schedule service restart after display switch: {e}")
+    logger.info(f"Display mode -> {mode} ({epd_type or 'n/a'}); service restart scheduled")
+    return True, 'display mode switching'
+
+
+def _save_wifi_profile(ssid, password=None):
+    """Persist a NetworkManager Wi-Fi profile (autoconnect) BEFORE the live
+    connect attempt, so a flaky single-radio AP->client hand-off never loses the
+    operator's credentials — a reboot then auto-joins. Idempotent.
+    """
+    try:
+        exists = subprocess.run(['nmcli', '-t', '-f', 'NAME', 'con', 'show', ssid],
+                                capture_output=True, text=True, timeout=15).returncode == 0
+        if exists:
+            if password:
+                subprocess.run(['sudo', 'nmcli', 'con', 'modify', ssid,
+                                'wifi-sec.key-mgmt', 'wpa-psk', 'wifi-sec.psk', password],
+                               capture_output=True, timeout=15)
+            subprocess.run(['sudo', 'nmcli', 'con', 'modify', ssid,
+                            'connection.autoconnect', 'yes'], capture_output=True, timeout=15)
+        else:
+            cmd = ['sudo', 'nmcli', 'con', 'add', 'type', 'wifi', 'con-name', ssid,
+                   'ssid', ssid, 'connection.autoconnect', 'yes']
+            if password:
+                cmd += ['wifi-sec.key-mgmt', 'wpa-psk', 'wifi-sec.psk', password]
+            subprocess.run(cmd, capture_output=True, timeout=15)
+        logger.info(f"Saved Wi-Fi profile for '{ssid}' (autoconnect) before live connect")
+        return True
+    except Exception as e:
+        logger.warning(f"Could not pre-save Wi-Fi profile '{ssid}': {e}")
+        return False
+
+
 @app.route('/api/wifi/connect', methods=['POST'])
 def connect_wifi():
     """Connect to a Wi-Fi network"""
@@ -20402,19 +20533,33 @@ def connect_wifi():
         password = data.get('password')
         priority = data.get('priority', 1)
         save_network = data.get('save', True)
-        
+        # Optional: enable an attached display as part of onboarding (from the
+        # captive portal's "Attached display" dropdown). 'headless'/empty = leave
+        # as-is. Applied only after a successful connect, so the screen comes up
+        # showing the real IP — and restarts the service out-of-band (below).
+        req_display = (data.get('display') or 'headless').strip()
+
         wifi_manager = getattr(shared_data, 'ragnar_instance', None)
         if not wifi_manager or not hasattr(wifi_manager, 'wifi_manager'):
             return jsonify({'success': False, 'error': 'Wi-Fi manager not available'}), 503
-        
+
         # Log the connection attempt
         logger.info(f"API: Attempting to connect to WiFi network: {ssid}")
-        
+
         # Check if currently in AP mode
         was_in_ap_mode = wifi_manager.wifi_manager.ap_mode_active
         if was_in_ap_mode:
             logger.info(f"API: Currently in AP mode, will stop AP before connecting to {ssid}")
-        
+
+        # Persist BEFORE the live attempt so nothing is lost if the (single-radio)
+        # AP->client hand-off flakes: a reboot alone then joins Wi-Fi and comes up
+        # in display mode. 1) save the Wi-Fi profile (autoconnect); 2) persist the
+        # display choice without restarting yet (we're mid-request).
+        _save_wifi_profile(ssid, password)
+        want_display = bool(req_display and req_display != 'headless')
+        if want_display:
+            _apply_display_mode('display', req_display, restart=False)
+
         # Try to connect
         success = wifi_manager.wifi_manager.connect_to_network(ssid, password)
         
@@ -20427,12 +20572,37 @@ def connect_wifi():
             message = 'Connected successfully'
             if is_ap_client_request():
                 message = 'Connected successfully! Ragnar will now use this network. You can disconnect from this AP.'
+
+            # We're online — if a display was requested, bounce into display mode
+            # (out-of-band) so the panel shows the connected IP.
+            if want_display:
+                ok, dmsg = _apply_display_mode('display', req_display)
+                if ok:
+                    message += ' Your display will show the IP once it restarts.'
+                else:
+                    logger.warning(f"Display enable requested but failed: {dmsg}")
         else:
-            logger.error(f"API: Failed to connect to {ssid}")
-            message = 'Connection failed. Please check the password and try again.'
-            if was_in_ap_mode:
-                message += ' Note: AP mode was stopped to attempt connection.'
-        
+            logger.error(f"API: Failed to connect to {ssid} (live). Credentials are saved; rebooting to let NetworkManager auto-join.")
+            # The live hand-off failed, but the Wi-Fi profile (and display choice)
+            # are already persisted. A reboot frees wlan0 of any AP leftovers and
+            # NetworkManager auto-connects the saved profile, coming up in the
+            # chosen mode. Schedule it detached so this response returns first.
+            message = ('Saved. The AP will close and Ragnar will reboot to join '
+                       f'"{ssid}"' + (' and start your display' if want_display else '') +
+                       '. Give it ~1 minute, then reach it at http://ragnar.local:8000'
+                       + (' or read the IP off the screen.' if want_display else '.'))
+            try:
+                subprocess.Popen(
+                    ['systemd-run', '--on-active=5', '--timer-property=AccuracySec=200ms',
+                     'systemctl', 'reboot'],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # A reboot is the recovery path, so report success to the portal.
+                success = True
+            except Exception as e:
+                logger.error(f"Could not schedule reboot after saving Wi-Fi: {e}")
+                message = (f'Saved "{ssid}", but could not auto-reboot. Power-cycle '
+                           'Ragnar and it will join the network on boot.')
+
         return jsonify({
             'success': success,
             'message': message

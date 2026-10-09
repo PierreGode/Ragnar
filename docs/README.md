@@ -5,6 +5,7 @@ browse than search.
 
 ## Getting started
 - [Install Guide](INSTALL.md) — the full installation walkthrough
+- [Ragnar OS image](ragnar-os.md) — prebuilt Raspberry Pi image, flash-and-go
 - [Updating Ragnar](updates.md) — updating from the web UI or the terminal
 - [Docker Guide](DOCKER.md) — headless web UI in a container
 - [AP Mode](RagnarAP.md) — getting the box onto a network
