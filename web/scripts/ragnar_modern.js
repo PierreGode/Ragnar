@@ -1510,6 +1510,7 @@ function showNetworkSubtab(name, layer) {
         _snmpFillIfaces();
         _fillIfaceSel('modbus-iface');
         _modbusLoadBaseline();
+        _fillIfaceSel('lldpw-iface');
         _certFillIfaces();
         _tlsFillIfaces();
         _lldpFillIfaces();
@@ -9923,6 +9924,104 @@ async function runFtpWatch() {
     }
 }
 
+// ---- LLDP Watch (802.1AB malformed-TLV CVE shapes / screening / flood) ------
+const _LLDPW_VERDICT_STYLE = {
+    'no-traffic': ['bg-slate-800 border-slate-700 text-slate-300', 'ℹ No LLDP seen — LLDP is off on this port, or the window was shorter than the ~30 s hello'],
+    clean:        ['bg-green-950/40 border-green-900 text-green-400', '✓ LLDP seen and every LLDPDU was well-formed — no flood, no forged neighbour'],
+    observed:     ['bg-sky-950/40 border-sky-900 text-sky-300', 'ℹ Neighbour advertises software in a vulnerable LLDP-parser family — verify its patch level (a version string is not patch state)'],
+    exposure:     ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Exposure — advertised version below your floor, or an LLDPDU with no End TLV'],
+    suspicious:   ['bg-orange-950/50 border-orange-800 text-orange-300', '⚠ Suspicious — reserved TLV type, duplicated TLV, or non-zero data smuggled after End-of-LLDPDU'],
+    attack:       ['bg-red-950/60 border-red-800 text-red-300', '🛑 LLDP ATTACK SHAPE — a malformed TLV matching an LLDP parser CVE, an LLDP flood, or a forged neighbour'],
+    unknown:      ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _LLDPW_SEV_STYLE = {
+    critical: 'text-red-300', high: 'text-orange-300', medium: 'text-amber-300', low: 'text-yellow-300', notice: 'text-sky-300',
+};
+async function runLldpWatch() {
+    const out = document.getElementById('lldpw-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('lldpw-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('lldpw-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '30';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing LLDP (EtherType 0x88CC — hellos are ~30s apart)…</p>';
+    try {
+        _fillIfaceSel('lldpw-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/lldp-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runLldpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _LLDPW_VERDICT_STYLE[d.verdict] || _LLDPW_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.packet_count} LLDP frame(s), ${(d.neighbours || []).length} neighbour(s) · forged-neighbour check: ${d.enforce ? 'on (' + d.baseline_count + ' trusted)' : 'off — click “Trust current” to enable'}</p>`;
+        const findings = d.findings || [];
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">What</th><th class="px-2 py-1">Source MAC</th><th class="px-2 py-1">#</th><th class="px-2 py-1">CVE</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => {
+                    const sc = _LLDPW_SEV_STYLE[f.severity] || 'text-gray-400';
+                    return `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${sc}">${escapeHtml(f.severity || '')}</td>
+                    <td class="px-2 py-1 font-mono ${sc}">${escapeHtml(f.code || '')}</td>
+                    <td class="px-2 py-1 text-gray-300 whitespace-normal" style="min-width:16rem">${escapeHtml(f.name || '')}<span class="block text-gray-500">${escapeHtml(f.detail || '')}</span></td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.src || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${f.count}</td>
+                    <td class="px-2 py-1 font-mono text-cyan-300 whitespace-normal" style="min-width:8rem">${escapeHtml((f.cves || []).join(' '))}</td>
+                </tr>`; }).join('') +
+                '</tbody></table>';
+        }
+        const nb = d.neighbours || [];
+        if (nb.length) {
+            html += '<div class="text-xs text-gray-500 mt-3 mb-1">Neighbours (directly attached — LLDP is never forwarded)</div>' +
+                '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">System name</th><th class="px-2 py-1">Description</th><th class="px-2 py-1">Port</th><th class="px-2 py-1">Mgmt</th><th class="px-2 py-1">VLAN</th><th class="px-2 py-1">Source MAC</th><th class="px-2 py-1">Trust</th></tr>' +
+                '</thead><tbody>' +
+                nb.slice(0, 40).map(n => {
+                    const badge = n.trusted == null ? '<span class="text-gray-500">—</span>' : (n.trusted ? '<span class="text-green-400">✓ known</span>' : '<span class="text-red-300">? new</span>');
+                    return `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 text-gray-200">${escapeHtml(n.name || n.chassis || '—')}</td>
+                    <td class="px-2 py-1 text-gray-400" title="${escapeHtml(n.desc || '')}">${escapeHtml((n.desc || '—').slice(0, 46))}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(n.port || '—')}</td>
+                    <td class="px-2 py-1 font-mono text-amber-300/90">${escapeHtml((n.mgmt || []).join(', ') || '—')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml((n.vlans || []).join('/') || '—')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-500">${escapeHtml(n.src)}</td>
+                    <td class="px-2 py-1">${badge}</td>
+                </tr>`; }).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+async function lldpwBaseline(action) {
+    if (action === 'reset' && !confirm('Forget the trusted LLDP neighbours? The forged-neighbour check (LLDP-049) turns off until you trust again.')) return;
+    try {
+        const d = await postAPI('/api/net/lldp-baseline', { action: action });
+        if (action === 'trust' && d && !d.enforce) {
+            addConsoleMessage('No LLDP neighbours seen yet — run a scan first, then trust', 'warning');
+            return;
+        }
+        addConsoleMessage(action === 'trust' ? 'LLDP neighbours trusted — an unknown LLDP speaker now raises LLDP-049' : 'LLDP baseline cleared — forged-neighbour check off', 'info');
+    } catch (e) {
+        addConsoleMessage('LLDP baseline update failed: ' + e.message, 'error');
+    }
+}
 // ---- Modbus Watch (Modbus/TCP posture: PLC writes / listen-only / UMAS) ----
 const _MODBUS_VERDICT_STYLE = {
     clean:       ['bg-green-950/40 border-green-900 text-green-400', '✓ No off-baseline write, listen-only, UMAS, sweep or malformed framing seen'],
@@ -11425,7 +11524,7 @@ async function runRoutingSelftest() {
             : 'Scapy: <span class="text-amber-300">not installed</span> — end-to-end leg skipped';
         if (instBtn) instBtn.classList.toggle('hidden', !!d.scapy_available);
 
-        const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory)', ssh: 'SSH Watch (regreSSHion / Terrapin)', telnet: 'Telnet Watch (CVE-2026-24061 / 32746)', ftp: 'FTP Watch (ProFTPD mod_copy / quoted verb)', smtp: 'SMTP Watch (Exim expansion / SNI / AUTH b64)', ble: 'BLE Watch (Bluetooth LE clone/spoof/MITM)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
+        const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory)', ssh: 'SSH Watch (regreSSHion / Terrapin)', telnet: 'Telnet Watch (CVE-2026-24061 / 32746)', ftp: 'FTP Watch (ProFTPD mod_copy / quoted verb)', smtp: 'SMTP Watch (Exim expansion / SNI / AUTH b64)', ble: 'BLE Watch (Bluetooth LE clone/spoof/MITM)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', lldp: 'LLDP Watch (802.1AB malformed TLV / CVE screening)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
                         arp: 'ARP Poisoning (incl. HSRP/VRRP virtual-MAC awareness)', dns: 'DNS Doctor (poison parser / anchors / ASN)',
                         mac: 'MAC Watch (spoof / vendor-OUI / randomization / HSRP-VRRP virtual-MAC)', dhcp: 'DHCP Guardian (rogue server / starvation)',
                         lacp: 'LACP Watch (802.1AX LAG-hijack / flapping)', rpc: 'RPC/NetLogon Watch (Zerologon / DCSync / WinRM)',
@@ -11442,7 +11541,7 @@ async function runRoutingSelftest() {
             '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
             '<tr class="text-left text-gray-500"><th class="px-2 py-1">Scanner</th><th class="px-2 py-1">Scenarios</th><th class="px-2 py-1">End-to-end</th><th class="px-2 py-1">Result</th></tr>' +
             '</thead><tbody>';
-        const order = ['igmp', 'ipv6', 'ndp', 'raguard', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'ssh', 'telnet', 'stp', 'smb', 'relay', 'ldap', 'dtp', 'cdp', 'vtp', 'eigrp', 'isis', 'fhrp', 'ospf', 'arp', 'mac', 'dhcp', 'dns', 'bgp', 'lacp', 'rpc', 'bfd', 'ptp', 'srmpls', 'ipsec', 'dns_passive', 'ftp', 'smtp', 'modbus', 'cisco_guard', 'juniper_guard', 'arista_guard', 'comware_guard', 'mikrotik_guard', 'aruba_guard', 'apc_guard', 'liebert_guard', 'dell_guard', 'bgp_speaker', 'path_asymmetry'];
+        const order = ['igmp', 'ipv6', 'ndp', 'raguard', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'ssh', 'telnet', 'stp', 'smb', 'relay', 'ldap', 'dtp', 'cdp', 'lldp', 'vtp', 'eigrp', 'isis', 'fhrp', 'ospf', 'arp', 'mac', 'dhcp', 'dns', 'bgp', 'lacp', 'rpc', 'bfd', 'ptp', 'srmpls', 'ipsec', 'dns_passive', 'ftp', 'smtp', 'modbus', 'cisco_guard', 'juniper_guard', 'arista_guard', 'comware_guard', 'mikrotik_guard', 'aruba_guard', 'apc_guard', 'liebert_guard', 'dell_guard', 'bgp_speaker', 'path_asymmetry'];
         // Append any suite the backend returned that isn't in the preferred order,
         // so a newly-wired detector can never again be counted toward pass/fail yet
         // stay invisible in the table.

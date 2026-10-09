@@ -2,6 +2,19 @@
 
 ## Releases
 
+### 2026-10-09
+
+#### [#932](https://github.com/PierreGode/Ragnar/pull/932) — feat(net): LLDP Watch — passive 802.1AB parser-CVE monitor + visibility matrix
+*branch `feature/lldp-watch`*
+
+- **New in-app watcher** (Diagnostics → L2, next to CDP Watch): vendored Solarflere `lldpwatch` engine (`python/lldpwatch*.py`) behind `do_lldp_watch`. Passive and detection-only: tcpdump captures to a pcap (promiscuous, inbound only, 802.1Q/QinQ-aware nested BPF) and a pure-Python TLV walk processes it.
+- **26 finding codes, 20 new CVEs.** Class A (13 structural codes, vendor-agnostic) catches the malformed-frame shapes behind lldpd CVE-2015-8011/8012/2020-27827, Cisco CVE-2018-0395/2021-34703/2023-20089/2024-20294/2026-20010, Juniper l2cpd CVE-2018-0007/2020-1641/2021-0277/2023-36849/2024-21618, OVS CVE-2022-4337/4338, Aruba CVE-2020-7121/2021-34618, FortiSwitch CVE-2021-26111, PAN-OS CVE-2025-0116 and SonicWall CVE-2021-20024. This includes the dual-stack (IPv4 + IPv6) Management Address checks. Class B (11 codes) screens advertised software; these are notes, not verdicts. Class C covers LLDP flood, plus forged neighbour once you click **Trust current**.
+- **Verdicts:** `no-traffic`/`clean` < `observed` < `exposure` < `suspicious` < `attack`. All are existing tokens, so no new paging sets were needed. Wired into the Net Integrity rotation (`lldp`), Watchtower (`lldp_watch` source, MEDIUM and above), routes `/api/net/lldp-watch` + `/api/net/lldp-baseline`, and the CLI `lldp-watch [--pcap]`.
+- **Self-test:** new `lldp` suite with 37 scenarios. It also runs the module's 1767-check conformance and 262-check scapy cross-check out of process. Validated live: the conformance attack pcap replayed with `tcpreplay` over a sealed-netns veth fired 23 codes.
+- **CVE index:** 275 → 295 named, 234 → 254 detected (`docs/CVE.md` regenerated). CREDITS and README updated.
+- **Visibility matrix:** new master image with the **LLDP Watch** tile in L2. `matrix_full` and the L7…L1 crops were re-cut (band edges unchanged), and the image cache-bust is now `?v=20261009-lldp`.
+- **Docs:** [nettools.md › LLDP Watch](nettools.md#lldp-watch), [watchtower.md](watchtower.md), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md).
+
 ### 2026-10-08
 
 #### [#931](https://github.com/PierreGode/Ragnar/pull/931) — feat(os): Ragnar OS — a prebuilt Raspberry Pi image
@@ -122,16 +135,16 @@
   - **FFT bins**: 256 / 512 / 1024 / 2048 (RBW = sample rate ÷ bins); the capture span still follows the band/zoom
 - Both apply live via the fast retune. Backend `esp_sdr.start(gain=…, fft_bins=…)`, exposed in `/status` (`gain`, `gain_hardware`, `gain_limits`, `fft_bins`); the ESP panel no longer sends HackRF params. `esp_sdr.selftest` 18/18
 
-#### feat(sdr): ESP-SDR frequency trim (FOFS) + Wi-Fi auto-calibration
-*branch `feature/esp-sdr-waterfall` · PR pending*
+#### [#919](https://github.com/PierreGode/Ragnar/pull/919) — feat(sdr): ESP-SDR frequency trim (FOFS) + Wi-Fi auto-calibration
+*branch `feature/esp-sdr-waterfall`*
 
 - The ESP32 has no TCXO, so its LO drifts a few ppm with temperature. New **Frequency trim** control (ESP panel → Settings) corrects it at the LO via the firmware's `FOFS <kHz>` command — verified on real hardware to shift the spectrum **1:1 in kHz** (+FOFS → +kHz). Set an offset by hand (shows the ppm equivalent), or **Auto-trim (Wi-Fi)**
 - **Auto-trim** runs a high-res 2.4 GHz sweep and nulls the drift against the **2.4 GHz Wi-Fi channel centres** (ch 1/6/11). It is self-validating — it only applies a correction when **two channels agree within 40 kHz** and the result is inside the crystal's physical range (~±100 kHz); in a congested 2.4 GHz environment it **declines rather than mis-calibrate** and points you at manual trim or a HackRF cross-reference. Measured edges are sub-bin interpolated; the trim persists across restarts (`data/esp_sdr_fofs.json`, git-ignored)
 - **vs HackRF** cross-reference — the most accurate trim: both radios sweep the same narrow ~40 MHz window (around Wi-Fi ch 6) and the ESP spectrum is **cross-correlated against the HackRF's** (resolution-matched, sub-bin peak). Both see the same ambient RF, so overlapping-channel contamination cancels — it works where the ambient-Wi-Fi lock can't. Applies only on a strong correlation (≥0.5). Validated synthetically (recovers a known shift; accurate on a narrow window where the full band is too coarse)
 - New backend `esp_sdr.set_fofs` / `auto_trim` / `calibrate_vs_reference` / `trim_state`, route `/api/net/esp/trim` (GET state · POST `{khz:N}` manual · `{auto:1}` Wi-Fi · `{hackrf:1}` HackRF cross-ref); FOFS is sent on every capture start and is part of the start signature so a trim change re-applies live. `esp_sdr.selftest` 18/18 (adds Wi-Fi-offset + cross-correlation checks)
 
-#### feat(sdr): ESP-SDR as a third live RF Waterfall panel
-*branch `feature/esp-sdr-waterfall` · PR pending*
+#### [#919](https://github.com/PierreGode/Ragnar/pull/919) — feat(sdr): ESP-SDR as a third live RF Waterfall panel
+*branch `feature/esp-sdr-waterfall`*
 
 - The **RF Waterfall** page (`/rf-waterfall`) now stacks a third live panel: an **[ESP-SDR](https://espargos.net/espsdr/) node** — any ESP32 flashed with the ESP-SDR firmware — streaming **on-chip FFT power spectra** over its native USB serial link, no dedicated SDR hardware needed. On an **ESP32-S3** it covers the 2.4 GHz ISM band (~2.2–2.7 GHz usable): Wi-Fi, Bluetooth, microwave ovens, drones, jammers
 - New backend `esp_sdr.py` speaks the firmware's `SPEC` protocol (newline commands + binary `SPC1` frames), decodes each frame to **dBFS** the way ESP-WebSDR does (`code/mult − 84.3`, with the fftshift + I/Q-axis-flip bin order), max-holds to a steady ~50 rows/s (near the browser's refresh ceiling — the ESP computes FFTs on a fixed window at hundreds/s, so unlike the sweeping HackRF/RTL it scrolls fast) and hands the web layer the **same frame contract** (`power[]` + `band_mhz` + `floor_dbm`) the HackRF/RTL panels use. Receive-only
@@ -145,31 +158,31 @@
 - A **⚡ Flash ESP32** button in the ESP panel header links to the ESP-SDR browser flasher (`espargos.net/espsdr/app/flash.html`, Web Serial) — visible even when the panel is collapsed, so a blank/undetected board can be flashed in a click
 - Verified on real hardware (ESP32-S3 on `/dev/ttyACM1`): `esp_sdr.selftest` 11/11, live 2.4 GHz capture showing real on-air energy, zoom tuning to 16 MS/s, clean stop/detect, and self-recovery after a `SIGKILL` mid-stream
 
-#### feat(mesh): PCAP view as a collapsible box inline on each capture row
-*branch `feature/mesh-pcap-view-collapsible` · PR pending*
+#### [#918](https://github.com/PierreGode/Ragnar/pull/918) — feat(mesh): PCAP view as a collapsible box inline on each capture row
+*branch `feature/mesh-pcap-view-collapsible`*
 
 - The on-screen PCAP **View** is now a **collapsible box on the capture's own row** (▸ View / ▾ Hide / ✕ Close) instead of a single panel at the bottom of the list. The packets expand **in place**, so nothing scrolls away or navigates off-page — much better on a phone
 - Open panels **survive the background mesh refresh**: each expanded capture's decoded packets are cached client-side (`_meshCaptureOpen`), so a periodic re-render keeps them open instead of collapsing them. Switching to another node clears the set
 - **Named per Ragnar unit**: the view header reads *Packets · <Viking name>* and a downloaded capture saves as `<Viking-name>_<id>.pcap` (falling back to label / Tailscale short name), instead of a raw node id — resolved server-side from the unit's reported identity
 - Verified: the list renders with one row expanded inline at phone (400px) width — summary header (with the unit name), protocol chips, top sources and the scrollable packet list all sit between the rows, no page overflow; app imports with the naming helper present
 
-#### feat(mesh): view PCAP capture contents on screen (not only download)
-*branch `feature/mesh-pcap-view` · PR pending*
+#### [#917](https://github.com/PierreGode/Ragnar/pull/917) — feat(mesh): view PCAP capture contents on screen (not only download)
+*branch `feature/mesh-pcap-view`*
 
 - Each finished capture on the node page now has a **View** button next to **Download**. View decodes the `.pcap` and shows its **packets on screen**: a summary header (packets shown / of total, byte size, a per-protocol tally as colour chips, and the top source addresses) over a scrollable monospace **packet list** — so you can see what was captured without opening Wireshark
 - The hub reads the file with `tcpdump -nr` over the tailnet (self or peer) and returns a bounded packet list (default 300, max 2000 lines) plus the summary; new `pcap_capture.view()` + rough protocol classifier
 - New routes: worker `GET /api/mesh/capture/view/<id>` (peer-readable) and operator `GET /api/mesh/peer-capture/view` (session-only, relays to the chosen unit)
 - Verified: `pcap_capture.selftest()` 14/14 (adds protocol-classifier + source-regex checks); live loopback `view()` (decoded 10 of 30 packets, protocol tally, top source, truncation flag); app imports with both view routes registered; view panel rendered against real Tailwind at desktop and phone (400px) widths
 
-#### feat(mesh): downloadable trace route / ping / diagnose results
-*branch `feature/mesh-probe-download` · PR pending*
+#### [#916](https://github.com/PierreGode/Ragnar/pull/916) — feat(mesh): downloadable trace route / ping / diagnose results
+*branch `feature/mesh-probe-download`*
 
 - Each **Trace route**, **Ping** and **Diagnose** result on a unit's node page now has a **⬇ Download** link alongside the on-page display — it saves the result as a plain-text report (parsed summary plus, for trace/ping, the raw `traceroute`/`ping` output). Built client-side from the result already in the browser (Blob + `<a download>`), so there is no re-run and no server round-trip; filenames are `trace_<target>_<ts>.txt` / `ping_…` / `diagnose_…`
 - No backend change — the probe/diagnose endpoints already return everything the report needs
 - Verified: report builders against mock trace/ping/diagnose payloads (hop table, loss/RTT, category/hint/error); results render with the Download link at desktop width
 
-#### feat(mesh): live PCAP capture on the Ragnar fleet node page
-*branch `feature/mesh-pcap-capture` · PR pending*
+#### [#915](https://github.com/PierreGode/Ragnar/pull/915) — feat(mesh): live PCAP capture on the Ragnar fleet node page
+*branch `feature/mesh-pcap-capture`*
 
 - New **Packet Capture** feature on a unit's node page, next to Traffic Analyzer / Integrity / Threats / Watchtower: start a **bounded** `tcpdump`-to-`.pcap` on any reachable unit (self or peer), pick interface / duration / packet cap / optional **BPF filter**, watch live progress (packets · bytes · elapsed), and **Download** the finished `.pcap` — the real frames for Wireshark, which the Traffic Analyzer (text stats only) never writes
 - New `pcap_capture.py` capture engine — strictly bounded (defaults 5 min / 100 MB / one capture at a time, oldest pruned), validates interface + BPF (no option/shell injection), runs `tcpdump` directly as root or via `sudo -n` otherwise. Selftest 10/10; live loopback capture verified (bounded stop, valid pcap, packet count)
@@ -179,8 +192,8 @@
 
 ### 2026-10-04
 
-#### feat(mesh): node filters + actions (trace the jumps) on both the Ragnar fleet and Meshtastic node lists
-*branch `feature/mesh-node-filters-actions` · PR pending*
+#### [#914](https://github.com/PierreGode/Ragnar/pull/914) — feat(mesh): node filters + actions (trace the jumps) on both the Ragnar fleet and Meshtastic node lists
+*branch `feature/mesh-node-filters-actions`*
 
 **Ragnar Mesh (Tailscale fleet) — Mesh Nodes card:**
 - **Filter/sort toolbar** above the list (appears once there is more than one peer): search by name / unit number (`3`, `03`, `unit 03`) / site label / hostname / tailnet IP; filter by status (*All / Online / Needs attention / Unreachable / Not polled*); sort by name, unit number, worst **severity**, open **alerts**, or **CPU**. A *Showing X of Y* counter plus **Reset**. All client-side over the already-polled roster — **no round-trip**, instant even on a Pi Zero; your own unit is never filtered out
@@ -196,14 +209,14 @@
 - Docs: [mesh.md](mesh.md) (fleet filters + path/trace/ping) and [sdr-subghz.md](sdr-subghz.md) (Meshtastic filters + traceroute, API rows); README mesh lines
 - Verified: `traceroute`/`ping` parsers against live loopback output; Meshtastic traceroute-reply parser via `meshtastic_node.selftest()` (32/32, incl. hop-chain order, /4 SNR scaling, name resolution); filter/sort/search + all renderers against mock payloads; offline chromium render of both cards at desktop and phone (400px) widths
 
-#### docs: wardrive firmware comparison on the ESP32-C5
-*branch `docs/wardrive-comparison` · PR pending*
+#### [#913](https://github.com/PierreGode/Ragnar/pull/913) — docs: wardrive firmware comparison on the ESP32-C5
+*branch `docs/wardrive-comparison`*
 
 - New [wardrivecomparison.md](wardrivecomparison.md): Huginn vs Piglet measured on the same Seeed XIAO ESP32-C5 (Huginn → Piglet → Huginn, 10 min each, Pi 5 `wlan0` as drift tracker). Huginn sweeps in ~5.3 s vs 9.7 s (1.8× more detections/min, plus BLE); Piglet hears slightly more per sweep; Huginn's scan-timing calibration; open issue with one channel-5 AP after `show_hidden`
 - Linked from the [docs index](README.md)
 
-#### fix(rf-waterfall): keep the scroll flowing on a slow sweep instead of freezing
-*branch `fix/rf-waterfall-smooth-scroll` · PR pending*
+#### [#912](https://github.com/PierreGode/Ragnar/pull/912) — fix(rf-waterfall): keep the scroll flowing on a slow sweep instead of freezing
+*branch `fix/rf-waterfall-smooth-scroll`*
 
 - **Symptom:** the RF Waterfall froze for ~1 s every couple of seconds, then jumped to catch up, instead of scrolling as a smooth constant flow
 - **Root cause:** live rows are genlocked to their producer timestamp behind a ~0.6 s buffer. The real-time IQ engine feeds 16 rows/s so the buffer stays full and the scroll is smooth — but wide sub-GHz bands fall back to the `rtl_power` sweep, which emits only ~1 row per completed sweep (`-i 1`). That gap is longer than the 0.6 s buffer, so the playhead starves between sweeps: freeze, then a jump when the next frame lands (same for any wide/slow producer, e.g. a wide HackRF span)
@@ -230,8 +243,8 @@
 - Display inversion (`INVON`) and MADCTL are now env-tunable instead of hardcoded; backlight pin respects `-1`
 - New "1.28" GC9A01 round TFT" section in [Display Controls](DISPLAY_CONTROLS.md) with wiring and a static/snow troubleshooting table
 
-#### feat(mesh): pick the Meshtastic MQTT region
-*branch `feature/meshtastic-mqtt-region` · PR pending*
+#### [#909](https://github.com/PierreGode/Ragnar/pull/909) — feat(mesh): pick the Meshtastic MQTT region
+*branch `feature/meshtastic-mqtt-region`*
 
 - **Region picker** next to the MQTT Topic box on Mesh Nodes and Mesh Map: All regions (`msh/+/2/#`), or one region root (`msh/EU_868/#`, `msh/US/#`, ANZ, CN, JP, …) including country and city sub-topics; *Custom topic* for a hand-typed filter. Choice is remembered per browser
 - Changing the topic while MQTT is on reconnects at once, and the backend drops the old region's nodes/messages (`MeshMqtt.connect`)
@@ -241,8 +254,8 @@
 
 ### 2026-10-03
 
-#### fix(wardriving): Piglet sync — newest drive first, give up on stuck files, sync on plug-in
-*branch `feature/piglet-sync-newest-plugin` · PR pending*
+#### [#908](https://github.com/PierreGode/Ragnar/pull/908) — fix(wardriving): Piglet sync — newest drive first, give up on stuck files, sync on plug-in
+*branch `feature/piglet-sync-newest-plugin`*
 
 - **Newest first:** with Piglet v2.61 `LIST` carries each file's last-write time; Ragnar fetches the newest drive first (unknown times next, previously failed files last). On a full card the first field sync imported months-old drives before the new ones
 - **Stuck files:** SD read errors (`@PG ERR read-error`, v2.61) stop that file at once; 2 no-progress resumes abandon it; a failed file waits 6 h before a retry and is skipped after 3 failed syncs (`unreadable`); a vanished port stops the sync instead of failing every remaining file

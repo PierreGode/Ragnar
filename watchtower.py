@@ -176,6 +176,11 @@ DEFAULT_SOURCES = {
     # libmodbus trigger (CVE-2019-14462/14463, CVE-2024-10918) — do_modbus_watch.
     'modbus_watch':  {'label': 'Modbus Watch (PLC write / listen-only / UMAS)',
                       'paths': ['/var/log/ragnar/modbus_watch.jsonl']},
+    # LLDP (802.1AB) malformed-TLV CVE shapes (lldpd CVE-2015-8011, Cisco, Juniper
+    # l2cpd, OVS, Aruba, PAN-OS, SonicWall), LLDP flood and forged neighbour —
+    # do_lldp_watch. Version-screening notes stay in the card.
+    'lldp_watch':    {'label': 'LLDP Watch (malformed TLV / flood / forged neighbour)',
+                      'paths': ['/var/log/ragnar/lldp_watch.jsonl']},
     # MPLS / SR-MPLS / SRv6 label & segment manipulation (do_sr_mpls_watch): a label
     # or SRH on a customer-facing port (label-injection / VRF-hopping), reserved /
     # implicit-null labels forwarded, TTL-expired frames forwarded, SRv6 path

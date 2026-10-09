@@ -25317,6 +25317,426 @@ def _modbus_selftest():
 
 
 # ==========================================================================
+# LLDP Watch — passive IEEE 802.1AB security monitor (vendored python/lldpwatch.py)
+# ==========================================================================
+# Adapts the vendored lldpwatch engine. LLDP (EtherType 0x88CC, link-local group
+# MACs, never forwarded past the first hop) is the multi-vendor sibling of CDP, and
+# its parsers carry a long CVE backbone: lldpd (CVE-2015-8011 lldp_decode overflow /
+# CVE-2015-8012 assert crash / CVE-2020-27827 leak, inherited by Ruckus), Cisco
+# FXOS/NX-OS/IOS-XE (CVE-2018-0395, CVE-2021-34703, CVE-2023-20089, CVE-2024-20294,
+# CVE-2026-20010), Juniper l2cpd (CVE-2018-0007, CVE-2020-1641, CVE-2021-0277,
+# CVE-2023-36849, CVE-2024-21618 — l2cpd also drives STP/LACP, so a crash flaps
+# both), Open vSwitch (CVE-2022-4337 / CVE-2022-4338 Auto Attach TLV), Aruba
+# (CVE-2020-7121, CVE-2021-34618), FortiSwitch lldpmedd (CVE-2021-26111), PAN-OS
+# (CVE-2025-0116) and SonicWall SWS (CVE-2021-20024).
+#
+# Three classes. Class A (LLDP-040..054) is the spine: vendor-agnostic structural TLV
+# bounds and grammar checks — a declared length past the frame, an oversized or
+# family-mismatched Management Address (v4 AND v6), an ID subtype that disagrees
+# with its length, a fixed-length org TLV of the wrong size, reserved TLV types,
+# non-zero data after End-of-LLDPDU (all-zero Ethernet padding and a 4-octet FCS
+# stay silent). Class B (LLDP-020..030) screens the cleartext System Name /
+# Description against the vulnerable-family table — a NOTE, never a verdict, since a
+# version string cannot show patch state. Class C: LLDP-048 flood / neighbour-table
+# pressure (the only signal for the leak CVEs, which have no single-frame shape) and
+# LLDP-049 forged neighbour, which needs a trusted baseline and is off until the
+# operator clicks "Trust current" (kept in data/lldp_watch.json).
+#
+# Capture is tcpdump -> pcap (inbound only, so this unit's own lldpd adverts are not
+# screened) and the engine walks raw frames; no scapy on this path. LLDP-MED
+# voice-VLAN hopping, SDN topology poisoning and E911/PoE semantics are out of scope.
+_LLDP_PY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+_LLDP_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                'data', 'lldp_watch.json')
+_lldp_lock = threading.Lock()
+_LLDP_MAX_BASELINE = 256
+_LLDP_MAX_NEIGHBOURS = 64
+_LLDP_SEV_RANK = {'notice': 0, 'low': 1, 'medium': 2, 'high': 3, 'critical': 4}
+_LLDP_SEV_TO_GUARD = {'critical': 'CRITICAL', 'high': 'HIGH', 'medium': 'MEDIUM',
+                      'low': 'LOW', 'notice': 'INFO'}
+# CVEs a structural / abuse code is the detection shape for (the engine's own finding
+# text names them). Screening rows carry their family's CVE list from the engine.
+_LLDP_CODE_CVES = {
+    'LLDP-040': ['CVE-2015-8011', 'CVE-2021-20024', 'CVE-2024-20294', 'CVE-2021-0277',
+                 'CVE-2024-21618'],
+    'LLDP-045': ['CVE-2015-8011'],
+    'LLDP-048': ['CVE-2020-27827', 'CVE-2023-20089', 'CVE-2021-26111'],
+    'LLDP-051': ['CVE-2022-4337', 'CVE-2022-4338'],
+}
+
+
+def _lldp_import():
+    """Import the vendored engine (python/ on sys.path). Pure Python — the engine
+    imports scapy only inside its own standalone live-capture function."""
+    if _LLDP_PY_DIR not in sys.path:
+        sys.path.insert(0, _LLDP_PY_DIR)
+    import lldpwatch as _w
+    return _w
+
+
+def _lldp_load():
+    try:
+        with open(_LLDP_STATE_PATH) as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _lldp_save(d):
+    try:
+        os.makedirs(os.path.dirname(_LLDP_STATE_PATH), exist_ok=True)
+        tmp = _LLDP_STATE_PATH + '.tmp'
+        with open(tmp, 'w') as fh:
+            json.dump(d, fh, indent=2)
+        os.replace(tmp, _LLDP_STATE_PATH)
+    except OSError:
+        pass
+
+
+def _lldp_read_pcap(path):
+    """Yield (ts, raw) from a classic pcap (either byte order, micro- or nanosecond).
+    Ethernet link type only: LLDP is EtherType-framed and the engine parses from the
+    MAC header. Raises ValueError on anything else."""
+    import struct as _st
+    with open(path, 'rb') as fh:
+        hdr = fh.read(24)
+        if len(hdr) < 24:
+            return
+        magic = hdr[:4]
+        if magic in (b'\xd4\xc3\xb2\xa1', b'\x4d\x3c\xb2\xa1'):
+            end = '<'
+        elif magic in (b'\xa1\xb2\xc3\xd4', b'\xa1\xb2\x3c\x4d'):
+            end = '>'
+        else:
+            raise ValueError('not a classic pcap file (pcapng is not supported)')
+        div = 1e9 if magic in (b'\x4d\x3c\xb2\xa1', b'\xa1\xb2\x3c\x4d') else 1e6
+        linktype = _st.unpack(end + 'I', hdr[20:24])[0] & 0x0FFFFFFF
+        if linktype != 1:
+            raise ValueError('pcap link type %d is not Ethernet' % linktype)
+        while True:
+            rec = fh.read(16)
+            if len(rec) < 16:
+                return
+            sec, frac, incl, _orig = _st.unpack(end + 'IIII', rec)
+            data = fh.read(incl)
+            if len(data) < incl:
+                return
+            yield sec + frac / div, data
+
+
+def _lldp_neighbour(W, fr, walk):
+    """Summarise one well-formed-enough LLDPDU for the neighbour table."""
+    n = {'src': fr.src, 'vlans': list(fr.vlans), 'chassis': None, 'port': None,
+         'name': None, 'desc': None, 'ttl': None,
+         'mgmt': W.extract_mgmt_addrs(walk)}
+    for t in walk.tlvs:
+        v = t.value
+        if t.type in (W.TLV_CHASSIS_ID, W.TLV_PORT_ID) and len(v) >= 2:
+            sub, body = v[0], v[1:]
+            mac_sub = 4 if t.type == W.TLV_CHASSIS_ID else 3
+            txt = W.normalise_mac(body) if sub == mac_sub and len(body) == 6 \
+                else W.printable(body, 64)
+            n['chassis' if t.type == W.TLV_CHASSIS_ID else 'port'] = txt
+        elif t.type == W.TLV_TTL and len(v) == 2:
+            n['ttl'] = (v[0] << 8) | v[1]
+        elif t.type == W.TLV_SYS_NAME:
+            n['name'] = W.printable(v, 64)
+        elif t.type == W.TLV_SYS_DESC:
+            n['desc'] = W.printable(v, 160)
+    return n
+
+
+def _lldp_summarize(findings):
+    """Collapse the engine's per-frame findings into one row per (code, source) with
+    a count — a malformed sender repeats every hello."""
+    rows = {}
+    for f in findings:
+        k = (f['code'], f['src'])
+        r = rows.get(k)
+        if r is None:
+            cves = list(f.get('cves') or _LLDP_CODE_CVES.get(f['code'], []))
+            rows[k] = {'code': f['code'], 'name': f['name'], 'severity': f['severity'],
+                       'group': f['group'], 'src': f['src'], 'detail': f['detail'],
+                       'cves': cves, 'family': f.get('family'),
+                       'mgmt_addrs': list(f.get('mgmt_addrs') or []),
+                       'count': 1, 'first_ts': f['ts']}
+        else:
+            r['count'] += 1
+    return sorted(rows.values(), key=lambda r: (-_LLDP_SEV_RANK.get(r['severity'], 0),
+                                                r['code'], r['src']))
+
+
+def _lldp_verdict(rows, frames):
+    """no-traffic < clean / observed < exposure < suspicious < attack. A high or
+    critical finding is a malformed-frame CVE shape, a flood or a forged neighbour;
+    medium is a reserved type / duplicate / smuggled tail; low is a below-floor
+    version or a missing End TLV. Screening notes alone are 'observed' (the card lists
+    them, but an advertised version is not a vulnerability)."""
+    sev = {r['severity'] for r in rows}
+    if sev & {'critical', 'high'}:
+        return 'attack'
+    if 'medium' in sev:
+        return 'suspicious'
+    if 'low' in sev:
+        return 'exposure'
+    if sev:
+        return 'observed'
+    return 'clean' if frames else 'no-traffic'
+
+
+def _lldp_normalize(r):
+    """lldpwatch summary row -> the guard finding shape _guard_emit_jsonl expects."""
+    return {'code': r['code'], 'name': r['name'],
+            'severity': _LLDP_SEV_TO_GUARD.get(r['severity'], 'MEDIUM'),
+            'klass': 'ATTACK' if r['group'] in ('structural', 'abuse') else 'EXPOSURE',
+            'src': r['src'], 'cves': list(r.get('cves') or []),
+            'detail': {'count': r['count'], 'group': r['group'], 'text': r['detail']}}
+
+
+def _lldp_analyze(pcap, baseline=None, enforce=False):
+    """Replay a pcap through the vendored engine. Returns (rows, neighbours, frames,
+    sources)."""
+    W = _lldp_import()
+    cfg = W.Config()
+    if enforce and baseline:
+        cfg.baseline = tuple(W.normalise_mac(m) for m in baseline)
+        cfg.enforce = True
+    eng = W.Engine(cfg)
+    frames = 0
+    neigh = {}
+    for ts, raw in _lldp_read_pcap(pcap):
+        fr = W.parse_ethernet(raw)
+        if fr is None:
+            continue
+        frames += 1
+        try:
+            eng.handle_frame(raw, ts=ts)
+            if fr.src in neigh or len(neigh) < _LLDP_MAX_NEIGHBOURS:
+                neigh[fr.src] = _lldp_neighbour(W, fr, W.walk_tlvs(fr.payload,
+                                                                   cfg.allow_fcs_tail))
+        except Exception:
+            continue              # one hostile frame must never kill the scan
+    rows = _lldp_summarize(eng.findings)
+    bl = set(cfg.baseline)
+    for n in neigh.values():
+        n['trusted'] = (n['src'] in bl) if bl else None
+    return rows, sorted(neigh.values(), key=lambda n: n['src']), frames, sorted(neigh)
+
+
+def do_lldp_watch(interface=None, seconds=30, pcap=None, persist=True, quick=False):
+    """Passive LLDP (802.1AB) security scan — detection-only, never transmits. Flags
+    malformed LLDPDUs in the shapes the lldpd / Cisco / Juniper l2cpd / OVS / Aruba /
+    PAN-OS / SonicWall parser CVEs are reached through, screens advertised software
+    against the vulnerable-family table (notes only), and trips on LLDP floods and —
+    once a baseline is trusted — forged neighbours. LLDP hellos are ~30 s apart.
+    `pcap` replays a file instead of capturing."""
+    iface = None
+    tmp = None
+    if pcap:
+        if not os.path.isfile(pcap):
+            return {'success': False, 'error': 'pcap not found: %s' % pcap}
+        seconds = 0
+    else:
+        iface = interface if _valid_iface(interface or '') else _capture_iface()
+        if not iface:
+            return {'success': False, 'error': 'no interface to capture on'}
+        seconds = _clamp_int(seconds, 30, 5, 65)
+        if not _have('tcpdump'):
+            return {'success': False, 'interface': iface,
+                    'error': 'tcpdump is not installed. Click Install to add it.',
+                    'missing_tool': 'tcpdump'}
+        W = _lldp_import()
+        import tempfile
+        fd, tmp = tempfile.mkstemp(suffix='.pcap')
+        os.close(fd)
+        # Promiscuous (no -p): the LLDP group MACs are multicasts the host never
+        # joins. -Q in: this unit's own lldpd adverts are not the neighbour. Full
+        # snaplen so LLDP-040's declared-vs-available length check sees every byte.
+        res = _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-Q', 'in',
+                    '-s', '65535', '-c', '5000', '-w', tmp, W.BPF_FILTER],
+                   timeout=seconds + 8)
+        if (os.path.getsize(tmp) <= 24 and res['err'] and any(
+                k in res['err'].lower() for k in ('permission', "couldn't",
+                                                  'no such device', 'syntax error'))):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return {'success': False, 'interface': iface, 'error': res['err'].strip()[:200]}
+        pcap = tmp
+    try:
+        with _lldp_lock:
+            d = _lldp_load() if persist else {}
+            rows, neigh, frames, sources = _lldp_analyze(
+                pcap, baseline=d.get('baseline') or [], enforce=bool(d.get('enforce')))
+            if persist and sources:
+                d['last_sources'] = sources[:_LLDP_MAX_BASELINE]
+                d['last_seen'] = time.time()
+                _lldp_save(d)
+    except Exception as e:
+        return {'success': False, 'interface': iface,
+                'error': 'lldp analysis failed: %s: %s' % (type(e).__name__, e)}
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    verdict = _lldp_verdict(rows, frames)
+    reasons = []
+    for r in rows:
+        if r['severity'] == 'notice' and len(rows) > 1 and reasons:
+            continue
+        cv = (' [%s]' % ', '.join(r['cves'][:3])) if r['cves'] else ''
+        reasons.append('%s: %s — %s (%s×)%s' % (r['code'], r['name'], r['src'],
+                                                r['count'], cv))
+        if len(reasons) >= 8:
+            break
+    if not reasons:
+        reasons = (['LLDP seen from %d neighbour(s); every LLDPDU was well-formed and no '
+                    'flood or forged neighbour was seen' % len(neigh)] if frames else
+                   ['No LLDP on this segment (EtherType 0x88CC) — LLDP is off here, or '
+                    'the window was shorter than the ~30 s hello interval'])
+    by_sev = {}
+    for r in rows:
+        by_sev[r['severity']] = by_sev.get(r['severity'], 0) + 1
+    result = {'success': True, 'module': 'lldp_watch', 'interface': iface,
+              'seconds': seconds, 'verdict': verdict, 'reasons': reasons,
+              'findings': rows, 'by_severity': by_sev, 'packet_count': frames,
+              'neighbours': neigh, 'enforce': bool(d.get('enforce')),
+              'baseline_count': len(d.get('baseline') or [])}
+    # Medium and up reach Watchtower: malformed frames, floods and forged neighbours.
+    # Screening notes / below-floor hints stay in the card.
+    alerts = [_lldp_normalize(r) for r in rows
+              if _LLDP_SEV_RANK.get(r['severity'], 0) >= 2]
+    if not quick and persist and alerts:
+        _guard_emit_jsonl('lldp_watch', {'interface': iface, 'findings': alerts})
+    return result
+
+
+def do_lldp_baseline(action='get'):
+    """Manage the trusted LLDP neighbour baseline. 'trust' adds the neighbours seen in
+    the last scan and turns LLDP-049 (forged neighbour) on; 'reset' forgets the
+    baseline and turns it off again."""
+    with _lldp_lock:
+        d = _lldp_load()
+        if action == 'reset':
+            d = {'last_sources': d.get('last_sources') or []}
+            _lldp_save(d)
+        elif action == 'trust':
+            bl = sorted(set(d.get('baseline') or []) | set(d.get('last_sources') or []))
+            d['baseline'] = bl[:_LLDP_MAX_BASELINE]
+            d['enforce'] = bool(d['baseline'])
+            _lldp_save(d)
+        return {'success': True, 'action': action, 'enforce': bool(d.get('enforce')),
+                'baseline': d.get('baseline') or [],
+                'last_sources': d.get('last_sources') or [],
+                'last_seen': d.get('last_seen')}
+
+
+def _lldp_selftest():
+    """Adapter scenarios over the vendored engine + frame builders (offline, no root),
+    plus the module's own tiers run out-of-process: the 1767-check conformance
+    harness (which asserts scapy is NOT imported, so it cannot run inside this
+    process) and, with scapy present, the 262-check independent-dissector cross-check."""
+    import tempfile
+    scenarios = []
+
+    def check(name, cond):
+        scenarios.append({'name': name, 'pass': bool(cond)})
+
+    try:
+        W = _lldp_import()
+        import lldpwatch_frames as Fr
+    except Exception as e:
+        return {'success': False, 'scenarios': [
+            {'name': 'lldpwatch import failed: %s' % e, 'pass': False}]}
+
+    check('registry: 26 codes (11 screening / 13 structural / 2 abuse)',
+          len(W.FINDINGS) == 26 and
+          sorted(g for _n, _s, g in W.FINDINGS.values()).count('screening') == 11 and
+          sorted(g for _n, _s, g in W.FINDINGS.values()).count('structural') == 13)
+    fam_cves = {c for f in W.BUILTIN_FAMILIES for c in f.cves}
+    check('screening table names 20 distinct LLDP CVEs', len(fam_cves) == 20)
+    check('engine passes its own passive-invariant AST audit',
+          W.audit_source(open(W.__file__).read(), 'lldpwatch.py') == [])
+
+    def replay(frames, baseline=None, enforce=False):
+        fd, path = tempfile.mkstemp(suffix='.pcap')
+        os.close(fd)
+        try:
+            Fr.write_pcap(path, frames)
+            return _lldp_analyze(path, baseline=baseline, enforce=enforce)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    rows, neigh, n, _src = replay([b() for b in Fr.BENIGN_BUILDERS])
+    check('benign set (v4/v6 mgmt, 802.1Q, QinQ, MED phone, long banner, padding, FCS) '
+          '-> no finding (FP guard)', n == len(Fr.BENIGN_BUILDERS) and not rows)
+    check('verdict: benign LLDP -> clean, nothing captured -> no-traffic',
+          _lldp_verdict(rows, n) == 'clean' and _lldp_verdict([], 0) == 'no-traffic')
+    v6 = [x for x in neigh if any(a.startswith('[') for a in x['mgmt'])]
+    check('neighbour table renders an IPv6 management address bracketed', bool(v6))
+
+    for code, builders in sorted(Fr.MALFORMED_BUILDERS.items()):
+        hit = all(code in {r['code'] for r in replay([b()])[0]} for b in builders)
+        check('%s %s: every fixture (%d) fires' % (code, W.FINDINGS[code][0], len(builders)),
+              hit)
+    rows = replay([Fr.mal_mgmt_v6_short()])[0]
+    check('LLDP-045 IPv6-family management address with a v4-sized body is caught '
+          '(dual-stack) and names CVE-2015-8011',
+          any(r['code'] == 'LLDP-045' and 'CVE-2015-8011' in r['cves'] for r in rows))
+    check('verdict: an LLDP-040 overrun -> attack',
+          _lldp_verdict(replay([Fr.mal_length_overrun()])[0], 1) == 'attack')
+
+    for code, b in sorted(Fr.VENDOR_BUILDERS.items()):
+        rows = replay([b()])[0]
+        check('%s screening note carries its family CVEs (severity notice)' % code,
+              any(r['code'] == code and r['cves'] and r['severity'] == 'notice'
+                  for r in rows))
+    check('verdict: a screening note alone -> observed (not a vulnerability verdict)',
+          _lldp_verdict(replay([Fr.vendor_juniper()])[0], 1) == 'observed')
+
+    rows = replay(Fr.flood_frames(30))[0]
+    check('LLDP-048 flood from 30 distinct sources -> attack, names CVE-2020-27827',
+          any(r['code'] == 'LLDP-048' and 'CVE-2020-27827' in r['cves'] for r in rows)
+          and _lldp_verdict(rows, 30) == 'attack')
+    rows = replay(Fr.flood_frames(5))[0]
+    check('5 neighbours in a window -> no LLDP-048 (FP guard)',
+          'LLDP-048' not in {r['code'] for r in rows})
+
+    good = Fr.benign_full()
+    src = W.parse_ethernet(good).src
+    rows = replay([good, Fr.benign_minimal()], baseline=[src], enforce=True)[0]
+    check('LLDP-049 with a trusted baseline: the unknown neighbour fires, the trusted '
+          'one does not', [(r['code'], r['src']) for r in rows if r['code'] == 'LLDP-049']
+          == [('LLDP-049', W.parse_ethernet(Fr.benign_minimal()).src)])
+    rows = replay([Fr.benign_minimal()])[0]
+    check('LLDP-049 is off without a trusted baseline (grab-and-go)', not rows)
+
+    # Out-of-process tiers.
+    here = _LLDP_PY_DIR
+    r = _run([sys.executable, os.path.join(here, 'lldpwatch.py'), '--self-test'],
+             timeout=120)
+    tail = (r['out'] or r['err'] or '').strip().splitlines()[-1:] or ['']
+    check('conformance tier: %s' % tail[0][:90], r['rc'] == 0)
+    xcheck = {'ran': False, 'reason': 'scapy not installed'}
+    if _have_scapy():
+        r = _run([sys.executable, os.path.join(here, 'lldpwatch_scapy_xcheck.py'),
+                  '--quiet'], timeout=180)
+        tail = (r['out'] or '').strip().splitlines()[-1:] or ['']
+        check('scapy cross-check tier: %s' % tail[0][:90], r['rc'] == 0)
+        xcheck = {'ran': True, 'pass': r['rc'] == 0}
+    return {'success': all(s['pass'] for s in scenarios), 'scenarios': scenarios,
+            'scapy': xcheck}
+
+
+# ==========================================================================
 # BLE Watch — passive Bluetooth Low Energy attack monitor (vendored blewatch.py)
 # ==========================================================================
 # Unlike the on-the-wire watchers, BLE is not captured off a NIC: the RX is done
@@ -25539,6 +25959,7 @@ def do_routing_selftest():
               'srmpls': _srmpls_selftest(), 'ipsec': _ipsec_selftest(),
               'dns_passive': _dns_passive_selftest(), 'ftp': _ftp_selftest(),
               'smtp': _smtp_selftest(), 'modbus': _modbus_selftest(),
+              'lldp': _lldp_selftest(),
               'ble': _ble_selftest(),
               'ospf': _ospf_selftest(), 'bgp': _bgp_selftest(),
               'arp': _arp_selftest(), 'dns': _dns_selftest(),
@@ -27422,6 +27843,25 @@ def register_network_diagnostics(app, logger=None):
             ot = [str(s) for s in (data.get('ot') or [])][:16]
         _log(f"net/modbus-baseline {action}")
         return jsonify(do_modbus_baseline(action, ot_subnets=ot))
+
+    @app.route('/api/net/lldp-watch', methods=['GET'])
+    def net_lldp_watch():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 30, 5, 65)
+        _log(f"net/lldp-watch iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_lldp_watch(interface=iface, seconds=secs))
+
+    @app.route('/api/net/lldp-baseline', methods=['GET', 'POST'])
+    def net_lldp_baseline():
+        action = 'get'
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            action = data.get('action') if data.get('action') in ('trust', 'reset') \
+                else 'get'
+        _log(f"net/lldp-baseline {action}")
+        return jsonify(do_lldp_baseline(action))
 
     @app.route('/api/net/ble-watch', methods=['GET'])
     def net_ble_watch():
@@ -30188,6 +30628,15 @@ def _cli(argv=None):
     fw_.add_argument('--ports', default='21', help='FTP control ports (default 21)')
     fw_.add_argument('--json', action='store_true', help='emit JSON')
 
+    lw_ = sub.add_parser('lldp-watch',
+                         help='passive LLDP (802.1AB) scan: malformed-TLV CVE shapes, '
+                              'vulnerable-family screening, flood / forged neighbour')
+    lw_.add_argument('--iface', '-i', default=None, help='interface (default: route)')
+    lw_.add_argument('--seconds', '-s', type=int, default=30, help='capture window (5-65)')
+    lw_.add_argument('--pcap', default=None,
+                     help='replay a pcap instead of capturing (baseline not used or saved)')
+    lw_.add_argument('--json', action='store_true', help='emit JSON')
+
     mw_ = sub.add_parser('modbus-watch',
                          help='passive Modbus/TCP posture scan (off-baseline writes, '
                               'FC8 listen-only, UMAS/ModiPwn, libmodbus framing)')
@@ -30879,6 +31328,21 @@ def _cli(argv=None):
                   f"({r['packet_count']} frames, {len(r['findings'])} finding(s))")
             for x in r.get('reasons', []):
                 print(f"  {x}")
+        return 0 if r.get('success') else 1
+
+    if args.cmd == 'lldp-watch':
+        r = do_lldp_watch(interface=args.iface, seconds=args.seconds, pcap=args.pcap,
+                          persist=not args.pcap)
+        if args.json:
+            print(json.dumps(r, indent=2))
+        elif not r.get('success'):
+            print(f"error: {r.get('error')}")
+        else:
+            print(f"verdict: {r['verdict']}  ({r['packet_count']} LLDP frames, "
+                  f"{len(r['neighbours'])} neighbour(s), enforce={r['enforce']})")
+            for f in r['findings']:
+                print(f"  [{f['code']}] {f['severity'].upper():8} {f['name']} | {f['src']} "
+                      f"x{f['count']}" + (f"  {' '.join(f['cves'])}" if f['cves'] else ''))
         return 0 if r.get('success') else 1
 
     if args.cmd == 'modbus-watch':
