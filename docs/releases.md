@@ -8,7 +8,8 @@
 *branch `feature/blewatch-list-controls`*
 
 - **Two new buttons on the BLE Watch panel** (Diagnostics → L2). **Trust current** adds the advertisers seen in the last scan to a persisted trusted-device list; **Clear list** empties it and clears the on-screen results.
-- Unlike the reset-then-relearn model of the other watchers, BLE is device-gated (each learn needs a sniffer capture), so the list is **additive**: `do_ble_watch` now returns every advertiser seen (`seen`: addr → name/services) and the web control persists exactly those into `data/ble_watch.json` in the `trusted_devices` shape the engine expects (name anchors the clone baseline; the addr suppresses GATT-masquerade flags).
+- Unlike the reset-then-relearn model of the other watchers, BLE is device-gated (each learn needs a sniffer capture), so the list is **additive**: `do_ble_watch` now returns every advertiser seen (`seen`: addr → name/services/rpa_class) and the web control persists exactly those into `data/ble_watch.json` in the `trusted_devices` shape the engine expects (name anchors the clone baseline; the addr suppresses GATT-masquerade flags).
+- **Rotating private addresses are skipped.** Phones/watches use resolvable or non-resolvable private addresses that reshuffle every ~15 min, so "Trust current" only persists **stable** addresses (`public`/random-`static`) and reports how many rotating ones it skipped — otherwise re-scanning + re-trusting grew the list without bound (every scan saw fresh random MACs).
 - `do_ble_watch` loads `data/ble_watch.json` by default, so trusted devices immediately stop being flagged as clones/masquerades. New engine accessor `BleWatch.seen_devices()`; new route `/api/net/ble-watch/baseline` (GET/POST `trust`|`clear`).
 - Docs: [blewatch](blewatch.md).
 

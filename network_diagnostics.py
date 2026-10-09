@@ -25849,7 +25849,7 @@ def do_ble_baseline(action='get', devices=None):
             _ble_watch_save(base)
             return {'success': True, 'cleared': True, 'trusted_devices': {}, 'count': 0}
         if action == 'trust':
-            added = 0
+            added = skipped_rotating = 0
             items = devices.items() if isinstance(devices, dict) else \
                 ((str(a), {}) for a in (devices or []))
             for addr, meta in items:
@@ -25857,6 +25857,13 @@ def do_ble_baseline(action='get', devices=None):
                 if not re.fullmatch(r'[0-9a-f:]{2,32}', akey):
                     continue
                 meta = meta if isinstance(meta, dict) else {}
+                # Skip rotating private addresses (resolvable / non-resolvable /
+                # unclassified random): they change every ~15 min, so trusting
+                # them by address is pointless and makes the list grow forever.
+                # Only 'public' and 'static' (random-static) addresses are stable.
+                if meta.get('rpa_class') in ('rpa', 'nonresolvable', 'random'):
+                    skipped_rotating += 1
+                    continue
                 entry = {}
                 if meta.get('name'):
                     entry['name'] = str(meta['name'])[:64]
@@ -25868,6 +25875,7 @@ def do_ble_baseline(action='get', devices=None):
             base['trusted_devices'] = trusted
             _ble_watch_save(base)
             return {'success': True, 'trusted': True, 'added': added,
+                    'skipped_rotating': skipped_rotating,
                     'count': len(trusted), 'trusted_devices': trusted}
         return {'success': True, 'trusted_devices': trusted, 'count': len(trusted)}
 

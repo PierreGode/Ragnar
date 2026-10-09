@@ -104,6 +104,13 @@ in the last scan (address + name/services) to the list so they stop being
 flagged as clones or GATT masquerades, and **Clear list** empties it. The scan
 loads this list automatically, so no config path has to be passed on the web.
 
+**Rotating addresses are skipped.** Phones, watches and most modern peripherals
+advertise with a resolvable/non-resolvable *private* address that reshuffles
+every ~15 minutes, so trusting one by address is pointless — the next scan sees
+a different MAC. "Trust current" therefore only persists **stable** addresses
+(`public` and random-`static`) and reports how many rotating ones it skipped;
+otherwise the trusted list would grow without bound.
+
 ## In Ragnar (web)
 
 **Network → Diagnostics → L2 tab → Passive · Bluetooth LE → BLE Watch.** The card is
