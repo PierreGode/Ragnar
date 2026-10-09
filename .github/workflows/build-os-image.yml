@@ -20,8 +20,15 @@ name: Build Ragnar OS image
 # After merge, use the manual "Run workflow" button to validate main on demand,
 # or push an os-v* tag to build + release it.
 #
-# The build runs pi-gen natively on the ubuntu-latest runner via os-image/build.sh
-# (PIGEN_NATIVE=1); pi-gen installs its own build dependencies through apt.
+# The build runs on a NATIVE arm64 runner (ubuntu-24.04-arm) via the pi-gen
+# Docker path — the same flow validated locally on a Pi 5. Building arm64 on a
+# native arm64 host avoids qemu emulation entirely (an x86 runner would have to
+# emulate every arm64 binary in the chroot, which is far slower and would likely
+# exceed the timeout), and the pi-gen build container installs its own deps.
+#
+# If arm64 hosted runners are ever unavailable for this repo, switch runs-on to
+# ubuntu-latest and register binfmt first (docker/setup-qemu-action@v3), then
+# this same Docker build path works under emulation — just much slower.
 
 on:
   push:
@@ -46,7 +53,8 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Native arm64 runner: the image is arm64, so this avoids qemu emulation.
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     steps:
       - name: Check out Ragnar
@@ -60,13 +68,8 @@ jobs:
                       /opt/hostedtoolcache/CodeQL || true
           df -h /
 
-      - name: Install pi-gen build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            coreutils quilt parted qemu-user-static debootstrap zerofree zip \
-            dosfstools libarchive-tools libcap2-bin grep rsync xz-utils file \
-            git curl bc gpg pigz xxd arch-test
+      # No apt step: the pi-gen Docker container installs its own build deps.
+      # Docker itself is preinstalled on GitHub-hosted runners.
 
       - name: Determine Ragnar branch
         id: vars
@@ -80,10 +83,9 @@ jobs:
           echo "Baking Ragnar ref: $BR"
           echo "branch=$BR" >> "$GITHUB_OUTPUT"
 
-      - name: Build image
+      - name: Build image (pi-gen Docker path, native arm64)
         run: |
-          sudo PIGEN_NATIVE=1 \
-            RAGNAR_REPO_URL="https://github.com/${{ github.repository }}.git" \
+          sudo RAGNAR_REPO_URL="https://github.com/${{ github.repository }}.git" \
             RAGNAR_REPO_BRANCH="${{ steps.vars.outputs.branch }}" \
             ./os-image/build.sh
 
