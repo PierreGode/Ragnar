@@ -4,8 +4,21 @@ name: Build Ragnar OS image
 # with pi-gen and attaches ragnar-os-<ver>-arm64.img.xz to a GitHub Release.
 #
 # Triggers:
-#   * push of a tag matching os-v*   (e.g. os-v1.0.0)  -> builds + creates release
-#   * manual run (workflow_dispatch) -> builds, uploads a workflow artifact only
+#   * push of a tag matching os-v*     (e.g. os-v1.0.0) -> builds + creates release
+#   * push to the feature/ragnar-os branch              -> builds, artifact only
+#   * manual run (workflow_dispatch) on any branch       -> builds, artifact only
+#
+# Only a tag push ever creates a release; branch pushes and manual runs are
+# artifact-only, so you can build-and-verify from this branch (and, once it's
+# merged, validate main by hitting "Run workflow") without publishing anything.
+# The ref baked into the image auto-follows the ref the run is on — override it
+# with the manual input — so a feature-branch build tests that branch, a tag
+# build tests the tag, and a main dispatch tests main.
+#
+# Note on main: a push trigger for main is deliberately omitted so a 45-minute
+# image build does not fire on every unrelated commit to the default branch.
+# After merge, use the manual "Run workflow" button to validate main on demand,
+# or push an os-v* tag to build + release it.
 #
 # The build runs pi-gen natively on the ubuntu-latest runner via os-image/build.sh
 # (PIGEN_NATIVE=1); pi-gen installs its own build dependencies through apt.
@@ -14,12 +27,19 @@ on:
   push:
     tags:
       - 'os-v*'
+    branches:
+      - feature/ragnar-os
   workflow_dispatch:
     inputs:
       ragnar_branch:
-        description: 'Ragnar branch to bake into the image'
+        description: 'Ragnar branch to bake into the image (blank = the ref this run is on)'
         required: false
-        default: 'main'
+        default: ''
+
+# A newer push to the same ref supersedes an in-flight build (these runs are long).
+concurrency:
+  group: ragnar-os-image-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write   # needed to create a release / upload release assets
@@ -51,8 +71,13 @@ jobs:
       - name: Determine Ragnar branch
         id: vars
         run: |
+          # Manual input wins; otherwise bake whatever ref this run is on
+          # (a branch name for a branch push, the tag name for an os-v* tag),
+          # so the image always matches the code that triggered the build.
           BR="${{ github.event.inputs.ragnar_branch }}"
+          [ -z "$BR" ] && BR="${{ github.ref_name }}"
           [ -z "$BR" ] && BR="main"
+          echo "Baking Ragnar ref: $BR"
           echo "branch=$BR" >> "$GITHUB_OUTPUT"
 
       - name: Build image
