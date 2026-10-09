@@ -31,18 +31,24 @@ git clone --branch "$REPO_BRANCH" --depth 1 "$REPO_URL" "$RAGNAR_PATH"
 # update_ragnar.sh unshallows when needed).
 
 # Run the installer build-safe + unattended. The profile choices below bake a
-# lean, headless-by-default, display-capable image:
+# headless-by-default, display-capable, batteries-included image:
 #   headless                -> web UI only, never seizes a board's display pins
 #   ALL_DISPLAYS=1          -> every screen driver present, so a user can enable
 #                              a display later via /boot/firmware/ragnar.conf
-#   ADVANCED=no             -> skip heavy scanners (nuclei/ZAP); install from the
-#                              web UI on a capable device
+#   ADVANCED=yes            -> bake the heavy scanners (Nuclei/Nikto/SQLMap/ZAP)
+#                              right into the image so everything Ragnar can do
+#                              works offline on first boot. The value below is
+#                              the build default; os-image/build.sh rewrites it
+#                              from $RAGNAR_INSTALL_ADVANCED, so a lean image is
+#                              `RAGNAR_INSTALL_ADVANCED=no ./os-image/build.sh`.
+#                              (A board without the RAM to run them still boots;
+#                              Ragnar's runtime RAM gate just keeps them idle.)
 #   FORCE_PI=1              -> the target is a Pi even if the build host is x86
 cd "$RAGNAR_PATH"
 chmod +x install_ragnar.sh
 RAGNAR_PROFILE=headless \
 RAGNAR_INSTALL_ALL_DISPLAYS=1 \
-RAGNAR_INSTALL_ADVANCED=no \
+RAGNAR_INSTALL_ADVANCED=yes \
 RAGNAR_INSTALL_PISUGAR=n \
 RAGNAR_FORCE_PI=1 \
     ./install_ragnar.sh --image-build

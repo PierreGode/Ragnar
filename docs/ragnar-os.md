@@ -27,8 +27,12 @@ running `install_ragnar.sh` by hand.
 - Every display driver present, so you can attach a screen later without
   reinstalling. The image is **headless by default** (it never grabs a board's
   display pins unless you ask for a screen).
-- Lean: the heavy scanners (Nuclei, OWASP ZAP) are **not** baked in — install
-  them from the web UI on a device that has the RAM for them.
+- Batteries included: the heavy scanners (Nuclei, Nikto, SQLMap, OWASP ZAP) are
+  baked in by default, so everything Ragnar can do works offline on first boot.
+  A board without the RAM to run them still boots fine — Ragnar's runtime RAM
+  gate just keeps them idle. Want a smaller image instead? Build with
+  `RAGNAR_INSTALL_ADVANCED=no ./os-image/build.sh` and those tools install on
+  demand from the web UI later.
 
 ## Flashing it
 
@@ -126,7 +130,8 @@ rootfs (`stage0`→`stage2`). Inside the image chroot it:
 1. clones Ragnar into `/home/ragnar/Ragnar` (a real `.git`, so updates work);
 2. runs `install_ragnar.sh --image-build` with
    `RAGNAR_PROFILE=headless RAGNAR_INSTALL_ALL_DISPLAYS=1
-   RAGNAR_INSTALL_ADVANCED=no RAGNAR_FORCE_PI=1`. `--image-build` means the
+   RAGNAR_INSTALL_ADVANCED=yes RAGNAR_FORCE_PI=1` (the advanced default is set
+   by `build.sh` from `$RAGNAR_INSTALL_ADVANCED`). `--image-build` means the
    installer only *enables* units (never starts services, never reboots, never
    touches a live kernel), because there is no init in a chroot;
 3. installs and enables `ragnar-firstboot.service`;
@@ -144,8 +149,9 @@ before `ragnar.service`, regenerates anything that must be unique, applies
 
 - Default profile is **headless** with all display drivers present — a script
   install asks you to pick one profile/display up front.
-- Advanced scanners are not preinstalled (keeps the image small); add them from
-  the web UI.
+- Advanced scanners (Nuclei/Nikto/SQLMap/ZAP) are preinstalled by default
+  (`RAGNAR_INSTALL_ADVANCED=yes`); a script install RAM-gates them. Build with
+  `RAGNAR_INSTALL_ADVANCED=no` for a smaller image that installs them on demand.
 - Everything else — the service, AP onboarding, the updater, sudoers, udev
   rules, system limits — is identical, because the image runs the very same
   installer.

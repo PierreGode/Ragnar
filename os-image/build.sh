@@ -32,6 +32,12 @@ PIGEN_REF="${PIGEN_REF:-arm64}"
 
 export RAGNAR_REPO_URL="${RAGNAR_REPO_URL:-https://github.com/PierreGode/Ragnar.git}"
 export RAGNAR_REPO_BRANCH="${RAGNAR_REPO_BRANCH:-main}"
+# Bake the heavy scanners (Nuclei/Nikto/SQLMap/ZAP) into the image by default so
+# everything Ragnar can do works offline. Set RAGNAR_INSTALL_ADVANCED=no for a
+# lean image (those tools then install on demand from the web UI). Only yes/no
+# are meaningful here — the installer's "auto" RAM-gate is forced to "no" in an
+# image build (the build host's RAM is not the target's).
+export RAGNAR_INSTALL_ADVANCED="${RAGNAR_INSTALL_ADVANCED:-yes}"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "This build must run as root (pi-gen uses chroot/loop devices)." >&2
@@ -69,9 +75,11 @@ CHROOT_SCRIPT="$PIGEN_DIR/stage-ragnar/00-ragnar/01-run-chroot.sh"
 sed -i \
     -e "s#RAGNAR_REPO_URL:-[^}\"]*#RAGNAR_REPO_URL:-${RAGNAR_REPO_URL}#" \
     -e "s#RAGNAR_REPO_BRANCH:-[^}\"]*#RAGNAR_REPO_BRANCH:-${RAGNAR_REPO_BRANCH}#" \
+    -e "s#^RAGNAR_INSTALL_ADVANCED=[A-Za-z]*#RAGNAR_INSTALL_ADVANCED=${RAGNAR_INSTALL_ADVANCED}#" \
     "$CHROOT_SCRIPT"
 echo "    baking repo into image: $(grep -m1 REPO_URL= "$CHROOT_SCRIPT")"
 echo "                            $(grep -m1 REPO_BRANCH= "$CHROOT_SCRIPT")"
+echo "    advanced scanners:      $(grep -m1 'RAGNAR_INSTALL_ADVANCED=' "$CHROOT_SCRIPT" | tr -d ' \\')"
 
 # Only our stage should export an image; stage2 provides the base rootfs only.
 touch "$PIGEN_DIR/stage2/SKIP_IMAGES"
