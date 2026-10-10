@@ -4,6 +4,11 @@
 
 ### 2026-10-10
 
+#### [#940](https://github.com/PierreGode/Ragnar/pull/940) — fix(ui): L2 layer button count 14 → 16 (OAM + CFM Watch)
+*branch `fix/l2-layer-count`*
+
+- The **L2 Data Link** button in Network → Diagnostics still read **14**. OAM Watch (#938) and CFM Watch (#938) both added a card to that layer without bumping the count. The badge now reads **16**, matching the L2 cards on the layer. No other layer counts changed.
+
 #### [#939](https://github.com/PierreGode/Ragnar/pull/939) — Ragnar OS: move the image build pipeline to a private repo
 *branch `feature/ragnar-os`*
 
