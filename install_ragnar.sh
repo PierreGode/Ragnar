@@ -313,11 +313,12 @@ detect_platform() {
             INSTALL_CMD="dnf install -y"
             PKG_PRESENT_CMD="rpm -q"
             ;;
-        arch|manjaro|endeavouros)
+        arch|manjaro|endeavouros|cachyos)
             PKG_MGR="pacman"
             UPDATE_CMD="pacman -Sy --noconfirm"
             INSTALL_CMD="pacman -S --noconfirm"
             PKG_PRESENT_CMD="pacman -Qi"
+            log "WARNING" "penis"
             ;;
         opensuse*|sles)
             PKG_MGR="zypper"
@@ -359,14 +360,21 @@ package_candidates() {
     case "$pkg" in
         libopenjp2-7) echo "libopenjp2-7 openjpeg2 openjpeg" ;;
         libopenblas-dev) echo "libopenblas-dev openblas-devel openblas" ;;
+        python3-pip) echo "python3-pip python-pip" ;;
+        python3-dbus) echo "python3-dbus python-dbus" ;;
+        python3-gi) echo "python3-gi python-gobject" ;;
+        python3-flask) echo "python3-flask python-flask" ;;
+        python3-flask-socketio) echo "python3-flask-socketio python-flask-socketio" ;;
+        python3-flask-cors) echo "python3-flask-cors python-flask-cors" ;;
         bluez-tools) echo "bluez-tools bluez-utils bluez-utils-compat" ;;
         dhcpcd5) echo "dhcpcd5 dhcpcd" ;;
         python3-pil) echo "python3-pil python3-pillow python-pillow pillow" ;;
         libjpeg-dev) echo "libjpeg-dev libjpeg-turbo-devel libjpeg-turbo" ;;
-        libpng-dev) echo "libpng-dev libpng-devel" ;;
-        python3-dev) echo "python3-dev python3-devel" ;;
-        libffi-dev) echo "libffi-dev libffi-devel" ;;
-        libssl-dev) echo "libssl-dev openssl-devel" ;;
+        zlib1g-dev) echo "zlib1g-dev zlib" ;;
+        libpng-dev) echo "libpng-dev libpng-devel libpng" ;;
+        python3-dev) echo "python3-dev python3-devel python" ;;
+        libffi-dev) echo "libffi-dev libffi-devel libffi" ;;
+        libssl-dev) echo "libssl-dev openssl-devel openssl" ;;
         libgpiod-dev) echo "libgpiod-dev libgpiod-devel libgpiod" ;;
         libi2c-dev) echo "libi2c-dev i2c-tools i2c-tools-devel" ;;
         build-essential) echo "build-essential base-devel" ;;
@@ -391,7 +399,8 @@ package_candidates() {
         bluez) echo "bluez" ;;
         hostapd) echo "hostapd" ;;
         dnsmasq) echo "dnsmasq" ;;
-        wireless-tools) echo "wireless-tools" ;;
+        wireless-tools) echo "wireless-tools wireless_tools" ;;
+        dnsutils) echo "dnsutils bind" ;;
         bridge-utils) echo "bridge-utils" ;;
         # Debian and Raspberry Pi OS ship the browser as firefox-esr (plain
         # "firefox" is not a package there); Ubuntu and others use "firefox".
@@ -465,7 +474,7 @@ install_package() {
 # # Check system compatibility
 # check_system_compatibility() {
 #     log "INFO" "Checking system compatibility..."
-    
+
 #     # Check if running on Raspberry Pi
 #     if ! grep -q "Raspberry Pi" /proc/cpuinfo; then
 #         log "WARNING" "This system might not be a Raspberry Pi. Continue anyway? (y/n)"
@@ -474,14 +483,14 @@ install_package() {
 #             clean_exit 1
 #         fi
 #     fi
-    
+
 #     check_success "System compatibility check completed"
 # }
 # Check system compatibility
 check_system_compatibility() {
     log "INFO" "Checking system compatibility..."
     local should_ask_confirmation=false
-    
+
     # Skip hardware gating - Ragnar now supports all tested platforms
 
     # Check RAM (Raspberry Pi Zero has 512MB RAM)
@@ -544,11 +553,11 @@ check_system_compatibility() {
 
 check_internet() {
     log "INFO" "Checking internet connectivity..."
-    
+
     # Try to ping common servers
     if ping -c 2 8.8.8.8 > /dev/null 2>&1 || ping -c 2 1.1.1.1 > /dev/null 2>&1; then
         log "SUCCESS" "Internet connectivity confirmed"
-        
+
         # Test DNS resolution
         if ping -c 1 pypi.org > /dev/null 2>&1; then
             log "SUCCESS" "DNS resolution working"
@@ -571,7 +580,7 @@ check_internet() {
         echo "2. Exit and fix network issues first (recommended)"
         read -r choice
         case $choice in
-            1) 
+            1)
                 log "WARNING" "Continuing without verified internet connection"
                 return 0
                 ;;
@@ -1014,7 +1023,7 @@ EOF
     echo "DefaultLimitNOFILE=65535" >> /etc/systemd/system.conf
     sed -i '/^#DefaultLimitNOFILE=/d' /etc/systemd/user.conf
     echo "DefaultLimitNOFILE=65535" >> /etc/systemd/user.conf
-    
+
     # Add process limit to systemd
     sed -i '/^#DefaultLimitNPROC=/d' /etc/systemd/system.conf
     echo "DefaultLimitNPROC=4096" >> /etc/systemd/system.conf
@@ -1186,7 +1195,12 @@ setup_ragnar() {
 
     # Create ragnar user if it doesn't exist
     if ! id -u $ragnar_USER >/dev/null 2>&1; then
-        adduser --disabled-password --gecos "" $ragnar_USER
+        # adduser is Debian-only (--gecos etc.); Arch and friends use useradd.
+        if [ "$PKG_MGR" = "apt" ] && command -v adduser >/dev/null 2>&1; then
+            adduser --disabled-password --gecos "" $ragnar_USER
+        else
+            useradd -m -s /bin/bash $ragnar_USER
+        fi
         check_success "Created ragnar user"
     fi
 
@@ -1305,10 +1319,10 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
 
     # Install requirements with --break-system-packages flag
     log "INFO" "Installing Python requirements..."
-    
+
     # Install packages that can fail separately to handle errors
     log "INFO" "Installing core Python packages..."
-    
+
     # Function to check if a Python package is installed
     # Runs import in a subshell to suppress the shell's "Illegal instruction"
     # message that appears when python3/numpy crash with SIGILL on some ARM builds.
@@ -1316,7 +1330,7 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         (python3 -c "import $1" >/dev/null 2>&1) 2>/dev/null
         return $?
     }
-    
+
     # RPi.GPIO + spidev drive the GPIO-attached displays, so they are only
     # meaningful on real Raspberry Pi hardware. On a generic Ubuntu/Debian server
     # RPi.GPIO fails to build (or installs but crashes on import, since there is
@@ -1333,7 +1347,7 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
     else
         log "INFO" "RPi.GPIO already installed, skipping"
     fi
-    
+
     # Install Pillow - use system package if pip fails
     if ! check_python_package "PIL"; then
         log "INFO" "Installing Pillow..."
@@ -1344,7 +1358,7 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
     else
         log "INFO" "Pillow already installed, skipping"
     fi
-    
+
     # Install numpy and pandas - prefer system packages but fallback to pip
     log "INFO" "Checking numpy and pandas..."
     if ! check_python_package "numpy" || ! check_python_package "pandas"; then
@@ -1355,7 +1369,7 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
     else
         log "INFO" "numpy and pandas already installed, skipping"
     fi
-    
+
     # Install remaining packages from requirements.txt with retry logic
     # This includes all dependencies for full Ragnar functionality:
     # - netifaces: Network interface detection for NetworkScanner
@@ -1363,7 +1377,7 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
     # - sqlalchemy: SQL database operations for StealDataSQL
     # - openai: AI-powered network analysis and vulnerability insights
     log "INFO" "Installing remaining Python packages..."
-    
+
     # Array of packages to install with their import names
     declare -A packages=(
         ["rich>=13.0.0"]="rich"
@@ -1383,7 +1397,7 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         ["logger>=1.4"]="logger"
         ["pyserial>=3.5"]="serial"
     )
-    
+
     # Install each package individually with retries if not already installed
     for package in "${!packages[@]}"; do
         import_name="${packages[$package]}"
@@ -1396,7 +1410,7 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
             }
         fi
     done
-    
+
     # Install OpenAI package separately for root (since service runs as root)
     log "INFO" "Installing OpenAI package for root user..."
     sudo pip3 install --break-system-packages --ignore-installed "openai>=2.0.0" || {
@@ -1520,7 +1534,7 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
     # fresh installs until the path is added to root's global git config.
     git config --global --get-all safe.directory 2>/dev/null | grep -qxF "/home/$ragnar_USER/Ragnar" \
         || git config --global --add safe.directory "/home/$ragnar_USER/Ragnar"
-    
+
     # Make utility scripts executable with proper ownership
     chmod +x $ragnar_PATH/kill_port_8000.sh 2>/dev/null || true
     chmod +x $ragnar_PATH/scripts/update_ragnar.sh 2>/dev/null || true
@@ -1539,10 +1553,10 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
     log "INFO" "Initializing data files from templates..."
     bash $ragnar_PATH/scripts/init_data_files.sh
     chown -R $ragnar_USER:$ragnar_USER $ragnar_PATH/data
-    
+
     # Create missing directories and files that are needed for proper operation
     log "INFO" "Creating missing directories and files..."
-    
+
     # Create dictionary directory and files
     mkdir -p $ragnar_PATH/data/input/dictionary
     if [ ! -f "$ragnar_PATH/data/input/dictionary/users.txt" ]; then
@@ -1556,7 +1570,7 @@ guest
 EOF
         log "SUCCESS" "Created users.txt dictionary file"
     fi
-    
+
     if [ ! -f "$ragnar_PATH/data/input/dictionary/passwords.txt" ]; then
         cat > $ragnar_PATH/data/input/dictionary/passwords.txt << EOF
 password
@@ -1570,24 +1584,24 @@ guest
 EOF
         log "SUCCESS" "Created passwords.txt dictionary file"
     fi
-    
+
     # Create comments.json file if missing
     if [ ! -f "$ragnar_PATH/resources/comments/comments.json" ]; then
         mkdir -p $ragnar_PATH/resources/comments
         echo "[]" > $ragnar_PATH/resources/comments/comments.json
         log "SUCCESS" "Created comments.json file"
     fi
-    
+
     # Create missing ragnar1.bmp placeholder if needed (optional since we handle this gracefully now)
     if [ ! -f "$ragnar_PATH/resources/images/static/ragnar1.bmp" ] && [ -f "$ragnar_PATH/resources/images/static/bjorn1.bmp" ]; then
         cp "$ragnar_PATH/resources/images/static/bjorn1.bmp" "$ragnar_PATH/resources/images/static/ragnar1.bmp"
         log "SUCCESS" "Created ragnar1.bmp from bjorn1.bmp"
     fi
-    
+
     # Set proper ownership for all created files
     chown -R $ragnar_USER:$ragnar_USER $ragnar_PATH/data/
     chown -R $ragnar_USER:$ragnar_USER $ragnar_PATH/resources/
-    
+
     # Validate and fix actions.json file
     log "INFO" "Validating actions.json configuration..."
     python3 << 'PYTHON_EOF'
@@ -1600,10 +1614,10 @@ actions_file = "/home/ragnar/Ragnar/config/actions.json"
 try:
     with open(actions_file, 'r') as f:
         actions = json.load(f)
-    
+
     # Check if scanning module is present
     has_scanning = any(action.get('b_module') == 'scanning' for action in actions)
-    
+
     if not has_scanning:
         print("WARNING: scanning module missing from actions.json, adding it...")
         scanning_action = {
@@ -1614,17 +1628,17 @@ try:
             "b_parent": None
         }
         actions.insert(0, scanning_action)
-        
+
         with open(actions_file, 'w') as f:
             json.dump(actions, f, indent=4)
         print("SUCCESS: Added scanning module to actions.json")
     else:
         print("SUCCESS: scanning module found in actions.json")
-        
+
 except Exception as e:
     print(f"ERROR validating actions.json: {e}")
 PYTHON_EOF
-    
+
     # Add ragnar user to necessary groups (including sudo for WiFi management).
     #
     # usermod is all-or-nothing: naming a single non-existent group makes it fail
@@ -1645,7 +1659,7 @@ PYTHON_EOF
         usermod -a -G "$joined_groups" "$ragnar_USER"
         log "INFO" "Added $ragnar_USER to groups: $joined_groups"
     fi
-    
+
     # Configure sudo for WiFi management commands without password
     log "INFO" "Configuring sudo permissions for WiFi management..."
     cat > /etc/sudoers.d/ragnar-wifi << EOF
@@ -1653,7 +1667,7 @@ PYTHON_EOF
 ragnar ALL=(ALL) NOPASSWD: /usr/bin/nmcli, /sbin/iwlist, /sbin/ip, /bin/systemctl start hostapd, /bin/systemctl stop hostapd, /bin/systemctl start dnsmasq, /bin/systemctl stop dnsmasq, /usr/sbin/hostapd, /usr/sbin/dnsmasq
 EOF
     chmod 440 /etc/sudoers.d/ragnar-wifi
-    
+
     # Configure sudo for nmap port scanning without password
     log "INFO" "Configuring sudo permissions for nmap..."
     cat > /etc/sudoers.d/ragnar-nmap << EOF
@@ -1661,7 +1675,7 @@ EOF
 ragnar ALL=(ALL) NOPASSWD: /usr/bin/nmap
 EOF
     chmod 440 /etc/sudoers.d/ragnar-nmap
-    
+
     # Configure sudo for traffic analysis tools without password
     log "INFO" "Configuring sudo permissions for traffic analysis..."
     cat > /etc/sudoers.d/ragnar-traffic << EOF
@@ -1672,7 +1686,7 @@ ragnar ALL=(ALL) NOPASSWD: /usr/sbin/iftop
 ragnar ALL=(ALL) NOPASSWD: /usr/sbin/nethogs
 EOF
     chmod 440 /etc/sudoers.d/ragnar-traffic
-    
+
     check_success "Added ragnar user to required groups and configured sudo permissions"
 }
 
@@ -1686,7 +1700,7 @@ setup_services() {
     if [ "$HEADLESS_MODE" != true ]; then
         wipe_exec="yes"
     fi
-    
+
     # Create kill_port_8000.sh script
     cat > $ragnar_PATH/kill_port_8000.sh << 'EOF'
 #!/bin/bash
@@ -1772,7 +1786,7 @@ EOF
 
     # Configure NetworkManager for WiFi management
     log "INFO" "Configuring NetworkManager for WiFi management..."
-    
+
     # Enable and start NetworkManager
     systemctl enable NetworkManager
     [ "$IMAGE_BUILD" = true ] || systemctl start NetworkManager
@@ -2105,28 +2119,28 @@ verify_installation() {
     else
         log "WARNING" "NetworkManager is not running - WiFi management may not work"
     fi
-    
+
     # Check nmcli command
     if command -v nmcli >/dev/null 2>&1; then
         log "SUCCESS" "nmcli command available"
     else
         log "ERROR" "nmcli command not found - critical for WiFi management"
     fi
-    
+
     # Check iwlist command
     if command -v iwlist >/dev/null 2>&1; then
         log "SUCCESS" "iwlist command available"
     else
         log "WARNING" "iwlist command not found - AP mode scanning may be limited"
     fi
-    
+
     # Check hostapd and dnsmasq
     if command -v hostapd >/dev/null 2>&1 && command -v dnsmasq >/dev/null 2>&1; then
         log "SUCCESS" "hostapd and dnsmasq available"
     else
         log "ERROR" "hostapd or dnsmasq not found - AP mode will not work"
     fi
-    
+
     # Check Python WiFi dependencies
     log "INFO" "Verifying Python dependencies..."
     python3 -c "
@@ -2147,14 +2161,14 @@ if failed:
 else:
     print('SUCCESS: All critical Python modules available')
 " && log "SUCCESS" "Python dependencies verified" || log "ERROR" "Some Python dependencies missing"
-    
+
     # Check if services are running
     if ! systemctl is-active --quiet ragnar.service; then
         log "WARNING" "ragnar service is not running"
     else
         log "SUCCESS" "ragnar service is running"
     fi
-    
+
     # Check web interface
     sleep 5
     if curl -s http://localhost:8000 > /dev/null; then
@@ -2162,7 +2176,7 @@ else:
     else
         log "WARNING" "Web interface is not responding"
     fi
-    
+
     log "INFO" "WiFi timer functionality will be available when AP mode is active"
 }
 
@@ -2594,7 +2608,7 @@ main() {
         else
         echo -e "\n${BLUE}Installing Waveshare e-Paper library...${NC}"
         log "INFO" "Installing Waveshare e-Paper library for auto-detection"
-        
+
         cd /home/$ragnar_USER 2>/dev/null || mkdir -p /home/$ragnar_USER
         if [ ! -d "e-Paper" ]; then
             local epd_cloned=false
@@ -2645,17 +2659,17 @@ main() {
         echo -e "${YELLOW}I will now attempt to detect your e-Paper display.${NC}"
         echo -e "${YELLOW}This requires the display to be properly connected via SPI.${NC}"
         read -p "Is your e-Paper display connected? (y/n): " epd_connected
-        
+
         if [[ "$epd_connected" =~ ^[Yy]$ ]]; then
             echo -e "\n${BLUE}Detecting E-Paper Display...${NC}"
             log "INFO" "Attempting to auto-detect E-Paper display"
-            
+
             EPD_VERSION=""
             # No commas — a stray one made the first element "epd2in13b_V4,",
             # so that model could never be auto-detected (the import always
             # failed on the trailing comma).
             EPD_VERSIONS=("epd2in13b_V4" "epd2in13_V4" "epd2in13_V3" "epd2in13_V2" "epd2in7_V2" "epd2in7" "epd2in13" "epd2in9_V2" "epd3in7" "epd4in26")
-            
+
             for version in "${EPD_VERSIONS[@]}"; do
                 echo -e "${BLUE}Testing ${version}...${NC}"
                 # Create a test script that properly cleans up GPIO
@@ -2685,7 +2699,7 @@ except Exception as e:
     print(f'FAILED: {e}', file=sys.stderr)
     sys.exit(1)
 " 2>&1)
-                
+
                 if echo "$TEST_RESULT" | grep -q "SUCCESS"; then
                     EPD_VERSION="$version"
                     echo -e "${GREEN}✓ Detected E-Paper display: $EPD_VERSION${NC}"
@@ -2706,7 +2720,7 @@ except:
                     fi
                 fi
             done
-            
+
             if [ -z "$EPD_VERSION" ]; then
                 echo -e "${YELLOW}⚠ Could not auto-detect E-Paper display${NC}"
                 echo -e "${YELLOW}This might be due to:${NC}"
@@ -2720,7 +2734,7 @@ except:
             echo -e "${YELLOW}Skipping auto-detection${NC}"
             log "INFO" "User indicated e-Paper display is not connected, skipping auto-detection"
         fi
-        
+
         if [ -z "$EPD_VERSION" ]; then
             echo -e "\n${BLUE}Please select your display:${NC}"
             echo ""
@@ -2804,7 +2818,7 @@ except:
 
     CURRENT_STEP=1; show_progress "Checking system compatibility"
     check_system_compatibility
-    
+
     CURRENT_STEP=2; show_progress "Checking internet connectivity"
     check_internet
 
@@ -2835,14 +2849,14 @@ except:
 
     # Check if system qualifies for advanced tools (8GB+ RAM, not Pi Zero)
     CURRENT_STEP=10; show_progress "Checking for advanced security tools eligibility"
-    
+
     # Detect if this is a Pi Zero (insufficient resources for advanced tools)
     IS_PI_ZERO=false
     if grep -qi "Raspberry Pi Zero" /proc/cpuinfo 2>/dev/null; then
         IS_PI_ZERO=true
         log "INFO" "Raspberry Pi Zero detected - skipping advanced tools installation"
     fi
-    
+
     # Check available RAM (7.5GB threshold for 8GB systems with overhead)
     # Read from /proc/meminfo — always English, works under sudo, no locale issues
     TOTAL_RAM_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null)
@@ -2851,7 +2865,7 @@ except:
     MIN_RAM_MB=7680
     HAS_ENOUGH_RAM=0
     [ "$TOTAL_RAM_MB" -ge "$MIN_RAM_MB" ] 2>/dev/null && HAS_ENOUGH_RAM=1
-    
+
     log "INFO" "System RAM: ${TOTAL_RAM_GB}GB / ${TOTAL_RAM_MB}MB (minimum: 7.5GB)"
     
     # RAGNAR_INSTALL_ADVANCED overrides the RAM gate in unattended mode:
@@ -2875,10 +2889,10 @@ except:
         echo -e "  ${BLUE}•${NC} Web application security testing (OWASP ZAP)"
         echo -e "  ${BLUE}•${NC} Enhanced Nmap vulnerability scripts"
         echo ""
-        
+
         log "INFO" "Automatically installing advanced security tools..."
         echo -e "${BLUE}Running advanced tools installer...${NC}"
-        
+
         # Check if install_advanced_tools.sh exists
         if [ -f "$ragnar_PATH/scripts/install_advanced_tools.sh" ]; then
             chmod +x "$ragnar_PATH/scripts/install_advanced_tools.sh"
