@@ -109,7 +109,8 @@ CONTEXT_CVES = {'CVE-2019-6111', 'CVE-2020-11897'}
 # Deliberately wrong IDs inside a vendored module's own mutation-test fixtures
 # (ptpwatch v4's README bite list swaps CVE-2024-42861 for this). Never a detection.
 IGNORED_CVES = {'CVE-2024-99999',
-                'CVE-9999-0001'}   # lldpwatch conformance: operator extra_families fixture
+                'CVE-9999-0001',   # lldpwatch conformance: operator extra_families fixture
+                'CVE-2019-14810'}  # oamwatch xcheck comment: Arista LDP, named only as a not-this-protocol example
 # Per-CVE owner overrides where a shared helper names another vendor's CVE.
 CVE_OWNER_OVERRIDE = {'CVE-2021-0254': 'Juniper Guard'}
 # Owners (or owner+CVE) whose mention is context/reference, not a detection.

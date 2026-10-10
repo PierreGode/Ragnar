@@ -4,6 +4,18 @@
 
 ### 2026-10-10
 
+#### [#938](https://github.com/PierreGode/Ragnar/pull/938) — feat(net): OAM Watch — passive IEEE 802.3ah Link OAM abuse monitor
+*branch `feature/oam-watch`*
+
+- **New in-app watcher** (Diagnostics → L2, next to LACP Watch): the vendored Solarflere `oamwatch` package (`python/oamwatch/`, tests in `python/oamwatch_tests/`) behind `do_oam_watch`. Passive and detection-only. tcpdump captures to a pcap (promiscuous, inbound only, slow-protocols `0x8809` subtype 3) and a pure-Python parser reads it.
+- **38 codes, no CVEs** (none exist for Link OAM). Highlights: **Loopback Control enable** (one forged frame blackholes the link, OAM-060), confirmed remote-loopback state, **flapping** Dying Gasp / Critical Event / Link Fault, discovery restart, peer substitution, capability escalation, cleartext Clause 30 MIB reads, event replay, a second speaker on a point-to-point link, the 10 PDU/s cap, and 18 structural OAMPDU checks. Posture capability bits are notes.
+- **Session state persists per interface across scans**, so a 300 s flap or a peer swapped between scans is caught. **Reset** (`POST /api/net/oam-reset`) forgets it after a legitimate change.
+- **Verdicts** use existing tokens: `no-traffic`/`clean` < `observed` < `exposure` < `suspicious` < `attack`. A single failure flag is only `suspicious`, since it is often a real power loss. Wired into the Net Integrity rotation (`oam`), Watchtower (`oam_watch`, MEDIUM and above), routes, and the CLI `oam-watch [--pcap]`.
+- **Self-test:** new `oam` suite with 19 scenarios, plus the module's 297-check conformance and 163-check Wireshark cross-check run out of process. **Validated live:** all 38 codes fire through the real capture path, replayed with tcpreplay over a sealed-netns veth.
+- CVE index unchanged at 295 / 254. `gen_cve_list.py` now ignores the "not this protocol" mention CVE-2019-14810 in the cross-check comments.
+- **Docs:** [nettools.md › OAM Watch](nettools.md#oam-watch), [watchtower.md](watchtower.md).
+
+
 #### [#935](https://github.com/PierreGode/Ragnar/pull/935) — Ragnar OS: preinstall Tailscale + AirSnitch, and fix kiosk on Lite
 *branch `feature/ragnar-os`*
 

@@ -2347,6 +2347,7 @@ def _net_integrity_check_once():
         ('ssh', 'SSH', lambda: watch(nd.do_ssh_watch, interface=cap_iface)),
         ('telnet', 'Telnet', lambda: watch(nd.do_telnet_watch, interface=cap_iface)),
         ('lacp', 'LACP', lambda: watch(nd.do_lacp_watch, interface=cap_iface)),
+        ('oam', 'Link OAM', lambda: watch(nd.do_oam_watch, interface=cap_iface)),
         ('rpc', 'RPC', lambda: watch(nd.do_rpc_watch, interface=cap_iface)),
         ('bfd', 'BFD', lambda: watch(nd.do_bfd_watch, interface=cap_iface)),
         ('srmpls', 'SR-MPLS', lambda: watch(nd.do_sr_mpls_watch, interface=cap_iface)),
