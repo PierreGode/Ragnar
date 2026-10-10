@@ -2,6 +2,16 @@
 
 ## Releases
 
+### 2026-10-10
+
+#### [#935](https://github.com/PierreGode/Ragnar/pull/935) — fix(kiosk): add the kiosk user to the graphics/input groups (Lite / Ragnar OS)
+*branch `fix/kiosk-graphics-groups`*
+
+- **Fixes kiosk crash-looping on Ragnar OS** (`ragnar-kiosk.service` active but Chromium/X never start, NRestarts climbing). Root cause: a non-root Xorg must open the GPU, the VT and input devices itself, but the Lite service user (`ragnar`) was only in `spi gpio i2c sudo netdev` — never **video/render/input/tty** — so Xorg died with *"no screens found"* and the unit crash-looped. A desktop Pi OS `pi` user has these by default; a Lite image does not.
+- `install_kiosk.sh` now adds the kiosk user to `video,render,input,tty` (only the groups that exist, since `usermod` is all-or-nothing), and if the kiosk is already enabled it `reset-failed` + restarts so the new membership takes effect without a reboot.
+- `kiosk_doctor.sh` now reports the kiosk user's groups and flags any missing graphics/input group — so this is self-diagnosing next time.
+- Docs: [Kiosk Mode — Troubleshooting](kiosk.md).
+
 ### 2026-10-09
 
 #### [#933](https://github.com/PierreGode/Ragnar/pull/933) — feat(ble): BLE Watch "Trust current" + "Clear list" controls
