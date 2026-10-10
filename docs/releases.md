@@ -4,7 +4,7 @@
 
 ### 2026-10-10
 
-#### [#938](https://github.com/PierreGode/Ragnar/pull/938) — feat(net): OAM Watch — passive IEEE 802.3ah Link OAM abuse monitor
+#### [#938](https://github.com/PierreGode/Ragnar/pull/938) — feat(net): OAM Watch + CFM Watch — passive carrier-Ethernet OAM monitors (802.3ah Link OAM, 802.1ag CFM / Y.1731)
 *branch `feature/oam-watch`*
 
 - **New in-app watcher** (Diagnostics → L2, next to LACP Watch): the vendored Solarflere `oamwatch` package (`python/oamwatch/`, tests in `python/oamwatch_tests/`) behind `do_oam_watch`. Passive and detection-only. tcpdump captures to a pcap (promiscuous, inbound only, slow-protocols `0x8809` subtype 3) and a pure-Python parser reads it.
@@ -13,7 +13,17 @@
 - **Verdicts** use existing tokens: `no-traffic`/`clean` < `observed` < `exposure` < `suspicious` < `attack`. A single failure flag is only `suspicious`, since it is often a real power loss. Wired into the Net Integrity rotation (`oam`), Watchtower (`oam_watch`, MEDIUM and above), routes, and the CLI `oam-watch [--pcap]`.
 - **Self-test:** new `oam` suite with 19 scenarios, plus the module's 297-check conformance and 163-check Wireshark cross-check run out of process. **Validated live:** all 38 codes fire through the real capture path, replayed with tcpreplay over a sealed-netns veth.
 - CVE index unchanged at 295 / 254. `gen_cve_list.py` registers the OAM owners/prefixes and ignores the "not this protocol" mention CVE-2019-14810 in the cross-check comments.
-- **Docs:** [nettools.md › OAM Watch](nettools.md#oam-watch), [watchtower.md](watchtower.md), [CREDITS.md](CREDITS.md) (new non-CVE coverage bullet; Detector Self-Test is now 51 suites).
+- **Docs:** [nettools.md › OAM Watch](nettools.md#oam-watch), [watchtower.md](watchtower.md), [CREDITS.md](CREDITS.md) (new non-CVE coverage bullet).
+- **CFM Watch, a second new in-app watcher** (Diagnostics → L2, next to OAM Watch). It wraps the vendored Solarflere `cfmwatch` module (`python/cfmwatch.py`, unmodified; fixtures and tiers in `python/cfmwatch_tests/`) behind `do_cfm_watch`. It is a passive IEEE 802.1ag CFM / ITU-T Y.1731 service-OAM monitor. tcpdump captures EtherType `0x8902`, untagged, 802.1Q or QinQ, promiscuous and inbound only, to a pcap.
+  - **54 codes.** Highlights: forged **APS** (Forced Switch, **Lockout of protection**, uncorroborated **Signal Fail**, group takeover, churn), forged AIS / LCK, CCM forgery (MAID mismatch, duplicate or **moved MEP**, unexpected MEP), MD-level hierarchy violations, an optional MD ceiling, LBM floods, linktrace TTL sweeps, MIP disclosure, and 10 structural checks.
+  - **CVEs:** CVE-2020-1639 (Junos cfmd crash shape, CFM-140) and CVE-2025-52961 (Junos Evolved cfmd load pattern, CFM-122/141, low confidence) are detected. CVE-2014-3223 and CVE-2023-20233 are named as context only. The CVE index moves to **299 named / 256 detected**, and CREDITS and README are synced.
+  - **Engine state persists per interface across scans**, and each scan reports its own delta. **Reset** is `POST /api/net/cfm-reset`.
+  - **Verdicts:** `no-traffic` < `clean` (inventory only) < `observed` (RDI / AIS / LBM events) < `suspicious` < `attack`.
+  - **Wiring:** Net Integrity rotation `cfm`, Watchtower `cfm_watch` (MEDIUM and above), routes, and CLI `cfm-watch [--md-ceiling] [--pcap]`. `gen_cve_list.py` registers the CFM owners, with the `_CFMW` prefix ahead of Cisco Guard's `_CFM`.
+  - **Self-test:** new `cfm` suite with 18 scenarios. All 9 fixtures match their manifests exactly through the adapter, and the module's 54-check conformance and 2155-comparison Wireshark + scapy cross-check run out of process. The Detector Self-Test is now **52 suites**.
+  - **Validated live:** 54/54 codes fire through the real tcpdump path, replayed with tcpreplay over a sealed-netns veth, VLAN-tagged frames included.
+  - **Docs:** [nettools.md › CFM Watch](nettools.md#cfm-watch), [watchtower.md](watchtower.md), [CREDITS.md](CREDITS.md).
+- **Visibility matrix** updated with the OAM Watch and CFM Watch tiles in L2.
 
 
 #### [#935](https://github.com/PierreGode/Ragnar/pull/935) — Ragnar OS: preinstall Tailscale + AirSnitch, and fix kiosk on Lite

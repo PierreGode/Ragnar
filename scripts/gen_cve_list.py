@@ -50,12 +50,14 @@ FILE_OWNERS = {
     'python/lldpwatch_frames.py': 'LLDP Watch',
     'python/lldpwatch_conformance.py': 'LLDP Watch',
     'python/lldpwatch_scapy_xcheck.py': 'LLDP Watch',
+    'python/cfmwatch.py': 'CFM Watch',
     'actions/ble_pentest.py': 'BLE Pentest (active)',
 }
 FILE_PREFIX_OWNERS = {'python/dns_doctor_passive/': 'DNS Watch',
                       'python/modbuswatch/': 'Modbus Watch',
                       'python/oamwatch/': 'OAM Watch',
-                      'python/oamwatch_tests/': 'OAM Watch'}
+                      'python/oamwatch_tests/': 'OAM Watch',
+                      'python/cfmwatch_tests/': 'CFM Watch'}
 # Files that only mention CVEs already owned elsewhere (labels, help text).
 MENTION_ONLY = {'webapp_modern.py', 'watchtower.py', 'web/scripts/ragnar_modern.js',
                 'web/index_modern.html'}
@@ -98,6 +100,8 @@ ND_PREFIXES = [
     ('_MODBUS', 'Modbus Watch'), ('_modbus', 'Modbus Watch'), ('do_modbus', 'Modbus Watch'),
     ('_LLDP', 'LLDP Watch'), ('_lldp', 'LLDP Watch'), ('do_lldp', 'LLDP Watch'),
     ('_OAM', 'OAM Watch'), ('_oam', 'OAM Watch'), ('do_oam', 'OAM Watch'),
+    # before Cisco Guard's ('_CFM', ...) VXLAN-NGOAM prefix, which would swallow these
+    ('_CFMW', 'CFM Watch'), ('_cfmw', 'CFM Watch'), ('do_cfm', 'CFM Watch'),
     ('_RELAY', 'Relay / Coercion Watch'), ('_relay', 'Relay / Coercion Watch'),
     ('_parse_relay', 'Relay / Coercion Watch'), ('do_relay', 'Relay / Coercion Watch'),
     ('_ND_DNSSL', 'ICMP Watch'), ('_ISIS', 'IS-IS Watch'), ('_CFM', 'Cisco Guard'),
@@ -108,7 +112,10 @@ ND_PREFIXES = [
 # CVEs named inside a detector's finding text for comparison only — e.g. the
 # OpenSSH scp bug named as the "twin" of the netkit rcp CVE Telnet Watch detects,
 # and the Ripple20 IPv6 bug APC Guard names only to state it does not apply to APC.
-CONTEXT_CVES = {'CVE-2019-6111', 'CVE-2020-11897'}
+CONTEXT_CVES = {'CVE-2019-6111', 'CVE-2020-11897',
+                # cfmwatch: Huawei Y.1731 DoS (trigger never published, screening row only)
+                # and a Cisco IOS XR CFM bug rejected below the bar; both only named.
+                'CVE-2014-3223', 'CVE-2023-20233'}
 # Deliberately wrong IDs inside a vendored module's own mutation-test fixtures
 # (ptpwatch v4's README bite list swaps CVE-2024-42861 for this). Never a detection.
 IGNORED_CVES = {'CVE-2024-99999',

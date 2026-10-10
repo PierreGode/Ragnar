@@ -107,6 +107,7 @@ matrix to zoom (`/web/images/osi/`).
 | [PTP Timing Detection](#ptp-timing-detection) | Diagnostics · L2 | `POST /api/net/ptp` |
 | [LACP Watch](#lacp-watch) | Diagnostics · L2 | `GET /api/net/lacp-watch` |
 | [OAM Watch](#oam-watch) | Diagnostics · L2 | `GET /api/net/oam-watch`, `POST /api/net/oam-reset` |
+| [CFM Watch](#cfm-watch) | Diagnostics · L2 | `GET /api/net/cfm-watch`, `POST /api/net/cfm-reset` |
 | [L2 Link Health](#l2-link-health) | Diagnostics · L2 | `POST /api/net/l2-health` |
 | [ARP Scan](#arp-scan) | Diagnostics · L2 | `GET /api/net/arp-scan` |
 | [Locate Port](#locate-port) | Diagnostics · L1 | `POST /api/net/locate-port` |
@@ -146,7 +147,7 @@ capture path.
 
 ### Detector Self-Test
 A one-click **Run self-test** that validates the IGMP, **IPv6 first-hop**, **NDP**, **RA Guard**,
-**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **LLDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **Link OAM** (802.3ah loopback blackhole), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **Modbus Watch** (PLC writes / Force Listen Only / UMAS / libmodbus framing), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB) and
+**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **LLDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **Link OAM** (802.3ah loopback blackhole), **CFM / Y.1731** (protection-switch forgery), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **Modbus Watch** (PLC writes / Force Listen Only / UMAS / libmodbus framing), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB) and
 **path-asymmetry / OWD** engine — by running each classifier against crafted attack
 captures (no root, no external network) and reports per-suite pass/fail. With Scapy
 installed it also runs the end-to-end packet-crafting leg for the capture-based
@@ -2619,7 +2620,7 @@ MEDIUM and above feed [Watchtower](watchtower.md). The card also lists each OAM 
 its OUI, advertised capabilities and state (operational / discovery / **remote loopback**).
 
 **Out of scope:** 802.1ag CFM / Y.1731 on EtherType `0x8902` is a different, service-layer
-protocol and is not assessed here. Cisco Guard's VXLAN NGOAM check covers only CFM inside
+protocol. [CFM Watch](#cfm-watch) covers it. Cisco Guard's VXLAN NGOAM check covers only CFM inside
 VXLAN.
 
 - Endpoint: `GET /api/net/oam-watch` `{interface, seconds}` · `POST /api/net/oam-reset`
@@ -2636,6 +2637,102 @@ VXLAN.
   scenarios replayed with `tcpreplay` over a veth pair in a sealed netns, and **38/38 codes
   fire** through `do_oam_watch`'s capture path. Not yet validated against production
   Link OAM traffic.
+
+### CFM Watch
+A **passive** IEEE 802.1ag **Connectivity Fault Management** / ITU-T **Y.1731** service-OAM
+monitor. It is **detection-only** and never sends an LBM, LTM or CCM: there is no MEP
+probing and no active verification. CFM runs on EtherType `0x8902` inside the service VLAN
+(untagged, 802.1Q and QinQ are all parsed) to the `01:80:C2:00:00:3x` groups. It provides
+maintenance domains at levels 0–7, continuity checks (CCM) between maintenance endpoints
+(MEPs), and the Y.1731 overlay: AIS / LCK / CSF, APS protection switching, loopback,
+linktrace and performance measurement. All of it is cleartext, unauthenticated and has no
+integrity protection. [OAM Watch](#oam-watch) covers the separate 802.3ah Link OAM.
+
+**Why it matters.** A forged **APS** frame moves production traffic onto the protection
+path, or locks protection out so the next real fault goes unprotected. A forged **AIS**
+suppresses the alarm for a fault that is really happening. A forged **CCM** raises a
+cross-connect or unexpected-MEP defect that takes a service down. A **linktrace sweep** maps
+a provider's MIP chain hop by hop.
+
+**54 codes in nine classes:**
+
+- **A, structural `CFM-001`..`010`**: First TLV Offset past the end, TLV overrun or
+  truncation, a missing End TLV, inconsistent MAID name lengths, a short opcode body, a
+  reserved opcode, a non-zero version, data after End TLV, and a First TLV Offset that
+  disagrees with the opcode.
+- **B, MD-level hierarchy `020`..`024`**: the level disagrees with the destination group,
+  the level is above the configured **MD ceiling** (`021`, inert unless one is set), the
+  same MAID appears at two levels, or a CCM goes to a non-CFM address.
+- **C, CCM state and forgery `040`..`049`**: a MAID mismatch, a duplicate MEP ID, an
+  unexpected MEP joining, an **established MEP moving to a new MAC**, an interval change, an
+  invalid or sub-100 ms interval, RDI, an anomalous MAID format, or an invalid MEP ID.
+- **D, Y.1731 fault management `060`..`065`**: AIS / LCK / CSF observed, **AIS from a
+  source with no CCM history**, AIS while the server-layer CCMs are healthy, or an invalid
+  period field.
+- **E, APS `080`..`087`**: a **Forced Switch**, a Manual Switch, a **Signal Fail with no
+  corroborating fault** (critical), a new source MAC for an established protection group,
+  protection-switch churn, a reserved request code, or **Lockout of protection** (critical).
+- **F, loopback and linktrace `100`..`106`**: LBM / LTM observed, an **LBM flood**, an
+  **LTM TTL sweep**, MIP identity disclosed in an LTR, an oversized Data TLV, or an anomalous
+  TTL.
+- **G, rate `120`..`122`** and **H, CVE triggers `140`/`141`**. **CVE-2020-1639** (Junos:
+  a crafted Ethernet OAM packet cores cfmd) is `CFM-140`, raised off the Class A bounds
+  violations. **CVE-2025-52961** (Junos Evolved: valid traffic drives cfmd to 100% CPU
+  through a cfmman leak) is `CFM-122` / `CFM-141`. Those are a rate correlation labelled
+  **LOW confidence**: the trigger is valid traffic, so the CVE cannot be told from any
+  other heavy CFM talker. Treat it as a prompt to check the peer's cfmman memory.
+  Two CVEs are named but never detected. CVE-2014-3223 (Huawei Y.1731 DoS) has no code,
+  because its trigger field was never published. CVE-2023-20233 (Cisco IOS XR CFM) is
+  rejected because it falls below the bar.
+- **P, posture `160`..`163`**: inventory of MD levels, MEPs, Y.1731 opcodes and service
+  VLANs. There is deliberately no "CFM is enabled" finding. Service OAM on a carrier handoff
+  is by design.
+
+**State is kept per interface across scans** (in memory). That covers MA / MEP tables, APS
+group ownership and the CCM history that disarms `CFM-061`. Each scan reports only the
+findings it added. **Reset** (`POST /api/net/cfm-reset`) forgets the state after a
+legitimate MEP or protection change. Set the card's **MD ceiling** to the highest
+maintenance level that is legitimate at the tap. Without it, cross-domain injection is
+caught only when it also violates the destination group address.
+
+**Vantage.** CFM normally only appears on a carrier / metro Ethernet service handoff or an
+EVC trunk. Everywhere else the card reports `no-traffic`. Capture is `tcpdump`
+(promiscuous, inbound only) with the BPF `ether proto 0x8902 or (vlan and (ether proto
+0x8902 or (vlan and ether proto 0x8902)))` to a pcap. That pcap is fed to the vendored
+stdlib parser, with no scapy on this path. CFM carries no IP header, so the dual-stack
+question does not apply.
+
+**Verdicts:**
+
+| Verdict | When |
+|---|---|
+| `no-traffic` | No CFM captured. |
+| `clean` | Inventory only, plus INFO notes such as APS No Request. |
+| `observed` | A LOW event: RDI, AIS, CSF, or LBM / LTM seen. |
+| `suspicious` | A MEDIUM finding, or a HIGH that rests on LOW-confidence evidence. |
+| **`attack`** | Any CRITICAL, or any other HIGH. |
+
+`attack` pages in the [Network Integrity Monitor](#-network-integrity-monitor). Everything
+except the posture inventory, at MEDIUM and above, feeds [Watchtower](watchtower.md)
+(`cfm_watch`). The card lists the findings and a MEP table (level, MEP ID, MAID, MAC,
+VLAN, interval).
+
+- Endpoint: `GET /api/net/cfm-watch` `{interface, seconds, md_ceiling?}` ·
+  `POST /api/net/cfm-reset` `{interface?}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py cfm-watch [--iface I] [--seconds N] [--md-ceiling L]
+  [--pcap FILE] [--json]`. `--pcap` replays a file through a fresh engine.
+- Self-test: suite `cfm`, 18 scenarios. All 9 upstream fixtures must fire **exactly**
+  their manifest code sets through the adapter, and together they cover all 54 codes. The
+  suite also checks the clean baseline, the CVE tagging, the APS lockout, the MD-ceiling
+  arming, that Link OAM is not parsed as CFM, a MEP moved between two scans (caught only by
+  the persistent engine), and per-scan deltas. It then runs the module's own **54-check
+  conformance** tier and the **2155-comparison Wireshark + scapy cross-check** tier, both
+  out of process.
+- Vendored engine (Solarflere): `python/cfmwatch.py`, unmodified. Its fixtures and tiers
+  live in `python/cfmwatch_tests/`. **Validated live:** the fixture corpus was replayed with
+  `tcpreplay` over a veth pair in a sealed netns, including VLAN-tagged frames, and **54/54
+  codes fire** through `do_cfm_watch`'s tcpdump path. Not yet validated against production
+  CFM traffic.
 
 ### BFD Watch
 A **passive** Bidirectional Forwarding Detection **failover-manipulation** monitor —

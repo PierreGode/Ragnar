@@ -1512,6 +1512,7 @@ function showNetworkSubtab(name, layer) {
         _modbusLoadBaseline();
         _fillIfaceSel('lldpw-iface');
         _fillIfaceSel('oam-iface');
+        _fillIfaceSel('cfm-iface');
         _certFillIfaces();
         _tlsFillIfaces();
         _lldpFillIfaces();
@@ -10016,6 +10017,103 @@ async function oamReset() {
         addConsoleMessage('Link OAM reset failed: ' + e.message, 'error');
     }
 }
+// ---- CFM Watch (IEEE 802.1ag CFM / ITU-T Y.1731 service OAM) ----------------
+const _CFM_VERDICT_STYLE = {
+    'no-traffic': ['bg-slate-800 border-slate-700 text-slate-300', 'ℹ No CFM on this port — 802.1ag / Y.1731 service OAM normally only appears on a carrier / metro Ethernet service handoff'],
+    clean:        ['bg-green-950/40 border-green-900 text-green-400', '✓ CFM seen — well-formed, no forgery, protection-switch abuse, linktrace sweep or flood (inventory only)'],
+    observed:     ['bg-sky-950/40 border-sky-900 text-sky-300', 'ℹ Operational CFM events seen (RDI, AIS, CSF, loopback / linktrace) — worth a look, not an attack'],
+    suspicious:   ['bg-orange-950/50 border-orange-800 text-orange-300', '⚠ Suspicious — a manual switch, LCK, an MD-level or MAID anomaly, a reserved encoding, or a load pattern'],
+    attack:       ['bg-red-950/60 border-red-800 text-red-300', '🛑 CFM ATTACK — forged protection switching, a forged AIS / CCM, a moved or duplicate MEP, a linktrace sweep, an LBM flood or a malformed CFM frame'],
+    unknown:      ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+async function runCfmWatch() {
+    const out = document.getElementById('cfm-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('cfm-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('cfm-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '30';
+    const ceilEl = document.getElementById('cfm-ceiling');
+    const ceil = ceilEl && ceilEl.value !== '' ? ceilEl.value : '';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing CFM (EtherType 0x8902, untagged / 802.1Q / QinQ)…</p>';
+    try {
+        _fillIfaceSel('cfm-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '') +
+            (ceil !== '' ? '&md_ceiling=' + encodeURIComponent(ceil) : '');
+        const d = await fetchAPI('/api/net/cfm-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runCfmWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _CFM_VERDICT_STYLE[d.verdict] || _CFM_VERDICT_STYLE.unknown;
+        const inv = d.inventory || {};
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.packet_count} CFM frame(s) · ${(inv.meps || []).length} MEP(s)` +
+            (d.md_ceiling !== null && d.md_ceiling !== undefined ? ` · MD ceiling ${d.md_ceiling}` : '') + '</p>';
+        const findings = (d.findings || []).filter(f => f.klass !== 'P');
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">What</th><th class="px-2 py-1">Source</th><th class="px-2 py-1">#</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => {
+                    const sc = _OAM_SEV_STYLE[f.severity] || 'text-gray-400';
+                    const cves = (f.cves || []).filter(c => !(f.name || '').includes(c));
+                    const cve = cves.length ? ` <span class="text-red-300 font-mono">${escapeHtml(cves.join(', '))}</span>` : '';
+                    const conf = f.confidence === 'low' ? ' <span class="text-gray-500">(low confidence)</span>' : '';
+                    return `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${sc}">${escapeHtml(f.severity || '')}</td>
+                    <td class="px-2 py-1 font-mono ${sc}">${escapeHtml(f.code || '')}</td>
+                    <td class="px-2 py-1 text-gray-300 whitespace-normal" style="min-width:16rem">${escapeHtml(f.name || '')}${cve}${conf} <span class="text-gray-600">${escapeHtml(f.class_name || '')}</span><span class="block text-gray-500">${escapeHtml(f.detail || '')}</span></td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.src || f.context || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${f.count}</td>
+                </tr>`; }).join('') +
+                '</tbody></table>';
+        }
+        const meps = inv.meps || [];
+        if (meps.length) {
+            html += '<div class="text-xs text-gray-500 mt-3 mb-1">Maintenance endpoints (state kept across scans)</div>' +
+                '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Level</th><th class="px-2 py-1">MEP</th><th class="px-2 py-1">MAID</th><th class="px-2 py-1">MAC</th><th class="px-2 py-1">VLAN</th><th class="px-2 py-1">Interval</th></tr>' +
+                '</thead><tbody>' +
+                meps.slice(0, 20).map(m => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 font-mono text-gray-400">${m.md_level}</td>
+                    <td class="px-2 py-1 font-mono text-gray-200">${m.mepid}</td>
+                    <td class="px-2 py-1 text-gray-300">${escapeHtml(m.maid || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(m.mac || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml((m.vlan || []).join('/') || 'untagged')}</td>
+                    <td class="px-2 py-1 text-gray-400">${escapeHtml(m.interval || '')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if ((inv.y1731 || []).length) {
+            html += `<p class="text-xs text-gray-500 mt-2">Y.1731 overlay: ${escapeHtml(inv.y1731.join(', '))}</p>`;
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+async function cfmReset() {
+    if (!confirm('Forget the learned CFM state (MEPs, associations, protection groups)? Use after a legitimate MEP or protection change.')) return;
+    try {
+        await postAPI('/api/net/cfm-reset', {});
+        addConsoleMessage('CFM state cleared', 'info');
+    } catch (e) {
+        addConsoleMessage('CFM reset failed: ' + e.message, 'error');
+    }
+}
 // ---- LLDP Watch (802.1AB malformed-TLV CVE shapes / screening / flood) ------
 const _LLDPW_VERDICT_STYLE = {
     'no-traffic': ['bg-slate-800 border-slate-700 text-slate-300', 'ℹ No LLDP seen — LLDP is off on this port, or the window was shorter than the ~30 s hello'],
@@ -11671,7 +11769,7 @@ async function runRoutingSelftest() {
             : 'Scapy: <span class="text-amber-300">not installed</span> — end-to-end leg skipped';
         if (instBtn) instBtn.classList.toggle('hidden', !!d.scapy_available);
 
-        const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory)', ssh: 'SSH Watch (regreSSHion / Terrapin)', telnet: 'Telnet Watch (CVE-2026-24061 / 32746)', ftp: 'FTP Watch (ProFTPD mod_copy / quoted verb)', smtp: 'SMTP Watch (Exim expansion / SNI / AUTH b64)', ble: 'BLE Watch (Bluetooth LE clone/spoof/MITM)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', lldp: 'LLDP Watch (802.1AB malformed TLV / CVE screening)', oam: 'OAM Watch (802.3ah Link OAM loopback / flag forgery)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
+        const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory)', ssh: 'SSH Watch (regreSSHion / Terrapin)', telnet: 'Telnet Watch (CVE-2026-24061 / 32746)', ftp: 'FTP Watch (ProFTPD mod_copy / quoted verb)', smtp: 'SMTP Watch (Exim expansion / SNI / AUTH b64)', ble: 'BLE Watch (Bluetooth LE clone/spoof/MITM)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', lldp: 'LLDP Watch (802.1AB malformed TLV / CVE screening)', oam: 'OAM Watch (802.3ah Link OAM loopback / flag forgery)', cfm: 'CFM Watch (802.1ag / Y.1731 service OAM)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
                         arp: 'ARP Poisoning (incl. HSRP/VRRP virtual-MAC awareness)', dns: 'DNS Doctor (poison parser / anchors / ASN)',
                         mac: 'MAC Watch (spoof / vendor-OUI / randomization / HSRP-VRRP virtual-MAC)', dhcp: 'DHCP Guardian (rogue server / starvation)',
                         lacp: 'LACP Watch (802.1AX LAG-hijack / flapping)', rpc: 'RPC/NetLogon Watch (Zerologon / DCSync / WinRM)',
@@ -11688,7 +11786,7 @@ async function runRoutingSelftest() {
             '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
             '<tr class="text-left text-gray-500"><th class="px-2 py-1">Scanner</th><th class="px-2 py-1">Scenarios</th><th class="px-2 py-1">End-to-end</th><th class="px-2 py-1">Result</th></tr>' +
             '</thead><tbody>';
-        const order = ['igmp', 'ipv6', 'ndp', 'raguard', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'ssh', 'telnet', 'stp', 'smb', 'relay', 'ldap', 'dtp', 'cdp', 'lldp', 'vtp', 'eigrp', 'isis', 'fhrp', 'ospf', 'arp', 'mac', 'dhcp', 'dns', 'bgp', 'lacp', 'oam', 'rpc', 'bfd', 'ptp', 'srmpls', 'ipsec', 'dns_passive', 'ftp', 'smtp', 'modbus', 'cisco_guard', 'juniper_guard', 'arista_guard', 'comware_guard', 'mikrotik_guard', 'aruba_guard', 'apc_guard', 'liebert_guard', 'dell_guard', 'bgp_speaker', 'path_asymmetry'];
+        const order = ['igmp', 'ipv6', 'ndp', 'raguard', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'ssh', 'telnet', 'stp', 'smb', 'relay', 'ldap', 'dtp', 'cdp', 'lldp', 'vtp', 'eigrp', 'isis', 'fhrp', 'ospf', 'arp', 'mac', 'dhcp', 'dns', 'bgp', 'lacp', 'oam', 'cfm', 'rpc', 'bfd', 'ptp', 'srmpls', 'ipsec', 'dns_passive', 'ftp', 'smtp', 'modbus', 'cisco_guard', 'juniper_guard', 'arista_guard', 'comware_guard', 'mikrotik_guard', 'aruba_guard', 'apc_guard', 'liebert_guard', 'dell_guard', 'bgp_speaker', 'path_asymmetry'];
         // Append any suite the backend returned that isn't in the preferred order,
         // so a newly-wired detector can never again be counted toward pass/fail yet
         // stay invisible in the table.
