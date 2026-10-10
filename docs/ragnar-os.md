@@ -9,7 +9,7 @@ running `install_ragnar.sh` by hand.
 - [Flashing it](#flashing-it)
 - [First boot](#first-boot)
 - [Optional: ragnar.conf](#optional-ragnarconf)
-- [Building the image yourself](#building-the-image-yourself)
+- [Where the image comes from](#where-the-image-comes-from)
 - [How it is put together](#how-it-is-put-together)
 - [Differences from a script install](#differences-from-a-script-install)
 
@@ -30,9 +30,9 @@ running `install_ragnar.sh` by hand.
 - Batteries included: the heavy scanners (Nuclei, Nikto, SQLMap, OWASP ZAP) are
   baked in by default, so everything Ragnar can do works offline on first boot.
   A board without the RAM to run them still boots fine — Ragnar's runtime RAM
-  gate just keeps them idle. Want a smaller image instead? Build with
-  `RAGNAR_INSTALL_ADVANCED=no ./os-image/build.sh` and those tools install on
-  demand from the web UI later.
+  gate just keeps them idle. (A lean image variant without them, where those
+  tools install on demand from the web UI, can also be produced — see
+  [Where the image comes from](#where-the-image-comes-from).)
 - Mesh- and attack-ready out of the box: the **Tailscale** client is baked in
   (binary only — it never joins a tailnet during imaging, so the web UI Mesh tab
   or a `/boot/firmware/ragnar-mesh.conf` can join with no download), and
@@ -45,9 +45,7 @@ running `install_ragnar.sh` by hand.
 Use [Raspberry Pi Imager](https://www.raspberrypi.com/software/):
 
 1. **Choose OS → Use custom**, and select the downloaded
-   `RagnarOS-*.img.xz` (from the project's GitHub Releases), **or** load the
-   Ragnar custom OS list (`os-image/os-list.json`) so "Ragnar OS" appears in the
-   list.
+   `RagnarOS-*.img.xz` from the project's [GitHub Releases](https://github.com/PierreGode/Ragnar/releases).
 2. Click the gear / **Edit Settings** and set, at minimum, a **username and
    password** (Raspberry Pi OS no longer ships a default login) and your
    **Wi-Fi** if you want it to join your network straight away. These are
@@ -78,7 +76,7 @@ Then reach the web UI:
 You usually do not need this. But if you want to set a hostname or turn on an
 attached screen *without* touching the web UI, drop a file named `ragnar.conf`
 onto the card's boot partition before first boot (it is a normal FAT partition —
-edit it on any computer). A template is at `os-image/ragnar.conf.example`:
+edit it on any computer). A minimal example:
 
 ```ini
 hostname=ragnar-01
@@ -93,40 +91,19 @@ the panel on that first boot. The file is read once and then ignored.
 To join the Tailscale mesh unattended, drop a `ragnar-mesh.conf` instead (see
 [mesh.md](mesh.md)).
 
-## Building the image yourself
+## Where the image comes from
 
-The image is built with [pi-gen](https://github.com/RPi-Distro/pi-gen) (the same
-tool Raspberry Pi uses for Raspberry Pi OS). Everything lives under `os-image/`.
+Official Ragnar OS images are produced by a separate, maintained build pipeline
+and published on this repo's [GitHub Releases](https://github.com/PierreGode/Ragnar/releases).
+Each release ships `RagnarOS-*.img.xz` plus a `.sha256` to verify the download.
 
-On a Raspberry Pi (or any arm64 Debian/Ubuntu host) with Docker:
-
-```bash
-sudo ./os-image/build.sh
-```
-
-On an x86 host or CI, the docker path handles the arm64 emulation for you. To
-build natively instead (you supply pi-gen's build dependencies):
-
-```bash
-sudo PIGEN_NATIVE=1 ./os-image/build.sh
-```
-
-The finished image lands in `os-image/.pi-gen/deploy/` as `RagnarOS-*.img.xz`.
-The build needs about 10 GB of free disk and an internet connection.
-
-Useful overrides:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `RAGNAR_REPO_BRANCH` | `main` | Ragnar branch baked into the image |
-| `RAGNAR_REPO_URL` | upstream | Ragnar repo to clone |
-| `PIGEN_REF` | `arm64` | pi-gen branch to pin |
-| `PIGEN_NATIVE` | `0` | `1` = build without Docker |
-
-CI builds it too: pushing a tag like `os-v1.0.0` runs
-`.github/workflows/build-os-image.yml`, which builds the image and attaches
-`RagnarOS-*.img.xz` (plus its `.sha256`) to the matching GitHub Release. A manual
-run (workflow_dispatch) builds and uploads a workflow artifact without releasing.
+The build recipe (pi-gen config and stage scripts) is kept in its own repository
+rather than here, so the official branded image stays hard to clone and rebrand.
+The app itself — everything in *this* repo — is open: you can always install it
+onto your own Raspberry Pi with `install_ragnar.sh` (see the main README). The
+`--image-build` / `--unattended` installer modes used by the pipeline are part
+of this repo and documented in `install_ragnar.sh --help`, so a scripted,
+headless install on real hardware is fully supported without the image.
 
 ## How it is put together
 
@@ -137,7 +114,7 @@ rootfs (`stage0`→`stage2`). Inside the image chroot it:
 2. runs `install_ragnar.sh --image-build` with
    `RAGNAR_PROFILE=headless RAGNAR_INSTALL_ALL_DISPLAYS=1
    RAGNAR_INSTALL_ADVANCED=yes RAGNAR_FORCE_PI=1` (the advanced default is set
-   by `build.sh` from `$RAGNAR_INSTALL_ADVANCED`). `--image-build` means the
+   by the build pipeline from `$RAGNAR_INSTALL_ADVANCED`). `--image-build` means the
    installer only *enables* units (never starts services, never reboots, never
    touches a live kernel), because there is no init in a chroot;
 3. installs and enables `ragnar-firstboot.service`;
@@ -155,9 +132,9 @@ before `ragnar.service`, regenerates anything that must be unique, applies
 
 - Default profile is **headless** with all display drivers present — a script
   install asks you to pick one profile/display up front.
-- Advanced scanners (Nuclei/Nikto/SQLMap/ZAP) are preinstalled by default
-  (`RAGNAR_INSTALL_ADVANCED=yes`); a script install RAM-gates them. Build with
-  `RAGNAR_INSTALL_ADVANCED=no` for a smaller image that installs them on demand.
+- Advanced scanners (Nuclei/Nikto/SQLMap/ZAP) are preinstalled by default; a
+  script install RAM-gates them. A lean image variant omits them, and they then
+  install on demand from the web UI.
 - Everything else — the service, AP onboarding, the updater, sudoers, udev
   rules, system limits — is identical, because the image runs the very same
   installer.
