@@ -14,7 +14,8 @@
 - **Fix kiosk crash-looping on Ragnar OS** (`ragnar-kiosk.service` active but Chromium/X never start, NRestarts climbing). Root cause: a non-root Xorg must open the GPU, the VT and input devices itself, but the Lite service user (`ragnar`) was only in `spi gpio i2c sudo netdev` — never **video/render/input/tty** — so Xorg died with *"no screens found"* and crash-looped. A desktop Pi OS `pi` user has these by default; a Lite image does not.
   - `install_kiosk.sh` now adds the kiosk user to `video,render,input,tty` (only the groups that exist, since `usermod` is all-or-nothing), and if the kiosk is already enabled it `reset-failed` + restarts so the membership takes effect without a reboot.
   - `kiosk_doctor.sh` now reports the kiosk user's groups and flags any missing graphics/input group — so this is self-diagnosing next time.
-- Docs: [Ragnar OS image](ragnar-os.md), [Kiosk Mode — Troubleshooting](kiosk.md).
+- **Kiosk + Tailscale HTTPS publishing can now run together.** They used to be mutually exclusive: `tailscale serve` proxies every tailnet request from `127.0.0.1`, and the kiosk bypass trusted *any* loopback request — so the pair would have exposed the full UI, unauthenticated, to the tailnet, and publishing was refused with kiosk on. The bypass is now scoped to a **per-box secret token** the local kiosk holds (`data/kiosk_token`, injected into the kiosk URL → set as a cookie); a tailnet visitor via `serve` reaches loopback too but can't hold the token, so they still must log in. `install_kiosk.sh` generates the token, the wrapper passes it, and the publish endpoint no longer blocks on `kiosk_enabled`.
+- Docs: [Ragnar OS image](ragnar-os.md), [Kiosk Mode — Troubleshooting](kiosk.md), [Mesh](mesh.md).
 
 ### 2026-10-09
 

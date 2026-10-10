@@ -64,6 +64,23 @@ Disable the toggle to stop and remove it.
 The default URL is `http://localhost:8000`; rotation and cursor-hiding are read
 live from the app config, so changing them only requires the kiosk to relaunch.
 
+## Login bypass & Tailscale publishing
+
+The on-screen browser skips the login so the dashboard is usable without a
+keyboard. That bypass is **scoped to the local kiosk by a secret token**
+(`data/kiosk_token`, generated at install, world-readable but never leaving the
+box): the wrapper adds `?kiosk_token=…` to the URL and the server sets a cookie
+from it. A request that merely arrives on loopback is **not** enough.
+
+This is what lets kiosk mode and **Tailscale HTTPS publishing** (`tailscale
+serve`) run at the same time. `serve` proxies every tailnet visitor through
+`127.0.0.1`, so if the bypass trusted all loopback it would have handed the full
+UI to the tailnet with no login — which is why publishing used to be refused
+while kiosk was on. Now a tailnet visitor reaches loopback too but can't hold
+the token, so they still have to log in, and publishing with kiosk on is allowed.
+Keep the kiosk URL on `localhost` (the default) so the token never travels the
+tailnet.
+
 ## Supported boards
 
 Tested and tuned for **Pi 4 and Pi 5** (2 GB and up). Pi Zero class boards are

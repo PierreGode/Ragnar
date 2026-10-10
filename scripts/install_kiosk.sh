@@ -454,6 +454,24 @@ if [[ ${#kiosk_wanted_groups[@]} -gt 0 ]]; then
     fi
 fi
 
+# Local kiosk auth-bypass token. The on-screen browser passes this to skip
+# login; the server only trusts it from loopback, so a tailnet visitor proxied
+# through `tailscale serve` (who can't read this file) still has to log in — the
+# server no longer blanket-trusts every loopback request, which is what lets
+# kiosk mode and Tailscale HTTPS publishing run together. Local-readable is fine:
+# any local user already has shell, and the token only gates the loopback bypass.
+KIOSK_TOKEN_FILE="$REPO_ROOT/data/kiosk_token"
+if [[ ! -s "$KIOSK_TOKEN_FILE" ]]; then
+    mkdir -p "$(dirname "$KIOSK_TOKEN_FILE")"
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 32 > "$KIOSK_TOKEN_FILE" 2>/dev/null
+    else
+        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$KIOSK_TOKEN_FILE"
+    fi
+    chmod 0644 "$KIOSK_TOKEN_FILE" 2>/dev/null || true
+    echo "[kiosk-install] generated kiosk auth-bypass token ($KIOSK_TOKEN_FILE)"
+fi
+
 # Pre-create Xorg log dir for the kiosk user
 install -d -o "$KIOSK_USER" -g "$KIOSK_USER" -m 0755 \
     "$KIOSK_HOME/.local" "$KIOSK_HOME/.local/share" "$KIOSK_HOME/.local/share/xorg"
