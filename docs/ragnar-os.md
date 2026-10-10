@@ -33,6 +33,12 @@ running `install_ragnar.sh` by hand.
   gate just keeps them idle. Want a smaller image instead? Build with
   `RAGNAR_INSTALL_ADVANCED=no ./os-image/build.sh` and those tools install on
   demand from the web UI later.
+- Mesh- and attack-ready out of the box: the **Tailscale** client is baked in
+  (binary only — it never joins a tailnet during imaging, so the web UI Mesh tab
+  or a `/boot/firmware/ragnar-mesh.conf` can join with no download), and
+  **AirSnitch** (the MacStealer / port-steal research tool) is cloned and built
+  into `tools/airsnitch` so the Pentest tab's AirSnitch runs offline. Both are
+  normally left as on-demand installs; the image bakes them in the stage script.
 
 ## Flashing it
 
