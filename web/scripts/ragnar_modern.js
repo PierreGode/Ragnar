@@ -39054,8 +39054,8 @@ function renderPiConnect(pc) {
         dot = 'bg-amber-400';
         headline = 'Running, not signed in';
         detail = `The service is on but no account is linked, so you can't reach this unit ` +
-                 `through it yet. Run <code class="text-gray-400">rpi-connect signin</code>${asUser} ` +
-                 `and open the link it prints to finish. Until then it is not a usable fallback.`;
+                 `through it yet. Paste an auth key below to finish signing in${asUser}. ` +
+                 `Until then it is not a usable fallback.`;
     } else {
         // Off on THIS unit. It is per-unit and per-user: signing in on another
         // Pi does nothing here. The linger note is the common headless gotcha —
@@ -39064,11 +39064,31 @@ function renderPiConnect(pc) {
         const lingerUser = pc.user || 'pi';
         headline = 'Installed but off (this unit)';
         detail = `Pi Connect isn't running for <code class="text-gray-400">${escapeHtml(lingerUser)}</code> ` +
-                 `on this unit — it is per-unit, so signing in on another Pi doesn't count. On this box, ` +
-                 `as that user: <code class="text-gray-400">rpi-connect on</code>, ` +
-                 `<code class="text-gray-400">rpi-connect signin</code> (open the link), and ` +
-                 `<code class="text-gray-400">sudo loginctl enable-linger ${escapeHtml(lingerUser)}</code> ` +
-                 `so it survives logout and reboot. Until then it is not a usable fallback.`;
+                 `on this unit — it is per-unit, so signing in on another Pi doesn't count. Paste an auth ` +
+                 `key below to sign in: it turns the service on and enables linger (so it survives logout ` +
+                 `and reboot) for you. Until then it is not a usable fallback.`;
+    }
+
+    // Interactive controls: sign in with an auth key (rpi-connect 2.12+,
+    // non-interactive) straight from here — no terminal. Only when installed.
+    let controls = '';
+    if (pc.installed && pc.signed_in) {
+        controls = `<div class="mt-3">
+            <button onclick="piConnectSignout()" class="bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm">Sign out</button>
+        </div>`;
+    } else if (pc.installed) {
+        controls = `<div class="mt-3 space-y-2">
+            <label class="block text-xs text-gray-400">Auth key
+                <span class="text-gray-600">— generate one at
+                    <a href="https://connect.raspberrypi.com" target="_blank" rel="noopener" class="text-Ragnar-400 hover:underline">connect.raspberrypi.com</a>
+                    (your account → Auth keys), then paste it here. No browser device-flow, no terminal.</span>
+            </label>
+            <div class="flex flex-wrap gap-2">
+                <input id="piconnect-authkey" type="password" autocomplete="off" spellcheck="false" placeholder="paste Raspberry Pi Connect auth key"
+                       class="flex-1 min-w-0 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                <button onclick="piConnectSignin()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Sign in</button>
+            </div>
+        </div>`;
     }
 
     el.innerHTML = `<div class="flex items-start justify-between gap-3">
@@ -39079,8 +39099,49 @@ function renderPiConnect(pc) {
                 </div>
                 <p class="text-xs text-gray-400 mt-2">${detail}</p>
                 ${pc.detail ? `<p class="text-[11px] text-gray-600 mt-1 font-mono truncate">${escapeHtml(pc.detail)}</p>` : ''}
+                ${controls}
             </div>
         </div>`;
+}
+
+// Sign in to Raspberry Pi Connect non-interactively with an auth key generated
+// at connect.raspberrypi.com. The backend enables linger + the per-user service
+// so it works headless; the key is sent once and never stored client-side.
+async function piConnectSignin() {
+    const inp = document.getElementById('piconnect-authkey');
+    const key = inp && inp.value ? inp.value.trim() : '';
+    if (!key) { showNotification('Paste a Raspberry Pi Connect auth key first', 'info'); return; }
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    if (btn) { btn.disabled = true; btn.textContent = 'Signing in…'; }
+    try {
+        const d = await postAPI('/api/mesh/pi-connect/signin', { auth_key: key });
+        if (d && d.success) {
+            if (inp) inp.value = '';
+            showNotification('Signed in to Raspberry Pi Connect', 'success');
+            refreshMesh(true);
+        } else {
+            showNotification('Pi Connect sign-in failed: ' + ((d && d.message) || 'unknown error'), 'error');
+        }
+    } catch (e) {
+        showNotification('Pi Connect sign-in failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Sign in'; }
+    }
+}
+
+async function piConnectSignout() {
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    if (btn) { btn.disabled = true; btn.textContent = 'Signing out…'; }
+    try {
+        const d = await postAPI('/api/mesh/pi-connect/signout', {});
+        showNotification(d && d.success ? 'Signed out of Raspberry Pi Connect'
+                                        : 'Sign-out failed', (d && d.success) ? 'success' : 'error');
+        refreshMesh(true);
+    } catch (e) {
+        showNotification('Sign-out failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Sign out'; }
+    }
 }
 
 async function refreshMesh(force) {

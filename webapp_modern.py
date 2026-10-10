@@ -6534,6 +6534,40 @@ def mesh_routes():
     return jsonify({'success': ok, 'message': message}), (200 if ok else 400)
 
 
+@app.route('/api/mesh/pi-connect/signin', methods=['POST'])
+def mesh_pi_connect_signin():
+    """Sign in to Raspberry Pi Connect with an auth key (non-interactive).
+
+    The operator generates a key at connect.raspberrypi.com and pastes it; we
+    run `rpi-connect signin -auth-key` for the login user (enabling linger so it
+    works headless). No browser device-flow, no terminal. The key is never
+    logged or echoed back.
+    """
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    data = request.get_json(silent=True) or {}
+    auth_key = (data.get('auth_key') or '').strip()
+    if not auth_key:
+        return jsonify({'success': False, 'message': 'An auth key is required.'}), 400
+    r = mesh_manager.pi_connect_signin(auth_key)
+    return jsonify({'success': bool(r.get('ok')),
+                    'signed_in': bool(r.get('signed_in')),
+                    'message': r.get('detail') or r.get('error') or ''}), \
+        (200 if r.get('ok') else 400)
+
+
+@app.route('/api/mesh/pi-connect/signout', methods=['POST'])
+def mesh_pi_connect_signout():
+    """Sign out of Raspberry Pi Connect on this node."""
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    r = mesh_manager.pi_connect_signout()
+    return jsonify({'success': bool(r.get('ok')),
+                    'signed_in': bool(r.get('signed_in')),
+                    'message': r.get('detail') or r.get('error') or ''}), \
+        (200 if r.get('ok') else 400)
+
+
 @app.route('/api/rusense/geofence', methods=['GET'])
 def rusense_geofence_status():
     """Diagnostic: the geofence's last verdict + how many node corners are
