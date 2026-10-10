@@ -25737,6 +25737,739 @@ def _lldp_selftest():
 
 
 # ==========================================================================
+# OAM Watch — passive IEEE 802.3ah Link OAM abuse monitor (vendored python/oamwatch/)
+# ==========================================================================
+# Adapts the vendored oamwatch package. Link OAM (EFM OAM, IEEE 802.3 Clause 57) is
+# the per-link operations channel on slow-protocols EtherType 0x8809 subtype 0x03 —
+# LACP's sibling (Ragnar's LACP Watch owns subtypes 0x01/0x02). It is cleartext,
+# unauthenticated, link-local, and capped by the standard at 10 frames/s. The
+# headline primitive is Loopback Control: ONE forged frame puts the peer into remote
+# loopback and sends its higher-layer egress to DISCARD — an instant link blackhole
+# (OAM-060, confirmed by OAM-062). The other abuse: forged Dying Gasp / Critical
+# Event / Link Fault flags that drive protection switches (a single assertion is
+# often real; OAM-066 is the repeated assert-and-clear while the session stays up),
+# discovery restart / peer substitution / capability escalation, cleartext Clause 30
+# MIB reads (Variable Request/Response), event-sequence replay, a second OAM speaker
+# on a point-to-point link, and the 10 PDU/s cap exceeded. Structural OAM-04x/05x
+# codes catch grammar and bounds violations. Posture OAM-02x are capability notes.
+#
+# There is NO CVE backbone (no Link OAM CVE clears the bar), so nothing here names
+# one. The vantage is narrow: Link OAM lives on one provider-to-CPE / metro handoff
+# link and is config-gated, so on most ports this sits silent — correctly. The engine
+# is kept per interface across scans (in memory), because its session state — peer
+# identity, flags, event sequence, flap history — is learned from the link itself and
+# a 30 s window alone would never see a 300 s flap or a peer swapped between scans.
+# 802.1ag CFM / Y.1731 (EtherType 0x8902) is a different protocol and out of scope.
+_OAM_PY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+_oam_lock = threading.Lock()
+_oam_engines = {}                  # iface -> persistent oamwatch Engine
+_OAM_BPF = 'ether proto 0x8809 and ether[14] = 3'
+_OAM_SEV_RANK = {'INFO': 0, 'LOW': 1, 'MEDIUM': 2, 'HIGH': 3, 'CRITICAL': 4}
+# A single failure-flag assertion is commonly legitimate (a real power loss sends a
+# Dying Gasp), so on its own it is 'suspicious', not 'attack'. OAM-066 (flapping) is
+# the forgery signal and is critical in the registry.
+_OAM_FLAG_CODES = ('OAM-063', 'OAM-064', 'OAM-065')
+
+
+def _oam_import():
+    """Import the vendored oamwatch package (relative imports inside; python/ must be
+    on sys.path). Returns (engine, parser, registry, config, sensor) modules. The
+    sensor's live AF_PACKET path imports socket lazily and is never used here."""
+    if _OAM_PY_DIR not in sys.path:
+        sys.path.insert(0, _OAM_PY_DIR)
+    from oamwatch import engine as _e, parser as _p, registry as _r, config as _c
+    from oamwatch import sensor as _s
+    return _e, _p, _r, _c, _s
+
+
+def _oam_summarize(findings):
+    """Collapse findings into one row per (code, source MAC) with a count."""
+    rows = {}
+    for f in findings:
+        k = (f.code, f.src)
+        r = rows.get(k)
+        if r is None:
+            rows[k] = {'code': f.code, 'name': f.name, 'klass': f.klass,
+                       'severity': f.severity.lower(), 'src': f.src,
+                       'detail': f.detail, 'count': 1, 'first_ts': f.ts}
+        else:
+            r['count'] += 1
+            r['detail'] = f.detail          # keep the latest wording (e.g. rates)
+    return sorted(rows.values(), key=lambda r: (-_OAM_SEV_RANK.get(r['severity'].upper(), 0),
+                                                r['code'], r['src']))
+
+
+def _oam_verdict(rows, frames):
+    """no-traffic < clean / observed < exposure < suspicious < attack. Posture notes
+    (capability bits) alone are 'observed'. A critical finding (loopback enable /
+    remote-loopback state, flag flapping, peer substitution, a second speaker) or a
+    high non-flag finding is 'attack'; a single failure-flag assertion or a medium
+    finding is 'suspicious'; a low structural finding is 'exposure'."""
+    sev_attack = False
+    sev = set()
+    for r in rows:
+        s = r['severity']
+        if r['klass'] == 'posture':
+            sev.add('posture')
+            continue
+        if s == 'critical' or (s == 'high' and r['code'] not in _OAM_FLAG_CODES):
+            sev_attack = True
+        elif s in ('high', 'medium'):
+            sev.add('medium')
+        elif s == 'low':
+            sev.add('low')
+    if sev_attack:
+        return 'attack'
+    if 'medium' in sev:
+        return 'suspicious'
+    if 'low' in sev:
+        return 'exposure'
+    if 'posture' in sev:
+        return 'observed'
+    return 'clean' if frames else 'no-traffic'
+
+
+def _oam_peers(engine, parser_mod):
+    names = {0x01: 'active', 0x02: 'unidirectional', 0x04: 'loopback',
+             0x08: 'link-events', 0x10: 'variable-retrieval'}
+    out = []
+    for mac, p in sorted(engine.peers.items()):
+        cfg = p.config
+        out.append({'src': mac, 'pdus': p.pdu_count, 'operational': bool(p.operational),
+                    'remote_loopback': bool(p.in_remote_loopback),
+                    'oui': p.identity[0].hex(':') if p.identity else None,
+                    'capabilities': [n for b, n in names.items() if cfg is not None and cfg & b],
+                    'flags': ('0x%04x' % p.last_flags) if p.last_flags is not None else None})
+    return out
+
+
+def _oam_normalize(r):
+    """oamwatch summary row -> the guard finding shape _guard_emit_jsonl expects."""
+    return {'code': r['code'], 'name': r['name'],
+            'severity': r['severity'].upper(),
+            'klass': 'ATTACK' if r['klass'] == 'abuse' else 'MALFORMED'
+            if r['klass'] == 'structural' else 'EXPOSURE',
+            'src': r['src'], 'cves': [],
+            'detail': {'count': r['count'], 'class': r['klass'], 'text': r['detail']}}
+
+
+def _oam_analyze(pcap, engine):
+    """Replay a pcap through `engine` (persistent or fresh). Returns (new findings,
+    OAM frames seen)."""
+    _e, P, _r, _c, S = _oam_import()
+    new = []
+    frames = 0
+    for ts, raw in S.read_pcap(pcap):
+        if not P.is_oam_frame(raw):
+            continue
+        frames += 1
+        try:
+            pdu = P.parse_frame(raw, strict_tail=engine.cfg.strict_tail, ts=ts)
+            if pdu is not None:
+                new.extend(engine.observe(pdu))
+        except Exception:
+            continue              # one hostile frame must never kill the scan
+    return new, frames
+
+
+def do_oam_watch(interface=None, seconds=30, pcap=None, quick=False):
+    """Passive IEEE 802.3ah Link OAM scan — detection-only, never transmits. Flags the
+    Loopback Control link-blackhole primitive, forged/flapping failure flags,
+    discovery restart and peer substitution, cleartext Clause 30 MIB reads, event
+    replay, a second OAM speaker, rate-cap floods and malformed OAMPDUs. Link OAM is
+    point-to-point and config-gated: it is only visible on an OAM-enabled link.
+    `pcap` replays a file through a fresh engine instead of capturing."""
+    E, P, _R, C, _S = _oam_import()
+    iface = None
+    tmp = None
+    if pcap:
+        if not os.path.isfile(pcap):
+            return {'success': False, 'error': 'pcap not found: %s' % pcap}
+        seconds = 0
+        engine = E.Engine(C.Config())
+    else:
+        iface = interface if _valid_iface(interface or '') else _capture_iface()
+        if not iface:
+            return {'success': False, 'error': 'no interface to capture on'}
+        seconds = _clamp_int(seconds, 30, 5, 65)
+        if not _have('tcpdump'):
+            return {'success': False, 'interface': iface,
+                    'error': 'tcpdump is not installed. Click Install to add it.',
+                    'missing_tool': 'tcpdump'}
+        import tempfile
+        fd, tmp = tempfile.mkstemp(suffix='.pcap')
+        os.close(fd)
+        # Promiscuous (no -p): 01:80:C2:00:00:02 is a group the host never joins.
+        # -Q in: only the far end's OAMPDUs — this unit is not the peer.
+        res = _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-Q', 'in',
+                    '-s', '65535', '-c', '5000', '-w', tmp, _OAM_BPF],
+                   timeout=seconds + 8)
+        if (os.path.getsize(tmp) <= 24 and res['err'] and any(
+                k in res['err'].lower() for k in ('permission', "couldn't",
+                                                  'no such device', 'syntax error'))):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return {'success': False, 'interface': iface, 'error': res['err'].strip()[:200]}
+        pcap = tmp
+        engine = None
+    try:
+        with _oam_lock:
+            if engine is None:
+                engine = _oam_engines.get(iface)
+                if engine is None:
+                    engine = _oam_engines[iface] = E.Engine(C.Config())
+            new, frames = _oam_analyze(pcap, engine)
+            peers = _oam_peers(engine, P)
+    except Exception as e:
+        return {'success': False, 'interface': iface,
+                'error': 'oam analysis failed: %s: %s' % (type(e).__name__, e)}
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    rows = _oam_summarize(new)
+    verdict = _oam_verdict(rows, frames)
+    reasons = []
+    for r in rows:
+        if r['klass'] == 'posture' and len(rows) > 1 and reasons:
+            continue
+        reasons.append('%s: %s — %s (%s×)' % (r['code'], r['name'], r['src'], r['count']))
+        if len(reasons) >= 8:
+            break
+    if not reasons:
+        if not frames:
+            reasons = ['No Link OAM on this port (slow-protocols 0x8809 subtype 3). '
+                       'Link OAM is point-to-point and config-gated — it is normally '
+                       'only seen on a metro / access handoff link']
+        else:
+            reasons = ['Link OAM seen from %d peer(s); every OAMPDU was well-formed and '
+                       'no loopback, flag forgery, re-peering or MIB read was seen'
+                       % len(peers)]
+    by_sev = {}
+    for r in rows:
+        by_sev[r['severity']] = by_sev.get(r['severity'], 0) + 1
+    result = {'success': True, 'module': 'oam_watch', 'interface': iface,
+              'seconds': seconds, 'verdict': verdict, 'reasons': reasons,
+              'findings': rows, 'by_severity': by_sev, 'packet_count': frames,
+              'peers': peers}
+    # Structural and abuse findings at MEDIUM and up reach Watchtower; posture notes
+    # stay in the card.
+    alerts = [_oam_normalize(r) for r in rows if r['klass'] != 'posture'
+              and _OAM_SEV_RANK.get(r['severity'].upper(), 0) >= 2]
+    if not quick and iface and alerts:
+        _guard_emit_jsonl('oam_watch', {'interface': iface, 'findings': alerts})
+    return result
+
+
+def do_oam_reset(interface=None):
+    """Forget the in-memory Link OAM session state (all interfaces, or one) — use after
+    a legitimate peer swap so the next scan does not report a peer substitution."""
+    with _oam_lock:
+        if interface:
+            _oam_engines.pop(interface, None)
+        else:
+            _oam_engines.clear()
+    return {'success': True, 'reset': interface or 'all'}
+
+
+def _oam_selftest():
+    """Adapter scenarios over the vendored engine with the upstream test frames
+    (offline, no root), plus the module's own tiers out-of-process: the 297-check
+    conformance harness (asserts scapy is NOT imported, so it cannot run in this
+    process) and, with scapy + tshark present, the 163-check Wireshark cross-check."""
+    import importlib.util
+    import tempfile
+    scenarios = []
+
+    def check(name, cond):
+        scenarios.append({'name': name, 'pass': bool(cond)})
+
+    try:
+        E, P, R, C, S = _oam_import()
+        spec = importlib.util.spec_from_file_location(
+            '_oamwatch_test_frames', os.path.join(_OAM_PY_DIR, 'oamwatch_tests', 'frames.py'))
+        Fr = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(Fr)
+    except Exception as e:
+        return {'success': False, 'scenarios': [
+            {'name': 'oamwatch import failed: %s' % e, 'pass': False}]}
+
+    split = {}
+    for _n, k, _s, _d in R.REGISTRY.values():
+        split[k] = split.get(k, 0) + 1
+    check('registry: 38 codes (5 posture / 18 structural / 15 abuse)',
+          len(R.REGISTRY) == 38 and split == {'posture': 5, 'structural': 18, 'abuse': 15})
+
+    def replay(frames, engine=None, step=0.2):
+        eng = engine or E.Engine(C.Config())
+        fd, path = tempfile.mkstemp(suffix='.pcap')
+        os.close(fd)
+        try:
+            S.write_pcap(path, frames, interval=step)
+            new, n = _oam_analyze(path, eng)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        rows = _oam_summarize(new)
+        return rows, n, eng
+
+    def codes(rows):
+        return {r['code'] for r in rows}
+
+    rows, n, _e = replay(Fr.clean_set())
+    check('clean reference set: no structural or abuse finding (posture notes only) '
+          '-> observed', n == len(Fr.clean_set()) and
+          all(r['klass'] == 'posture' for r in rows) and _oam_verdict(rows, n) == 'observed')
+    check('verdict: nothing captured -> no-traffic', _oam_verdict([], 0) == 'no-traffic')
+    nonoam = Fr.eth(0x00, b'\x00', subtype=0x01)            # an LACP-subtype frame
+    rows, n, _e = replay([nonoam])
+    check('LACP (slow-protocols subtype 1) is not parsed as OAM', n == 0 and not rows)
+
+    rows, n, _e = replay([Fr.information(), Fr.loopback_control(command=0x01)])
+    check('Loopback Control enable -> OAM-060, verdict attack (link-blackhole primitive)',
+          'OAM-060' in codes(rows) and _oam_verdict(rows, n) == 'attack')
+    rows, n, _e = replay([Fr.information([Fr.info_tlv(state=0x01)])])
+    check('peer reports parser=loopback -> OAM-062 remote-loopback confirmed',
+          'OAM-062' in codes(rows) and _oam_verdict(rows, n) == 'attack')
+    rows, n, _e = replay([Fr.information(flags=Fr.FLAGS_OPERATIONAL | Fr.F_DYING_GASP)])
+    check('a single Dying Gasp -> OAM-063 but only suspicious (often a real power loss)',
+          'OAM-063' in codes(rows) and _oam_verdict(rows, n) == 'suspicious')
+    flap = []
+    for _i in range(3):
+        flap += [Fr.information(flags=Fr.FLAGS_OPERATIONAL | Fr.F_DYING_GASP),
+                 Fr.information(flags=Fr.FLAGS_OPERATIONAL)]
+    rows, n, _e = replay(flap)
+    check('Dying Gasp asserted+cleared 3x with the session up -> OAM-066 flapping, attack',
+          'OAM-066' in codes(rows) and _oam_verdict(rows, n) == 'attack')
+    rows, n, _e = replay([Fr.keepalive(src=Fr.SRC_A), Fr.keepalive(src=Fr.SRC_B)])
+    check('two OAM speakers on a point-to-point link -> OAM-074', 'OAM-074' in codes(rows))
+    rows, n, _e = replay([Fr.keepalive() for _i in range(16)], step=0.05)
+    check('16 OAMPDUs in under a second -> OAM-070 rate cap; 4 do not',
+          'OAM-070' in codes(rows) and
+          'OAM-070' not in codes(replay([Fr.keepalive() for _i in range(4)], step=0.05)[0]))
+    rows, n, _e = replay([Fr.variable_response()])
+    check('Variable Response with MIB contents -> OAM-072 cleartext leak',
+          'OAM-072' in codes(rows))
+    rows, n, _e = replay([Fr.event_notification(seq=5), Fr.event_notification(seq=5)])
+    check('repeated Event Notification sequence -> OAM-073 replay',
+          'OAM-073' in codes(rows))
+    bad = Fr.information([bytes([0x01, 0x40]) + b'\x00' * 8])
+    rows, n, _e = replay([bad])
+    check('TLV length past the OAMPDU -> structural finding, verdict attack',
+          {'OAM-040', 'OAM-042'} & codes(rows) and _oam_verdict(rows, n) == 'attack')
+    rows, n, _e = replay([Fr.information([Fr.info_tlv(version=0x02)])])
+    check('Information TLV version != 1 -> OAM-054 (low) -> exposure',
+          'OAM-054' in codes(rows) and _oam_verdict(rows, n) == 'exposure')
+
+    # Persistent engine: session state carries across scan windows.
+    rows1, _n, eng = replay([Fr.information([Fr.info_tlv(oui=Fr.OUI_A)])])
+    rows2, _n, _e = replay([Fr.information([Fr.info_tlv(oui=Fr.OUI_B)])], engine=eng)
+    check('peer identity swapped between two scans -> OAM-068 on the second scan '
+          '(engine kept per interface)', 'OAM-068' in codes(rows2)
+          and 'OAM-068' not in codes(rows1))
+    check('peer table: OUI, capabilities and operational state reported',
+          any(p['oui'] and 'loopback' in p['capabilities'] and p['operational']
+              for p in _oam_peers(eng, P)))
+    r = do_oam_reset('selftest0')
+    check('reset clears per-interface session state', r.get('success'))
+
+    # Out-of-process tiers.
+    tdir = os.path.join(_OAM_PY_DIR, 'oamwatch_tests')
+    r = _run([sys.executable, os.path.join(tdir, 'conformance.py')], timeout=120)
+    tail = (r['out'] or r['err'] or '').strip().splitlines()[-1:] or ['']
+    check('conformance tier: %s' % tail[0][:90], r['rc'] == 0)
+    xcheck = {'ran': False, 'reason': 'needs scapy and tshark'}
+    if _have_scapy() and _have('tshark'):
+        r = _run([sys.executable, os.path.join(tdir, 'xcheck.py')], timeout=180)
+        tail = (r['out'] or '').strip().splitlines()[-1:] or ['']
+        check('Wireshark cross-check tier: %s' % tail[0][:90], r['rc'] == 0)
+        xcheck = {'ran': True, 'pass': r['rc'] == 0}
+    return {'success': all(s['pass'] for s in scenarios), 'scenarios': scenarios,
+            'scapy': xcheck}
+
+# ==========================================================================
+# CFM Watch — passive IEEE 802.1ag CFM / ITU-T Y.1731 service-OAM monitor
+# (vendored python/cfmwatch.py, stdlib-only, unmodified)
+# ==========================================================================
+# CFM is the service layer of carrier Ethernet OAM (EtherType 0x8902 inside the
+# service VLAN; 802.1Q and QinQ parsed): maintenance domains at levels 0-7,
+# continuity checks between MEPs, and the Y.1731 overlay (AIS / LCK / CSF, APS
+# protection switching, loopback, linktrace, performance). All of it is cleartext
+# and unauthenticated, so any station on an EVC trunk can forge it: a forged APS
+# moves production traffic onto the protection path or locks protection out
+# (CFM-081/083/087), a forged AIS hides a real fault (CFM-061/063), a forged CCM
+# raises a cross-connect / unexpected-MEP defect (CFM-040/041/045/046), and a
+# linktrace sweep maps the provider's MIP chain (CFM-103/104).
+#
+# CVE backbone: CVE-2020-1639 (Junos crafted Ethernet OAM cores cfmd) is CFM-140,
+# raised off the Class A bounds violations; CVE-2025-52961 (Junos Evolved cfmd
+# CPU / cfmman leak from VALID traffic) is CFM-122/141, a rate correlation with LOW
+# confidence — it cannot tell the CVE from any other heavy CFM talker. Huawei's
+# Y.1731 DoS has no published trigger field and so no code; a Cisco IOS XR CFM bug
+# is rejected below the CVSS bar. Both stay context only.
+#
+# The engine is kept per interface across scans (in memory): MA / MEP state,
+# APS group ownership and the CCM history that disarms CFM-061 are learned from
+# the link, and a 30 s window alone would see neither an established MEP moving to
+# a new MAC between scans nor an AIS from a source that has CCM'd before. Each scan
+# reports only what it added. 802.3ah Link OAM (EtherType 0x8809) is OAM Watch.
+_CFMW_PY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+_cfmw_lock = threading.Lock()
+_cfmw_engines = {}                 # iface -> persistent cfmwatch Engine
+# 0x8902 untagged, behind one tag, or behind QinQ (libpcap's `vlan` also reads the
+# kernel-offloaded tag).
+_CFMW_BPF = 'ether proto 0x8902 or (vlan and (ether proto 0x8902 or (vlan and ether proto 0x8902)))'
+_CFMW_SEV_RANK = {'info': 0, 'low': 1, 'medium': 2, 'high': 3, 'critical': 4}
+
+
+def _cfmw_import():
+    """Import the vendored cfmwatch module (python/ must be on sys.path). Its live
+    AF_PACKET path is never used here — capture is tcpdump, like every in-app watch."""
+    if _CFMW_PY_DIR not in sys.path:
+        sys.path.insert(0, _CFMW_PY_DIR)
+    import cfmwatch
+    return cfmwatch
+
+
+def _cfmw_ceiling(v):
+    """MD-level ceiling (0-7) arms CFM-021; anything else leaves it off."""
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return None
+    return v if 0 <= v <= 7 else None
+
+
+def _cfmw_analyze(pcap, engine):
+    """Replay a pcap through `engine` (persistent or fresh) and return (rows added by
+    this scan, CFM frames seen). The engine collapses findings per (code, context)
+    with a running count, so a row's count here is this scan's delta."""
+    cw = _cfmw_import()
+    before = {k: f.count for k, f in engine.findings.items()}
+    frames = 0
+    for i, (ts, raw) in enumerate(cw.read_pcap(pcap)):
+        try:
+            if engine.feed_raw(raw, i, ts) is not None:
+                frames += 1
+        except Exception:
+            continue              # one hostile frame must never kill the scan
+    if frames:
+        engine.finalize()         # posture inventory roll-up (CFM-160..163)
+    rows = []
+    for k, f in engine.findings.items():
+        delta = f.count - before.get(k, 0)
+        if delta <= 0:
+            continue
+        s = f.spec
+        rows.append({'code': f.code, 'name': s.title, 'severity': s.severity.lower(),
+                     'klass': s.cls, 'class_name': cw.CLASS_NAMES.get(s.cls, s.cls),
+                     'confidence': s.confidence.lower(), 'cves': list(s.cves),
+                     'src': (f.evidence or {}).get('src') or '', 'context': f.key,
+                     'detail': f.detail, 'caveat': s.caveat, 'count': delta})
+    rows.sort(key=lambda r: (-_CFMW_SEV_RANK.get(r['severity'], 0), r['code'], r['context']))
+    return rows, frames
+
+
+def _cfmw_verdict(rows, frames):
+    """no-traffic < clean < observed < suspicious < attack. Class P inventory and the
+    INFO 'APS frame observed' note are by-design visibility on a carrier handoff, not
+    weaknesses, so they alone are 'clean'. LOW codes are real operational events (RDI,
+    AIS, CSF, LBM / LTM seen) -> 'observed'. MEDIUM, or a HIGH resting on LOW-confidence
+    evidence (CFM-122 rate correlation), -> 'suspicious'. CRITICAL or any other HIGH
+    -> 'attack'."""
+    level = 0
+    for r in rows:
+        s = r['severity']
+        if s == 'critical' or (s == 'high' and r['confidence'] != 'low'):
+            return 'attack'
+        if s in ('high', 'medium'):
+            level = max(level, 2)
+        elif s == 'low':
+            level = max(level, 1)
+    if level == 2:
+        return 'suspicious'
+    if level == 1:
+        return 'observed'
+    return 'clean' if frames else 'no-traffic'
+
+
+def _cfmw_inventory(engine):
+    """Maintenance endpoints, MD levels and service VLANs learned so far."""
+    cw = _cfmw_import()
+    meps = [dict(engine.inv_meps[k]) for k in sorted(engine.inv_meps)][:40]
+    vlans = [{'tags': list(vk) or ['untagged'], 'frames': c}
+             for vk, c in sorted(engine.inv_vlans.items())]
+    return {'meps': meps, 'levels': sorted(engine.inv_levels), 'vlans': vlans,
+            'y1731': sorted(cw.OPCODE_NAMES.get(o, str(o)) for o in engine.inv_y1731)}
+
+
+def _cfmw_normalize(r):
+    """cfmwatch row -> the guard finding shape _guard_emit_jsonl expects."""
+    return {'code': r['code'], 'name': r['name'], 'severity': r['severity'].upper(),
+            'klass': 'MALFORMED' if r['klass'] == 'A' else 'ATTACK',
+            'src': r['src'], 'cves': r['cves'],
+            'detail': {'count': r['count'], 'class': r['class_name'],
+                       'confidence': r['confidence'], 'context': r['context'],
+                       'text': r['detail']}}
+
+
+def do_cfm_watch(interface=None, seconds=30, pcap=None, md_ceiling=None, quick=False):
+    """Passive IEEE 802.1ag CFM / Y.1731 scan — detection-only, never transmits. Flags
+    forged APS protection switching (forced / lockout / uncorroborated Signal Fail /
+    churn), forged AIS and LCK, CCM forgery (MAID mismatch, duplicate or moved MEP,
+    unexpected MEP), MD-level hierarchy violations, LBM floods and linktrace sweeps,
+    malformed CFM (CVE-2020-1639 shape) and the CVE-2025-52961 load pattern. CFM only
+    appears on a carrier / metro Ethernet service handoff. `md_ceiling` (0-7) arms
+    CFM-021; `pcap` replays a file through a fresh engine instead of capturing."""
+    cw = _cfmw_import()
+    ceiling = _cfmw_ceiling(md_ceiling)
+    iface = None
+    tmp = None
+    engine = None
+    if pcap:
+        if not os.path.isfile(pcap):
+            return {'success': False, 'error': 'pcap not found: %s' % pcap}
+        seconds = 0
+        engine = cw.Engine(cw.Config(md_ceiling=ceiling))
+    else:
+        iface = interface if _valid_iface(interface or '') else _capture_iface()
+        if not iface:
+            return {'success': False, 'error': 'no interface to capture on'}
+        seconds = _clamp_int(seconds, 30, 5, 65)
+        if not _have('tcpdump'):
+            return {'success': False, 'interface': iface,
+                    'error': 'tcpdump is not installed. Click Install to add it.',
+                    'missing_tool': 'tcpdump'}
+        import tempfile
+        fd, tmp = tempfile.mkstemp(suffix='.pcap')
+        os.close(fd)
+        # Promiscuous (no -p): the 01:80:C2:00:00:3x CFM groups are never joined and
+        # LBM / LTR are unicast to the MEP. -Q in: only frames from the wire.
+        res = _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-Q', 'in',
+                    '-s', '65535', '-c', '20000', '-w', tmp, _CFMW_BPF],
+                   timeout=seconds + 8)
+        if (os.path.getsize(tmp) <= 24 and res['err'] and any(
+                k in res['err'].lower() for k in ('permission', "couldn't",
+                                                  'no such device', 'syntax error'))):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            return {'success': False, 'interface': iface, 'error': res['err'].strip()[:200]}
+        pcap = tmp
+    try:
+        with _cfmw_lock:
+            if engine is None:
+                engine = _cfmw_engines.get(iface)
+                if engine is None:
+                    engine = _cfmw_engines[iface] = cw.Engine(cw.Config())
+                engine.cfg.md_ceiling = ceiling
+            rows, frames = _cfmw_analyze(pcap, engine)
+            inventory = _cfmw_inventory(engine)
+    except Exception as e:
+        return {'success': False, 'interface': iface,
+                'error': 'cfm analysis failed: %s: %s' % (type(e).__name__, e)}
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    verdict = _cfmw_verdict(rows, frames)
+    reasons = []
+    for r in rows:
+        if r['klass'] == 'P':
+            continue
+        cves = [c for c in r['cves'] if c not in r['name']]
+        cve = (' [%s]' % ', '.join(cves)) if cves else ''
+        reasons.append('%s: %s%s — %s (%s×)' % (r['code'], r['name'], cve,
+                                                r['src'] or r['context'], r['count']))
+        if len(reasons) >= 8:
+            break
+    if not reasons:
+        if not frames:
+            reasons = ['No CFM on this port (EtherType 0x8902, untagged or VLAN-tagged). '
+                       'CFM / Y.1731 service OAM is normally only seen on a carrier or '
+                       'metro Ethernet service handoff']
+        else:
+            reasons = ['CFM seen from %d maintenance endpoint(s) at MD level(s) %s; every '
+                       'frame was well-formed and no forgery, protection-switch abuse, '
+                       'linktrace sweep or flood was seen'
+                       % (len(inventory['meps']),
+                          ', '.join(str(x) for x in inventory['levels']) or '—')]
+    by_sev = {}
+    for r in rows:
+        by_sev[r['severity']] = by_sev.get(r['severity'], 0) + 1
+    result = {'success': True, 'module': 'cfm_watch', 'interface': iface,
+              'seconds': seconds, 'verdict': verdict, 'reasons': reasons,
+              'findings': rows, 'by_severity': by_sev, 'packet_count': frames,
+              'md_ceiling': ceiling, 'inventory': inventory}
+    # Everything but the posture inventory, at MEDIUM and up, reaches Watchtower.
+    alerts = [_cfmw_normalize(r) for r in rows if r['klass'] != 'P'
+              and _CFMW_SEV_RANK.get(r['severity'], 0) >= 2]
+    if not quick and iface and alerts:
+        _guard_emit_jsonl('cfm_watch', {'interface': iface, 'findings': alerts})
+    return result
+
+
+def do_cfm_reset(interface=None):
+    """Forget the in-memory CFM state (all interfaces, or one) — use after a legitimate
+    MEP / protection-group change so the next scan does not report it as forgery."""
+    with _cfmw_lock:
+        if interface:
+            _cfmw_engines.pop(interface, None)
+        else:
+            _cfmw_engines.clear()
+    return {'success': True, 'reset': interface or 'all'}
+
+
+def _cfmw_selftest():
+    """Adapter scenarios over the vendored engine with the upstream fixture corpus
+    (offline, no root): every fixture must fire exactly its manifest code set through
+    this adapter, plus verdict, CVE tagging and cross-scan persistence. Then the
+    module's own tiers out-of-process: the 54-check conformance harness and, with
+    scapy + tshark present, the dual-dissector cross-check. (The upstream fuzz tier
+    scans its own directory's copy of the module and is not run in-app.)"""
+    import importlib.util
+    import tempfile
+    scenarios = []
+
+    def check(name, cond):
+        scenarios.append({'name': name, 'pass': bool(cond)})
+
+    tdir = os.path.join(_CFMW_PY_DIR, 'cfmwatch_tests')
+    fdir = os.path.join(tdir, 'fixtures')
+    try:
+        cw = _cfmw_import()
+        spec = importlib.util.spec_from_file_location(
+            '_cfmwatch_test_fixtures', os.path.join(tdir, 'make_fixtures.py'))
+        mk = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mk)
+        manifest = json.load(open(os.path.join(fdir, 'manifest.json')))
+    except Exception as e:
+        return {'success': False, 'scenarios': [
+            {'name': 'cfmwatch import failed: %s' % e, 'pass': False}]}
+
+    split = {}
+    for s in cw.SPECS:
+        split[s.severity] = split.get(s.severity, 0) + 1
+    check('registry: 54 codes (2 critical / 20 high / 21 medium / 6 low / 5 info)',
+          len(cw.SPECS) == 54 and split == {'CRITICAL': 2, 'HIGH': 20, 'MEDIUM': 21,
+                                            'LOW': 6, 'INFO': 5})
+
+    def fixture(name):
+        e = next(x for x in manifest if x['name'] == name)
+        ceiling = e['args'][e['args'].index('--md-ceiling') + 1] \
+            if '--md-ceiling' in e['args'] else None
+        rows, n = _cfmw_analyze(os.path.join(fdir, e['pcap']),
+                                cw.Engine(cw.Config(md_ceiling=_cfmw_ceiling(ceiling))))
+        return e, rows, n
+
+    def codes(rows):
+        return {r['code'] for r in rows}
+
+    fired = set()
+    bad = []
+    for e in manifest:
+        _e, rows, n = fixture(e['name'])
+        fired |= codes(rows)
+        if codes(rows) != set(e['expect']) or n != e['frames']:
+            bad.append(e['name'])
+    check('all %d fixtures fire exactly their manifest codes through the adapter%s'
+          % (len(manifest), (' (bad: %s)' % ', '.join(bad)) if bad else ''), not bad)
+    check('the fixture corpus covers all 54 codes', len(fired) == 54)
+
+    _e, rows, n = fixture('baseline')
+    check('baseline (settled CCMs, APS No Request, LMM): inventory only -> clean',
+          _cfmw_verdict(rows, n) == 'clean' and all(r['severity'] == 'info' for r in rows))
+    check('verdict: nothing captured -> no-traffic', _cfmw_verdict([], 0) == 'no-traffic')
+    _e, rows, n = fixture('structural')
+    check('malformed CFM -> CFM-140 tagged CVE-2020-1639, verdict attack',
+          any(r['code'] == 'CFM-140' and 'CVE-2020-1639' in r['cves'] for r in rows)
+          and _cfmw_verdict(rows, n) == 'attack')
+    _e, rows, n = fixture('rate')
+    check('sustained valid burst -> CFM-141 tagged CVE-2025-52961 (low confidence)',
+          any(r['code'] == 'CFM-141' and 'CVE-2025-52961' in r['cves']
+              and r['confidence'] == 'low' for r in rows))
+    _e, rows, n = fixture('aps')
+    check('APS Lockout of protection -> CFM-087 critical, verdict attack',
+          any(r['code'] == 'CFM-087' and r['severity'] == 'critical' for r in rows)
+          and _cfmw_verdict(rows, n) == 'attack')
+    _e, rows, n = fixture('ceiling')
+    check('MD-level ceiling 4 arms CFM-021', 'CFM-021' in codes(rows))
+    rows, n = _cfmw_analyze(os.path.join(fdir, 'ceiling.pcap'), cw.Engine(cw.Config()))
+    check('no ceiling configured -> CFM-021 stays inert', 'CFM-021' not in codes(rows))
+    check('verdict ladder: a lone LOW event (RDI) -> observed, a HIGH on LOW-confidence '
+          'evidence -> suspicious',
+          _cfmw_verdict([{'severity': 'low', 'confidence': 'high'}], 1) == 'observed' and
+          _cfmw_verdict([{'severity': 'high', 'confidence': 'low'}], 1) == 'suspicious')
+
+    def replay(frames, engine):
+        fd, path = tempfile.mkstemp(suffix='.pcap')
+        os.close(fd)
+        try:
+            mk.write_pcap(path, frames)
+            return _cfmw_analyze(path, engine)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    oam = mk.MAC_A + mk.MAC_B + b'\x88\x09\x03' + b'\x00' * 50
+    rows, n = replay([(mk.BASE_TS, oam)], cw.Engine(cw.Config()))
+    check('802.3ah Link OAM (0x8809) is not parsed as CFM', n == 0 and not rows)
+
+    # Persistent engine: an established MEP moving to a new MAC between two scans.
+    eng = cw.Engine(cw.Config())
+    settle = [(mk.BASE_TS + i, mk.eth(mk.D3, mk.MAC_A, mk.ccm(3, 10, seq=i + 1)))
+              for i in range(3)]
+    moved = [(mk.BASE_TS + 3, mk.eth(mk.D3, mk.MAC_C, mk.ccm(3, 10, seq=4)))]
+    rows1, _n = replay(settle, eng)
+    rows2, _n = replay(moved, eng)
+    rows3, _n = replay(moved, cw.Engine(cw.Config()))
+    check('MEP moved to a new MAC between two scans -> CFM-046 on the second scan '
+          '(engine kept per interface; a fresh engine misses it)',
+          'CFM-046' in codes(rows2) and 'CFM-046' not in codes(rows1)
+          and 'CFM-046' not in codes(rows3))
+    check('second scan reports only its own delta (inventory counted once)',
+          all(r['count'] == 1 for r in rows2))
+    inv = _cfmw_inventory(eng)
+    check('inventory: MEP 10 at level 3 on VLAN 100',
+          any(m['mepid'] == 10 and m['md_level'] == 3 for m in inv['meps'])
+          and 3 in inv['levels'] and any(v['tags'] == [100] for v in inv['vlans']))
+    r = do_cfm_reset('selftest0')
+    check('reset clears per-interface state', r.get('success'))
+
+    # Out-of-process tiers: the upstream harnesses import cfmwatch from their own
+    # directory, so run them with python/ on the path.
+    def tier(script, timeout):
+        code = ('import runpy,sys; sys.path.append(%r); sys.argv=[%r]; '
+                'runpy.run_path(%r, run_name="__main__")' % (_CFMW_PY_DIR, script, script))
+        r = _run([sys.executable, '-c', code], timeout=timeout)
+        tail = (r['out'] or r['err'] or '').strip().splitlines()[-1:] or ['']
+        return r['rc'] == 0, tail[0][:90]
+
+    ok, tail = tier(os.path.join(tdir, 'test_conformance.py'), 120)
+    check('conformance tier: %s' % tail, ok)
+    xcheck = {'ran': False, 'reason': 'needs scapy and tshark'}
+    if _have_scapy() and _have('tshark'):
+        ok, tail = tier(os.path.join(tdir, 'test_xcheck.py'), 240)
+        check('Wireshark + scapy cross-check tier: %s' % tail, ok)
+        xcheck = {'ran': True, 'pass': ok}
+    return {'success': all(s['pass'] for s in scenarios), 'scenarios': scenarios,
+            'scapy': xcheck}
+
+
+# ==========================================================================
 # BLE Watch — passive Bluetooth Low Energy attack monitor (vendored blewatch.py)
 # ==========================================================================
 # Unlike the on-the-wire watchers, BLE is not captured off a NIC: the RX is done
@@ -26049,7 +26782,7 @@ def do_routing_selftest():
               'srmpls': _srmpls_selftest(), 'ipsec': _ipsec_selftest(),
               'dns_passive': _dns_passive_selftest(), 'ftp': _ftp_selftest(),
               'smtp': _smtp_selftest(), 'modbus': _modbus_selftest(),
-              'lldp': _lldp_selftest(),
+              'lldp': _lldp_selftest(), 'oam': _oam_selftest(), 'cfm': _cfmw_selftest(),
               'ble': _ble_selftest(),
               'ospf': _ospf_selftest(), 'bgp': _bgp_selftest(),
               'arp': _arp_selftest(), 'dns': _dns_selftest(),
@@ -27952,6 +28685,43 @@ def register_network_diagnostics(app, logger=None):
                 else 'get'
         _log(f"net/lldp-baseline {action}")
         return jsonify(do_lldp_baseline(action))
+
+    @app.route('/api/net/oam-watch', methods=['GET'])
+    def net_oam_watch():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 30, 5, 65)
+        _log(f"net/oam-watch iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_oam_watch(interface=iface, seconds=secs))
+
+    @app.route('/api/net/oam-reset', methods=['POST'])
+    def net_oam_reset():
+        data = request.get_json(silent=True) or {}
+        iface = (data.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        _log(f"net/oam-reset {iface or 'all'}")
+        return jsonify(do_oam_reset(iface))
+
+    @app.route('/api/net/cfm-watch', methods=['GET'])
+    def net_cfm_watch():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 30, 5, 65)
+        ceiling = _cfmw_ceiling(request.args.get('md_ceiling'))
+        _log(f"net/cfm-watch iface={iface or 'default-route'} secs={secs} ceiling={ceiling}")
+        return jsonify(do_cfm_watch(interface=iface, seconds=secs, md_ceiling=ceiling))
+
+    @app.route('/api/net/cfm-reset', methods=['POST'])
+    def net_cfm_reset():
+        data = request.get_json(silent=True) or {}
+        iface = (data.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        _log(f"net/cfm-reset {iface or 'all'}")
+        return jsonify(do_cfm_reset(iface))
 
     @app.route('/api/net/ble-watch', methods=['GET'])
     def net_ble_watch():
@@ -30730,6 +31500,24 @@ def _cli(argv=None):
     fw_.add_argument('--ports', default='21', help='FTP control ports (default 21)')
     fw_.add_argument('--json', action='store_true', help='emit JSON')
 
+    ow_ = sub.add_parser('oam-watch',
+                         help='passive 802.3ah Link OAM scan: loopback blackhole, forged '
+                              'failure flags, re-peering, MIB reads, malformed OAMPDUs')
+    ow_.add_argument('--iface', '-i', default=None, help='interface (default: route)')
+    ow_.add_argument('--seconds', '-s', type=int, default=30, help='capture window (5-65)')
+    ow_.add_argument('--pcap', default=None, help='replay a pcap instead of capturing')
+    ow_.add_argument('--json', action='store_true', help='emit JSON')
+
+    cw_ = sub.add_parser('cfm-watch',
+                         help='passive 802.1ag CFM / Y.1731 scan: forged APS protection '
+                              'switching, AIS/LCK, CCM forgery, linktrace sweeps, malformed CFM')
+    cw_.add_argument('--iface', '-i', default=None, help='interface (default: route)')
+    cw_.add_argument('--seconds', '-s', type=int, default=30, help='capture window (5-65)')
+    cw_.add_argument('--pcap', default=None, help='replay a pcap instead of capturing')
+    cw_.add_argument('--md-ceiling', type=int, default=None,
+                     help='highest legitimate MD level at this tap (0-7); arms CFM-021')
+    cw_.add_argument('--json', action='store_true', help='emit JSON')
+
     lw_ = sub.add_parser('lldp-watch',
                          help='passive LLDP (802.1AB) scan: malformed-TLV CVE shapes, '
                               'vulnerable-family screening, flood / forged neighbour')
@@ -31430,6 +32218,36 @@ def _cli(argv=None):
                   f"({r['packet_count']} frames, {len(r['findings'])} finding(s))")
             for x in r.get('reasons', []):
                 print(f"  {x}")
+        return 0 if r.get('success') else 1
+
+    if args.cmd == 'oam-watch':
+        r = do_oam_watch(interface=args.iface, seconds=args.seconds, pcap=args.pcap)
+        if args.json:
+            print(json.dumps(r, indent=2))
+        elif not r.get('success'):
+            print(f"error: {r.get('error')}")
+        else:
+            print(f"verdict: {r['verdict']}  ({r['packet_count']} OAMPDUs, "
+                  f"{len(r['peers'])} peer(s))")
+            for f in r['findings']:
+                print(f"  [{f['code']}] {f['severity'].upper():8} {f['name']} | {f['src']} "
+                      f"x{f['count']} | {f['detail']}")
+        return 0 if r.get('success') else 1
+
+    if args.cmd == 'cfm-watch':
+        r = do_cfm_watch(interface=args.iface, seconds=args.seconds, pcap=args.pcap,
+                         md_ceiling=args.md_ceiling)
+        if args.json:
+            print(json.dumps(r, indent=2))
+        elif not r.get('success'):
+            print(f"error: {r.get('error')}")
+        else:
+            print(f"verdict: {r['verdict']}  ({r['packet_count']} CFM frames, "
+                  f"{len(r['inventory']['meps'])} MEP(s))")
+            for f in r['findings']:
+                cve = f" {','.join(f['cves'])}" if f['cves'] else ''
+                print(f"  [{f['code']}] {f['severity'].upper():8} {f['name']}{cve} | "
+                      f"{f['src'] or f['context']} x{f['count']} | {f['detail']}")
         return 0 if r.get('success') else 1
 
     if args.cmd == 'lldp-watch':

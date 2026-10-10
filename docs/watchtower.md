@@ -70,6 +70,32 @@ and WinRM Basic/unencrypted land as **critical**, the rest of the auth-posture s
 Relay/Coercion Watch already streams it (see above), so the RPC/NetLogon feed never
 double-reports the same PetitPotam/PrinterBug/DFSCoerce/ShadowCoerce event.
 
+[`cfm_watch`](nettools.md#cfm-watch) (CFM Watch) appends every non-inventory finding at
+**MEDIUM** and above to `/var/log/ragnar/cfm_watch.jsonl`, deduplicated per code and
+context. These land as **critical**:
+
+- forged APS **Lockout of protection**
+- an APS Signal Fail that no visible fault corroborates
+
+These land as **high**:
+
+- a Forced Switch, protection-group takeover or churn
+- an AIS from a source that never sent a CCM
+- a MEP that moves MAC, a duplicate MEP or a MAID mismatch
+- MD-level violations, an LBM flood or an LTM sweep
+- malformed CFM, including the CVE-2020-1639 shape
+
+The CVE-2025-52961 load correlation carries the CVE id and its low confidence in the
+alert detail. MD-level / MEP / VLAN inventory stays in the card.
+
+[`oam_watch`](nettools.md#oam-watch) (OAM Watch) appends its structural and abuse findings
+at **MEDIUM** and above to `/var/log/ragnar/oam_watch.jsonl` (deduplicated per code + source
+MAC). These land as **critical**: an 802.3ah Loopback Control enable (a one-frame link
+blackhole) and its confirmed remote-loopback state, failure flags that flap while the
+session stays up, peer substitution and a second OAM speaker. Malformed OAMPDUs, discovery
+restart, capability change, a rate-cap flood and a cleartext MIB response land as **high**
+or **medium**. Link OAM has no CVEs; capability posture notes stay in the card.
+
 [`lacp_watch`](nettools.md#lacp-watch) (LACP Watch) appends its **HIGH/CRITICAL**
 slow-protocol integrity findings to `/var/log/ragnar/lacp_watch.jsonl` (deduplicated per
 code + session) — a correlated **LAG hijack** lands as **critical**, and delivery-path

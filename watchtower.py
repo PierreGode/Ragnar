@@ -146,6 +146,15 @@ DEFAULT_SOURCES = {
     # flapping, Marker floods — the HIGH/CRITICAL findings land here.
     'lacp_watch':    {'label': 'LACP Watch (aggregation hijack / flapping)',
                       'paths': ['/var/log/ragnar/lacp_watch.jsonl']},
+    # 802.3ah Link OAM (do_oam_watch): Loopback Control link blackhole, forged /
+    # flapping failure flags, re-peering, cleartext MIB reads, malformed OAMPDUs.
+    'oam_watch':     {'label': 'OAM Watch (Link OAM loopback blackhole / flag forgery)',
+                      'paths': ['/var/log/ragnar/oam_watch.jsonl']},
+    # 802.1ag CFM / Y.1731 service OAM (do_cfm_watch): forged APS protection
+    # switching, forged AIS / CCM, moved / duplicate MEPs, linktrace sweeps, LBM
+    # floods, malformed CFM (CVE-2020-1639) and the CVE-2025-52961 load pattern.
+    'cfm_watch':     {'label': 'CFM Watch (802.1ag / Y.1731 protection-switch / CCM forgery)',
+                      'paths': ['/var/log/ragnar/cfm_watch.jsonl']},
     # RPC / NetLogon Watch (do_rpc_watch): Zerologon chain, NetLogon secure-channel
     # posture, DCERPC auth-trailer posture, NTLM weaknesses, DCSync / remote-exec /
     # backup-key / EPM-sweep, and WinRM/WS-Man posture. Coercion is Relay Watch's.

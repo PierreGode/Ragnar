@@ -1,0 +1,159 @@
+[
+  {
+    "name": "baseline",
+    "pcap": "baseline.pcap",
+    "frames": 14,
+    "expect": [
+      "CFM-080",
+      "CFM-160",
+      "CFM-161",
+      "CFM-162",
+      "CFM-163"
+    ],
+    "args": []
+  },
+  {
+    "name": "structural",
+    "pcap": "structural.pcap",
+    "frames": 10,
+    "expect": [
+      "CFM-001",
+      "CFM-002",
+      "CFM-003",
+      "CFM-004",
+      "CFM-005",
+      "CFM-006",
+      "CFM-007",
+      "CFM-008",
+      "CFM-009",
+      "CFM-010",
+      "CFM-100",
+      "CFM-140",
+      "CFM-160",
+      "CFM-161",
+      "CFM-163"
+    ],
+    "args": []
+  },
+  {
+    "name": "level",
+    "pcap": "level.pcap",
+    "frames": 4,
+    "expect": [
+      "CFM-020",
+      "CFM-022",
+      "CFM-024",
+      "CFM-160",
+      "CFM-161",
+      "CFM-163"
+    ],
+    "args": []
+  },
+  {
+    "name": "ceiling",
+    "pcap": "ceiling.pcap",
+    "frames": 2,
+    "expect": [
+      "CFM-021",
+      "CFM-160",
+      "CFM-161",
+      "CFM-163"
+    ],
+    "args": [
+      "--md-ceiling",
+      "4"
+    ]
+  },
+  {
+    "name": "ccm",
+    "pcap": "ccm.pcap",
+    "frames": 21,
+    "expect": [
+      "CFM-040",
+      "CFM-041",
+      "CFM-042",
+      "CFM-043",
+      "CFM-044",
+      "CFM-045",
+      "CFM-046",
+      "CFM-047",
+      "CFM-048",
+      "CFM-049",
+      "CFM-121",
+      "CFM-160",
+      "CFM-161",
+      "CFM-163"
+    ],
+    "args": []
+  },
+  {
+    "name": "y1731",
+    "pcap": "y1731.pcap",
+    "frames": 7,
+    "expect": [
+      "CFM-060",
+      "CFM-061",
+      "CFM-062",
+      "CFM-063",
+      "CFM-064",
+      "CFM-065",
+      "CFM-160",
+      "CFM-161",
+      "CFM-162",
+      "CFM-163"
+    ],
+    "args": []
+  },
+  {
+    "name": "aps",
+    "pcap": "aps.pcap",
+    "frames": 10,
+    "expect": [
+      "CFM-080",
+      "CFM-081",
+      "CFM-082",
+      "CFM-083",
+      "CFM-084",
+      "CFM-085",
+      "CFM-086",
+      "CFM-087",
+      "CFM-160",
+      "CFM-161",
+      "CFM-162",
+      "CFM-163"
+    ],
+    "args": []
+  },
+  {
+    "name": "lblt",
+    "pcap": "lblt.pcap",
+    "frames": 29,
+    "expect": [
+      "CFM-100",
+      "CFM-101",
+      "CFM-102",
+      "CFM-103",
+      "CFM-104",
+      "CFM-105",
+      "CFM-106",
+      "CFM-160",
+      "CFM-163"
+    ],
+    "args": []
+  },
+  {
+    "name": "rate",
+    "pcap": "rate.pcap",
+    "frames": 120,
+    "expect": [
+      "CFM-100",
+      "CFM-101",
+      "CFM-120",
+      "CFM-122",
+      "CFM-141",
+      "CFM-160",
+      "CFM-163"
+    ],
+    "args": []
+  }
+]
