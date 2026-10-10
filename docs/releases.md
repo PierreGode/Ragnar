@@ -4,6 +4,15 @@
 
 ### 2026-10-10
 
+#### [#939](https://github.com/PierreGode/Ragnar/pull/939) — Ragnar OS: move the image build pipeline to a private repo
+*branch `feature/ragnar-os`*
+
+- **Why:** to keep the official branded *Ragnar OS* image hard to clone and rebrand. The pi-gen recipe is now maintained in a **separate private repository** (`PierreGode/RagnarOS`) instead of in this public app repo.
+- **Removed from this repo:** the `os-image/` tree (`build.sh`, `config`, `stage-ragnar/`, `os-list.json`, `ragnar.conf.example`) and `.github/workflows/build-os-image.yml`. The private pipeline clones this public repo at build time and runs its installer, so nothing about the app is hidden.
+- **The app stays fully open.** `install_ragnar.sh` still installs Ragnar on any Raspberry Pi, and the `--image-build` / `--unattended` installer modes the pipeline relies on remain here and documented (`install_ragnar.sh --help`).
+- **Downloads stay public.** On an `os-v*` tag the private pipeline publishes `RagnarOS-*.img.xz` + `.sha256` as a **Release on this repo**, so end users still download from the usual [Releases](https://github.com/PierreGode/Ragnar/releases) page. (This needs a `RAGNAR_RELEASE_TOKEN` secret, a fine-grained PAT with Contents:write on this repo, configured in the private repo.)
+- **Docs:** [ragnar-os.md](ragnar-os.md) — the "Building the image yourself" section is now "Where the image comes from", and the dead `os-image/` path references are removed. End-user flashing/first-boot/`ragnar.conf` instructions are unchanged.
+
 #### [#938](https://github.com/PierreGode/Ragnar/pull/938) — feat(net): OAM Watch + CFM Watch — passive carrier-Ethernet OAM monitors (802.3ah Link OAM, 802.1ag CFM / Y.1731)
 *branch `feature/oam-watch`*
 
