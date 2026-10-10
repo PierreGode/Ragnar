@@ -12,8 +12,8 @@
 - **Session state persists per interface across scans**, so a 300 s flap or a peer swapped between scans is caught. **Reset** (`POST /api/net/oam-reset`) forgets it after a legitimate change.
 - **Verdicts** use existing tokens: `no-traffic`/`clean` < `observed` < `exposure` < `suspicious` < `attack`. A single failure flag is only `suspicious`, since it is often a real power loss. Wired into the Net Integrity rotation (`oam`), Watchtower (`oam_watch`, MEDIUM and above), routes, and the CLI `oam-watch [--pcap]`.
 - **Self-test:** new `oam` suite with 19 scenarios, plus the module's 297-check conformance and 163-check Wireshark cross-check run out of process. **Validated live:** all 38 codes fire through the real capture path, replayed with tcpreplay over a sealed-netns veth.
-- CVE index unchanged at 295 / 254. `gen_cve_list.py` now ignores the "not this protocol" mention CVE-2019-14810 in the cross-check comments.
-- **Docs:** [nettools.md › OAM Watch](nettools.md#oam-watch), [watchtower.md](watchtower.md).
+- CVE index unchanged at 295 / 254. `gen_cve_list.py` registers the OAM owners/prefixes and ignores the "not this protocol" mention CVE-2019-14810 in the cross-check comments.
+- **Docs:** [nettools.md › OAM Watch](nettools.md#oam-watch), [watchtower.md](watchtower.md), [CREDITS.md](CREDITS.md) (new non-CVE coverage bullet; Detector Self-Test is now 51 suites).
 
 
 #### [#935](https://github.com/PierreGode/Ragnar/pull/935) — Ragnar OS: preinstall Tailscale + AirSnitch, and fix kiosk on Lite

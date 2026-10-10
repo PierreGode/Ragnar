@@ -197,8 +197,14 @@ behind them is Solarflere's work.
   (CVE-2020-7121, CVE-2021-34618), FortiSwitch (CVE-2021-26111), PAN-OS (CVE-2025-0116) and
   SonicWall SWS (CVE-2021-20024). It detects the malformed frame structurally, whichever
   stack it targets. The advertised-version screen is labelled a note, not a verdict.
+- **Beyond the CVE corpus** — not every module needs a CVE to earn its place. **OAM Watch**
+  covers IEEE 802.3ah Link OAM, where no CVE clears the bar. It is still a one-frame link
+  blackhole: a forged Loopback Control frame puts the peer into remote loopback and discards
+  its traffic. It also flags failure-flag forgery that drives protection switches, peer
+  substitution and cleartext MIB reads. These are 38 protocol-abuse and structural codes
+  that name no CVE, and they are not counted above.
 
-_(Counts reflect the detector code as of September 2026 and grow as new modules land.)_
+_(Counts reflect the detector code as of October 2026 and grow as new modules land.)_
 
 ### What makes these detections different
 
@@ -221,7 +227,7 @@ _(Counts reflect the detector code as of September 2026 and grow as new modules 
 - **Privacy by design.** Credential material is never logged — for example, RADIUS
   Proxy-State is compared by digest and the values are discarded.
 
-Every classifier is validated offline by the 42-suite **Detector Self-Test**, which runs each
+Every classifier is validated offline by the 51-suite **Detector Self-Test**, which runs each
 detector against crafted attack captures with no root and no live traffic.
 
 Thank you, Solarflere. 🙏

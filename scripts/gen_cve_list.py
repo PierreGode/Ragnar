@@ -53,7 +53,9 @@ FILE_OWNERS = {
     'actions/ble_pentest.py': 'BLE Pentest (active)',
 }
 FILE_PREFIX_OWNERS = {'python/dns_doctor_passive/': 'DNS Watch',
-                      'python/modbuswatch/': 'Modbus Watch'}
+                      'python/modbuswatch/': 'Modbus Watch',
+                      'python/oamwatch/': 'OAM Watch',
+                      'python/oamwatch_tests/': 'OAM Watch'}
 # Files that only mention CVEs already owned elsewhere (labels, help text).
 MENTION_ONLY = {'webapp_modern.py', 'watchtower.py', 'web/scripts/ragnar_modern.js',
                 'web/index_modern.html'}
@@ -95,6 +97,7 @@ ND_PREFIXES = [
     ('_SMTP', 'SMTP Watch'), ('_smtp', 'SMTP Watch'), ('do_smtp', 'SMTP Watch'),
     ('_MODBUS', 'Modbus Watch'), ('_modbus', 'Modbus Watch'), ('do_modbus', 'Modbus Watch'),
     ('_LLDP', 'LLDP Watch'), ('_lldp', 'LLDP Watch'), ('do_lldp', 'LLDP Watch'),
+    ('_OAM', 'OAM Watch'), ('_oam', 'OAM Watch'), ('do_oam', 'OAM Watch'),
     ('_RELAY', 'Relay / Coercion Watch'), ('_relay', 'Relay / Coercion Watch'),
     ('_parse_relay', 'Relay / Coercion Watch'), ('do_relay', 'Relay / Coercion Watch'),
     ('_ND_DNSSL', 'ICMP Watch'), ('_ISIS', 'IS-IS Watch'), ('_CFM', 'Cisco Guard'),
