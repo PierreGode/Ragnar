@@ -64,6 +64,23 @@ Disable the toggle to stop and remove it.
 The default URL is `http://localhost:8000`; rotation and cursor-hiding are read
 live from the app config, so changing them only requires the kiosk to relaunch.
 
+## Login bypass & Tailscale publishing
+
+The on-screen browser skips the login so the dashboard is usable without a
+keyboard. That bypass is **scoped to the local kiosk by a secret token**
+(`data/kiosk_token`, generated at install, world-readable but never leaving the
+box): the wrapper adds `?kiosk_token=…` to the URL and the server sets a cookie
+from it. A request that merely arrives on loopback is **not** enough.
+
+This is what lets kiosk mode and **Tailscale HTTPS publishing** (`tailscale
+serve`) run at the same time. `serve` proxies every tailnet visitor through
+`127.0.0.1`, so if the bypass trusted all loopback it would have handed the full
+UI to the tailnet with no login — which is why publishing used to be refused
+while kiosk was on. Now a tailnet visitor reaches loopback too but can't hold
+the token, so they still have to log in, and publishing with kiosk on is allowed.
+Keep the kiosk URL on `localhost` (the default) so the token never travels the
+tailnet.
+
 ## Supported boards
 
 Tested and tuned for **Pi 4 and Pi 5** (2 GB and up). Pi Zero class boards are
@@ -269,3 +286,14 @@ sudo apt-get install xserver-xorg-legacy
 (Fresh installs pull this in automatically.) After fixing the root cause, clear
 the failure counter with `sudo systemctl reset-failed ragnar-kiosk` and start it
 again.
+
+On a **Lite image (e.g. Ragnar OS)** the other common cause is the kiosk user
+not being in the graphics/input/console groups. A non-root Xorg has to open the
+GPU (`/dev/dri/card*`, needs **video**/**render**), the virtual terminal (needs
+**tty**) and input devices (needs **input**) itself; on a desktop Pi OS the
+default `pi` user already has these, but a Lite service user (e.g. `ragnar`)
+does not, so Xorg dies with *"no screens found"* and the unit crash-loops.
+`install_kiosk.sh` now adds the kiosk user to `video,render,input,tty` (and
+`kiosk_doctor.sh` reports any that are missing). To heal an existing install,
+re-run `sudo scripts/install_kiosk.sh`, then
+`sudo systemctl reset-failed ragnar-kiosk && sudo systemctl restart ragnar-kiosk`.

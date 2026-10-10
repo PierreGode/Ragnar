@@ -14,6 +14,8 @@ import sys
 import json
 import csv
 import glob
+import hmac
+import secrets
 import collections
 import signal
 import logging
@@ -147,6 +149,17 @@ _CSP_VALUE = os.environ.get('RAGNAR_CSP', _DEFAULT_CSP).strip()
 
 @app.after_request
 def _apply_security_headers(response):
+    # Persist the kiosk bypass token as a cookie once the local kiosk presents it
+    # in the URL, so the SPA's later XHRs (no query string) keep the bypass. Only
+    # set when the request actually proved the token (check_authentication gated
+    # g._set_kiosk_cookie on _request_has_kiosk_token), so a tailnet request can
+    # never trigger it.
+    if getattr(g, '_set_kiosk_cookie', False):
+        try:
+            response.set_cookie(_KIOSK_COOKIE, _kiosk_token(), max_age=31536000,
+                                httponly=True, samesite='Lax', path='/')
+        except Exception:
+            pass
     # Content-Security-Policy — mitigates XSS / data injection.
     if _CSP_VALUE and 'Content-Security-Policy' not in response.headers:
         response.headers['Content-Security-Policy'] = _CSP_VALUE
@@ -835,6 +848,64 @@ def _remote_share_push_url(address):
     return address.rstrip('/') + '/api/mesh/files/push'
 
 
+# ---------------------------------------------------------------------------
+# Kiosk loopback auth-bypass token
+# ---------------------------------------------------------------------------
+# The on-screen kiosk (chromium -> localhost) skips login. We must NOT let that
+# bypass reach a tailnet visitor proxied through `tailscale serve`, which also
+# arrives on 127.0.0.1. A tailnet request is indistinguishable from a local one
+# by source address alone, so we gate the bypass on a secret the LOCAL kiosk
+# holds (a file on the box) and a tailnet peer cannot. The kiosk wrapper opens
+# the UI with ?kiosk_token=<secret>; we then set a cookie so the SPA's later
+# requests carry it. This is what lets kiosk + Tailscale HTTPS publishing run at
+# the same time without exposing an unauthenticated UI to the tailnet.
+_KIOSK_TOKEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 'data', 'kiosk_token')
+_KIOSK_COOKIE = 'ragnar_kiosk'
+
+
+def _kiosk_token():
+    """The local kiosk's shared secret (read-or-create under data/).
+
+    World-readable on purpose: the token only gates the LOOPBACK bypass, and any
+    local user already has shell on the box, so it adds no local attack surface.
+    Its sole job is to deny the bypass to a tailnet visitor (via `tailscale
+    serve`) who reaches loopback but can't read a file on the device.
+    """
+    try:
+        with open(_KIOSK_TOKEN_PATH) as f:
+            tok = f.read().strip()
+        if tok:
+            return tok
+    except OSError:
+        pass
+    tok = secrets.token_hex(32)
+    try:
+        os.makedirs(os.path.dirname(_KIOSK_TOKEN_PATH), exist_ok=True)
+        tmp = _KIOSK_TOKEN_PATH + '.tmp'
+        with open(tmp, 'w') as f:
+            f.write(tok + '\n')
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, _KIOSK_TOKEN_PATH)
+    except OSError:
+        pass
+    return tok
+
+
+def _request_has_kiosk_token():
+    """True when the request carries the local kiosk secret (cookie or query).
+
+    A `tailscale serve` request from the tailnet reaches Flask on loopback too,
+    but never carries this token, so it does not get the bypass. Constant-time
+    comparison so the token can't be probed by timing.
+    """
+    tok = _kiosk_token()
+    if not tok:
+        return False
+    supplied = request.cookies.get(_KIOSK_COOKIE) or request.args.get('kiosk_token') or ''
+    return bool(supplied) and hmac.compare_digest(str(supplied), tok)
+
+
 @app.before_request
 def check_authentication():
     """Enforce authentication on all endpoints when auth is configured."""
@@ -891,11 +962,18 @@ def check_authentication():
         if request.method == 'POST' and path in write_api:
             return
 
-    # Kiosk loopback bypass: any request originating from the Pi itself
-    # (the on-screen kiosk runs chromium pointed at localhost) bypasses auth.
-    # Anyone with local access already has shell on the device, so this
-    # adds no attack surface vs. the existing network-facing auth.
-    if request.remote_addr in ('127.0.0.1', '::1') and shared_data.config.get('kiosk_enabled'):
+    # Kiosk loopback bypass: the on-screen kiosk (chromium -> localhost) skips
+    # login. Scoped to the LOCAL kiosk by a secret token (see _kiosk_token) so a
+    # tailnet visitor proxied through `tailscale serve` — who also arrives on
+    # 127.0.0.1 but cannot hold the token — is NOT bypassed and must log in.
+    # That is what lets kiosk mode and Tailscale HTTPS publishing coexist.
+    if (request.remote_addr in ('127.0.0.1', '::1')
+            and shared_data.config.get('kiosk_enabled')
+            and _request_has_kiosk_token()):
+        # The kiosk wrapper passes the token in the URL; persist it as a cookie
+        # so the SPA's subsequent XHRs (which drop the query string) stay bypassed.
+        if request.args.get('kiosk_token') and not request.cookies.get(_KIOSK_COOKIE):
+            g._set_kiosk_cookie = True
         return
 
     # Mesh machine auth: let a *peer Ragnar* reach this node's mesh endpoints
@@ -6422,21 +6500,13 @@ def mesh_serve():
     # and is how units are actually reached. HTTPS is opt-in.
     use_https = bool(data.get('https', False))
 
-    # Refuse the one combination that silently disables authentication.
-    # `tailscale serve` proxies from tailscaled, so every request reaches Flask
-    # from 127.0.0.1 — and the kiosk bypass grants unauthenticated access to
-    # exactly that address. Together they would expose the full UI, no login, to
-    # every device on the tailnet. Neither setting is wrong alone; the pair is.
-    if enable and shared_data.config.get('kiosk_enabled'):
-        return jsonify({
-            'success': False,
-            'message': ('Kiosk mode is enabled, which grants unauthenticated '
-                        'access to loopback requests. Publishing over Tailscale '
-                        'Serve would route every tailnet visitor through '
-                        'loopback and bypass the login. Disable kiosk mode '
-                        'first, or reach this node directly on port '
-                        f'{_mesh_node_port()} instead.'),
-        }), 409
+    # Kiosk mode and publishing used to be mutually exclusive: `tailscale serve`
+    # proxies every tailnet request from 127.0.0.1, and the kiosk bypass used to
+    # trust *any* loopback request — so the pair exposed the full UI, no login,
+    # to the tailnet. That hole is closed: the bypass is now scoped to the local
+    # kiosk's secret token (see _request_has_kiosk_token), which a tailnet
+    # visitor proxied through serve cannot hold, so they still have to log in.
+    # Publishing with kiosk on is therefore safe and allowed.
 
     ok, message = mesh_manager.serve_web(port=_mesh_node_port(), enable=enable,
                                          use_https=use_https)

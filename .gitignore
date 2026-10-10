@@ -147,6 +147,8 @@ backup/uploads/
 data/safe/
 # sensing-server browser-session secret (generated at runtime; never track)
 data/session-secret
+# per-box local kiosk auth-bypass token (never commit)
+data/kiosk_token
 
 # Mesh file-transfer inbox — received files, must never be committed
 data/mesh_inbox/

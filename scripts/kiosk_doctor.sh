@@ -218,6 +218,27 @@ if [ -z "$(ls /dev/dri/card* 2>/dev/null)" ]; then
     check "Display hardware present (/dev/dri/card*)" 1 \
           "headless box: the kiosk needs a real display (HDMI/DSI) attached"
 fi
+# A non-root Xorg has to open the GPU (video/render), the VT (tty) and input
+# devices (input) itself. On a Lite image the service user often isn't in these
+# groups, so Xorg dies with "no screens found" and the unit crash-loops — the
+# usual Ragnar OS kiosk failure. Report it explicitly.
+KUSER="$(systemctl show -p User --value ragnar-kiosk.service 2>/dev/null)"
+[ -z "$KUSER" ] && KUSER="$(awk -F= '/^User=/{print $2; exit}' /etc/systemd/system/ragnar-kiosk.service 2>/dev/null)"
+if [ -n "$KUSER" ] && id "$KUSER" >/dev/null 2>&1; then
+    UGROUPS=" $(id -nG "$KUSER" 2>/dev/null) "
+    echo "  kiosk user '$KUSER' groups:$UGROUPS"
+    MISSING=""
+    for g in video render input tty; do
+        getent group "$g" >/dev/null 2>&1 || continue
+        case "$UGROUPS" in *" $g "*) ;; *) MISSING="$MISSING $g" ;; esac
+    done
+    if [ -n "$MISSING" ]; then
+        check "Kiosk user in graphics/input groups" 1 \
+              "missing:$MISSING — Xorg can't open the GPU/VT/input. Fix: sudo scripts/install_kiosk.sh (re-run), then sudo systemctl restart ragnar-kiosk"
+    else
+        check "Kiosk user in graphics/input groups" 0 ""
+    fi
+fi
 MODEL="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)"
 echo "  model: $MODEL"
 RAM_MB="$(awk '/^MemTotal:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)"

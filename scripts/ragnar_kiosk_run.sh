@@ -65,6 +65,12 @@ fi
 QS_SEP="?"
 if [[ "$KIOSK_URL" == *"?"* ]]; then QS_SEP="&"; fi
 FINAL_URL="${KIOSK_URL}${QS_SEP}kiosk=1"
+# Pass the local kiosk auth-bypass token so the on-screen browser skips login
+# (the server sets a cookie from it). A tailnet visitor proxied through
+# `tailscale serve` never holds this token, so it does not weaken published
+# access — it's what lets kiosk mode and Tailscale HTTPS publishing coexist.
+KIOSK_TOKEN="$(tr -d '[:space:]' < "$REPO_ROOT/data/kiosk_token" 2>/dev/null || true)"
+[[ -n "$KIOSK_TOKEN" ]] && FINAL_URL="${FINAL_URL}&kiosk_token=${KIOSK_TOKEN}"
 if [[ "$WARDRIVING_ENABLED" == "true" ]]; then
     FINAL_URL="${FINAL_URL}#wardriving"
 fi
