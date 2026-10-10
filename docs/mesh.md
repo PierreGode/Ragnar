@@ -539,18 +539,23 @@ when:
 - `tailscaled` will not start after an update
 - you are debugging Tailscale itself
 
-Ragnar reports its state on the Mesh tab — installed, signed in, and therefore
-actually usable — but never enables it. Signing in requires an interactive
-browser flow that cannot be automated from the unit, and enabling a second
-remote-access path is an operator's decision, not a program's.
+Ragnar reports its state on the Mesh tab and can **sign you in from there** — no
+terminal. Paste a Raspberry Pi Connect **auth key** (generate one at
+[connect.raspberrypi.com](https://connect.raspberrypi.com) → your account → Auth
+keys) into the field under the Pi Connect card and click **Sign in**. Ragnar
+enables linger, turns the per-user service on, and runs `rpi-connect signin
+-auth-key …` (rpi-connect 2.12+) for the right login user — so it works on a
+headless box with nobody logged in. The key is sent once and never stored or
+logged. Enabling a second remote-access path is still your call, not automatic.
 
-Run these **as your login user (e.g. `pi`), not as root** — Connect is a
-per-user service:
+Prefer the command line? Run these **as your login user (e.g. `pi`/`ragnar`),
+not as root** — Connect is a per-user service:
 
 ```sh
 sudo apt install rpi-connect
-rpi-connect on          # starts the per-user service
-rpi-connect signin      # open the link it prints to link your account
+rpi-connect on                       # starts the per-user service
+rpi-connect signin                   # interactive: open the link it prints
+rpi-connect signin -auth-key <KEY>   # or non-interactive, with a key
 rpi-connect status
 ```
 

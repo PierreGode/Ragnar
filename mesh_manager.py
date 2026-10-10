@@ -385,9 +385,10 @@ def derive_viking_name(seed=None):
 # transport, different credentials. That independence is the whole value — if a
 # tailnet is misconfigured, a key expires or tailscaled will not start, Pi
 # Connect is still a way to reach a box that would otherwise need a site visit.
-# Ragnar only ever *reports* its state; enabling it is the operator's call and
-# `rpi-connect` requires an interactive browser sign-in that cannot be automated
-# from here anyway.
+# Ragnar reports its state and can sign in for you: rpi-connect 2.12+ accepts a
+# non-interactive `signin -auth-key` (a bearer key you generate at
+# connect.raspberrypi.com), so pi_connect_signin() does it from the web UI — no
+# browser device-flow, no terminal. Enabling it is still the operator's call.
 
 def _parse_pi_connect(out):
     """Parse `rpi-connect status` text into running/signed_in flags.
@@ -501,6 +502,105 @@ def pi_connect_status():
         except (KeyError, ImportError):
             result['user'] = f'uid {best["uid"]}'
     return result
+
+
+# An auth key is a bearer secret; keep the shape check permissive but bounded so
+# we never shell-inject or log a megabyte. Never echo the key itself anywhere.
+_PI_CONNECT_KEY_RE = re.compile(r'^[A-Za-z0-9._\-]{8,512}$')
+
+
+def _pi_connect_signin_user():
+    """pwd entry of the user to sign Raspberry Pi Connect in as.
+
+    Prefer a user that already has a login session; otherwise the box's primary
+    'ragnar' user (then 'pi'). With linger enabled a headless box can still run
+    the per-user Connect service, so a signed-in session is not required first.
+    """
+    import pwd
+    for uid in _pi_connect_login_uids():
+        try:
+            return pwd.getpwuid(uid)
+        except KeyError:
+            continue
+    for name in ('ragnar', 'pi'):
+        try:
+            return pwd.getpwnam(name)
+        except KeyError:
+            continue
+    return None
+
+
+def _rpc_user_cmd(exe, pw, *args):
+    """rpi-connect <args> run inside user `pw`'s session (as root via sudo)."""
+    runtime = f'/run/user/{pw.pw_uid}'
+    return ['sudo', '-n', f'-u#{pw.pw_uid}', 'env',
+            f'XDG_RUNTIME_DIR={runtime}',
+            f'DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus',
+            exe, *args]
+
+
+def pi_connect_signin(auth_key):
+    """Sign in to Raspberry Pi Connect non-interactively with an auth key.
+
+    rpi-connect 2.12+ accepts `signin -auth-key <key>` — a bearer key generated
+    at https://connect.raspberrypi.com — so the whole thing is doable from the
+    web UI with no browser device-flow and no terminal. We enable linger and
+    turn the per-user service on first so it works on a headless box, then sign
+    in. The key is a secret: it is passed as a bare argv (never a shell) and is
+    never logged or returned. Returns {'ok', 'signed_in', 'user'/'error'}.
+    """
+    exe = shutil.which('rpi-connect')
+    if not exe:
+        return {'ok': False, 'error': 'Raspberry Pi Connect is not installed on this node.'}
+    key = (auth_key or '').strip()
+    if not _PI_CONNECT_KEY_RE.match(key):
+        return {'ok': False, 'error': 'That does not look like a Raspberry Pi Connect auth key.'}
+
+    pw = _pi_connect_signin_user()
+    if not pw:
+        return {'ok': False, 'error': 'No local user to sign Connect in as.'}
+
+    # Linger lets the per-user Connect service persist with nobody logged in.
+    subprocess.run(['loginctl', 'enable-linger', pw.pw_name],
+                   capture_output=True, timeout=10)
+    # Wait briefly for the user manager to create /run/user/<uid>.
+    runtime = f'/run/user/{pw.pw_uid}'
+    for _ in range(10):
+        if os.path.isdir(runtime):
+            break
+        time.sleep(0.5)
+
+    # Enable + start Connect for that user, then sign in with the key.
+    subprocess.run(_rpc_user_cmd(exe, pw, 'on'), capture_output=True, timeout=25)
+    try:
+        proc = subprocess.run(_rpc_user_cmd(exe, pw, 'signin', '-auth-key', key),
+                              capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {'ok': False, 'error': f'Sign-in command failed: {type(e).__name__}.'}
+
+    invalidate_cache()
+    st = pi_connect_status()
+    if st.get('signed_in'):
+        return {'ok': True, 'signed_in': True, 'user': pw.pw_name,
+                'detail': 'Signed in to Raspberry Pi Connect.'}
+    # Surface the tool's own message, but scrub anything that echoes the key.
+    msg = ((proc.stderr or proc.stdout or '').strip()
+           or 'Sign-in did not complete. Check the auth key and try again.')
+    msg = msg.replace(key, '<key>')
+    return {'ok': False, 'signed_in': False, 'error': msg[:300]}
+
+
+def pi_connect_signout():
+    """Sign out of Raspberry Pi Connect for whichever user is signed in."""
+    exe = shutil.which('rpi-connect')
+    if not exe:
+        return {'ok': False, 'error': 'Raspberry Pi Connect is not installed.'}
+    pw = _pi_connect_signin_user()
+    if not pw:
+        return {'ok': False, 'error': 'No local user to sign out.'}
+    subprocess.run(_rpc_user_cmd(exe, pw, 'signout'), capture_output=True, timeout=25)
+    invalidate_cache()
+    return {'ok': True, 'signed_in': False, 'detail': 'Signed out of Raspberry Pi Connect.'}
 
 # `tailscale status` is cheap but not free, and the UI polls. 5s is short enough
 # that an operator clicking Refresh sees current truth, long enough that a busy
