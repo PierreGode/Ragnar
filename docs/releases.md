@@ -4,14 +4,17 @@
 
 ### 2026-10-10
 
-#### [#934](https://github.com/PierreGode/Ragnar/pull/934) — feat(os): preinstall Tailscale + AirSnitch in the Ragnar OS image
-*branch `feature/os-preinstall-tailscale-airsnitch`*
+#### [#935](https://github.com/PierreGode/Ragnar/pull/935) — Ragnar OS: preinstall Tailscale + AirSnitch, and fix kiosk on Lite
+*branch `feature/ragnar-os`*
 
-- The image stage (`os-image/stage-ragnar/.../01-run-chroot.sh`) now bakes two tools the installer otherwise leaves on-demand, right after `install_ragnar.sh --image-build`:
+- **Preinstall Tailscale + AirSnitch in the image.** The image stage (`os-image/stage-ragnar/.../01-run-chroot.sh`) now bakes two tools the installer otherwise leaves on-demand, right after `install_ragnar.sh --image-build`:
   - **Tailscale client** via `scripts/setup_mesh.sh install` — binary only, never joins during imaging (`tailscaled` is enabled; the start is a chroot no-op, so it comes up on first real boot). The web UI Mesh tab or a `/boot/firmware/ragnar-mesh.conf` can now join with no download.
   - **AirSnitch** via `AirSnitchRunner(...).install()` — clones `vanhoefm/airsnitch` into `tools/airsnitch` and builds its hostapd, so the Pentest tab's AirSnitch works offline on a fresh flash.
-- Both steps are **non-fatal** — a clone/build hiccup logs a warning and the image still builds (the tool stays a one-click retry on-device). `tools/` is chowned to `ragnar`.
-- Docs: [Ragnar OS image](ragnar-os.md).
+  - Both steps are **non-fatal** — a clone/build hiccup logs a warning and the image still builds (the tool stays a one-click retry on-device). `tools/` is chowned to `ragnar`.
+- **Fix kiosk crash-looping on Ragnar OS** (`ragnar-kiosk.service` active but Chromium/X never start, NRestarts climbing). Root cause: a non-root Xorg must open the GPU, the VT and input devices itself, but the Lite service user (`ragnar`) was only in `spi gpio i2c sudo netdev` — never **video/render/input/tty** — so Xorg died with *"no screens found"* and crash-looped. A desktop Pi OS `pi` user has these by default; a Lite image does not.
+  - `install_kiosk.sh` now adds the kiosk user to `video,render,input,tty` (only the groups that exist, since `usermod` is all-or-nothing), and if the kiosk is already enabled it `reset-failed` + restarts so the membership takes effect without a reboot.
+  - `kiosk_doctor.sh` now reports the kiosk user's groups and flags any missing graphics/input group — so this is self-diagnosing next time.
+- Docs: [Ragnar OS image](ragnar-os.md), [Kiosk Mode — Troubleshooting](kiosk.md).
 
 ### 2026-10-09
 

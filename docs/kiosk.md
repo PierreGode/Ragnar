@@ -269,3 +269,14 @@ sudo apt-get install xserver-xorg-legacy
 (Fresh installs pull this in automatically.) After fixing the root cause, clear
 the failure counter with `sudo systemctl reset-failed ragnar-kiosk` and start it
 again.
+
+On a **Lite image (e.g. Ragnar OS)** the other common cause is the kiosk user
+not being in the graphics/input/console groups. A non-root Xorg has to open the
+GPU (`/dev/dri/card*`, needs **video**/**render**), the virtual terminal (needs
+**tty**) and input devices (needs **input**) itself; on a desktop Pi OS the
+default `pi` user already has these, but a Lite service user (e.g. `ragnar`)
+does not, so Xorg dies with *"no screens found"* and the unit crash-loops.
+`install_kiosk.sh` now adds the kiosk user to `video,render,input,tty` (and
+`kiosk_doctor.sh` reports any that are missing). To heal an existing install,
+re-run `sudo scripts/install_kiosk.sh`, then
+`sudo systemctl reset-failed ragnar-kiosk && sudo systemctl restart ragnar-kiosk`.

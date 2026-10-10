@@ -429,8 +429,43 @@ else
     echo "[kiosk-install] Xwrapper.config updated"
 fi
 
+# Graphics / input / console group membership. A non-root Xorg (our Xwrapper
+# setup above) still has to OPEN the GPU, the VT and the input devices itself,
+# so the kiosk user must be in:
+#   video, render -> /dev/dri/card* + renderD* (KMS GPU) and /dev/fb*
+#   input         -> /dev/input/* (keyboard / mouse / touchscreen)
+#   tty           -> the virtual terminal Xorg runs on (tty7)
+# On a desktop Pi OS the default 'pi' user is pre-added to all of these; on a
+# Lite image (e.g. Ragnar OS) the service user is not, so Xorg dies with
+# "no screens found" / cannot open the DRM device and the unit crash-loops.
+# usermod is all-or-nothing, so only add the groups that actually exist here.
+kiosk_wanted_groups=()
+for grp in video render input tty; do
+    if getent group "$grp" >/dev/null 2>&1; then
+        kiosk_wanted_groups+=("$grp")
+    fi
+done
+if [[ ${#kiosk_wanted_groups[@]} -gt 0 ]]; then
+    kiosk_join_groups="$(IFS=,; echo "${kiosk_wanted_groups[*]}")"
+    if usermod -a -G "$kiosk_join_groups" "$KIOSK_USER"; then
+        echo "[kiosk-install] added $KIOSK_USER to groups: $kiosk_join_groups (takes effect on next service start)"
+    else
+        echo "[kiosk-install] WARN: could not add $KIOSK_USER to $kiosk_join_groups — Xorg may fail to open the GPU/VT"
+    fi
+fi
+
 # Pre-create Xorg log dir for the kiosk user
 install -d -o "$KIOSK_USER" -g "$KIOSK_USER" -m 0755 \
     "$KIOSK_HOME/.local" "$KIOSK_HOME/.local/share" "$KIOSK_HOME/.local/share/xorg"
+
+# If the kiosk is already enabled (re-run to heal a broken install), clear any
+# crash-loop backoff and restart so the new group membership takes effect — a
+# session only picks up groups on a fresh start, so the old crash-looping one
+# would otherwise keep failing until a reboot.
+if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled ragnar-kiosk.service >/dev/null 2>&1; then
+    systemctl reset-failed ragnar-kiosk.service 2>/dev/null || true
+    systemctl restart ragnar-kiosk.service 2>/dev/null || true
+    echo "[kiosk-install] restarted ragnar-kiosk.service to apply new group membership"
+fi
 
 echo "[kiosk-install] done. Enable with: sudo systemctl enable --now ragnar-kiosk.service"
