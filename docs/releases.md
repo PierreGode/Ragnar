@@ -2,6 +2,17 @@
 
 ## Releases
 
+### 2026-10-10
+
+#### [#934](https://github.com/PierreGode/Ragnar/pull/934) — feat(os): preinstall Tailscale + AirSnitch in the Ragnar OS image
+*branch `feature/os-preinstall-tailscale-airsnitch`*
+
+- The image stage (`os-image/stage-ragnar/.../01-run-chroot.sh`) now bakes two tools the installer otherwise leaves on-demand, right after `install_ragnar.sh --image-build`:
+  - **Tailscale client** via `scripts/setup_mesh.sh install` — binary only, never joins during imaging (`tailscaled` is enabled; the start is a chroot no-op, so it comes up on first real boot). The web UI Mesh tab or a `/boot/firmware/ragnar-mesh.conf` can now join with no download.
+  - **AirSnitch** via `AirSnitchRunner(...).install()` — clones `vanhoefm/airsnitch` into `tools/airsnitch` and builds its hostapd, so the Pentest tab's AirSnitch works offline on a fresh flash.
+- Both steps are **non-fatal** — a clone/build hiccup logs a warning and the image still builds (the tool stays a one-click retry on-device). `tools/` is chowned to `ragnar`.
+- Docs: [Ragnar OS image](ragnar-os.md).
+
 ### 2026-10-09
 
 #### [#933](https://github.com/PierreGode/Ragnar/pull/933) — feat(ble): BLE Watch "Trust current" + "Clear list" controls

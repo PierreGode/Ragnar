@@ -53,6 +53,31 @@ RAGNAR_INSTALL_PISUGAR=n \
 RAGNAR_FORCE_PI=1 \
     ./install_ragnar.sh --image-build
 
+# ── Bake extra tools the installer leaves on-demand ─────────────────────────
+# Both are non-fatal: a clone/build hiccup must never fail the whole image.
+
+# Tailscale CLIENT (binary only, never joins here) so the device is mesh-ready
+# out of the box — the web UI Mesh tab / a /boot ragnar-mesh.conf can join with
+# no download. setup_mesh.sh's `install` enables tailscaled; the start is a
+# chroot no-op, so it comes up on the device's first real boot.
+echo "=== Ragnar OS: installing Tailscale client ==="
+bash "$RAGNAR_PATH/scripts/setup_mesh.sh" install \
+    || echo "WARN: Tailscale client install failed — the Mesh tab can retry on-device"
+
+# AirSnitch (MacStealer / port-steal research tool) — the installer leaves this
+# a web-UI one-click; bake it so it's ready offline. Clones vanhoefm/airsnitch
+# into tools/airsnitch and builds its hostapd via the repo's setup.sh.
+echo "=== Ragnar OS: installing AirSnitch ==="
+python3 -c "
+import logging
+logging.basicConfig(level=logging.INFO)
+from actions.airsnitch import AirSnitchRunner
+ok = AirSnitchRunner('$RAGNAR_PATH/tools/airsnitch', logging.getLogger('airsnitch')).install()
+print('AirSnitch install:', 'ok' if ok else 'incomplete')
+" || echo "WARN: AirSnitch install failed — the Pentest tab can retry on-device"
+# Keep ownership consistent with the rest of the checkout.
+chown -R "${RAGNAR_USER}:${RAGNAR_USER}" "$RAGNAR_PATH/tools" 2>/dev/null || true
+
 # ── First-boot finalisation unit ────────────────────────────────────────────
 chmod +x "$RAGNAR_PATH/scripts/ragnar-firstboot.sh"
 install -m 0644 "$RAGNAR_PATH/scripts/ragnar-firstboot.service" /etc/systemd/system/ragnar-firstboot.service
