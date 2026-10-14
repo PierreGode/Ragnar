@@ -81,6 +81,15 @@
 - **Live-validated** in a sealed netns: malformed DCBX frames replayed with `tcpreplay` fire `LLDP-060`/`062`/`063`/`067` through the real `tcpdump` capture path, verdict `attack`.
 - **Docs:** [nettools.md › LLDP Watch](nettools.md#lldp-watch) (DCBX class, 40 codes, tiers), [CREDITS.md](CREDITS.md).
 
+#### [#949](https://github.com/PierreGode/Ragnar/pull/949) — feat(net): CDP Watch v5 — UDLD detection (CVE-2021-1368 port-channel RCE, CVE-2021-34714 reload DoS)
+*branch `feature/cdp-watch-v5`*
+
+- **Ported the v5 (v1.2.0) UDLD family into the in-app `do_cdp_watch`.** UDLD (UniDirectional Link Detection) rides the same Cisco group MAC as CDP (PID `0x0111`), so the capture BPF now admits both (`ether[20:2] = 0x2000 or 0x0111`). CVE index **342 → 344 named, 299 → 301 detected** (+2); CDP Watch now names 27 CVEs.
+- **UDLD is off by default and both CVEs require it enabled**, so a UDLD frame on the wire is itself the exposure (`UDLD-001`). UDLD carries no version banner, so OS-family attribution reuses the **CDP identity of the same source MAC**: NX-OS/FXOS/UCS → `UDLD-020` (**CVE-2021-1368**, 8.8 port-channel RCE + **CVE-2021-34714**, 7.4 reload DoS); IOS/IOS-XE/IOS-XR → `UDLD-021` (CVE-2021-34714, which *unlike* CDPwn affects plain IOS/IOS-XE); no CDP sighting → `UDLD-022` (honest "attribute by hand"). Malformed UDLD TLVs raise `UDLD-040`/`041`/`042`/`043` (overrun / underflow / oversized / trailing) and escalate the verdict.
+- **Not ported:** CVE-2020-3217 (onePK) — the module itself names it only as a contrast (state invisible on the wire); no packet signature.
+- **Self-test:** the `cdp` suite grows with 10 UDLD scenarios (presence, each malformed shape, NX-OS/IOS screening with CVE attribution, the unattributed case, verdict escalation). **Live-validated** in a sealed netns: a CDP NX-OS banner + UDLD frames replayed with `tcpreplay` fire `UDLD-001`/`UDLD-020` (with CVE-2021-1368) / `UDLD-041` through the real `tcpdump` capture path.
+- **Docs:** [nettools.md › CDP Watch](nettools.md#cdp-watch) (UDLD section, BPF), [CREDITS.md](CREDITS.md), card text. `gen_cve_list` owns the `_udld` helpers under CDP Watch and labels the two CVEs.
+
 ### 2026-10-13
 
 #### fix(kiosk): turning the kiosk off returns to the CLI instead of a black screen

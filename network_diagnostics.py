@@ -15926,6 +15926,114 @@ _CDPWN_SEV = {'CDP-020': 'high', 'CDP-021': 'high', 'CDP-022': 'high',
 _CDPWN_ATTACK_CODES = ('CDP-040', 'CDP-041', 'CDP-042', 'CDP-043', 'CDP-044',
                        'CDP-045', 'CDP-046', 'CDP-047', 'CDP-053', 'CDP-054')
 
+# --- UDLD (UniDirectional Link Detection, Cisco PID 0x0111 on the same CDP
+# group MAC). UDLD is OFF by default and both UDLD CVEs REQUIRE it enabled, so a
+# UDLD frame on the wire is itself the exposure signal. It carries no version
+# banner, so OS-family attribution reuses the CDP identity of the SAME source MAC
+# (CVE-2021-1368 8.8 port-channel RCE on NX-OS/FXOS/UCS; CVE-2021-34714 7.4
+# reload DoS, which — unlike CDPwn — DOES affect plain IOS/IOS-XE). Ported from
+# the standalone cdpwatch v5 (CDP + UDLD/DTP/PAgP family parser).
+_UDLD_SNAP_SIG = b'\xaa\xaa\x03\x00\x00\x0c\x01\x11'
+_UDLD_HDR_LEN = 4                 # version/opcode(1) flags(1) checksum(2)
+_UDLD_MAX_STRING = 256
+_UDLD_STRING_TLVS = {0x0001: 'device_id', 0x0002: 'port_id', 0x0006: 'device_name'}
+_UDLD_SEV = {'UDLD-001': 'info', 'UDLD-002': 'low', 'UDLD-020': 'high',
+             'UDLD-021': 'high', 'UDLD-022': 'info', 'UDLD-040': 'critical',
+             'UDLD-041': 'critical', 'UDLD-042': 'high', 'UDLD-043': 'medium'}
+_UDLD_ATTACK_CODES = ('UDLD-040', 'UDLD-041', 'UDLD-042')
+_UDLD_FAMILIES = [
+    (re.compile(r"NX[\s-]?OS|Nexus|FXOS|Firepower|\bUCS\b"), 'UDLD-020',
+     ['CVE-2021-1368', 'CVE-2021-34714'],
+     "UDLD enabled on an NX-OS / FXOS / UCS neighbour — verify against "
+     "CVE-2021-1368 (8.8, code execution; needs a UDLD-enabled port channel) "
+     "and CVE-2021-34714 (7.4, reload DoS)"),
+    (re.compile(r"IOS[\s-]?XR|IOS[\s-]?XE|\bIOS\b"), 'UDLD-021',
+     ['CVE-2021-34714'],
+     "UDLD enabled on an IOS / IOS-XE / IOS-XR neighbour — verify against "
+     "CVE-2021-34714 (7.4, reload DoS; unlike the CDPwn five, this one DOES "
+     "affect IOS and IOS-XE)"),
+]
+
+
+def _udld_parse_frame(raw):
+    """Bounds-checked byte-level parse of one raw UDLD frame (SNAP PID 0x0111).
+    Returns {src, tlvs, malformations} or None. The TLV walk is bounded by the
+    802.3 length field (padding-safe) and records UDLD-040 overrun / UDLD-041
+    underflow / UDLD-042 oversized-string / UDLD-043 trailing-data; never raises."""
+    if len(raw) < 14:
+        return None
+    idx = raw.find(_UDLD_SNAP_SIG)
+    if idx < 2 or idx > 32:
+        return None
+    off = idx + len(_UDLD_SNAP_SIG)
+    end = len(raw)
+    lenfield = int.from_bytes(raw[idx - 2:idx], 'big')
+    if 0 < lenfield <= 1500 and idx + lenfield <= len(raw):
+        end = idx + lenfield
+    r = {'src': ':'.join('%02x' % b for b in raw[6:12]), 'tlvs': {}, 'malformations': []}
+    tail = raw[end:]
+    if tail and tail.strip(b'\x00'):
+        r['malformations'].append(
+            ('UDLD-043', '%d byte(s) of non-zero data after the declared 802.3 '
+             'length' % len(tail)))
+    if off + _UDLD_HDR_LEN > end:
+        r['malformations'].append(('UDLD-040', 'UDLD header truncated'))
+        return r
+    p = off + _UDLD_HDR_LEN
+    while p + 4 <= end:
+        ttype = int.from_bytes(raw[p:p + 2], 'big')
+        tlen = int.from_bytes(raw[p + 2:p + 4], 'big')
+        if tlen < 4:
+            r['malformations'].append(
+                ('UDLD-041', 'TLV type 0x%04x length %d < 4 (underflow)' % (ttype, tlen)))
+            break
+        ve = p + tlen
+        overran = ve > end
+        if overran:
+            r['malformations'].append(
+                ('UDLD-040', 'TLV type 0x%04x length %d overruns frame' % (ttype, tlen)))
+            ve = end
+        if ttype in _UDLD_STRING_TLVS:
+            s = raw[p + 4:ve].decode('latin-1', 'replace')
+            r['tlvs'][_UDLD_STRING_TLVS[ttype]] = s
+            if len(s) > _UDLD_MAX_STRING:
+                r['malformations'].append(
+                    ('UDLD-042', '%s length %d > %d (oversized string TLV)'
+                     % (_UDLD_STRING_TLVS[ttype], len(s), _UDLD_MAX_STRING)))
+        if overran:
+            break
+        p = ve
+    return r
+
+
+def _udld_process(fr, add, cdp_idents):
+    """Fold one UDLD frame's findings in via `add`; screen the speaker against the
+    CDP identity (platform/version/device-id) of the same MAC in `cdp_idents`."""
+    pr = _udld_parse_frame(fr)
+    if not pr:
+        return
+    src = pr['src']
+    add('UDLD-001', src, 'UDLD is enabled here — UDLD is off by default and both '
+        'UDLD CVEs (CVE-2021-1368 / CVE-2021-34714) require it enabled')
+    for code, detail in pr['malformations']:
+        add(code, src, detail)
+    dev = pr['tlvs'].get('device_id') or pr['tlvs'].get('device_name')
+    if dev:
+        add('UDLD-002', src, 'UDLD advertises device identity %r' % dev[:48])
+    hay = cdp_idents.get(src, '')
+    if hay.strip():
+        hit = False
+        for rx, code, cves, note in _UDLD_FAMILIES:
+            if rx.search(hay):
+                add(code, src, note, cves)
+                hit = True
+        if not hit:
+            add('UDLD-022', src, 'UDLD enabled; the CDP identity %r matches no '
+                'known-affected OS family' % hay.strip()[:48])
+    else:
+        add('UDLD-022', src, 'UDLD enabled but no CDP identity seen for this source '
+            '— attribute by hand; check CVE-2021-1368 / CVE-2021-34714')
+
 
 def _cdp_scan_format_specifiers(s):
     """printf-accurate scan: return [(specifier, 'write'|'read')]. Honours '%%'
@@ -16098,12 +16206,17 @@ def _cdp_cdpwn_scan(frames):
         if key in seen:
             return
         seen.add(key)
-        out.append({'code': code, 'severity': _CDPWN_SEV.get(code, 'medium'),
+        out.append({'code': code,
+                    'severity': _CDPWN_SEV.get(code) or _UDLD_SEV.get(code) or 'medium',
                     'src': src, 'detail': detail, 'cves': cves or []})
 
+    cdp_idents = {}          # src MAC -> CDP identity hay, for UDLD attribution
+    udld_frames = []
     for fr in frames:
         pr = _cdp_parse_frame(fr)
         if not pr:
+            if _UDLD_SNAP_SIG in fr:
+                udld_frames.append(fr)
             continue
         src = pr['src']
         for code, detail in pr['malformations']:
@@ -16141,9 +16254,14 @@ def _cdp_cdpwn_scan(frames):
                 "flushes neighbour tables")
         hay = ' '.join(str(tl.get(k, '')) for k in ('platform', 'version', 'device_id'))
         if hay.strip():
+            cdp_idents[src] = hay
             for rx, code, cves, note in _CDPWN_FAMILIES:
                 if rx.search(hay):
                     add(code, src, note, cves)
+    # Second pass: UDLD speakers, attributed to a CVE family via the CDP identity
+    # of the same MAC collected above.
+    for fr in udld_frames:
+        _udld_process(fr, add, cdp_idents)
     return out
 
 
@@ -16155,7 +16273,8 @@ def _apply_cdpwn(result, findings):
     if not findings:
         return
     result['cdpwn'] = findings                 # full per-finding detail for the UI
-    attack = [f for f in findings if f['code'] in _CDPWN_ATTACK_CODES]
+    attack = [f for f in findings
+              if f['code'] in _CDPWN_ATTACK_CODES or f['code'] in _UDLD_ATTACK_CODES]
     if attack and result.get('verdict') in ('clean', 'cdp-enabled',
                                             'trailing-data', None):
         result['verdict'] = 'cdpwn'
@@ -16172,12 +16291,13 @@ def _apply_cdpwn(result, findings):
 
 
 def _cdp_capture(interface, seconds):
-    """One passive tcpdump window over CDP frames -> (raw, error). Uses -e for the
-    sending MAC; the BPF isolates CDP (PID 0x2000) from the other protocols that
-    share the Cisco group MAC (DTP/VTP/UDLD/PAgP)."""
+    """One passive tcpdump window over CDP + UDLD frames -> (raw, error). Uses -e
+    for the sending MAC; the BPF admits CDP (PID 0x2000) and UDLD (PID 0x0111) off
+    the shared Cisco group MAC, leaving DTP/VTP/PAgP to their own watchers."""
     if not _have('tcpdump'):
         return '', 'tcpdump is not installed. Click Install to add it.'
-    bpf = 'ether dst 01:00:0c:cc:cc:cc and ether[20:2] = 0x2000'
+    bpf = ('ether dst 01:00:0c:cc:cc:cc and '
+           '(ether[20:2] = 0x2000 or ether[20:2] = 0x0111)')
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface, '-e',
                 '-nn', '-t', '-v', '-xx', '-s', '1500', '-c', '20000', bpf],
                timeout=seconds + 8)
@@ -16360,6 +16480,12 @@ def _cdp_selftest():
             def _cdp_tlv(t, v):
                 return t.to_bytes(2, 'big') + (len(v) + 4).to_bytes(2, 'big') + v
 
+            def _udld_bytes(tlvs, src='de:ad:be:ef:00:0c'):
+                pay = bytes([0x20, 0x00, 0x00, 0x00]) + tlvs   # ver1/opcode0 flags0 cksum0
+                return _sraw(Dot3(dst='01:00:0c:cc:cc:cc', src=src)
+                             / LLC(dsap=0xaa, ssap=0xaa, ctrl=3)
+                             / SNAP(OUI=0x00000c, code=0x0111) / pay)
+
             cdpwn_cases = [
                 ('cdpwn-oversized-deviceid', _cdp_bytes(_cdp_tlv(0x0001, b'A' * 300)), 'CDP-042'),
                 ('cdpwn-oversized-portid', _cdp_bytes(_cdp_tlv(0x0003, b'B' * 200)), 'CDP-043'),
@@ -16419,6 +16545,46 @@ def _cdp_selftest():
             _apply_cdpwn(_res, _cdp_cdpwn_scan([cdpwn_cases[0][1]]))
             scenarios.append({'name': 'cdpwn-verdict-escalates', 'expect': 'cdpwn',
                               'got': _res['verdict'], 'pass': _res['verdict'] == 'cdpwn'})
+
+            # --- UDLD (v5): presence, malformed TLVs, and CDP-identity screening.
+            _udld_cases = [
+                ('udld-presence', _udld_bytes(_cdp_tlv(0x0001, b'sw1')), 'UDLD-001'),
+                ('udld-device-id', _udld_bytes(_cdp_tlv(0x0001, b'coreSW.lab')), 'UDLD-002'),
+                ('udld-overrun',
+                 _udld_bytes(b'\x00\x01' + (5000).to_bytes(2, 'big') + b'sw'), 'UDLD-040'),
+                ('udld-underflow', _udld_bytes(b'\x00\x01\x00\x02'), 'UDLD-041'),
+                ('udld-oversized', _udld_bytes(_cdp_tlv(0x0001, b'A' * 300)), 'UDLD-042'),
+                ('udld-trailing', _udld_bytes(_cdp_tlv(0x0001, b'sw1')) + b'\xde\xad\xbe\xef',
+                 'UDLD-043'),
+            ]
+            for _nm, _fr, _code in _udld_cases:
+                _ucodes = {x['code'] for x in _cdp_cdpwn_scan([_fr])}
+                scenarios.append({'name': _nm, 'expect': _code, 'got': sorted(_ucodes),
+                                  'pass': _code in _ucodes})
+            # screening: a UDLD speaker attributed via the CDP identity of the same MAC
+            _nx = _cdp_cdpwn_scan([_cdp_bytes(_cdp_tlv(0x0006, b'cisco Nexus N9K')),
+                                   _udld_bytes(_cdp_tlv(0x0001, b'nx-sw'))])
+            scenarios.append({'name': 'udld-screen-nxos (CVE-2021-1368)',
+                              'expect': 'UDLD-020 + CVE-2021-1368',
+                              'got': sorted({x['code'] for x in _nx}),
+                              'pass': any(x['code'] == 'UDLD-020'
+                                          and 'CVE-2021-1368' in x['cves'] for x in _nx)})
+            _ios = _cdp_cdpwn_scan([_cdp_bytes(_cdp_tlv(0x0005, b'Cisco IOS Software 15.2')),
+                                    _udld_bytes(_cdp_tlv(0x0001, b'ios-sw'))])
+            scenarios.append({'name': 'udld-screen-ios (CVE-2021-34714)',
+                              'expect': 'UDLD-021',
+                              'got': sorted({x['code'] for x in _ios}),
+                              'pass': 'UDLD-021' in {x['code'] for x in _ios}})
+            # no CDP identity for the source -> honest UDLD-022, no CVE attributed
+            _unatt = {x['code'] for x in _cdp_cdpwn_scan(
+                [_udld_bytes(_cdp_tlv(0x0001, b'mystery'), src='de:ad:be:ef:00:99')])}
+            scenarios.append({'name': 'udld-unattributed', 'expect': 'UDLD-022',
+                              'got': sorted(_unatt), 'pass': 'UDLD-022' in _unatt})
+            # a UDLD malformed shape escalates the verdict to cdpwn
+            _ures = {'verdict': 'clean', 'reasons': ['CDP speakers all match the trusted baseline']}
+            _apply_cdpwn(_ures, _cdp_cdpwn_scan([_udld_bytes(b'\x00\x01\x00\x02')]))
+            scenarios.append({'name': 'udld-verdict-escalates', 'expect': 'cdpwn',
+                              'got': _ures['verdict'], 'pass': _ures['verdict'] == 'cdpwn'})
 
             try:
                 os.remove(pcap_path)

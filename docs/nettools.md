@@ -2387,13 +2387,24 @@ CDP Watch looks at the same frames from the attacker's side and flags their abus
   (CVE-2023-41910), **Cisco ATA 190/191/192** (CVE-2022-20688…20766) and
   **Unified CM** (CVE-2022-20804); plain IOS/IOS-XE deliberately excluded per
   Cisco's advisory, and an ATA guarded off the IP-Phone family by a negative
-  lookahead — attaches the CVEs to verify that device against, now spanning **25
+  lookahead — attaches the CVEs to verify that device against, now spanning **27
   CDP-plane CVEs**. `TTL=0` withdrawals (`CDP-050`) and the shared trailing-data
   check (`CDP-052`) round it out.
+- **UDLD** (`UDLD-001…043`) — the same scan also admits **UDLD** (UniDirectional Link
+  Detection, Cisco PID `0x0111` on the shared group MAC). UDLD is **off by default** and
+  both UDLD CVEs *require* it enabled, so a UDLD frame on the wire is itself the exposure
+  (`UDLD-001`). It carries no version banner, so OS-family attribution reuses the **CDP
+  identity of the same source MAC**: an NX-OS / FXOS / UCS neighbour → `UDLD-020`
+  (**CVE-2021-1368**, 8.8 port-channel code execution, + **CVE-2021-34714**, 7.4 reload
+  DoS); an IOS / IOS-XE / IOS-XR neighbour → `UDLD-021` (CVE-2021-34714, which *unlike*
+  CDPwn affects plain IOS/IOS-XE); no CDP sighting → `UDLD-022` (honest "attribute by
+  hand"). Malformed UDLD TLVs raise `UDLD-040`/`041`/`042`/`043` (overrun / underflow /
+  oversized string / trailing data), which escalate the verdict.
 
 The scan uses `tcpdump -e` with the BPF
-`ether dst 01:00:0c:cc:cc:cc and ether[20:2] = 0x2000`, isolating CDP from the other
-protocols on that Cisco group MAC (DTP/VTP/UDLD/PAgP). CDP hellos are ~60s apart, so
+`ether dst 01:00:0c:cc:cc:cc and (ether[20:2] = 0x2000 or ether[20:2] = 0x0111)`, admitting
+CDP and UDLD while leaving the other protocols on that Cisco group MAC (DTP/VTP/PAgP) to
+their own watchers. CDP hellos are ~60s apart, so
 the default window is longer (30s). The first scan **learns** the current CDP speakers
 (the real switches/phones) as the baseline (`data/cdp_watch.json`); "Trust current"
 re-learns. Every result carries a **mitigation advisory**: disable CDP on access/edge
