@@ -3696,6 +3696,17 @@ screened against the tracked CVE trains (a NOTE to verify THIS device, never a v
 IOS-XE now names the **August 2026 advisory wave** (CVE-2026-20267…20273, incl. the 9.8
 RCE CVE-2026-20272) and NX-OS adds **CVE-2025-20111**; a patched train stays quiet, and an
 untracked train is reported as unscreenable (silence is not evidence of patching).
+**TWAMP / IP SLA:** **`CG-114`** the TWAMP/OWAMP control plane reachable (TCP/862 — the
+unauthenticated precondition for **CVE-2025-20154** and **CVE-2021-34720**, both 8.6),
+**`CG-014`** a TWAMP responder's 64-byte Server Greeting, **`CG-115`** that greeting
+advertising **Unauthenticated mode** (usable with no shared secret, Modes bit `0x1`),
+**`CG-294`** a malformed greeting (nonzero MBZ tail), and **`CG-116`** Cisco's IP SLA
+Responder control on UDP/1967 (CVE-2021-34720 — IP SLA and TWAMP share the code path).
+**WLC (`CG-105`):** a Catalyst 9800 / Embedded Wireless Controller identity in the capture →
+verify the Out-of-Band AP-Image-Download feature against **CVE-2025-20188** (10.0,
+hardcoded-JWT arbitrary file upload) — gated on the WLC identity, not a bare 8443 flow.
+**SD-WAN (`CG-106`):** a Catalyst SD-WAN Manager (vManage) API path (`/dataservice/`,
+`vmanage`) in cleartext HTTP → **CVE-2026-20133**.
 - Endpoint: `GET /api/net/cisco-guard` `{interface, seconds}` · binary: `tcpdump`
 - CLI: `python3 network_diagnostics.py cisco-guard [--iface I] [--seconds N] [--json]`
 

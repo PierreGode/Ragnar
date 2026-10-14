@@ -20279,6 +20279,7 @@ _CISCO_GUARD_BPF = (
     'udp port 161 or udp port 162 or udp port 546 or udp port 547 or '
     'udp port 500 or udp port 4500 or udp port 5246 or udp port 5247 or '
     'udp port 4341 or udp port 4342 or '
+    'tcp port 862 or udp port 862 or udp port 1967 or '
     'tcp port 23 or tcp port 80 or '
     'tcp port 8080 or tcp port 8443 or ' + _CISCO_VXLAN_TRILL_BPF + ' or '
     + _GUARD_IP6_EXTHDR_BPF)
@@ -20643,6 +20644,37 @@ _CISCO_SMB_CVES = ('CVE-2023-20159', 'CVE-2023-20160', 'CVE-2023-20161',
 _CISCO_LISP_PORTS = (4341, 4342)
 _LISP_TYPES = frozenset((1, 2, 3, 4, 6, 8))   # map-request .. encapsulated-control
 _LISP_AFI_LEN = {0: 0, 1: 4, 2: 16}           # 0=none, 1=IPv4, 2=IPv6
+
+# --- TWAMP / IP SLA (CG-014/114/115/116/294, v7). TWAMP-Control is TCP/862,
+# TWAMP-Light test UDP/862; Cisco's IP SLA Responder control is UDP/1967. Both
+# TWAMP CVEs (CVE-2025-20154 OOB array access reload, CVE-2021-34720 IP SLA/TWAMP
+# socket mishandling) are unauthenticated and need the control plane reachable,
+# so presence is the exposure. The 64-byte Server Greeting carries the offered
+# Modes bitmap (offset 12); the Unauthenticated bit (0x1) means usable with no
+# shared secret, and a nonzero MBZ tail (octets 52..64) is a definite malformation.
+_TWAMP_PORT = 862
+_IPSLA_CONTROL_PORT = 1967
+_TWAMP_CVES = ['CVE-2025-20154', 'CVE-2021-34720']
+_TWAMP_LEN_GREETING = 64
+_TWAMP_MODE_UNAUTH = 0x1
+# Catalyst 9800 / Embedded WLC identity -> the CVE-2025-20188 (10.0 OOB AP-image
+# download / hardcoded-JWT upload) precondition. Gated on the identity, not a bare
+# 8443 match, to avoid firing on every HTTPS flow in the broad guard capture.
+_CISCO_WLC_RE = re.compile(r'\b(?:C9800|Catalyst\s*9800|Wireless\s*Controller|'
+                           r'Embedded\s*Wireless|\bEWC\b|AireOS)\b', re.I)
+
+
+def _twamp_greeting_issues(payload):
+    """For a 64-byte TWAMP Server Greeting, return (unauth_offered, malformed).
+    unauth_offered = the Modes bitmap advertises Unauthenticated mode; malformed
+    = the MBZ tail is nonzero. ('', '') when it is not a greeting."""
+    p = payload or b''
+    if len(p) < _TWAMP_LEN_GREETING:
+        return (False, False)
+    modes = int.from_bytes(p[12:16], 'big')
+    unauth = bool(modes & _TWAMP_MODE_UNAUTH)
+    malformed = any(p[52:64])
+    return (unauth, malformed)
 
 _CISCO_GUARD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                  'data', 'cisco_guard.json')
@@ -21091,6 +21123,14 @@ def _cisco_analyze(records):
                 [], {'note': 'Cisco security appliance — cover with firewall tooling'})
         elif re.search(r'\bcisco\b', text, re.I):
             add('CG-001', 'CISCO_DEVICE_OBSERVED', 'INFO', 'POSTURE', src, [], {})
+        # Catalyst 9800 / Embedded WLC identity -> the CVE-2025-20188 (10.0) OOB
+        # AP-image-download exposure. Gated on the identity, not a bare 8443 flow.
+        if _CISCO_WLC_RE.search(text):
+            add('CG-105', 'WLC_OOB_AP_IMAGE_PORT_ACTIVE', 'HIGH', 'EXPOSURE', src,
+                ['CVE-2025-20188'],
+                {'note': 'Cisco Catalyst 9800 / Embedded Wireless Controller seen — '
+                 'verify the Out-of-Band AP Image Download feature against '
+                 'CVE-2025-20188 (10.0, hardcoded-JWT arbitrary file upload)'})
 
         # --- SNMP (UDP 161/162): exposure + attack ---
         if r['proto'] == 'UDP' and (r['dport'] in (161, 162) or r['sport'] in (161, 162)):
@@ -21144,6 +21184,42 @@ def _cisco_analyze(records):
                     {'model': _smb_model, 'note': 'Cisco Small Business switch web '
                      'UI on the segment — verify against the May 2023 web-UI '
                      'cluster (SB 200/300/500 has no fix; 220 Series excluded)'})
+            if re.search(r'/dataservice/|vmanage', _http_txt, re.I):
+                add('CG-106', 'SDWAN_MANAGER_REACHABLE', 'MEDIUM', 'EXPOSURE',
+                    dst or src, ['CVE-2026-20133'],
+                    {'note': 'Catalyst SD-WAN Manager (vManage) API path observed — '
+                     'verify against CVE-2026-20133'})
+
+        # --- TWAMP / OWAMP control + IP SLA (CG-014/114/115/116/294, v7) ---
+        if r['proto'] in ('TCP', 'UDP') and (r['dport'] == _TWAMP_PORT
+                                             or r['sport'] == _TWAMP_PORT):
+            server = dst if r['dport'] == _TWAMP_PORT else src
+            add('CG-114', 'TWAMP_CONTROL_EXPOSED', 'HIGH', 'EXPOSURE', server,
+                list(_TWAMP_CVES),
+                {'proto': r['proto'], 'note': 'TWAMP/OWAMP control plane reachable — '
+                 'the unauthenticated precondition for CVE-2025-20154 and '
+                 'CVE-2021-34720 (both 8.6)'})
+            # a 64-byte Server Greeting (server->client) carries the Modes bitmap
+            if r['sport'] == _TWAMP_PORT and len(r['payload'] or b'') == _TWAMP_LEN_GREETING:
+                _unauth, _malf = _twamp_greeting_issues(r['payload'])
+                add('CG-014', 'TWAMP_RESPONDER_OBSERVED', 'INFO', 'POSTURE', server, [],
+                    {'note': 'a TWAMP responder answered with a Server Greeting'})
+                if _unauth:
+                    add('CG-115', 'TWAMP_UNAUTH_MODE_OFFERED', 'MEDIUM', 'EXPOSURE',
+                        server, list(_TWAMP_CVES),
+                        {'note': 'the Server Greeting advertises Unauthenticated mode — '
+                         'the control plane is usable with no shared secret'})
+                if _malf:
+                    add('CG-294', 'TWAMP_CONTROL_MALFORMED', 'HIGH', 'ATTACK', server,
+                        ['CVE-2025-20154'],
+                        {'note': 'nonzero MBZ tail in the TWAMP Server Greeting (RFC 5357 '
+                         'requires it zero) — a malformed control shape'})
+        if r['proto'] == 'UDP' and (r['dport'] == _IPSLA_CONTROL_PORT
+                                    or r['sport'] == _IPSLA_CONTROL_PORT):
+            add('CG-116', 'IPSLA_RESPONDER_CONTROL_EXPOSED', 'MEDIUM', 'EXPOSURE',
+                dst if r['dport'] == _IPSLA_CONTROL_PORT else src, ['CVE-2021-34720'],
+                {'note': 'Cisco IP SLA Responder control (UDP/1967) reachable — the '
+                 'CVE-2021-34720 precondition (IP SLA and TWAMP share the code path)'})
 
         # --- Telnet to infrastructure ---
         if r['proto'] == 'TCP' and (r['dport'] == 23 or r['sport'] == 23):
@@ -24325,6 +24401,36 @@ def _cisco_selftest():
     # v6: LISP Map-Request whose source-EID AFI overruns the datagram -> CG-241.
     check('cisco-lisp-afi', [_guard_rec(proto='UDP', sport=4342, dport=4342,
           payload=b'\x10\x00\x00\x02' + b'\x00' * 8 + b'\x00\x02')], 'attack', ['CG-241'])
+
+    # v7: TWAMP control plane reachable (TCP/862) -> exposure CG-114.
+    check('cisco-twamp-exposed', [_guard_rec(proto='TCP', dport=862)],
+          'exposure', ['CG-114'])
+    # v7: a 64-byte TWAMP Server Greeting advertising Unauthenticated mode (Modes
+    # bit 0x1 at offset 12, MBZ tail zero) -> responder (CG-014) + unauth (CG-115).
+    _greet_ok = bytes(12) + (0x1).to_bytes(4, 'big') + bytes(36) + bytes(12)
+    _r_tw = check('cisco-twamp-unauth', [_guard_rec(proto='TCP', src='10.0.0.5',
+                  sport=862, dst='10.0.0.9', dport=50000, payload=_greet_ok)],
+                  'exposure', ['CG-014', 'CG-115'])
+    scenarios.append({'name': 'cisco-twamp-cve-named', 'expect': 'CVE-2025-20154',
+                      'got': '', 'pass': any('CVE-2025-20154' in f['cves']
+                      for f in _r_tw['findings'] if f['code'] == 'CG-114')})
+    # v7: a greeting with a nonzero MBZ tail is malformed -> CG-294.
+    _greet_bad = bytes(12) + (0x1).to_bytes(4, 'big') + bytes(36) + b'\x01' * 12
+    check('cisco-twamp-malformed', [_guard_rec(proto='TCP', sport=862, dport=50000,
+          payload=_greet_bad)], 'attack', ['CG-294'])
+    # v7: Cisco IP SLA Responder control (UDP/1967) -> exposure CG-116.
+    check('cisco-ipsla', [_guard_rec(proto='UDP', dport=1967)], 'exposure', ['CG-116'])
+    # v7: a Catalyst 9800 WLC identity -> CG-105 (CVE-2025-20188, 10.0).
+    _r_wlc = check('cisco-wlc-oob', [_guard_rec(
+        dissect='Cisco IOS XE Software, Catalyst 9800-CL Wireless Controller')],
+        'exposure', ['CG-105'])
+    scenarios.append({'name': 'cisco-wlc-cve-named', 'expect': 'CVE-2025-20188',
+                      'got': '', 'pass': any('CVE-2025-20188' in f['cves']
+                      for f in _r_wlc['findings'] if f['code'] == 'CG-105')})
+    # v7: a Catalyst SD-WAN Manager (vManage) API path -> CG-106.
+    check('cisco-sdwan', [_guard_rec(proto='TCP', dport=80,
+          payload=b'GET /dataservice/system/device HTTP/1.1\r\nHost: x\r\n\r\n')],
+          'exposure', ['CG-106'])
 
     # attack: IKEv2 message whose declared Length overruns the datagram
     # (CVE-2024-20307/20308 malformed-input shape). 28-byte header, Length=9999.

@@ -14,8 +14,8 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **299 CVEs detected from the wire.** 349 distinct CVE IDs are named across Ragnar's
-  code; 299 of them a passive detector actually identifies. The rest are named, not detected:
+- **305 CVEs detected from the wire.** 355 distinct CVE IDs are named across Ragnar's
+  code; 305 of them a passive detector actually identifies. The rest are named, not detected:
   41 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
@@ -27,9 +27,9 @@ behind them is Solarflere's work.
   **CVE-2026-86060**.
 - **Two CISA KEV entries** join the corpus with SMTP Watch (CVE-2019-10149, CVE-2018-6789),
   and APC Guard adds the KEV-listed Ripple20 CVE-2020-11899.
-- Weighted to the current threat wave (all named IDs): **45 CVEs from 2023, 51 from 2024, 38 from 2025, and
-  45 from 2026**, with a nine-strong 2021 cluster from the LLDP SB220 / RV / TRENDnet /
-  QNAP families and a deep 2020–2022 CDP seam (30 / 34 / 29) that the CDP Watch **LCDPwn**
+- Weighted to the current threat wave (all named IDs): **45 CVEs from 2023, 52 from 2024, 40 from 2025, and
+  46 from 2026**, with a nine-strong 2021 cluster from the LLDP SB220 / RV / TRENDnet /
+  QNAP families and a deep 2020–2022 CDP seam (30 / 37 / 29) that the CDP Watch **LCDPwn**
   expansion widened — the Video Surveillance 7000/8000 set, the Cisco ATA 190 cluster,
   Unified CM, FortiSwitch and lldpd.
 - Spanning **~40 passive detectors** from L2 to L7 plus the timing- and forwarding-plane

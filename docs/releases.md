@@ -90,6 +90,17 @@
 - **Self-test:** the `cdp` suite grows with 10 UDLD scenarios (presence, each malformed shape, NX-OS/IOS screening with CVE attribution, the unattributed case, verdict escalation). **Live-validated** in a sealed netns: a CDP NX-OS banner + UDLD frames replayed with `tcpreplay` fire `UDLD-001`/`UDLD-020` (with CVE-2021-1368) / `UDLD-041` through the real `tcpdump` capture path.
 - **Docs:** [nettools.md › CDP Watch](nettools.md#cdp-watch) (UDLD section, BPF), [CREDITS.md](CREDITS.md), card text. `gen_cve_list` owns the `_udld` helpers under CDP Watch and labels the two CVEs.
 
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): Cisco Guard v7 — TWAMP / IP SLA, WLC OOB AP-image (CVE-2025-20188 10.0), SD-WAN (+4 CVEs)
+*branch `feature/cisco-guard-v7`*
+
+- **Ported the feasible v7 additions into the in-app `do_cisco_guard`.** CVE index **342 → 346 named, 299 → 303 detected** (+4); Cisco Guard now names 33 CVEs. BPF adds `tcp port 862 or udp port 862 or udp port 1967`.
+- **TWAMP / IP SLA:** `CG-114` TWAMP/OWAMP control plane reachable on TCP/862 — the unauthenticated precondition for **CVE-2025-20154** (server OOB array-access reload) and **CVE-2021-34720** (IP SLA/TWAMP socket memory exhaustion), both 8.6; `CG-014` a 64-byte Server Greeting; `CG-115` that greeting offering **Unauthenticated mode** (Modes bit 0x1, usable with no shared secret); `CG-294` a malformed greeting (nonzero MBZ tail); `CG-116` Cisco IP SLA Responder control on UDP/1967 (CVE-2021-34720 — IP SLA and TWAMP share the code path).
+- **WLC (`CG-105`, CVE-2025-20188, 10.0):** a Catalyst 9800 / Embedded Wireless Controller identity → verify the Out-of-Band AP-Image-Download feature (hardcoded-JWT arbitrary file upload). **Gated on the WLC identity, not a bare 8443 flow**, so it doesn't fire on every HTTPS session in the broad guard capture.
+- **SD-WAN (`CG-106`, CVE-2026-20133):** a Catalyst SD-WAN Manager (vManage) API path (`/dataservice/`, `vmanage`) in cleartext HTTP.
+- **Deferred, with reasons:** `CG-295` (stateful Accept-Session resource-limit — needs TCP flow state the in-app model doesn't keep), `CG-293` (SMB default-account cleartext — needs request/response correlation), CVE-2024-20314 / CVE-2024-20271 (no passive packet signature, per the module), and the L2-byte codes still deferred from v6.
+- **Self-test:** the `cisco` suite grows to **43 scenarios** (TWAMP exposed/unauth/malformed, IP SLA, WLC with CVE-2025-20188, SD-WAN). **Live-validated** in a sealed netns: crafted TWAMP greeting + IP SLA + vManage HTTP replayed with `tcpreplay` fire `CG-114`/`CG-115`/`CG-116`/`CG-106` through the real `tcpdump` capture path.
+- **Docs:** [nettools.md › Cisco Guard](nettools.md#cisco-guard), [CREDITS.md](CREDITS.md), card text. `gen_cve_list` owns the `_twamp` helpers under Cisco Guard and labels the four new IDs.
+
 ### 2026-10-13
 
 #### fix(kiosk): turning the kiosk off returns to the CLI instead of a black screen
