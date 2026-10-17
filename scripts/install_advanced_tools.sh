@@ -27,6 +27,12 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+if [[ -n "${BASH_SOURCE[0]}" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+    SCRIPT_DIR="$(pwd)"
+fi
+
 echo -e "${CYAN}"
 echo "╔══════════════════════════════════════════════════════════════════╗"
 echo "║          Ragnar Advanced Security Tools Installer                ║"
@@ -232,7 +238,7 @@ if check_installed "nuclei"; then
     fi
 else
     echo -e "${BLUE}Installing Nuclei...${NC}"
-    
+
     # Detect architecture
     ARCH=$(uname -m)
     case $ARCH in
@@ -250,24 +256,24 @@ else
             NUCLEI_ARCH=""
             ;;
     esac
-    
+
     if [ -n "$NUCLEI_ARCH" ]; then
         # Get latest version
         echo -e "${BLUE}Downloading Nuclei for ${NUCLEI_ARCH}...${NC}"
-        
+
         # Try to get latest release URL from GitHub API
         NUCLEI_VERSION=$(curl -s https://api.github.com/repos/projectdiscovery/nuclei/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/' || echo "3.3.7")
         NUCLEI_URL="https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VERSION}/nuclei_${NUCLEI_VERSION}_linux_${NUCLEI_ARCH}.zip"
-        
+
         TEMP_DIR=$(mktemp -d)
         cd "$TEMP_DIR"
-        
+
         if curl -sL -o nuclei.zip "$NUCLEI_URL"; then
             if unzip -q nuclei.zip 2>/dev/null; then
                 chmod +x nuclei
                 mv nuclei /usr/local/bin/
                 echo -e "${GREEN}✓ Nuclei ${NUCLEI_VERSION} installed successfully${NC}"
-                
+
                 # Download templates
                 echo -e "${BLUE}Downloading Nuclei templates...${NC}"
                 if [ -n "$RAGNAR_USER" ]; then
@@ -281,16 +287,16 @@ else
         else
             echo -e "${RED}Failed to download Nuclei${NC}"
         fi
-        
+
         cd /
         rm -rf "$TEMP_DIR"
     fi
-    
+
     # Fallback: try Go install if available
     if ! check_installed "nuclei" && check_installed "go"; then
         echo -e "${BLUE}Trying Go install method...${NC}"
         go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest 2>/dev/null || true
-        
+
         # Add Go bin to path if nuclei was installed there
         if [ -f "$HOME/go/bin/nuclei" ]; then
             ln -sf "$HOME/go/bin/nuclei" /usr/local/bin/nuclei
@@ -312,13 +318,8 @@ if grep -qi "Raspberry Pi Zero" /proc/cpuinfo 2>/dev/null; then
     IS_PI_ZERO=true
 fi
 
-# Determine Ragnar installation directory (where this script is located)
-# Handle both direct execution and sudo execution
-if [ -n "${BASH_SOURCE[0]}" ]; then
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-else
-    SCRIPT_DIR="$(pwd)"
-fi
+# Determine Ragnar installation directory (SCRIPT_DIR was resolved at the top
+# of this script, before any section could cd elsewhere).
 RAGNAR_DIR="$SCRIPT_DIR"
 
 # Verify this is actually the Ragnar directory
@@ -350,7 +351,8 @@ else
     if ! java -version 2>&1 | grep -qE "openjdk.*(21|17|11)"; then
         echo -e "${BLUE}Installing OpenJDK 21 JRE...${NC}"
         install_pkg "openjdk-21-jre" || install_pkg "openjdk-21-jre-headless" || \
-        install_pkg "java-21-openjdk" || install_pkg "java-21-openjdk-headless" || {
+        install_pkg "java-21-openjdk" || install_pkg "java-21-openjdk-headless" || \
+        install_pkg "jre21-openjdk" || install_pkg "jre-openjdk" || {
             echo -e "${YELLOW}Could not install OpenJDK 21, trying OpenJDK 17...${NC}"
             install_pkg "openjdk-17-jre" || install_pkg "openjdk-17-jre-headless" || \
             install_pkg "java-17-openjdk" || install_pkg "java-17-openjdk-headless" || {
@@ -480,7 +482,7 @@ if [ -d "$NMAP_SCRIPTS_DIR" ]; then
     else
         echo -e "${GREEN}✓ vulners.nse already installed${NC}"
     fi
-    
+
     # vulscan
     if [ ! -d "$NMAP_SCRIPTS_DIR/vulscan" ]; then
         echo -e "${BLUE}Downloading vulscan...${NC}"
@@ -490,7 +492,7 @@ if [ -d "$NMAP_SCRIPTS_DIR" ]; then
     else
         echo -e "${GREEN}✓ vulscan already installed${NC}"
     fi
-    
+
     # Update nmap script database
     echo -e "${BLUE}Updating nmap script database...${NC}"
     nmap --script-updatedb 2>/dev/null || true
