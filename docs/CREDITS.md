@@ -14,8 +14,8 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **336 CVEs detected from the wire.** 395 distinct CVE IDs are named across Ragnar's
-  code; 336 of them a passive detector actually identifies. The rest are named, not detected:
+- **337 CVEs detected from the wire.** 396 distinct CVE IDs are named across Ragnar's
+  code; 337 of them a passive detector actually identifies. The rest are named, not detected:
   50 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
@@ -35,7 +35,7 @@ behind them is Solarflere's work.
   gNOI authorization bypass (CVE-2025-1260 / CVE-2025-0936), the actively-exploited
   tunnel-decapsulation CVE-2026-7473, and the VLAN / OSPFv3 / CVX / IPsec dataplane shapes.
 - Weighted to the current threat wave (all named IDs): **49 CVEs from 2023, 55 from 2024, 45 from 2025, and
-  51 from 2026**, with a nine-strong 2021 cluster from the LLDP SB220 / RV / TRENDnet /
+  52 from 2026**, with a nine-strong 2021 cluster from the LLDP SB220 / RV / TRENDnet /
   QNAP families and a deep 2020–2022 CDP seam (30 / 37 / 29) that the CDP Watch **LCDPwn**
   expansion widened — the Video Surveillance 7000/8000 set, the Cisco ATA 190 cluster,
   Unified CM, FortiSwitch and lldpd.

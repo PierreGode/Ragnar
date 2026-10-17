@@ -1569,6 +1569,24 @@ handshake, yields:
   directly from the cleartext SKE (TLS 1.2 DHE only; TLS 1.3/QUIC have no ServerKeyExchange),
   which also recovers the real group size for the D(HE)at accounting. NVD 7.5 HIGH; OpenSSL
   rates it Low (*disputed*).
+- **Unvalidated SNI host_name length / `CVE-2026-52346` *(new in v9)*** —
+  **`cve_2026_52346_sni_overread`** (*attack*-shape): a ClientHello whose SNI `host_name`
+  declares more bytes than its RFC 6066 container carries — the MikroTik RouterOS `xt_tls`
+  kernel module reads that unchecked length and copies past the packet buffer (out-of-bounds
+  read). Pure arithmetic on the four nested declared lengths (handshake message → extensions
+  block → server_name extension → server_name_list → host_name), the same read-only shape as
+  the Heartbleed and CVE-2017-3731 bounds tests. **Two severities:** *high* when the declared
+  length runs past the bytes the handshake message itself carries (nothing in the packet can
+  satisfy the read), *warn* for an inner-container overrun that still lands inside the message
+  (equally illegal under RFC 6066, but a reassembled view cannot prove the read left the
+  device's `skb`). The scan runs **independent of the parser** — the illegal nesting makes
+  `parse_client_hello` raise, so the finding would otherwise be dropped — and it **scopes out
+  the benign `no_sni`** notice an over-claim previously masqueraded as. Fires on TLS, DTLS and
+  QUIC ClientHellos alike. Every finding carries `precondition_unobserved` (the vulnerable path
+  needs a `tls-host` firewall rule, invisible from a tap). No CVSS vector is recorded — MikroTik
+  published no score and NVD had none as of 2026-10-17; the **7.5** is the reporter's figure.
+  Fixed in RouterOS 7.22.2 / 7.21.4. The RouterOS version bounds live in `mikrotikwatch`'s
+  registry; tlswatch owns only the wire evidence.
 - **Certificate posture (TLS 1.2 over TCP only)** — subject/issuer, SANs, validity
   window, self-issued flag, signature hash, and findings: `cert_expired`,
   `cert_not_yet_valid`, `cert_self_signed`, `cert_short_chain`, `cert_weak_sig`,

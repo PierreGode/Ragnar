@@ -4,6 +4,16 @@
 
 ### 2026-10-17
 
+#### [#976](https://github.com/PierreGode/Ragnar/pull/976) — feat(net): TLS Watch v9 — CVE-2026-52346 unvalidated SNI host_name length (xt_tls OOB read)
+*branch `feature/tls-watch-v9`*
+
+- **TLS Watch v9 adds CVE-2026-52346** — an unvalidated SNI `host_name` length in a ClientHello (MikroTik RouterOS `xt_tls` out-of-bounds read). A new read-only walk `scan_sni_overread` audits the four nested RFC 6066 lengths (handshake message → extensions block → server_name extension → server_name_list → host_name) and flags a `host_name` whose declared length overruns its container. Ported into the in-app `tls_watch.py` (`analyze_session`, add-to-existing — the standalone tlswatch v9 is the reference). No new verdict token (high/warn → suspicious).
+- **Two severities by evidence:** `cve_2026_52346_sni_overread` is **high** when the declared length runs past the handshake message itself (nothing in the packet can satisfy the read), **warn** for an inner-container overrun that still lands inside the message. Fields `bound` / `declared_host_len` / `available` / `overrun_bytes`; every finding carries `precondition_unobserved` (the vulnerable path needs a `tls-host` firewall rule, invisible from a tap).
+- **Runs independent of the parser.** The illegal nesting makes `parse_client_hello` raise ("short take"), so the scan runs on the raw bytes at capture time and the finding survives a hello too malformed to parse — at all three ClientHello sites (TLS over TCP, QUIC Initial, DTLS). It also **scopes out the benign `no_sni` notice** an over-claim previously masqueraded as, and hardens the TCP path against a malformed-hello parse crash.
+- **CVE index +1 → 396 named / 337 detected** (range CVE-1999-0113 → CVE-2026-102019); attributes to TLS Watch (the wire evidence) — the RouterOS version bounds live in `mikrotikwatch`'s registry. CREDITS.md / README.md synced. No CVSS vector recorded (MikroTik unscored, NVD had no record 2026-10-17; the 7.5 is the reporter's figure).
+- **Self-test:** `tls_watch.selftest()` → **157 checks** (was 135), 22 new for CVE-2026-52346 (the boundary, the four graded containers, parser-raise-but-scan-survives, the `no_sni` scope-out). Aggregate `do_routing_selftest` **59 suites**, all green.
+- **Docs:** [nettools.md › TLS Watch](nettools.md#tls-watch).
+
 #### [#975](https://github.com/PierreGode/Ragnar/pull/975) — fix(boot): unblock radios at every boot (rfkill) — both images
 *branch `fix/rfkill-boot-unblock`*
 

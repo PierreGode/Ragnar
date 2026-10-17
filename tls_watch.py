@@ -628,6 +628,127 @@ _CVE_2018_0732 = {'cve': 'CVE-2018-0732', 'cvss': 7.5,
                   'score_confidence': 'disputed'}
 
 
+# CVE-2026-52346 — unvalidated SNI host_name length (MikroTik RouterOS xt_tls OOB read).
+# RFC 6066 nests four independently declared lengths around the hostname:
+#   handshake message -> extensions block -> server_name extension
+#                                         -> server_name_list -> host_name
+# Each inner length must fit inside its container; xt_tls read the innermost one and copied
+# that many bytes without checking any of them. A SEPARATE read-only walk rather than a
+# change to parse_client_hello, because an over-claiming hostname length makes the parser
+# raise ("short take") and the hello would otherwise be dropped with no event. The scan runs
+# BEFORE/INDEPENDENT of the parse so the finding survives a hello that cannot be parsed.
+# Segmentation is not a false-positive source: _scan_tls_stream only yields a complete
+# handshake message, so what is tested is a message whose own declared lengths disagree.
+# TWO SEVERITIES: high when the declared length runs past the bytes the message itself
+# carries (nothing in the packet can satisfy the read); warn when it overruns an inner
+# container but still lands inside the message (equally illegal under RFC 6066 and exactly
+# the arithmetic xt_tls acts on, but a reassembled view cannot prove the read left the skb).
+_CVE_2026_52346 = {'cve': 'CVE-2026-52346', 'cvss': 7.5,
+                   'cvss_source': 'reporter 7.5; MikroTik unscored, NVD no record 2026-10-17',
+                   'score_confidence': 'unscored_by_nvd'}
+_SNI_HOST_NAME = 0
+# Outermost container first: a declared length is classified by the furthest limit it
+# crosses, since that is how far the unchecked arithmetic reaches.
+SNI_OVERREAD_BOUNDS = ('handshake_message', 'extensions_block', 'extension_data',
+                       'server_name_list')
+
+
+def scan_sni_overread(body):
+    """Read-only bounds audit of the SNI host_name length in a ClientHello body
+    (CVE-2026-52346). Returns None when there is no SNI or the nesting is legal, else a
+    dict naming the outermost container the declared length crosses. Never raises."""
+    try:
+        return _scan_sni_overread(bytes(body))
+    except Exception:
+        return None
+
+
+def _scan_sni_overread(b):
+    msg_end = len(b)
+    o = 2 + 32                                   # legacy_version + random
+    if o + 1 > msg_end:
+        return None
+    o += 1 + b[o]                                # session_id
+    if o + 2 > msg_end:
+        return None
+    o += 2 + ((b[o] << 8) | b[o + 1])            # cipher_suites
+    if o + 1 > msg_end:
+        return None
+    o += 1 + b[o]                                # compression_methods
+    if o + 2 > msg_end:
+        return None
+    block_declared_end = o + 2 + ((b[o] << 8) | b[o + 1])
+    o += 2
+    block_end = min(block_declared_end, msg_end)
+    while o + 4 <= block_end:
+        et = (b[o] << 8) | b[o + 1]
+        el = (b[o + 2] << 8) | b[o + 3]
+        o += 4
+        ext_declared_end = o + el
+        if et != 0x0000:                         # server_name
+            o = ext_declared_end
+            continue
+        return _sni_entry_overread(b, o, min(ext_declared_end, block_end),
+                                   ext_declared_end, block_declared_end, msg_end)
+    return None
+
+
+def _sni_entry_overread(b, o, ext_end, ext_declared_end, block_declared_end, msg_end):
+    if o + 2 > ext_end:
+        return None                              # no room for the list length itself
+    list_declared_end = o + 2 + ((b[o] << 8) | b[o + 1])
+    o += 2
+    list_end = min(list_declared_end, ext_end)
+    while o + 3 <= list_end:
+        ntype = b[o]
+        nlen = (b[o + 1] << 8) | b[o + 2]
+        o += 3
+        host_end = o + nlen
+        if ntype != _SNI_HOST_NAME:
+            o = host_end
+            continue
+        if host_end > msg_end:                   # classify by the OUTERMOST limit crossed
+            bound, limit = 'handshake_message', msg_end
+        elif host_end > block_declared_end:
+            bound, limit = 'extensions_block', block_declared_end
+        elif host_end > ext_declared_end:
+            bound, limit = 'extension_data', ext_declared_end
+        elif host_end > list_declared_end:
+            bound, limit = 'server_name_list', list_declared_end
+        else:
+            return None                          # legal nesting
+        return {'bound': bound, 'declared_host_len': nlen,
+                'available': max(0, limit - o), 'overrun_bytes': host_end - limit,
+                'severity': 'high' if bound == 'handshake_message' else 'warn'}
+    return None
+
+
+def _client_hello_and_overread(body):
+    """(client_or_None, sni_overread) for a raw ClientHello body. The CVE-2026-52346 scan
+    runs on the raw bytes independent of the parse, so an illegal hello that makes
+    parse_client_hello raise ("short take") still carries its over-read finding."""
+    ov = scan_sni_overread(body)
+    try:
+        return parse_client_hello(body), ov
+    except Exception:
+        return None, ov
+
+
+def _dtls_ch_overread(body):
+    """CVE-2026-52346 scan of a DTLS ClientHello body (cookie stripped). Never raises."""
+    try:
+        r = _Reader(body)
+        r.take(2 + 32)
+        r.take(r.u8())
+        cookie_at = r.i
+        clen = r.u8()
+        r.take(clen)
+        tls_body = bytes(body[:cookie_at]) + bytes(body[cookie_at + 1 + clen:])
+    except Exception:
+        return None
+    return scan_sni_overread(tls_body)
+
+
 def parse_dhe_server_key_exchange(body):
     """Bit length of the DH prime p in a (finite-field) ServerKeyExchange, or None.
     ServerDHParams (RFC 5246 §7.4.3) starts with dh_p as u16-length + bytes; leading
@@ -700,7 +821,7 @@ def _leaf_findings(der, chain_len, sni, now):
     return out, info
 
 
-def analyze_session(client, server, cert_ders, now, records=None):
+def analyze_session(client, server, cert_ders, now, records=None, sni_overread=None):
     """Combine parsed client/server/cert state into a findings list (severity
     descending) plus per-cert info. Any argument may be None. `records` is the
     optional list of per-direction record-layer stats from `_scan_tls_stream`,
@@ -710,6 +831,24 @@ def analyze_session(client, server, cert_ders, now, records=None):
     def add(sev, code, msg):
         findings.append({'severity': sev, 'code': code, 'message': msg})
 
+    # CVE-2026-52346 — unvalidated SNI host_name length (xt_tls OOB read). Emitted from the
+    # raw-byte scan done at capture time, independent of parse_client_hello (which raises on
+    # the illegal nesting), so an attack survives a hello that cannot be parsed at all.
+    if sni_overread:
+        ov = sni_overread
+        findings.append({
+            'severity': ov['severity'], 'code': 'cve_2026_52346_sni_overread',
+            'message': ('ClientHello SNI host_name declares {} bytes but its {} carries {} '
+                        '(overrun {}) - unvalidated SNI length, MikroTik RouterOS xt_tls '
+                        'out-of-bounds read (CVE-2026-52346)'.format(
+                            ov['declared_host_len'], ov['bound'].replace('_', ' '),
+                            ov['available'], ov['overrun_bytes'])),
+            'cve': 'CVE-2026-52346', 'cvss': _CVE_2026_52346['cvss'],
+            'cvss_source': _CVE_2026_52346['cvss_source'], 'detect_class': 'attack',
+            'bound': ov['bound'], 'declared_host_len': ov['declared_host_len'],
+            'available': ov['available'], 'overrun_bytes': ov['overrun_bytes'],
+            'precondition_unobserved': True})
+
     if client:
         cand = [v for v in client['sup_versions'] if not _is_grease(v)] \
             or [client['client_version']]
@@ -717,7 +856,7 @@ def analyze_session(client, server, cert_ders, now, records=None):
         if _tls_equiv_version(top) <= 0x0302:
             add('warn', 'client_legacy_version',
                 'Client offers only {} or lower'.format(_VER_NAME.get(top, 'TLS 1.1')))
-        if 0x0000 not in client['exts_order']:
+        if 0x0000 not in client['exts_order'] and not sni_overread:
             add('notice', 'no_sni', 'ClientHello carries no SNI')
         if 0xfe0d in client['exts_order'] or 0xfe08 in client['exts_order']:
             add('info', 'ech_present', 'encrypted_client_hello present; true SNI hidden')
@@ -1268,6 +1407,7 @@ def _dtls_sessions(udp):
         client_addr = c5 = None
         asm = {}
         client = server = None
+        sni_ov = None
         certs = []
         neg_version = None
         for (src, sport, dst, dport, pay) in dgrams:
@@ -1283,8 +1423,11 @@ def _dtls_sessions(udp):
                 a = asm.get(role) or asm.setdefault(role, _DtlsHandshakeAssembler())
                 for mtype, _seq, hbody in a.add(frag):
                     try:
-                        if is_client and mtype == 0x01 and client is None:
-                            client = _parse_dtls_client_hello(hbody)[0]
+                        if is_client and mtype == 0x01:
+                            if sni_ov is None:    # CVE-2026-52346, before the raising parse
+                                sni_ov = _dtls_ch_overread(hbody)
+                            if client is None:
+                                client = _parse_dtls_client_hello(hbody)[0]
                         elif not is_client and mtype == 0x02 and server is None:
                             server = parse_server_hello(hbody)
                             neg_version = server.get('neg_version')
@@ -1299,12 +1442,12 @@ def _dtls_sessions(udp):
                                 server['dh_prime_bits'] = bits
                     except Exception:
                         continue
-        if client is None or c5 is None:
+        if (client is None and sni_ov is None) or c5 is None:
             continue
         csrc, csport, cdst, cdport = c5
         sessions.append({'proto': 'dtls', 'src': csrc, 'sport': csport,
                          'dst': cdst, 'dport': cdport, 'client': client,
-                         'server': server, 'certs': certs,
+                         'server': server, 'certs': certs, 'sni_overread': sni_ov,
                          'service': _service_for('udp', csport, cdport)})
     return sessions
 
@@ -1353,7 +1496,8 @@ def parse_pcap(path):
         rev = (dst, dport, src, sport)
         cmsgs, cstats = _scan_tls_stream(stream)
         if any(m[0] == 0x01 for m in cmsgs):
-            client = parse_client_hello(next(b for t, b in cmsgs if t == 0x01))
+            client, sni_ov = _client_hello_and_overread(
+                next(b for t, b in cmsgs if t == 0x01))
             server, certs = None, []
             smsgs, sstats = _scan_tls_stream(streams.get(rev, b''))
             for t, b in smsgs:
@@ -1379,6 +1523,7 @@ def parse_pcap(path):
             sessions.append({'proto': 'tls', 'src': src, 'sport': sport,
                              'dst': dst, 'dport': dport, 'client': client,
                              'server': server, 'certs': certs, 'records': records,
+                             'sni_overread': sni_ov,
                              'service': _service_for('tcp', sport, dport)})
         seen.add(key)
 
@@ -1397,9 +1542,10 @@ def parse_pcap(path):
             for t, b in handshake_messages(reassemble_crypto(plain)):
                 if t == 0x01:
                     quic_seen.add(qkey)           # one session per QUIC connection
+                    client, sni_ov = _client_hello_and_overread(b)
                     sessions.append({'proto': 'quic', 'src': src, 'sport': sport,
                                      'dst': dst, 'dport': dport,
-                                     'client': parse_client_hello(b),
+                                     'client': client, 'sni_overread': sni_ov,
                                      'server': None, 'certs': [],
                                      'service': _service_for('udp', sport, dport)})
                     break
@@ -1446,7 +1592,8 @@ def _tls_analyze(sessions, now=None, denylist=None):
             if j4s:
                 rec['ja4s'] = j4s
         findings, infos = analyze_session(client, server, s.get('certs'), now,
-                                          records=s.get('records'))
+                                          records=s.get('records'),
+                                          sni_overread=s.get('sni_overread'))
         if client and rec.get('ja4') in denylist:
             findings.insert(0, {'severity': 'high', 'code': 'ja4_denylist',
                                 'message': 'Client JA4 on denylist: {}'.format(
@@ -1989,6 +2136,58 @@ def selftest():
     ck('oversized_dh_no_fp',
        not any(x['code'] == 'cve_2018_0732_oversized_dh_prime'
                for x in analyze_session(None, shdhe3, [], now)[0]))
+
+    # CVE-2026-52346 — unvalidated SNI host_name length (xt_tls OOB read).
+    def _ch52346(nlen=None, host=b'h.lab', list_len=None, ext_len=None,
+                 block_len=None, pad=0):
+        n = len(host) if nlen is None else nlen
+        entry = b'\x00' + n.to_bytes(2, 'big') + host
+        ll = len(entry) if list_len is None else list_len
+        sni = ll.to_bytes(2, 'big') + entry
+        el = len(sni) if ext_len is None else ext_len
+        ext = (0).to_bytes(2, 'big') + el.to_bytes(2, 'big') + sni
+        bl = len(ext) if block_len is None else block_len
+        b = bytearray((0x0303).to_bytes(2, 'big') + b'\x00' * 32 + b'\x00')
+        b += (2).to_bytes(2, 'big') + (0x1301).to_bytes(2, 'big') + b'\x01\x00'
+        b += bl.to_bytes(2, 'big') + ext + b'\x00' * pad
+        return bytes(b)
+
+    _H, _K = len(b'h.lab'), 4
+    _INNER = 2 + 2 + 2 + 3 + _H + _K + 10
+    ck('cve52346_exact_fit_silent', scan_sni_overread(_ch52346(nlen=_H)), None)
+    ck('cve52346_clean_silent', scan_sni_overread(_ch52346()), None)
+    ck('cve52346_empty_host_silent', scan_sni_overread(_ch52346(nlen=0, host=b'')), None)
+    _ov = scan_sni_overread(_ch52346(nlen=_H + 1))
+    ck('cve52346_one_over_bound', (_ov or {}).get('bound'), 'handshake_message')
+    ck('cve52346_one_over_high', (_ov or {}).get('severity'), 'high')
+    ck('cve52346_declared', (_ov or {}).get('declared_host_len'), _H + 1)
+    ck('cve52346_available', (_ov or {}).get('available'), _H)
+    ck('cve52346_overrun', (_ov or {}).get('overrun_bytes'), 1)
+    for _b, _body, _sev in (
+            ('extensions_block', _ch52346(nlen=_H + _K, pad=64), 'warn'),
+            ('extension_data', _ch52346(nlen=_H + _K, pad=64, block_len=_INNER), 'warn'),
+            ('server_name_list', _ch52346(nlen=_H + _K, pad=64, ext_len=2 + 3 + _H + _K,
+                                          block_len=_INNER), 'warn')):
+        _r = scan_sni_overread(_body)
+        ck('cve52346_bound_%s' % _b, (_r or {}).get('bound'), _b)
+        ck('cve52346_sev_%s' % _b, (_r or {}).get('severity'), _sev)
+    ck('cve52346_bounds_outermost_first', list(SNI_OVERREAD_BOUNDS),
+       ['handshake_message', 'extensions_block', 'extension_data', 'server_name_list'])
+    # A legal hostname length stays silent whatever else is malformed.
+    ck('cve52346_legal_host_silent', scan_sni_overread(_ch52346(ext_len=5000)), None)
+    # The parser raises on the illegal nesting, but the scan survives it.
+    _cli, _ovp = _client_hello_and_overread(_ch52346(nlen=_H + 1))
+    ck('cve52346_parse_raises_overread_kept', _cli is None and _ovp is not None, True)
+    _cli2, _ovp2 = _client_hello_and_overread(_ch52346())
+    ck('cve52346_clean_parses_no_overread', _cli2 is not None and _ovp2 is None, True)
+    # analyze_session emits the finding and scopes out the benign no_sni notice.
+    _fo, _ = analyze_session(None, None, None, now, sni_overread=_ov)
+    _codes = {x['code'] for x in _fo}
+    ck('cve52346_finding_emitted', 'cve_2026_52346_sni_overread' in _codes)
+    ck('cve52346_no_sni_scoped_out', 'no_sni' not in _codes)
+    _fcve = next((x for x in _fo if x['code'] == 'cve_2026_52346_sni_overread'), {})
+    ck('cve52346_finding_cve', _fcve.get('cve'), 'CVE-2026-52346')
+    ck('cve52346_precondition_unobserved', _fcve.get('precondition_unobserved'), True)
 
     try:
         # self-signed leaf + SNI mismatch (the interception signal)

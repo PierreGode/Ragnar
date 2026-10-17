@@ -10,8 +10,8 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **395** distinct CVE IDs
-- **336** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **396** distinct CVE IDs
+- **337** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
 - **50** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
@@ -41,7 +41,7 @@ detector works is in [nettools.md](nettools.md).
 | 2023 | 49 |
 | 2024 | 55 |
 | 2025 | 45 |
-| 2026 | 51 |
+| 2026 | 52 |
 
 ## By detector
 
@@ -89,7 +89,7 @@ detector works is in [nettools.md](nettools.md).
 | SR-MPLS Watch | 17 |
 | SSH Watch | 11 |
 | Telnet Watch | 10 |
-| TLS Watch | 11 |
+| TLS Watch | 12 |
 | Trailing-data / Etherleak | 1 |
 
 ## All CVEs
@@ -478,6 +478,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2026-37461](https://nvd.nist.gov/vuln/detail/CVE-2026-37461) |  | context only | BGP Path Watch | — |
 | [CVE-2026-37462](https://nvd.nist.gov/vuln/detail/CVE-2026-37462) |  | context only | BGP Path Watch | — |
 | [CVE-2026-42944](https://nvd.nist.gov/vuln/detail/CVE-2026-42944) |  | detected | DNS Watch | — |
+| [CVE-2026-52346](https://nvd.nist.gov/vuln/detail/CVE-2026-52346) |  | detected | TLS Watch | — |
 | [CVE-2026-52688](https://nvd.nist.gov/vuln/detail/CVE-2026-52688) |  | detected | DNS Watch | — |
 | [CVE-2026-52896](https://nvd.nist.gov/vuln/detail/CVE-2026-52896) |  | detected | Arista Guard | — |
 | [CVE-2026-52897](https://nvd.nist.gov/vuln/detail/CVE-2026-52897) |  | detected | Arista Guard | — |
