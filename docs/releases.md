@@ -2,6 +2,14 @@
 
 ## Releases
 
+### 2026-10-19
+
+#### [#989](https://github.com/PierreGode/Ragnar/pull/989) — feat(ulfberht): Arsenal builds tool-adapted playbooks + "Generate with AI" (BYO AI)
+*branch `feature/ulfberht-arsenal-ai`*
+
+- **"Build playbook" now produces a starter tailored to the selected tools**, not a generic one. `_TOOL_STEP_TEMPLATES` was expanded so **every** selectable tool gets a real, sensible step (no `{scope}` fallback): cracking tools get a hash file + wordlist with a longer timeout, wireless tools a monitor-mode interface, MITM/capture/framework tools a non-interactive invocation (e.g. `msfconsole -r <rc>`, `tcpdump -c … -w …`), all argv-only. The generated **description is category-aware** ("Web engagement…", "SMB/AD engagement…", "Password-cracking engagement…") and flags steps that **need operator input before running** (⚠ hash file / capture / interface).
+- **"Generate with AI" — bring your own AI, works offline.** Describe the engagement in a prompt box; Ragnar builds a complete, copy-pasteable **prompt** (the exact playbook JSON schema + the action catalog + the tool allowlist + the argv/no-shell safety rules + your selected tools + your instruction + a worked example) that you paste into **your own AI** (Claude/ChatGPT/local). Paste the AI's JSON reply back into the editor to validate & save. No AI runs on the device, no API key, nothing leaves the box. `POST /api/ulfberht/playbooks {ai_prompt:true, name, tools, instruction}` → `{prompt}`. The embedded schema/example are built so a well-formed AI reply passes `_validate_playbook` as-is.
+
 ### 2026-10-18
 
 #### [#987](https://github.com/PierreGode/Ragnar/pull/987) — feat(ulfberht): persisted engagement history + pro HTML/PDF report with remediation

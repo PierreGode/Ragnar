@@ -27246,6 +27246,15 @@ def ulfberht_playbooks_api():
             return jsonify({"enabled": False, "playbooks": []})
         if request.method == 'POST':
             data = request.get_json(silent=True) or {}
+            # AI prompt generator: build a copy-paste prompt for the operator's own
+            # AI (no AI runs here, nothing is saved). Checked first because the body
+            # also carries `tools`, which would otherwise hit the builder branch.
+            if data.get('ai_prompt'):
+                prompt, err = ulfberht_engine.build_ai_prompt(
+                    data.get('name'), data.get('tools') or [], data.get('instruction') or '')
+                if err:
+                    return jsonify({"success": False, "error": err}), 400
+                return jsonify({"success": True, "prompt": prompt})
             name = data.get('name') or (data.get('playbook') or {}).get('name') \
                 or (data.get('playbook') or {}).get('id')
             # Arsenal builder: {name, tools:[bin,...]} -> generate a playbook.

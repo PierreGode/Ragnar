@@ -75,9 +75,23 @@ on load — an invalid one is shown with the reason and cannot be run.
 **Or build one from the Arsenal.** On the **Pentest** tab, the **Ulfberht
 Arsenal** lists every offensive tool detected on the image. Click the tools you
 want, give it a name, and **Build playbook** — a valid, methodology-ordered
-playbook is generated from your selection (an nmap discovery sweep + a posture
-pass are added automatically, then your tools as assessment steps, then a
-report) and saved to `engagement_playbooks`, ready to run or refine in Files.
+playbook is generated from your selection and opened in an editor to review
+before saving. The starter is **tailored to the tools you picked**: each gets a
+real, sensible step (cracking tools get a hash file + wordlist, wireless tools a
+monitor-mode interface, capture/MITM/framework tools a non-interactive
+invocation), an nmap discovery sweep + a posture pass are prepended, a report is
+appended, and the description is category-aware and flags any step that needs
+you to supply input first (a hash file, a capture, an interface).
+
+**Or let your own AI write it.** Still in the Arsenal, describe the engagement
+in plain language under **Generate with AI** and click **Generate AI prompt**.
+Ragnar assembles a complete, copy-pasteable prompt — the exact playbook schema,
+the action catalog, the tool allowlist, the argv/no-shell safety rules, your
+selected tools and your instruction, plus a worked example — that you paste into
+**your own AI** (Claude, ChatGPT, a local model). Paste the AI's JSON reply back
+into the editor and **Save**. No AI runs on the device and no API key is needed,
+so it works on an offline/airgapped box; the prompt is built so a well-formed
+reply validates and runs as-is.
 
 ```json
 {

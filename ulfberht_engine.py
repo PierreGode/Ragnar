@@ -1045,14 +1045,17 @@ def save_playbook(name, content):
 # targeting {scope} that the operator must edit (Wi-Fi / cracking / interactive
 # tools especially — they need a capture, a wordlist, or non-interactive args).
 _TOOL_STEP_TEMPLATES = {
+    # ── discovery / recon ────────────────────────────────────────────────────
     "nmap":          ("discovery",  "nmap",    {"ports": "top-100", "service_version": True}),
     "masscan":       ("discovery",  "command", {"tool": "masscan", "args": ["-p1-1000", "--rate", "1000", "{scope}"]}),
     "arp-scan":      ("discovery",  "command", {"tool": "arp-scan", "args": ["{scope}"]}),
     "fping":         ("discovery",  "command", {"tool": "fping", "args": ["-a", "-g", "{scope}"]}),
     "nbtscan":       ("discovery",  "command", {"tool": "nbtscan", "args": ["{scope}"]}),
     "dig":           ("discovery",  "command", {"tool": "dig", "args": ["{scope}"]}),
+    "host":          ("discovery",  "command", {"tool": "host", "args": ["{host}"], "per_host": True}),
     "whois":         ("discovery",  "command", {"tool": "whois", "args": ["{scope}"]}),
     "whatweb":       ("diagnostics", "command", {"tool": "whatweb", "args": ["--no-errors", "{web_urls}"], "per_target": True}),
+    # ── web / service validation ─────────────────────────────────────────────
     "nuclei":        ("assessment", "nuclei",  {"severity": ["medium", "high", "critical"]}),
     "nikto":         ("assessment", "command", {"tool": "nikto", "args": ["-ask", "no", "-nointeractive", "-host", "{web_urls}"], "per_target": True}),
     "sqlmap":        ("assessment", "command", {"tool": "sqlmap", "args": ["-u", "{web_urls}", "--batch", "--crawl=1"], "per_target": True}),
@@ -1061,14 +1064,91 @@ _TOOL_STEP_TEMPLATES = {
     "ffuf":          ("assessment", "command", {"tool": "ffuf", "args": ["-u", "{web_urls}/FUZZ", "-w", "/usr/share/wordlists/dirb/common.txt"], "per_target": True}),
     "feroxbuster":   ("assessment", "command", {"tool": "feroxbuster", "args": ["-u", "{web_urls}"], "per_target": True}),
     "sslscan":       ("assessment", "command", {"tool": "sslscan", "args": ["{web_urls}"], "per_target": True}),
+    "sslyze":        ("assessment", "command", {"tool": "sslyze", "args": ["{web_urls}"], "per_target": True}),
     "testssl.sh":    ("assessment", "command", {"tool": "testssl.sh", "args": ["{web_urls}"], "per_target": True}),
+    # ── SMB / AD / network services ──────────────────────────────────────────
     "enum4linux-ng": ("assessment", "command", {"tool": "enum4linux-ng", "args": ["-A", "{host}"], "per_host": True}),
     "enum4linux":    ("assessment", "command", {"tool": "enum4linux", "args": ["-a", "{host}"], "per_host": True}),
     "smbclient":     ("assessment", "command", {"tool": "smbclient", "args": ["-L", "{host}", "-N"], "per_host": True}),
     "netexec":       ("assessment", "command", {"tool": "netexec", "args": ["smb", "{host}"], "per_host": True}),
+    "nxc":           ("assessment", "command", {"tool": "nxc", "args": ["smb", "{host}"], "per_host": True}),
     "snmpwalk":      ("assessment", "command", {"tool": "snmpwalk", "args": ["-v2c", "-c", "public", "{host}"], "per_host": True}),
     "onesixtyone":   ("assessment", "command", {"tool": "onesixtyone", "args": ["{host}"], "per_host": True}),
+    # ── credentials / cracking (need a hash file + wordlist — edit the paths) ─
+    "hydra":         ("assessment", "command", {"tool": "hydra", "args": ["-L", "/usr/share/wordlists/metasploit/unix_users.txt", "-P", "/usr/share/wordlists/rockyou.txt", "-t", "4", "-f", "{host}", "ssh"], "per_host": True, "timeout": 1200}),
+    "hashcat":       ("assessment", "command", {"tool": "hashcat", "args": ["-m", "0", "-a", "0", "/root/engagement/hashes.txt", "/usr/share/wordlists/rockyou.txt"], "timeout": 1800}),
+    "john":          ("assessment", "command", {"tool": "john", "args": ["--wordlist=/usr/share/wordlists/rockyou.txt", "/root/engagement/hashes.txt"], "timeout": 1800}),
+    # ── wireless (need a monitor-mode interface / a capture — edit these) ─────
+    "airodump-ng":   ("discovery",  "command", {"tool": "airodump-ng", "args": ["wlan1mon"], "timeout": 120}),
+    "aircrack-ng":   ("assessment", "command", {"tool": "aircrack-ng", "args": ["-w", "/usr/share/wordlists/rockyou.txt", "/root/engagement/capture.cap"], "timeout": 1800}),
+    "wifite":        ("assessment", "command", {"tool": "wifite", "args": ["-i", "wlan1mon", "--kill"], "timeout": 600}),
+    "reaver":        ("assessment", "command", {"tool": "reaver", "args": ["-i", "wlan1mon", "-b", "AA:BB:CC:DD:EE:FF", "-vv"], "timeout": 1200}),
+    "bully":         ("assessment", "command", {"tool": "bully", "args": ["wlan1mon", "-b", "AA:BB:CC:DD:EE:FF"], "timeout": 1200}),
+    "kismet":        ("discovery",  "command", {"tool": "kismet", "args": ["-c", "wlan1mon"], "timeout": 120}),
+    # ── framework / MITM / capture (interactive or long-running) ─────────────
+    "responder":     ("assessment", "command", {"tool": "responder", "args": ["-I", "eth0", "-A"], "timeout": 120}),
+    "msfconsole":    ("assessment", "command", {"tool": "msfconsole", "args": ["-q", "-r", "/root/engagement/msf.rc"], "timeout": 1200}),
+    "ettercap":      ("assessment", "command", {"tool": "ettercap", "args": ["-T", "-q", "-i", "eth0", "-M", "arp", "//", "//"], "timeout": 120}),
+    "tcpdump":       ("discovery",  "command", {"tool": "tcpdump", "args": ["-i", "eth0", "-c", "200", "-w", "/root/engagement/capture.pcap"], "timeout": 120}),
+    "tshark":        ("discovery",  "command", {"tool": "tshark", "args": ["-i", "eth0", "-c", "200"], "timeout": 120}),
 }
+
+# Tools whose generated step needs the operator to supply input before it will
+# run (wordlist, hash file, capture, monitor interface, resource script). Flagged
+# in the generated playbook's description so the starter is honest about them.
+_TOOLS_NEED_INPUT = {
+    "hydra": "a userlist / passlist + the right service",
+    "hashcat": "a hash file + hash mode",
+    "john": "a hash file",
+    "aircrack-ng": "a .cap capture",
+    "airodump-ng": "a monitor-mode interface",
+    "wifite": "a monitor-mode interface",
+    "reaver": "a monitor-mode interface + target BSSID",
+    "bully": "a monitor-mode interface + target BSSID",
+    "kismet": "a capture interface",
+    "responder": "the right interface",
+    "msfconsole": "a .rc resource script",
+    "setoolkit": "interactive — not suited to unattended runs",
+    "ettercap": "the right interface + MITM targets",
+    "tcpdump": "the right interface",
+    "tshark": "the right interface",
+}
+
+# Coarse category per tool — drives the generated playbook's description so it
+# reads like a focused engagement, not a generic tool dump.
+_TOOL_CATEGORY = {
+    "nuclei": "web", "nikto": "web", "wpscan": "web", "sqlmap": "web",
+    "gobuster": "web", "ffuf": "web", "feroxbuster": "web", "whatweb": "web",
+    "sslscan": "web", "sslyze": "web", "testssl.sh": "web",
+    "enum4linux": "SMB/AD", "enum4linux-ng": "SMB/AD", "smbclient": "SMB/AD",
+    "netexec": "SMB/AD", "nxc": "SMB/AD", "responder": "SMB/AD",
+    "hydra": "credential", "hashcat": "password-cracking", "john": "password-cracking",
+    "aircrack-ng": "wireless", "airodump-ng": "wireless", "wifite": "wireless",
+    "reaver": "wireless", "bully": "wireless", "kismet": "wireless",
+    "nmap": "network", "masscan": "network", "arp-scan": "network",
+    "fping": "network", "nbtscan": "network", "dig": "network", "host": "network",
+    "whois": "network", "snmpwalk": "network", "onesixtyone": "network",
+    "msfconsole": "exploitation", "setoolkit": "social-engineering",
+    "ettercap": "MITM", "tcpdump": "capture", "tshark": "capture",
+}
+
+
+def _describe_selection(tools):
+    """A category-aware description + a 'needs input' note for a tool selection."""
+    cats = []
+    for t in tools:
+        c = _TOOL_CATEGORY.get(t)
+        if c and c not in cats:
+            cats.append(c)
+    lead = (", ".join(cats[:-1]) + " & " + cats[-1]) if len(cats) > 1 else (cats[0] if cats else "mixed")
+    lead = lead[:1].upper() + lead[1:]   # capitalize first letter only (keep SMB/AD, MITM)
+    desc = (f"{lead} engagement built from the Arsenal ({', '.join(tools)}). "
+            f"Flow: nmap discovery → the selected tools → posture → report. "
+            f"Review the tool args before running.")
+    need = [f"{t} ({_TOOLS_NEED_INPUT[t]})" for t in tools if t in _TOOLS_NEED_INPUT]
+    if need:
+        desc += "  ⚠ Edit before running: " + "; ".join(need) + "."
+    return desc
 
 
 def suggest_step(tool):
@@ -1109,8 +1189,7 @@ def build_playbook_spec(name, tools, description=None):
     steps.sort(key=lambda s: order.get(s["phase"], 2))   # stable → methodology order
     spec = {
         "id": _slugify(name), "name": name,
-        "description": description or ("Built from the Arsenal (" + ", ".join(tools)
-                       + "). Review/edit tool args before running."),
+        "description": description or _describe_selection(tools),
         "steps": steps,
     }
     return spec, None
@@ -1122,6 +1201,93 @@ def build_playbook_from_tools(name, tools, description=None):
     if err:
         return {"success": False, "error": err}
     return save_playbook(name, spec)
+
+
+_AI_INSTRUCTION_MAX = 2000
+
+
+def build_ai_prompt(name, tools, instruction):
+    """Return (prompt, error): a complete, copy-pasteable prompt the operator feeds
+    to their OWN AI (Claude / ChatGPT / a local model) to author an Engagements
+    playbook from a free-text instruction plus the tools picked in the Arsenal.
+
+    No AI runs on the device — Ragnar only *builds the prompt* (offline, no key),
+    embedding the exact schema, the action catalog, the tool allowlist and the
+    argv/no-shell safety rules so whatever the AI returns passes validation. The
+    operator pastes the AI's JSON back into the editor to validate and save."""
+    tools = [t for t in (tools or []) if t in _ALLOWED_TOOLS]
+    instruction = (instruction or "").strip()[:_AI_INSTRUCTION_MAX]
+    if not instruction and not tools:
+        return None, "Describe what you want, or select at least one tool."
+
+    cat = list_action_catalog()
+    action_lines = []
+    for a in cat["actions"]:
+        params = ", ".join(f"{k}: {v}" for k, v in a["params"].items()) or "(none)"
+        action_lines.append(f'  - "{a["action"]}" (phase {a["phase"]}): {params}')
+    example = {
+        "name": "Example — Web Triage",
+        "description": "Discover web services, fingerprint them, validate with nuclei.",
+        "steps": [
+            {"phase": "discovery", "action": "nmap",
+             "params": {"ports": "80,443,8080,8443", "service_version": True}},
+            {"phase": "diagnostics", "action": "posture"},
+            {"phase": "diagnostics", "action": "command",
+             "params": {"tool": "whatweb", "args": ["--no-errors", "{web_urls}"], "per_target": True}},
+            {"phase": "assessment", "action": "nuclei",
+             "params": {"severity": ["medium", "high", "critical"]}, "active": True},
+            {"phase": "reporting", "action": "report"},
+        ],
+    }
+    lines = [
+        "You are a senior penetration tester authoring an \"Engagement playbook\" for",
+        "Ragnar OS Ulfberht. Produce ONE JSON object and nothing else — no prose, no",
+        "explanation, no markdown code fences.",
+        "",
+        "OPERATOR'S GOAL:",
+        (instruction or "(none given — design a sensible engagement for the selected tools)"),
+        "",
+        "TOOLS THE OPERATOR SELECTED (prefer these; you may add allowlisted recon/support steps):",
+        ("  " + ", ".join(tools)) if tools else "  (none selected — choose appropriate allowlisted tools)",
+        "",
+        "OUTPUT SCHEMA (exact):",
+        '  {"name": "<short title>", "description": "<1-2 sentences>", "steps": [ <step>, ... ]}',
+        '  step = {"phase": <phase>, "action": <action>, "params": {...}, "active": <bool, optional>}',
+        "",
+        "PHASES (NIST SP 800-115 order — order your steps this way):",
+        "  discovery -> diagnostics -> assessment -> reporting",
+        "  The assessment phase is the only active one (set \"active\": true on active steps).",
+        "",
+        "ACTIONS and their params:",
+        *action_lines,
+        "",
+        "PLACEHOLDERS (substituted at run time, confined to the engagement scope — use",
+        "these, do NOT hardcode targets): " + " ".join(cat["placeholders"]),
+        "  Use {host} with \"per_host\": true to iterate discovered hosts, and {web_urls}",
+        "  with \"per_target\": true to iterate discovered web URLs.",
+        "",
+        "HARD RULES (a playbook that breaks these is rejected):",
+        "  1. Start with an nmap discovery step so {host}/{web_urls}/{ports} resolve,",
+        "     unless the goal is purely wireless/offline.",
+        "  2. \"command\" steps run as an argv list, NEVER through a shell. Each arg is a",
+        "     string. These characters are FORBIDDEN in any arg:  ; & | < > $ ` \\ \" '  and newlines.",
+        "     No pipes, redirects, command chaining, globbing or sub-shells.",
+        "  3. \"tool\" MUST be one of the allowlisted tools below — or best fit.",
+        "  4. End with a {\"phase\": \"reporting\", \"action\": \"report\"} step.",
+        "  5. Output valid JSON only.",
+        "",
+        "ALLOWLISTED TOOLS:",
+        "  " + ", ".join(cat["tools"]),
+        "",
+        "EXAMPLE of a valid playbook:",
+        json.dumps(example, indent=2),
+        "",
+        "Now output the JSON playbook for the operator's goal.",
+    ]
+    prompt = "\n".join(lines)
+    if name:
+        prompt = prompt.replace('"<short title>"', json.dumps(str(name)[:120]))
+    return prompt, None
 
 
 def delete_playbook(playbook_id):

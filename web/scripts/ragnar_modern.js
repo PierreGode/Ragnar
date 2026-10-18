@@ -28929,6 +28929,54 @@ function ulfArsenalSaveEdited() {
             } else if (sm) { sm.style.color = '#f87171'; sm.textContent = d.error || 'Save failed'; }
         }).catch(e => { if (sm) { sm.style.color = '#f87171'; sm.textContent = 'Failed: ' + e; } });
 }
+
+// Generate with AI: ask the server to build a copy-paste prompt (schema +
+// selected tools + the operator's instruction). No AI call here — the operator
+// pastes it into their own AI and pastes the JSON reply into the editor to Save.
+function ulfArsenalAiPrompt() {
+    const msg = document.getElementById('ulf-arsenal-ai-msg');
+    const instr = ((document.getElementById('ulf-arsenal-ai-instr') || {}).value || '').trim();
+    const name = ((document.getElementById('ulf-arsenal-name') || {}).value || '').trim();
+    if (!instr && !ulfArsenalSel.size) {
+        if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Describe what you want, or select at least one tool.'; }
+        return;
+    }
+    if (msg) { msg.style.color = '#9ca3af'; msg.textContent = 'Building prompt…'; }
+    fetch('/api/ulfberht/playbooks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ai_prompt: true, name: name, tools: [...ulfArsenalSel], instruction: instr }) })
+        .then(r => r.json()).then(d => {
+            if (d.success && d.prompt) {
+                const box = document.getElementById('ulf-arsenal-ai-prompt');
+                if (box) box.value = d.prompt;
+                const wrap = document.getElementById('ulf-arsenal-ai-wrap');
+                if (wrap) wrap.classList.remove('hidden');
+                // Reveal the editor (empty) so the operator can paste the AI's JSON and Save.
+                const ed = document.getElementById('ulf-arsenal-editor');
+                if (ed && !ed.value.trim()) ed.value = '';
+                const ew = document.getElementById('ulf-arsenal-editor-wrap');
+                if (ew) ew.classList.remove('hidden');
+                if (msg) { msg.style.color = '#9ca3af'; msg.textContent = 'Prompt ready — copy it into your AI, paste the JSON below, Save.'; }
+                if (box) box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            } else if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || 'Could not build prompt'; }
+        }).catch(e => { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Failed: ' + e; } });
+}
+
+function ulfArsenalAiCopy() {
+    const box = document.getElementById('ulf-arsenal-ai-prompt');
+    const msg = document.getElementById('ulf-arsenal-ai-msg');
+    if (!box || !box.value) return;
+    const done = () => { if (msg) { msg.style.color = '#4ade80'; msg.textContent = 'Copied to clipboard.'; } };
+    const fallback = () => {   // clipboard API blocked (http / iframe) → select + execCommand
+        box.removeAttribute('readonly'); box.focus(); box.select();
+        try { document.execCommand('copy'); done(); }
+        catch (e) { if (msg) { msg.style.color = '#fbbf24'; msg.textContent = 'Select the text and copy manually.'; } }
+        box.setAttribute('readonly', 'readonly');
+        window.getSelection && window.getSelection().removeAllRanges();
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(box.value).then(done).catch(fallback);
+    } else { fallback(); }
+}
 let ulfEnabled = false;
 function fetchEdition() {
     fetch('/api/edition')
