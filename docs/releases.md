@@ -2,6 +2,15 @@
 
 ## Releases
 
+### 2026-10-18
+
+#### [#976](https://github.com/PierreGode/Ragnar/pull/976) — docs(ulfberht): point download at the Proton Drive-hosted image
+*branch `docs/ulfberht-download-link`*
+
+- The first **Ragnar OS Ulfberht** release (`os-ulfberht-v1.0.0`) is live. Because the finished `.img.xz` is **~4.3 GB** — over GitHub's hard **2 GiB** per-release-asset limit — the image can't be a GitHub asset. The release instead carries the `.sha256` and links the single `RagnarOS-Ulfberht-arm64.img.xz` on **Proton Drive**.
+- Updated [docs/ragnar-os-ulfberht.md](ragnar-os-ulfberht.md): **Flashing & first boot** step 1 now downloads from the Proton Drive link in the release notes and verifies against the published `sha256`; the build/CI note explains the release links out to external storage rather than attaching the oversized image.
+- Docs-only; no code change.
+
 ### 2026-10-17
 
 #### [#977](https://github.com/PierreGode/Ragnar/pull/977) — feat(net): BGP Pathwatch v7 — CVE-2026-93345 labelled-VPN NLRI (passive tap)
