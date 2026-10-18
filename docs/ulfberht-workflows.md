@@ -22,18 +22,20 @@ to a client — and something a student can be graded on.
 |-------|-----------------|--------|--------------|
 | **Discovery** | §4 Target identification | passive | `nmap` host + service sweep of the scope (XML-parsed). |
 | **Diagnostics** | §4 Vulnerability/posture analysis | passive | Derives a security posture from what's exposed (cleartext protocols, legacy r-services, exposed SMB/RDP/DB/SNMP…), each mapped to a CWE / MITRE ATT&CK reference. This safe phase also *aims* the active phase. |
-| **Assessment** | §5 Target vulnerability validation | **active (gated)** | Validates findings against discovered services (e.g. `nuclei` on web services). Runs **only** when the operator opts in **and** Ragnar's `enable_attacks` flag is on. |
-| **Reporting** | §8 Post-testing / reporting | passive | One report: scope, methodology, host/service table, findings by severity with references, phases executed. Viewable in-tab and downloadable as Markdown. |
+| **Assessment** | §5 Target vulnerability validation | **active (gated)** | Validates findings against discovered services (e.g. `nuclei` on web services). Runs **only** when the operator opts in per-run; it is authorized by the **Ulfberht edition** itself (the engine is marker-locked to the official image), **not** the global auto-attacks toggle. |
+| **Reporting** | §8 Post-testing / reporting | passive | One report: executive summary with an overall risk rating, host/service table, findings by severity with references **and per-finding remediation**, phases executed. Viewable in-tab and downloadable as **Markdown** or a styled, printable **HTML (→ PDF)** report. Every finished run is **saved on the device**. |
 
 ## Safety model
 
 - **Scope is entered once and every step is confined to it.** No phase targets
   anything outside the scope you give.
 - **Passive by default.** Discovery and diagnostics are non-intrusive and always
-  allowed. The **assessment** phase is the only active one and is double-gated:
-  the operator must tick "enable active assessment" *and* the server's
-  `enable_attacks` setting must be on, or the phase is skipped and the report
-  says so.
+  allowed. The **assessment** phase is the only active one. It is authorized by
+  the **Ulfberht edition** (the engine is marker-locked to the official image)
+  together with a **per-run opt-in** — tick "enable active assessment" — and is
+  deliberately **not** tied to the global auto-attacks toggle: choosing the
+  edition is the authorization. Leave the opt-in off and the phase is skipped and
+  the report says so.
 - Everything runs in a background thread with per-tool timeouts.
 
 ## Using it
@@ -45,8 +47,12 @@ to a client — and something a student can be graded on.
    (where you can also **Upload .json** playbooks and delete your custom ones) —
    enter a **scope** (IP / CIDR / host), optionally enable the active phase, and
    **Run engagement**.
-3. Watch the phases progress and findings stream in; when it completes, **view**
-   or **download** the engagement report.
+3. Watch the phases progress and findings stream in; when it completes, **open
+   the HTML report** (print → PDF in the browser) or **download** it as HTML or
+   Markdown.
+4. Past engagements are saved on the device and listed under **Recent
+   engagements** (survives a restart) — click one to reopen its findings and
+   report.
 
 ### Built-in playbooks
 
@@ -123,10 +129,30 @@ is enabled, same as the assessment phase.
 > responder, ettercap, tcpdump) should be invoked non-interactively (e.g.
 > `msfconsole -q -x …`) or they will run until the step `timeout`.
 
+## Reports & history
+
+Every finished engagement produces a report in two forms and is saved on the
+device so nothing is lost on a restart:
+
+- **HTML report (print → PDF).** A self-contained, styled, printable page:
+  executive summary with an overall **risk rating** badge, KPI tiles (live hosts
+  / high+critical / medium / low / info), the targets, a hosts-&-services table,
+  and per-finding cards — each with a severity badge and a **remediation box**
+  (a one-line fix per risk class: disable Telnet, restrict SMB, drop SNMP
+  v1/v2c, …) — followed by the NIST SP 800-115 phase table. Open it with **Open
+  report (print / PDF)** and use the browser's *Print → Save as PDF*.
+- **Markdown report.** The same content as text, with remediation inline — handy
+  to paste into a ticket or wiki. **Download .md** (or `.html`).
+- **Recent engagements.** Finished runs are written to
+  `data/engagements/<id>.json` and listed in a collapsible panel on the
+  Engagements tab (playbook · scope · time · status); click one to reopen it.
+
+API: `GET /api/ulfberht/report/<id>` returns Markdown JSON; add
+`?format=html` for the HTML page, and `&download=1` on either to save the file.
+
 ## Roadmap
 
-- Persisted engagement history + PDF export + SIEM push of findings (reusing
-  Ragnar's existing SIEM egress).
+- SIEM push of engagement findings (reusing Ragnar's existing SIEM egress).
 - Wi-Fi playbooks driving the Nexmon onboard radio.
 - Deeper feed-forward from the passive watcher/guard layer into the diagnostics
   phase.

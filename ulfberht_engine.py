@@ -58,6 +58,7 @@ except Exception:  # pragma: no cover - defensive
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 PLAYBOOKS_DIR = os.path.join(_HERE, "data", "engagement_playbooks")
+RUNS_DIR = os.path.join(_HERE, "data", "engagements")   # persisted engagement history
 
 # ── Methodology ─────────────────────────────────────────────────────────────
 # Phases map to NIST SP 800-115 ("Technical Guide to Information Security
@@ -147,6 +148,23 @@ _RISK_SERVICES = {
 _RISK_PORTS = {23: "telnet", 21: "ftp", 513: "rlogin", 514: "rsh",
                5900: "vnc", 445: "microsoft-ds", 139: "netbios-ssn",
                161: "snmp", 1433: "ms-sql-s", 3306: "mysql", 3389: "rdp"}
+
+# One-line remediation per risk key — shown per finding in the report so the
+# output is actionable (operators) and instructive (students).
+_REMEDIATION = {
+    "telnet": "Disable Telnet; use SSH and restrict it to management networks.",
+    "ftp": "Replace FTP with SFTP/FTPS and disable anonymous access.",
+    "http": "Serve over HTTPS (redirect 80→443) with a valid TLS certificate.",
+    "rlogin": "Disable the r-services (rlogin/rsh/rexec); use SSH with key auth.",
+    "rsh": "Disable the r-services (rlogin/rsh/rexec); use SSH with key auth.",
+    "vnc": "Don't expose VNC directly; tunnel it over SSH/VPN and require strong auth.",
+    "microsoft-ds": "Restrict SMB to trusted hosts, require SMB signing, disable SMBv1.",
+    "netbios-ssn": "Disable NetBIOS over TCP/IP and retire legacy SMB.",
+    "snmp": "Drop SNMP v1/v2c and default communities; use SNMPv3 (auth/priv) and firewall it.",
+    "ms-sql-s": "Don't expose the database to untrusted networks; enforce TLS + strong auth.",
+    "mysql": "Bind the database to localhost/trusted subnets; enforce TLS + strong auth.",
+    "rdp": "Put RDP behind a VPN/gateway, enable NLA, and enforce MFA + strong passwords.",
+}
 
 _SCOPE_RE = re.compile(r"^[0-9a-zA-Z\.\:/\-\s]{1,200}$")
 _PORTSPEC_RE = re.compile(r"^[0-9,\-]{1,64}$")
@@ -435,6 +453,7 @@ def start_run(playbook_id, scope, enable_active=False, targets=None):
         "findings": [],
         "log": [],
         "report_md": "",
+        "report_html": "",
     }
     with _lock:
         _runs[run_id] = run
@@ -443,24 +462,76 @@ def start_run(playbook_id, scope, enable_active=False, targets=None):
     return run_id, None
 
 
+_RUN_SUMMARY_KEYS = ("id", "playbook_name", "scope", "status", "phase",
+                     "started", "finished")
+_PERSIST_KEYS = ("id", "playbook", "playbook_name", "scope", "targets",
+                 "enable_active", "status", "phase", "phases_done", "started",
+                 "finished", "hosts", "findings", "log", "report_md", "report_html")
+
+
+def _persist_run(run_id):
+    """Write a finished run to RUNS_DIR/<id>.json so history survives a restart."""
+    try:
+        with _lock:
+            run = _runs.get(run_id)
+            if not run:
+                return
+            data = {k: run.get(k) for k in _PERSIST_KEYS}
+        os.makedirs(RUNS_DIR, exist_ok=True)
+        tmp = os.path.join(RUNS_DIR, f".{run_id}.tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, os.path.join(RUNS_DIR, f"{run_id}.json"))
+    except Exception:
+        pass
+
+
+def _load_persisted_run(run_id):
+    try:
+        with open(os.path.join(RUNS_DIR, f"{run_id}.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def _list_persisted():
+    out = []
+    try:
+        files = os.listdir(RUNS_DIR)
+    except OSError:
+        return out
+    for fn in files:
+        if fn.endswith(".json"):
+            d = _load_persisted_run(fn[:-5])
+            if d:
+                out.append(d)
+    return out
+
+
 def get_run(run_id):
     with _lock:
         run = _runs.get(run_id)
-        return dict(run) if run else None
+        if run:
+            return dict(run)
+    return _load_persisted_run(run_id)   # fall back to persisted history
 
 
 def list_runs():
+    seen = {}
     with _lock:
-        return [
-            {k: r[k] for k in ("id", "playbook_name", "scope", "status",
-                               "phase", "started", "finished")}
-            for r in sorted(_runs.values(), key=lambda x: x["started"], reverse=True)
-        ]
+        for r in _runs.values():
+            seen[r["id"]] = {k: r.get(k) for k in _RUN_SUMMARY_KEYS}
+    for d in _list_persisted():           # add history not currently in memory
+        if d.get("id") and d["id"] not in seen:
+            seen[d["id"]] = {k: d.get(k) for k in _RUN_SUMMARY_KEYS}
+    return sorted(seen.values(), key=lambda x: x.get("started") or 0, reverse=True)
 
 
-def get_report(run_id):
+def get_report(run_id, fmt="md"):
     run = get_run(run_id)
-    return run["report_md"] if run else None
+    if not run:
+        return None
+    return run.get("report_html") if fmt == "html" else run.get("report_md")
 
 
 # ── Execution ─────────────────────────────────────────────────────────────────
@@ -474,11 +545,11 @@ def _set(run, **kw):
         _runs[run["id"]].update(kw)
 
 
-def _finding(run, severity, title, host, detail, ref=""):
+def _finding(run, severity, title, host, detail, ref="", remediation=""):
     with _lock:
         _runs[run["id"]]["findings"].append({
             "severity": severity, "title": title, "host": host,
-            "detail": detail, "ref": ref,
+            "detail": detail, "ref": ref, "remediation": remediation,
         })
 
 
@@ -519,6 +590,7 @@ def _execute(run):
     except Exception as e:  # never leave a run wedged in "running"
         _log(run, f"ERROR: {e}")
         _set(run, status="failed", finished=time.time())
+    _persist_run(run["id"])   # engagement history survives a restart
 
 
 # ── Target helpers ───────────────────────────────────────────────────────────
@@ -639,7 +711,7 @@ def _act_posture(run, params):
                 sev, title, ref = risk
                 banner = " ".join(x for x in (p["product"], p["version"]) if x)
                 detail = f"{p['port']}/{p['proto']} {key}" + (f" — {banner}" if banner else "")
-                _finding(run, sev, title, h["ip"], detail, ref)
+                _finding(run, sev, title, h["ip"], detail, ref, _REMEDIATION.get(key, ""))
     _log(run, f"Posture analysis produced {len(run_findings(run)) - n0} finding(s).")
 
 
@@ -791,6 +863,8 @@ def _act_report(run, params):
                 A(f"- {det}")
             if f["ref"]:
                 A(f"- Reference: {f['ref']}")
+            if f.get("remediation"):
+                A(f"- **Remediation:** {f['remediation']}")
             A("")
     else:
         A("_No posture findings. Scope looks clean for the checks run._")
@@ -802,7 +876,116 @@ def _act_report(run, params):
     A("")
     A("---")
     A("_Ragnar OS Ulfberht — for authorized security testing only._")
-    _set(run, report_md="\n".join(lines))
+    _set(run, report_md="\n".join(lines),
+         report_html=_render_report_html(run, findings, counts))
+
+
+def _risk_rating(counts):
+    """Overall engagement risk rating from the finding severity counts."""
+    if counts.get("critical") or counts.get("high"):
+        return ("High", "#f87171")
+    if counts.get("medium"):
+        return ("Medium", "#fbbf24")
+    if counts.get("low"):
+        return ("Low", "#60a5fa")
+    return ("Informational", "#4ade80")
+
+
+def _render_report_html(run, findings, counts):
+    """A self-contained, printable (→ PDF) HTML engagement report."""
+    e = html.escape
+    sev_color = {"critical": "#dc2626", "high": "#ef4444", "medium": "#f59e0b",
+                 "low": "#3b82f6", "info": "#6b7280"}
+    rating, rating_col = _risk_rating(counts)
+    high = counts.get("high", 0) + counts.get("critical", 0)
+    started = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(run['started']))
+    out = []
+    A = out.append
+    A("<!doctype html><html lang=en><head><meta charset=utf-8>")
+    A("<meta name=viewport content='width=device-width,initial-scale=1'>")
+    A(f"<title>Engagement Report — {e(run['playbook_name'])}</title>")
+    A("""<style>
+*{box-sizing:border-box} body{font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+color:#1e293b;background:#f8fafc;margin:0;padding:32px;max-width:960px;margin:0 auto}
+h1{font-size:24px;margin:0 0 4px} h2{font-size:17px;margin:28px 0 10px;border-bottom:2px solid #e2e8f0;padding-bottom:6px}
+.sub{color:#64748b;font-size:13px;margin-bottom:18px}
+.kpis{display:flex;gap:12px;flex-wrap:wrap;margin:14px 0}
+.kpi{flex:1;min-width:120px;background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:12px}
+.kpi .n{font-size:22px;font-weight:700} .kpi .l{color:#64748b;font-size:12px}
+.rating{display:inline-block;padding:4px 12px;border-radius:999px;color:#fff;font-weight:700}
+table{width:100%;border-collapse:collapse;font-size:13px;margin:6px 0 }
+th,td{text-align:left;padding:7px 9px;border-bottom:1px solid #e2e8f0;vertical-align:top}
+th{background:#f1f5f9;font-size:12px;text-transform:uppercase;letter-spacing:.03em;color:#475569}
+.f{background:#fff;border:1px solid #e2e8f0;border-left-width:5px;border-radius:8px;padding:12px 14px;margin:10px 0}
+.badge{display:inline-block;padding:1px 8px;border-radius:999px;color:#fff;font-size:11px;font-weight:700;vertical-align:middle}
+.rem{background:#ecfdf5;border:1px solid #a7f3d0;border-radius:6px;padding:8px 10px;margin-top:8px;font-size:13px}
+.rem b{color:#047857} code,pre{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+pre{background:#0f172a;color:#e2e8f0;padding:10px;border-radius:6px;overflow:auto;white-space:pre-wrap}
+.muted{color:#64748b} .foot{margin-top:28px;color:#94a3b8;font-size:12px;border-top:1px solid #e2e8f0;padding-top:12px}
+@media print{body{padding:0;background:#fff}.kpi,.f,table{break-inside:avoid}}
+</style></head><body>""")
+    A(f"<h1>Engagement Report</h1>")
+    A(f"<div class=sub>{e(run['playbook_name'])} &middot; scope <code>{e(run['scope'])}</code> &middot; {e(started)} "
+      f"&middot; active validation: {'enabled' if run['enable_active'] else 'not run (passive)'}</div>")
+    # executive summary
+    A("<h2>Executive summary</h2>")
+    A(f"<p>Overall risk: <span class=rating style='background:{rating_col}'>{rating}</span>. "
+      f"The engagement swept <b>{e(run['scope'])}</b> and found <b>{len(run['hosts'])}</b> live host(s) "
+      f"and <b>{len(findings)}</b> finding(s) across the exposed services, following the NIST SP 800-115 "
+      f"methodology (discovery → diagnostics → assessment → reporting).</p>")
+    A("<div class=kpis>")
+    A(f"<div class=kpi><div class=n>{len(run['hosts'])}</div><div class=l>Live hosts</div></div>")
+    A(f"<div class=kpi><div class=n style='color:#ef4444'>{high}</div><div class=l>High / Critical</div></div>")
+    A(f"<div class=kpi><div class=n style='color:#f59e0b'>{counts.get('medium',0)}</div><div class=l>Medium</div></div>")
+    A(f"<div class=kpi><div class=n style='color:#3b82f6'>{counts.get('low',0)}</div><div class=l>Low</div></div>")
+    A(f"<div class=kpi><div class=n class=muted>{counts.get('info',0)}</div><div class=l>Informational</div></div>")
+    A("</div>")
+    # targets (if a list)
+    if len(run.get("targets", [])) > 1:
+        A("<h2>Targets</h2><p class=muted>" + ", ".join(f"<code>{e(t)}</code>" for t in run["targets"][:100])
+          + (f" … (+{len(run['targets'])-100} more)" if len(run["targets"]) > 100 else "") + "</p>")
+    # hosts & services
+    A("<h2>Hosts &amp; services</h2>")
+    if run["hosts"]:
+        A("<table><tr><th>Host</th><th>Port</th><th>Service</th><th>Product / version</th></tr>")
+        for h in run["hosts"]:
+            for p in h["ports"]:
+                pv = e(" ".join(x for x in (p["product"], p["version"]) if x))
+                hn = f" ({e(h['name'])})" if h["name"] else ""
+                A(f"<tr><td>{e(h['ip'])}{hn}</td><td>{p['port']}/{e(p['proto'])}</td>"
+                  f"<td>{e(p['service'])}</td><td>{pv}</td></tr>")
+        A("</table>")
+    else:
+        A("<p class=muted>No live hosts found in scope.</p>")
+    # findings
+    A("<h2>Findings</h2>")
+    if findings:
+        for f in findings:
+            col = sev_color.get(f["severity"], "#6b7280")
+            A(f"<div class=f style='border-left-color:{col}'>")
+            A(f"<div><span class=badge style='background:{col}'>{e(f['severity'].upper())}</span> "
+              f"<b>{e(f['title'])}</b> <span class=muted>— {e(f['host'])}</span></div>")
+            det = f["detail"]
+            if "\n" in det:
+                A(f"<pre>{e(det)}</pre>")
+            else:
+                A(f"<div style='margin-top:6px'>{e(det)}</div>")
+            if f.get("ref"):
+                A(f"<div class=muted style='margin-top:4px;font-size:12px'>Reference: {e(f['ref'])}</div>")
+            if f.get("remediation"):
+                A(f"<div class=rem><b>Remediation:</b> {e(f['remediation'])}</div>")
+            A("</div>")
+    else:
+        A("<p class=muted>No posture findings. Scope looks clean for the checks run.</p>")
+    # phases
+    A("<h2>Methodology — phases executed</h2><table><tr><th></th><th>Phase</th><th>Standard</th></tr>")
+    for ph in PHASES:
+        done = "✓" if ph in run["phases_done"] else "—"
+        A(f"<tr><td>{done}</td><td>{e(PHASE_META[ph]['name'])}</td><td class=muted>{e(PHASE_META[ph]['nist'])}</td></tr>")
+    A("</table>")
+    A("<div class=foot>Generated by <b>Ragnar OS Ulfberht</b> — for authorized security testing only.</div>")
+    A("</body></html>")
+    return "\n".join(out)
 
 
 _ACTIONS = {

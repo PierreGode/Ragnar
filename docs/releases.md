@@ -4,6 +4,13 @@
 
 ### 2026-10-18
 
+#### [#987](https://github.com/PierreGode/Ragnar/pull/987) — feat(ulfberht): persisted engagement history + pro HTML/PDF report with remediation
+*branch `feature/ulfberht-report-history`*
+
+- **Engagement history now persists.** Every finished run is written to `data/engagements/<id>.json` (atomic write), so the Engagements tab keeps its history across a service restart. A new collapsible **"Recent engagements"** panel lists past runs (playbook · scope · time · status); click one to reopen its findings and report. `list_runs()`/`get_run()` merge in-memory and on-disk runs; the run-status API no longer ships the heavy report blobs (fetched separately).
+- **Pro HTML report (print → PDF) with remediation.** Alongside the Markdown report, each engagement now renders a self-contained, styled, printable **HTML report**: executive summary with an overall **risk rating** badge, KPI tiles (live hosts / high+critical / medium / low / info), targets, a hosts-&-services table, and per-finding cards with a severity badge and a **green remediation box** (one-line fix per risk class — Telnet/FTP/SMB/RDP/SNMP/MySQL/…), plus the NIST SP 800-115 phase table. `GET /api/ulfberht/report/<id>?format=html` (add `&download=1` to save `.html`); the run panel gained **Open report (print / PDF)** + **Download .html** next to the Markdown ones. Remediation is also appended to the Markdown report.
+- Runtime state (`data/engagements/`, `data/engagement_playbooks/`) is git-ignored.
+
 #### [#986](https://github.com/PierreGode/Ragnar/pull/986) — feat(ulfberht): Engagements scope accepts a targets file
 *branch `feature/ulfberht-scope-file`*
 

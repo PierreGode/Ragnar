@@ -295,5 +295,11 @@ certs/
 # Console scripts — seeded at runtime, user-editable (never overwrite on update)
 data/console_scripts/
 
+# Ulfberht engagement history — persisted run reports written by the service
+data/engagements/
+
+# Ulfberht user playbooks — seeded/uploaded at runtime (synced via the Files tab)
+data/engagement_playbooks/
+
 # Ragnar OS image build (pi-gen checkout + deploy artifacts)
 os-image/.pi-gen/

@@ -28982,6 +28982,7 @@ document.addEventListener('DOMContentLoaded', fetchEdition);
 let ulfPlaybooks = [];
 let ulfCurrentRun = null;
 let ulfPollTimer = null;
+let ulfRuns = [];
 
 let ulfCatalog = null;
 
@@ -28990,6 +28991,8 @@ function ulfLoadPlaybooks() {
         if (!d.enabled) return;
         ulfPlaybooks = d.playbooks || [];
         ulfCatalog = d.catalog || ulfCatalog;
+        ulfRuns = d.runs || [];
+        ulfRenderHistory();
         const sel = document.getElementById('ulf-playbook');
         if (sel) {
             const prev = sel.value;
@@ -29182,7 +29185,8 @@ function ulfPoll() {
     fetch('/api/ulfberht/run/' + ulfCurrentRun).then(r => r.json()).then(d => {
         if (d.error) return;
         ulfRenderRun(d);
-        if (d.status === 'running') ulfPollTimer = setTimeout(ulfPoll, 2500);
+        if (d.status === 'running') { ulfPollTimer = setTimeout(ulfPoll, 2500); }
+        else { ulfLoadPlaybooks(); }   // run finished → refresh persisted history
     }).catch(() => { ulfPollTimer = setTimeout(ulfPoll, 4000); });
 }
 
@@ -29217,16 +29221,72 @@ function ulfRenderRun(d) {
             row.style.cssText = 'background:rgba(255,255,255,0.04)';
             row.innerHTML = '<span style="color:' + col + '">[' + String(f.severity||'').toUpperCase() + ']</span> <b>' +
                 _esc(f.title) + '</b> — ' + _esc(f.host) + '<br><span class="text-gray-400">' +
-                _esc(f.detail) + (f.ref ? ' · ' + _esc(f.ref) : '') + '</span>';
+                _esc(f.detail) + (f.ref ? ' · ' + _esc(f.ref) : '') + '</span>' +
+                (f.remediation ? '<br><span style="color:#4ade80">↳ Fix: ' + _esc(f.remediation) + '</span>' : '');
             fl.appendChild(row);
         });
         if (!(d.findings||[]).length) fl.innerHTML = '<span class="text-xs text-gray-500">no findings yet…</span>';
     }
-    if (d.status === 'completed') {
-        const b = document.getElementById('ulf-report-btn'); if (b) b.classList.remove('hidden');
-        const dl = document.getElementById('ulf-report-dl');
-        if (dl) { dl.href = '/api/ulfberht/report/' + d.id + '?download=1'; dl.classList.remove('hidden'); }
+    if (d.status === 'completed' || d.status === 'failed') {
+        const id = d.id;
+        const show = (elid, href) => {
+            const el = document.getElementById(elid);
+            if (!el) return;
+            if (href) el.href = href;
+            el.classList.remove('hidden');
+        };
+        show('ulf-report-html', '/api/ulfberht/report/' + id + '?format=html');
+        show('ulf-report-dl-html', '/api/ulfberht/report/' + id + '?format=html&download=1');
+        show('ulf-report-btn', null);
+        show('ulf-report-dl', '/api/ulfberht/report/' + id + '?download=1');
     }
+}
+
+function ulfToggleHistory() {
+    const body = document.getElementById('ulf-history-body');
+    const chev = document.getElementById('ulf-hist-chevron');
+    if (!body) return;
+    const collapsed = body.classList.toggle('hidden');   // true => now hidden
+    if (chev) chev.style.transform = collapsed ? '' : 'rotate(90deg)';
+}
+
+function ulfRenderHistory() {
+    const list = document.getElementById('ulf-history');
+    const cnt = document.getElementById('ulf-hist-count');
+    if (cnt) cnt.textContent = '· ' + ulfRuns.length + ' run(s)';
+    if (!list) return;
+    list.innerHTML = '';
+    if (!ulfRuns.length) { list.innerHTML = '<span class="text-xs text-gray-500">No engagements yet.</span>'; return; }
+    ulfRuns.forEach(r => {
+        const col = r.status === 'completed' ? '#4ade80' : (r.status === 'failed' ? '#f87171' : '#fbbf24');
+        const when = r.started ? new Date(r.started * 1000).toLocaleString() : '';
+        const row = document.createElement('div');
+        row.className = 'flex items-center justify-between gap-2 text-xs p-2 rounded cursor-pointer hover:bg-slate-700';
+        row.style.cssText = 'background:rgba(255,255,255,0.04)';
+        row.onclick = () => ulfOpenRun(r.id);
+        row.innerHTML = '<span><b>' + _esc(r.playbook_name || r.id) + '</b> · ' + _esc(r.scope || '') +
+            '</span><span class="text-gray-400">' + _esc(when) +
+            ' · <span style="color:' + col + '">' + _esc(r.status || '') + '</span></span>';
+        list.appendChild(row);
+    });
+}
+
+function ulfOpenRun(id) {
+    if (!id) return;
+    if (ulfPollTimer) clearTimeout(ulfPollTimer);
+    ulfCurrentRun = id;
+    const panel = document.getElementById('ulf-run-panel'); if (panel) panel.classList.remove('hidden');
+    const idEl = document.getElementById('ulf-run-id'); if (idEl) idEl.textContent = id;
+    const pre = document.getElementById('ulf-report'); if (pre) pre.classList.add('hidden');
+    ['ulf-report-html','ulf-report-dl-html','ulf-report-btn','ulf-report-dl'].forEach(e => {
+        const el = document.getElementById(e); if (el) el.classList.add('hidden');
+    });
+    fetch('/api/ulfberht/run/' + id).then(r => r.json()).then(d => {
+        if (d.error) return;
+        ulfRenderRun(d);
+        if (d.status === 'running') ulfPoll();   // still live → resume polling
+    }).catch(() => {});
+    if (panel) panel.scrollIntoView({behavior:'smooth', block:'start'});
 }
 
 function _esc(s) {

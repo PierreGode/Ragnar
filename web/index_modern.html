@@ -5827,10 +5827,27 @@
                         <div id="ulf-findings" class="space-y-1"></div>
                     </div>
                     <div class="mt-3 flex gap-2 flex-wrap">
-                        <button onclick="ulfLoadReport()" id="ulf-report-btn" class="bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded text-xs hidden">View report</button>
+                        <a id="ulf-report-html" href="#" target="_blank" rel="noopener" class="text-white px-3 py-1.5 rounded text-xs hidden" style="background:#dc2626">Open report (print / PDF)</a>
+                        <button onclick="ulfLoadReport()" id="ulf-report-btn" class="bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded text-xs hidden">View markdown</button>
+                        <a id="ulf-report-dl-html" href="#" class="bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded text-xs hidden">Download .html</a>
                         <a id="ulf-report-dl" href="#" class="bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded text-xs hidden">Download .md</a>
                     </div>
                     <pre id="ulf-report" class="mt-3 p-3 bg-slate-900 rounded text-xs overflow-x-auto whitespace-pre-wrap hidden" style="max-height:60vh"></pre>
+                </div>
+
+                <!-- Recent engagements — persisted history (survives a restart); click to reopen -->
+                <div class="glass-card p-4 mb-4">
+                    <div class="flex items-center justify-between flex-wrap gap-2 mb-1">
+                        <button onclick="ulfToggleHistory()" class="flex items-center gap-2 font-semibold text-sm text-left">
+                            <span id="ulf-hist-chevron" class="inline-block text-gray-400 transition-transform">▸</span>
+                            Recent engagements <span id="ulf-hist-count" class="text-xs text-gray-500"></span>
+                        </button>
+                        <button onclick="ulfLoadPlaybooks()" class="bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded text-xs">Refresh</button>
+                    </div>
+                    <div id="ulf-history-body" class="hidden">
+                        <p class="text-xs text-gray-500 mb-3 mt-1">Completed engagements are saved on the device and survive a restart. Click one to reopen its findings and report.</p>
+                        <div id="ulf-history" class="space-y-1"></div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -9755,7 +9772,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261018-ulfberht-scope-file"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261018-ulfberht-report-history"></script>
 
 
 

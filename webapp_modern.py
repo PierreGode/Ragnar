@@ -27323,7 +27323,8 @@ def ulfberht_run_status_api(run_id):
         run = ulfberht_engine.get_run(run_id)
         if not run:
             return jsonify({"error": "no such run"}), 404
-        run.pop('report_md', None)  # fetched separately
+        run.pop('report_md', None)   # reports are large; fetched separately
+        run.pop('report_html', None)
         return jsonify(run)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -27335,11 +27336,21 @@ def ulfberht_report_api(run_id):
         import ulfberht_engine
         if not ulfberht_engine.is_enabled():
             return jsonify({"error": "not available"}), 403
+        from flask import Response
+        fmt = (request.args.get('format') or 'md').lower()
+        if fmt == 'html':
+            html = ulfberht_engine.get_report(run_id, 'html')
+            if not html:
+                return jsonify({"error": "no such run"}), 404
+            headers = {}
+            if request.args.get('download'):
+                headers['Content-Disposition'] = \
+                    f'attachment; filename=engagement-{run_id}.html'
+            return Response(html, mimetype='text/html', headers=headers)
         md = ulfberht_engine.get_report(run_id)
         if md is None:
             return jsonify({"error": "no such run"}), 404
         if request.args.get('download'):
-            from flask import Response
             return Response(md, mimetype='text/markdown', headers={
                 'Content-Disposition': f'attachment; filename=engagement-{run_id}.md'})
         return jsonify({"run_id": run_id, "report_md": md})
