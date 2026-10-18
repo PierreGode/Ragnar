@@ -65,9 +65,15 @@ Pentest tab) on the official image only. See
 
 ## Flashing & first boot
 
-1. Download `RagnarOS-Ulfberht-arm64.img.xz` + its `.sha256` from the
-   [Releases page](https://github.com/PierreGode/Ragnar/releases) (tag
-   `os-ulfberht-vX.Y.Z`); verify the checksum.
+1. Open the [Releases page](https://github.com/PierreGode/Ragnar/releases) (tag
+   `os-ulfberht-vX.Y.Z`). The image is **~4.3 GB** — larger than GitHub's 2 GiB
+   per-asset limit — so the release carries the `.sha256` and the release notes
+   link to the single `RagnarOS-Ulfberht-arm64.img.xz` hosted on **Proton Drive**.
+   Download the image from that link and verify it against the published
+   `sha256` before flashing:
+   ```bash
+   sha256sum -c RagnarOS-Ulfberht-arm64.img.xz.sha256   # must print: OK
+   ```
 2. Write it with Raspberry Pi Imager (or `dd`) to an SD card / USB / NVMe.
 3. Boot headless. The web UI is on **`:8000`**. No network yet? Join Wi-Fi
    **`Ragnar`** (pass `ragnarconnect`) and open `http://192.168.4.1:8000` to
@@ -97,6 +103,8 @@ reuses Kali's known-good kernel, Nexmon and bootloader:
 
 CI publishes a release on the public repo when an **`os-ulfberht-v*`** tag is
 pushed to the private repo; `workflow_dispatch` builds a test artifact from any
-Ragnar branch.
+Ragnar branch. Because the finished `.img.xz` is well over GitHub's 2 GiB
+per-asset limit, the release ships the `.sha256` and links out to the image on
+external storage (Proton Drive) rather than attaching the image itself.
 
 See also: [Ragnar OS (standard image)](ragnar-os.md).
