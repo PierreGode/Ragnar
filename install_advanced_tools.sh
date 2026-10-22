@@ -441,6 +441,29 @@ EOF
                 echo -e "${GREEN}✓ ZAP ${ZAP_VERSION} installed successfully${NC}"
                 echo -e "${BLUE}  Location: ${ZAP_DIR}${NC}"
                 echo -e "${BLUE}  Commands: zap, zap.sh${NC}"
+
+                # ------------------------------------------------------------
+                # Browser-login support (authhelper drives a real browser
+                # through the login form; used for Entra/OIDC/SSO targets).
+                # ------------------------------------------------------------
+                # The ZAP Linux distribution already BUNDLES authhelper — keep it
+                # (the newer 0.43 breaks browser login on ZAP 2.17). Only make
+                # sure selenium + webdriverlinux (the WebDriver glue) are present.
+                echo -e "${BLUE}Ensuring ZAP browser-login add-ons (selenium, webdriverlinux)...${NC}"
+                "${ZAP_DIR}/zap.sh" -cmd -silent \
+                    -addoninstall selenium -addoninstall webdriverlinux \
+                    >/dev/null 2>&1 \
+                    && echo -e "${GREEN}  ✓ ZAP browser-login add-ons ready${NC}" \
+                    || echo -e "${YELLOW}  ZAP add-on install failed (needs network) — browser login unavailable until re-run${NC}"
+
+                # Chromium + chromedriver: ZAP drives chrome-headless, which is
+                # preferred on Raspberry Pi (lighter than Firefox). firefox-esr is
+                # the fallback and is installed by install_ragnar.sh.
+                echo -e "${BLUE}Installing Chromium + chromedriver for browser login...${NC}"
+                install_pkg "chromium" || install_pkg "chromium-browser" || \
+                    echo -e "${YELLOW}  Could not install Chromium — browser login will fall back to Firefox${NC}"
+                install_pkg "chromium-driver" || install_pkg "chromium-chromedriver" || \
+                    echo -e "${YELLOW}  Could not install chromium-driver — ZAP may need a system chromedriver${NC}"
             else
                 echo -e "${RED}Failed to download ZAP${NC}"
             fi

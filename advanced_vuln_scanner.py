@@ -42,6 +42,74 @@ from server_capabilities import get_server_capabilities
 logger = Logger(name="advanced_vuln_scanner", level=logging.INFO)
 
 
+# ---------------------------------------------------------------------------
+# Fast authenticated content-discovery wordlist.
+# Crawlers only follow HTML links (and the AJAX spider often returns nothing on
+# single-page apps), so XHR-loaded /api/* endpoints are never found. These names,
+# crossed with the prefixes below, give ~500 common candidate endpoints that the
+# scanner probes directly and seeds the ones that exist.
+# ---------------------------------------------------------------------------
+_COMMON_ENDPOINT_NAMES = [
+    'users', 'user', 'me', 'profile', 'accounts', 'account', 'admin', 'administrator',
+    'auth', 'login', 'logout', 'token', 'tokens', 'oauth', 'session', 'sessions', 'sso',
+    'search', 'query', 'find', 'lookup', 'filter', 'suggest', 'autocomplete',
+    'docs', 'doc', 'documents', 'document', 'files', 'file', 'attachments', 'attachment',
+    'folders', 'folder', 'inbox', 'outbox', 'archive', 'drafts', 'trash', 'sent',
+    'invoices', 'invoice', 'orders', 'order', 'payments', 'payment', 'transactions', 'transaction',
+    'approvals', 'approval', 'tasks', 'task', 'jobs', 'job', 'workflows', 'workflow', 'queue', 'queues',
+    'config', 'configuration', 'configurations', 'settings', 'setting', 'preferences', 'options',
+    'health', 'healthcheck', 'status', 'ping', 'version', 'info', 'about', 'ready', 'live',
+    'metrics', 'stats', 'statistics', 'counts', 'summary',
+    'notifications', 'notification', 'messages', 'message', 'alerts', 'alert', 'events', 'event',
+    'activity', 'activities', 'feed', 'stream',
+    'reports', 'report', 'export', 'exports', 'import', 'imports', 'upload', 'uploads', 'download', 'downloads',
+    'companies', 'company', 'customers', 'customer', 'vendors', 'vendor', 'suppliers', 'supplier',
+    'products', 'product', 'items', 'item', 'catalog', 'inventory', 'categories', 'category',
+    'roles', 'role', 'permissions', 'permission', 'groups', 'group', 'teams', 'team', 'members', 'member',
+    'projects', 'project', 'organizations', 'organization', 'tenants', 'tenant', 'departments', 'department',
+    'logs', 'log', 'audit', 'audits', 'history', 'trace', 'traces',
+    'keys', 'key', 'apikeys', 'secrets', 'secret', 'credentials', 'certificates', 'certificate',
+    'webhooks', 'webhook', 'integrations', 'integration', 'connectors', 'connector',
+    'data', 'datasets', 'dataset', 'records', 'record', 'entities', 'entity', 'resources', 'resource',
+    'dashboard', 'dashboards', 'widgets', 'widget', 'charts', 'chart', 'graphs', 'graph',
+    'currencies', 'currency', 'languages', 'language', 'countries', 'country', 'locales', 'timezones',
+    'templates', 'template', 'forms', 'form', 'fields', 'field', 'schemas', 'schema', 'definitions',
+    'images', 'image', 'media', 'assets', 'asset', 'icons', 'avatars', 'avatar', 'thumbnails',
+    'comments', 'comment', 'ratings', 'rating', 'reviews', 'review', 'tags', 'tag', 'labels', 'label',
+    'ping/labels', 'users/profile', 'users/options', 'users/me', 'users/current',
+    'search/folder', 'search/criterias', 'search/counts', 'doc/list', 'doc/search',
+    'documents/search', 'files/list', 'admin/users', 'admin/settings', 'chat/notifications',
+]
+_COMMON_ENDPOINT_PREFIXES = ['/api/', '/api/v1/', '/api/v2/', '/']
+_COMMON_SPECIAL_PATHS = [
+    '/swagger/v1/swagger.json', '/swagger/v2/swagger.json', '/swagger.json',
+    '/openapi.json', '/openapi/v1.json', '/openapi/v1.1.json',
+    '/v3/api-docs', '/v2/api-docs', '/v1/api-docs', '/api-docs',
+    '/api/openapi.json', '/api/swagger.json', '/api/swagger/v1/swagger.json',
+    '/graphql', '/graphiql', '/.well-known/openid-configuration',
+    '/actuator', '/actuator/health', '/health', '/healthz', '/robots.txt', '/sitemap.xml',
+]
+
+
+def _build_common_endpoint_list() -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for prefix in _COMMON_ENDPOINT_PREFIXES:
+        for name in _COMMON_ENDPOINT_NAMES:
+            path = prefix + name
+            if path not in seen:
+                seen.add(path)
+                out.append(path)
+    for sp in _COMMON_SPECIAL_PATHS:
+        if sp not in seen:
+            seen.add(sp)
+            out.append(sp)
+    return out
+
+
+_COMMON_ENDPOINT_LIST = _build_common_endpoint_list()
+
+
 class VulnSeverity(Enum):
     """Vulnerability severity levels"""
     INFO = "info"
@@ -339,6 +407,13 @@ class AdvancedVulnScanner:
 
     # Ragnar-Fuzz payload library
     RAGNAR_FUZZ_PAYLOADS = {
+        # Qualys-parity probes — kept first so they always fire within the
+        # per-parameter payload budget. These catch the reflected-input findings
+        # Qualys reports on API validation errors (application/problem+json).
+        'qualys_parity': [
+            '"\'><qss truvio=1>',                # Unencoded characters (Qualys QID 150084)
+            '\x00<script>truvio_nb</script>',    # Null byte injection (Qualys QID 150320)
+        ],
         'xss_basic': [
             '<script>alert(1)</script>',
             '"><script>alert(1)</script>',
@@ -3229,6 +3304,17 @@ class AdvancedVulnScanner:
             if is_windows:
                 popen_kwargs['creationflags'] = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
+            # Make the JVM hand memory back to the OS when ZAP is idle (e.g.
+            # during the browser login) so the headless Chromium used by
+            # authhelper has room on small Pi boards. zap.sh keeps managing -Xmx
+            # (passing -J-Xmx errors on 2.17.0), so only the GC flags go here.
+            zap_env = dict(os.environ)
+            prior_jto = zap_env.get('JAVA_TOOL_OPTIONS', '').strip()
+            gc_opts = ("-XX:+UseG1GC -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=25 "
+                       "-XX:+ShrinkHeapInSteps -XX:G1PeriodicGCInterval=15000")
+            zap_env['JAVA_TOOL_OPTIONS'] = f"{prior_jto} {gc_opts}".strip()
+            popen_kwargs['env'] = zap_env
+
             self._zap_process = subprocess.Popen(cmd, **popen_kwargs)
             logger.info(f"[ZAP-START] Process launched — PID: {self._zap_process.pid}")
 
@@ -3551,6 +3637,73 @@ class AdvancedVulnScanner:
             except Exception as e:
                 logger.warning(f"Failed to seed API request: {e}")
 
+    def _probe_common_endpoints(self, scan_id: str, target: str, options: Dict,
+                                max_workers: int = 30, timeout: int = 6) -> int:
+        """Fast authenticated content discovery.
+
+        The spider only follows HTML links and the AJAX spider often returns
+        nothing on single-page apps, so XHR-loaded ``/api/*`` endpoints are never
+        found. This probes a built-in list of ~500 common endpoints with the
+        scan's session cookie and seeds the ones that exist into ZAP, so the
+        active scan and fuzzer reach them. A 400/500 to a bare GET is kept on
+        purpose: it means the endpoint exists and expects parameters, which is
+        exactly where reflected-input findings live.
+        """
+        import ssl as _ssl
+        parsed = urllib.parse.urlparse(target)
+        base = f"https://{parsed.netloc}"  # apps usually 301 http -> https
+        ssl_ctx = _ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = _ssl.CERT_NONE
+        headers = {'User-Agent': 'Mozilla/5.0 RagnarScanner', 'Accept': '*/*'}
+        cookie = options.get('cookie_value') or options.get('_session_cookie')
+        if cookie:
+            headers['Cookie'] = cookie
+
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, hdrs, newurl):  # noqa: N802
+                return None
+
+        def _probe(path: str) -> Tuple[str, int]:
+            opener = urllib.request.build_opener(_NoRedirect,
+                                                 urllib.request.HTTPSHandler(context=ssl_ctx))
+            req = urllib.request.Request(base + path, headers=headers, method='GET')
+            try:
+                with opener.open(req, timeout=timeout) as resp:
+                    return path, resp.status
+            except urllib.error.HTTPError as exc:
+                return path, exc.code
+            except Exception:
+                return path, 0
+
+        paths = _COMMON_ENDPOINT_LIST
+        self._scan_log(scan_id, 'info',
+                       f"Content discovery: probing {len(paths)} common endpoints (authenticated)...")
+        found: List[Tuple[str, int]] = []
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                for path, code in ex.map(_probe, paths):
+                    # Exists = server handled it: not 404, not a redirect to login, not a conn error.
+                    if code and code != 404 and not (300 <= code < 400):
+                        found.append((path, code))
+        except Exception as exc:
+            self._scan_log(scan_id, 'warning', f"Content discovery error: {exc}")
+            return 0
+
+        seeded = 0
+        for path, _code in found:
+            try:
+                self._zap_api_call('JSON/core/action/accessUrl',
+                                   {'url': base + path, 'followRedirects': 'true'})
+                seeded += 1
+            except Exception:
+                pass
+        sample = ', '.join(p for p, _ in found[:8])
+        self._scan_log(scan_id, 'info',
+                       f"Content discovery: {len(found)} existing endpoint(s) found and seeded"
+                       + (f" (e.g. {sample})" if sample else ""))
+        return seeded
+
     def _auto_discover_openapi_spec(self, target: str, options: Dict, progress):
         """Auto-discover an OpenAPI/Swagger spec on the target and seed endpoints.
 
@@ -3560,60 +3713,97 @@ class AdvancedVulnScanner:
         so the user does not need to manually provide a spec URL.
         """
         parsed = urllib.parse.urlparse(target)
-        base = f"{parsed.scheme}://{parsed.netloc}"
+        host = parsed.netloc
+        # Prefer https (apps 301 http->https); fall back to the entered scheme.
+        bases = [f"https://{host}"]
+        if parsed.scheme == 'http':
+            bases.append(f"http://{host}")
 
         common_paths = [
-            '/openapi.json',
-            '/swagger.json',
-            '/v3/api-docs',
-            '/v2/api-docs',
-            '/swagger/v1/swagger.json',
-            '/api/openapi.json',
-            '/api/swagger.json',
-            '/api-docs',
-            '/api-docs.json',
-            '/docs/openapi.json',
-            '/swagger/doc.json',
-            '/api/v1/openapi.json',
-            '/api/v1/swagger.json',
-            '/api/v2/openapi.json',
-            '/.well-known/openapi.json',
+            '/swagger/v1/swagger.json', '/swagger/v2/swagger.json', '/swagger.json',
+            '/openapi.json', '/openapi/v1.json', '/openapi/v1.1.json',
+            '/v3/api-docs', '/v2/api-docs', '/v1/api-docs',
+            '/api-docs', '/api-docs.json', '/api/openapi.json', '/api/swagger.json',
+            '/api/swagger/v1/swagger.json', '/api/v1/openapi.json', '/api/v1/swagger.json',
+            '/api/v2/openapi.json', '/docs/openapi.json', '/swagger/doc.json',
+            '/swagger/v1.json', '/.well-known/openapi.json',
         ]
+        # Swagger-UI / ReDoc HTML pages that reference the real spec URL.
+        ui_paths = ['/swagger', '/swagger/index.html', '/swagger-ui', '/swagger-ui.html',
+                    '/api-docs', '/docs', '/redoc', '/api/docs']
 
-        # Build auth headers for probing (specs may be behind auth)
+        import ssl as _ssl
+        ssl_ctx = _ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = _ssl.CERT_NONE
+        # Build auth headers for probing (specs may be behind auth).
         auth_headers = self._build_fuzz_auth_headers(options) if options else {}
 
-        for probe_path in common_paths:
-            probe_url = f"{base}{probe_path}"
+        def _fetch(url):
+            req = urllib.request.Request(url, method='GET')
+            req.add_header('Accept', 'application/json, */*')
+            req.add_header('User-Agent', 'Mozilla/5.0 RagnarScanner')
+            for h_name, h_value in auth_headers.items():
+                req.add_header(h_name, h_value)
             try:
-                probe_req = urllib.request.Request(probe_url, method='GET')
-                probe_req.add_header('Accept', 'application/json')
-                for h_name, h_value in auth_headers.items():
-                    probe_req.add_header(h_name, h_value)
-                ssl_ctx = None
-                if probe_url.startswith('https'):
-                    import ssl
-                    ssl_ctx = ssl.create_default_context()
-                    ssl_ctx.check_hostname = False
-                    ssl_ctx.verify_mode = ssl.CERT_NONE
-                with urllib.request.urlopen(probe_req, timeout=8, context=ssl_ctx) as resp:
-                    body = resp.read().decode('utf-8')
-                    spec = json.loads(body)
-                    if 'paths' in spec and spec['paths']:
-                        logger.info(f"Auto-discovered OpenAPI spec at {probe_url} "
-                                    f"({len(spec['paths'])} paths)")
-                        progress.current_check = f"Seeding endpoints from {probe_path}..."
-
-                        # Also try the addon import (best-effort)
-                        try:
-                            self.zap_import_openapi(probe_url, target)
-                        except Exception:
-                            pass
-
-                        self._seed_endpoints_from_spec(spec, target, options)
-                        return True
+                with urllib.request.urlopen(req, timeout=8, context=ssl_ctx) as resp:
+                    return resp.read(3_000_000).decode('utf-8', 'replace')
             except Exception:
-                continue
+                return None
+
+        def _as_spec(raw):
+            if not raw:
+                return None
+            try:
+                cand = json.loads(raw)
+            except Exception:
+                return None
+            return cand if isinstance(cand, dict) and cand.get('paths') else None
+
+        spec = None
+        spec_url = None
+        # 1) Direct probes of the common spec paths (https first).
+        for b in bases:
+            for probe_path in common_paths:
+                cand = _as_spec(_fetch(b + probe_path))
+                if cand:
+                    spec, spec_url = cand, b + probe_path
+                    break
+            if spec:
+                break
+        # 2) Fall back to parsing a Swagger-UI / ReDoc page for the spec URL.
+        if not spec:
+            for b in bases:
+                for up in ui_paths:
+                    page = _fetch(b + up)
+                    if not page:
+                        continue
+                    low = page.lower()
+                    if not any(k in low for k in ('swagger', 'openapi', 'redoc')):
+                        continue
+                    refs = re.findall(r'url\s*:\s*[\x22\x27]([^\x22\x27]+)[\x22\x27]', page)
+                    refs += re.findall(r'[\x22\x27]([^\x22\x27]*(?:swagger|openapi|api-docs)[^\x22\x27]*\.json)[\x22\x27]', page, re.I)
+                    for ref in refs:
+                        ref_url = urllib.parse.urljoin(b + up, ref)
+                        cand = _as_spec(_fetch(ref_url))
+                        if cand:
+                            spec, spec_url = cand, ref_url
+                            break
+                    if spec:
+                        break
+                if spec:
+                    break
+
+        if spec:
+            logger.info(f"Auto-discovered OpenAPI spec at {spec_url} ({len(spec['paths'])} paths)")
+            progress.current_check = f"Seeding endpoints from {spec_url}..."
+            # Also try the addon import (best-effort).
+            try:
+                self.zap_import_openapi(spec_url, target)
+            except Exception:
+                pass
+            self._seed_endpoints_from_spec(spec, target, options)
+            return True
 
         logger.info("No OpenAPI spec auto-discovered on target")
         return False
@@ -4156,10 +4346,155 @@ class AdvancedVulnScanner:
             logger.warning(f"Auth verification failed: {e}")
             return True  # Don't block scan on verification failure
 
+    def _bba_authenticate_and_capture(self, target: str, options: Dict) -> bool:
+        """Drive the configured browser-based login, capture the session cookie
+        and apply it as a ``ScanAuth-Cookie`` replacer rule.
+
+        authenticateAsUser is asynchronous (the SPA keeps the browser busy, so it
+        may time out even when the login succeeded), so the captured cookie is the
+        source of truth and is verified with retries. Also stores the cookie in
+        ``options['_session_cookie']`` / ``options['cookie_value']`` so the direct
+        content-discovery probe runs authenticated.
+        """
+        import ssl as _ssl
+        ctx_id = self._get_zap_context_id('default')
+        if not ctx_id:
+            return False
+        try:
+            users = self._zap_api_call('JSON/users/view/usersList',
+                                       {'contextId': ctx_id}).get('usersList', [])
+        except Exception:
+            users = []
+        if not users:
+            return False
+        user_id = users[0].get('id')
+
+        # Trigger the browser login (don't treat a timeout as failure).
+        try:
+            self._zap_api_call('JSON/users/action/authenticateAsUser',
+                               {'contextId': ctx_id, 'userId': user_id})
+        except Exception as e:
+            logger.debug(f"authenticateAsUser returned: {e}")
+
+        parsed = urllib.parse.urlparse(target)
+        target_host = (parsed.hostname or '').lower()
+        host_netloc = parsed.netloc
+        logged_out_re = r'(?i)(login\.microsoftonline\.com|login\.windows\.net|login\.live\.com|/signin-oidc|/\.auth/login)'
+        ssl_ctx = _ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = _ssl.CERT_NONE
+
+        def _extract_cookie():
+            for scheme in ('https', 'http'):
+                base = f"{scheme}://{host_netloc}"
+                try:
+                    tot = int(self._zap_api_call('JSON/core/view/numberOfMessages',
+                                                 {'baseurl': base}).get('numberOfMessages', 0))
+                except Exception:
+                    tot = 0
+                if tot <= 0:
+                    continue
+                try:
+                    msgs = self._zap_api_call('JSON/core/view/messages',
+                                              {'baseurl': base, 'start': str(max(0, tot - 150)),
+                                               'count': '150'}).get('messages', [])
+                except Exception:
+                    continue
+                for m in reversed(msgs):
+                    for line in (m.get('requestHeader') or '').split('\r\n'):
+                        if line.lower().startswith('cookie:'):
+                            c = line.split(':', 1)[1].strip()
+                            if c:
+                                return c
+            return None
+
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, hdrs, newurl):  # noqa: N802
+                return None
+
+        def _verify(cookie):
+            if not cookie:
+                return False
+            opener = urllib.request.build_opener(_NoRedirect,
+                                                 urllib.request.HTTPSHandler(context=ssl_ctx))
+            url = f"https://{host_netloc}{parsed.path or '/'}"
+            for _ in range(5):
+                req = urllib.request.Request(
+                    url, headers={'Cookie': cookie, 'User-Agent': 'Mozilla/5.0 RagnarScanner'}, method='GET')
+                loc = None
+                try:
+                    with opener.open(req, timeout=30) as resp:
+                        code = resp.status
+                except urllib.error.HTTPError as exc:
+                    code = exc.code
+                    loc = exc.headers.get('Location') if exc.headers else None
+                except Exception:
+                    return False
+                if code in (301, 302, 303, 307, 308) and loc:
+                    nxt = urllib.parse.urljoin(url, loc)
+                    if re.search(logged_out_re, nxt):
+                        return False
+                    if (urllib.parse.urlparse(nxt).hostname or '').lower() != target_host:
+                        return False
+                    url = nxt
+                    continue
+                return code == 200 or code >= 500
+            return False
+
+        cookie = None
+        for _attempt in range(5):
+            cand = _extract_cookie()
+            if _verify(cand):
+                cookie = cand
+                break
+            time.sleep(6)
+        if not cookie:
+            return False
+
+        # Apply via the existing replacer mechanism; the scan is now
+        # authenticated by the cookie and needs no forced-user mode.
+        try:
+            self._zap_api_call('JSON/replacer/action/removeRule', {'description': 'ScanAuth-Cookie'})
+        except Exception:
+            pass
+        try:
+            self._zap_api_call('JSON/replacer/action/addRule', {
+                'description': 'ScanAuth-Cookie', 'enabled': 'true',
+                'matchType': 'REQ_HEADER', 'matchRegex': 'false',
+                'matchString': 'Cookie', 'replacement': cookie, 'initiators': ''})
+        except Exception as e:
+            logger.error(f"Failed to apply captured session cookie: {e}")
+            return False
+        options['_session_cookie'] = cookie
+        options['cookie_value'] = cookie
+        logger.info("Browser login: captured session cookie and applied via replacer")
+        return True
+
     def _apply_and_verify_auth(self, scan_id: str, target: str, options: Dict, progress: 'ScanProgress'):
         """Apply auth and verify it works. Sets progress.auth_type/auth_status and options._context_id."""
         auth_applied, auth_type = self._apply_scan_auth(options)
         has_auth = auth_applied
+
+        # Browser-based auth: drive the login, capture the session cookie, and
+        # apply it via the replacer so the whole scan authenticates with the
+        # cookie. This is the reliability fix from analyticsportal — it avoids
+        # ZAP's forced-user mode, which stalls the active scan and relaunches the
+        # browser mid-scan, and it lets the content-discovery probe run
+        # authenticated (cookie stored in options['_session_cookie']).
+        if auth_type in ('form', 'oauth2_bba', 'script_auth'):
+            progress.current_check = f"Browser login ({auth_type}): establishing session..."
+            self._scan_log(scan_id, 'info',
+                           f"Browser login: driving {auth_type} and capturing the session cookie...")
+            try:
+                if self._bba_authenticate_and_capture(target, options):
+                    has_auth = True
+                    self._scan_log(scan_id, 'info',
+                                   "Browser login: session cookie captured and applied via replacer")
+                else:
+                    self._scan_log(scan_id, 'warning',
+                                   "Browser login: no session cookie captured — scan may be unauthenticated")
+            except Exception as e:
+                self._scan_log(scan_id, 'warning', f"Browser login capture skipped: {e}")
 
         if auth_type:
             progress.auth_type = auth_type
@@ -4553,6 +4888,14 @@ class AdvancedVulnScanner:
             except Exception as e:
                 logger.debug(f"OpenAPI auto-discovery skipped: {e}")
 
+        # Fast authenticated content discovery — probe ~500 common endpoints the
+        # crawlers miss (SPA XHR-only /api/* paths) and seed the ones that exist.
+        try:
+            progress.current_check = "Content discovery: probing common endpoints..."
+            self._probe_common_endpoints(scan_id, target, options)
+        except Exception as e:
+            logger.debug(f"Content-endpoint probe skipped: {e}")
+
         # Configure input vectors for thorough/insane
         if strength != 'standard':
             progress.current_check = "Configuring scan input vectors..."
@@ -4917,6 +5260,23 @@ class AdvancedVulnScanner:
         Returns dict with context, risk, confidence, cwe_id, description or None."""
         payload_lower = payload.lower()
         body_lower = response_body.lower()
+
+        # Null-byte probe (Qualys QID 150320): the raw %00 is sent URL-encoded and
+        # JSON-serialises to \u0000, so the raw payload never substring-matches.
+        # Detect the echoed null plus the payload tail instead.
+        if payload.startswith('\x00'):
+            tail = payload[1:]
+            nul_echoed = ('\\u0000' in response_body or '\x00' in response_body or '%00' in response_body)
+            if nul_echoed and tail and (tail in response_body or tail.lower() in body_lower):
+                return {
+                    'context': 'null-byte',
+                    'risk': 1,
+                    'confidence': 2,
+                    'cwe_id': 'CWE-158',
+                    'description': ('Null byte (%00) accepted and echoed back (Qualys QID 150320) — '
+                                    'input containing %00 should be rejected'),
+                }
+            return None
 
         # Check if payload is reflected at all
         if payload not in response_body and payload_lower not in body_lower:
@@ -5984,6 +6344,13 @@ class AdvancedVulnScanner:
                         'loginPageUrl': login_url,
                         'loginPageWait': str(login_page_wait),
                     }
+
+                    # Drive the browser ZAP already detected — chrome-headless
+                    # (Chromium) is preferred on Raspberry Pi, with firefox as a
+                    # fallback. Without this ZAP picks its own default.
+                    _bid = getattr(self, '_detected_browser', None)
+                    if _bid and _bid != 'htmlunit':
+                        bba_config['browserId'] = _bid
 
                     # Add wait_for_url if specified (helps ZAP know when login is complete)
                     if wait_for_url:
