@@ -216,6 +216,54 @@ for tool in "${VULN_TOOLS[@]}"; do
 done
 
 # ============================================================================
+# WIRELESS AUDIT TOOLS (Ulfberht / Kali only)
+# ============================================================================
+# The Ulfberht edition's "Wireless WPA/WPS Audit" playbook (ulfberht_engine.py)
+# runs wifite, and ragnar_edition.py surfaces the whole wireless set when it is
+# present -- but none of it was ever installed here, so on a slim image the
+# playbook invoked a `wifite` that did not exist. These are Kali-provided
+# packages (often absent or stale on plain Debian/Ubuntu), so install them only
+# on the Kali base / genuine Ulfberht image and leave the silent-defensive
+# standard image untouched.
+is_ulfberht_or_kali() {
+    # Genuine Ulfberht image marker (written only by the RagnarOS build).
+    local m
+    for m in /etc/ragnar-edition /boot/firmware/ragnar-edition; do
+        [ -f "$m" ] && grep -qi 'ulfberht' "$m" 2>/dev/null && return 0
+    done
+    [ "${RAGNAR_EDITION:-}" = "ulfberht" ] && return 0
+    # Kali base (the Ulfberht edition is built on Kali).
+    [ -f /etc/kali_version ] && return 0
+    if [ -r /etc/os-release ]; then
+        . /etc/os-release 2>/dev/null
+        [ "${ID:-}" = "kali" ] && return 0
+        case " ${ID_LIKE:-} " in *" kali "*) return 0 ;; esac
+    fi
+    return 1
+}
+
+echo ""
+echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+echo -e "${CYAN}  Installing Wireless Audit Tools${NC}"
+echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+
+if [ "$PKG_MGR" = "apt" ] && is_ulfberht_or_kali; then
+    $UPDATE_CMD
+    # aircrack-ng pulls in airodump-ng/aireplay-ng/airmon-ng too; wifite drives
+    # them. reaver/bully do WPS; hcxdumptool/hcxtools feed hashcat; kismet is the
+    # survey/monitor tool. The binary name matches the package for all but
+    # hcxtools (its binaries are hcxpcapngtool etc.), so install by package and
+    # verify the key binaries in the summary below.
+    WIRELESS_TOOLS=("aircrack-ng" "wifite" "reaver" "bully" "hcxdumptool" "hcxtools" "kismet")
+    for pkg in "${WIRELESS_TOOLS[@]}"; do
+        install_pkg "$pkg" || true
+    done
+else
+    echo -e "${YELLOW}Skipping wireless audit tools (not the Ulfberht/Kali edition).${NC}"
+    echo -e "${BLUE}  These offensive Wi-Fi tools ship with the Ragnar OS Ulfberht image.${NC}"
+fi
+
+# ============================================================================
 # NUCLEI INSTALLATION (requires Go or direct binary)
 # ============================================================================
 echo ""
@@ -565,6 +613,15 @@ echo -e "${BLUE}Vulnerability Assessment Tools:${NC}"
 for tool in nmap nikto sqlmap whatweb hydra nuclei; do
     check_installed "$tool"
 done
+
+if is_ulfberht_or_kali; then
+    echo ""
+    echo -e "${BLUE}Wireless Audit Tools (Ulfberht):${NC}"
+    # hcxtools ships hcxpcapngtool rather than an `hcxtools` binary.
+    for tool in wifite aircrack-ng airodump-ng reaver bully hcxdumptool hcxpcapngtool kismet; do
+        check_installed "$tool"
+    done
+fi
 
 echo ""
 echo -e "${BLUE}Web Application Security:${NC}"

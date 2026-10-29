@@ -81,6 +81,10 @@ sudo systemctl restart ragnar
 - **Vulnerability scanners**: Nuclei, Nikto, SQLMap, WhatWeb
 - **Web app security**: OWASP ZAP (requires Java)
 - **Nmap scripts**: vulners.nse, vulscan database
+- **Wireless audit tools** *(Ulfberht / Kali base only)*: aircrack-ng (airodump-ng,
+  aireplay-ng, airmon-ng), wifite, reaver, bully, hcxdumptool, hcxtools, kismet —
+  the set the Ulfberht **Wireless WPA/WPS Audit** playbook drives. Skipped on the
+  standard defensive image, which ships none of this offensive Wi-Fi tooling.
 
 Ragnar auto-detects available tools and enables the corresponding features in the
 web interface.
