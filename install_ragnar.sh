@@ -1850,19 +1850,33 @@ EOF
         log "INFO" "Legacy wlan services disabled — NetworkManager owns wlan0 (hostapd/dnsmasq start on demand for AP mode)"
     fi
 
-    # Configure NetworkManager for WiFi management priority
+    # Configure NetworkManager for WiFi management priority + a STABLE uplink IP.
+    # Keep this content byte-for-byte in sync with scripts/provision_network_tools.sh
+    # (the update paths re-assert the same file); tests/test_nm_uplink_stable_mac.py
+    # guards against drift and against 'preserve' ever coming back.
     cat > /etc/NetworkManager/conf.d/99-ragnar-wifi.conf << EOF
 [main]
-# Ragnar WiFi Management Configuration
+# Ragnar network management
 dns=default
 
 [device]
-# Manage WiFi devices
+# Keep the Wi-Fi radio predictable: no per-scan MAC randomisation.
 wifi.scan-rand-mac-address=no
 
 [connection]
-# WiFi connection settings
-wifi.cloned-mac-address=preserve
+# Pin Ragnar's management uplink to the burned-in hardware MAC. On the offensive
+# (Ulfberht / Red Team) edition, monitor mode, macchanger and Nexmon change an
+# interface's MAC; NetworkManager's default of 'preserve' carries that changed
+# MAC into the managed connection, so the router hands out a new DHCP lease and
+# the box's IP keeps moving — on both Wi-Fi and Ethernet. 'permanent' keeps the
+# uplink on the real MAC so the lease stays put.
+wifi.cloned-mac-address=permanent
+ethernet.cloned-mac-address=permanent
+# Key the DHCP lease on the hardware MAC (option 61) so a recreated or renamed
+# connection profile (new UUID) can't change the client-id and pull a fresh
+# lease. A per-connection cloned-mac-address still overrides this default when
+# an engagement deliberately needs a spoofed uplink.
+ipv4.dhcp-client-id=mac
 EOF
 
     # Ensure NetworkManager manages wlan0 (no live interface in a chroot)

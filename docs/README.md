@@ -60,6 +60,7 @@ browse than search.
 - [BLE provisioning](ble_provisioning.md) · [Power (badge, Pi 5 USB limit, power test)](power.md) · [Cooling fan (status, manual speed, fan curve)](fan.md) · [UPS integration](UPS_INTEGRATION.md)
 
 ## Platform & safety
+- [Uplink IP stability](uplink-stability.md) — why a Red-Team box used to keep changing its own IP, and the stable-MAC / DHCP fix that pins it
 - [Cellular Uplink Fallback](cellular-uplink.md) — USB-tethered hotspot / phone / LTE modem as a backup uplink with heartbeat failover + failback hysteresis, never scanned
 - [Security & Authentication](SECURITY.md) — hardware-bound login, encryption at rest
 - [Files](files.md) — file manager (create/move/rename across every tree), in-browser editor, phone uploads

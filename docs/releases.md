@@ -4,6 +4,14 @@
 
 ### 2026-10-29
 
+#### [#1028](https://github.com/PierreGode/Ragnar/pull/1028) — fix(net): keep a stable uplink IP on the Red-Team edition (stop MAC-driven DHCP churn)
+*branch `fix/kali-mac-randomization-stable-ip`*
+
+- **Root cause of the "Ragnar keeps switching its IP on wired and wireless since I went Red Team" report:** the management uplink used NetworkManager's default `cloned-mac-address=preserve`, which means *use whatever MAC is on the interface at activation*. On the offensive (Ulfberht) edition the tooling legitimately changes interface MACs — monitor mode, `macchanger`, `airmon-ng`, Nexmon on the onboard radio — so `preserve` carried a changed MAC into the managed connection; the router then saw a new device and handed out a **new DHCP lease**. With no Ethernet setting either (NM's built-in default is also `preserve`), it hit both links. The standard edition ships none of that MAC-mangling tooling, so the box "never had that issue before." RuSense/`ruview` nodes pinned to the old IP then had to be re-flashed.
+- **Pin the uplink to the hardware MAC and key the lease on it.** `/etc/NetworkManager/conf.d/99-ragnar-wifi.conf` now sets `wifi.cloned-mac-address=permanent` **and** `ethernet.cloned-mac-address=permanent` (always associate with the burned-in MAC, whatever the attack tooling did to the live interface) plus `ipv4.dhcp-client-id=mac` (lease keyed on the hardware MAC, so a recreated profile's new UUID can't change the client-id and pull a fresh lease). A per-connection `cloned-mac-address` still overrides the default when an engagement deliberately needs a spoofed uplink.
+- **Install *and* update both apply it.** `install_ragnar.sh` writes the drop-in; `scripts/provision_network_tools.sh` (run by both `update_ragnar.sh` and the in-app Update button) now re-asserts the identical content idempotently and reloads NetworkManager — so existing boxes self-heal on their next update, and the update never tears down the live connection mid-run.
+- Docs: new [Uplink IP stability](uplink-stability.md) guide (symptom → cause → fix → the DHCP-reservation permanent cure). Test: `tests/test_nm_uplink_stable_mac.py` asserts both scripts carry the stable-MAC/DHCP settings, that the two copies stay byte-identical, and that `preserve` can never come back.
+
 #### [#1027](https://github.com/PierreGode/Ragnar/pull/1027) — fix(update): survive a corrupt tag ref that blocks fetch/update/branch-switch
 *branch `fix/update-resilient-fetch`*
 
