@@ -76,6 +76,7 @@ in the card and in the console panel underneath it.
 | `disk_full` | Not enough space to pull | Free space — `data/logs` and old captures first |
 | `not_a_repo` | No `.git` (tarball install) **and** upstream unreachable | Check the box's internet connection; the check repairs this by itself once it can reach github.com |
 | `branch_missing` | The tracked branch is gone upstream | Nothing — the updater falls back to the default branch automatically |
+| `broken_tag` | A tag in this clone or on the remote is corrupt and was blocking the fetch | Nothing — the updater drops the broken tag and refetches branches only; see [A corrupt tag blocks every update](#a-corrupt-tag-blocks-every-update) |
 | `ownership` | Git refused the checkout's file ownership | Usually self-repairing; else `sudo chown -R ragnar:ragnar /home/ragnar/Ragnar` |
 | `locked` | Another git process holds the repository | Wait a moment and retry; stale locks are swept automatically |
 | `permission` | The service cannot write its own directory | `sudo chown -R ragnar:ragnar /home/ragnar/Ragnar` |
@@ -172,6 +173,36 @@ the same. A box in that state is not "behind" — it is running the release it w
 installed from — so once the metadata is back the card simply reads **Up to
 Date**. Only a box that cannot reach github.com at all reports `not_a_repo`, and
 the repair is retried at most every 10 minutes until it succeeds.
+
+### A corrupt tag blocks every update
+
+A release tag that was force-pushed, partially deleted or had its objects
+garbage-collected (for example an `os-v*` OS-image tag) leaves a tag ref pointing
+at an object git can no longer read. From then on a plain `git fetch` aborts with:
+
+```
+fatal: bad object refs/tags/os-v1.8.0
+error: ... did not send all necessary objects
+```
+
+Because a pull and a branch checkout both fetch first, this blocks **every**
+update *and* every branch switch — not just the tag. **Ragnar now recovers from
+this automatically:** the web updater and `update_ragnar.sh` detect the signature,
+delete the broken tag ref (the updater only ever syncs to a branch head, never a
+tag) and refetch branches only. Note that `--no-tags` alone does **not** fix a
+broken *local* tag — git still uses it during negotiation — so the broken ref is
+deleted first.
+
+If you ever need to clear it by hand:
+
+```bash
+cd /home/ragnar/Ragnar
+# drop any local tag ref whose object is missing, then refetch branches only
+for t in $(git for-each-ref --format='%(refname)' refs/tags); do
+  git rev-parse --verify --quiet "$t^{object}" >/dev/null || git update-ref -d "$t"
+done
+git fetch --no-tags --prune --force origin '+refs/heads/*:refs/remotes/origin/*'
+```
 
 ### The service did not come back after an update
 

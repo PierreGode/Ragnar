@@ -2,6 +2,19 @@
 
 ## Releases
 
+### 2026-10-29
+
+#### [#1027](https://github.com/PierreGode/Ragnar/pull/1027) — fix(update): survive a corrupt tag ref that blocks fetch/update/branch-switch
+*branch `fix/update-resilient-fetch`*
+
+- **Root cause of the "can't update / can't switch branches" reports:** a release tag that was force-pushed, partially deleted or had its objects GC'd (e.g. `os-v1.8.0`) leaves a tag ref pointing at an unreadable object. From then on a plain `git fetch` aborts with `bad object refs/tags/...` / `did not send all necessary objects` — and because both `git pull` and a branch checkout fetch first, this blocks **every** update *and* every branch switch, not just the tag.
+- **Self-healing fetch everywhere.** The updater only ever syncs to a branch head, never a tag, so on that signature it now **drops broken tag refs and refetches branches only**. Verified that `--no-tags` *alone* does not rescue a broken **local** tag (git still uses it during negotiation), so the broken ref is deleted first.
+  - `git_updater.py` (web / in-app): new `prune_broken_tags()` + `resilient_fetch()`, a `broken_tag` error code + hint, wired into `check()` and `_fetch_with_retry()`.
+  - `update_ragnar.sh` + `scripts/update_ragnar.sh`: a `resilient_fetch()` bash helper (prune broken tags → branch-only `--no-tags` refetch → all-tags-drop last resort); pull uses `--no-tags`; the forced-sync fallback reuses it.
+  - `install_ragnar.sh`: `git clone` retries with `--no-tags` before the tarball fallback, so a corrupt **remote** tag no longer forces a `.git`-less (un-updatable) install.
+- A healthy remote still syncs tags normally — the recovery only triggers on the broken-tag signature.
+- **Tests:** `tests/test_git_updater.py` +4 cases against real git repos (classification, `prune_broken_tags`, `resilient_fetch` recovery, and `update()` landing with a broken tag present) — **41 passed**. **Docs:** [updates.md › A corrupt tag blocks every update](updates.md#a-corrupt-tag-blocks-every-update).
+
 ### 2026-10-28
 
 #### [#1026](https://github.com/PierreGode/Ragnar/pull/1026) — feat(net): IP Range Scan — host-discovery sweep on the Hosts tab

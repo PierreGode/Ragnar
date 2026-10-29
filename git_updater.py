@@ -207,6 +207,9 @@ _ERROR_SIGNATURES = (
                  'network is unreachable', 'operation timed out', 'ssl connect error',
                  'failed to connect', 'temporary failure in name resolution', 'rpc failed'),
      'The box could not reach github.com. Check its internet connection and try again.'),
+    ('broken_tag', ('did not send all necessary objects', 'bad object refs/tags'),
+     'A tag in this clone or on the remote is corrupt and was blocking the fetch. Ragnar drops the '
+     'broken tag and fetches branches only (it never needs a tag to update), so no action is needed.'),
     ('branch_missing', ("couldn't find remote ref", 'unknown revision', 'not a valid object name',
                         'does not appear to be a git repository'),
      'This checkout tracks a branch that no longer exists upstream. Ragnar will fall back to the '
@@ -501,6 +504,72 @@ def ensure_remote(repo_path, warnings=None):
         if warnings is not None:
             warnings.append(msg)
     return True, ''
+
+
+def prune_broken_tags(repo_path, warnings=None):
+    """Delete local tag refs whose object is missing or corrupt.
+
+    One bad tag ref - a release tag like ``os-v1.8.0`` that was force-pushed,
+    partially deleted or had its objects GC'd on the remote - makes a plain
+    ``git fetch`` abort with ``bad object refs/tags/...`` / ``did not send all
+    necessary objects``, which blocks every update and branch switch. The
+    updater only ever syncs to a *branch head*, never a tag, so dropping the
+    broken tag ref is always safe. Returns the number of refs removed.
+    """
+    listed = run_git(['for-each-ref', '--format=%(refname)', 'refs/tags'], repo_path,
+                     timeout=GIT_QUICK_TIMEOUT)
+    if not listed.ok:
+        return 0
+    removed = 0
+    for ref in listed.out.splitlines():
+        ref = ref.strip()
+        if not ref:
+            continue
+        # A ref whose peeled object is unreadable is the one that aborts fetch.
+        check_ref = run_git(['rev-parse', '--verify', '--quiet', f'{ref}^{{object}}'],
+                            repo_path, timeout=GIT_QUICK_TIMEOUT)
+        if not (check_ref.ok and check_ref.out.strip()):
+            drop = run_git(['update-ref', '-d', ref], repo_path, timeout=GIT_QUICK_TIMEOUT)
+            if drop.ok:
+                removed += 1
+                logger.warning(f"Removed broken tag ref blocking fetch: {ref}")
+    if removed and warnings is not None:
+        warnings.append(f"Removed {removed} broken tag ref(s) that were blocking the fetch")
+    return removed
+
+
+def _branch_only_fetch(repo_path, timeout):
+    """Fetch branch heads only, skipping tags entirely.
+
+    Sidesteps a tag that is corrupt *on the remote* (which per-clone pruning
+    cannot reach). ``--force`` keeps a rewound remote branch from failing the
+    refspec; the updater resets onto the fetched head anyway.
+    """
+    return run_git(
+        ['fetch', '--no-tags', '--prune', '--force', 'origin',
+         '+refs/heads/*:refs/remotes/origin/*'],
+        repo_path, timeout=timeout, network=True)
+
+
+def resilient_fetch(repo_path, warnings, timeout=GIT_NETWORK_TIMEOUT):
+    """A single fetch that survives a corrupt tag ref (local or remote).
+
+    Tries a normal tag-syncing fetch first - keeps tags current when the remote
+    is healthy. On the broken-tag signature it drops broken local tag refs and
+    retries branches-only, which is all the updater needs. Returns a GitResult.
+    """
+    res = run_git(['fetch', '--prune', 'origin'], repo_path, timeout=timeout, network=True)
+    if res.ok:
+        return res
+    code, _hint = classify(res.message, res.timed_out)
+    if code != 'broken_tag':
+        return res
+    logger.warning("Fetch hit a corrupt tag; pruning broken tags and retrying without tags")
+    prune_broken_tags(repo_path, warnings)
+    recovered = _branch_only_fetch(repo_path, timeout)
+    if recovered.ok and warnings is not None:
+        warnings.append('A corrupt tag was skipped; branch updates were fetched without tags')
+    return recovered
 
 
 def _reattach_branch_candidates(repo_path):
@@ -801,8 +870,7 @@ def check(repo_path=None, allow_fetch=True):
         try:
             clear_stale_locks(repo_path)
             ensure_remote(repo_path, warnings)
-            fetch = run_git(['fetch', '--prune', 'origin'], repo_path,
-                            timeout=GIT_CHECK_TIMEOUT, network=True)
+            fetch = resilient_fetch(repo_path, warnings, timeout=GIT_CHECK_TIMEOUT)
             result['fetched'] = fetch.ok
             if not fetch.ok:
                 code, hint = classify(fetch.message, fetch.timed_out)
@@ -997,8 +1065,9 @@ def _fetch_with_retry(repo_path, warnings, attempts=3):
     """Fetch, retrying transient network trouble with a short backoff."""
     last = None
     for attempt in range(1, attempts + 1):
-        res = run_git(['fetch', '--prune', 'origin'], repo_path,
-                      timeout=GIT_NETWORK_TIMEOUT, network=True)
+        # resilient_fetch already recovers a corrupt tag (local or remote) by
+        # pruning broken tag refs and refetching branches only.
+        res = resilient_fetch(repo_path, warnings, timeout=GIT_NETWORK_TIMEOUT)
         if res.ok:
             return res
         last = res

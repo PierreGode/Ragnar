@@ -239,6 +239,15 @@ clone_or_download() {
         if git clone "$repo_url" "$target_dir" 2>/dev/null; then
             return 0
         fi
+        # A corrupt tag on the remote (a force-pushed/GC'd os-v* release tag)
+        # aborts a normal clone. Retry without tags: the install never needs a
+        # tag, and a real git clone keeps updates working — a tarball fallback
+        # leaves no .git, so every later update has to reattach first.
+        log "WARNING" "git clone failed — retrying without tags (a corrupt remote tag can block it)"
+        rm -rf "$target_dir" 2>/dev/null || true
+        if git clone --no-tags "$repo_url" "$target_dir" 2>/dev/null; then
+            return 0
+        fi
         log "WARNING" "git clone failed — falling back to wget tarball download"
     fi
 

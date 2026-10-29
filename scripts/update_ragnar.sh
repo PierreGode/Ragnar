@@ -52,6 +52,44 @@ chown -R ragnar:ragnar "$ragnar_PATH" 2>/dev/null || true
 # Stash and merge commits need an author identity; root rarely has one.
 GIT_ID=(-c user.name="Ragnar Updater" -c user.email="ragnar-updater@localhost" -c pull.rebase=false)
 
+# A fetch that survives a corrupt tag ref - the failure that currently blocks
+# updates AND branch switches on some boxes. One bad release tag (os-v*) that
+# was force-pushed, partially deleted or had its objects GC'd makes a plain
+# `git fetch` abort with "bad object refs/tags/..." / "did not send all
+# necessary objects". The updater only ever syncs to a branch head, never a
+# tag, so on that signature we drop broken local tag refs and refetch branches
+# only. NOTE: --no-tags alone does NOT rescue a broken *local* tag - git still
+# uses it as a negotiation "have" - so the broken ref must be deleted first.
+resilient_fetch() {
+    local errf; errf="$(mktemp 2>/dev/null || echo "/tmp/ragnar_fetch.$$.err")"
+    if git fetch --prune origin 2>"$errf"; then
+        rm -f "$errf"; return 0
+    fi
+    cat "$errf" >&2 || true
+    if ! grep -qiE 'did not send all necessary objects|bad object refs/tags' "$errf"; then
+        rm -f "$errf"; return 1   # not a tag problem - let the caller fall back
+    fi
+    rm -f "$errf"
+    echo -e "${YELLOW}Fetch hit a corrupt tag - clearing broken tag refs and retrying without tags...${NC}"
+    local ref
+    while IFS= read -r ref; do
+        [ -z "$ref" ] && continue
+        if ! git rev-parse --verify --quiet "${ref}^{object}" >/dev/null 2>&1; then
+            echo -e "  ${YELLOW}Removing broken tag ref: ${ref}${NC}"
+            git update-ref -d "$ref" 2>/dev/null || true
+        fi
+    done < <(git for-each-ref --format='%(refname)' refs/tags 2>/dev/null)
+    git remote prune origin >/dev/null 2>&1 || true
+    if git fetch --no-tags --prune --force origin '+refs/heads/*:refs/remotes/origin/*'; then
+        echo -e "${GREEN}Fetched branches (a corrupt tag was skipped).${NC}"
+        return 0
+    fi
+    # A corrupt tag inside packed-refs can survive the per-ref cleanup above.
+    echo -e "${YELLOW}Retrying after dropping all local tags...${NC}"
+    git tag -l | xargs -r git tag -d >/dev/null 2>&1 || true
+    git fetch --no-tags --prune --force origin '+refs/heads/*:refs/remotes/origin/*'
+}
+
 echo -e "${BLUE}Step 2: Backing up local changes...${NC}"
 if git diff --quiet && git diff --staged --quiet; then
     echo -e "${GREEN}No local changes to backup.${NC}"
@@ -73,7 +111,7 @@ for file in "${PRESERVE_FILES[@]}"; do
 done
 
 echo -e "${BLUE}Step 3: Fetching latest updates...${NC}"
-git fetch origin
+resilient_fetch || echo -e "${YELLOW}Initial fetch incomplete - the update step below will retry.${NC}"
 
 echo -e "${BLUE}Step 4: Updating to latest version...${NC}"
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
@@ -83,14 +121,16 @@ if [ "$CURRENT_BRANCH" = "HEAD" ]; then
     git checkout main 2>/dev/null || git checkout -B main origin/main
     CURRENT_BRANCH="main"
 fi
-if git "${GIT_ID[@]}" pull origin "$CURRENT_BRANCH"; then
+# --no-tags keeps the pull's own fetch from re-tripping on a tag that is corrupt
+# on the remote (resilient_fetch above already cleared any broken local tag).
+if git "${GIT_ID[@]}" pull --no-tags origin "$CURRENT_BRANCH"; then
     echo -e "${GREEN}Update completed successfully!${NC}"
 else
     # Deterministic fallback: local changes are already in the stash and the
     # runtime data is copied aside below, so matching origin exactly is safe
     # and guarantees the update lands even on conflicted/diverged checkouts.
     echo -e "${YELLOW}git pull failed - forcing checkout to match origin/$CURRENT_BRANCH (local changes stay in the stash)...${NC}"
-    if git fetch origin "$CURRENT_BRANCH" && git reset --hard "origin/$CURRENT_BRANCH"; then
+    if resilient_fetch && git reset --hard "origin/$CURRENT_BRANCH"; then
         echo -e "${GREEN}Update completed via forced sync.${NC}"
     else
         echo -e "${RED}Update failed. Attempting to restore backup...${NC}"
