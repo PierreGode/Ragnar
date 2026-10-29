@@ -168,4 +168,57 @@ if [ -f "$_pc" ]; then
     bash "$_pc" || true
 fi
 
+# ---------------------------------------------------------------------------
+# 5. NetworkManager uplink: a STABLE management IP
+# ---------------------------------------------------------------------------
+# Ragnar's management uplink must keep the same IP even while the offensive
+# tooling (monitor mode, macchanger, Nexmon) mangles interface MACs. Before
+# this, NetworkManager's default 'preserve' carried a changed MAC into the
+# managed connection and the router handed out a new DHCP lease — the box's IP
+# kept moving on both Wi-Fi and Ethernet, so RuSense/ruview nodes pointed at it
+# had to be re-flashed. Pin the uplink to the hardware MAC and key the lease on
+# it. Historically this file was only written at install time, so existing
+# boxes never got the fix on update; assert it here (idempotent) too.
+#
+# Keep this content byte-for-byte in sync with install_ragnar.sh;
+# tests/test_nm_uplink_stable_mac.py guards against drift.
+_nm_conf=/etc/NetworkManager/conf.d/99-ragnar-wifi.conf
+if [ -d /etc/NetworkManager/conf.d ]; then
+    _nm_want="$(cat << 'NMEOF'
+[main]
+# Ragnar network management
+dns=default
+
+[device]
+# Keep the Wi-Fi radio predictable: no per-scan MAC randomisation.
+wifi.scan-rand-mac-address=no
+
+[connection]
+# Pin Ragnar's management uplink to the burned-in hardware MAC. On the offensive
+# (Ulfberht / Red Team) edition, monitor mode, macchanger and Nexmon change an
+# interface's MAC; NetworkManager's default of 'preserve' carries that changed
+# MAC into the managed connection, so the router hands out a new DHCP lease and
+# the box's IP keeps moving — on both Wi-Fi and Ethernet. 'permanent' keeps the
+# uplink on the real MAC so the lease stays put.
+wifi.cloned-mac-address=permanent
+ethernet.cloned-mac-address=permanent
+# Key the DHCP lease on the hardware MAC (option 61) so a recreated or renamed
+# connection profile (new UUID) can't change the client-id and pull a fresh
+# lease. A per-connection cloned-mac-address still overrides this default when
+# an engagement deliberately needs a spoofed uplink.
+ipv4.dhcp-client-id=mac
+NMEOF
+)"
+    if [ "$(cat "$_nm_conf" 2>/dev/null)" != "$_nm_want" ]; then
+        printf '%s\n' "$_nm_want" > "$_nm_conf"
+        # Reload only — this re-reads config for the NEXT activation and does
+        # not disturb the live connection (so we never drop the box or change
+        # its IP out from under an in-flight update).
+        nmcli connection reload >/dev/null 2>&1 || true
+        echo -e "  ${GREEN}✓${NC} NetworkManager uplink pinned to a stable MAC/DHCP lease"
+    else
+        echo -e "  ${GREEN}✓${NC} NetworkManager uplink already pinned to a stable MAC/DHCP lease"
+    fi
+fi
+
 exit 0
