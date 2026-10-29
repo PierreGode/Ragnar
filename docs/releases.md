@@ -4,6 +4,13 @@
 
 ### 2026-10-29
 
+#### [#1029](https://github.com/PierreGode/Ragnar/pull/1029) — feat(ulfberht): install the wireless Wi-Fi audit arsenal (wifite & co)
+*branch `feature/ulfberht-wireless-arsenal`*
+
+- **"Doesn't the Kali image include wifite?" — it was supposed to, but nothing in this repo installed it.** The Ulfberht edition advertises and *uses* the wireless arsenal: the **Wireless WPA/WPS Audit** playbook (`ulfberht_engine.py`) runs `wifite`, `ragnar_edition.py` detects the whole wireless set, and the docs list "aircrack-ng/wifite". Yet `install_advanced_tools.sh` only installed the traffic set (tcpdump/tshark…) and the vuln set (sqlmap/whatweb/hydra/nikto/nuclei) — the entire wireless cracking set was absent, so on a slim image (or any `git clone` onto Kali) the playbook invoked a `wifite` that did not exist.
+- **New "Wireless Audit Tools" step** in `scripts/install_advanced_tools.sh` installs `aircrack-ng` (→ airodump-ng/aireplay-ng/airmon-ng), `wifite`, `reaver`, `bully`, `hcxdumptool`, `hcxtools` and `kismet`. It is **gated to the Kali base / genuine Ulfberht image** (edition marker, `RAGNAR_EDITION=ulfberht`, or os-release `ID=kali`/`ID_LIKE` contains kali) — these are Kali-provided packages, absent or stale on plain Debian/Ubuntu, and offensive Wi-Fi tooling has no place on the silent-defensive standard image, so it is skipped there with a clear note. The install summary verifies the key wireless binaries (hcxtools via `hcxpcapngtool`). Gating confirmed safe under the script's `set -e`.
+- Docs: [Adv Scan](adv-scan.md) "What gets installed" now lists the wireless audit tools (Ulfberht/Kali only). The private `PierreGode/RagnarOS` image-build manifest remains the other place to guarantee the arsenal is baked into the shipped `.img`.
+
 #### [#1028](https://github.com/PierreGode/Ragnar/pull/1028) — fix(net): keep a stable uplink IP on the Red-Team edition (stop MAC-driven DHCP churn)
 *branch `fix/kali-mac-randomization-stable-ip`*
 
