@@ -462,3 +462,58 @@ def test_git_is_never_allowed_to_ask_a_human_for_anything():
 def test_repo_root_does_not_depend_on_the_working_directory(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert os.path.isfile(os.path.join(gu.repo_root(), 'git_updater.py'))
+
+
+# --- broken tag recovery ----------------------------------------------------
+#
+# A release tag (os-v1.8.0) that was force-pushed, partially deleted or had its
+# objects GC'd leaves a ref pointing at an object git can no longer read. From
+# then on a plain `git fetch` aborts with "bad object refs/tags/..." / "did not
+# send all necessary objects", which blocks every update AND every branch
+# switch - the exact symptom users reported. The updater never needs a tag, so
+# it drops the broken ref and fetches branch heads only.
+
+def _plant_broken_tag(box, name='os-v1.8.0'):
+    """Point a tag ref at an object that does not exist."""
+    ref = box / '.git' / 'refs' / 'tags' / name
+    ref.parent.mkdir(parents=True, exist_ok=True)
+    ref.write_text('deadbeef' * 5 + '\n')   # 40 hex chars, no such object
+
+
+def test_classify_flags_the_broken_tag_signature():
+    code, _ = gu.classify('fatal: bad object refs/tags/os-v1.8.0\n'
+                          'error: origin did not send all necessary objects')
+    assert code == 'broken_tag'
+
+
+def test_prune_broken_tags_drops_the_corrupt_ref_and_keeps_healthy_ones(box):
+    _git(box, 'tag', 'v-good')               # a real tag on HEAD
+    _plant_broken_tag(box)
+    removed = gu.prune_broken_tags(str(box))
+    assert removed == 1
+    tags = _git(box, 'tag', '-l').split()
+    assert 'v-good' in tags
+    assert 'os-v1.8.0' not in tags
+
+
+def test_plain_fetch_breaks_on_a_bad_tag_but_resilient_fetch_recovers(box, upstream):
+    _publish(upstream)
+    _plant_broken_tag(box)
+    # The raw fetch really is broken by the planted tag (guards the premise).
+    raw = gu.run_git(['fetch', '--prune', 'origin'], str(box))
+    assert not raw.ok
+    assert gu.classify(raw.message)[0] == 'broken_tag'
+    # The resilient fetch prunes the bad ref and gets the new commit anyway.
+    warnings = []
+    res = gu.resilient_fetch(str(box), warnings)
+    assert res.ok, res.message
+    assert gu._remote_has(str(box), 'main')
+
+
+def test_update_lands_even_with_a_broken_tag_present(box, upstream):
+    target = _publish(upstream)
+    _plant_broken_tag(box)
+    result = gu.update(str(box))
+    assert result['ok'], result
+    assert _head(box) == target
+    assert _private_data_intact(box)
