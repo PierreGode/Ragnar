@@ -21,7 +21,15 @@ Two things the stock Raspberry Pi OS build can't give you:
 - **The full offensive toolset in-repo** — nmap, aircrack-ng/wifite, hashcat,
   hydra, bettercap, responder, sqlmap, nikto, Metasploit, CrackMapExec/NetExec
   and friends are one `apt` away (and many are preinstalled), so Ragnar can
-  surface them rather than re-bundle them.
+  surface them rather than re-bundle them. The image build **bakes in** the core
+  arsenal explicitly so it's always present: **wireless** (wifite, aircrack-ng,
+  reaver, bully, hcxdumptool, hcxtools, kismet), **AD / internal** (impacket,
+  evil-winrm, certipy, kerbrute, bloodhound.py, ldapdomaindump, windapsearch) and
+  **pivoting** (ligolo-ng, chisel, sshuttle, proxychains4). The lighter
+  **recon / OSINT** (subfinder, httpx, dnsx, katana, dnsrecon, dnsenum,
+  theHarvester, searchsploit) and **WPA-Enterprise Wi-Fi** (mdk4, eaphammer,
+  hostapd-wpe) sets install on demand from the **Engagements tab → Arsenal extras**
+  (live progress, validation, and the Arsenal refreshes when it finishes).
 
 Trade-offs: Kali is a **rolling** release (more churn than Debian stable), the
 image is **larger**, and it leans harder on RAM — Ragnar's existing runtime RAM

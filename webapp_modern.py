@@ -27342,7 +27342,10 @@ def get_edition_api():
     the detected offensive toolset and Nexmon onboard-Wi-Fi capability."""
     try:
         import ragnar_edition
-        return jsonify(ragnar_edition.detect())
+        # ?refresh=1 rebuilds the cached detection — used after the Engagements
+        # tab installs arsenal extras so the tool list reflects them immediately.
+        refresh = request.args.get('refresh') in ('1', 'true', 'yes')
+        return jsonify(ragnar_edition.detect(refresh=refresh))
     except Exception as e:
         return jsonify({
             "edition": "standard",
@@ -27353,6 +27356,143 @@ def get_edition_api():
             "tool_count": 0,
             "error": str(e),
         })
+
+
+# ============================================================================
+# ULFBERHT ARSENAL EXTRAS  (on-demand install of the recon/OSINT + WPA-Enterprise
+# sets that aren't baked into the image — driven by the Engagements tab)
+# ============================================================================
+# The core wireless / AD / pivoting arsenals are baked into the Ulfberht image
+# by the RagnarOS build. These lighter extras are installed on demand so the
+# base image stays lean. Kept in sync with scripts/install_ulfberht_extras.sh
+# and ragnar_edition._TOOL_CATALOG.
+_ULF_EXTRAS = (
+    ("subfinder", "Subfinder", "recon"),
+    ("httpx", "httpx", "recon"),
+    ("dnsx", "dnsx", "recon"),
+    ("katana", "Katana", "web"),
+    ("dnsrecon", "DNSRecon", "recon"),
+    ("dnsenum", "dnsenum", "recon"),
+    ("theHarvester", "theHarvester", "recon"),
+    ("searchsploit", "SearchSploit", "exploit"),
+    ("mdk4", "MDK4", "wifi"),
+    ("eaphammer", "EAPHammer", "wifi"),
+    ("hostapd-wpe", "hostapd-wpe", "wifi"),
+)
+ULF_EXTRAS_SCRIPT = os.path.join(shared_data.currentdir, 'scripts', 'install_ulfberht_extras.sh')
+ULF_EXTRAS_LOG = os.path.join(shared_data.currentdir, 'data', 'ulfberht_extras_install.log')
+_ulf_extras_lock = threading.Lock()
+_ulf_extras_installing = False
+
+
+def _ulf_enabled():
+    """True only on the official Ulfberht image (same gate as the engine)."""
+    try:
+        import ulfberht_engine
+        return bool(ulfberht_engine.is_enabled())
+    except Exception:
+        return False
+
+
+def _ulf_extras_status():
+    """(list of {bin,name,category,present}, count present) for the extras set."""
+    out, present = [], 0
+    for b, label, cat in _ULF_EXTRAS:
+        ok = bool(shutil.which(b))
+        if ok:
+            present += 1
+        out.append({"bin": b, "name": label, "category": cat, "present": ok})
+    return out, present
+
+
+def _run_ulf_extras_install():
+    """Install the extras in the background, logging to ULF_EXTRAS_LOG.
+
+    Root is required (apt); the packaged service runs as root, a hand-started
+    instance falls back to `sudo -n` (which fails cleanly into the log). Refreshes
+    the edition cache at the end so the arsenal reflects the new tools.
+    """
+    global _ulf_extras_installing
+    cmd = (['bash', ULF_EXTRAS_SCRIPT] if os.geteuid() == 0
+           else ['sudo', '-n', 'bash', ULF_EXTRAS_SCRIPT])
+    try:
+        with open(ULF_EXTRAS_LOG, 'a') as logf:
+            logf.write("\n=== install ulfberht arsenal extras ===\n")
+            logf.flush()
+            subprocess.run(cmd, stdout=logf, stderr=subprocess.STDOUT, timeout=1800)
+    except Exception as exc:
+        logger.error(f"[ulfberht] extras install failed: {exc}")
+        try:
+            with open(ULF_EXTRAS_LOG, 'a') as logf:
+                logf.write(f"\nERROR: {exc}\n")
+        except OSError:
+            pass
+    finally:
+        with _ulf_extras_lock:
+            _ulf_extras_installing = False
+        try:
+            import ragnar_edition
+            ragnar_edition.detect(refresh=True)
+        except Exception:
+            pass
+
+
+@app.route('/api/ulfberht/extras', methods=['GET'])
+def ulfberht_extras_status():
+    """Which optional arsenal extras are present, and whether an install runs."""
+    if not _ulf_enabled():
+        return jsonify({"enabled": False, "extras": []})
+    extras, present = _ulf_extras_status()
+    with _ulf_extras_lock:
+        installing = _ulf_extras_installing
+    return jsonify({"enabled": True, "installing": installing, "extras": extras,
+                    "present": present, "total": len(extras)})
+
+
+@app.route('/api/ulfberht/extras/install', methods=['POST'])
+def ulfberht_extras_install():
+    """Start a background install of the missing arsenal extras (Ulfberht only)."""
+    global _ulf_extras_installing
+    if not _ulf_enabled():
+        return jsonify({"success": False, "error": "Not the Ulfberht edition."}), 403
+    if not os.path.isfile(ULF_EXTRAS_SCRIPT):
+        return jsonify({"success": False,
+                        "error": "scripts/install_ulfberht_extras.sh is missing — update Ragnar."}), 500
+    extras, present = _ulf_extras_status()
+    if present >= len(extras):
+        return jsonify({"success": True, "message": "All extras already installed.",
+                        "installing": False})
+    with _ulf_extras_lock:
+        if _ulf_extras_installing:
+            return jsonify({"success": True, "message": "Install already in progress.",
+                            "installing": True})
+        _ulf_extras_installing = True
+    try:
+        open(ULF_EXTRAS_LOG, 'w').close()  # fresh log per run
+    except OSError:
+        pass
+    threading.Thread(target=_run_ulf_extras_install, daemon=True,
+                     name='ulf-extras-install').start()
+    return jsonify({"success": True, "message": "Arsenal extras install started.",
+                    "installing": True})
+
+
+@app.route('/api/ulfberht/extras/install-log', methods=['GET'])
+def ulfberht_extras_install_log():
+    """Live install log + current presence — polled by the Engagements tab."""
+    if not _ulf_enabled():
+        return jsonify({"success": False, "error": "Not the Ulfberht edition."}), 403
+    with _ulf_extras_lock:
+        installing = _ulf_extras_installing
+    log = ''
+    try:
+        with open(ULF_EXTRAS_LOG, 'r') as fh:
+            log = fh.read()[-8000:]  # tail — the whole apt log is not useful
+    except OSError:
+        pass
+    extras, present = _ulf_extras_status()
+    return jsonify({"success": True, "installing": installing, "log": log,
+                    "extras": extras, "present": present, "total": len(extras)})
 
 
 # ============================================================================

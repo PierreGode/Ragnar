@@ -1224,6 +1224,18 @@ _TOOL_CATEGORY = {
     "whois": "network", "snmpwalk": "network", "onesixtyone": "network",
     "msfconsole": "exploitation", "setoolkit": "social-engineering",
     "ettercap": "MITM", "tcpdump": "capture", "tshark": "capture",
+    # AD / internal + pivoting (baked into the Ulfberht image)
+    "impacket-secretsdump": "AD/internal", "evil-winrm": "AD/internal",
+    "certipy": "AD/internal", "kerbrute": "AD/internal",
+    "bloodhound-python": "AD/internal", "ldapdomaindump": "AD/internal",
+    "windapsearch": "AD/internal",
+    "ligolo-proxy": "pivoting", "chisel": "pivoting",
+    "sshuttle": "pivoting", "proxychains4": "pivoting",
+    # Recon / OSINT + Wi-Fi extras (installed on demand from the Engagements tab)
+    "subfinder": "recon", "httpx": "recon", "dnsx": "recon", "katana": "web",
+    "dnsrecon": "recon", "dnsenum": "recon", "theHarvester": "OSINT",
+    "searchsploit": "exploitation",
+    "mdk4": "wireless", "eaphammer": "wireless", "hostapd-wpe": "wireless",
 }
 
 
