@@ -5926,6 +5926,26 @@
                     <pre id="ulf-help" class="hidden mt-3 p-3 bg-slate-900 rounded text-xs overflow-x-auto whitespace-pre-wrap" style="max-height:50vh"></pre>
                 </div>
 
+                <!-- Arsenal extras — install the optional recon/OSINT + WPA-Enterprise sets on demand -->
+                <div id="ulf-extras-card" class="glass-card p-4 mb-4 hidden">
+                    <div class="flex items-center justify-between flex-wrap gap-2 mb-1">
+                        <button onclick="ulfToggleExtras()" class="flex items-center gap-2 font-semibold text-sm text-left">
+                            <span id="ulf-extras-chevron" class="inline-block text-gray-400 transition-transform">▸</span>
+                            🧰 Arsenal extras <span id="ulf-extras-count" class="text-xs text-gray-500"></span>
+                        </button>
+                        <button id="ulf-extras-install-btn" onclick="ulfInstallExtras()" class="text-white px-3 py-1.5 rounded text-xs hidden" style="background:#dc2626">Install missing</button>
+                    </div>
+                    <div id="ulf-extras-body" class="hidden">
+                        <p class="text-xs text-gray-500 mb-2 mt-1">The core <b>wireless / AD / pivoting</b> arsenal is baked into the Ulfberht image. These lighter <b>recon / OSINT</b> and <b>WPA-Enterprise Wi-Fi</b> tools install on demand from Kali's repos. For authorized testing only.</p>
+                        <div id="ulf-extras-list" class="flex flex-wrap gap-1.5 mb-2"></div>
+                        <div id="ulf-extras-progress" class="hidden">
+                            <div class="text-xs text-gray-400 mb-1">⏳ Installing… <span id="ulf-extras-status" class="text-gray-500"></span></div>
+                            <pre id="ulf-extras-log" class="p-3 bg-slate-900 rounded text-xs overflow-x-auto whitespace-pre-wrap font-mono text-gray-400" style="max-height:220px;overflow:auto;line-height:1.4"></pre>
+                        </div>
+                        <div id="ulf-extras-msg" class="text-xs mt-1"></div>
+                    </div>
+                </div>
+
                 <div id="ulf-run-panel" class="glass-card p-4 mb-4 hidden">
                     <div class="flex items-center justify-between flex-wrap gap-2">
                         <div class="font-semibold text-sm">Run <span id="ulf-run-id" class="text-gray-400"></span></div>
@@ -9884,7 +9904,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261028-ip-range-scan"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261030-ulfberht-extras"></script>
 
 
 

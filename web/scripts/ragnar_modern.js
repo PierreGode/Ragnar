@@ -29461,8 +29461,8 @@ function ulfArsenalAiCopy() {
     } else { fallback(); }
 }
 let ulfEnabled = false;
-function fetchEdition() {
-    fetch('/api/edition')
+function fetchEdition(refresh) {
+    fetch('/api/edition' + (refresh ? '?refresh=1' : ''))
         .then(r => r.ok ? r.json() : null)
         .then(d => {
             const on = d && (d.is_ulfberht || d.is_security_distro);
@@ -29504,10 +29504,114 @@ function fetchEdition() {
                 ars.classList.remove('hidden');
             }
             ulfLoadPlaybooks();
+            ulfLoadExtras();
         })
         .catch(() => { /* standard build / offline: ignore */ });
 }
 document.addEventListener('DOMContentLoaded', fetchEdition);
+
+// ── Ulfberht arsenal extras (on-demand recon/OSINT + WPA-Enterprise install) ─
+let _ulfExtrasPoll = null;
+let _ulfExtrasOpened = false;
+function ulfToggleExtras() {
+    const body = document.getElementById('ulf-extras-body');
+    const chev = document.getElementById('ulf-extras-chevron');
+    if (!body) return;
+    const open = body.classList.toggle('hidden') === false;
+    if (chev) chev.style.transform = open ? 'rotate(90deg)' : '';
+    if (open && !_ulfExtrasOpened) { _ulfExtrasOpened = true; ulfLoadExtras(); }
+}
+function _ulfRenderExtras(d) {
+    const card = document.getElementById('ulf-extras-card');
+    if (!d || d.enabled === false) { if (card) card.classList.add('hidden'); return; }
+    if (card) card.classList.remove('hidden');
+    const cnt = document.getElementById('ulf-extras-count');
+    if (cnt) cnt.textContent = '(' + (d.present || 0) + '/' + (d.total || 0) + ' installed)';
+    const list = document.getElementById('ulf-extras-list');
+    if (list) {
+        list.innerHTML = '';
+        (d.extras || []).forEach(t => {
+            const chip = document.createElement('span');
+            chip.className = 'ulf-chip text-xs px-2 py-0.5 rounded';
+            chip.style.cssText = t.present
+                ? 'background:rgba(22,163,74,0.2);border:1px solid rgba(22,163,74,0.5)'
+                : 'background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12)';
+            chip.title = (t.category || '') + (t.present ? ' · installed' : ' · not installed');
+            chip.textContent = (t.present ? '✓ ' : '○ ') + (t.name || t.bin);
+            list.appendChild(chip);
+        });
+    }
+    const btn = document.getElementById('ulf-extras-install-btn');
+    if (btn) {
+        const allIn = (d.total || 0) > 0 && (d.present || 0) >= (d.total || 0);
+        btn.classList.toggle('hidden', allIn || !!d.installing);
+        btn.disabled = !!d.installing;
+    }
+}
+function ulfLoadExtras() {
+    fetch('/api/ulfberht/extras').then(r => r.json()).then(d => {
+        _ulfRenderExtras(d);
+        if (d && d.installing) ulfStartExtrasPoll();  // an install is already running
+    }).catch(() => {});
+}
+function ulfInstallExtras() {
+    const msg = document.getElementById('ulf-extras-msg');
+    const btn = document.getElementById('ulf-extras-install-btn');
+    if (btn) { btn.disabled = true; btn.classList.add('hidden'); }
+    if (msg) { msg.textContent = ''; }
+    const prog = document.getElementById('ulf-extras-progress');
+    const logEl = document.getElementById('ulf-extras-log');
+    if (logEl) logEl.textContent = '';
+    if (prog) prog.classList.remove('hidden');
+    fetch('/api/ulfberht/extras/install', { method: 'POST' })
+        .then(r => r.json()).then(d => {
+            if (!d.success) {
+                if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || 'Install failed to start.'; }
+                if (prog) prog.classList.add('hidden');
+                ulfLoadExtras();
+                return;
+            }
+            if (!d.installing) {   // already all installed
+                if (msg) { msg.style.color = '#4ade80'; msg.textContent = d.message || 'All extras already installed.'; }
+                if (prog) prog.classList.add('hidden');
+                ulfLoadExtras();
+                return;
+            }
+            ulfStartExtrasPoll();
+        }).catch(() => {
+            if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Install request failed.'; }
+            if (prog) prog.classList.add('hidden');
+        });
+}
+function ulfStartExtrasPoll() {
+    if (_ulfExtrasPoll) return;
+    const prog = document.getElementById('ulf-extras-progress');
+    if (prog) prog.classList.remove('hidden');
+    _ulfExtrasPoll = setInterval(ulfPollExtras, 2000);
+    ulfPollExtras();
+}
+function ulfPollExtras() {
+    fetch('/api/ulfberht/extras/install-log').then(r => r.json()).then(d => {
+        if (!d.success) return;
+        const logEl = document.getElementById('ulf-extras-log');
+        if (logEl && typeof d.log === 'string') { logEl.textContent = d.log; logEl.scrollTop = logEl.scrollHeight; }
+        const st = document.getElementById('ulf-extras-status');
+        if (st) st.textContent = (d.present || 0) + '/' + (d.total || 0) + ' present';
+        _ulfRenderExtras(d);
+        if (!d.installing) {
+            clearInterval(_ulfExtrasPoll); _ulfExtrasPoll = null;
+            const msg = document.getElementById('ulf-extras-msg');
+            const done = (d.total || 0) > 0 && (d.present || 0) >= (d.total || 0);
+            if (msg) {
+                msg.style.color = done ? '#4ade80' : '#fbbf24';
+                msg.textContent = done
+                    ? '✓ All extras installed. Arsenal updated.'
+                    : '⚠ ' + (d.present || 0) + '/' + (d.total || 0) + ' installed — some packages weren’t available on this base (see log).';
+            }
+            fetchEdition(true);   // refresh the Pentest-tab arsenal with the new tools
+        }
+    }).catch(() => {});
+}
 
 // ── Ulfberht Engagements (marker-gated workflow engine) ─────────────────────
 let ulfPlaybooks = [];

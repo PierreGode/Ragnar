@@ -2,6 +2,18 @@
 
 ## Releases
 
+### 2026-10-30
+
+#### [#1030](https://github.com/PierreGode/Ragnar/pull/1030) — feat(ulfberht): arsenal extras — on-demand recon/OSINT + WPA-Enterprise install
+*branch `feature/ulfberht-arsenal-extras`*
+
+- **Grows the Ulfberht arsenal into a real internal-assessment + dropbox kit.** Companion to RagnarOS #11, which **bakes** the AD/internal (impacket, evil-winrm, certipy, kerbrute, bloodhound.py, ldapdomaindump, windapsearch) and pivoting (ligolo-ng, chisel, sshuttle, proxychains4) tools into the image. This PR makes those tools show up in the **Arsenal**, and adds an on-demand installer for the lighter sets we deliberately don't bake (to keep the image lean).
+- **Arsenal detection** (`ragnar_edition.py`): `_TOOL_CATALOG` now covers the AD, pivoting, recon/OSINT (subfinder, httpx, dnsx, katana, dnsrecon, dnsenum, theHarvester, searchsploit) and Wi-Fi-extra (mdk4, eaphammer, hostapd-wpe) tools, with new `ad`/`pivot` categories. `detect()` gained a `refresh` arg and `/api/edition?refresh=1` rebuilds the cache, so the Arsenal updates the instant an install finishes.
+- **On-demand installer** (`scripts/install_ulfberht_extras.sh`): installs the recon/OSINT + WPA-Enterprise sets from Kali's repos. **Kali/Ulfberht-gated** (refuses elsewhere), root-required, per-tool and non-fatal; prints live progress and a `VALIDATION` block. Candidate-package fallbacks cover the awkward names (`httpx-toolkit`/`httpx`, `theharvester`, `exploitdb`).
+- **API** (`webapp_modern.py`): `/api/ulfberht/extras` (per-tool status), `/api/ulfberht/extras/install` (background start), `/api/ulfberht/extras/install-log` (polled progress + live presence) — all edition-gated, mirroring the mesh/sensing install pattern.
+- **UI**: a new **🧰 Arsenal extras** card in the Engagements tab — installed/missing chips per tool, an **Install missing** button, a live progress log, a validation summary and an authorized-use banner; refreshes the Pentest-tab Arsenal when done. Mobile-friendly. Nothing offensive is installable off the Ulfberht edition — the script self-gates and every endpoint is edition-gated.
+- Docs: [Ragnar OS Ulfberht](ragnar-os-ulfberht.md) documents the baked arsenal + the on-demand extras.
+
 ### 2026-10-29
 
 #### [#1029](https://github.com/PierreGode/Ragnar/pull/1029) — feat(ulfberht): install the wireless Wi-Fi audit arsenal (wifite & co)
