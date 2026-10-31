@@ -58,6 +58,8 @@ FILE_OWNERS = {
     'python/ripwatch.py': 'RIP Watch',
     'python/radiuswatch.py': 'RADIUS Watch',
     'python/ssdpwatch.py': 'SSDP/UPnP Watch',
+    'python/certwatch.py': 'Cert Watch',
+    'python/certwatch_selftest.py': 'Cert Watch',
     'python/ssdpwatch_selftest.py': 'SSDP/UPnP Watch',
     'actions/ble_pentest.py': 'BLE Pentest (active)',
 }
@@ -173,6 +175,7 @@ NAMES = {
     'CVE-2003-0001': 'Etherleak',
     'CVE-2024-38077': 'MadLicense', 'CVE-2026-54121': 'Certighost',
     'CVE-2025-29969': 'EventLogin', 'CVE-2026-41089': 'LongLogon',
+    'CVE-2020-0601': 'CurveBall', 'CVE-2017-15361': 'ROCA',
     'CVE-2015-8011': 'lldpd lldp_decode Management Address overflow',
     'CVE-2022-4338': 'Open vSwitch LLDP Auto Attach integer underflow',
     'CVE-2014-9222': 'Misfortune Cookie', 'CVE-2025-41426': 'Liebert RDU101 / IS-UNITY HTTP method overflow',
