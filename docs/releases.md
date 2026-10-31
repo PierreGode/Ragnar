@@ -4,6 +4,13 @@
 
 ### 2026-10-31
 
+#### [#1033](https://github.com/PierreGode/Ragnar/pull/1033) — feat(net): Cert Watch v3 (4 cert-bytes CVEs + SIEM forwarder) + SMB/Kerberos Watch v5
+*branch `feature/cert-v3-smb-kerb-v5`*
+
+- **[Cert Watch](certwatch.md) v3** (the passive X.509 triage daemon, `python/certwatch.py`) adds **four CVE detectors read from the certificate's own bytes**: **CurveBall** (`CVE-2020-0601`, CISA KEV — explicit EC parameters matching a standard curve except the base point, read from the original DER because the `cryptography` lib normalizes it away), **`CVE-2022-0778`** (explicit EC parameters declaring a non-prime field — the OpenSSL `BN_mod_sqrt` infinite-loop DoS), **ROCA** (`CVE-2017-15361` — the Infineon RSA key-generation fingerprint) and **`CVE-2025-58188`** (a DSA public key that panics Go's `crypto/x509` chain validation). New finding codes `CURVEBALL_SUSPECT` / `EC_INVALID_FIELD` / `EC_EXPLICIT_PARAMS` / `ROCA_KEY` / `DSA_IN_CHAIN` / `KEY_UNPARSEABLE`. Also ships **`ragnar_syslog.py`** — the suite-wide CEF/LEEF/RFC5424/RFC3164 SIEM forwarder (previously deferred) with its own egress-allowlisted `certwatch-forward.service`. Self-test **71/71**, forwarder **65/65**. Handshake-level CVEs stay with TLS Watch; these are the certificate-bytes half.
+- **SMB & Kerberos Watch v5** — the in-app watcher (`do_smb_watch` / `_smb_analyze` / `_krb_analyze`) is **already at v5 detection parity**, so no in-app code change and no new CVEs (identical 5-CVE set): all five CVEs (V1-V6 — SMBGhost exposure/exploit, reflective relay, RC4-MD4 offer/grant/injection, EternalBlue primitive), the full Kerberos set (K1-K7 incl. AS-REP-roast and KDC-error recon), NTLM relay tells (N2 workstation mismatch, N3 Responder challenge; N1 lives in Relay Watch), SMBv1 posture (S1; S2/S3 signing in Relay Watch), name-poisoning (a deliberately broader "nothing legitimate answers LLMNR/NBT-NS, so any answerer is a finding" model that covers R1-R4's attack space) and the spoof-conflict A/AAAA-only / DNS-SD-exclusion false-positive fixes. The v5 standalone's C1/C2 correlation is done in-app by the Incident Correlation Engine + Watchtower (the deliberate cross-module split).
+- **CVE index** regenerated (`scripts/gen_cve_list.py`): **435 → 439 named**, **371 → 375 detected** (+4, all Cert Watch). CREDITS.md + README.md counts synced (2025 count 47 → 48).
+
 #### [#1032](https://github.com/PierreGode/Ragnar/pull/1032) — feat(net): TLS Watch v11 — SNI host_name over-read + http.sys record-flood
 *branch `feature/tls-watch-v11`*
 

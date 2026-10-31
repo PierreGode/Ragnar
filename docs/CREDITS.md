@@ -14,8 +14,8 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **371 CVEs detected from the wire.** 435 distinct CVE IDs are named across Ragnar's
-  code; 371 of them a passive detector actually identifies. The rest are named, not detected:
+- **375 CVEs detected from the wire.** 439 distinct CVE IDs are named across Ragnar's
+  code; 375 of them a passive detector actually identifies. The rest are named, not detected:
   55 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
@@ -56,7 +56,14 @@ behind them is Solarflere's work.
   per-request buffer-reference-array integer overflow, MSRC 9.8 — a run of client application_data
   records with no server response, the non-full ones the primary signal, reachable over TLS and
   HTTP/1.x only).
-- Weighted to the current threat wave (all named IDs): **50 CVEs from 2023, 62 from 2024, 47 from 2025, and
+- **Cert Watch v3** (the passive X.509 triage daemon) adds four CVEs read from the certificate's own
+  bytes: **CurveBall** (`CVE-2020-0601`, CISA KEV — explicit EC parameters matching a standard curve
+  except the base point, read from the original DER because `cryptography` normalizes it away),
+  **`CVE-2022-0778`** (explicit EC parameters declaring a non-prime field — the OpenSSL `BN_mod_sqrt`
+  infinite loop), **ROCA** (`CVE-2017-15361` — the Infineon RSA key-generation fingerprint) and
+  **`CVE-2025-58188`** (a DSA public key that panics Go's `crypto/x509` chain validation). Handshake-level
+  CVEs stay with TLS Watch; these are the certificate-bytes half.
+- Weighted to the current threat wave (all named IDs): **50 CVEs from 2023, 62 from 2024, 48 from 2025, and
   60 from 2026**, with a nine-strong 2021 cluster from the LLDP SB220 / RV / TRENDnet /
   QNAP families and a deep 2020–2022 CDP seam (30 / 37 / 29) that the CDP Watch **LCDPwn**
   expansion widened — the Video Surveillance 7000/8000 set, the Cisco ATA 190 cluster,

@@ -1,0 +1,50 @@
+[Unit]
+Description=certwatch -> SIEM forwarder (Ragnar)
+Documentation=https://github.com/<you>/ragnar/tree/lcdhat
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The scanner and the forwarder are one pipeline but two programs: certwatch
+# keeps CAP_NET_RAW and never transmits; ragnar_syslog transmits and never
+# touches the wire. /bin/sh is needed for the pipe.
+ExecStart=/bin/sh -c '/usr/bin/python3 /opt/ragnar/certwatch.py -i mon0 --json \
+    --min-status INFO \
+  | exec /usr/bin/python3 /opt/ragnar/ragnar_syslog.py \
+    --transport udp --host siem.example.net --port 514 \
+    --format cef --min-status WARN'
+Restart=on-failure
+RestartSec=5
+
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+User=certwatch
+Group=certwatch
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_PACKET AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryMax=128M
+
+# Egress allowlist: this pipeline should only ever talk to the collector.
+# Uncomment and set to your SIEM to make "passive except for findings"
+# enforceable by the kernel rather than by convention.
+#IPAddressDeny=any
+#IPAddressAllow=198.51.100.10
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

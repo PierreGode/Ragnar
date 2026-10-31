@@ -10,8 +10,8 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **435** distinct CVE IDs
-- **371** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **439** distinct CVE IDs
+- **375** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
 - **55** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
@@ -33,15 +33,15 @@ detector works is in [nettools.md](nettools.md).
 | 2014 | 8 |
 | 2015 | 13 |
 | 2016 | 8 |
-| 2017 | 18 |
+| 2017 | 19 |
 | 2018 | 13 |
 | 2019 | 20 |
-| 2020 | 34 |
+| 2020 | 35 |
 | 2021 | 42 |
-| 2022 | 34 |
+| 2022 | 35 |
 | 2023 | 50 |
 | 2024 | 62 |
-| 2025 | 47 |
+| 2025 | 48 |
 | 2026 | 60 |
 
 ## By detector
@@ -56,6 +56,7 @@ detector works is in [nettools.md](nettools.md).
 | BGP Path Watch | 15 |
 | BLE Pentest (active) | 6 |
 | CDP Watch | 27 |
+| Cert Watch | 4 |
 | CFM Watch | 4 |
 | Cisco Guard | 38 |
 | Comware Guard | 2 |
@@ -173,6 +174,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2017-10985](https://nvd.nist.gov/vuln/detail/CVE-2017-10985) |  | detected | RADIUS Watch | — |
 | [CVE-2017-10986](https://nvd.nist.gov/vuln/detail/CVE-2017-10986) |  | context only | RADIUS Watch | — |
 | [CVE-2017-10987](https://nvd.nist.gov/vuln/detail/CVE-2017-10987) |  | context only | RADIUS Watch | — |
+| [CVE-2017-15361](https://nvd.nist.gov/vuln/detail/CVE-2017-15361) | ROCA | detected | Cert Watch | — |
 | [CVE-2017-20149](https://nvd.nist.gov/vuln/detail/CVE-2017-20149) | Chimay-Red | detected | MikroTik Guard | — |
 | [CVE-2018-0007](https://nvd.nist.gov/vuln/detail/CVE-2018-0007) |  | detected | LLDP Watch | — |
 | [CVE-2018-0063](https://nvd.nist.gov/vuln/detail/CVE-2018-0063) |  | context only | ARP Watch | — |
@@ -207,6 +209,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2019-15846](https://nvd.nist.gov/vuln/detail/CVE-2019-15846) | Exim SNI/cert-DN RCE | detected | SMTP Watch | — |
 | [CVE-2019-16928](https://nvd.nist.gov/vuln/detail/CVE-2019-16928) | Exim overlong EHLO overflow | detected | SMTP Watch | — |
 | [CVE-2019-17185](https://nvd.nist.gov/vuln/detail/CVE-2019-17185) |  | context only | RADIUS Watch | — |
+| [CVE-2020-0601](https://nvd.nist.gov/vuln/detail/CVE-2020-0601) | CurveBall | detected | Cert Watch | — |
 | [CVE-2020-0796](https://nvd.nist.gov/vuln/detail/CVE-2020-0796) | SMBGhost | detected | SMB / Kerberos Watch | — |
 | [CVE-2020-1350](https://nvd.nist.gov/vuln/detail/CVE-2020-1350) |  | detected | DNS Watch | — |
 | [CVE-2020-1472](https://nvd.nist.gov/vuln/detail/CVE-2020-1472) | Zerologon | detected | RPC / NetLogon Watch | — |
@@ -283,6 +286,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2021-34780](https://nvd.nist.gov/vuln/detail/CVE-2021-34780) |  | detected | LLDP Watch | — |
 | [CVE-2021-36942](https://nvd.nist.gov/vuln/detail/CVE-2021-36942) | PetitPotam | detected | RPC / NetLogon Watch, Relay / Coercion Watch | — |
 | [CVE-2021-41987](https://nvd.nist.gov/vuln/detail/CVE-2021-41987) |  | detected | MikroTik Guard | — |
+| [CVE-2022-0778](https://nvd.nist.gov/vuln/detail/CVE-2022-0778) |  | detected | Cert Watch | — |
 | [CVE-2022-4337](https://nvd.nist.gov/vuln/detail/CVE-2022-4337) |  | detected | LLDP Watch | — |
 | [CVE-2022-4338](https://nvd.nist.gov/vuln/detail/CVE-2022-4338) | Open vSwitch LLDP Auto Attach integer underflow | detected | LLDP Watch | — |
 | [CVE-2022-20688](https://nvd.nist.gov/vuln/detail/CVE-2022-20688) | Cisco ATA 190 CDP OOB read | detected | CDP Watch | — |
@@ -466,6 +470,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2025-44954](https://nvd.nist.gov/vuln/detail/CVE-2025-44954) |  | detected | SSH Watch | — |
 | [CVE-2025-50681](https://nvd.nist.gov/vuln/detail/CVE-2025-50681) |  | detected | IGMP / MLD Watch | — |
 | [CVE-2025-52961](https://nvd.nist.gov/vuln/detail/CVE-2025-52961) |  | detected | CFM Watch | — |
+| [CVE-2025-58188](https://nvd.nist.gov/vuln/detail/CVE-2025-58188) |  | detected | Cert Watch | — |
 | [CVE-2025-59978](https://nvd.nist.gov/vuln/detail/CVE-2025-59978) |  | detected | Juniper Guard | — |
 | [CVE-2025-61099](https://nvd.nist.gov/vuln/detail/CVE-2025-61099) |  | context only | OSPF Watch | — |
 | [CVE-2025-61101](https://nvd.nist.gov/vuln/detail/CVE-2025-61101) |  | context only | SR-MPLS Watch | — |
