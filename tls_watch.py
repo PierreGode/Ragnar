@@ -567,6 +567,205 @@ _CVE_2014_0160 = {'cve': 'CVE-2014-0160', 'cvss': 7.5, 'cvss_source': 'NVD (KEV)
 # absence is a reviewable decision, not an oversight.
 
 
+# ---- CVE-2026-52346 (v11): unvalidated SNI host_name length (RouterOS xt_tls) ----
+# An out-of-bounds read in RouterOS's xt_tls, which reads the attacker-supplied SNI
+# host_name length out of a ClientHello without validating it against the packet
+# bounds. Observable because the ClientHello is cleartext by definition — the same
+# "readable because it happens before the handshake finishes" class as Heartbleed, but
+# cleaner (the ClientHello is ALWAYS cleartext). The check is pure arithmetic on the four
+# RFC 6066 nested lengths; no threshold, no baseline. The wire evidence is a generic TLS
+# grammar violation, so tlswatch owns it while the RouterOS version bounds live in
+# mikrotikwatch's registry. Fires on any ClientHello — TLS, DTLS and QUIC alike.
+_EXT_SERVER_NAME = 0x0000
+_SNI_HOST_NAME_T = 0x00
+_CVE_2026_52346 = {'cve': 'CVE-2026-52346', 'cvss': 7.5,
+                   'cvss_source': "Reporter's disclosure (blog.nns.ee); MikroTik "
+                                  'publishes no score, NVD had no record as of 2026-10-17',
+                   'cwe': 'CWE-125'}
+
+
+def scan_sni_overread(body):
+    """Read-only bounds audit of the SNI host_name length in a ClientHello body.
+    Returns None when there is no SNI or the nesting is legal, else a dict naming the
+    outermost container the declared length crosses (CVE-2026-52346). Never raises."""
+    try:
+        return _scan_sni_overread(bytes(body))
+    except Exception:
+        return None
+
+
+def _scan_sni_overread(b):
+    msg_end = len(b)
+    o = 2 + 32                                    # legacy_version + random
+    if o + 1 > msg_end:
+        return None
+    o += 1 + b[o]                                 # session_id
+    if o + 2 > msg_end:
+        return None
+    o += 2 + ((b[o] << 8) | b[o + 1])             # cipher_suites
+    if o + 1 > msg_end:
+        return None
+    o += 1 + b[o]                                 # compression_methods
+    if o + 2 > msg_end:
+        return None
+    block_declared_end = o + 2 + ((b[o] << 8) | b[o + 1])
+    o += 2
+    block_end = min(block_declared_end, msg_end)
+    while o + 4 <= block_end:
+        et = (b[o] << 8) | b[o + 1]
+        el = (b[o + 2] << 8) | b[o + 3]
+        o += 4
+        ext_declared_end = o + el
+        if et != _EXT_SERVER_NAME:
+            o = ext_declared_end
+            continue
+        return _sni_entry_overread(b, o, min(ext_declared_end, block_end),
+                                   ext_declared_end, block_declared_end, msg_end)
+    return None
+
+
+def _sni_entry_overread(b, o, ext_end, ext_declared_end, block_declared_end, msg_end):
+    if o + 2 > ext_end:
+        return None                               # no room for the list length itself
+    list_declared_end = o + 2 + ((b[o] << 8) | b[o + 1])
+    o += 2
+    list_end = min(list_declared_end, ext_end)
+    while o + 3 <= list_end:
+        ntype = b[o]
+        nlen = (b[o + 1] << 8) | b[o + 2]
+        o += 3
+        host_end = o + nlen
+        if ntype != _SNI_HOST_NAME_T:
+            o = host_end
+            continue
+        # Classify by the OUTERMOST limit crossed: only a read past the captured
+        # handshake message proves the bytes cannot come from the packet (high);
+        # an inner-container overrun is equally illegal but not provably off-packet
+        # from a reassembled view (warn).
+        if host_end > msg_end:
+            bound, limit = 'handshake_message', msg_end
+        elif host_end > block_declared_end:
+            bound, limit = 'extensions_block', block_declared_end
+        elif host_end > ext_declared_end:
+            bound, limit = 'extension_data', ext_declared_end
+        elif host_end > list_declared_end:
+            bound, limit = 'server_name_list', list_declared_end
+        else:
+            return None                           # legal nesting
+        return {'bound': bound, 'declared_host_len': nlen,
+                'available': max(0, limit - o), 'overrun_bytes': host_end - limit,
+                'severity': 'high' if bound == 'handshake_message' else 'warn'}
+    return None
+
+
+def _client_hello_and_overread(body):
+    """Parse a ClientHello AND independently scan its SNI for CVE-2026-52346. The parse
+    raises on an over-claim one level up (an over-declared extensions block or a truncated
+    trailing extension), and all ClientHello call sites drop the message on that — so the
+    scan MUST run outside the parse, never inside it."""
+    try:
+        client = parse_client_hello(body)
+    except Exception:
+        client = None
+    return client, scan_sni_overread(body)
+
+
+def _dtls_ch_overread(body):
+    """Cookie-strip a DTLS ClientHello to TLS shape, then run the SNI over-read scan.
+    Does not touch _parse_dtls_client_hello (which has its own callers)."""
+    try:
+        r = _Reader(body)
+        r.take(2 + 32)                            # legacy_version + random
+        r.take(r.u8())                            # session_id
+        cookie_at = r.i
+        clen = r.u8()
+        r.take(clen)
+        tls_body = bytes(body[:cookie_at]) + bytes(body[cookie_at + 1 + clen:])
+    except Exception:
+        return None
+    return scan_sni_overread(tls_body)
+
+
+# ---- CVE-2026-47291 (v11): http.sys per-request buffer-reference array overflow ----
+# An integer overflow in http.sys (MSRC 9.8). One buffer reference is added per receive
+# buffer consumed parsing HTTP/1.x header LINES; a 16-bit capacity grows by +5 with no
+# overflow check and wraps after 13107 growths, after which a memmove copies count*8 into
+# a 40-byte allocation. REACHABLE OVER TLS ONLY: SChannel hands http.sys one buffer per
+# decrypted TLS record, so one header line per record gives a 1:1 reference count; over
+# plaintext TCP coalescing / UlpMergeBuffers prevents it. So the discriminator is RECORD
+# CADENCE, read off cleartext record headers: a run of client application_data records
+# with no server response, the non-full ones being the primary signal. PRECONDITION (not
+# observable): MaxRequestBytes >= 262144 — the default 16384 is not exploitable. HTTP/1.x
+# only (the h2/h3 parser paths never touch the array). In-app SNAPSHOT SCOPE: this fires on
+# the clean no-server-response flood a bounded capture catches; the interleaved
+# keep-alive/multi-request case (a flood on a later request after an earlier response) needs
+# the streaming daemon's per-request window and is deferred here — see analyze_session.
+HTTPSYS_REF_TRIGGER = 65536
+TLS_PLAINTEXT_MAX = 16384
+CVE_2026_47291_TIERS = (
+    (1000, 'warn', 'zdi_reporting_threshold'),
+    (4096, 'high', 'beyond_default_max_request_bytes'),
+    (HTTPSYS_REF_TRIGGER, 'high', 'trigger_reference_count_reached'),
+)
+# TLS 1.3 early-server-record grace (bounded 3 ways so it cannot hold a window across an
+# attack): 8 records, each <= 1024 bytes, only while the client is under 32 records in.
+# Measured against OpenSSL 3.0, whose encrypted handshake flight + tickets ride outer
+# type 0x17 and would otherwise read as "the response" and close the window early.
+NST_ALLOWANCE = 8
+NST_MAX_TICKET_LEN = 1024
+NST_WITHIN_CLIENT_RECORDS = 32
+TLS13_SUITE_TAG_LEN = {0x1301: 16, 0x1302: 16, 0x1303: 16, 0x1304: 16, 0x1305: 8}
+TLS12_CHACHA_TAG_LEN = 16
+_RF_APPDATA_CAP = HTTPSYS_REF_TRIGGER + 16        # bound per-direction record-length lists
+_CVE_2026_47291 = {'cve': 'CVE-2026-47291', 'cvss': 9.8,
+                   'cvss_source': 'MSRC (rated "Exploitation More Likely"); no vector '
+                                  'string is published',
+                   'cwe': 'CWE-190',
+                   'score_note': ('Sources disagree on the mechanism (ZDI http.sys '
+                                  'reference-array overflow vs Ionix request-size '
+                                  'arithmetic vs an HTTP/2 counter wrap); every reading is '
+                                  'TLS-borne against http.sys, so the detection holds and '
+                                  'only the attribution would change.')}
+
+
+def tls_max_record_len(version, cipher):
+    """Largest conformant TLSCiphertext length for the negotiated parameters. CONSERVATIVE
+    by construction: returning a value ABOVE the true maximum would call a full record
+    non-full and report a bulk upload as an attack (the one FP this cannot afford), so the
+    exact maximum is derived only where the suite is identifiable from a table carrying its
+    IANA name; everything else falls back to the always-safe 2^14 floor."""
+    if version == 0x0304 or cipher in TLS13_SUITE_TAG_LEN:
+        return TLS_PLAINTEXT_MAX + 1 + TLS13_SUITE_TAG_LEN.get(cipher, 16)
+    name = _CVE_2017_3731_CIPHERS.get(cipher) or ''
+    if 'CHACHA20_POLY1305' in name:
+        return TLS_PLAINTEXT_MAX + TLS12_CHACHA_TAG_LEN
+    return TLS_PLAINTEXT_MAX
+
+
+def is_nonfull_record(rlen, version, cipher):
+    """A record that cannot be a full one — the primary CVE-2026-47291 signal: a body
+    upload rides full-size records, while one header line per record never does."""
+    return rlen < tls_max_record_len(version, cipher)
+
+
+def record_flood_armed(client, server, negotiated_version):
+    """HTTP/1.x-only gating from what is visible on the wire. TLS 1.2 and below: the
+    server's ALPN selection is cleartext in the ServerHello, so h2/h3 is excluded exactly.
+    TLS 1.3: the selection moves into encrypted EncryptedExtensions and is not visible, so
+    arm unless the client offered h2/h3 ONLY. QUIC and DTLS never reach here."""
+    if negotiated_version is None:
+        return False
+    offered = list((client or {}).get('alpn') or [])
+    if _tls_equiv_version(negotiated_version) < 0x0304:
+        selected = list((server or {}).get('alpn') or [])
+        if selected:
+            return not any(a.startswith('h2') or a.startswith('h3') for a in selected)
+        return True                               # no ALPN selected: HTTP/1.x by default
+    if offered and all(a.startswith('h2') or a.startswith('h3') for a in offered):
+        return False
+    return True
+
+
 # ---- CVE-2002-20001 D(HE)at: DoS on finite-field Diffie-Hellman -------------
 # A server cannot tell a random number from a real DH public key without first doing the
 # expensive modular exponentiation, so a client forcing finite-field DHE makes the server
@@ -700,11 +899,14 @@ def _leaf_findings(der, chain_len, sni, now):
     return out, info
 
 
-def analyze_session(client, server, cert_ders, now, records=None):
+def analyze_session(client, server, cert_ders, now, records=None, sni_overread=None):
     """Combine parsed client/server/cert state into a findings list (severity
     descending) plus per-cert info. Any argument may be None. `records` is the
     optional list of per-direction record-layer stats from `_scan_tls_stream`,
-    used for the v4 record-layer findings (CVE-2016-8610 / CVE-2017-3731)."""
+    used for the record-layer findings (CVE-2016-8610 / CVE-2017-3731, and the v11
+    CVE-2026-47291 record cadence). `sni_overread` is the v11 CVE-2026-52346 scan
+    result for the ClientHello (works even when `client` is None, because the parse
+    raises on exactly the over-claims the scan is meant to catch)."""
     findings = []
 
     def add(sev, code, msg):
@@ -717,10 +919,36 @@ def analyze_session(client, server, cert_ders, now, records=None):
         if _tls_equiv_version(top) <= 0x0302:
             add('warn', 'client_legacy_version',
                 'Client offers only {} or lower'.format(_VER_NAME.get(top, 'TLS 1.1')))
-        if 0x0000 not in client['exts_order']:
+        if 0x0000 not in client['exts_order'] and not sni_overread:
+            # Scoped out when an over-read is present: before this, an over-claiming
+            # host_name length was indistinguishable from a hello with no SNI and got
+            # reported as the benign no_sni notice — an attack wearing an innocent
+            # explanation (CVE-2026-52346).
             add('notice', 'no_sni', 'ClientHello carries no SNI')
         if 0xfe0d in client['exts_order'] or 0xfe08 in client['exts_order']:
             add('info', 'ech_present', 'encrypted_client_hello present; true SNI hidden')
+    # ---- CVE-2026-52346 (v11): unvalidated SNI host_name length (RouterOS xt_tls) ----
+    # Independent of parse_client_hello, so it fires even when the parse raised on an
+    # over-claim one level up. high only when the read passes the captured handshake
+    # message itself; the inner-container overruns are equally illegal but not provably
+    # off-packet from a reassembled view. Fires on TLS, DTLS and QUIC alike.
+    if sni_overread:
+        _m = _CVE_2026_52346
+        findings.append({
+            'severity': sni_overread['severity'],
+            'code': 'cve_2026_52346_sni_overread',
+            'message': ('ClientHello SNI host_name length ({} bytes) runs past its {} '
+                        '({} available, overrun {} bytes) - the RouterOS xt_tls '
+                        'out-of-bounds read shape (CVE-2026-52346); a crafted length is '
+                        'malformed however it is transported'.format(
+                            sni_overread['declared_host_len'], sni_overread['bound'],
+                            sni_overread['available'], sni_overread['overrun_bytes'])),
+            'cve': _m['cve'], 'cvss': _m['cvss'], 'cvss_source': _m['cvss_source'],
+            'cwe': _m['cwe'], 'detect_class': 'attack', 'bound': sni_overread['bound'],
+            'declared_host_len': sni_overread['declared_host_len'],
+            'available': sni_overread['available'],
+            'overrun_bytes': sni_overread['overrun_bytes'],
+            'precondition_unobserved': True})
     if server:
         if _tls_equiv_version(server['neg_version']) <= 0x0302:
             add('warn', 'server_legacy_version',
@@ -875,6 +1103,61 @@ def analyze_session(client, server, cert_ders, now, records=None):
                 'detect_class': 'attack', 'confidence': 'shape',
                 'direction': d.get('label'), 'cipher': '0x{:04x}'.format(neg_ch),
                 'cipher_name': _CVE_2017_3731_CIPHERS[neg_ch], 'short_records': short})
+
+    # ---- CVE-2026-47291 (v11): http.sys record-cadence flood ----
+    # SNAPSHOT SCOPE: the streaming daemon counts client application_data records
+    # per-request and resets the window on each server response. A bounded capture
+    # cannot bound "pre-response" across an interleaved keep-alive, so this fires only on
+    # the case a snapshot sees unambiguously — a flood of client records with NO
+    # substantive server response (grace-aware) — and defers the post-response keep-alive
+    # flood to the streaming path. The non-full client records are the primary signal.
+    rec_by_dir = {d.get('dir'): d for d in (records or []) if d.get('dir')}
+    c2s, s2c = rec_by_dir.get('c2s'), rec_by_dir.get('s2c')
+    neg_version = server.get('neg_version') if server else None
+    if c2s is not None and record_flood_armed(client, server, neg_version):
+        neg_cipher = server.get('cipher') if server else None
+        client_lens = c2s.get('appdata_lens') or []
+        pre = len(client_lens)
+        nonfull = sum(1 for L in client_lens
+                      if is_nonfull_record(L, neg_version, neg_cipher))
+        # A substantive server response — any server record beyond the bounded TLS 1.3
+        # early-record grace — would have reset the window; if one exists the pre-response
+        # count is unbounded from a snapshot, so the flood is left to the streaming path.
+        server_lens = (s2c.get('appdata_lens') or []) if s2c is not None else []
+        substantive_server = any(L > NST_MAX_TICKET_LEN or i >= NST_ALLOWANCE
+                                 for i, L in enumerate(server_lens))
+        tier = None
+        if not substantive_server:
+            for limit, sev, label in CVE_2026_47291_TIERS:
+                if nonfull >= limit:
+                    tier = (sev, label)
+            if tier is None and pre >= HTTPSYS_REF_TRIGGER:
+                # Size-agnostic catch-all: TLS 1.3 record padding can inflate a one-line
+                # record to full size, so a client reaching the trigger count regardless
+                # of size is reported too (suppressed once a non-full tier has fired).
+                tier = ('high', 'padded_or_bulk')
+        if tier is not None:
+            sev, label = tier
+            _m = _CVE_2026_47291
+            try:
+                sh = _maybe_ja4s(server) if server else None
+            except Exception:
+                sh = None
+            findings.append({
+                'severity': sev, 'code': 'cve_2026_47291_record_flood',
+                'message': ('{} client application_data records ({} non-full) with no '
+                            'server response - the http.sys buffer-reference flood shape '
+                            '(CVE-2026-47291, {}); reachable over TLS only, and needs '
+                            'MaxRequestBytes >= 262144 to overflow, which is not '
+                            'observable here'.format(pre, nonfull, label)),
+                'cve': _m['cve'], 'cvss': _m['cvss'], 'cvss_source': _m['cvss_source'],
+                'cwe': _m['cwe'], 'detect_class': 'attack', 'tier': label,
+                'primary_signal': ('client_records_pre_response'
+                                   if label == 'padded_or_bulk' else 'nonfull_records'),
+                'client_records_pre_response': pre, 'nonfull_records': nonfull,
+                'server_stack_hint': sh, 'server_stack': 'unverified',
+                'cve_conflict_note': _m['score_note'],
+                'precondition_unobserved': True, 'confidence': 'heuristic'})
 
     infos = []
     if cert_ders:
@@ -1078,6 +1361,7 @@ def _scan_tls_stream(stream):
     alert_sample = []
     short_records = 0
     shortest = None
+    appdata_lens = []                             # post-handshake type-23 record lengths (v11)
     bad_heartbeats = heartbeats_seen = 0
     heartbeat_sample = None
     n = len(stream)
@@ -1093,6 +1377,8 @@ def _scan_tls_stream(stream):
         elif ctype == 23:                         # application_data (protected)
             saw_appdata = True
             consec_warn = 0
+            if len(appdata_lens) < _RF_APPDATA_CAP:   # CVE-2026-47291 record cadence
+                appdata_lens.append(rlen)
             if rlen < _CVE_2017_3731_MIN_RECORD:
                 short_records += 1
                 if shortest is None or rlen < shortest:
@@ -1129,6 +1415,7 @@ def _scan_tls_stream(stream):
     stats = {'plaintext_alerts': plaintext_alerts,
              'max_consec_warn': max_consec_warn, 'alert_sample': alert_sample,
              'short_records': short_records, 'shortest': shortest,
+             'appdata_lens': appdata_lens,
              'bad_heartbeats': bad_heartbeats, 'heartbeats_seen': heartbeats_seen,
              'heartbeat_sample': heartbeat_sample}
     return handshake_messages(bytes(hs)), stats
@@ -1268,6 +1555,7 @@ def _dtls_sessions(udp):
         client_addr = c5 = None
         asm = {}
         client = server = None
+        sni_ov = None
         certs = []
         neg_version = None
         for (src, sport, dst, dport, pay) in dgrams:
@@ -1284,6 +1572,7 @@ def _dtls_sessions(udp):
                 for mtype, _seq, hbody in a.add(frag):
                     try:
                         if is_client and mtype == 0x01 and client is None:
+                            sni_ov = _dtls_ch_overread(hbody)   # before the parse (v11)
                             client = _parse_dtls_client_hello(hbody)[0]
                         elif not is_client and mtype == 0x02 and server is None:
                             server = parse_server_hello(hbody)
@@ -1299,12 +1588,12 @@ def _dtls_sessions(udp):
                                 server['dh_prime_bits'] = bits
                     except Exception:
                         continue
-        if client is None or c5 is None:
-            continue
+        if (client is None and sni_ov is None) or c5 is None:
+            continue                              # keep a session for a malformed-SNI CH
         csrc, csport, cdst, cdport = c5
         sessions.append({'proto': 'dtls', 'src': csrc, 'sport': csport,
                          'dst': cdst, 'dport': cdport, 'client': client,
-                         'server': server, 'certs': certs,
+                         'server': server, 'certs': certs, 'sni_overread': sni_ov,
                          'service': _service_for('udp', csport, cdport)})
     return sessions
 
@@ -1353,7 +1642,8 @@ def parse_pcap(path):
         rev = (dst, dport, src, sport)
         cmsgs, cstats = _scan_tls_stream(stream)
         if any(m[0] == 0x01 for m in cmsgs):
-            client = parse_client_hello(next(b for t, b in cmsgs if t == 0x01))
+            client, sni_ov = _client_hello_and_overread(
+                next(b for t, b in cmsgs if t == 0x01))
             server, certs = None, []
             smsgs, sstats = _scan_tls_stream(streams.get(rev, b''))
             for t, b in smsgs:
@@ -1373,12 +1663,15 @@ def parse_pcap(path):
             # death-alert flood or a truncated record is attributed to the side
             # that sent it — CVE-2016-8610 and CVE-2017-3731 are both asymmetric.
             records = [
-                dict(cstats, label='{}:{} -> {}:{}'.format(src, sport, dst, dport)),
-                dict(sstats, label='{}:{} -> {}:{}'.format(dst, dport, src, sport)),
+                dict(cstats, dir='c2s',
+                     label='{}:{} -> {}:{}'.format(src, sport, dst, dport)),
+                dict(sstats, dir='s2c',
+                     label='{}:{} -> {}:{}'.format(dst, dport, src, sport)),
             ]
             sessions.append({'proto': 'tls', 'src': src, 'sport': sport,
                              'dst': dst, 'dport': dport, 'client': client,
                              'server': server, 'certs': certs, 'records': records,
+                             'sni_overread': sni_ov,
                              'service': _service_for('tcp', sport, dport)})
         seen.add(key)
 
@@ -1397,10 +1690,12 @@ def parse_pcap(path):
             for t, b in handshake_messages(reassemble_crypto(plain)):
                 if t == 0x01:
                     quic_seen.add(qkey)           # one session per QUIC connection
+                    client_q, sni_ov = _client_hello_and_overread(b)
                     sessions.append({'proto': 'quic', 'src': src, 'sport': sport,
                                      'dst': dst, 'dport': dport,
-                                     'client': parse_client_hello(b),
+                                     'client': client_q,
                                      'server': None, 'certs': [],
+                                     'sni_overread': sni_ov,
                                      'service': _service_for('udp', sport, dport)})
                     break
         except Exception:
@@ -1446,7 +1741,8 @@ def _tls_analyze(sessions, now=None, denylist=None):
             if j4s:
                 rec['ja4s'] = j4s
         findings, infos = analyze_session(client, server, s.get('certs'), now,
-                                          records=s.get('records'))
+                                          records=s.get('records'),
+                                          sni_overread=s.get('sni_overread'))
         if client and rec.get('ja4') in denylist:
             findings.insert(0, {'severity': 'high', 'code': 'ja4_denylist',
                                 'message': 'Client JA4 on denylist: {}'.format(
@@ -2238,6 +2534,69 @@ def selftest():
     _bpf2 = _build_capture_bpf(TLS_TCP_PORTS, tuple(DTLS_UDP_PORTS))
     ck('bpf_radsec_dtls_udp', 'udp port 2083' in _bpf2 and 'tcp port 2083' in _bpf2
        and 'tcp port 802' in _bpf2)
+
+    # ---- CVE-2026-52346 (v11): SNI host_name over-read ----
+    def _ch52346(nlen=None, host=b'h.lab', pad=0, ext_len=None, block_len=None,
+                 list_len=None):
+        n = len(host) if nlen is None else nlen
+        entry = b'\x00' + n.to_bytes(2, 'big') + host
+        ll = len(entry) if list_len is None else list_len
+        sni = ll.to_bytes(2, 'big') + entry
+        el = len(sni) if ext_len is None else ext_len
+        ext = _EXT_SERVER_NAME.to_bytes(2, 'big') + el.to_bytes(2, 'big') + sni
+        bl = len(ext) if block_len is None else block_len
+        b = bytearray()
+        b += (0x0303).to_bytes(2, 'big') + b'\x00' * 32 + b'\x00'
+        b += (2).to_bytes(2, 'big') + (0x1301).to_bytes(2, 'big') + b'\x01\x00'
+        b += bl.to_bytes(2, 'big') + ext + b'\x00' * pad
+        return bytes(b)
+    _H = len(b'h.lab')
+    ck('sni_overread_exact_fit_silent', scan_sni_overread(_ch52346(nlen=_H)), None)
+    _ov = scan_sni_overread(_ch52346(nlen=_H + 1))
+    ck('sni_overread_one_over_fires', bool(_ov), True)
+    ck('sni_overread_one_over_bound', _ov and _ov['bound'], 'handshake_message')
+    ck('sni_overread_one_over_high', _ov and _ov['severity'], 'high')
+    ck('sni_overread_overrun_bytes', _ov and _ov['overrun_bytes'], 1)
+    ck('sni_overread_clean_silent', scan_sni_overread(_ch52346()), None)
+    _ov2 = scan_sni_overread(_ch52346(nlen=_H + 4, pad=64))     # inner-container overrun
+    ck('sni_overread_inner_warn', _ov2 and _ov2['severity'], 'warn')
+    _f346 = analyze_session(None, None, [], now, sni_overread=_ov)[0]
+    ck('sni_overread_e2e_fires',
+       any(x['code'] == 'cve_2026_52346_sni_overread' for x in _f346), True)
+    ck('sni_overread_e2e_cve',
+       next((x['cve'] for x in _f346
+             if x['code'] == 'cve_2026_52346_sni_overread'), None), 'CVE-2026-52346')
+    _fno = analyze_session(cnos, None, [], now, sni_overread=_ov)[0]
+    ck('sni_overread_scopes_out_no_sni',
+       any(x['code'] == 'no_sni' for x in _fno), False)
+    ck('sni_overread_still_fires_with_client',
+       any(x['code'] == 'cve_2026_52346_sni_overread' for x in _fno), True)
+    ck('no_sni_without_overread',
+       any(x['code'] == 'no_sni' for x in analyze_session(cnos, None, [], now)[0]), True)
+
+    # ---- CVE-2026-47291 (v11): http.sys record-cadence flood ----
+    ck('rf_armed_tls12_no_h2', record_flood_armed(None, {'alpn': []}, 0x0303), True)
+    ck('rf_armed_tls12_server_h2',
+       record_flood_armed(None, {'alpn': ['h2']}, 0x0303), False)
+    ck('rf_armed_tls13_client_h2_only',
+       record_flood_armed({'alpn': ['h2']}, None, 0x0304), False)
+    ck('rf_armed_tls13_mixed_alpn',
+       record_flood_armed({'alpn': ['http/1.1', 'h2']}, None, 0x0304), True)
+    ck('rf_nonfull_small', is_nonfull_record(50, 0x0303, 0x009c), True)
+    ck('rf_full_not_nonfull', is_nonfull_record(TLS_PLAINTEXT_MAX, 0x0303, 0x009c), False)
+    _srv12 = {'server_version': 0x0303, 'cipher': 0x009c, 'exts_order': [],
+              'alpn': [], 'selected_group': None, 'neg_version': 0x0303}
+
+    def _rf(nonfull, full=0, server_resp=None):
+        c2s = {'dir': 'c2s', 'appdata_lens': [50] * nonfull + [TLS_PLAINTEXT_MAX] * full}
+        s2c = {'dir': 's2c', 'appdata_lens': server_resp or []}
+        return [x for x in analyze_session(None, _srv12, [], now, records=[c2s, s2c])[0]
+                if x['code'] == 'cve_2026_47291_record_flood']
+    ck('rf_flood_warn_tier', (_rf(1000)[0]['severity'] if _rf(1000) else None), 'warn')
+    ck('rf_flood_high_tier', (_rf(4096)[0]['severity'] if _rf(4096) else None), 'high')
+    ck('rf_below_threshold_silent', _rf(999), [])
+    ck('rf_bulk_full_records_silent', _rf(0, full=4096), [])
+    ck('rf_server_response_defers', _rf(4096, server_resp=[16000]), [])
 
     failed = sum(1 for c in checks if not c['pass'])
     return {'success': failed == 0, 'checks': checks, 'failed': failed}

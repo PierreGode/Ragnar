@@ -1788,6 +1788,31 @@ handshake, yields:
   directly from the cleartext SKE (TLS 1.2 DHE only; TLS 1.3/QUIC have no ServerKeyExchange),
   which also recovers the real group size for the D(HE)at accounting. NVD 7.5 HIGH; OpenSSL
   rates it Low (*disputed*).
+- **SNI host_name over-read / `CVE-2026-52346` *(new in v11)*** — **`cve_2026_52346_sni_overread`**
+  (high / warn, *attack*): a ClientHello whose declared SNI `host_name` length runs past one of its
+  four RFC 6066 nested containers — the MikroTik RouterOS `xt_tls` out-of-bounds read. Pure arithmetic
+  on the declared lengths, the same shape as the Heartbleed `payload_length` check; **high** only when
+  the read passes the captured handshake message itself (nothing in the packet can satisfy it), **warn**
+  for an inner-container overrun (equally illegal, but not provably off-packet from a reassembled view).
+  The scan runs *independent of* the ClientHello parse (which raises on exactly these over-claims) and
+  scopes out the benign `no_sni` notice when an over-read is present. Fires on TLS, DTLS and QUIC. The
+  wire evidence is a generic TLS grammar violation, so TLS Watch owns it while the RouterOS version
+  bounds live in [MikroTik Guard](#mikrotik-guard); every finding carries `precondition_unobserved`
+  (the device needs a `tls-host` firewall rule, not observable from a tap). Reporter-scored 7.5; no NVD
+  record, so no CVSS vector is invented.
+- **http.sys record-cadence flood / `CVE-2026-47291` *(new in v11)*** — **`cve_2026_47291_record_flood`**
+  (warn / high, *attack*): the `http.sys` per-request buffer-reference-array integer overflow
+  (MSRC 9.8). One reference is added per HTTP/1.x header line, and this is **reachable over TLS only** —
+  SChannel hands `http.sys` one buffer per decrypted record, so one header line per record gives a 1:1
+  count, while plaintext TCP coalescing prevents it. The discriminator is therefore **record cadence**,
+  read off cleartext record headers: a run of client `application_data` records with no server response,
+  the **non-full** ones (below the negotiated ciphertext maximum) the primary signal. Tiers at 1,000
+  (warn), 4,096 and 65,536 non-full records, plus a size-agnostic `padded_or_bulk` catch-all for TLS 1.3
+  record padding. Armed on HTTP/1.x only (h2/h3 excluded from the ServerHello ALPN on TLS 1.2, or the
+  client offer on TLS 1.3); never on QUIC/DTLS. Carries `precondition_unobserved` (needs
+  `MaxRequestBytes` ≥ 262144; the default is not exploitable) and `confidence: heuristic`. **In-app
+  snapshot scope:** fires on the clean no-server-response flood a bounded capture catches, and defers
+  the interleaved keep-alive/multi-request case to the streaming daemon.
 - **Certificate posture (TLS 1.2 over TCP only)** — subject/issuer, SANs, validity
   window, self-issued flag, signature hash, and findings: `cert_expired`,
   `cert_not_yet_valid`, `cert_self_signed`, `cert_short_chain`, `cert_weak_sig`,

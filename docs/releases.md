@@ -4,6 +4,15 @@
 
 ### 2026-10-31
 
+#### [#1032](https://github.com/PierreGode/Ragnar/pull/1032) — feat(net): TLS Watch v11 — SNI host_name over-read + http.sys record-flood
+*branch `feature/tls-watch-v11`*
+
+- **[TLS Watch](nettools.md#tls-watch) v11** adds two TLS-borne CVEs, both read off cleartext framing in the in-app `tls_watch.py` (add-to-existing, no new verdict token):
+  - **`CVE-2026-52346`** (MikroTik RouterOS `xt_tls` SNI `host_name` out-of-bounds read) — `cve_2026_52346_sni_overread`: pure arithmetic on the four RFC 6066 nested lengths, **high** when the declared length passes the captured handshake message, **warn** for an inner-container overrun. The scan runs *independent of* `parse_client_hello` (which raises on exactly these over-claims) at all three ClientHello sites (TCP / QUIC / DTLS) and scopes out the benign `no_sni` notice when an over-read is present. `precondition_unobserved` (the device needs a `tls-host` rule); TLS Watch owns the wire evidence, MikroTik Guard the version bounds.
+  - **`CVE-2026-47291`** (http.sys per-request buffer-reference-array integer overflow, MSRC 9.8) — `cve_2026_47291_record_flood`: a run of client `application_data` records with **no server response**, the **non-full** ones (below the negotiated ciphertext max) the primary signal; latching tiers at 1,000 / 4,096 / 65,536 + a size-agnostic `padded_or_bulk` catch-all. Reachable over TLS + HTTP/1.x only (h2/h3 excluded from the cleartext ALPN); `precondition_unobserved` + `confidence: heuristic`. **Snapshot scope:** fires on the clean no-server-response flood a bounded capture catches; the interleaved keep-alive/multi-request case is deferred to the streaming daemon.
+- **CVE index** regenerated: **433 → 435 named**, **369 → 371 detected** (both new CVEs → TLS Watch, both 2026). CREDITS.md + README.md counts synced.
+- Self-test `tls_watch.selftest()` **135 → 158** (23 new: the SNI-over-read bounds + `no_sni` scope-out + end-to-end, and the record-flood arming / tiers / bulk-silent / server-response-defers). Card prose updated (static HTML — findings render generically, no JS/cache-bust).
+
 #### [#1031](https://github.com/PierreGode/Ragnar/pull/1031) — feat(net): RDP Watch (new · L5) + RPC/NetLogon Watch v7 + LDAP Watch v5 (LongLogon)
 *branch `feature/rdp-rpc-v7-ldap-v5`*
 
