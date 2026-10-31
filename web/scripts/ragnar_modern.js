@@ -9239,6 +9239,7 @@ async function runRadiusWatch() {
 
 // ---- Cert Watch (active certificate & TLS hygiene checker) ------------------
 const _CERT_VERDICT_STYLE = {
+    'cert-cve':         ['bg-red-950/60 border-red-800 text-red-300', '🛑 certificate CVE (CurveBall / non-prime field / ROCA)'],
     valid:              ['bg-green-950/40 border-green-900 text-green-400', '✓ valid'],
     clean:              ['bg-green-950/40 border-green-900 text-green-400', '✓ All certificates valid, trusted and in-date'],
     expiring:           ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ expiring soon'],

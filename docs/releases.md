@@ -2,6 +2,14 @@
 
 ## Releases
 
+### 2026-11-01
+
+#### [#1034](https://github.com/PierreGode/Ragnar/pull/1034) — feat(net): active Cert Watch cert-bytes CVEs + RPC/LDAP/TLS card refresh
+*branch `feature/cert-active-cves-card-refresh`*
+
+- **Active [Cert Watch](#cert-watch) (`do_cert_watch`) now runs the four cert-content CVE detectors** the passive `certwatch` daemon gained in v3 — **CurveBall** (`CVE-2020-0601`), the non-prime EC field (`CVE-2022-0778`), **ROCA** (`CVE-2017-15361`) and a DSA-in-chain (`CVE-2025-58188`) — read straight from the presented leaf's DER in `_tls_cve_findings` (reusing certwatch's own tested functions, not a second copy). New `cert-cve` verdict (worst-first) + card prose + `_CERT_VERDICT_STYLE` entry. `_cert_selftest` 10 → 16. **CVE index unchanged at 439/375** (these 4 were already detected via the passive daemon; the active grader is now a second detector for the same CVEs, both attributed to Cert Watch).
+- **Card-prose drift fixed.** The **RPC / NetLogon** card was stuck at v3 (only Zerologon/WinSpool) — now names the v7 additions (MadLicense/RD Licensing, LSM container, RpcGetSessionIds, Certighost, EventLogin). The **LDAP** card was at v3 (LDAPNightmare only) — now adds v4 filter-nest (`CVE-2020-12243`) and v5 **LongLogon** (`CVE-2026-41089`). The **TLS** card gained the v7 Heartbleed (`CVE-2014-0160`) + oversized-DH (`CVE-2018-0732`) names it had omitted. Audited every detector card: the remaining gaps are intentional subset-highlighting (vendor guards that detect 40+ CVEs, generic cards that render findings dynamically), not drift. `ragnar_modern.js` cache-bust → `20261031-cert-active-cves-cards`.
+
 ### 2026-10-31
 
 #### [#1033](https://github.com/PierreGode/Ragnar/pull/1033) — feat(net): Cert Watch v3 (4 cert-bytes CVEs + SIEM forwarder) + SMB/Kerberos Watch v5
