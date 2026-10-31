@@ -2,6 +2,18 @@
 
 ## Releases
 
+### 2026-10-31
+
+#### [#1031](https://github.com/PierreGode/Ragnar/pull/1031) — feat(net): RDP Watch (new · L5) + RPC/NetLogon Watch v7 + LDAP Watch v5 (LongLogon)
+*branch `feature/rdp-rpc-v7-ldap-v5`*
+
+- **New [RDP Watch](nettools.md#rdp-watch)** (L5 Session, next to SSH/Telnet) — a passive RDP negotiation-**posture** + abuse observer. Reads only the cleartext **X.224 Connection Request / Confirm** on tcp/3389 that precedes TLS or CredSSP; **no CVE codes** (BlueKeep is below the OS floor; `CVE-2005-1794` Standard-Security MITM is a posture *reference* only). 13 codes RDP-001..040: Standard RDP Security selected, TLS refused, legacy path, NLA requested-but-not-enforced, Restricted-Admin, a cleartext `mstshash` username (length only — never the value; a `msts=` routing token is never a username), and the latching brute-force / username-spray (per-run keyed digest, never emitted) / horizontal-scan tier. Vendored `rdpwatch.py` + `do_rdp_watch` + `GET /api/net/rdp-watch`; L5 card, mobile-friendly; dual-stack (bare `ip6` term, every finding carries `af`). Watchtower feed `rdp_watch.jsonl` + Net-Integrity `RDP` chip.
+- **[RPC / NetLogon Watch](nettools.md#rpc--netlogon-watch) v7** (re-vendored engine, 41 → 52 finding codes). **+13 detected CVEs:** **MadLicense** + the July-2024 **RD Licensing** cluster (`CVE-2024-38077 / -38074 / -38076 / -38071 / -38072 / -38073 / -38099`), the **LSM container** interface (`CVE-2022-37973 / CVE-2022-37998`), **RpcGetSessionIds** LSM crash (`CVE-2025-26651`), **Certighost** AD CS chase (`CVE-2026-54121`) and the **EventLogin** MS-EVEN backup-write cluster (`CVE-2025-29969 / CVE-2026-50502`). **+3 no-CVE** surfaces (ESC11 enrollment-relay level, MS-DNSP `ServerLevelPluginDll`, interface inventory) + WS-Man anon-identify / WEC endpoints. Three CVEs (`CVE-2021-36936 / CVE-2021-36947 / CVE-2026-50346`) are **evaluated and deliberately not claimed** and are kept out of the CVE index.
+- **[LDAP Watch](nettools.md#ldap-watch) v5** — **LongLogon** (`CVE-2026-41089`): the CLDAP DC-locator ping whose `NtVer` routes to the legacy `BuildSamLogonResponse` builder (request leg), and a DC whose own forest/domain/host DNS names overrun its 528-byte stack buffer (response leg). Keyed on the routing bits + the DC's own names, never the length-capped attacker `User` field; both legs on CLDAP and TCP, v4/v6.
+- **CVE index** regenerated (`scripts/gen_cve_list.py`): **418 → 433 named**, **355 → 369 detected** (+14 detected: 13 RPC + 1 LDAP; +1 context: RDP's `CVE-2005-1794`). CREDITS.md + README.md counts synced.
+- **Visibility matrix** refreshed (RDP added at L5): `docs/ragnar_osi_visibility_matrix.jpg` + the L5 crop.
+- Self-tests: RPC `rpc` suite 35 → 50 scenarios, new RDP `rdp` suite (16), LDAP `ldap` 25 → 31 — all green; `do_routing_selftest` gains the `rdp` key. `ragnar_modern.js` cache-bust → `20261031-rdp-rpc-v7-ldap-v5`.
+
 ### 2026-10-30
 
 #### [#1030](https://github.com/PierreGode/Ragnar/pull/1030) — feat(ulfberht): arsenal extras — on-demand recon/OSINT + WPA-Enterprise install

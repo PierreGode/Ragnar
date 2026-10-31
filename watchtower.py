@@ -160,6 +160,11 @@ DEFAULT_SOURCES = {
     # backup-key / EPM-sweep, and WinRM/WS-Man posture. Coercion is Relay Watch's.
     'rpc_watch':     {'label': 'RPC / NetLogon Watch (Zerologon / DCSync / WinRM)',
                       'paths': ['/var/log/ragnar/rpc_watch.jsonl']},
+    # RDP Watch (do_rdp_watch): cleartext X.224 negotiation posture + connection
+    # abuse (Standard RDP Security selected, TLS refused, NLA not enforced,
+    # Restricted-Admin, cleartext mstshash cookie, brute force / spray / scan).
+    'rdp_watch':     {'label': 'RDP Watch (X.224 negotiation posture / brute-force)',
+                      'paths': ['/var/log/ragnar/rdp_watch.jsonl']},
     # BFD failover-manipulation (do_bfd_watch): forged teardown / forced AdminDown /
     # illegal state regression that induces routing reconvergence, malformed/truncated
     # headers (CVE-2018-0155 iosd crash), auth downgrade/asymmetric, GTSM violations.

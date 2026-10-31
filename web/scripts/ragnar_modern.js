@@ -9852,6 +9852,66 @@ async function runRpcWatch() {
     }
 }
 
+// ---- RDP Watch (passive X.224 negotiation posture + abuse) -----------------
+const _RDP_VERDICT_STYLE = {
+    clean:    ['bg-green-950/40 border-green-900 text-green-400', '✓ RDP clean — no Standard-Security, TLS-refusal, NLA-downgrade, Restricted-Admin, cleartext-cookie or brute/spray/scan'],
+    posture:  ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ RDP posture — Restricted Admin, a legacy negotiation path or a horizontal scan seen'],
+    exposure: ['bg-red-950/60 border-red-800 text-red-300', '🛑 RDP exposure — Standard RDP Security selected / TLS refused / NLA not enforced, or brute-force / username-spray'],
+    unknown:  ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _RDP_SEV_STYLE = {
+    high: 'text-red-300', medium: 'text-amber-300', notice: 'text-gray-300', info: 'text-gray-500',
+};
+async function runRdpWatch() {
+    const out = document.getElementById('rdp-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('rdp-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('rdp-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing RDP X.224 negotiation (tcp/3389)…</p>';
+    try {
+        _fillIfaceSel('rdp-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/rdp-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool === 'tcpdump') extra = ' <button onclick="installNetTool(\'tcpdump\', this, runRdpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            else if (d && d.missing_tool === 'scapy') extra = ' <span class="ml-2 text-amber-400">Install Scapy in Detector Self-Test.</span>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _RDP_VERDICT_STYLE[d.verdict] || _RDP_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · findings: ${(d.findings || []).length}</p>`;
+        const findings = (d.findings || []).filter(f => ['high', 'medium', 'notice'].includes(f.severity));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Source</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_RDP_SEV_STYLE[f.severity] || 'text-gray-400'}">${escapeHtml(f.severity)}</td>
+                    <td class="px-2 py-1 font-mono ${_RDP_SEV_STYLE[f.severity] || 'text-gray-300'}">${escapeHtml(f.code || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.src || f.dst || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
 // ---- BFD Watch (forged teardown / failover manipulation) -------------------
 const _BFD_VERDICT_STYLE = {
     clean:                    ['bg-green-950/40 border-green-900 text-green-400', '✓ BFD clean — no forged teardown, malformed header, auth downgrade, GTSM or instability'],

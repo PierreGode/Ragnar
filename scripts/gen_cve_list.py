@@ -29,6 +29,7 @@ FILE_OWNERS = {
     'telnet_watch.py': 'Telnet Watch',
     'telnet_watch_selftest.py': 'Telnet Watch',
     'rpcwatch.py': 'RPC / NetLogon Watch',
+    'rdpwatch.py': 'RDP Watch',
     'bfdwatch.py': 'BFD Watch',
     'ptpwatch.py': 'PTP Watch',
     'ldap_watch.py': 'LDAP Watch',
@@ -136,7 +137,11 @@ CONTEXT_CVES = {'CVE-2019-6111', 'CVE-2020-11897',
                 # dns_doctor_passive mdns.py "why the Avahi CVEs are absent" note: the
                 # remote crafted-packet bugs are 2006-2011, ~5.0 CVSS v2 (under the 6.5
                 # floor), not in CISA KEV -- named only to document the deliberate gap.
-                'CVE-2008-5081', 'CVE-2010-2244', 'CVE-2011-1002'}
+                'CVE-2008-5081', 'CVE-2010-2244', 'CVE-2011-1002',
+                # RDP Watch names CVE-2005-1794 (Standard RDP Security MITM) as a
+                # posture reference on RDP-001/RDP-002 only — no CVE code is claimed,
+                # the module is posture/abuse with no detected CVEs.
+                'CVE-2005-1794'}
 # Deliberately wrong IDs inside a vendored module's own mutation-test fixtures
 # (ptpwatch v4's README bite list swaps CVE-2024-42861 for this). Never a detection.
 IGNORED_CVES = {'CVE-2024-99999',
@@ -148,7 +153,13 @@ IGNORED_CVES = {'CVE-2024-99999',
                 # silently promoted into the catalog — no advisory/CVSS confirmed, no
                 # detection rule exists, they never fire. Not part of coverage.
                 'CVE-2024-27890', 'CVE-2020-15897', 'CVE-2024-12378',
-                'CVE-2026-11704', 'CVE-2025-6188', 'CVE-2023-24548'}
+                'CVE-2026-11704', 'CVE-2025-6188', 'CVE-2023-24548',
+                # rpcwatch v7 EVALUATED_NOT_CLAIMED: three CVEs whose titles name a
+                # service rpcwatch watches but which it deliberately does NOT claim —
+                # the two August-2021 spooler RCEs have no published mechanism to key
+                # on, and CVE-2026-50346 is a local vector (AV:L) that never crosses
+                # the wire. The conformance harness fails if any is ever claimed.
+                'CVE-2021-36936', 'CVE-2021-36947', 'CVE-2026-50346'}
 # Per-CVE owner overrides where a shared helper names another vendor's CVE.
 CVE_OWNER_OVERRIDE = {'CVE-2021-0254': 'Juniper Guard'}
 # Owners (or owner+CVE) whose mention is context/reference, not a detection.
@@ -160,6 +171,8 @@ CONTEXT_OWNERS = {'BGP Path Watch:advisory', 'OSPF Watch:advisory', 'SR-MPLS Wat
 NAMES = {
     'CVE-2002-20001': 'D(HE)at', 'CVE-2022-40735': 'D(HE)at', 'CVE-2024-41996': 'D(HE)at',
     'CVE-2003-0001': 'Etherleak',
+    'CVE-2024-38077': 'MadLicense', 'CVE-2026-54121': 'Certighost',
+    'CVE-2025-29969': 'EventLogin', 'CVE-2026-41089': 'LongLogon',
     'CVE-2015-8011': 'lldpd lldp_decode Management Address overflow',
     'CVE-2022-4338': 'Open vSwitch LLDP Auto Attach integer underflow',
     'CVE-2014-9222': 'Misfortune Cookie', 'CVE-2025-41426': 'Liebert RDU101 / IS-UNITY HTTP method overflow',
