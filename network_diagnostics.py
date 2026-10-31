@@ -11193,7 +11193,7 @@ _TLS_DEPRECATED_PROTOS = ('SSLv2', 'SSLv3', 'TLSv1', 'TLSv1.1')
 _TLS_WEAK_CIPHER_RE = re.compile(r'RC4|RC2|(?<![A-Z0-9])DES|3DES|NULL|EXPORT|MD5|'
                                  r'ANON|_anon', re.IGNORECASE)
 # Severity order used for the per-target verdict and the overall roll-up.
-_TLS_PRIORITY = ['expired', 'not-yet-valid', 'self-signed', 'untrusted',
+_TLS_PRIORITY = ['cert-cve', 'expired', 'not-yet-valid', 'self-signed', 'untrusted',
                  'hostname-mismatch', 'weak-crypto', 'deprecated-tls', 'expiring',
                  'valid']
 
@@ -11341,6 +11341,77 @@ def _tls_key_desc(cert):
         return '?', False
 
 
+def _tls_cve_findings(der, cert):
+    """Cert-CONTENT CVE detectors, run on the presented leaf (the active Cert Watch
+    half of the passive certwatch daemon's four cert-bytes CVEs). Reuses certwatch's
+    own tested detector functions rather than a second copy. Returns
+    [(verdict_key, reason), ...]: the critical shapes (CurveBall / non-prime field /
+    factorable ROCA) map to the 'cert-cve' verdict, the warn-level ones (a
+    non-factorable ROCA fingerprint, a DSA key, benign explicit EC params) fold into
+    'weak-crypto'. Each detector is independent and defensively wrapped — a hostile
+    certificate costs one target, never the scan."""
+    out = []
+    try:
+        if _SNMP_PY_DIR not in sys.path:        # python/ on sys.path (shared helper dir)
+            sys.path.insert(0, _SNMP_PY_DIR)
+        from certwatch import (roca_fingerprint, roca_factorable, ec_params_tag,
+                               parse_explicit_ec_params, match_std_curve,
+                               _is_probable_prime, STD_CURVES)
+        from cryptography.hazmat.primitives.asymmetric import rsa, dsa
+    except Exception:
+        return out
+    try:
+        pk = cert.public_key()
+    except Exception:
+        pk = None
+    # CVE-2017-15361 ROCA — Infineon RSA key-generation fingerprint.
+    try:
+        if isinstance(pk, rsa.RSAPublicKey) and roca_fingerprint(pk.public_numbers().n):
+            if roca_factorable(pk.key_size):
+                out.append(('cert-cve', f"RSA-{pk.key_size} modulus carries the Infineon "
+                            f"ROCA fingerprint (CVE-2017-15361) — size is in the "
+                            f"practically-factorable range"))
+            else:
+                out.append(('weak-crypto', f"RSA-{pk.key_size} modulus carries the "
+                            f"Infineon ROCA fingerprint (CVE-2017-15361); size outside the "
+                            f"published factorable range"))
+    except Exception:
+        pass
+    # CVE-2025-58188 — a DSA key in the chain panics Go crypto/x509 chain validation.
+    try:
+        if isinstance(pk, dsa.DSAPublicKey):
+            out.append(('weak-crypto', "DSA public key — panics Go crypto/x509 chain "
+                        "validation (CVE-2025-58188, Go <1.24.8 / 1.25.0-1.25.2)"))
+    except Exception:
+        pass
+    # CVE-2020-0601 CurveBall / CVE-2022-0778 — explicit EC parameters, read from the
+    # ORIGINAL DER because the cryptography lib normalizes them back to a named curve.
+    try:
+        if ec_params_tag(der) == 0x30:
+            params = parse_explicit_ec_params(der)
+            if params is None:
+                out.append(('weak-crypto', "EC key uses explicit curve parameters that "
+                            "could not be decoded"))
+            else:
+                std = match_std_curve(params)
+                if not _is_probable_prime(params['p']):
+                    out.append(('cert-cve', "explicit EC parameters declare a non-prime "
+                                "field — infinite loop in OpenSSL BN_mod_sqrt on parse "
+                                "(CVE-2022-0778)"))
+                if std and params['G'] != STD_CURVES[std]['G']:
+                    out.append(('cert-cve', f"explicit EC parameters match {std} except for "
+                                f"the base point G — the forged-signature shape of "
+                                f"CVE-2020-0601 (CurveBall)"))
+                else:
+                    out.append(('weak-crypto', "EC key uses explicit curve parameters"
+                                + (f" (matches {std})" if std else " (non-standard curve)")
+                                + " — rare in TLS server certs and the precondition for "
+                                  "CVE-2020-0601"))
+    except Exception:
+        pass
+    return out
+
+
 def _tls_classify(der, check_name, trusted, verify_reason, proto, cipher, now):
     """Pure classifier over one presented certificate + connection facts. Returns a
     per-target result dict. Separated from the network I/O so the self-test can drive
@@ -11402,6 +11473,10 @@ def _tls_classify(der, check_name, trusted, verify_reason, proto, cipher, now):
     if not expired and days_left <= _TLS_EXPIRING_DAYS:
         findings.append(('expiring', f"expires in {days_left} days "
                          f"(notAfter {not_after:%Y-%m-%d})"))
+
+    # Cert-content CVEs read from the presented leaf (CurveBall / CVE-2022-0778 /
+    # ROCA / DSA-in-chain) — the active half of the passive certwatch detectors.
+    findings += _tls_cve_findings(der, cert)
 
     if findings:
         verdict = min((k for k, _ in findings), key=_TLS_PRIORITY.index)
@@ -11748,6 +11823,72 @@ def _cert_selftest():
     # 10. wildcard SAN matches sub-domain -> valid.
     _, d = make('*.lan', -2, 200, sans=['*.lan'])
     run('wildcard-match', d, 'nas.lan', True, 'valid')
+
+    # 11-16. Cert-content CVE detectors (CurveBall / CVE-2022-0778 / ROCA / DSA),
+    # reusing the passive certwatch fixtures. Skips cleanly if they are unavailable.
+    def run_cve(name, der, check, trusted, want_verdict, cve_text):
+        res = _tls_classify(der, check, trusted, None, 'TLSv1.2',
+                            'ECDHE-RSA-AES256-GCM-SHA384', now)
+        hit = (res['verdict'] == want_verdict
+               and any(cve_text in r for r in res.get('reasons', [])))
+        scenarios.append({'name': name, 'expect': '{}+{}'.format(want_verdict, cve_text),
+                          'got': res['verdict'], 'pass': hit})
+    try:
+        if _SNMP_PY_DIR not in sys.path:
+            sys.path.insert(0, _SNMP_PY_DIR)
+        import certwatch as _cw
+        from certwatch_selftest import _explicit_ec_der, ROCA_MODULUS
+        from cryptography.hazmat.primitives.asymmetric import dsa as _dsa
+        _cve_ok = True
+    except Exception:
+        _cve_ok = False
+    if _cve_ok:
+        # CVE-2017-15361 ROCA — the detector fn (a full cert needs a real ROCA key).
+        _rp = _cw.roca_fingerprint(ROCA_MODULUS)
+        scenarios.append({'name': 'roca-fingerprint-positive', 'expect': True,
+                          'got': _rp, 'pass': _rp is True})
+        _fp = _cw.roca_fingerprint(
+            rsa.generate_private_key(public_exponent=65537,
+                                     key_size=1024).public_key().public_numbers().n)
+        scenarios.append({'name': 'roca-no-fp-on-genuine-key', 'expect': False,
+                          'got': _fp, 'pass': _fp is False})
+        # CVE-2025-58188 — a DSA leaf -> weak-crypto, CVE named.
+        _dk = _dsa.generate_private_key(key_size=2048)
+        _nm = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'dsa.test')])
+        _dc = (x509.CertificateBuilder().subject_name(_nm).issuer_name(_nm)
+               .public_key(_dk.public_key()).serial_number(x509.random_serial_number())
+               .not_valid_before(now - timedelta(days=1))
+               .not_valid_after(now + timedelta(days=200))
+               .add_extension(x509.SubjectAlternativeName([x509.DNSName('dsa.test')]),
+                              False).sign(_dk, hashes.SHA256()))
+        run_cve('cve-2025-58188-dsa', _dc.public_bytes(serialization.Encoding.DER),
+                'dsa.test', True, 'weak-crypto', 'CVE-2025-58188')
+        # CVE-2020-0601 CurveBall + CVE-2022-0778 non-prime field — mutate the fixture.
+        try:
+            _der = _explicit_ec_der()
+            _G = _cw.STD_CURVES['prime256v1']['G']
+            _i = _der.find(_G)
+            if _i > 0:
+                _bad = bytearray(_G); _bad[-1] ^= 0x01
+                run_cve('cve-2020-0601-curveball',
+                        _der[:_i] + bytes(_bad) + _der[_i + len(_G):],
+                        'x', False, 'cert-cve', 'CVE-2020-0601')
+            _pb = _cw.STD_CURVES['prime256v1']['p'].to_bytes(32, 'big')
+            _j = _der.find(_pb)
+            if _j > 0:
+                _bad = bytearray(_pb); _bad[-1] = 0xFE
+                run_cve('cve-2022-0778-nonprime',
+                        _der[:_j] + bytes(_bad) + _der[_j + len(_pb):],
+                        'x', False, 'cert-cve', 'CVE-2022-0778')
+        except Exception:
+            pass
+        # FP guard: a healthy cert gains no cert-content CVE.
+        _, _dok = make('ok.test', -2, 200, sans=['ok.test'])
+        _rok = _tls_classify(_dok, 'ok.test', True, None, 'TLSv1.2',
+                             'ECDHE-RSA-AES256-GCM-SHA384', now)
+        _clean = not any('CVE-' in r for r in _rok.get('reasons', []))
+        scenarios.append({'name': 'no-cert-cve-on-healthy-cert', 'expect': True,
+                          'got': _clean, 'pass': _clean})
 
     # End-to-end: real local TLS server with a self-signed cert, graded live.
     e2e = {'ran': False, 'reason': 'skipped'}
