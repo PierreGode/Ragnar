@@ -14,8 +14,8 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **369 CVEs detected from the wire.** 433 distinct CVE IDs are named across Ragnar's
-  code; 369 of them a passive detector actually identifies. The rest are named, not detected:
+- **371 CVEs detected from the wire.** 435 distinct CVE IDs are named across Ragnar's
+  code; 371 of them a passive detector actually identifies. The rest are named, not detected:
   55 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
@@ -49,8 +49,15 @@ behind them is Solarflere's work.
   builder plus the DC's own-DNS-name overflow precondition). The new **RDP Watch** reads the
   cleartext X.224 Connection Request/Confirm for negotiation posture and connection abuse — no
   CVE codes (BlueKeep is below the OS floor).
+- **TLS Watch v11** adds two TLS-borne CVEs read off cleartext framing: **CVE-2026-52346** (MikroTik
+  RouterOS `xt_tls` out-of-bounds read from an unvalidated SNI `host_name` length — pure arithmetic
+  on the four RFC 6066 nested lengths, high when the declared length passes the handshake message,
+  warn for an inner-container overrun, on TLS/DTLS/QUIC) and **CVE-2026-47291** (the `http.sys`
+  per-request buffer-reference-array integer overflow, MSRC 9.8 — a run of client application_data
+  records with no server response, the non-full ones the primary signal, reachable over TLS and
+  HTTP/1.x only).
 - Weighted to the current threat wave (all named IDs): **50 CVEs from 2023, 62 from 2024, 47 from 2025, and
-  58 from 2026**, with a nine-strong 2021 cluster from the LLDP SB220 / RV / TRENDnet /
+  60 from 2026**, with a nine-strong 2021 cluster from the LLDP SB220 / RV / TRENDnet /
   QNAP families and a deep 2020–2022 CDP seam (30 / 37 / 29) that the CDP Watch **LCDPwn**
   expansion widened — the Video Surveillance 7000/8000 set, the Cisco ATA 190 cluster,
   Unified CM, FortiSwitch and lldpd.

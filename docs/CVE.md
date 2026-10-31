@@ -10,8 +10,8 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **433** distinct CVE IDs
-- **369** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **435** distinct CVE IDs
+- **371** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
 - **55** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
@@ -42,7 +42,7 @@ detector works is in [nettools.md](nettools.md).
 | 2023 | 50 |
 | 2024 | 62 |
 | 2025 | 47 |
-| 2026 | 58 |
+| 2026 | 60 |
 
 ## By detector
 
@@ -92,7 +92,7 @@ detector works is in [nettools.md](nettools.md).
 | SSDP/UPnP Watch | 1 |
 | SSH Watch | 11 |
 | Telnet Watch | 10 |
-| TLS Watch | 11 |
+| TLS Watch | 13 |
 | Trailing-data / Etherleak | 1 |
 
 ## All CVEs
@@ -513,7 +513,9 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2026-37462](https://nvd.nist.gov/vuln/detail/CVE-2026-37462) |  | context only | BGP Path Watch | — |
 | [CVE-2026-41089](https://nvd.nist.gov/vuln/detail/CVE-2026-41089) | LongLogon | detected | LDAP Watch | — |
 | [CVE-2026-42944](https://nvd.nist.gov/vuln/detail/CVE-2026-42944) |  | detected | DNS Watch | — |
+| [CVE-2026-47291](https://nvd.nist.gov/vuln/detail/CVE-2026-47291) |  | detected | TLS Watch | — |
 | [CVE-2026-50502](https://nvd.nist.gov/vuln/detail/CVE-2026-50502) |  | detected | RPC / NetLogon Watch | — |
+| [CVE-2026-52346](https://nvd.nist.gov/vuln/detail/CVE-2026-52346) |  | detected | TLS Watch | — |
 | [CVE-2026-52688](https://nvd.nist.gov/vuln/detail/CVE-2026-52688) |  | detected | DNS Watch | — |
 | [CVE-2026-52896](https://nvd.nist.gov/vuln/detail/CVE-2026-52896) |  | detected | Arista Guard | — |
 | [CVE-2026-52897](https://nvd.nist.gov/vuln/detail/CVE-2026-52897) |  | detected | Arista Guard | — |
