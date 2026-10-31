@@ -14,9 +14,9 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **355 CVEs detected from the wire.** 418 distinct CVE IDs are named across Ragnar's
-  code; 355 of them a passive detector actually identifies. The rest are named, not detected:
-  54 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
+- **369 CVEs detected from the wire.** 433 distinct CVE IDs are named across Ragnar's
+  code; 369 of them a passive detector actually identifies. The rest are named, not detected:
+  55 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
   cannot reconstruct on the wire — the Ripple20 IPv6 bug CVE-2020-11897, which APC Guard
@@ -24,7 +24,9 @@ behind them is Solarflere's work.
   Watch's three Avahi mDNS crafted-packet bugs (CVE-2008-5081 / CVE-2010-2244 / CVE-2011-1002),
   named only to document the deliberate gap — ~5.0 CVSS v2, under the bar, not in CISA KEV —
   and **RADIUS Watch's ten triaged/deferred CVEs** — the FreeRADIUS DHCP-decoder set, the
-  EAP-pwd side channels and a logrotate priv-esc, all undetectable from a passive RADIUS vantage),
+  EAP-pwd side channels and a logrotate priv-esc, all undetectable from a passive RADIUS vantage,
+  and **RDP Watch's CVE-2005-1794** Standard-RDP-Security MITM, carried as a posture reference
+  on RDP-001/RDP-002 only — RDP Watch is a posture/abuse module with no CVE codes of its own),
   3 in card prose as related context, and 6 **active** BLE
   checks in the BLE Pentest action. Every one is listed, with its detector and status, in the
   generated **[CVE Index](CVE.md)**.
@@ -36,8 +38,19 @@ behind them is Solarflere's work.
   BlastRADIUS (CVE-2024-3596, now scoped to Arista hardware learned from LLDP), regreSSHion,
   gNOI authorization bypass (CVE-2025-1260 / CVE-2025-0936), the actively-exploited
   tunnel-decapsulation CVE-2026-7473, and the VLAN / OSPFv3 / CVX / IPsec dataplane shapes.
-- Weighted to the current threat wave (all named IDs): **49 CVEs from 2023, 55 from 2024, 45 from 2025, and
-  55 from 2026**, with a nine-strong 2021 cluster from the LLDP SB220 / RV / TRENDnet /
+- **RPC / NetLogon Watch v7** adds thirteen Windows RPC CVEs: **MadLicense** and the rest of the
+  July-2024 RD Licensing cluster (CVE-2024-38077 / -38074 / -38076 / -38071 / -38072 / -38073 /
+  -38099), the LSM container-interface pair (CVE-2022-37973 / CVE-2022-37998), the RpcGetSessionIds
+  LSM crash (CVE-2025-26651), the **Certighost** AD CS chase (CVE-2026-54121) and the **EventLogin**
+  MS-EVEN backup-write cluster (CVE-2025-29969 / CVE-2026-50502) — graded off the cleartext RPC
+  security trailer, interface UUID and opnum — alongside the no-CVE ESC11, MS-DNSP
+  ServerLevelPluginDll and interface-inventory surfaces. **LDAP Watch v5** adds **LongLogon**
+  (CVE-2026-41089, the CLDAP netlogon DC-locator ping routed to the legacy BuildSamLogonResponse
+  builder plus the DC's own-DNS-name overflow precondition). The new **RDP Watch** reads the
+  cleartext X.224 Connection Request/Confirm for negotiation posture and connection abuse — no
+  CVE codes (BlueKeep is below the OS floor).
+- Weighted to the current threat wave (all named IDs): **50 CVEs from 2023, 62 from 2024, 47 from 2025, and
+  58 from 2026**, with a nine-strong 2021 cluster from the LLDP SB220 / RV / TRENDnet /
   QNAP families and a deep 2020–2022 CDP seam (30 / 37 / 29) that the CDP Watch **LCDPwn**
   expansion widened — the Video Surveillance 7000/8000 set, the Cisco ATA 190 cluster,
   Unified CM, FortiSwitch and lldpd.

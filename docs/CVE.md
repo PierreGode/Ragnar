@@ -10,9 +10,9 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **418** distinct CVE IDs
-- **355** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
-- **54** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
+- **433** distinct CVE IDs
+- **369** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **55** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
 - Range **CVE-1999-0113** → **CVE-2026-102019**
@@ -22,7 +22,7 @@ detector works is in [nettools.md](nettools.md).
 | 1999 | 2 |
 | 2002 | 2 |
 | 2003 | 1 |
-| 2005 | 2 |
+| 2005 | 3 |
 | 2006 | 3 |
 | 2007 | 1 |
 | 2008 | 3 |
@@ -38,11 +38,11 @@ detector works is in [nettools.md](nettools.md).
 | 2019 | 20 |
 | 2020 | 34 |
 | 2021 | 42 |
-| 2022 | 32 |
+| 2022 | 34 |
 | 2023 | 50 |
-| 2024 | 55 |
-| 2025 | 45 |
-| 2026 | 55 |
+| 2024 | 62 |
+| 2025 | 47 |
+| 2026 | 58 |
 
 ## By detector
 
@@ -71,7 +71,7 @@ detector works is in [nettools.md](nettools.md).
 | IS-IS Watch | 2 |
 | Juniper Guard | 9 |
 | LACP Watch | 1 |
-| LDAP Watch | 3 |
+| LDAP Watch | 4 |
 | Liebert Guard | 2 |
 | LLDP Watch | 30 |
 | MikroTik Guard | 19 |
@@ -81,9 +81,10 @@ detector works is in [nettools.md](nettools.md).
 | OSPF Watch | 15 |
 | PTP Watch | 4 |
 | RADIUS Watch | 19 |
+| RDP Watch | 1 |
 | Relay / Coercion Watch | 2 |
 | RIP Watch | 5 |
-| RPC / NetLogon Watch | 10 |
+| RPC / NetLogon Watch | 23 |
 | SMB / Kerberos Watch | 5 |
 | SMTP Watch | 4 |
 | SNMP Watch | 5 |
@@ -105,6 +106,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2002-1623](https://nvd.nist.gov/vuln/detail/CVE-2002-1623) |  | detected | IPsec / IKE Watch | — |
 | [CVE-2002-20001](https://nvd.nist.gov/vuln/detail/CVE-2002-20001) | D(HE)at | detected | SSH Watch, TLS Watch | — |
 | [CVE-2003-0001](https://nvd.nist.gov/vuln/detail/CVE-2003-0001) | Etherleak | detected | Trailing-data / Etherleak | — |
+| [CVE-2005-1794](https://nvd.nist.gov/vuln/detail/CVE-2005-1794) |  | context only | RDP Watch | — |
 | [CVE-2005-4436](https://nvd.nist.gov/vuln/detail/CVE-2005-4436) | EIGRP K-value / Goodbye reset | detected | EIGRP Watch | — |
 | [CVE-2005-4437](https://nvd.nist.gov/vuln/detail/CVE-2005-4437) | EIGRP missing authentication | detected | EIGRP Watch | — |
 | [CVE-2006-2223](https://nvd.nist.gov/vuln/detail/CVE-2006-2223) |  | detected | RIP Watch | — |
@@ -305,6 +307,8 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2022-37887](https://nvd.nist.gov/vuln/detail/CVE-2022-37887) |  | detected | Aruba Guard | — |
 | [CVE-2022-37888](https://nvd.nist.gov/vuln/detail/CVE-2022-37888) |  | detected | Aruba Guard | — |
 | [CVE-2022-37889](https://nvd.nist.gov/vuln/detail/CVE-2022-37889) |  | detected | Aruba Guard | — |
+| [CVE-2022-37973](https://nvd.nist.gov/vuln/detail/CVE-2022-37973) |  | detected | RPC / NetLogon Watch | — |
+| [CVE-2022-37998](https://nvd.nist.gov/vuln/detail/CVE-2022-37998) |  | detected | RPC / NetLogon Watch | — |
 | [CVE-2022-39028](https://nvd.nist.gov/vuln/detail/CVE-2022-39028) | inetutils telnetd EC/EL crash | detected | Telnet Watch | — |
 | [CVE-2022-40302](https://nvd.nist.gov/vuln/detail/CVE-2022-40302) |  | context only | BGP Path Watch | — |
 | [CVE-2022-40735](https://nvd.nist.gov/vuln/detail/CVE-2022-40735) | D(HE)at | detected | IPsec / IKE Watch, SSH Watch, TLS Watch | — |
@@ -404,6 +408,13 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2024-33511](https://nvd.nist.gov/vuln/detail/CVE-2024-33511) |  | detected | Aruba Guard | — |
 | [CVE-2024-33512](https://nvd.nist.gov/vuln/detail/CVE-2024-33512) |  | detected | Aruba Guard | — |
 | [CVE-2024-33655](https://nvd.nist.gov/vuln/detail/CVE-2024-33655) | DNSBomb | detected | DNS Watch | — |
+| [CVE-2024-38071](https://nvd.nist.gov/vuln/detail/CVE-2024-38071) |  | detected | RPC / NetLogon Watch | — |
+| [CVE-2024-38072](https://nvd.nist.gov/vuln/detail/CVE-2024-38072) |  | detected | RPC / NetLogon Watch | — |
+| [CVE-2024-38073](https://nvd.nist.gov/vuln/detail/CVE-2024-38073) |  | detected | RPC / NetLogon Watch | — |
+| [CVE-2024-38074](https://nvd.nist.gov/vuln/detail/CVE-2024-38074) |  | detected | RPC / NetLogon Watch | — |
+| [CVE-2024-38076](https://nvd.nist.gov/vuln/detail/CVE-2024-38076) |  | detected | RPC / NetLogon Watch | — |
+| [CVE-2024-38077](https://nvd.nist.gov/vuln/detail/CVE-2024-38077) | MadLicense | detected | RPC / NetLogon Watch | — |
+| [CVE-2024-38099](https://nvd.nist.gov/vuln/detail/CVE-2024-38099) |  | detected | RPC / NetLogon Watch | — |
 | [CVE-2024-41996](https://nvd.nist.gov/vuln/detail/CVE-2024-41996) | D(HE)at | detected | SSH Watch, TLS Watch | — |
 | [CVE-2024-42393](https://nvd.nist.gov/vuln/detail/CVE-2024-42393) |  | detected | Aruba Guard | — |
 | [CVE-2024-42394](https://nvd.nist.gov/vuln/detail/CVE-2024-42394) |  | detected | Aruba Guard | — |
@@ -444,6 +455,8 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2025-20702](https://nvd.nist.gov/vuln/detail/CVE-2025-20702) | Airoha RACE | active check | BLE Pentest (active) | — |
 | [CVE-2025-21595](https://nvd.nist.gov/vuln/detail/CVE-2025-21595) |  | card text only | Juniper Guard | — |
 | [CVE-2025-22474](https://nvd.nist.gov/vuln/detail/CVE-2025-22474) | Dell OS10 SSRF | detected | Dell Guard | — |
+| [CVE-2025-26651](https://nvd.nist.gov/vuln/detail/CVE-2025-26651) |  | detected | RPC / NetLogon Watch | — |
+| [CVE-2025-29969](https://nvd.nist.gov/vuln/detail/CVE-2025-29969) | EventLogin | detected | RPC / NetLogon Watch | — |
 | [CVE-2025-33073](https://nvd.nist.gov/vuln/detail/CVE-2025-33073) | SMB reflective relay | detected | SMB / Kerberos Watch | — |
 | [CVE-2025-36911](https://nvd.nist.gov/vuln/detail/CVE-2025-36911) | WhisperPair | active check | BLE Pentest (active) | — |
 | [CVE-2025-38741](https://nvd.nist.gov/vuln/detail/CVE-2025-38741) | Duplicate SSH host key | detected | Dell Guard, SSH Watch | — |
@@ -498,12 +511,15 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2026-37459](https://nvd.nist.gov/vuln/detail/CVE-2026-37459) |  | context only | BGP Path Watch | — |
 | [CVE-2026-37461](https://nvd.nist.gov/vuln/detail/CVE-2026-37461) |  | context only | BGP Path Watch | — |
 | [CVE-2026-37462](https://nvd.nist.gov/vuln/detail/CVE-2026-37462) |  | context only | BGP Path Watch | — |
+| [CVE-2026-41089](https://nvd.nist.gov/vuln/detail/CVE-2026-41089) | LongLogon | detected | LDAP Watch | — |
 | [CVE-2026-42944](https://nvd.nist.gov/vuln/detail/CVE-2026-42944) |  | detected | DNS Watch | — |
+| [CVE-2026-50502](https://nvd.nist.gov/vuln/detail/CVE-2026-50502) |  | detected | RPC / NetLogon Watch | — |
 | [CVE-2026-52688](https://nvd.nist.gov/vuln/detail/CVE-2026-52688) |  | detected | DNS Watch | — |
 | [CVE-2026-52896](https://nvd.nist.gov/vuln/detail/CVE-2026-52896) |  | detected | Arista Guard | — |
 | [CVE-2026-52897](https://nvd.nist.gov/vuln/detail/CVE-2026-52897) |  | detected | Arista Guard | — |
 | [CVE-2026-52898](https://nvd.nist.gov/vuln/detail/CVE-2026-52898) |  | detected | Arista Guard | — |
 | [CVE-2026-53275](https://nvd.nist.gov/vuln/detail/CVE-2026-53275) |  | detected | IGMP / MLD Watch | — |
+| [CVE-2026-54121](https://nvd.nist.gov/vuln/detail/CVE-2026-54121) | Certighost | detected | RPC / NetLogon Watch | — |
 | [CVE-2026-56719](https://nvd.nist.gov/vuln/detail/CVE-2026-56719) |  | detected | MikroTik Guard | — |
 | [CVE-2026-67276](https://nvd.nist.gov/vuln/detail/CVE-2026-67276) | MikroTrick SSH key forgery (RouterOS) | detected | MikroTik Guard | — |
 | [CVE-2026-67281](https://nvd.nist.gov/vuln/detail/CVE-2026-67281) |  | detected | MikroTik Guard | — |

@@ -2350,6 +2350,7 @@ def _net_integrity_check_once():
         ('oam', 'Link OAM', lambda: watch(nd.do_oam_watch, interface=cap_iface)),
         ('cfm', 'CFM / Y.1731', lambda: watch(nd.do_cfm_watch, interface=cap_iface)),
         ('rpc', 'RPC', lambda: watch(nd.do_rpc_watch, interface=cap_iface)),
+        ('rdp', 'RDP', lambda: watch(nd.do_rdp_watch, interface=cap_iface)),
         ('bfd', 'BFD', lambda: watch(nd.do_bfd_watch, interface=cap_iface)),
         ('srmpls', 'SR-MPLS', lambda: watch(nd.do_sr_mpls_watch, interface=cap_iface)),
         ('ipsec', 'IPsec', lambda: watch(nd.do_ipsec_watch, interface=cap_iface)),
