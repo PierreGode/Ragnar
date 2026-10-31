@@ -9852,6 +9852,66 @@ async function runRpcWatch() {
     }
 }
 
+// ---- RDP Watch (passive X.224 negotiation posture + abuse) -----------------
+const _RDP_VERDICT_STYLE = {
+    clean:    ['bg-green-950/40 border-green-900 text-green-400', '✓ RDP clean — no Standard-Security, TLS-refusal, NLA-downgrade, Restricted-Admin, cleartext-cookie or brute/spray/scan'],
+    posture:  ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ RDP posture — Restricted Admin, a legacy negotiation path or a horizontal scan seen'],
+    exposure: ['bg-red-950/60 border-red-800 text-red-300', '🛑 RDP exposure — Standard RDP Security selected / TLS refused / NLA not enforced, or brute-force / username-spray'],
+    unknown:  ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _RDP_SEV_STYLE = {
+    high: 'text-red-300', medium: 'text-amber-300', notice: 'text-gray-300', info: 'text-gray-500',
+};
+async function runRdpWatch() {
+    const out = document.getElementById('rdp-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('rdp-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('rdp-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing RDP X.224 negotiation (tcp/3389)…</p>';
+    try {
+        _fillIfaceSel('rdp-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/rdp-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool === 'tcpdump') extra = ' <button onclick="installNetTool(\'tcpdump\', this, runRdpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            else if (d && d.missing_tool === 'scapy') extra = ' <span class="ml-2 text-amber-400">Install Scapy in Detector Self-Test.</span>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _RDP_VERDICT_STYLE[d.verdict] || _RDP_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · findings: ${(d.findings || []).length}</p>`;
+        const findings = (d.findings || []).filter(f => ['high', 'medium', 'notice'].includes(f.severity));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Source</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_RDP_SEV_STYLE[f.severity] || 'text-gray-400'}">${escapeHtml(f.severity)}</td>
+                    <td class="px-2 py-1 font-mono ${_RDP_SEV_STYLE[f.severity] || 'text-gray-300'}">${escapeHtml(f.code || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.src || f.dst || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
 // ---- BFD Watch (forged teardown / failover manipulation) -------------------
 const _BFD_VERDICT_STYLE = {
     clean:                    ['bg-green-950/40 border-green-900 text-green-400', '✓ BFD clean — no forged teardown, malformed header, auth downgrade, GTSM or instability'],
@@ -29461,8 +29521,8 @@ function ulfArsenalAiCopy() {
     } else { fallback(); }
 }
 let ulfEnabled = false;
-function fetchEdition() {
-    fetch('/api/edition')
+function fetchEdition(refresh) {
+    fetch('/api/edition' + (refresh ? '?refresh=1' : ''))
         .then(r => r.ok ? r.json() : null)
         .then(d => {
             const on = d && (d.is_ulfberht || d.is_security_distro);
@@ -29504,10 +29564,114 @@ function fetchEdition() {
                 ars.classList.remove('hidden');
             }
             ulfLoadPlaybooks();
+            ulfLoadExtras();
         })
         .catch(() => { /* standard build / offline: ignore */ });
 }
 document.addEventListener('DOMContentLoaded', fetchEdition);
+
+// ── Ulfberht arsenal extras (on-demand recon/OSINT + WPA-Enterprise install) ─
+let _ulfExtrasPoll = null;
+let _ulfExtrasOpened = false;
+function ulfToggleExtras() {
+    const body = document.getElementById('ulf-extras-body');
+    const chev = document.getElementById('ulf-extras-chevron');
+    if (!body) return;
+    const open = body.classList.toggle('hidden') === false;
+    if (chev) chev.style.transform = open ? 'rotate(90deg)' : '';
+    if (open && !_ulfExtrasOpened) { _ulfExtrasOpened = true; ulfLoadExtras(); }
+}
+function _ulfRenderExtras(d) {
+    const card = document.getElementById('ulf-extras-card');
+    if (!d || d.enabled === false) { if (card) card.classList.add('hidden'); return; }
+    if (card) card.classList.remove('hidden');
+    const cnt = document.getElementById('ulf-extras-count');
+    if (cnt) cnt.textContent = '(' + (d.present || 0) + '/' + (d.total || 0) + ' installed)';
+    const list = document.getElementById('ulf-extras-list');
+    if (list) {
+        list.innerHTML = '';
+        (d.extras || []).forEach(t => {
+            const chip = document.createElement('span');
+            chip.className = 'ulf-chip text-xs px-2 py-0.5 rounded';
+            chip.style.cssText = t.present
+                ? 'background:rgba(22,163,74,0.2);border:1px solid rgba(22,163,74,0.5)'
+                : 'background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12)';
+            chip.title = (t.category || '') + (t.present ? ' · installed' : ' · not installed');
+            chip.textContent = (t.present ? '✓ ' : '○ ') + (t.name || t.bin);
+            list.appendChild(chip);
+        });
+    }
+    const btn = document.getElementById('ulf-extras-install-btn');
+    if (btn) {
+        const allIn = (d.total || 0) > 0 && (d.present || 0) >= (d.total || 0);
+        btn.classList.toggle('hidden', allIn || !!d.installing);
+        btn.disabled = !!d.installing;
+    }
+}
+function ulfLoadExtras() {
+    fetch('/api/ulfberht/extras').then(r => r.json()).then(d => {
+        _ulfRenderExtras(d);
+        if (d && d.installing) ulfStartExtrasPoll();  // an install is already running
+    }).catch(() => {});
+}
+function ulfInstallExtras() {
+    const msg = document.getElementById('ulf-extras-msg');
+    const btn = document.getElementById('ulf-extras-install-btn');
+    if (btn) { btn.disabled = true; btn.classList.add('hidden'); }
+    if (msg) { msg.textContent = ''; }
+    const prog = document.getElementById('ulf-extras-progress');
+    const logEl = document.getElementById('ulf-extras-log');
+    if (logEl) logEl.textContent = '';
+    if (prog) prog.classList.remove('hidden');
+    fetch('/api/ulfberht/extras/install', { method: 'POST' })
+        .then(r => r.json()).then(d => {
+            if (!d.success) {
+                if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || 'Install failed to start.'; }
+                if (prog) prog.classList.add('hidden');
+                ulfLoadExtras();
+                return;
+            }
+            if (!d.installing) {   // already all installed
+                if (msg) { msg.style.color = '#4ade80'; msg.textContent = d.message || 'All extras already installed.'; }
+                if (prog) prog.classList.add('hidden');
+                ulfLoadExtras();
+                return;
+            }
+            ulfStartExtrasPoll();
+        }).catch(() => {
+            if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Install request failed.'; }
+            if (prog) prog.classList.add('hidden');
+        });
+}
+function ulfStartExtrasPoll() {
+    if (_ulfExtrasPoll) return;
+    const prog = document.getElementById('ulf-extras-progress');
+    if (prog) prog.classList.remove('hidden');
+    _ulfExtrasPoll = setInterval(ulfPollExtras, 2000);
+    ulfPollExtras();
+}
+function ulfPollExtras() {
+    fetch('/api/ulfberht/extras/install-log').then(r => r.json()).then(d => {
+        if (!d.success) return;
+        const logEl = document.getElementById('ulf-extras-log');
+        if (logEl && typeof d.log === 'string') { logEl.textContent = d.log; logEl.scrollTop = logEl.scrollHeight; }
+        const st = document.getElementById('ulf-extras-status');
+        if (st) st.textContent = (d.present || 0) + '/' + (d.total || 0) + ' present';
+        _ulfRenderExtras(d);
+        if (!d.installing) {
+            clearInterval(_ulfExtrasPoll); _ulfExtrasPoll = null;
+            const msg = document.getElementById('ulf-extras-msg');
+            const done = (d.total || 0) > 0 && (d.present || 0) >= (d.total || 0);
+            if (msg) {
+                msg.style.color = done ? '#4ade80' : '#fbbf24';
+                msg.textContent = done
+                    ? '✓ All extras installed. Arsenal updated.'
+                    : '⚠ ' + (d.present || 0) + '/' + (d.total || 0) + ' installed — some packages weren’t available on this base (see log).';
+            }
+            fetchEdition(true);   // refresh the Pentest-tab arsenal with the new tools
+        }
+    }).catch(() => {});
+}
 
 // ── Ulfberht Engagements (marker-gated workflow engine) ─────────────────────
 let ulfPlaybooks = [];

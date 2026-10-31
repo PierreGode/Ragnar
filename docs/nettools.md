@@ -80,6 +80,7 @@ matrix to zoom (`/web/images/osi/`).
 | [Cert Watch](#cert-watch) | Diagnostics · L6 | `POST /api/net/cert-watch`, `POST /api/net/cert-baseline` |
 | [SSH Watch](#ssh-watch) | Diagnostics · L5 | `GET /api/net/ssh-watch` |
 | [Telnet Watch](#telnet-watch) | Diagnostics · L5 | `GET /api/net/telnet-watch` |
+| [RDP Watch](#rdp-watch) | Diagnostics · L5 | `GET /api/net/rdp-watch` |
 | [Live Flow Telemetry](#live-flow-telemetry) | Diagnostics · L4 | `GET /api/net/flows` |
 | [LAN Throughput (iperf3)](#lan-throughput-iperf3) | Diagnostics · L4 | `POST /api/net/iperf3`, `/iperf3-server` |
 | [IGMP Watch](#igmp-watch) | Diagnostics · L3 | `GET /api/net/igmp-watch`, `POST /api/net/igmp-baseline` |
@@ -1787,6 +1788,31 @@ handshake, yields:
   directly from the cleartext SKE (TLS 1.2 DHE only; TLS 1.3/QUIC have no ServerKeyExchange),
   which also recovers the real group size for the D(HE)at accounting. NVD 7.5 HIGH; OpenSSL
   rates it Low (*disputed*).
+- **SNI host_name over-read / `CVE-2026-52346` *(new in v11)*** — **`cve_2026_52346_sni_overread`**
+  (high / warn, *attack*): a ClientHello whose declared SNI `host_name` length runs past one of its
+  four RFC 6066 nested containers — the MikroTik RouterOS `xt_tls` out-of-bounds read. Pure arithmetic
+  on the declared lengths, the same shape as the Heartbleed `payload_length` check; **high** only when
+  the read passes the captured handshake message itself (nothing in the packet can satisfy it), **warn**
+  for an inner-container overrun (equally illegal, but not provably off-packet from a reassembled view).
+  The scan runs *independent of* the ClientHello parse (which raises on exactly these over-claims) and
+  scopes out the benign `no_sni` notice when an over-read is present. Fires on TLS, DTLS and QUIC. The
+  wire evidence is a generic TLS grammar violation, so TLS Watch owns it while the RouterOS version
+  bounds live in [MikroTik Guard](#mikrotik-guard); every finding carries `precondition_unobserved`
+  (the device needs a `tls-host` firewall rule, not observable from a tap). Reporter-scored 7.5; no NVD
+  record, so no CVSS vector is invented.
+- **http.sys record-cadence flood / `CVE-2026-47291` *(new in v11)*** — **`cve_2026_47291_record_flood`**
+  (warn / high, *attack*): the `http.sys` per-request buffer-reference-array integer overflow
+  (MSRC 9.8). One reference is added per HTTP/1.x header line, and this is **reachable over TLS only** —
+  SChannel hands `http.sys` one buffer per decrypted record, so one header line per record gives a 1:1
+  count, while plaintext TCP coalescing prevents it. The discriminator is therefore **record cadence**,
+  read off cleartext record headers: a run of client `application_data` records with no server response,
+  the **non-full** ones (below the negotiated ciphertext maximum) the primary signal. Tiers at 1,000
+  (warn), 4,096 and 65,536 non-full records, plus a size-agnostic `padded_or_bulk` catch-all for TLS 1.3
+  record padding. Armed on HTTP/1.x only (h2/h3 excluded from the ServerHello ALPN on TLS 1.2, or the
+  client offer on TLS 1.3); never on QUIC/DTLS. Carries `precondition_unobserved` (needs
+  `MaxRequestBytes` ≥ 262144; the default is not exploitable) and `confidence: heuristic`. **In-app
+  snapshot scope:** fires on the clean no-server-response flood a bounded capture catches, and defers
+  the interleaved keep-alive/multi-request case to the streaming daemon.
 - **Certificate posture (TLS 1.2 over TCP only)** — subject/issuer, SANs, validity
   window, self-issued flag, signature hash, and findings: `cert_expired`,
   `cert_not_yet_valid`, `cert_self_signed`, `cert_short_chain`, `cert_weak_sig`,
@@ -2437,6 +2463,22 @@ so a NetLogon secure channel to a host outside that set is flagged. The verdict 
 `clean` / `posture` / `exposure` / `credential-exposure` / `dcsync` / `zerologon`. The
 hardening it drives: patch DCs and enforce **Secure RPC** to close Zerologon; break
 relay/DCSync with **SMB + LDAP signing**, **channel binding (EPA)** and tiered admin.
+
+**v7** widens the interface surface well beyond Zerologon and the PrintNightmare / WinReg /
+PetitPotam set. It now names **MadLicense** and the full July-2024 **RD Licensing** cluster
+(`CVE-2024-38077` plus the six siblings `-38074 / -38076 / -38071 / -38072 / -38073 / -38099`,
+graded by the authentication **level** rather than anonymity), the hvsocket-only **LSM container**
+interface reached over the network (`CVE-2022-37973 / CVE-2022-37998`), the **RpcGetSessionIds** LSM
+crash (`CVE-2025-26651`, graded by the server's answer), the **Certighost** AD CS "chase"
+(`CVE-2026-54121` — a known CA opening an outbound LSARPC bind to a non-DC) and the **EventLogin**
+MS-EVEN backup-write cluster (`CVE-2025-29969 / CVE-2026-50502`). It adds three **no-CVE** abuse
+surfaces — **ESC11** relay to the AD CS enrollment interfaces (the level the hardening flag changes),
+**MS-DNSP `ServerLevelPluginDll`** (DnsAdmin → SYSTEM) and an **interface inventory** of every bound
+RPC UUID with no rule behind it — plus the WS-Man `/wsman-anon/identify` and Event-Collector
+subscription endpoints. Three further CVEs (`CVE-2021-36936 / CVE-2021-36947 / CVE-2026-50346`) are
+**evaluated and deliberately not claimed** — no observable mechanism, or a local-only vector — so the
+[CVE index](CVE.md) does not count them.
+
 **API:** `GET /api/net/rpc-watch` (query: `interface`, `seconds`, `dcs`).
 
 > **Watchtower feed.** HIGH/CRITICAL RPC/NetLogon/WinRM findings (coercion excluded) are
@@ -2501,6 +2543,16 @@ For **continuous** monitoring there is an opt-in **least-privilege systemd unit*
 (`scripts/ragnar-ldapwatch.service`) that runs `ldap_watch.py --daemon` with **only
 `CAP_NET_RAW`** and streams **JSON-lines** findings (one object per line) to
 `/var/log/ragnar/ldapwatch.jsonl` for the web UI + Pushover.
+
+**v5** adds **LongLogon** (`CVE-2026-41089`), on the two legs that are observable. The **request
+leg** is a **CLDAP DC-locator ping** whose `NtVer` routes to the legacy `BuildSamLogonResponse`
+builder — `(NtVer & 0x0C) == 0 && (NtVer & 0x02) != 0`; modern Windows sets V5EX (`0x04`) and lands
+in the bounds-safe `*Ex` builder, so this is path selection, not proof of exploitation (a legacy
+client can legitimately omit V5EX). The **response leg** is a DC whose own forest / domain / host DNS
+names total enough wide chars to overrun that builder's 528-byte (264 wide-char) stack buffer. It keys
+on the routing bits and the DC's **own** names — never on the attacker's length-capped `User` field,
+which cannot overflow — and reports exposure geometry, not patch state (a patched DC takes the identical
+path and refuses the over-long write). Both legs fire on CLDAP and TCP, IPv4 and IPv6.
 
 Hardening it drives: require **LDAPS/StartTLS** and reject simple binds on cleartext,
 **disable anonymous binds**, enforce **LDAP signing + channel binding (EPA)** on DCs,
@@ -2677,6 +2729,40 @@ plane. **API:** `GET /api/net/telnet-watch`. **CLI:** `telnet-watch`, `telnet-se
 > A `compromised` finding (argument injection, confirmed overflow) lands as **critical** there.
 > The observer also joins the **Network Integrity Monitor** rotation, so its verdict shows as
 > a `Telnet` chip there.
+
+### RDP Watch
+A **passive** RDP negotiation-**posture** and abuse observer — **detection-only, it never transmits,
+probes or verifies**. It reads only the cleartext **X.224 Connection Request / Connection Confirm** on
+**tcp/3389** (MS-RDPBCGR 2.2.1.1 / 2.2.1.2) that precedes TLS or CredSSP — everything after is encrypted
+and opaque — and reports how a session was negotiated, who it exposed, and connection-level abuse.
+**No CVE codes:** this is a posture module. BlueKeep sits below the Windows 10 / Server 2016 floor, and
+DejaBlue / BlueGate / the 2025 RDP-client CVEs trigger inside encryption or are unpublished;
+`CVE-2005-1794` (Standard-Security MITM) is carried as a posture **reference** on RDP-001 / RDP-002 only.
+
+Thirteen finding codes: **RDP-001** Standard RDP Security selected by the server (MITM-able, high),
+**RDP-002** `SSL_NOT_ALLOWED_BY_SERVER` — the server speaks Standard Security only (high), **RDP-003**
+the legacy no-`RDP_NEG` path (medium), **RDP-004** NLA requested but not enforced — a client asked for
+HYBRID / HYBRID_EX and the server selected plain SSL (high), **RDP-005** the negotiation inventory
+(requested vs selected protocol + a `secure` verdict), **RDP-006** `SSL_CERT_NOT_ON_SERVER`; **RDP-010**
+client Restricted-Admin mode — a credential-less logon that enables pass-the-hash, common and legitimate,
+so medium — and **RDP-011** the server advertising it; **RDP-020** a cleartext `mstshash` username in the
+cookie — **length only is recorded, the value never leaves the parser**, and a `msts=` routing token is
+never mistaken for a username; the latching behavioural tier **RDP-030** brute force (≥ 10 Connection
+Requests one→one in 60 s), **RDP-031** username spray (≥ 5 distinct cookie usernames, counted by a per-run
+keyed BLAKE2b digest that is never emitted) and **RDP-032** horizontal scan (one source → ≥ 20
+destinations); and **RDP-040** a malformed negotiation. HYBRID / HYBRID_EX selected and Remote Credential
+Guard are the good states and raise no code.
+
+RDP's TLS layer belongs to [TLS Watch](#tls-watch) and **MadLicense** (RD Licensing) to
+[RPC / NetLogon Watch](#rpc--netlogon-watch); neither is duplicated here. The filter keeps a bare `ip6`
+term so IPv6 behind extension headers is captured (a software port gate rejects the rest), and every
+finding carries an `af`. The verdict is `clean` / `posture` / `exposure`. **API:**
+`GET /api/net/rdp-watch` (query: `interface`, `seconds`).
+
+> **Watchtower feed.** HIGH RDP findings are appended as JSON-lines to
+> `/var/log/ragnar/rdp_watch.jsonl` (time-window deduplicated per code + source), so
+> [Watchtower](#watchtower) folds them into the unified alert pane and single Pushover path, and the
+> observer joins the **Network Integrity Monitor** rotation, so its verdict shows as an `RDP` chip there.
 
 ### DTP Watch
 A **passive** VLAN-hopping / switch-spoofing scanner for Cisco's **Dynamic Trunking

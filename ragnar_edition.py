@@ -71,6 +71,33 @@ _TOOL_CATALOG = (
     ("enum4linux", "enum4linux", "smb"),
     ("crackmapexec", "CrackMapExec", "smb"),
     ("netexec", "NetExec", "smb"),
+    # ── Active Directory / internal (baked into the Ulfberht image) ──────────
+    # Representative impacket binary; impacket-scripts installs many (impacket-*).
+    ("impacket-secretsdump", "Impacket", "ad"),
+    ("evil-winrm", "Evil-WinRM", "ad"),
+    ("certipy", "Certipy (AD CS)", "ad"),
+    ("kerbrute", "Kerbrute", "ad"),
+    ("bloodhound-python", "BloodHound.py", "ad"),
+    ("ldapdomaindump", "ldapdomaindump", "ad"),
+    ("windapsearch", "windapsearch", "ad"),
+    # ── Pivoting (baked into the Ulfberht image) ─────────────────────────────
+    ("ligolo-proxy", "Ligolo-ng", "pivot"),
+    ("chisel", "Chisel", "pivot"),
+    ("sshuttle", "sshuttle", "pivot"),
+    ("proxychains4", "proxychains4", "pivot"),
+    # ── Recon / OSINT (optional extras — install from the Engagements tab) ────
+    ("subfinder", "Subfinder", "recon"),
+    ("httpx", "httpx", "recon"),
+    ("dnsx", "dnsx", "recon"),
+    ("katana", "Katana", "web"),
+    ("dnsrecon", "DNSRecon", "recon"),
+    ("dnsenum", "dnsenum", "recon"),
+    ("theHarvester", "theHarvester", "recon"),
+    ("searchsploit", "SearchSploit", "exploit"),
+    # ── Wi-Fi extras (optional — install from the Engagements tab) ───────────
+    ("mdk4", "MDK4", "wifi"),
+    ("eaphammer", "EAPHammer", "wifi"),
+    ("hostapd-wpe", "hostapd-wpe", "wifi"),
 )
 
 # Nexmon packages (onboard-Wi-Fi monitor/injection support on the Ulfberht base).

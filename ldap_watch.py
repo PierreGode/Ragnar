@@ -100,6 +100,92 @@ FILTER_NEST_DEPTH = 12          # nested boolean-filter depth that trips the Ope
                                 # slapd stack-exhaustion crash (CVE-2020-12243)
 CLDAP_AMPLIFICATION = 4.0       # response/request byte ratio flagged as reflector
 
+# CVE-2026-41089 "LongLogon": a CLDAP DC-locator ping whose NtVer routes to the
+# legacy (bounds-unsafe) BuildSamLogonResponse builder, and a DC whose OWN forest/
+# domain/host DNS names are long enough to overrun that builder's 528-byte
+# (264 wide-char) stack buffer. Detected on the two legs that are observable; the
+# attacker's User field is capped by the binary and cannot overflow it, so there is
+# deliberately NO length rule on the request. Patch state is not passively
+# observable (a patched DC takes the identical path and refuses the over-long write).
+NTVER_V5            = 0x00000002    # MS-ADTS 6.3.1.1
+NTVER_V5EX          = 0x00000004
+NTVER_V5EX_WITH_IP  = 0x00000008
+# Netlogon opcodes (MS-ADTS 6.3.1.9): the legacy pair is served by the vulnerable
+# BuildSamLogonResponse, the *_EX pair by the bounds-safe BuildSamLogonResponseEx.
+NETLOGON_LEGACY_OPS = frozenset({19, 21})   # SAM_LOGON_RESPONSE, SAM_USER_UNKNOWN
+NETLOGON_EX_OPS     = frozenset({23, 25})   # ..._EX
+NETLOGON_LEGACY_BUFFER_WCHARS = 264         # the 528-byte legacy stack buffer
+NETLOGON_FILL_FLOOR = 305                   # wide chars; anchored to the published lab crash point
+
+
+def _ntver_routes_legacy(ntver):
+    """True when an NtVer value routes a DC-locator ping to the VULNERABLE legacy
+    BuildSamLogonResponse rather than the bounds-safe *Ex builder: (NtVer & 0x0C) == 0
+    and (NtVer & 0x02) != 0. Public PoCs send 0x16/0x06 (V5EX set) and land in the
+    *Ex builder, never triggering the bug."""
+    return (ntver & (NTVER_V5EX | NTVER_V5EX_WITH_IP)) == 0 and (ntver & NTVER_V5) != 0
+
+
+def _nl_utf16_z(buf, off):
+    """Skip one NUL-terminated UTF-16LE string; returns the next offset."""
+    end = off
+    while end + 1 < len(buf) and buf[end:end + 2] != b'\x00\x00':
+        end += 2
+    return min(end + 2, len(buf))
+
+
+def _nl_rfc1035_name(buf, off, _depth=0):
+    """Read one RFC 1035 label-encoded name -> (text, next_offset). Compression
+    pointers are followed for the value but never advance the caller's cursor; the
+    recursion is depth-capped so a self-referential pointer cannot loop."""
+    labels, cur, after = [], off, None
+    while cur < len(buf) and _depth < 16:
+        ln = buf[cur]
+        if ln == 0:
+            cur += 1
+            break
+        if ln & 0xC0 == 0xC0:                       # compression pointer
+            if cur + 1 >= len(buf):
+                break
+            ptr = ((ln & 0x3F) << 8) | buf[cur + 1]
+            after = cur + 2
+            sub, _ = _nl_rfc1035_name(buf, ptr, _depth + 1)
+            if sub:
+                labels.append(sub)
+            cur = after
+            break
+        if cur + 1 + ln > len(buf):
+            break
+        labels.append(buf[cur + 1:cur + 1 + ln].decode('utf-8', 'replace'))
+        cur += 1 + ln
+    return '.'.join(l for l in labels if l), (after if after is not None else cur)
+
+
+def parse_netlogon_response(blob):
+    """Decode the three DNS names a DC advertises in a NETLOGON_SAM_LOGON_RESPONSE[_EX].
+    Those names are what BuildSamLogonResponse serializes into its fixed stack buffer,
+    so their combined length is the CVE-2026-41089 overflow precondition. Returns a
+    dict or None when the blob is not a recognisable netlogon response."""
+    if len(blob) < 4:
+        return None
+    op = int.from_bytes(blob[0:2], 'little')
+    if op in NETLOGON_EX_OPS:
+        off = 2 + 2 + 4 + 16                        # Sbz, Flags, DomainGuid
+    elif op in NETLOGON_LEGACY_OPS:
+        off = 2
+        for _ in range(3):                          # LogonServer, UserName, DomainName
+            off = _nl_utf16_z(blob, off)
+        off += 16                                   # DomainGuid
+    else:
+        return None
+    if off >= len(blob):
+        return None
+    forest, off = _nl_rfc1035_name(blob, off)
+    domain, off = _nl_rfc1035_name(blob, off)
+    host, off = _nl_rfc1035_name(blob, off)
+    return {'legacy': op in NETLOGON_LEGACY_OPS, 'dns_forest': forest,
+            'dns_domain': domain, 'dns_host': host}
+
 
 # =============================================================================
 # BER / ASN.1 - hand-rolled definite-length decoder (no library dissectors)
@@ -195,9 +281,14 @@ def ber_oid(buf, start, end):
 # =============================================================================
 # LDAPMessage decode
 # =============================================================================
-def _decode_filter(buf, tag_off, hard_end, raw_values, depth=0, meta=None):
+def _decode_filter(buf, tag_off, hard_end, raw_values, depth=0, meta=None,
+                   equalities=None):
     """Render the Filter TLV whose tag byte is at tag_off to its RFC 4515 string
     form, collecting raw assertion values into `raw_values` for injection checks.
+    When `equalities` is given, (attr-lower, raw-value-bytes) pairs of equality
+    matches are collected into it too — the netlogon DC-locator ping carries NtVer
+    as a 4-byte equality value whose binary bytes a string render would mangle
+    (CVE-2026-41089).
     `meta` (a dict) accumulates the maximum boolean-nesting depth reached, so the
     analyzer can flag the OpenLDAP nested-filter DoS (CVE-2020-12243)."""
     if meta is not None and depth > meta.get('max_depth', 0):
@@ -221,7 +312,8 @@ def _decode_filter(buf, tag_off, hard_end, raw_values, depth=0, meta=None):
                 _t, _cvs, _cve, nxt = ber_tlv(buf, i)
             except BERError:
                 break
-            inner += _decode_filter(buf, i, ve, raw_values, depth + 1, meta)
+            inner += _decode_filter(buf, i, ve, raw_values, depth + 1, meta,
+                                    equalities)
             i = nxt
         return '(' + op + inner + ')'
     if tag == _F_PRESENT:                        # [7] primitive: attribute present
@@ -233,6 +325,9 @@ def _decode_filter(buf, tag_off, hard_end, raw_values, depth=0, meta=None):
             attr = ber_str(buf, kids[0][1], kids[0][2])
             val = ber_str(buf, kids[1][1], kids[1][2])
             raw_values.append(val)
+            if equalities is not None and tag == _F_EQ:
+                equalities.append((attr.lower(),
+                                   bytes(buf[kids[1][1]:kids[1][2]])))
             return '(' + attr + sym + val + ')'
         return '(=)'
     if tag == _F_SUBSTR:                          # [4] substrings
@@ -250,6 +345,25 @@ def _decode_filter(buf, tag_off, hard_end, raw_values, depth=0, meta=None):
     if tag == _F_EXT:
         return '(extensibleMatch)'
     return '(?)'
+
+
+def _entry_netlogon_vals(buf, attr_seq):
+    """Raw AttributeValue bytes of the 'netlogon' attribute in a SearchResultEntry's
+    PartialAttributeList (the entry's second child). Returns [] when absent. Used for
+    the CVE-2026-41089 overflow-precondition check; binary-safe (no string decode)."""
+    out = []
+    try:
+        for _at, pvs, pve in ber_children(buf, attr_seq[1], attr_seq[2]):
+            pk = list(ber_children(buf, pvs, pve))
+            if len(pk) < 2:
+                continue
+            if ber_str(buf, pk[0][1], pk[0][2]).lower() != 'netlogon':
+                continue
+            for _vt, vvs, vve in ber_children(buf, pk[1][1], pk[1][2]):
+                out.append(bytes(buf[vvs:vve]))
+    except BERError:
+        pass
+    return out
 
 
 def parse_ldap_message(buf, start, end):
@@ -282,6 +396,8 @@ def parse_ldap_message(buf, start, end):
             msg['op'] = 'search-entry'
             ek = list(ber_children(buf, ops, ope))
             msg['dn'] = ber_str(buf, ek[0][1], ek[0][2]) if ek else ''
+            msg['netlogon_vals'] = (_entry_netlogon_vals(buf, ek[1])
+                                    if len(ek) >= 2 else [])
         elif op_tag == OP_SEARCH_DONE:
             msg['op'] = 'search-done'
             msg['result_code'] = _first_enum(buf, ops, ope)
@@ -377,9 +493,12 @@ def _decode_search_request(buf, start, end, msg):
     msg['base'] = ber_str(buf, kids[0][2], kids[0][3])
     msg['scope'] = ber_int(buf, kids[1][2], kids[1][3])
     raw_values = []
+    equalities = []
     fmeta = {'max_depth': 0, 'truncated': False}
-    msg['filter'] = _decode_filter(buf, kids[6][1], kids[6][3], raw_values, meta=fmeta)
+    msg['filter'] = _decode_filter(buf, kids[6][1], kids[6][3], raw_values,
+                                   meta=fmeta, equalities=equalities)
     msg['assertion_values'] = raw_values
+    msg['filter_equalities'] = equalities
     msg['filter_max_depth'] = fmeta['max_depth']
     msg['filter_depth_truncated'] = fmeta['truncated']
     attrs = []
@@ -470,6 +589,9 @@ class LdapDetector:
         self.cldap_resp_bytes = {}
         self.stats = {'ldap_messages': 0, 'binds': 0, 'searches': 0,
                       'extended': 0, 'cldap': 0, 'flows': 0}
+        # CVE-2026-41089 correlation / once-per-DC latches, keyed by server ip.
+        self._legacy_ntver_dcs = set()   # DCs seen receiving a legacy-routed ping
+        self._netlogon_flagged = set()   # DCs already reported for the overflow precond
 
     # -- helpers --------------------------------------------------------------
     def _add(self, flowkey, sev, code, message):
@@ -502,10 +624,15 @@ class LdapDetector:
             self._check_referrals(flowkey, msg.get('referrals'))
         elif op == 'search-ref':
             self._check_referrals(flowkey, msg.get('referrals'))
+        elif op == 'search-entry':
+            # CVE-2026-41089 response leg (a netlogon ping can also ride TCP/389).
+            self._check_netlogon_precond(flowkey, msg, server_ip=src)
         elif op == 'search-req':
             self.stats['searches'] += 1
             self.searches[src] = self.searches.get(src, 0) + 1
             self._check_search(flowkey, msg, cleartext)
+            # CVE-2026-41089 request leg: a DC-locator ping routed to the legacy builder.
+            self._check_netlogon_ntver(flowkey, msg, server_ip=dst)
         elif op == 'ext-req':
             self.stats['extended'] += 1
             if msg.get('ext_name') == 'starttls':
@@ -638,8 +765,18 @@ class LdapDetector:
         flowkey = (src, sport, dst, dport)
         if is_response:
             self.cldap_resp_bytes[src] = self.cldap_resp_bytes.get(src, 0) + len(payload)
+            # CVE-2026-41089 response leg: does this DC's own advertised DNS names
+            # meet the legacy-netlogon-builder overflow precondition?
+            msg = parse_ldap_message(payload, 0, len(payload))
+            if msg and msg.get('op') == 'search-entry':
+                self._check_netlogon_precond(flowkey, msg, server_ip=src)
             return
         self.cldap_req_bytes[dst] = self.cldap_req_bytes.get(dst, 0) + len(payload)
+        # CVE-2026-41089 request leg: a DC-locator ping whose NtVer routes to the
+        # vulnerable legacy BuildSamLogonResponse builder (the DC is the destination).
+        msg = parse_ldap_message(payload, 0, len(payload))
+        if msg and msg.get('op') == 'search-req':
+            self._check_netlogon_ntver(flowkey, msg, server_ip=dst)
         # A CLDAP query whose source is off-subnet can be a spoofed victim address -
         # i.e. this DC is being used as a reflection amplifier.
         if local_nets is not None and not _ip_in_nets(src, local_nets):
@@ -647,6 +784,56 @@ class LdapDetector:
                       'CLDAP (UDP/389) query from off-subnet source %s - if spoofed, '
                       'this DC is an open reflector for UDP amplification DDoS. '
                       'Restrict UDP/389 at the edge' % src)
+
+    def _check_netlogon_ntver(self, flowkey, msg, server_ip=None):
+        """CVE-2026-41089 'LongLogon' request leg: an NtVer in a DC-locator ping that
+        routes to the vulnerable legacy BuildSamLogonResponse builder. Keyed on the
+        routing bits, never on a length (the attacker's User field cannot overflow)."""
+        for attr, raw in (msg.get('filter_equalities') or ()):
+            if attr != 'ntver' or len(raw) != 4:
+                continue
+            ntver = int.from_bytes(raw, 'little')
+            if not _ntver_routes_legacy(ntver):
+                continue
+            if server_ip:
+                self._legacy_ntver_dcs.add(server_ip)
+            self._add(flowkey, 'high', 'netlogon-ntver-anomaly',
+                      "CLDAP netlogon DC-locator ping with NtVer=0x%08x (V5 set, V5EX "
+                      "clear) routes to the legacy BuildSamLogonResponse builder - the "
+                      "CVE-2026-41089 'LongLogon' path (LSASS DoS / RCE). Modern Windows "
+                      "sets V5EX (0x04) and lands in the bounds-safe *Ex builder; this is "
+                      "path selection, not proof of exploitation (a legacy client can "
+                      "legitimately omit V5EX)" % ntver)
+            break
+
+    def _check_netlogon_precond(self, flowkey, msg, server_ip=None):
+        """CVE-2026-41089 'LongLogon' response leg: a DC whose own forest/domain/host
+        DNS names total enough wide chars to overrun the legacy builder's fixed stack
+        buffer. The write bytes are the DC's OWN names, not any attacker field, so this
+        is exposure geometry - patch state is NOT observable passively. Latched per DC."""
+        for blob in (msg.get('netlogon_vals') or ()):
+            info = parse_netlogon_response(blob)
+            if not info:
+                continue
+            fill = (len(info['dns_forest']) + len(info['dns_domain'])
+                    + len(info['dns_host']) + 3)      # + a NUL per name
+            if fill < NETLOGON_FILL_FLOOR:
+                continue
+            if server_ip and server_ip in self._netlogon_flagged:
+                break
+            if server_ip:
+                self._netlogon_flagged.add(server_ip)
+            also = (' (a legacy-routed ping was also seen to this DC)'
+                    if server_ip in self._legacy_ntver_dcs else '')
+            self._add(flowkey, 'high', 'netlogon-overflow-precond',
+                      "DC advertises forest/domain/host DNS names totalling %d wide chars "
+                      "vs the %d-wide-char legacy netlogon stack buffer - the CVE-2026-41089 "
+                      "'LongLogon' overflow PRECONDITION%s. The overflowing bytes are the "
+                      "DC's OWN DNS names, not any attacker payload; patch state is not "
+                      "observable passively (a patched DC takes the identical path and "
+                      "refuses the over-long write)"
+                      % (fill, NETLOGON_LEGACY_BUFFER_WCHARS, also))
+            break
 
     def finalize_cldap(self):
         for host, rbytes in self.cldap_resp_bytes.items():
@@ -1152,6 +1339,45 @@ def selftest():
         ck('malformed_no_raise', True)
     except Exception:
         ck('malformed_no_raise', False)
+
+    # 15-16. CVE-2026-41089 "LongLogon" (CLDAP netlogon).
+    def _nl_name(s):                                    # RFC 1035 labels (<= 63 each)
+        out = b''
+        for label in s.split('.'):
+            out += bytes([len(label)]) + label.encode()
+        return out + b'\x00'
+
+    def _nl_blob(forest, domain, host):                 # legacy SAM_LOGON_RESPONSE (op 19)
+        return ((19).to_bytes(2, 'little')
+                + '\\\\DC01'.encode('utf-16-le') + b'\x00\x00'
+                + 'user'.encode('utf-16-le') + b'\x00\x00'
+                + 'CORP'.encode('utf-16-le') + b'\x00\x00'
+                + b'\x00' * 16                          # DomainGuid
+                + _nl_name(forest) + _nl_name(domain) + _nl_name(host))
+
+    def _nl_entry(blob):                                # SearchResultEntry carrying Netlogon
+        partial = _tlv(_T_SEQUENCE, _octet('Netlogon') + _tlv(0x31, _octet(blob)))
+        return _ldap_message(2, _tlv(OP_SEARCH_ENTRY,
+                                     _octet('') + _tlv(_T_SEQUENCE, partial)))
+
+    # Request leg: an NtVer that routes to the legacy builder fires; V5EX set is quiet.
+    ping = _search_req('', 0, _f_equal('NtVer', (0x02).to_bytes(4, 'little')), ['Netlogon'])
+    r = detect([], cldap=[('10.0.0.5', 50000, '10.0.0.1', 389, ping, False, None)])
+    ck('netlogon_ntver_anomaly', 'netlogon-ntver-anomaly' in codes(r))
+    ck('netlogon_ntver_verdict', r['verdict'], 'suspicious')
+    ping_ex = _search_req('', 0, _f_equal('NtVer', (0x16).to_bytes(4, 'little')), ['Netlogon'])
+    r = detect([], cldap=[('10.0.0.5', 50000, '10.0.0.1', 389, ping_ex, False, None)])
+    ck('netlogon_v5ex_clean', 'netlogon-ntver-anomaly' not in codes(r))
+
+    # Response leg: a DC with pathologically long DNS names meets the overflow
+    # precondition; a normally-named DC does not.
+    long_entry = _nl_entry(_nl_blob('forest', '.'.join(['x' * 60] * 5), 'host'))
+    r = detect([], cldap=[('10.0.0.1', 389, '10.0.0.5', 50000, long_entry, True, None)])
+    ck('netlogon_overflow_precond', 'netlogon-overflow-precond' in codes(r))
+    short_entry = _nl_entry(_nl_blob('forest.example.com', 'corp.example.com',
+                                     'dc01.corp.example.com'))
+    r = detect([], cldap=[('10.0.0.1', 389, '10.0.0.9', 50000, short_entry, True, None)])
+    ck('netlogon_short_names_clean', 'netlogon-overflow-precond' not in codes(r))
 
     # 14. PASSIVE proof: this source contains no packet-transmit primitives.
     ck('no_transmit_primitives', _scan_for_transmit_primitives(), [])

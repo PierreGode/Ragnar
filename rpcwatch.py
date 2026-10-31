@@ -167,13 +167,40 @@ IF_SVCCTL = "367abb81-9844-35f1-ad32-98f038001003"
 IF_ATSVC = "1ff70682-0a51-30e8-076d-740be8cee98b"
 IF_ITASKSCHED = "86d35949-83c9-4044-b424-db363231fd0c"
 IF_WINREG = "338cd001-2244-31f1-aaaa-900038001003"
+# Terminal Server / Remote Desktop Licensing (lserver.exe), CVE-2024-38077
+# "MadLicense".  No MS open specification exists for this interface, so the
+# provenance of each constant is recorded next to it rather than assumed.
+IF_TSLICENSING = "3d267954-eeb7-11d1-b94e-00c04fa3080d"
 IF_BKRP = "3dde7c30-165d-11d1-ab8f-00805f14db40"
 IF_EPM = "e1af8308-5d1f-11c9-91a4-08002b14a0fa"
 IF_ISYSTEMACTIVATOR = "000001a0-0000-0000-c000-000000000046"
 IF_SRVSVC = "4b324fc8-1670-01d3-1278-5a47bf6ee188"
 IF_WKSSVC = "6bffd098-a112-3610-9833-46c3f87e345a"
 
+# Promoted out of the reference table once they earned a rule of their own:
+# MS-ICPR and MS-WCCE for ESC11, MS-DNSP for the ServerLevelPluginDll path.
+IF_ICPR = "91ae6020-9e3c-11cf-8d7c-00aa00c091be"
+IF_WCCE_CERTREQD = "d99e6e70-fc88-11d0-b498-00a0c90312f3"
+IF_DNSSERVER = "50abc2a4-574d-40b3-9d66-ee4fd5fba076"
+# MS-TSTS TermSrvEnumeration, reached over \pipe\LSM_API_service.  Opnum 8
+# RpcGetSessionIds is an unimplemented stub on Win11/Server 2025 that crashes
+# LSM on a single call (CVE-2025-26651).  Confirmed against MS-TSTS Appendix A.
+IF_TSTS_ENUM = "88143fd0-c28d-4b2b-8fef-8d882f6a9390"
+# The LSM container-management interface (TermSrv).  No MS open spec - the UUID
+# and method names come from Akamai's research (Ben Barnea): it is meant only
+# for Hyper-V containers over hvsocket, but endpoint multiplexing makes it
+# reachable over \pipe\LSM_API_service.  A network bind is never legitimate
+# (CVE-2022-37973 memory-leak crash, CVE-2022-37998 critical-section deadlock).
+IF_LSM_CONTAINER = "c938b419-5092-4385-8360-7cdc9625976a"
+
 INTERFACES = {
+    IF_ICPR: ("icertpassage", "certenroll", "MS-ICPR ICertPassage"),
+    IF_WCCE_CERTREQD: ("icertrequestd", "certenroll",
+                       "MS-WCCE ICertRequestD"),
+    IF_DNSSERVER: ("dnsserver", "dnsadmin", "MS-DNSP DNS Server Management"),
+    IF_TSTS_ENUM: ("termsrv-enum", "lsm", "MS-TSTS TermSrvEnumeration (LSM)"),
+    IF_LSM_CONTAINER: ("lsm-container", "lsm",
+                       "TermSrv container interface (hvsocket-only; Akamai)"),
     IF_NETLOGON: ("netlogon", "netlogon", "MS-NRPC Netlogon Remote Protocol"),
     IF_LSARPC: ("lsarpc", "directory", "MS-LSAD/LSAT Local Security Authority"),
     IF_SAMR: ("samr", "directory", "MS-SAMR Security Account Manager"),
@@ -188,6 +215,8 @@ INTERFACES = {
     IF_SVCCTL: ("svcctl", "exec", "MS-SCMR Service Control Manager Remote"),
     IF_ATSVC: ("atsvc", "exec", "MS-TSCH Task Scheduler (ATSvc)"),
     IF_ITASKSCHED: ("itaskschedulerservice", "exec", "MS-TSCH Task Scheduler Service"),
+    IF_TSLICENSING: ("tslicensing", "exec",
+                     "Terminal Server Licensing (MS-RDL, \\pipe\\HydraLsPipe)"),
     IF_WINREG: ("winreg", "exec", "MS-RRP Remote Registry"),
     IF_BKRP: ("backupkey", "directory", "MS-BKRP BackupKey Remote (DPAPI)"),
     IF_EPM: ("epmapper", "epm", "DCE Endpoint Mapper"),
@@ -195,6 +224,54 @@ INTERFACES = {
     IF_SRVSVC: ("srvsvc", "other", "MS-SRVS Server Service Remote"),
     IF_WKSSVC: ("wkssvc", "other", "MS-WKST Workstation Service Remote"),
 }
+
+# ---------------------------------------------------------------------------
+# Reference catalogue: network-reachable Windows RPC interfaces that rpcwatch
+# knows about but has no RULE for.
+#
+# INTERFACES above is the WATCHED set - every entry there has at least one
+# finding behind it, and its class drives behaviour (a "coercion" class arms
+# the coercion-call path).  This table is deliberately separate and inert.
+# Nothing here is classified, so nothing here can arm a rule by accident; it
+# exists so that a bind to one of these is reported as a DOCUMENTED interface
+# nobody is watching, rather than as an unknown one.
+#
+# That distinction is the whole value of the inventory finding.  "An
+# uncatalogued UUID appeared" is noise on a real network.  "A documented
+# Windows RPC interface with no rule behind it appeared" is an inventory fact,
+# and "a UUID in neither table appeared" is third-party or bespoke RPC that no
+# enumeration of Microsoft's own specs will ever cover.
+#
+# Sources are the MS open specs named in each value; the RD Licensing
+# interface is in INTERFACES, not here, because it has a rule.  ALPC- and
+# ncalrpc-only interfaces are excluded on purpose: they never reach a tap.
+REFERENCE_INTERFACES = {
+    # core / infrastructure
+    "99fcfec4-5260-101b-bbcb-00aa0021347a": "MS-DCOM IObjectExporter",
+    "4d9f4ab8-7d1c-11cf-861e-0020af6e7c57": "MS-DCOM IRemoteActivation (legacy)",
+    "378e52b0-c0a9-11cf-822d-00aa0051e40f": "MS-TSCH SASec",
+    "f6beaff7-1e19-4fbb-9f8f-b89e2018337c": "MS-EVEN6 IEventService",
+    "894de0c0-0d55-11d3-a322-00c04fa321a1": "MS-RSP InitShutdown",
+    "d95afe70-a6d5-4259-822e-2c84da1ddb0d": "MS-RSP WindowsShutdown",
+    "8fb6d884-2388-11d0-8c35-00c04fda2795": "MS-W32T W32Time",
+    "f309ad18-d86a-11d0-a075-00c04fb68820": "MS-WMI IWbemLevel1Login",
+    # file / print / SMB-adjacent
+    "6bffd098-a112-3610-9833-012892020162": "MS-BRWSA browser (legacy)",
+    "897e2e5f-93f3-4376-9c9c-fd2277495c27": "MS-FRS2 FrsTransport",
+    "f5cc59b4-4264-101a-8c59-08002b2f8426": "MS-FRS1 frsrpc (legacy)",
+    # identity / domain controller
+    "3919286a-b10c-11d0-9ba8-00c04fd92ef5": "MS-DSSP dssetup",
+    "b9785960-524f-11df-8b6d-83dcded72085": "MS-GKDI ISDKey",
+    # role services, present only when the role is installed
+    "6bffd098-a112-3610-9833-46c3f874532d": "MS-DHCPM dhcpsrv",
+    "5b821720-f63b-11d0-aad2-00c04fc324db": "MS-DHCPM dhcpsrv2",
+    "484809d6-4239-471b-b5bc-61df8c23ac48": "MS-TSTS LSM session",
+    "5ca4a760-ebb1-11cf-8611-00a0245420ed": "MS-TSTS winstation_rpc",
+    "906b0ce0-c70b-1067-b317-00dd010662da": "MS-CMPO IXnRemote (MSDTC)",
+    "b97db8b2-4c63-11cf-bff6-08002be23f2f": "MS-CMRP clusapi",
+    "ccd8c074-d0e5-4a40-92b4-d074faa6ba28": "MS-SWN Witness",
+}
+
 
 # Transfer syntaxes
 XFER_NDR32 = "8a885d04-1ceb-11c9-9fe8-08002b104860"
@@ -295,9 +372,6 @@ COERCION_CALLS = {
     IF_PAR: {
         14: "RpcAsyncOpenPrinter",
     },
-    IF_EVEN: {
-        9: "ElfrOpenBELW",
-    },
 }
 
 # Opnums that are lateral-movement primitives rather than coercion.
@@ -371,6 +445,20 @@ MSV_AV_FLAGS_MIC = 0x00000002
 
 WINRM_HTTP_PORT = 5985
 WINRM_HTTPS_PORT = 5986
+
+# WS-Man compatibility listeners.  EnableCompatibilityHttpListener and its
+# HTTPS twin put /wsman on tcp/80 and tcp/443, and the optional WinRM IIS
+# Extension serves it from IIS on the same two ports.  Both are off by
+# default on Windows, and both are indistinguishable from ordinary web
+# traffic until the request line is read.
+#
+# So they are opt-in here, for the same reason --dynamic-range and --ipv6-eh
+# are: watching 80 and 443 on a datacentre segment means watching the web,
+# and on a Zero 2W that cost is real.  Everything downstream still gates on
+# the /wsman path, so enabling them does not turn rpcwatch into an HTTP IDS.
+WSMAN_COMPAT_HTTP_PORT = 80
+WSMAN_COMPAT_HTTPS_PORT = 443
+HTTPAPI_BANNER = "microsoft-httpapi"
 EPMAPPER_PORT = 135
 SMB_PORT = 445
 NBT_SESSION_PORT = 139
@@ -448,6 +536,73 @@ FINDINGS = {
     "RPC-NTLM-NO-MIC": (
         "medium", "auth",
         "NTLM AUTHENTICATE without a MIC - relay-protection absent"),
+    "RPC-PRINTNIGHTMARE-DRIVER-ADD": (
+        "critical", "interface",
+        "Printer driver installation call (PrintNightmare CVE-2021-34527 / "
+        "CVE-2021-1675); opnum is cleartext even when the stub is sealed"),
+    "RPC-EVENTLOG-BACKUP-WRITE": (
+        "critical", "interface",
+        "MS-EVEN event-log backup used as an arbitrary file-write primitive "
+        "(EventLogin, CVE-2025-29969 / CVE-2026-50502) - off-box source or a "
+        "destination that is not a .evtx log"),
+    "RPC-EVENTLOG-PATH-PROBE": (
+        "low", "interface",
+        "Burst of ElfrOpenBELW opens against varied paths - the unfixed "
+        "arbitrary-path-existence check in MS-EVEN, used for enumeration"),
+    "RPC-LSM-CONTAINER-REMOTE": (
+        "high", "interface",
+        "Bind to the LSM container interface (hvsocket-only) over the network "
+        "- never legitimate remotely; a sustained call loop crashes LSM "
+        "(CVE-2022-37973 / CVE-2022-37998)"),
+    "RPC-LSM-GETSESSIONIDS-CRASH": (
+        "high", "interface",
+        "MS-TSTS RpcGetSessionIds (opnum 8) from the network - an "
+        "unimplemented stub on current builds that crashes LSM on one call "
+        "(CVE-2025-26651)"),
+    "RPC-ADCS-CHASE": (
+        "critical", "interface",
+        "AD CS enrollment host opened an outbound LSARPC bind to a non-DC "
+        "shortly after serving a certificate request - the Certighost DC "
+        "'chase' (CVE-2026-54121)"),
+    "RPC-CERTENROLL-RELAY-LEVEL": (
+        "high", "interface",
+        "AD CS certificate enrollment interface bound below "
+        "RPC_C_AUTHN_LEVEL_PKT_PRIVACY (ESC11) - either "
+        "IF_ENFORCEENCRYPTICERTREQUEST is off or an NTLM relay is in "
+        "progress"),
+    "RPC-DNS-SERVERLEVELPLUGINDLL": (
+        "critical", "interface",
+        "R_DnssrvOperation setting ServerLevelPluginDll - the DNS server "
+        "will load this DLL in-process as SYSTEM (DnsAdmin to SYSTEM)"),
+    "RPC-INTERFACE-UNCATALOGUED": (
+        "low", "interface",
+        "Bind to an RPC interface with no rule behind it - a documented "
+        "Windows interface nobody is watching, or third-party RPC entirely; "
+        "inventory, not a vulnerability"),
+    "RPC-WINREG-RELAY-FALLBACK": (
+        "high", "auth",
+        "Remote Registry bound over ncacn_ip_tcp at RPC_C_AUTHN_LEVEL_CONNECT "
+        "(CVE-2024-43532) - the insecure transport fallback used for NTLM relay"),
+    "RPC-LSA-ANONYMOUS-COERCION": (
+        "critical", "interface",
+        "Unauthenticated coercion call on the LSARPC pipe (CVE-2022-26925, "
+        "PetitPotam) - anonymous access is the vulnerability"),
+    "RPC-RUNTIME-BINDACK-UNDERFLOW": (
+        "critical", "protocol",
+        "Malformed big-endian bind_ack with a zero secondary address length "
+        "(CVE-2022-26809) - the RPC runtime integer underflow"),
+    "WINRM-HTTPSYS-ACCEPT-ENCODING": (
+        "high", "winrm",
+        "Malformed Accept-Encoding with an empty coding-list element "
+        "(CVE-2021-31166 / CVE-2022-21907 http.sys kernel RCE)"),
+    "RPC-TSLICENSING-PREAUTH": (
+        "critical", "interface",
+        "RD Licensing interface reached below RPC_C_AUTHN_LEVEL_PKT_PRIVACY "
+        "(CVE-2024-38077 MadLicense) - heap spray or the overflow call"),
+    "RPC-WINSPOOL-RELAY-LEVEL": (
+        "high", "auth",
+        "IRemoteWinSpool bound below RPC_C_AUTHN_LEVEL_PKT_PRIVACY "
+        "(CVE-2021-1678) - the insufficient auth level an NTLM relay needs"),
     "RPC-NTLM-ANONYMOUS": (
         "high", "auth",
         "Anonymous / null NTLM authentication to an RPC interface"),
@@ -489,7 +644,8 @@ FINDINGS = {
     # --- WinRM ------------------------------------------------------------
     "WINRM-CLEARTEXT-HTTP": (
         "high", "winrm",
-        "WS-Man traffic on tcp/5985 without transport encryption"),
+        "WS-Man traffic on a cleartext HTTP listener (tcp/5985, or "
+        "tcp/80 with --wsman-compat) - no transport encryption"),
     "WINRM-BASIC-AUTH": (
         "critical", "winrm",
         "HTTP Basic authentication to WinRM over cleartext"),
@@ -502,35 +658,17 @@ FINDINGS = {
     "WINRM-CREDSSP": (
         "medium", "winrm",
         "CredSSP authentication - credentials delegated to the remote host"),
+    "WINRM-ANON-IDENTIFY": (
+        "low", "winrm",
+        "Request to the anonymous WS-Man Identify endpoint (/wsman-anon/"
+        "identify) - a pre-auth confirmation that a WinRM listener exists"),
+    "WINRM-WEC-SUBSCRIPTION": (
+        "low", "winrm",
+        "Windows Event Collector source-initiated subscription endpoint "
+        "(/wsman/SubscriptionManager/WEC) in use over cleartext HTTP"),
     "WINRM-SHELL-CREATE": (
         "medium", "winrm",
         "WS-Man Shell Create - remote command execution session opened"),
-
-    # --- CVE-mapped additions (v2) ---------------------------------------
-    "RPC-PRINTNIGHTMARE-DRIVER-ADD": (
-        "critical", "interface",
-        "Printer driver installation call (PrintNightmare CVE-2021-34527 / "
-        "CVE-2021-1675); opnum is cleartext even when the stub is sealed"),
-    "RPC-WINREG-RELAY-FALLBACK": (
-        "high", "auth",
-        "Remote Registry bound over ncacn_ip_tcp at RPC_C_AUTHN_LEVEL_CONNECT "
-        "(CVE-2024-43532) - the insecure transport fallback used for NTLM relay"),
-    "RPC-LSA-ANONYMOUS-COERCION": (
-        "critical", "interface",
-        "Unauthenticated coercion call on the LSARPC pipe (CVE-2022-26925, "
-        "PetitPotam) - anonymous access is the vulnerability"),
-    "RPC-RUNTIME-BINDACK-UNDERFLOW": (
-        "critical", "protocol",
-        "Malformed big-endian bind_ack with a zero secondary address length "
-        "(CVE-2022-26809) - the RPC runtime integer underflow"),
-    "WINRM-HTTPSYS-ACCEPT-ENCODING": (
-        "high", "winrm",
-        "Malformed Accept-Encoding with an empty coding-list element "
-        "(CVE-2021-31166 / CVE-2022-21907 http.sys kernel RCE)"),
-    "RPC-WINSPOOL-RELAY-LEVEL": (
-        "high", "auth",
-        "IRemoteWinSpool bound below RPC_C_AUTHN_LEVEL_PKT_PRIVACY "
-        "(CVE-2021-1678) - the insufficient auth level an NTLM relay needs"),
 }
 
 CATEGORIES = sorted({v[1] for v in FINDINGS.values()})
@@ -735,6 +873,9 @@ def parse_bind_ack(pdu: bytes, hdr: dict) -> dict:
     sec_addr_len = u16(pdu, off, big)
     off += 2
     sec_addr = ""
+    # The raw length is kept, not just the decoded string: CVE-2022-26809 turns
+    # on sec_addr_len being zero, which an empty string alone cannot distinguish
+    # from a parse that simply found nothing.
     if sec_addr_len:
         _need(pdu, off, sec_addr_len)
         sec_addr = pdu[off:off + sec_addr_len].decode("ascii", "replace").rstrip("\x00")
@@ -755,7 +896,8 @@ def parse_bind_ack(pdu: bytes, hdr: dict) -> dict:
             off += 24
     except RPCError:
         pass
-    return {"sec_addr": sec_addr, "sec_addr_len": sec_addr_len, "results": results}
+    return {"sec_addr": sec_addr, "sec_addr_len": sec_addr_len,
+            "results": results}
 
 
 def parse_bind_nak(pdu: bytes, hdr: dict) -> dict:
@@ -1003,7 +1145,7 @@ def extract_unc_paths(stub: bytes, limit: int = 4) -> list[str]:
             s = m.group(0).decode("utf-16-le", "strict")
         except Exception:
             continue
-        s = s.split("\x00")[0]
+        s = s.split(chr(0))[0]
         if len(s) >= 5 and s.startswith("\\\\"):
             out.append(s)
         if len(out) >= limit:
@@ -1014,6 +1156,65 @@ def extract_unc_paths(stub: bytes, limit: int = 4) -> list[str]:
 def unc_host(path: str) -> str:
     body = path.lstrip("\\")
     return body.split("\\", 1)[0] if body else ""
+
+
+_WIDE_PATH_RE = re.compile(
+    rb"(?:[A-Za-z]\x00:\x00|\\\x00\\\x00|\\\x00\?\x00\?\x00)"
+    rb"(?:[\x20-\x7e]\x00){1,300}")
+
+
+def extract_wide_paths(stub: bytes, limit: int = 6) -> list[str]:
+    r"""
+    Pull UTF-16LE path-like strings from a request stub - both UNC
+    (\\host\share), \??\ device paths, and drive-letter paths (C:\...).
+
+    extract_unc_paths only matches \\..., which is right for the coercion
+    primitives but not for an ElfrBackupELFW DESTINATION, which is usually a
+    local path.  Same best-effort discipline: find the string, do not try to
+    say which NDR parameter it came from.
+    """
+    out = []
+    for m in _WIDE_PATH_RE.finditer(stub):
+        try:
+            txt = m.group(0).decode("utf-16-le", "strict").split(chr(0))[0]
+        except Exception:
+            continue
+        if len(txt) >= 4 and ("\\" in txt or ":" in txt):
+            out.append(txt)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _is_off_box(path: str) -> str:
+    r"""Return the off-box host named by a UNC or \??\UNC\ path, else ""."""
+    low = path.lower()
+    if low.startswith("\\??\\unc\\"):
+        return path[8:].split("\\", 1)[0]
+    if path.startswith("\\\\") or path.startswith("\\"):
+        return unc_host(path)
+    return ""
+
+
+def _backup_dest_suspect(path: str) -> str | None:
+    """
+    Why an ElfrBackupELFW destination looks like a write primitive, or None.
+
+    A legitimate backup is a .evtx file in the log directory.  "Outside the
+    log dir" cannot be checked without %SystemRoot%, so a non-.evtx extension
+    stands in for it; an autostart path is called out specifically because it
+    is the CVE-2026-50502 target.
+    """
+    low = path.lower().split("\x00", 1)[0]
+    for marker in AUTORUN_MARKERS:
+        if marker in low:
+            return "destination in a per-user autostart path"
+    dot = low.rfind(".")
+    slash = low.rfind("\\")
+    ext = low[dot:] if dot > slash else ""
+    if ext != EVTX_EXTENSION:
+        return f"destination extension {ext or '(none)'} is not .evtx"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1162,7 +1363,8 @@ FSCTL_PIPE_TRANSCEIVE = 0x0011C017
 _RPC_PIPE_NAMES = {
     "lsarpc", "netlogon", "lsass", "samr", "netdfs", "spoolss", "svcctl",
     "atsvc", "winreg", "srvsvc", "wkssvc", "eventlog", "efsrpc",
-    "fssagentrpc", "epmapper", "browser", "ntsvcs",
+    "fssagentrpc", "epmapper", "browser", "ntsvcs", "hydralspipe",
+    "lsm_api_service",
 }
 
 
@@ -1428,6 +1630,35 @@ def is_wsman_path(path: str) -> bool:
     return p.startswith("/wsman") or p.startswith("/powershell") or "/wsman" in p
 
 
+# WS-Man lands on more than one URL reservation, and which one a request hit
+# changes what it means.  All three are in the cleartext request line, so the
+# distinction is free even when the SOAP envelope is sealed.
+#
+#   /wsman-anon/identify            - the anonymous Identify endpoint.  It is
+#       on whenever a listener is, needs NO credentials, and answers with the
+#       product vendor and protocol version.  A pre-auth confirmation that a
+#       WinRM listener exists, which is why it is worth saying out loud.
+#   /wsman/SubscriptionManager/WEC  - the Windows Event Collector endpoint for
+#       source-initiated subscriptions.  Legitimate and common, but it is a
+#       standing authenticated channel from every forwarding host to the
+#       collector, so knowing it is in use on cleartext 5985 matters.
+#   /wsman                          - everything else: PowerShell remoting,
+#       JEA, WinRS, WMI-over-WS-Man.  Which plugin is behind it lives in the
+#       ResourceURI, inside the envelope, so it is NOT observable once the
+#       session is encrypted.  rpcwatch does not guess at it.
+WSMAN_ANON_IDENTIFY = "/wsman-anon/identify"
+WSMAN_WEC_SUBSCRIPTION = "/wsman/subscriptionmanager/wec"
+
+
+def wsman_endpoint(path: str) -> str:
+    p = path.lower().split("?", 1)[0].rstrip("/")
+    if p.startswith(WSMAN_ANON_IDENTIFY):
+        return "anon-identify"
+    if p.startswith(WSMAN_WEC_SUBSCRIPTION):
+        return "wec-subscription"
+    return "wsman"
+
+
 # http.sys parses Accept-Encoding in the kernel, before any routing decision,
 # so these two CVEs are reachable on any path a listener is bound to - which
 # on a Windows host means tcp/5985 whether or not WinRM is the target.
@@ -1476,6 +1707,7 @@ class Config:
         "window": 60,
         "zerologon_threshold": 8,
         "epm_threshold": 20,
+        "tslicensing_spray_threshold": 50,
         "dedup_seconds": 60,
         "min_severity": "low",
         "local_nets": (),
@@ -1484,6 +1716,9 @@ class Config:
         "allow_interfaces": (),
         "rpc_ports": None,
         "dynamic_range": False,
+        "ipv6_eh": False,
+        "wsman_compat": False,
+        "ca_hosts": (),
         "ntlm_from_smb": False,
         "record_identities": True,
     }
@@ -1497,15 +1732,20 @@ class Config:
         self.window = kw.get("window", 60)
         self.zerologon_threshold = kw.get("zerologon_threshold", 8)
         self.epm_threshold = kw.get("epm_threshold", 20)
+        self.tslicensing_spray_threshold = kw.get(
+            "tslicensing_spray_threshold", 50)
         self.dedup_seconds = kw.get("dedup_seconds", 60)
         self.min_severity = kw.get("min_severity", "low")
         self.local_nets = list(kw.get("local_nets", []))
         self.dc_hosts = list(kw.get("dc_hosts", []))
         self.allow_clients = set(kw.get("allow_clients", []))
         self.allow_interfaces = set(kw.get("allow_interfaces", []))
+        self.wsman_compat = bool(kw.get("wsman_compat", False))
+        self.ca_hosts = list(kw.get("ca_hosts", []))
         ports = kw.get("rpc_ports") or [EPMAPPER_PORT, SMB_PORT, NBT_SESSION_PORT]
         self.rpc_ports = set(ports)
         self.dynamic_range = kw.get("dynamic_range", False)
+        self.ipv6_eh = kw.get("ipv6_eh", False)
         self.ntlm_from_smb = kw.get("ntlm_from_smb", False)
         self.record_identities = kw.get("record_identities", True)
 
@@ -1527,6 +1767,21 @@ class Config:
             return None
         for entry in self.dc_hosts:
             if isinstance(entry, ipaddress.IPv4Network) or isinstance(entry, ipaddress.IPv6Network):
+                if addr in entry:
+                    return True
+            elif addr == entry:
+                return True
+        return False
+
+    def is_ca(self, ip: str) -> bool | None:
+        if not self.ca_hosts:
+            return None
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return None
+        for entry in self.ca_hosts:
+            if isinstance(entry, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
                 if addr in entry:
                     return True
             elif addr == entry:
@@ -1623,7 +1878,11 @@ class Association:
 
     __slots__ = ("contexts", "auth_type", "auth_level", "auth_reported",
                  "ntlm_reported", "spnego_seen", "kerberos_seen", "pipe_name",
-                 "pending_calls", "created", "over_pipe", "anonymous")
+                 "pending_calls", "created", "over_pipe", "anonymous",
+                 "tsl_connects", "tsl_spray_fired",
+                 "elfr_open_offbox", "elfr_probe_paths", "elfr_backup_fired",
+                 "elfr_probe_fired",
+                 "lsm_bind_reported", "lsm_call_count", "lsm_loop_fired")
 
     def __init__(self, ts):
         self.contexts: dict[int, dict] = {}
@@ -1638,6 +1897,15 @@ class Association:
         self.created = ts
         self.over_pipe = False     # ncacn_np (carved from SMB) vs ncacn_ip_tcp
         self.anonymous = False     # bound with no auth, or NTLM anonymous
+        self.tsl_connects = deque()   # CVE-2024-38077 heap-spray window
+        self.tsl_spray_fired = False  # latch: report the spray once
+        self.elfr_open_offbox = None  # last ElfrOpenBELW off-box source, if any
+        self.elfr_probe_paths = set() # distinct ElfrOpenBELW paths (probe)
+        self.elfr_backup_fired = False  # latch the sealed-sequence finding
+        self.elfr_probe_fired = False  # latch the path-probe finding
+        self.lsm_bind_reported = False  # latch the LSM container bind
+        self.lsm_call_count = 0         # calls on the LSM container assoc
+        self.lsm_loop_fired = False     # latch the sustained-loop escalation
 
 
 class NetlogonPeer:
@@ -1688,6 +1956,127 @@ PRINTNIGHTMARE_CALLS = {
     },
 }
 
+# CVE-2024-38077 "MadLicense": a pre-auth heap overflow in the RD Licensing
+# service (lserver.dll), reached over the Terminal Server Licensing interface.
+# CDataCoding::DecodeData base24-decodes a caller-supplied string into a fixed
+# 21-byte heap buffer without checking the input against that allocation.
+#
+# Provenance, since this interface has no published MS specification:
+#   UUID and \pipe\HydraLsPipe  - runZero's RDL discovery write-up
+#   opnum 49 TLSRpcTelephoneRegisterLKP - Star Labs patch-diff RCA
+#   opnum 1  TLSRpcConnect       - public PoC only, NOT independently confirmed
+# The conformance harness carries its own copy of these and records the same
+# provenance, so a wrong value is a disagreement rather than a shared belief.
+TSL_RPC_CONNECT = 1
+TSL_RPC_TELEPHONE_REGISTER_LKP = 49
+
+# The patch registers TLSRpcSecurityCallback on the interface, which rejects a
+# call unless the authentication level is RPC_C_AUTHN_LEVEL_PKT_PRIVACY.  So
+# the signal is the LEVEL, not merely the absence of an auth verifier: a call
+# authenticated at CONNECT or PKT_INTEGRITY is refused by a patched host too.
+TSLICENSING_REQUIRED_LEVEL = 6      # RPC_C_AUTHN_LEVEL_PKT_PRIVACY
+
+# The July 2024 Patch Tuesday fixed SEVEN bugs in this one service.  Only
+# CVE-2024-38077 has a public patch diff, so it is the only one whose opnum is
+# known.  But TLSRpcSecurityCallback is registered on the INTERFACE, not on a
+# method, so every one of them shares a single passive precondition: a call to
+# this interface below packet privacy.  That is why the cluster is attributed
+# rather than given a code each - there is no wire evidence that separates
+# them, and inventing one per CVE would be inventing precision.
+#   ZDI July 2024 review for the cluster and scores; Star Labs' archive for
+#   which ones were diffed (only 38077).
+RDL_RCE_CLUSTER = ("CVE-2024-38074", "CVE-2024-38076", "CVE-2024-38077")
+# CVE-2024-38099 scores 5.9, below the suite's usual 6.5 bar, but it is in the
+# same service behind the same interface-wide callback, so the precondition
+# that detects it is already being evaluated.  Including it costs nothing and
+# completes the patch mapping; excluding it on score alone would leave one
+# seventh of a single Patch Tuesday's work for this service unaccounted for.
+RDL_DOS_CLUSTER = ("CVE-2024-38071", "CVE-2024-38072", "CVE-2024-38073",
+                   "CVE-2024-38099")
+RDL_SUB_BAR = ("CVE-2024-38099",)   # in the cluster, but below 6.5 on score
+
+# CVEs evaluated for this module and deliberately NOT claimed by name.  Each
+# entry is a CVE whose service rpcwatch already watches, which is exactly why
+# it has to be written down: the temptation is to attach it to a finding that
+# fires nearby and call the mapping done.
+#
+#   CVE-2021-36936 (8.8, AV:N/PR:L) and CVE-2021-36947 (8.8) - August 2021
+#       Print Spooler RCEs, found internally by Microsoft.  No researcher
+#       credit, no PoC, no root-cause analysis, so no published opnum.  Their
+#       AV:N/PR:L shape is CONSISTENT with the driver-install family, but
+#       consistent is not evidence, and the August 2021 batch shares no
+#       interface-wide gate the way the RD Licensing seven do - there is no
+#       single precondition that could honestly stand for all of them.  If
+#       either one is in fact an AddPrinterDriver-family bug then
+#       RPC-PRINTNIGHTMARE-DRIVER-ADD already fires on it, because that
+#       finding keys on the CALL and its off-box UNC rather than on a CVE.
+#       Coverage is therefore incidental and free; the attribution is not
+#       available and is not invented.
+#
+#   CVE-2026-50346 (7.8) - "Netlogon RPC Elevation of Privilege" in
+#       Microsoft's own title, which is why it reached this module at all.
+#       Its vector is CVSS:3.1/AV:L/... - LOCAL.  Improper authorization in
+#       the RPC runtime, exploited by an already-authenticated local user.
+#       Nothing crosses the wire, so no passive sensor anywhere can see it.
+#       Rejected on transport, not on score.
+#
+# The conformance harness greps this module and fails if any of these is ever
+# claimed as cve="...", the same guard the un-diffed RDL cluster gets.
+EVALUATED_NOT_CLAIMED = {
+    "CVE-2021-36936": "spooler RCE with no public mechanism; no opnum to key on",
+    "CVE-2021-36947": "spooler RCE with no public mechanism; no opnum to key on",
+    "CVE-2026-50346": "local vector (AV:L); never observable on the wire",
+}
+
+# ESC11 - NTLM relay to the AD CS certificate enrollment RPC interfaces.
+#
+# MS-ICPR has exactly one method, CertServerRequest (opnum 0), through which a
+# caller submits a certificate request to the CA.  There is no CVE here: the
+# CA hardening flag IF_ENFORCEENCRYPTICERTREQUEST, set under CA\InterfaceFlags
+# with "certutil -setreg CA\InterfaceFlags +IF_ENFORCEENCRYPTICERTREQUEST",
+# makes the interface accept only RPC_C_AUTHN_LEVEL_PKT_PRIVACY.  It is ON by
+# default, and routinely turned OFF so that clients which cannot reach that
+# level can still enroll.  With it off, a relayed NTLM authentication reaches
+# the enrollment interface and comes back with a certificate.
+#
+# So this is structurally the CVE-2021-1678 rule with the CVE removed: the
+# signal is the LEVEL on an enrollment bind, and a bind below packet privacy
+# means either the flag is off or a relay is in progress.  Both are worth
+# saying; neither is proof of exploitation on its own.
+ICPR_CERT_SERVER_REQUEST = 0        # MS-ICPR 3.2.4.1.1 CertServerRequest
+CERTENROLL_REQUIRED_LEVEL = 6       # RPC_C_AUTHN_LEVEL_PKT_PRIVACY
+
+# MS-WCCE's ICertRequestD is the DCOM counterpart and is covered by the same
+# hardening flag, but its opnums are NOT claimed here: the flag is registered
+# on the interface rather than on a method, so the bind posture is the whole
+# signal.  Same reasoning as the RD Licensing cluster - reporting the
+# condition without inventing a method mapping nobody published.
+CERTENROLL_INTERFACES = (IF_ICPR, IF_WCCE_CERTREQD)
+CERTENROLL_CALLS = {IF_ICPR: {ICPR_CERT_SERVER_REQUEST: "CertServerRequest"}}
+
+# MS-DNSP: the DnsAdmin-to-SYSTEM path.  R_DnssrvOperation's pszOperation
+# parameter can be the literal "ServerLevelPluginDll", whose pData is a path
+# to a DLL that dns.exe then LOADS IN-PROCESS as SYSTEM on next restart.  It
+# is a documented administrative feature, not a vulnerability - which is why
+# this is abuse detection and carries no CVE.
+#
+# Four opnums reach it.  0-4 are deprecated in favour of 5-9, but the spec
+# says servers SHOULD still support all of them, so a detection keyed only on
+# the modern opnum would be trivially evaded by calling the obsolete one.
+DNSP_OPERATION_OPNUMS = {
+    0: "R_DnssrvOperation",          # MS-DNSP 3.1.4.1, deprecated
+    5: "R_DnssrvOperation2",         # MS-DNSP 3.1.4.6
+    12: "R_DnssrvOperation3",        # MS-DNSP 3.1.4.13
+    15: "R_DnssrvOperation4",        # MS-DNSP 3.1.4.16, virtualization
+}
+
+# pszOperation is LPCSTR - a null-terminated UTF-8/ASCII string - while the
+# DLL path that follows is a DNSSRV_TYPEID_LPWSTR, UTF-16LE.  That mixture is
+# in the IDL and is the reason this is matched as ASCII and extracted as
+# UTF-16LE rather than one or the other.
+DNSP_PLUGIN_OPERATION = b"ServerLevelPluginDll"
+DNSSRV_TYPEID_LPWSTR = 3            # MS-DNSP 2.2.1.1.1 DNS_RPC_TYPEID
+
 # MS-PAR 3.1.4 opnum 62.  CVE-2021-1678: an attacker relays an NTLM session to
 # the IRemoteWinSpool interface and calls this to execute code.  The root cause
 # is an insufficient authentication level on the interface itself, so the
@@ -1715,6 +2104,81 @@ COERCION_CVES = {
 # DC into authenticating to the attacker over NTLM.
 LSA_PIPE_INTERFACES = (IF_EFSR_LSA, IF_LSARPC)
 
+# MS-EVEN 3.1.4: the event-log backup pair behind the "EventLogin" arbitrary
+# file-write chain.  ElfrOpenBELW (opnum 9) opens a *backed-up* log for
+# reading and validates the EVTX format at open; ElfrBackupELFW (opnum 1)
+# backs up a *live* log to a caller-named destination and did NOT re-validate.
+#   CVE-2025-29969 (7.5, May 2025, SafeBreach "EventLogin") - TOCTOU: the file
+#       validated at ElfrOpenBELW is swapped before ElfrBackupELFW uses it.
+#   CVE-2026-50502 (8.0, Jul 2026) - bypasses the 29969 fix by appending an
+#       HTA payload after a valid EVTX header; backup destination is the
+#       victim's Startup folder with a .hta extension, run at next logon.
+# Opnums confirmed against the MS-EVEN 3.1.4 method table; the conformance
+# harness carries its own transcribed copy so a wrong value is a disagreement.
+ELFR_BACKUP_ELFW = 1
+ELFR_OPEN_BELW = 9
+EVENTLOG_BACKUP_CALLS = {
+    IF_EVEN: {
+        ELFR_OPEN_BELW: "ElfrOpenBELW",
+        ELFR_BACKUP_ELFW: "ElfrBackupELFW",
+    },
+}
+# One finding, both CVEs: the wire sequence is identical and the two
+# differentiators - the TOCTOU swap and the HTA-after-EVTX-header payload -
+# happen on the attacker's SMB server or inside file content, neither of
+# which is on the tap.  Attribute the cluster rather than mint a code each.
+EVENTLOG_BACKUP_CLUSTER = ("CVE-2025-29969", "CVE-2026-50502")
+
+# A legitimate backup lands in the log directory with a .evtx extension.  A
+# destination that is off-box, not .evtx, or inside a per-user autostart path
+# is the write primitive.  "Outside the log dir" cannot be checked precisely
+# without knowing %SystemRoot%, so a non-.evtx extension stands in for it -
+# a backup that is not an .evtx file is already not a backup.
+EVTX_EXTENSION = ".evtx"
+AUTORUN_MARKERS = (
+    "\\start menu\\programs\\startup\\",   # per-user Startup, the 50502 target
+    "\\roaming\\microsoft\\windows\\start menu\\programs\\startup\\",
+)
+
+# SafeBreach report that ElfrOpenBELW can still TEST whether arbitrary paths
+# exist (unfixed), so a burst of opens against varied paths is a path-probe.
+# Off by default sensitivity: distinct paths on one association.
+EVENTLOG_PROBE_THRESHOLD = 10
+
+# MS-TSTS TermSrvEnumeration opnum 8.  On Win11/Server 2025 this is a stub
+# (DebugBreak + E_NOTIMPL) and a single call crashes LSM; a domain account is
+# enough to kill LSM on a DC.  Win10 still implements it, so the crash is
+# graded by the server's answer rather than assumed.  CVE-2025-26651 (6.5).
+# Opnum confirmed from the MS-TSTS method order (Opnum7NotUsedOnWire precedes).
+TSTS_GET_SESSION_IDS = 8
+
+# The LSM container interface methods, from Akamai's write-up.  Not used to
+# gate - a bind to the interface over the network is the whole signal - but
+# named so a readable call can be reported precisely.
+LSM_CONTAINER_CALLS = {
+    1: "ContainerCom_AskForSession",
+    2: "ContainerCom_SessionLoggedOff",
+}
+# A sustained call loop is what turns the leak (CVE-2022-37973, ~3 MB/s) into
+# a crash.  Report the bind at high; escalate to critical once the loop is
+# clearly running.  CVE-2022-37998 (deadlock) shares the interface and wire
+# shape, so attribute the cluster rather than split it.
+LSM_CONTAINER_CLUSTER = ("CVE-2022-37973", "CVE-2022-37998")
+LSM_CONTAINER_LOOP_THRESHOLD = 50
+
+# Certighost (CVE-2026-54121).  A CA with EDITF_ENABLECHASECLIENTDC set can be
+# steered by cdc:/rmd: request attributes into "chasing" an attacker-run host
+# for a DC's identity, then issuing it a DC certificate -> PKINIT -> DCSync.
+# The enrollment request is sealed, so cdc:/rmd: are normally invisible; the
+# OBSERVABLE signal is the chase itself - the CA opening an OUTBOUND LSARPC
+# bind to a host that is not a known DC, shortly after serving enrollment.
+CERTENROLL_ENROLL_INTERFACES = (IF_ICPR, IF_WCCE_CERTREQD)
+CHASE_WINDOW_SECONDS = 120
+# When a legacy CA accepts an UNSEALED enrollment request, the attribute string
+# is readable and the chase-directing attribute can be seen directly.
+CHASE_ATTR_MARKER = b"cdc:"
+CHASE_ATTR_MARKER_W = "cdc:".encode("utf-16-le")
+
 SENSITIVE_CLASSES = ("netlogon", "directory", "coercion", "exec")
 
 
@@ -1725,6 +2189,16 @@ class RPCEngine:
         self.assocs: dict[tuple, Association] = {}
         self.netlogon: dict[tuple, NetlogonPeer] = {}
         self.epm_lookups: dict[str, deque] = {}
+        # Latch for the inventory finding.  An interface is an inventory fact,
+        # not an event: say it once per (server, uuid) and never again, so a
+        # busy management host does not drown the catalogue in repeats.
+        self.inventory_seen: set[tuple[str, str]] = set()
+        # Certighost: when each host last served AD CS enrollment, so an
+        # outbound LSARPC bind from it can be correlated as a "chase".  A CA
+        # named by --ca-hosts is always eligible, with no prior-enrollment
+        # requirement.  Keyed by server IP -> last-enrollment timestamp.
+        self.ca_enroll_seen: dict[str, float] = {}
+        self.chase_fired: set[tuple[str, str]] = set()
 
     # -- helpers ---------------------------------------------------------
     def _assoc(self, flow, ts) -> Association:
@@ -1738,7 +2212,20 @@ class RPCEngine:
         return client_ip in self.config.allow_clients
 
     def _iface_info(self, uuid: str):
-        return INTERFACES.get(uuid, (uuid, "other", "unknown interface"))
+        """
+        Name an interface for a finding.
+
+        A reference-table hit is named and described but classed "other", so
+        it reads legibly in a report without arming any class-driven rule.
+        Only INTERFACES carries behaviour; this method must never promote a
+        reference entry into a watched one.
+        """
+        if uuid in INTERFACES:
+            return INTERFACES[uuid]
+        spec = REFERENCE_INTERFACES.get(uuid)
+        if spec:
+            return (spec.split(" ", 1)[-1], "other", spec)
+        return (uuid, "other", "unknown interface")
 
     # -- entry point -----------------------------------------------------
     def process_pdu(self, ts, flow, client_ip, server_ip, pdu: bytes,
@@ -1840,6 +2327,9 @@ class RPCEngine:
                 "auth": AUTHN_NAMES.get(new_type, new_type),
                 "auth_level": AUTHN_LEVEL_NAMES.get(new_level, new_level),
             }
+            if uuid not in INTERFACES:
+                self._uncatalogued_interface(ts, subject, base, uuid,
+                                             server_ip, assoc)
             if assoc.pipe_name:
                 base["pipe"] = assoc.pipe_name
 
@@ -1861,6 +2351,12 @@ class RPCEngine:
                 self.emitter.emit(ts, "RPC-COERCION-INTERFACE-BIND", subject,
                                   dict(base, description=desc), key_extra=(uuid,))
 
+            # CVE-2024-43532.  The WinReg client's BaseBindToMachine falls back
+            # to a legacy transport when SMB is unavailable and binds with
+            # RpcBindingSetAuthInfo at RPC_C_AUTHN_LEVEL_CONNECT, which neither
+            # signs nor verifies - the condition an NTLM relay to AD CS needs.
+            # A healthy Remote Registry session runs over \pipe\winreg, so it
+            # is the combination of interface, transport and level that matters.
             # CVE-2021-1678.  IRemoteWinSpool accepted sessions below packet
             # privacy, so a relayed NTLM authentication could reach it and
             # call RpcAsyncInstallPrinterDriverFromPackage for code execution.
@@ -1877,12 +2373,33 @@ class RPCEngine:
                                             "exploitation"),
                                   key_extra=(uuid, "bind"))
 
-            # CVE-2024-43532.  The WinReg client's BaseBindToMachine falls back
-            # to a legacy transport when SMB is unavailable and binds with
-            # RpcBindingSetAuthInfo at RPC_C_AUTHN_LEVEL_CONNECT, which neither
-            # signs nor verifies - the condition an NTLM relay to AD CS needs.
-            # A healthy Remote Registry session runs over \pipe\winreg, so it
-            # is the combination of interface, transport and level that matters.
+            # ESC11.  The enrollment interfaces are deliberately NOT in
+            # SENSITIVE_CLASSES: this rule supersedes the generic
+            # RPC-BIND-NO-AUTH / RPC-NO-PACKET-INTEGRITY posture for them,
+            # and two findings for one condition is noise, not thoroughness.
+            if uuid in CERTENROLL_INTERFACES and new_level < CERTENROLL_REQUIRED_LEVEL:
+                self._certenroll_level(ts, subject, base, uuid, new_level,
+                                       trailer, "bind")
+
+            # Certighost: learn CA identity passively.  A host that serves an
+            # AD CS enrollment bind is a CA; remember when, so an outbound
+            # LSARPC bind from it can be correlated as a chase.
+            if uuid in CERTENROLL_ENROLL_INTERFACES:
+                self.ca_enroll_seen[server_ip] = ts
+
+            # The chase itself: a known CA (learned above or named by
+            # --ca-hosts) is the CLIENT of an LSARPC bind to a host that is not
+            # a declared DC, within the window.  The bind header is cleartext,
+            # so this survives PKT_PRIVACY on the enrollment leg.
+            if uuid == IF_LSARPC:
+                self._adcs_chase_bind(ts, subject, base, client_ip, server_ip)
+
+            # LSM container interface: any bind we see is over the network
+            # (local hvsocket/ALPC never reaches the tap), which is never
+            # legitimate for this interface.
+            if uuid == IF_LSM_CONTAINER:
+                self._lsm_container_bind(ts, subject, base, assoc)
+
             if (uuid == IF_WINREG and not assoc.over_pipe
                     and trailer is not None
                     and new_level == RPC_C_AUTHN_LEVEL_CONNECT):
@@ -1983,6 +2500,10 @@ class RPCEngine:
         if uuid in PRINTNIGHTMARE_CALLS and opnum in PRINTNIGHTMARE_CALLS[uuid]:
             self._printer_driver_call(ts, subject, base, stub, uuid, opnum,
                                       sealed, server_ip)
+        if uuid == IF_TSLICENSING:
+            self._tslicensing_call(ts, subject, base, assoc, opnum, trailer,
+                                   stub, hdr)
+
         # The driver-install call on an association that never reached packet
         # privacy is the exploit step, not just the posture.
         if (uuid == IF_PAR
@@ -1996,6 +2517,36 @@ class RPCEngine:
                                    required_level=AUTHN_LEVEL_NAMES[
                                        WINSPOOL_REQUIRED_LEVEL]),
                               severity="critical", key_extra=(uuid, "call"))
+
+        # ESC11 at the call: the enrollment request itself, on an
+        # association that never reached packet privacy.
+        if (uuid in CERTENROLL_CALLS and opnum in CERTENROLL_CALLS[uuid]
+                and (assoc.auth_level or RPC_C_AUTHN_LEVEL_NONE)
+                < CERTENROLL_REQUIRED_LEVEL):
+            self._certenroll_level(ts, subject, base, uuid,
+                                   assoc.auth_level or RPC_C_AUTHN_LEVEL_NONE,
+                                   trailer, "call",
+                                   call=CERTENROLL_CALLS[uuid][opnum])
+
+        if uuid == IF_DNSSERVER and opnum in DNSP_OPERATION_OPNUMS:
+            self._dnssrv_operation(ts, subject, base, stub, opnum, sealed,
+                                   server_ip)
+
+        if uuid == IF_EVEN and opnum in EVENTLOG_BACKUP_CALLS[IF_EVEN]:
+            self._eventlog_backup(ts, subject, base, assoc, stub, opnum,
+                                  sealed, server_ip)
+
+        if uuid == IF_TSTS_ENUM and opnum == TSTS_GET_SESSION_IDS:
+            self._tsts_getsessionids(ts, subject, base, assoc, hdr["call_id"])
+
+        if uuid == IF_LSM_CONTAINER:
+            self._lsm_container_call(ts, subject, base, assoc, opnum)
+
+        # On an unsealed legacy CA, the enrollment request attributes are
+        # readable, so the chase-directing attribute can be seen outright.
+        if uuid in CERTENROLL_ENROLL_INTERFACES and not sealed:
+            self._adcs_chase_attr(ts, subject, base, stub)
+
         if uuid in COERCION_CALLS and opnum in COERCION_CALLS[uuid]:
             self._coercion_call(ts, subject, base, stub, uuid, opnum, sealed,
                                 server_ip)
@@ -2070,6 +2621,158 @@ class RPCEngine:
                               dict(d, strong_key=bool(flags & NETLOGON_NEG_STRONG_KEY)),
                               key_extra=(stage,))
 
+    def _uncatalogued_interface(self, ts, subject, base, uuid, server_ip,
+                                assoc):
+        """
+        Inventory, from the one field DCERPC always leaves in the clear.
+
+        The abstract-syntax UUID is in the bind body, outside the security
+        trailer, so it is readable at every auth level including PKT_PRIVACY.
+        That makes a passive tap a complete interface inventory for the
+        segment it watches, at no cost and with nothing sent.
+
+        Two grades, because they mean different things to an operator:
+          documented  - in REFERENCE_INTERFACES: a Microsoft-specified
+                        interface rpcwatch has no rule for.  Expected on a
+                        managed network; worth knowing is reachable.
+          unknown     - in neither table: third-party RPC (backup, AV,
+                        monitoring, a vendor agent) or something bespoke.  No
+                        enumeration of Microsoft's specs will ever name it,
+                        which is exactly why it is the more interesting grade.
+
+        This claims no CVE and asserts no vulnerability.  It is the one
+        finding in the module whose job is to describe the network rather
+        than to accuse it.
+        """
+        key = (server_ip, uuid)
+        if key in self.inventory_seen:
+            return
+        self.inventory_seen.add(key)
+        spec = REFERENCE_INTERFACES.get(uuid)
+        d = dict(base,
+                 grade="documented" if spec else "unknown",
+                 spec=spec or "no MS open spec maps this UUID",
+                 transport="ncacn_np" if assoc.pipe_name else "ncacn_ip_tcp")
+        if assoc.pipe_name:
+            d["pipe"] = assoc.pipe_name
+        self.emitter.emit(ts, "RPC-INTERFACE-UNCATALOGUED", subject, d,
+                          key_extra=(uuid,))
+
+    def _eventlog_backup(self, ts, subject, base, assoc, stub, opnum, sealed,
+                         server_ip):
+        """
+        MS-EVEN event-log backup as an arbitrary file-write primitive:
+        SafeBreach's "EventLogin" (CVE-2025-29969) and its bypass
+        (CVE-2026-50502).
+
+        ElfrOpenBELW (opnum 9) opens a backed-up log from a caller-named path;
+        ElfrBackupELFW (opnum 1) writes a backup to a caller-named
+        destination.  The exploit chains them: open an attacker file, back it
+        up into the victim's Startup folder as a .hta.  The opnum is in the
+        cleartext REQUEST header, so this fires even at PKT_PRIVACY - the
+        stub, when readable, grades the finding rather than gating it.
+
+        One finding, both CVEs, because nothing on the wire separates them:
+        the TOCTOU swap and the HTA-after-header payload both happen off-tap.
+        This supersedes the generic coercion finding for opnum 9 - opnum 9 to
+        an off-box path is also an NTLM coercion primitive, and the detail
+        says so, so no framing is lost by consolidating.
+        """
+        cluster = list(EVENTLOG_BACKUP_CLUSTER)
+        name = EVENTLOG_BACKUP_CALLS[IF_EVEN][opnum]
+        d = dict(base, call=name, cve_cluster=cluster)
+
+        if sealed:
+            # Can't read the destination.  Only the sealed open->backup
+            # SEQUENCE on one association is worth a word: a lone sealed call
+            # on this busy interface is ordinary administration.
+            if opnum == ELFR_OPEN_BELW:
+                assoc.elfr_open_offbox = assoc.elfr_open_offbox or "sealed"
+                return
+            if opnum == ELFR_BACKUP_ELFW and assoc.elfr_open_offbox \
+                    and not assoc.elfr_backup_fired:
+                assoc.elfr_backup_fired = True
+                self.emitter.emit(
+                    ts, "RPC-EVENTLOG-BACKUP-WRITE", subject,
+                    dict(d, confidence="opnum-only", stage="sequence",
+                         note="ElfrOpenBELW followed by ElfrBackupELFW on one "
+                              "sealed association; stub not readable"),
+                    severity="high", key_extra=(opnum, "sealed-seq"))
+            return
+
+        paths = extract_wide_paths(stub)
+
+        if opnum == ELFR_OPEN_BELW:
+            offbox = next((h for h in (_is_off_box(p) for p in paths) if h), "")
+            if offbox:
+                assoc.elfr_open_offbox = offbox
+                external = self.config.in_local(offbox) is not True
+                self.emitter.emit(
+                    ts, "RPC-EVENTLOG-BACKUP-WRITE", subject,
+                    dict(d, source_paths=paths, source_host=offbox,
+                         external_source=bool(external), stage="open",
+                         confidence="source-path",
+                         note="ElfrOpenBELW against an off-box file: opens the "
+                              "write chain AND coerces the server to "
+                              "authenticate to that host (NTLM relay vector)"),
+                    severity="critical", key_extra=(opnum, offbox))
+            else:
+                # Local open.  Record it for the probe counter and, if it is
+                # the start of a sealed-less sequence, as the prior step; but
+                # a single local open is legitimate admin backup reading.
+                for pth in paths:
+                    assoc.elfr_probe_paths.add(pth.lower())
+                if paths:
+                    assoc.elfr_open_offbox = assoc.elfr_open_offbox or "local"
+                self._eventlog_probe(ts, subject, base, assoc)
+            return
+
+        # ElfrBackupELFW: the destination is the write.
+        suspect = next(((p, r) for p in paths
+                        for r in (_backup_dest_suspect(p),) if r), None)
+        offbox = next((h for h in (_is_off_box(p) for p in paths) if h), "")
+        if suspect:
+            dest, why = suspect
+            external = bool(offbox) and self.config.in_local(offbox) is not True
+            self.emitter.emit(
+                ts, "RPC-EVENTLOG-BACKUP-WRITE", subject,
+                dict(d, dest_path=dest, dest_reason=why,
+                     external_source=external, stage="backup",
+                     confidence="dest-path",
+                     note="ElfrBackupELFW to a destination that is not an "
+                          "ordinary .evtx backup - the file-write primitive"),
+                severity="critical", key_extra=(opnum, dest.lower()))
+        elif paths:
+            # A .evtx destination named locally: how a legitimate scheduled
+            # backup looks.  Record it, do not accuse it.
+            self.emitter.emit(
+                ts, "RPC-EVENTLOG-BACKUP-WRITE", subject,
+                dict(d, dest_path=paths[0], stage="backup",
+                     confidence="benign-shape",
+                     note="ElfrBackupELFW to a local .evtx path; consistent "
+                          "with a legitimate backup"),
+                severity="medium", key_extra=(opnum, "local-evtx"))
+
+    def _eventlog_probe(self, ts, subject, base, assoc):
+        """
+        The unfixed ElfrOpenBELW path-existence oracle SafeBreach noted: a
+        burst of opens against varied paths is enumeration, not a backup.
+        Latches once per association at the threshold.
+        """
+        if assoc.elfr_backup_fired:
+            return
+        if len(assoc.elfr_probe_paths) < EVENTLOG_PROBE_THRESHOLD:
+            return
+        if assoc.elfr_probe_fired:
+            return
+        assoc.elfr_probe_fired = True
+        self.emitter.emit(
+            ts, "RPC-EVENTLOG-PATH-PROBE", subject,
+            dict(base, distinct_paths=len(assoc.elfr_probe_paths),
+                 note="many ElfrOpenBELW opens against distinct paths on one "
+                      "association; the arbitrary-path-existence oracle"),
+            key_extra=("probe",))
+
     def _coercion_call(self, ts, subject, base, stub, uuid, opnum, sealed, server_ip):
         """
         A coercion primitive is only an attack when it names a listener other
@@ -2098,6 +2801,240 @@ class RPCEngine:
         self.emitter.emit(ts, "RPC-COERCION-CALL", subject,
                           dict(d, unc_paths=targets, external_listener=bool(external)),
                           severity=sev, key_extra=(uuid, opnum))
+
+    def _tslicensing_call(self, ts, subject, base, assoc, opnum, trailer,
+                          stub, hdr):
+        """
+        CVE-2024-38077 "MadLicense".
+
+        The patch registers TLSRpcSecurityCallback on the RD Licensing
+        interface, which refuses any call below RPC_C_AUTHN_LEVEL_PKT_PRIVACY.
+        So the condition is the LEVEL, not merely a missing auth verifier -
+        a call authenticated at CONNECT or PKT_INTEGRITY is refused by a
+        patched host as well, and is just as anomalous on the wire.
+
+        Two stages, following the shape used for CVE-2021-1678: the heap spray
+        of TLSRpcConnect calls is posture, the TLSRpcTelephoneRegisterLKP call
+        that carries the overflow is the exploit step.
+        """
+        level = trailer["auth_level"] if trailer else RPC_C_AUTHN_LEVEL_NONE
+        if level >= TSLICENSING_REQUIRED_LEVEL:
+            return      # what the patched callback accepts: legitimate traffic
+        d = dict(base,
+                 cve_cluster=list(RDL_RCE_CLUSTER + RDL_DOS_CLUSTER),
+                 auth_level=AUTHN_LEVEL_NAMES.get(level, level),
+                 required_level=AUTHN_LEVEL_NAMES[TSLICENSING_REQUIRED_LEVEL],
+                 workgroup_caveat="a host with DisableWorkgroupAuthEnforcement "
+                                  "set may legitimately accept this")
+
+        if opnum == TSL_RPC_CONNECT:
+            q = assoc.tsl_connects
+            cutoff = ts - self.config.window
+            q.append(ts)
+            while q and q[0] < cutoff:
+                q.popleft()
+            if (len(q) >= self.config.tslicensing_spray_threshold
+                    and not assoc.tsl_spray_fired):
+                assoc.tsl_spray_fired = True
+                self.emitter.emit(ts, "RPC-TSLICENSING-PREAUTH", subject,
+                                  dict(d, stage="spray",
+                                       call="TLSRpcConnect",
+                                       connects=len(q),
+                                       window_seconds=self.config.window),
+                                  severity="high", key_extra=("spray",))
+            return
+
+        if opnum == TSL_RPC_TELEPHONE_REGISTER_LKP:
+            # Reported at the call rather than held until the server answers:
+            # a successful overflow can leave no answer at all, and silence is
+            # the most alarming outcome, not a reason to stay quiet.
+            assoc.pending_calls[hdr["call_id"]] = (
+                IF_TSLICENSING, opnum, ts)
+            self.emitter.emit(ts, "RPC-TSLICENSING-PREAUTH", subject,
+                              dict(d, stage="call",
+                                   cve="CVE-2024-38077",
+                                   call="TLSRpcTelephoneRegisterLKP",
+                                   outcome="unanswered",
+                                   stub_bytes=len(stub) if stub else 0),
+                              key_extra=("call",))
+            return
+
+        # Any OTHER method on this interface below packet privacy.  Six of the
+        # seven July 2024 RDL bugs have no public patch diff, so their opnums
+        # are unknown - but the callback they all sit behind is interface-wide.
+        # Reporting only the one opnum we can name would leave the other two
+        # 9.8 RCEs undetectable, so the interface condition is reported on its
+        # own, with the opnum stated and no CVE claimed.
+        self.emitter.emit(ts, "RPC-TSLICENSING-PREAUTH", subject,
+                          dict(d, stage="interface",
+                               call=f"opnum {opnum}",
+                               attribution="cluster only; no public patch diff "
+                                           "maps this opnum to a CVE"),
+                          severity="high", key_extra=("iface", opnum))
+
+    def _tslicensing_outcome(self, ts, subject, pending, accepted):
+        """Grade the overflow call by how the server answered it."""
+        uuid, opnum, _ = pending
+        if uuid != IF_TSLICENSING or opnum != TSL_RPC_TELEPHONE_REGISTER_LKP:
+            return
+        d = {"cve": "CVE-2024-38077",
+             "cve_cluster": list(RDL_RCE_CLUSTER + RDL_DOS_CLUSTER),
+             "interface": "tslicensing",
+             "opnum": opnum, "call": "TLSRpcTelephoneRegisterLKP",
+             "stage": "call"}
+        if accepted:
+            self.emitter.emit(ts, "RPC-TSLICENSING-PREAUTH", subject,
+                              dict(d, outcome="accepted",
+                                   note="server answered the pre-auth call; "
+                                        "the security callback did not stop it"),
+                              key_extra=("accepted",))
+        else:
+            self.emitter.emit(ts, "RPC-TSLICENSING-PREAUTH", subject,
+                              dict(d, outcome="rejected",
+                                   note="server faulted the call, consistent "
+                                        "with the callback enforcing or the "
+                                        "host being patched"),
+                              severity="high", key_extra=("rejected",))
+
+    def _lsm_container_bind(self, ts, subject, base, assoc):
+        r"""
+        CVE-2022-37973 / CVE-2022-37998.
+
+        The LSM container interface is meant only for Hyper-V containers over
+        hvsocket, and its security callback always returns RPC_S_OK.  Endpoint
+        multiplexing exposes it over \pipe\LSM_API_service, so any bind that
+        reaches a network tap is illegitimate - there is no remote caller for
+        it.  The bind header is cleartext, so this holds at PKT_PRIVACY.
+
+        Reported once per association at high; the sustained call loop that
+        actually drives the leak to a crash escalates it (see the call hook).
+        Both CVEs share the interface and wire shape, so attribute the cluster
+        rather than split a code.
+        """
+        if assoc.lsm_bind_reported:
+            return
+        assoc.lsm_bind_reported = True
+        self.emitter.emit(
+            ts, "RPC-LSM-CONTAINER-REMOTE", subject,
+            dict(base, stage="bind", cve_cluster=list(LSM_CONTAINER_CLUSTER),
+                 note="hvsocket-only container interface bound over the "
+                      "network; no legitimate remote caller exists"),
+            severity="high", key_extra=("bind",))
+
+    def _lsm_container_call(self, ts, subject, base, assoc, opnum):
+        """A sustained call loop is what turns the leak into an LSM crash."""
+        assoc.lsm_call_count += 1
+        if (assoc.lsm_call_count >= LSM_CONTAINER_LOOP_THRESHOLD
+                and not assoc.lsm_loop_fired):
+            assoc.lsm_loop_fired = True
+            call = LSM_CONTAINER_CALLS.get(opnum, f"opnum {opnum}")
+            self.emitter.emit(
+                ts, "RPC-LSM-CONTAINER-REMOTE", subject,
+                dict(base, stage="loop", call=call,
+                     cve_cluster=list(LSM_CONTAINER_CLUSTER),
+                     calls=assoc.lsm_call_count,
+                     note="sustained call loop on the container interface; "
+                          "the memory leak that ends in an LSM crash"),
+                severity="critical", key_extra=("loop",))
+
+    def _tsts_getsessionids(self, ts, subject, base, assoc, call_id):
+        """
+        CVE-2025-26651.  On Win11 / Server 2025, MS-TSTS RpcGetSessionIds
+        (opnum 8) is an unimplemented stub that crashes LSM on one call; a
+        domain account is enough to kill LSM on a DC.  Win10 builds still
+        implement it, so the crash is graded by the server's answer, not
+        assumed: the request is reported at high with outcome "unanswered",
+        and the response/fault hook grades it.  The opnum is in the cleartext
+        request header, so this fires even when the stub is sealed.
+        """
+        assoc.pending_calls[call_id] = (
+            IF_TSTS_ENUM, TSTS_GET_SESSION_IDS, ts)
+        self.emitter.emit(
+            ts, "RPC-LSM-GETSESSIONIDS-CRASH", subject,
+            dict(base, call="RpcGetSessionIds", cve="CVE-2025-26651",
+                 outcome="unanswered",
+                 note="no legitimate remote caller on affected builds; one "
+                      "call crashes LSM where the method is a stub"),
+            severity="high", key_extra=("call",))
+
+    def _tsts_outcome(self, ts, subject, pending, accepted):
+        """Grade the RpcGetSessionIds call by how (or whether) the server answered."""
+        uuid, opnum, _ = pending
+        if uuid != IF_TSTS_ENUM or opnum != TSTS_GET_SESSION_IDS:
+            return
+        d = {"interface": "termsrv-enum", "opnum": opnum,
+             "call": "RpcGetSessionIds", "cve": "CVE-2025-26651"}
+        if accepted:
+            # A normal result means the build implements the method (Win10):
+            # the host is not the crash target.  Lower concern, recorded.
+            self.emitter.emit(
+                ts, "RPC-LSM-GETSESSIONIDS-CRASH", subject,
+                dict(d, outcome="answered", note="server returned a result; "
+                     "build appears to implement the method (not the crash "
+                     "target)"),
+                severity="medium", key_extra=("answered",))
+        else:
+            # A fault is the stub path (DebugBreak/E_NOTIMPL) - the crash case.
+            self.emitter.emit(
+                ts, "RPC-LSM-GETSESSIONIDS-CRASH", subject,
+                dict(d, outcome="faulted", note="server faulted the call, "
+                     "consistent with the unimplemented stub that crashes LSM"),
+                severity="critical", key_extra=("faulted",))
+
+    def _adcs_chase_bind(self, ts, subject, base, client_ip, server_ip):
+        """
+        Certighost (CVE-2026-54121), the observable half.
+
+        A CA steered by cdc:/rmd: attributes "chases" an attacker-run host for
+        a DC's identity.  The enrollment request is sealed, so those
+        attributes are normally invisible - but the chase is an OUTBOUND
+        connection from the CA, and its LSARPC bind header is cleartext.  So
+        the signal is: a known CA is the CLIENT of an LSARPC bind to a host
+        that is not a declared DC, shortly after it served enrollment.
+
+        CA identity is learned passively from enrollment binds, or declared
+        with --ca-hosts (which needs no prior enrollment, since a configured
+        CA is always a CA).  The server leg over LDAP/389 belongs to
+        ldapwatch; this correlates the LSARPC leg only.
+        """
+        is_ca = self.config.is_ca(client_ip)
+        if is_ca is not True:
+            seen = self.ca_enroll_seen.get(client_ip)
+            if seen is None or ts - seen > CHASE_WINDOW_SECONDS:
+                return
+        # The destination must not be a known DC.  If no DC set is declared the
+        # rule is undecidable and stays silent, like RPC-NETLOGON-UNEXPECTED.
+        if self.config.is_dc(server_ip) is not False:
+            return
+        key = (client_ip, server_ip)
+        if key in self.chase_fired:
+            return
+        self.chase_fired.add(key)
+        self.emitter.emit(
+            ts, "RPC-ADCS-CHASE", subject,
+            dict(base, cve="CVE-2026-54121", ca_host=client_ip,
+                 chase_target=server_ip,
+                 ca_source=("configured" if is_ca is True else "observed"),
+                 ldap_leg="UDP/389 to the same host belongs to ldapwatch; "
+                          "cross-reference",
+                 note="AD CS host opened an outbound LSARPC bind to a non-DC "
+                      "shortly after serving enrollment - the DC 'chase'"),
+            severity="critical", key_extra=("chase", server_ip))
+
+    def _adcs_chase_attr(self, ts, subject, base, stub):
+        """
+        If a legacy CA accepts an UNSEALED enrollment request, the chase
+        attribute is readable directly - a second, independent signal.
+        """
+        low = stub.lower() if stub else b""
+        if not (CHASE_ATTR_MARKER in low or CHASE_ATTR_MARKER_W in low):
+            return
+        self.emitter.emit(
+            ts, "RPC-ADCS-CHASE", subject,
+            dict(base, cve="CVE-2026-54121", stage="attribute",
+                 note="unsealed enrollment request carries a cdc: chase "
+                      "attribute directly"),
+            severity="critical", key_extra=("attr",))
 
     def _printer_driver_call(self, ts, subject, base, stub, uuid, opnum,
                              sealed, server_ip):
@@ -2144,6 +3081,107 @@ class RPCEngine:
                                confidence="local-paths-only",
                                note="no off-box driver path observed"),
                           severity="medium", key_extra=(uuid, opnum))
+
+    def _certenroll_level(self, ts, subject, base, uuid, level, trailer,
+                          stage, call=None):
+        """
+        ESC11: NTLM relay to the AD CS enrollment RPC interfaces.
+
+        No CVE exists for this and none is claimed.  The CA flag
+        IF_ENFORCEENCRYPTICERTREQUEST makes the interface refuse anything
+        below RPC_C_AUTHN_LEVEL_PKT_PRIVACY; it ships ON and gets switched
+        OFF to accommodate clients that cannot reach that level.  With it
+        off, a relayed authentication enrolls a certificate.
+
+        Reported at the LEVEL, exactly like CVE-2021-1678 on
+        IRemoteWinSpool, because the level is what the fix changed.  An
+        anonymous bind and an authenticated-but-unsealed one are both below
+        the bar but mean different things, so the auth type is carried
+        rather than collapsed.
+
+        The bind is posture: a legitimately misconfigured CA and a live
+        relay are indistinguishable at bind time.  The enrollment call on
+        the same unsealed association is the exploit step, and that is what
+        escalates it.
+        """
+        d = dict(base, technique="ESC11", stage=stage,
+                 observed_level=AUTHN_LEVEL_NAMES.get(level, level),
+                 required_level=AUTHN_LEVEL_NAMES[CERTENROLL_REQUIRED_LEVEL],
+                 setting="IF_ENFORCEENCRYPTICERTREQUEST",
+                 authenticated=trailer is not None)
+        if call:
+            d["call"] = call
+        if stage == "call":
+            d["note"] = ("certificate request submitted on an association "
+                         "that never reached packet privacy")
+            self.emitter.emit(ts, "RPC-CERTENROLL-RELAY-LEVEL", subject, d,
+                              severity="critical", key_extra=(uuid, "call"))
+            return
+        d["note"] = ("below the level the CA hardening flag requires; a CA "
+                     "with the flag off or an active relay, not proof of "
+                     "exploitation")
+        self.emitter.emit(ts, "RPC-CERTENROLL-RELAY-LEVEL", subject, d,
+                          key_extra=(uuid, "bind"))
+
+    def _dnssrv_operation(self, ts, subject, base, stub, opnum, sealed,
+                          server_ip):
+        """
+        MS-DNSP ServerLevelPluginDll: DnsAdmin to SYSTEM.
+
+        R_DnssrvOperation takes an operation NAME as a string parameter, and
+        one of the names it accepts is "ServerLevelPluginDll", whose value is
+        a path to a DLL that dns.exe loads in-process as SYSTEM when the
+        service next starts.  It is a documented feature, so there is no CVE
+        and none is claimed - this is abuse detection.
+
+        The parse is deliberately not a fixed-offset one.  pszOperation is a
+        [unique, string] LPCSTR sitting behind another unique pointer and a
+        DWORD, so its offset moves with the length of pwszServerName and
+        pszZone; the NDR alignment bug this module already shipped once came
+        from exactly that assumption.  Instead the operation name is matched
+        as the ASCII bytes it is on the wire, and the DLL path - a
+        DNSSRV_TYPEID_LPWSTR, UTF-16LE - is extracted separately.  The
+        mixture of encodings is in the IDL, not a guess.
+
+        Confidence is graded and never inflated:
+          operation-and-path  both the name and a path were readable
+          operation-only      the name was there, no path recovered
+          opnum-only          the stub is sealed; only the opnum is visible
+        """
+        opname = DNSP_OPERATION_OPNUMS[opnum]
+        d = dict(base, call=opname, technique="DnsAdmin to SYSTEM",
+                 operation="ServerLevelPluginDll")
+        if sealed:
+            # An operation name cannot be read out of ciphertext.  Saying
+            # nothing would hide the call entirely; claiming the operation
+            # would be inventing it.  So the call is NOT reported here -
+            # R_DnssrvOperation is the DNS management workhorse and firing on
+            # every sealed one would bury the signal.  The sealed case is
+            # covered by the interface posture rules instead.
+            return
+        if DNSP_PLUGIN_OPERATION not in stub:
+            return
+        paths = extract_unc_paths(stub)
+        remote = [pth for pth in paths
+                  if unc_host(pth) and unc_host(pth) != server_ip]
+        if remote:
+            external = [pth for pth in remote
+                        if self.config.in_local(unc_host(pth)) is not True]
+            self.emitter.emit(
+                ts, "RPC-DNS-SERVERLEVELPLUGINDLL", subject,
+                dict(d, plugin_paths=remote, external_source=bool(external),
+                     confidence="operation-and-path",
+                     note="the DNS service will load this DLL in-process as "
+                          "SYSTEM on next restart"),
+                severity="critical", key_extra=(opnum, "remote"))
+            return
+        self.emitter.emit(
+            ts, "RPC-DNS-SERVERLEVELPLUGINDLL", subject,
+            dict(d, plugin_paths=[], external_source=False,
+                 confidence="operation-only",
+                 note="operation name observed; no off-box path recovered "
+                      "from the stub"),
+            severity="high", key_extra=(opnum, "local"))
 
     def _lsa_anonymous_coercion(self, ts, subject, base, assoc, uuid, opnum):
         """
@@ -2193,6 +3231,8 @@ class RPCEngine:
                                      trailer["auth_value"], "rpc")
         if not pending:
             return
+        self._tslicensing_outcome(ts, subject, pending, accepted=True)
+        self._tsts_outcome(ts, subject, pending, accepted=True)
         uuid, opnum, _ = pending
         if uuid != IF_NETLOGON or opnum not in NRPC_AUTH_OPNUMS:
             return
@@ -2211,7 +3251,10 @@ class RPCEngine:
                              "negotiated")
 
     def _on_fault(self, ts, subject, assoc, pdu, hdr):
-        assoc.pending_calls.pop(hdr["call_id"], None)
+        pending = assoc.pending_calls.pop(hdr["call_id"], None)
+        if pending:
+            self._tslicensing_outcome(ts, subject, pending, accepted=False)
+            self._tsts_outcome(ts, subject, pending, accepted=False)
 
     # -- NTLM / SPNEGO ---------------------------------------------------
     def _inspect_auth_value(self, ts, subject, assoc, auth_type, blob, transport):
@@ -2281,7 +3324,7 @@ _SHELL_HINTS = (
 
 class WinRMFlow:
     __slots__ = ("offered", "reported", "assoc", "cbuf", "sbuf",
-                 "cpend", "spend")
+                 "cpend", "spend", "httpapi")
 
     def __init__(self, ts):
         self.offered: set[str] = set()
@@ -2291,6 +3334,9 @@ class WinRMFlow:
         self.sbuf = bytearray()       # server -> client
         self.cpend = None             # head seen, body still arriving
         self.spend = None
+        # Set when a response on this flow carries Server: Microsoft-HTTPAPI.
+        # On 5985 http.sys is a given; on a compat port it has to be earned.
+        self.httpapi = False
 
 
 class WinRMEngine:
@@ -2302,7 +3348,7 @@ class WinRMEngine:
 
     def process(self, ts, flow, client_ip, server_ip, data: bytes,
                 from_client: bool, server_port: int):
-        if server_port == WINRM_HTTPS_PORT:
+        if server_port in wsman_tls_ports(self.config):
             return  # TLS: observed at the flow level only, never dissected
         if client_ip in self.config.allow_clients:
             return
@@ -2362,20 +3408,37 @@ class WinRMEngine:
         if parsed["kind"] == "response":
             for s in auth_schemes_offered(parsed):
                 st.offered.add(s)
+            if HTTPAPI_BANNER in http_header(parsed, "server").lower():
+                st.httpapi = True
             return
         path = parsed.get("path", "")
 
         # Checked BEFORE the wsman-path gate on purpose: http.sys parses
         # Accept-Encoding in the kernel before it routes the request, so the
         # bug is reachable on any path, not just /wsman.
-        self._httpsys_accept_encoding(ts, subject, parsed, path, server_port)
+        self._httpsys_accept_encoding(ts, subject, parsed, path,
+                                      server_port, st)
 
         if not is_wsman_path(path):
             return
         if "cleartext" not in st.reported:
             st.reported.add("cleartext")
             self.emitter.emit(ts, "WINRM-CLEARTEXT-HTTP", subject, {
-                "path": path, "port": server_port})
+                "path": path, "port": server_port,
+                "endpoint": wsman_endpoint(path)})
+        endpoint = wsman_endpoint(path)
+        if endpoint == "anon-identify" and "anon" not in st.reported:
+            st.reported.add("anon")
+            self.emitter.emit(ts, "WINRM-ANON-IDENTIFY", subject, {
+                "path": path, "port": server_port, "endpoint": endpoint,
+                "note": "no credentials required; answers with vendor and "
+                        "protocol version"})
+        elif endpoint == "wec-subscription" and "wec" not in st.reported:
+            st.reported.add("wec")
+            self.emitter.emit(ts, "WINRM-WEC-SUBSCRIPTION", subject, {
+                "path": path, "port": server_port, "endpoint": endpoint,
+                "note": "source-initiated event forwarding channel"})
+
         scheme, blob = auth_scheme_used(parsed)
         if scheme == "basic":
             self.emitter.emit(ts, "WINRM-BASIC-AUTH", subject, {
@@ -2397,7 +3460,8 @@ class WinRMEngine:
             self.emitter.emit(ts, "WINRM-AUTH-DOWNGRADE", subject, {
                 "selected": scheme, "offered": sorted(st.offered)})
 
-    def _httpsys_accept_encoding(self, ts, subject, parsed, path, server_port):
+    def _httpsys_accept_encoding(self, ts, subject, parsed, path,
+                                 server_port, st):
         """
         CVE-2021-31166 and CVE-2022-21907.
 
@@ -2414,6 +3478,16 @@ class WinRMEngine:
         """
         if parsed["kind"] != "request":
             return
+        # Which carrier is on this port decides whether the CVEs even apply.
+        # On 5985/5986 http.sys is the only thing that answers, so the shape
+        # alone is enough.  On a compat port the listener may be IIS, Apache
+        # or anything else, so the claim has to be earned by a response that
+        # named Microsoft-HTTPAPI.  Responses follow requests, so the first
+        # request on a compat flow is not attributable and stays silent -
+        # under-claiming, which is the right direction to fail in.
+        native = server_port in (WINRM_HTTP_PORT, WINRM_HTTPS_PORT)
+        if not native and not st.httpapi:
+            return
         value = http_header(parsed, "accept-encoding")
         if not value:
             return
@@ -2421,6 +3495,8 @@ class WinRMEngine:
         if not shape["empty_elements"]:
             return
         d = dict(shape, path=path, port=server_port,
+                 carrier="native WinRM port" if native
+                         else "Server: Microsoft-HTTPAPI observed on this flow",
                  cve="CVE-2021-31166 / CVE-2022-21907",
                  note="empty coding-list element; the 2022 variant also "
                       "requires EnableTrailerSupport, which is host state "
@@ -2477,7 +3553,7 @@ class FlowManager:
         self.streams: dict[tuple, HalfStream] = {}
 
     def server_port_for(self, sport: int, dport: int) -> int | None:
-        watched = set(self.config.rpc_ports) | {WINRM_HTTP_PORT, WINRM_HTTPS_PORT}
+        watched = set(self.config.rpc_ports) | wsman_ports(self.config)
         if dport in watched:
             return dport
         if sport in watched:
@@ -2505,7 +3581,7 @@ class FlowManager:
         flow = (client_ip, client_port, server_ip, server_port)
         key = flow + (from_client,)
 
-        if server_port in (WINRM_HTTP_PORT, WINRM_HTTPS_PORT):
+        if server_port in wsman_ports(self.config):
             self.winrm.process(ts, flow, client_ip, server_ip, payload,
                                from_client, server_port)
             return
@@ -2619,11 +3695,44 @@ class RPCWatch:
         self.flows.handle_segment(ts, src, sport, dst, dport, payload)
 
 
+# libpcap cannot walk an IPv6 extension-header chain: once a Destination
+# Options (or Routing, or Fragment) header sits between the fixed header and
+# TCP, neither "tcp port N" nor even "ip6 and tcp" matches, because both walk
+# to a fixed offset.  Measured, not assumed - see the pcap tier's
+# extension-header section.  The only portable filter that still sees those
+# frames is a bare "ip6", which means capturing ALL IPv6 and port-filtering in
+# userspace.  That costs real CPU on a Pi Zero 2W, so it is opt-in, exactly
+# like --dynamic-range.
+IPV6_EH_CLAUSE = "ip6"
+
+
+def wsman_cleartext_ports(config: Config) -> set:
+    """Ports where WS-Man is readable: 5985 always, 80 when compat is on."""
+    ports = {WINRM_HTTP_PORT}
+    if config.wsman_compat:
+        ports.add(WSMAN_COMPAT_HTTP_PORT)
+    return ports
+
+
+def wsman_tls_ports(config: Config) -> set:
+    """Ports where WS-Man is TLS-wrapped: observed at flow level, never dissected."""
+    ports = {WINRM_HTTPS_PORT}
+    if config.wsman_compat:
+        ports.add(WSMAN_COMPAT_HTTPS_PORT)
+    return ports
+
+
+def wsman_ports(config: Config) -> set:
+    return wsman_cleartext_ports(config) | wsman_tls_ports(config)
+
+
 def bpf_filter(config: Config) -> str:
-    ports = sorted(set(config.rpc_ports) | {WINRM_HTTP_PORT, WINRM_HTTPS_PORT})
+    ports = sorted(set(config.rpc_ports) | wsman_ports(config))
     clause = " or ".join(f"tcp port {p}" for p in ports)
     if config.dynamic_range:
         clause += " or (tcp and portrange 49152-65535)"
+    if config.ipv6_eh:
+        clause += f" or {IPV6_EH_CLAUSE}"
     return clause
 
 
@@ -2655,14 +3764,18 @@ def build_config(args) -> Config:
         window=args.window,
         zerologon_threshold=args.zerologon_threshold,
         epm_threshold=args.epm_threshold,
+        tslicensing_spray_threshold=args.tslicensing_spray_threshold,
         dedup_seconds=args.dedup_seconds,
         min_severity=args.min_severity,
         local_nets=_parse_nets(args.local_net),
         dc_hosts=_parse_hosts(args.dc),
+        ca_hosts=_parse_hosts(args.ca_host),
         allow_clients=set(args.allow_client or []),
         allow_interfaces=set(u.lower() for u in (args.allow_interface or [])),
         rpc_ports=rpc_ports,
         dynamic_range=args.dynamic_range,
+        ipv6_eh=args.ipv6_eh,
+        wsman_compat=args.wsman_compat,
         ntlm_from_smb=args.ntlm_from_smb,
         record_identities=not args.no_identities,
     )
@@ -2707,7 +3820,14 @@ def tcp_payload_bytes(pkt, tcp) -> bytes:
             ip = pkt["IP"]
             seg_len = int(ip.len) - int(ip.ihl) * 4
         elif pkt.haslayer("IPv6"):
-            seg_len = int(pkt["IPv6"].plen)
+            # plen counts everything after the fixed 40-byte header, which
+            # INCLUDES any extension headers.  Subtract them, or the trim
+            # over-counts and silently stops trimming link-layer padding.
+            ip6 = pkt["IPv6"]
+            seg_len = int(ip6.plen)
+            ext = len(bytes(ip6.payload)) - len(bytes(tcp))
+            if 0 <= ext <= seg_len:
+                seg_len -= ext
     except Exception:                       # malformed header: use what we have
         seg_len = None
     if seg_len is not None:
@@ -2762,8 +3882,6 @@ def assert_passive(path: str | None = None) -> list[str]:
                 hits.append(f"{i}: {stripped}")
                 break
     return hits
-
-
 
 
 # ===========================================================================
@@ -3479,6 +4597,135 @@ def selftest():
     cves = _coercion_cves(h)
     check("petitpotam-other-opnum-not-36942",
           cves and "CVE-2021-36942" not in cves, cves)
+
+    # ----- v7 detectors (ported from the v7 drop; one positive per new code,
+    #       plus the false-positive guards that keep each honest) -------------
+
+    # 36-37. MadLicense / RD Licensing (CVE-2024-38077 + the July-2024 cluster):
+    #        the TLSRpcTelephoneRegisterLKP call below packet privacy is the
+    #        overflow step; the same call sealed is what a patched host accepts.
+    h = _STHarness(client="10.20.10.1")
+    _st_bind(h, IF_TSLICENSING, level=RPC_C_AUTHN_LEVEL_CONNECT)
+    h.c2s(_st_co_pdu(PTYPE_REQUEST, _st_request_body(
+        TSL_RPC_TELEPHONE_REGISTER_LKP, b"\x00" * 64), call_id=4))
+    check("tslicensing-preauth-call-38077",
+          "RPC-TSLICENSING-PREAUTH" in h.codes, sorted(h.codes))
+
+    h = _STHarness(client="10.20.10.2")
+    _st_bind(h, IF_TSLICENSING, level=RPC_C_AUTHN_LEVEL_PKT_PRIVACY)
+    h.c2s(_st_co_pdu(PTYPE_REQUEST, _st_request_body(
+        TSL_RPC_TELEPHONE_REGISTER_LKP, b"\x00" * 64),
+        auth=_st_sec_trailer(RPC_C_AUTHN_GSS_NEGOTIATE,
+                             RPC_C_AUTHN_LEVEL_PKT_PRIVACY, _AUTH_TOKEN),
+        call_id=4))
+    check("tslicensing-sealed-quiet",
+          "RPC-TSLICENSING-PREAUTH" not in h.codes, sorted(h.codes))
+
+    # 38. LSM container interface over the network (CVE-2022-37973 / -37998):
+    #     any bind reaching the tap is illegitimate — no remote caller exists.
+    h = _STHarness(client="10.20.10.3")
+    _st_bind(h, IF_LSM_CONTAINER)
+    check("lsm-container-bind-remote",
+          "RPC-LSM-CONTAINER-REMOTE" in h.codes, sorted(h.codes))
+
+    # 39. RpcGetSessionIds LSM crash (CVE-2025-26651): opnum 8 is in the
+    #     cleartext header, so the request fires even sealed.
+    h = _STHarness(client="10.20.10.4")
+    _st_bind(h, IF_TSTS_ENUM)
+    h.c2s(_st_co_pdu(PTYPE_REQUEST, _st_request_body(
+        TSTS_GET_SESSION_IDS, b""), call_id=4))
+    check("lsm-getsessionids-crash-26651",
+          "RPC-LSM-GETSESSIONIDS-CRASH" in h.codes, sorted(h.codes))
+
+    # 40-41. ESC11 — relay to the AD CS enrollment interface (no CVE): a bind
+    #        below packet privacy is posture; the same bind sealed is quiet.
+    h = _STHarness(client="10.20.10.5")
+    _st_bind(h, IF_ICPR, level=RPC_C_AUTHN_LEVEL_CONNECT)
+    check("certenroll-relay-level-bind",
+          "RPC-CERTENROLL-RELAY-LEVEL" in h.codes, sorted(h.codes))
+
+    h = _STHarness(client="10.20.10.6")
+    _st_bind(h, IF_ICPR, level=RPC_C_AUTHN_LEVEL_PKT_PRIVACY)
+    check("certenroll-sealed-quiet",
+          "RPC-CERTENROLL-RELAY-LEVEL" not in h.codes, sorted(h.codes))
+
+    # 42-43. Certighost chase (CVE-2026-54121): a declared CA opening an
+    #        outbound LSARPC bind to a non-DC fires; with no --ca/--dc set the
+    #        rule is undecidable and stays silent.
+    h = _STHarness(client="10.20.10.7", server="10.20.10.8",
+                   ca_hosts=_parse_hosts(["10.20.10.7"]),
+                   dc_hosts=_parse_hosts(["10.20.10.9"]))
+    _st_bind(h, IF_LSARPC)
+    check("adcs-chase-54121",
+          "RPC-ADCS-CHASE" in h.codes, sorted(h.codes))
+
+    h = _STHarness(client="10.20.10.10", server="10.20.10.11")
+    _st_bind(h, IF_LSARPC)
+    check("adcs-chase-undeclared-silent",
+          "RPC-ADCS-CHASE" not in h.codes, sorted(h.codes))
+
+    # 44-45. MS-DNSP ServerLevelPluginDll — DnsAdmin to SYSTEM (no CVE): the
+    #        operation name plus an off-box DLL path is critical; a sealed call
+    #        is deliberately not reported (DNS management workhorse).
+    h = _STHarness(client="10.20.10.12")
+    _st_bind(h, IF_DNSSERVER)
+    h.c2s(_st_co_pdu(PTYPE_REQUEST, _st_request_body(
+        0, DNSP_PLUGIN_OPERATION + b"\x00\x00"
+        + _st_ndr_wstr("\\\\10.88.88.88\\s\\evil.dll")), call_id=4))
+    check("dnsp-serverlevelplugindll-path",
+          "RPC-DNS-SERVERLEVELPLUGINDLL" in h.codes, sorted(h.codes))
+
+    h = _STHarness(client="10.20.10.13")
+    _st_bind(h, IF_DNSSERVER)
+    h.c2s(_st_co_pdu(PTYPE_REQUEST, _st_request_body(
+        0, DNSP_PLUGIN_OPERATION),
+        auth=_st_sec_trailer(RPC_C_AUTHN_GSS_NEGOTIATE,
+                             RPC_C_AUTHN_LEVEL_PKT_PRIVACY, _AUTH_TOKEN),
+        call_id=4))
+    check("dnsp-sealed-quiet",
+          "RPC-DNS-SERVERLEVELPLUGINDLL" not in h.codes, sorted(h.codes))
+
+    # 46. MS-EVEN backup-write (CVE-2025-29969 / CVE-2026-50502): ElfrOpenBELW
+    #     against an off-box file opens the write chain.
+    h = _STHarness(client="10.20.10.14")
+    _st_bind(h, IF_EVEN)
+    h.c2s(_st_co_pdu(PTYPE_REQUEST, _st_request_body(
+        ELFR_OPEN_BELW, _st_ndr_wstr("\\\\10.77.77.77\\x\\evil.evtx")),
+        call_id=4))
+    check("eventlog-backup-write-openbelw",
+          "RPC-EVENTLOG-BACKUP-WRITE" in h.codes, sorted(h.codes))
+
+    # 47. MS-EVEN path-existence oracle (no CVE): a burst of ElfrOpenBELW opens
+    #     against distinct local paths is enumeration, latched once.
+    h = _STHarness(client="10.20.10.15")
+    _st_bind(h, IF_EVEN)
+    for i in range(EVENTLOG_PROBE_THRESHOLD + 1):
+        h.c2s(_st_co_pdu(PTYPE_REQUEST, _st_request_body(
+            ELFR_OPEN_BELW, _st_ndr_wstr("C:\\logs\\probe%d.evtx" % i)),
+            call_id=20 + i))
+    check("eventlog-path-probe",
+          "RPC-EVENTLOG-PATH-PROBE" in h.codes, sorted(h.codes))
+
+    # 48. Interface inventory (no CVE): a bind to a UUID with no rule behind it
+    #     is described, graded unknown vs documented.
+    h = _STHarness(client="10.20.10.16")
+    _st_bind(h, "deadbeef-0000-0000-0000-00000000cafe")
+    check("interface-uncatalogued-unknown",
+          "RPC-INTERFACE-UNCATALOGUED" in h.codes, sorted(h.codes))
+
+    # 49-50. WS-Man endpoints (no CVE): the anonymous Identify endpoint and the
+    #        Event Collector subscription endpoint, read from the request line.
+    h = _STHarness(client="10.20.10.17")
+    h.c2s(_st_http_request("POST", "/wsman-anon/identify",
+          {"Host": "dc01:5985", "Content-Length": "0"}), dport=5985)
+    check("winrm-anon-identify",
+          "WINRM-ANON-IDENTIFY" in h.codes, sorted(h.codes))
+
+    h = _STHarness(client="10.20.10.18")
+    h.c2s(_st_http_request("POST", "/wsman/SubscriptionManager/WEC",
+          {"Host": "collector:5985", "Content-Length": "0"}), dport=5985)
+    check("winrm-wec-subscription",
+          "WINRM-WEC-SUBSCRIPTION" in h.codes, sorted(h.codes))
 
     # 27. Catalogue integrity: every declared code has a known severity.
     bad = [c for c, spec in FINDINGS.items() if spec[0] not in SEVERITY_RANK]
