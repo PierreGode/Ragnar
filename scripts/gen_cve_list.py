@@ -80,6 +80,10 @@ MENTION_ONLY = {'webapp_modern.py', 'watchtower.py', 'web/scripts/ragnar_modern.
 # network_diagnostics.py: enclosing def / constant -> detector (first prefix match).
 ND_PREFIXES = [
     ('_cli', None),
+    # Active Cert Watch (do_cert_watch) now runs the same 4 cert-bytes CVE detectors
+    # as the passive certwatch daemon (_tls_cve_findings / _tls_classify comment /
+    # _cert_selftest), so those CVE tokens attribute to Cert Watch, not this file.
+    ('_tls_c', 'Cert Watch'), ('_cert_selftest', 'Cert Watch'),
     ('_BGP_ADVISORIES', 'BGP Path Watch'), ('_OSPF_ADVISORIES', 'OSPF Watch'),
     ('_arista', 'Arista Guard'), ('_ARISTA', 'Arista Guard'), ('do_arista', 'Arista Guard'),
     ('_aruba', 'Aruba Guard'), ('_ARUBA', 'Aruba Guard'),
