@@ -4,6 +4,14 @@
 
 ### 2026-11-01
 
+#### [#1038](https://github.com/PierreGode/Ragnar/pull/1038) — fix(ble): de-duplicate BLE Watch findings + stop clone false positives on churning beacons
+*branch `fix/blewatch-dedupe-findings-churn`*
+
+- **Follow-up to [#1037](https://github.com/PierreGode/Ragnar/pull/1037).** On a live nRF52840 the [BLE Watch](blewatch.md) findings list was still long and dominated by **the same device repeated many times**, plus clone/impersonation alerts on ordinary sensor beacons. Two causes, two fixes:
+  - **Output de-dupe** — a passive scan sees each advertiser on every PDU, so the same `(address, code)` finding was emitted dozens of times (and a device flapping between two identities emitted both `A→B` and `B→A`). `_ble_dedupe_findings()` now collapses to **one row per `(src, code)`** in first-seen order, with a `(seen N times)` count and the most recent detail. Same collapse feeds the Watchtower `ble_watch.jsonl` export.
+  - **Identity-based clone detection** — `BLE-001`/`BLE-002` compared raw payload bytes, so a **sensor beacon streaming changing telemetry** (same name/services) read as *“conflicting payloads / two radios”*, and a device that carries its name in only some frame types read as a name clone when the name blinked in and out. They now compare **identity** (name + service UUIDs) via `_ident_conflict()`, which treats an *absent* field as “not advertised here”, never a conflict. `BLE-002` wording → *“conflicting identities”*.
+- **Validation:** self-test **38 → 40** (new sensor-telemetry-churn + present/absent-name negative controls; `BLE-002` case now uses genuinely conflicting names). Dedup checked against the reported scan: **14 raw findings → 9 rows**. No new config keys, no JS change (the count rides in `detail.text`). `docs/blewatch.md` documents both.
+
 #### [#1037](https://github.com/PierreGode/Ragnar/pull/1037) — fix(ble): stop nRF52 sniffer false-positive advertising floods
 *branch `fix/blewatch-nrf52-false-positives`*
 

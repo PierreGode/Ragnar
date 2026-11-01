@@ -186,12 +186,30 @@ def _run_checks(verbose):
     feed(g, ll_adv(b.ADV_IND, 'c0:11:ec:00:00:01', ad(name_ad('Pwned'))), 2)
     h.ck('BLE-001 identity clone', 'BLE-001' in _codes(al))
 
-    # ---- BLE-002 impersonation (payload flap) -----------------------------
+    # ---- BLE-002 impersonation (conflicting identities) -------------------
+    # Two radios on one address = conflicting *identities* (distinct names or
+    # service sets) — not merely changing manufacturer bytes (that's telemetry,
+    # covered by the negative control below).
     g, al = _w({'clone_flap_count': 4})
     for i in range(6):
-        feed(g, ll_adv(b.ADV_NONCONN_IND, 'be:ac:00:00:00:02',
-                       ad(manuf_ad(0x0059, bytes([i, i, i])))), 1 + i * 0.1)
+        feed(g, ll_adv(b.ADV_IND, 'be:ac:00:00:00:02', ad(name_ad('Radio-%d' % i))), 1 + i * 0.1)
     h.ck('BLE-002 two radios one AdvA', 'BLE-002' in _codes(al))
+
+    # ---- negative: a sensor streaming changing telemetry is NOT a clone ----
+    g, al = _w({'clone_flap_count': 4})
+    for i in range(8):
+        feed(g, ll_adv(b.ADV_NONCONN_IND, 'be:ac:00:00:00:fd',
+                       ad(name_ad('TempSensor'), manuf_ad(0x0059, bytes([i, i * 3, i * 7, 0x11])))),
+             1 + i * 0.1)
+    h.ck('sensor telemetry churn is not a clone/impersonation',
+         not ({'BLE-001', 'BLE-002'} & _codes(al)))
+
+    # ---- negative: name present in some frame types, absent in others ------
+    g, al = _w()
+    feed(g, ll_adv(b.ADV_IND, 'c0:ff:ee:00:00:fc', ad(name_ad('Watch'))), 1)
+    feed(g, ll_adv(b.ADV_NONCONN_IND, 'c0:ff:ee:00:00:fc', ad(manuf_ad(0x004C, b'\x10\x05\x01'))), 2)
+    feed(g, ll_adv(b.ADV_IND, 'c0:ff:ee:00:00:fc', ad(name_ad('Watch'))), 3)
+    h.ck('name present/absent across frame types is not a clone', 'BLE-001' not in _codes(al))
 
     # ---- BLE-003 public address reused across names -----------------------
     g, al = _w()

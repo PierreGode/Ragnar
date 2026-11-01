@@ -30093,6 +30093,46 @@ def _ble_normalize(alert, blewatch):
     return out
 
 
+def _ble_dedupe_findings(findings):
+    """Collapse repeat findings to one row per (source address, code).
+
+    A passive scan sees the same advertiser on every PDU, so without this the
+    same device re-emits the same finding dozens of times, and a device that
+    flaps between two identities emits both the A->B and the B->A row. Keep one
+    row per (src, code) in first-seen order, carry an occurrence count, keep the
+    most recent detail (e.g. the highest "N conflicting" count), and annotate the
+    row text when it was seen more than once. Findings with no source address
+    (connection-layer events keyed by access address) are never merged together,
+    so distinct events are not collapsed by accident."""
+    order, groups, uniq = [], {}, 0
+    for f in findings:
+        src = (f.get('src') or '').lower()
+        if src:
+            key = (src, f.get('code'))
+        else:
+            uniq += 1
+            key = (uniq, f.get('code'))
+        g = groups.get(key)
+        if g is None:
+            g = dict(f)
+            g['count'] = 1
+            groups[key] = g
+            order.append(key)
+        else:
+            g['count'] += 1
+            g['detail'] = f.get('detail')          # keep the most recent detail
+    out = []
+    for key in order:
+        g = groups[key]
+        if g.get('count', 1) > 1:
+            d = dict(g.get('detail') or {})
+            if d.get('text'):
+                d['text'] = '%s (seen %d times)' % (d['text'], g['count'])
+            g['detail'] = d
+        out.append(g)
+    return out
+
+
 # Trusted-device baseline for BLE Watch (data/ble_watch.json). Unlike the IGMP/
 # NDP "reset then re-learn on next scan" model, BLE is device-gated (each learn
 # needs a sniffer capture), so the web controls manage an explicit trust LIST:
@@ -30279,6 +30319,7 @@ def do_ble_watch(device=None, seconds=20, replay=None, config=None, quick=False)
     findings = []
     for a in alerts:
         findings.extend(_ble_normalize(a, blewatch))
+    findings = _ble_dedupe_findings(findings)       # one row per (address, code)
     verdict = _ble_verdict(alerts)
     reasons, seen = [], set()
     for a in sorted(alerts, key=lambda x: _BLE_SEV_RANK.get(x.get('severity'), 0),

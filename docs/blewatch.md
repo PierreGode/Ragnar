@@ -157,6 +157,32 @@ lossy nRF51 they were first prototyped against. Two things matter:
   addresses per second) and a single hammered/cloned advertiser still trip. All
   of these are overridable per deployment in `data/ble_watch.json`.
 
+### Identity churn is not a clone, and the output is de-duplicated
+
+The clone/impersonation detectors (`BLE-001`/`BLE-002`) compare an advertiser's
+**identity** — its name plus its advertised service UUIDs — not its raw payload
+bytes. This matters on a full-coverage sniffer:
+
+- A **sensor beacon streaming changing telemetry** (temperature, humidity,
+  battery in the manufacturer/service data) keeps one identity, so it no longer
+  reads as "two radios advertising conflicting payloads".
+- A field that is simply **absent in some frame types** — a device that puts its
+  name in `ADV_IND` but not in a scan response or a non-connectable frame — is
+  "not advertised here", not a competing identity, so the name blinking in and
+  out stops raising clone alerts. Only a real name-vs-name or service-set change
+  is flagged.
+
+The findings table is also **de-duplicated to one row per (address, code)**: a
+passive scan sees each advertiser on every PDU, so the raw stream repeats the
+same finding (and a flapping device emits both the `A -> B` and `B -> A` row).
+Each row now carries a "(seen *N* times)" count and keeps the most recent detail
+(e.g. the highest "*N* conflicting identities" figure). The same collapse feeds
+the Watchtower `ble_watch.jsonl` export, so one device no longer floods it.
+
+If a device you trust still shows up (a beacon that legitimately rotates a
+service UUID, say), use **Trust current** after a scan to add the advertisers on
+air to `data/ble_watch.json` so they stop being flagged.
+
 ## Which board, and how to plug it in
 
 **Plug the sniffer in normally. Don't hold any button, and switch position doesn't
