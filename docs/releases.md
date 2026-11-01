@@ -4,7 +4,12 @@
 
 ### 2026-11-01
 
-#### [#1034](https://github.com/PierreGode/Ragnar/pull/1034) — feat(net): active Cert Watch cert-bytes CVEs + RPC/LDAP/TLS card refresh
+#### [#1036](https://github.com/PierreGode/Ragnar/pull/1036) — docs: correct PR link on the active-Cert-Watch release entry
+*branch `fix/releases-pr-number-1035`*
+
+- Fixed the changelog heading below: the active Cert Watch cert-bytes CVEs + RPC/LDAP/TLS card-refresh work was logged against `#1034`, but it actually merged as **PR #1035** (`#1034` is an unrelated open PR). Corrected the link so the entry points at the right PR. Docs-only.
+
+#### [#1035](https://github.com/PierreGode/Ragnar/pull/1035) — feat(net): active Cert Watch cert-bytes CVEs + RPC/LDAP/TLS card refresh
 *branch `feature/cert-active-cves-card-refresh`*
 
 - **Active [Cert Watch](#cert-watch) (`do_cert_watch`) now runs the four cert-content CVE detectors** the passive `certwatch` daemon gained in v3 — **CurveBall** (`CVE-2020-0601`), the non-prime EC field (`CVE-2022-0778`), **ROCA** (`CVE-2017-15361`) and a DSA-in-chain (`CVE-2025-58188`) — read straight from the presented leaf's DER in `_tls_cve_findings` (reusing certwatch's own tested functions, not a second copy). New `cert-cve` verdict (worst-first) + card prose + `_CERT_VERDICT_STYLE` entry. `_cert_selftest` 10 → 16. **CVE index unchanged at 439/375** (these 4 were already detected via the passive daemon; the active grader is now a second detector for the same CVEs, both attributed to Cert Watch).
