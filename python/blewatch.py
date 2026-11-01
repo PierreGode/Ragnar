@@ -413,6 +413,24 @@ def _norm_trusted(td):
     return out
 
 
+def _ident_conflict(a, b):
+    """True only when two advertised identities genuinely CONFLICT — both name a
+    concrete value that differs. Each identity is (name, sorted-service-UUIDs). A
+    field that is simply absent in one frame (name None, or an empty service
+    list) is "not advertised here", not a competing identity: many devices send
+    their name in only some frame types (ADV_IND vs a scan response / non-conn
+    frame), and a sensor that streams changing manufacturer/service data keeps
+    one identity. Only a real name-vs-name or service-set-vs-service-set
+    difference is a clone / two-radios tell, so telemetry churn and
+    present/absent name flapping stop being false positives."""
+    (name_a, svc_a), (name_b, svc_b) = a, b
+    if name_a and name_b and name_a != name_b:
+        return True
+    if svc_a and svc_b and set(svc_a) != set(svc_b):
+        return True
+    return False
+
+
 class BleWatch:
     def __init__(self, config=None, emit=None):
         c = dict(DEFAULTS)
@@ -513,24 +531,36 @@ class BleWatch:
         trusted_here = akey in self.trusted
 
         # --- BLE-001 / BLE-002 clone & impersonation --------------------------
+        # Count conflicting *identities* (name + service UUIDs), not raw payload
+        # bytes: a sensor beacon streaming changing telemetry keeps one identity
+        # and must not read as a clone, and a name that is simply absent in some
+        # frame types is not a competing identity (see _ident_conflict). This is
+        # what kept flooding the findings with false BLE-001/002 on churning
+        # beacons and devices that alternate ADV_IND with a scan response.
         prev = self._adv.get(akey)
         if prev is None:
             self._adv[akey] = {'hash': phash, 'ident': ident, 'flaps': deque(),
                                'rpa_class': rpa_class}
         else:
             if phash != prev['hash']:
-                fl = prev['flaps']
-                fl.append((ts, phash))
-                self._trim(fl, ts, self.cfg['clone_flap_window_s'])
-                distinct = len({h for _t, h in fl})
-                if distinct >= self.cfg['clone_flap_count']:
-                    out.append(('BLE-002', '%s is advertising %d conflicting payloads within '
-                                '%.0fs — two radios sharing one address (impersonation)'
-                                % (adva, distinct + 1, self.cfg['clone_flap_window_s'])))
-                elif ident != prev['ident']:
-                    out.append(('BLE-001', '%s identity changed %r -> %r — device clone'
-                                % (adva, prev['ident'], ident)))
-                prev['hash'], prev['ident'] = phash, ident
+                prev['hash'] = phash
+                if _ident_conflict(prev['ident'], ident):
+                    fl = prev['flaps']
+                    fl.append((ts, ident))
+                    self._trim(fl, ts, self.cfg['clone_flap_window_s'])
+                    distinct = len({i for _t, i in fl})
+                    if distinct >= self.cfg['clone_flap_count']:
+                        out.append(('BLE-002', '%s is advertising %d conflicting identities within '
+                                    '%.0fs — two radios sharing one address (impersonation)'
+                                    % (adva, distinct + 1, self.cfg['clone_flap_window_s'])))
+                    else:
+                        out.append(('BLE-001', '%s identity changed %r -> %r — device clone'
+                                    % (adva, prev['ident'], ident)))
+                    prev['ident'] = ident
+                elif ident[0] or ident[1]:
+                    # Non-conflicting refinement (e.g. the name appeared in this
+                    # frame): adopt the latest concrete identity as the baseline.
+                    prev['ident'] = ident
         # A configured trusted device whose advertised identity does not match its
         # baseline is always a clone, even on the first drift.
         if trusted_here:
