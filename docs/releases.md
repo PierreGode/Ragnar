@@ -4,6 +4,14 @@
 
 ### 2026-11-01
 
+#### [#1039](https://github.com/PierreGode/Ragnar/pull/1039) — feat(net): live module search in the Diagnostics tab
+*branch `feature/diagnostics-module-search`*
+
+- **The [Diagnostics](nettools.md) sub-tab (~70 module cards across eight OSI-layer panels) gets a search box above the layer buttons** that live-filters every card across **all** layers as you type — no more clicking layer by layer to find a module.
+  - **Word-boundary matching** over each card's title + description (prefix allowed): `ble` finds **BLE Watch** but not "ta*ble*", while `router` still matches **RouterOS**; `/`, `-`, `.` are separators so `mac`, `cve` and `1472` (from `CVE-2020-1472`) all hit. Multiple words are AND-ed.
+  - **Cross-layer results** appear at once, each under its layer label (e.g. *L2 · Data Link*), with a running match count and a *no matches* hint. The **Clear** button, *Esc*, or tapping any layer button restores the normal single-layer view.
+- Pure client-side (`web/index_modern.html` input/CSS + `web/scripts/ragnar_modern.js`); no backend change. Non-matching cards hide via a dedicated `.diag-search-hidden` marker (never the real `.hidden`), so a card's own state is never clobbered. Mobile-friendly; JS cache-bust bumped. Verified headless in Chromium against production-style markup.
+
 #### [#1038](https://github.com/PierreGode/Ragnar/pull/1038) — fix(ble): de-duplicate BLE Watch findings + stop clone false positives on churning beacons
 *branch `fix/blewatch-dedupe-findings-churn`*
 
