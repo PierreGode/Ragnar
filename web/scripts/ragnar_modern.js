@@ -1602,7 +1602,104 @@ function _netLayerSaved() {
     } catch (e) { return 'overview'; }
 }
 
+// --- Diagnostics module search ----------------------------------------------
+// There are ~70 Diagnostics cards spread across the OSI-layer panels, so a live
+// search that reveals matching modules from every layer at once (not just the
+// open one) is far quicker than hunting tab by tab. It filters on each card's
+// visible text (title + description), which already carries protocol names, CVE
+// ids and vendor names, so "ble", "nrf", "zerologon" or "mikrotik" all hit.
+const _NET_LAYER_LABELS = {
+    overview: 'Overview', l7: 'L7 · Application', l6: 'L6 · Presentation',
+    l5: 'L5 · Session', l4: 'L4 · Transport', l3: 'L3 · Network',
+    l2: 'L2 · Data Link', l1: 'L1 · Physical'
+};
+let _netDiagSearching = false;
+
+function _netDiagLayerCards(layer) {
+    const panel = document.getElementById('net-layer-' + layer);
+    const grid = panel && panel.querySelector(':scope > .grid');
+    return grid ? Array.from(grid.children) : [];
+}
+
+function _netDiagSetLayerLabel(panel, layer, show) {
+    let lbl = panel.querySelector(':scope > .diag-search-layerlabel');
+    if (show) {
+        if (!lbl) {
+            lbl = document.createElement('div');
+            lbl.className = 'diag-search-layerlabel text-[11px] uppercase tracking-wide font-semibold text-Ragnar-300/80 mb-2 mt-1';
+            panel.insertBefore(lbl, panel.firstChild);
+        }
+        lbl.textContent = _NET_LAYER_LABELS[layer] || layer;
+    } else if (lbl) {
+        lbl.remove();
+    }
+}
+
+// Drop out of search mode without re-selecting a layer (the caller does that).
+function _netDiagClearSearchState() {
+    _netDiagSearching = false;
+    const input = document.getElementById('net-diag-search');
+    if (input) input.value = '';
+    const clearBtn = document.getElementById('net-diag-search-clear');
+    if (clearBtn) clearBtn.classList.add('hidden');
+    const count = document.getElementById('net-diag-search-count');
+    if (count) { count.textContent = ''; count.classList.add('hidden'); }
+    document.querySelectorAll('#net-sub-diagnostics .diag-search-hidden')
+        .forEach(e => e.classList.remove('diag-search-hidden'));
+    document.querySelectorAll('#net-sub-diagnostics .diag-search-layerlabel')
+        .forEach(e => e.remove());
+}
+
+function netDiagSearch(q) {
+    const terms = (q || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) {                       // cleared -> back to normal layer view
+        _netDiagClearSearchState();
+        showNetLayer(_netLayerSaved());
+        return;
+    }
+    _netDiagSearching = true;
+    const clearBtn = document.getElementById('net-diag-search-clear');
+    if (clearBtn) clearBtn.classList.remove('hidden');
+    // Match each term at a WORD BOUNDARY (start of a word, prefix allowed) so
+    // "ble" finds BLE Watch but not "ta[ble]", and "router" still matches
+    // "RouterOS". Non-alphanumerics (/, -, .) count as separators, so "mac",
+    // "cve" or "1472" (from CVE-2020-1472) all hit.
+    const res = terms.map(t =>
+        new RegExp('(^|[^a-z0-9])' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    let total = 0;
+    NET_LAYERS.forEach(layer => {
+        const panel = document.getElementById('net-layer-' + layer);
+        if (!panel) return;
+        let shown = 0;
+        _netDiagLayerCards(layer).forEach(card => {
+            const txt = (card.textContent || '').toLowerCase();
+            const match = res.every(re => re.test(txt));
+            card.classList.toggle('diag-search-hidden', !match);
+            if (match) shown++;
+        });
+        total += shown;
+        panel.classList.toggle('hidden', shown === 0);
+        _netDiagSetLayerLabel(panel, layer, shown > 0);
+        const btn = document.getElementById('net-layer-btn-' + layer);
+        if (btn) {                             // no single layer is "active" while searching
+            _NET_LAYER_ON.forEach(c => btn.classList.remove(c));
+            _NET_LAYER_OFF.forEach(c => btn.classList.add(c));
+            btn.setAttribute('aria-pressed', 'false');
+        }
+    });
+    const count = document.getElementById('net-diag-search-count');
+    if (count) {
+        count.textContent = total
+            ? (total + ' module' + (total === 1 ? '' : 's') + ' match — across every layer')
+            : 'No modules match — try a protocol, vendor or CVE name';
+        count.classList.remove('hidden');
+    }
+    const desc = document.getElementById('net-layer-desc');
+    if (desc) desc.textContent = 'Showing modules from every OSI layer that match your search. Clear the search to return to the layer view.';
+}
+
 function showNetLayer(layer) {
+    if (_netDiagSearching) _netDiagClearSearchState();   // a layer click exits search
     if (!NET_LAYERS.includes(layer)) layer = 'overview';
     NET_LAYERS.forEach(l => {
         const panel = document.getElementById('net-layer-' + l);

@@ -37,6 +37,10 @@
             word-break: break-word;
             min-width: 0;
         }
+
+        /* Diagnostics module search hides non-matching cards via its own marker
+           class (not Tailwind .hidden) so it never clobbers a card's real state. */
+        .diag-search-hidden { display: none !important; }
         
         .scrollbar-thin::-webkit-scrollbar {
             width: 6px;
@@ -1919,6 +1923,19 @@
             <div id="net-sub-diagnostics" class="net-subview hidden">
                 <!-- OSI layer navigation: every Diagnostics module sits at the layer it mostly watches -->
                 <div class="glass rounded-xl p-3 sm:p-4 mb-6">
+                    <!-- Module search: live-filters every Diagnostics card across all OSI layers as you type -->
+                    <div class="relative mb-2">
+                        <svg class="w-4 h-4 text-gray-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z"/></svg>
+                        <input id="net-diag-search" type="search" autocomplete="off" spellcheck="false"
+                               oninput="netDiagSearch(this.value)"
+                               onkeydown="if(event.key==='Escape'){netDiagSearch('');this.blur();}"
+                               placeholder="Search modules — protocol, vendor or CVE (BLE, OSPF, Zerologon, MikroTik…)"
+                               aria-label="Search diagnostics modules"
+                               class="w-full pl-9 pr-16 py-2 bg-slate-900/70 border border-slate-700 focus:border-Ragnar-500 focus:outline-none rounded-lg text-sm text-gray-200 placeholder-gray-500">
+                        <button id="net-diag-search-clear" type="button" onclick="netDiagSearch('')"
+                                class="hidden absolute right-2 top-1/2 -translate-y-1/2 text-gray-300 hover:text-white bg-slate-700/70 hover:bg-slate-600 rounded px-2 py-0.5 text-xs">Clear</button>
+                    </div>
+                    <p id="net-diag-search-count" class="hidden text-xs text-Ragnar-300 mb-2" aria-live="polite"></p>
                     <div id="net-layer-bar" class="flex flex-wrap items-center gap-1">
                         <button id="net-layer-btn-overview" data-layer="overview" onclick="showNetLayer('overview')" class="net-layer-btn px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap bg-Ragnar-600 text-white">Overview</button>
                         <button id="net-layer-btn-l7" data-layer="l7" onclick="showNetLayer('l7')" class="net-layer-btn px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap text-slate-400 hover:bg-slate-700 hover:text-white">L7 Application <span class="opacity-60 font-normal">31</span></button>
@@ -9918,7 +9935,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261031-cert-active-cves-cards"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261101-diag-module-search"></script>
 
 
 
