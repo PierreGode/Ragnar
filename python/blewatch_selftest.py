@@ -219,6 +219,27 @@ def _run_checks(verbose):
         feed(g, ll_adv(b.ADV_IND, 'f1:00:00:00:00:06', ad(name_ad('beam'))), 1 + i * 0.05)
     h.ck('BLE-006 adv-interval collapse', 'BLE-006' in _codes(al))
 
+    # ---- channel-duplicate collapse (nRF52 full-coverage sniffer) ---------
+    # The nRF52 reports every event on channels 37/38/39; the three copies share
+    # the AdvA + payload and must count once, so a healthy beacon is not a flood.
+    g, al = _w({'adv_flood_count': 25, 'channel_dedup_window_s': 0.012})
+    t = 1.0
+    for _ in range(10):                          # 10 real events, 100 ms apart
+        for ch in (37, 38, 39):                  # each mirrored on all three channels
+            feed(g, ll_adv(b.ADV_IND, 'c0:de:00:00:00:06', ad(name_ad('beam'))), t, channel=ch)
+            t += 0.002
+        t += 0.094
+    h.ck('channel copies collapse to one event (no false BLE-006)', 'BLE-006' not in _codes(al))
+    # ...but a genuinely collapsed interval is still caught across all channels.
+    g, al = _w({'adv_flood_count': 8, 'channel_dedup_window_s': 0.012})
+    t = 1.0
+    for _ in range(10):
+        for ch in (37, 38, 39):
+            feed(g, ll_adv(b.ADV_IND, 'c0:de:00:00:00:07', ad(name_ad('beam'))), t, channel=ch)
+            t += 0.002
+        t += 0.094
+    h.ck('dedup still catches a genuine single-AdvA flood', 'BLE-006' in _codes(al))
+
     # ---- BLE-007 advertiser flood (generic) -------------------------------
     g, al = _w({'advertiser_flood_count': 6})
     for i in range(7):

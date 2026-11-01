@@ -135,6 +135,28 @@ quality:
 - An **Ubertooth** is an alternative for heavy connection-following; again the
   parser and codes are unchanged, only the capture front end differs.
 
+### Flood/churn thresholds are tuned for the nRF52
+
+Because the nRF52 hears so much more of the air, the flood and churn detectors
+(`BLE-004`, `BLE-006`, `BLE-007`, `BLE-013`) are calibrated for it, not for the
+lossy nRF51 they were first prototyped against. Two things matter:
+
+- **Channel-copy collapse.** A full-coverage sniffer reports the *same*
+  advertising event once per primary channel (37/38/39). Those copies share the
+  AdvA and payload and land within a few milliseconds, so blewatch collapses them
+  into one logical event (`channel_dedup_window_s`, default 12 ms) before
+  counting. Without this, a healthy beacon on an nRF52 counts three times and
+  reads as a flood — the original cause of the false `BLE-006`/`BLE-007` alerts
+  users saw after moving from an nRF51 to an nRF52840.
+- **Per-event counts set above a busy room.** The thresholds count *logical*
+  events over a 10 s window: `adv_flood_count` 150 (one AdvA), `advertiser_flood_count`
+  60 (distinct AdvAs), `rpa_count` 80 (distinct resolvable-private addresses). A
+  crowded office or street full of phones, wearables and tags — every modern
+  device rotating RPAs and emitting Apple/Fast-Pair/Swift-Pair proximity payloads
+  — stays below them, while BLE-spam tooling (which churns dozens of fresh
+  addresses per second) and a single hammered/cloned advertiser still trip. All
+  of these are overridable per deployment in `data/ble_watch.json`.
+
 ## Which board, and how to plug it in
 
 **Plug the sniffer in normally. Don't hold any button, and switch position doesn't

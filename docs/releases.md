@@ -4,6 +4,14 @@
 
 ### 2026-11-01
 
+#### [#1037](https://github.com/PierreGode/Ragnar/pull/1037) — fix(ble): stop nRF52 sniffer false-positive advertising floods
+*branch `fix/blewatch-nrf52-false-positives`*
+
+- **[BLE Watch](blewatch.md) (`blewatch`) no longer reads an ordinary busy room as an attack on an nRF52840 sniffer.** The flood/churn detectors (`BLE-004`/`BLE-006`/`BLE-007`/`BLE-013`) were first tuned against the **lossy single-channel nRF51** Bluefruit sniffer; a modern **nRF52840** hears the whole air — every advertising event on all three primary channels (37/38/39) with no loss — so the same thresholds over-counted (the reported false positives).
+  - **Channel-copy collapse** — the three 37/38/39 copies of one advertising event share AdvA + payload and arrive within a few ms, so they now count as **one logical event** before the flood counters (new `channel_dedup_window_s`, default 12 ms). Main driver: a healthy beacon was counted 3× and tripped `BLE-006`/`BLE-007`.
+  - **Rescaled per-event thresholds** for a full-coverage radio: `adv_flood_count` 60→150, `advertiser_flood_count` 25→60, `rpa_count` 40→80 — above what a crowded room of phones/wearables/tags emits, while BLE-spam tooling (dozens of fresh MACs/s) and a single hammered/cloned advertiser still trip. All overridable in `data/ble_watch.json`.
+- **Validation (shipped defaults):** a 7 110-frame busy-room simulation (30 RPA advertisers ×3 channels, plus Apple proximity popups) stays **silent**, while a 150-fresh-MAC BLE-spam flood still raises `BLE-013` and a ~30 ms single-AdvA flood still raises `BLE-006`. Self-test **36 → 38** (added dedup-suppression + genuine-flood checks). `python/blewatch.example.json` + [`docs/blewatch.md`](blewatch.md) updated. Engine/codes otherwise unchanged; **no new CVEs**.
+
 #### [#1036](https://github.com/PierreGode/Ragnar/pull/1036) — docs: correct PR link on the active-Cert-Watch release entry
 *branch `fix/releases-pr-number-1035`*
 

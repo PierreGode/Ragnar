@@ -112,9 +112,18 @@ DEFAULTS = {
     'trusted_devices': {},            # addr -> {name, services[], mitm:bool}  (or a bare list of addrs)
     'beacon_baseline': [],            # [{uuid, addr}] of legitimate iBeacon/Eddystone UUIDs
     'trusted_services': [],           # service UUIDs only a trusted AdvA may advertise
-    'adv_flood_window_s': 10.0, 'adv_flood_count': 60,          # per single AdvA
-    'advertiser_flood_window_s': 10.0, 'advertiser_flood_count': 25,  # distinct AdvAs
-    'rpa_window_s': 10.0, 'rpa_count': 40,                      # distinct RPAs
+    # Flood/churn thresholds assume a modern full-coverage sniffer (nRF52 family):
+    # it hears every advertising event on all three primary channels (37/38/39)
+    # with no packet loss, where the older single-channel nRF51 dropped most of
+    # the air and these counts were first tuned against it. channel_dedup_window_s
+    # collapses the three channel copies of one event so a healthy beacon is not
+    # counted 3x, and the counts below are then per *logical* event, set above
+    # what a normally busy room of phones / wearables / tags emits — otherwise an
+    # nRF52 reads an ordinary environment as a flood (the reported false alarms).
+    'channel_dedup_window_s': 0.012,                            # 37/38/39 copies of one event
+    'adv_flood_window_s': 10.0, 'adv_flood_count': 150,         # per single AdvA (post-dedup events)
+    'advertiser_flood_window_s': 10.0, 'advertiser_flood_count': 60,  # distinct AdvAs
+    'rpa_window_s': 10.0, 'rpa_count': 80,                      # distinct RPAs
     'clone_flap_window_s': 15.0, 'clone_flap_count': 4,         # distinct payloads / AdvA
     'connect_window_s': 10.0,
     'terminate_window_s': 20.0, 'terminate_count': 4,
@@ -418,6 +427,7 @@ class BleWatch:
         self._adv = {}                               # adva -> {hash,name,services,flaps}
         self._pub_names = defaultdict(set)           # public addr -> {names}
         self._adv_times = defaultdict(deque)         # adva -> ts (per-AdvA flood)
+        self._adv_evt = {}                           # adva -> (phash, ts) last counted event (channel-dedup)
         self._advertisers = deque()                  # (ts, adva) distinct-advertiser flood
         self._spam = deque()                         # (ts, adva) spam-shaped adv
         self._rpa = deque()                          # ts of distinct RPAs
@@ -570,30 +580,45 @@ class BleWatch:
                             'rotation storm (tracking evasion / adv churn)'
                             % (len(self._rpa), self.cfg['rpa_window_s'])))
 
+        # --- channel-duplicate collapse ---------------------------------------
+        # A full-coverage sniffer (nRF52) reports the same advertising event once
+        # per primary channel (37/38/39). Those copies share the AdvA and payload
+        # and arrive within a few ms, so collapse them into one logical event
+        # before the flood counters — otherwise every healthy beacon reads as a
+        # 3x flood. A genuine fast advertiser still advances the counter because
+        # its successive events are spaced well beyond channel_dedup_window_s.
+        prev_evt = self._adv_evt.get(akey)
+        is_chan_dup = (prev_evt is not None and prev_evt[0] == phash
+                       and 0 <= (ts - prev_evt[1]) <= self.cfg['channel_dedup_window_s'])
+        if not is_chan_dup:
+            self._adv_evt[akey] = (phash, ts)
+
         # --- BLE-006 per-AdvA flood -------------------------------------------
-        dq = self._adv_times[akey]
-        dq.append(ts)
-        self._trim(dq, ts, self.cfg['adv_flood_window_s'], keyed=False)
-        if len(dq) >= self.cfg['adv_flood_count']:
-            out.append(('BLE-006', '%s advertising-interval collapse (%d adv in %.0fs) — '
-                        'beacon flood' % (adva, len(dq), self.cfg['adv_flood_window_s'])))
+        if not is_chan_dup:
+            dq = self._adv_times[akey]
+            dq.append(ts)
+            self._trim(dq, ts, self.cfg['adv_flood_window_s'], keyed=False)
+            if len(dq) >= self.cfg['adv_flood_count']:
+                out.append(('BLE-006', '%s advertising-interval collapse (%d adv in %.0fs) — '
+                            'beacon flood' % (adva, len(dq), self.cfg['adv_flood_window_s'])))
 
         # --- BLE-007 / BLE-013 advertiser flood (generic vs spam-shaped) ------
-        self._advertisers.append((ts, akey))
-        self._trim(self._advertisers, ts, self.cfg['advertiser_flood_window_s'])
-        spam = self._spam_label(ad)
-        if spam:
-            self._spam.append((ts, akey))
-            self._trim(self._spam, ts, self.cfg['advertiser_flood_window_s'])
-        distinct_adv = len({a for _t, a in self._advertisers})
-        if distinct_adv >= self.cfg['advertiser_flood_count']:
-            distinct_spam = len({a for _t, a in self._spam})
-            if spam and distinct_spam >= self.cfg['advertiser_flood_count'] // 2:
-                out.append(('BLE-013', 'advertising flood of %d addresses matching BLE-spam '
-                            'tooling (%s)' % (distinct_spam, spam)))
-            else:
-                out.append(('BLE-007', '%d distinct advertisers in %.0fs — advertising-channel '
-                            'flood' % (distinct_adv, self.cfg['advertiser_flood_window_s'])))
+        if not is_chan_dup:
+            self._advertisers.append((ts, akey))
+            self._trim(self._advertisers, ts, self.cfg['advertiser_flood_window_s'])
+            spam = self._spam_label(ad)
+            if spam:
+                self._spam.append((ts, akey))
+                self._trim(self._spam, ts, self.cfg['advertiser_flood_window_s'])
+            distinct_adv = len({a for _t, a in self._advertisers})
+            if distinct_adv >= self.cfg['advertiser_flood_count']:
+                distinct_spam = len({a for _t, a in self._spam})
+                if spam and distinct_spam >= self.cfg['advertiser_flood_count'] // 2:
+                    out.append(('BLE-013', 'advertising flood of %d addresses matching BLE-spam '
+                                'tooling (%s)' % (distinct_spam, spam)))
+                else:
+                    out.append(('BLE-007', '%d distinct advertisers in %.0fs — advertising-channel '
+                                'flood' % (distinct_adv, self.cfg['advertiser_flood_window_s'])))
         return out
 
     # -- CONNECT_IND ---------------------------------------------------------
