@@ -4,6 +4,13 @@
 
 ### 2026-11-02
 
+#### [#1043](https://github.com/PierreGode/Ragnar/pull/1043) — feat: revive dashboard AI chat assistant + M5Stack CardputerZero support
+*branch `feature/revive-ai-chat-and-cardputer`*
+
+- **Two well-developed features rescued from stale branches** (~1,180–1,370 commits behind `main`) and **re-integrated onto current `main`** — taking the feature modules and re-applying their wiring to today's code, not raw-merging 3-month-old copies of core files.
+- **🤖 Dashboard AI chat assistant** — a floating assistant (shown only when AI is enabled) that answers from `docs/` and can take actions via an **allowlisted** set of existing endpoints (scans, Watchtower, incidents, Wi-Fi control, deep scan). New `ai_chat.py` engine, `ai_service.chat_messages()` (parallel to the existing `_ask_*` path), `/api/ai/chat` route + `_CHAT_TOOL_ROUTES` self-call dispatcher, floating chat panel in the UI, and `docs/AI_INTEGRATION.md`. **Validation:** all 12 dispatched endpoints and every `ai_service` internal the graft needs confirmed present in `main`; **48/48 tests pass** (full-app import + endpoint); JS parses, all four handlers defined.
+- **🖥 M5Stack CardputerZero support** — a Pi CM0 (BCM2837) with a built-in 1.9" ST7789V2 LCD (320×170) + 46-key TCA8418 keyboard, installed as a normal Pi pinned to that panel. New `m5ioe1.py` (I2C backlight/reset expander), `cardputer_input.py` (keyboard listener), `resources/waveshare_epd/st7789v2.py` (framebuffer+SPI driver); `shared.py`/`epd_helper.py`/`display.py` wiring; installer **profile option 7** (Docker stays 6, fixing a duplicate `case 6)` the merge would have created); `docs/M5StackCardputerZero.md` + `docs/INSTALL.md`. **Validation (static only):** modules compile, `shared`/`epd_helper` import clean, both install scripts pass `bash -n`, dispatch labels unique. **Not yet validated on the physical device** (none on the dev box) — panel offsets/rotation and the keymap may need on-device tuning.
+
 #### [#1042](https://github.com/PierreGode/Ragnar/pull/1042) — feat(net): BLE Watch overlay on the Signal Intelligence spectrum
 *branch `feature/ble-watch-spectrum-overlay`*
 
