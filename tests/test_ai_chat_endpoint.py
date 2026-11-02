@@ -46,24 +46,22 @@ def client():
 # --------------------------------------------------------------------------- #
 # Compaction (pure function)
 # --------------------------------------------------------------------------- #
-def test_compact_devices_trims_fields_and_counts():
+def test_compact_devices_keeps_true_totals_and_drops_internal_fields():
     raw = [{"ip": f"10.0.0.{i}", "hostname": "h", "vendor": "v", "status": "alive",
             "ports": ["22"], "threats": [], "secret_internal_field": "leak"}
            for i in range(90)]
     out = webapp._chat_compact("get_network_devices", raw)
-    assert out["count"] == 90
-    assert len(out["devices"]) == 60                     # capped
-    assert set(out["devices"][0]) == {"ip", "hostname", "vendor", "status", "ports", "threats"}
-    assert "secret_internal_field" not in out["devices"][0]
+    assert out["total"] == 90 and out["matching"] == 90
+    assert "leak" not in str(out)
 
 
-def test_compact_vulnerabilities():
+def test_compact_vulnerabilities_passes_filters_through():
     raw = {"vulnerabilities": [{"host": "10.0.0.5", "port": 445, "service": "smb",
                                 "severity": "high", "vulnerability": "x", "extra": "y"}
                                for _ in range(70)]}
-    out = webapp._chat_compact("get_vulnerabilities", raw)
-    assert out["count"] == 70 and len(out["vulnerabilities"]) == 50
-    assert "extra" not in out["vulnerabilities"][0]
+    out = webapp._chat_compact("get_vulnerabilities", raw, {"severity": "critical"})
+    assert out["matching"] == 0 and out["findings"] == []
+    assert "extra" not in str(out)
 
 
 def test_compact_passthrough_for_unknown_shape():
@@ -220,3 +218,124 @@ def test_status_reports_the_chat_setting(client, monkeypatch, setting):
     monkeypatch.setitem(webapp.shared_data.config, "ai_chat_enabled", setting)
     assert client.get("/api/ai/status").get_json()["chat_enabled"] is setting
 
+
+# --------------------------------------------------------------------------- #
+# Action tools against their real endpoints
+# --------------------------------------------------------------------------- #
+def _fake_wifi(monkeypatch, interfaces):
+    calls = []
+
+    def self_call(method, path, cookie, json_body=None):
+        if method == "GET":
+            return 200, {"interfaces": interfaces}
+        calls.append((path, json_body))
+        return 200, {"success": True}
+
+    monkeypatch.setattr(webapp, "_chat_self_call", self_call)
+    return calls
+
+
+WIFI = [{"name": "wlan0", "scan_enabled": True}, {"name": "wlan1", "scan_enabled": False}]
+
+
+def test_stop_wifi_scan_names_the_interfaces_that_are_scanning(monkeypatch):
+    calls = _fake_wifi(monkeypatch, WIFI)
+    result = webapp._chat_dispatch("stop_wifi_scan", {}, "")
+    assert calls == [("/api/wifi/scan-control/stop", {"interface": "wlan0"})]
+    assert result["ok"] is True and result["data"]["changed"] == ["wlan0"]
+
+
+def test_start_wifi_scan_reports_when_it_is_already_on(monkeypatch):
+    calls = _fake_wifi(monkeypatch, WIFI)
+    result = webapp._chat_dispatch("start_wifi_scan", {}, "")
+    assert calls == []
+    assert "already on on wlan0" in result["data"]["note"]
+
+
+def test_start_wifi_scan_picks_an_interface_when_all_are_off(monkeypatch):
+    calls = _fake_wifi(monkeypatch, [{"name": "wlan0", "scan_enabled": False}])
+    webapp._chat_dispatch("start_wifi_scan", {}, "")
+    assert calls == [("/api/wifi/scan-control/start", {"interface": "wlan0"})]
+
+
+def test_named_wifi_interface_is_respected(monkeypatch):
+    calls = _fake_wifi(monkeypatch, WIFI)
+    webapp._chat_dispatch("start_wifi_scan", {"interface": "wlan1"}, "")
+    assert calls == [("/api/wifi/scan-control/start", {"interface": "wlan1"})]
+
+
+def test_wifi_failure_is_not_reported_as_success(monkeypatch):
+    def self_call(method, path, cookie, json_body=None):
+        if method == "GET":
+            return 200, {"interfaces": WIFI}
+        return 404, {"success": False, "error": "interface not managed"}
+
+    monkeypatch.setattr(webapp, "_chat_self_call", self_call)
+    result = webapp._chat_dispatch("stop_wifi_scan", {}, "")
+    assert result["ok"] is False
+    assert result["data"]["failed"] == {"wlan0": "interface not managed"}
+
+
+def test_wifi_tools_work_against_the_real_handler():
+    """No interface is managed in the test app, so this reaches the real handler
+    without changing anything, and must not fail on a missing argument."""
+    result = webapp._chat_dispatch("stop_wifi_scan", {"interface": "wlan9"}, "")
+    assert "interface is required" not in str(result)
+
+
+def test_vulnerability_scan_uses_the_endpoint_that_starts_it(monkeypatch):
+    calls = []
+    monkeypatch.setattr(webapp, "_chat_self_call",
+                        lambda m, p, c, b=None: calls.append((m, p)) or (200, {"success": True}))
+    webapp._chat_dispatch("start_vulnerability_scan", {}, "")
+    assert calls == [("POST", "/api/manual/scan/vulnerability")]
+
+
+def test_vulnerability_scan_failure_is_reported(monkeypatch):
+    monkeypatch.setattr(webapp, "_collect_manual_targets", lambda: [])
+    result = webapp._chat_dispatch("start_vulnerability_scan", {}, "")
+    assert result["ok"] is False
+    assert "No targets" in str(result["data"])
+
+
+# --------------------------------------------------------------------------- #
+# Run / Cancel over HTTP
+# --------------------------------------------------------------------------- #
+ACTION = '<tool>{"tool":"run_network_scan","args":{}}</tool>'
+
+
+def test_chat_returns_a_prompt_and_runs_nothing(client, monkeypatch):
+    _chat_ready(monkeypatch, ScriptedAI([ACTION]))
+    ran = []
+    monkeypatch.setattr(webapp, "_chat_dispatch", lambda *a: ran.append(a) or {"ok": True})
+    data = client.post("/api/ai/chat", json={"message": "scan"}).get_json()
+    assert data["pending"]["label"] == "Scan the local network"
+    assert ran == []
+
+
+def test_only_an_explicit_true_runs_the_action(client, monkeypatch):
+    _chat_ready(monkeypatch, ScriptedAI([ACTION, ACTION, "done"]))
+    ran = []
+    monkeypatch.setattr(webapp, "_chat_dispatch", lambda *a: ran.append(a[0]) or {"ok": True})
+    token = client.post("/api/ai/chat", json={"message": "scan"}).get_json()["pending"]["id"]
+    assert client.post("/api/ai/chat/confirm", json={"id": token, "approve": "yes"}).get_json()["success"]
+    assert ran == []
+    token = client.post("/api/ai/chat", json={"message": "scan"}).get_json()["pending"]["id"]
+    client.post("/api/ai/chat/confirm", json={"id": token, "approve": True})
+    assert ran == ["run_network_scan"]
+
+
+def test_confirm_requires_login(monkeypatch):
+    monkeypatch.setattr(webapp.auth_mgr, "is_configured", lambda: True)
+    response = webapp.app.test_client().post("/api/ai/chat/confirm", json={"id": "x", "approve": True})
+    assert response.status_code == 401
+
+
+def test_turning_chat_off_also_blocks_a_pending_action(client, monkeypatch):
+    _chat_ready(monkeypatch, ScriptedAI([ACTION]))
+    ran = []
+    monkeypatch.setattr(webapp, "_chat_dispatch", lambda *a: ran.append(a) or {"ok": True})
+    token = client.post("/api/ai/chat", json={"message": "scan"}).get_json()["pending"]["id"]
+    monkeypatch.setitem(webapp.shared_data.config, "ai_chat_enabled", False)
+    response = client.post("/api/ai/chat/confirm", json={"id": token, "approve": True})
+    assert response.status_code == 400 and ran == []

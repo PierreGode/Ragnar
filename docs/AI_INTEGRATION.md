@@ -135,14 +135,15 @@ and can **take real actions** on the unit, then read the results back and explai
 them in plain language.
 
 To hide it, untick **Show chat assistant** under **Config → AI Integration**. This
-removes the button and also stops `/api/ai/chat`, so nothing can run tools through chat
-while it is off. AI Insights keep working.
+removes the button and also stops chat requests, so nothing can be proposed or run through
+chat while it is off. AI Insights keep working.
 
 ### What it can do
 
 Ask it questions ("how does wardriving GPS work?", "what is Watchtower?") or give
-it commands. The operator has authorised it to run actions **automatically** — it
-does not ask for confirmation, it just runs the tool and reports what happened.
+it commands. It reads your data straight away, but **every action needs your approval**:
+it shows what it wants to do with **Run** and **Cancel** buttons, and nothing happens
+until you click Run. A prompt expires after 5 minutes and works once.
 Available tools (a curated allowlist):
 
 | Intent | Tools |
@@ -184,8 +185,15 @@ Backs the dashboard **Chat Assistant**. Body:
 `{ "message": "<user text>", "history": [{"role":"user|assistant","content":"…"}] }`.
 Returns `{ success, reply, actions, docs, model }`, where `actions` lists the
 tools the assistant ran this turn (`{tool, args, ok, summary}`) and `docs` lists
-the documentation sections it consulted. Requires `ai_enabled` and a ready AI
-service (token or self-hosted endpoint), otherwise returns 400/503 with a reason.
+the documentation sections it consulted. When it wants to run an action it also
+returns `pending: { id, label }` and runs nothing. Requires `ai_enabled`,
+`ai_chat_enabled` and a ready AI service (token or self-hosted endpoint), otherwise
+returns 400/503 with a reason.
+
+### POST /api/ai/chat/confirm
+Runs or cancels a pending action. Body: `{ "id": "<pending id>", "approve": true }`.
+Only `approve: true` runs it. Ids work once and expire after 5 minutes. Returns the
+same shape as `/api/ai/chat`.
 
 ### POST /api/ai/models
 Lists the models offered by an OpenAI-compatible endpoint (self-hosted support).

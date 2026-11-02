@@ -30962,7 +30962,7 @@ _CHAT_TOOL_ROUTES = {
     'get_scan_status':          ('GET',  '/api/scan/status'),
     'get_wifi_status':          ('GET',  '/api/wifi/scan-control'),
     'run_network_scan':         ('GET',  '/api/scan/combined-network'),
-    'start_vulnerability_scan': ('POST', '/api/threat-intelligence/trigger-vuln-scan'),
+    'start_vulnerability_scan': ('POST', '/api/manual/scan/vulnerability'),
     'deep_scan_host':           ('POST', '/api/scan/deep'),
     'start_wifi_scan':          ('POST', '/api/wifi/scan-control/start'),
     'stop_wifi_scan':           ('POST', '/api/wifi/scan-control/stop'),
@@ -30987,28 +30987,47 @@ def _chat_self_call(method, path, cookie, json_body=None):
     return resp.status_code, data
 
 
-def _chat_compact(tool, data):
-    """Shrink verbose endpoint payloads to the fields the model actually needs,
-    so a big /api/network response doesn't blow the observation budget."""
-    try:
-        if tool == 'get_network_devices' and isinstance(data, list):
-            keys = ('ip', 'hostname', 'vendor', 'status', 'ports', 'threats')
-            return {'count': len(data),
-                    'devices': [{k: h.get(k) for k in keys} for h in data[:60]]}
-        if tool == 'get_vulnerabilities' and isinstance(data, dict):
-            vulns = data.get('vulnerabilities') or []
-            keys = ('host', 'port', 'service', 'severity', 'vulnerability')
-            return {'count': len(vulns),
-                    'vulnerabilities': [{k: v.get(k) for k in keys} for v in vulns[:50]]}
-        if tool == 'get_watchtower' and isinstance(data, dict):
-            return {'enabled': data.get('enabled'), 'summary': data.get('summary'),
-                    'alerts': (data.get('alerts') or [])[:25]}
-        if tool == 'get_incidents' and isinstance(data, dict):
-            return {'summary': data.get('summary'),
-                    'incidents': (data.get('incidents') or [])[:15]}
-    except Exception:  # pragma: no cover - compaction is best-effort
-        pass
-    return data
+def _chat_compact(tool, data, args=None):
+    """Shrink an endpoint payload to true totals plus the rows that matter."""
+    from ai_chat import compact_result
+    return compact_result(tool, data, args)
+
+
+def _chat_wifi_toggle(tool, args, cookie):
+    """The endpoint works on one named interface; chat usually names none."""
+    enable = tool == 'start_wifi_scan'
+    status, state = _chat_self_call('GET', '/api/wifi/scan-control', cookie)
+    if status != 200 or not isinstance(state, dict):
+        return {'ok': False, 'status': status, 'error': 'could not read Wi-Fi state'}
+    interfaces = state.get('interfaces') or []
+    names = [i.get('name') for i in interfaces if i.get('name')]
+    active = [i.get('name') for i in interfaces if i.get('name') and i.get('scan_enabled')]
+    wanted = str((args or {}).get('interface') or '').strip()
+    if wanted:
+        targets = [wanted]
+    elif enable:
+        targets = [] if active else names[:1]
+    else:
+        targets = active
+    if not targets:
+        word = 'on' if enable else 'off'
+        detail = f" on {', '.join(active)}" if active else ''
+        return {'ok': True, 'status': 200,
+                'data': {'changed': [], 'note': f'Wi-Fi scanning is already {word}{detail}'}}
+
+    path = _CHAT_TOOL_ROUTES[tool][1]
+    changed, failed = [], {}
+    for name in targets:
+        code, data = _chat_self_call('POST', path, cookie, {'interface': name})
+        if 200 <= code < 300:
+            changed.append(name)
+        else:
+            failed[name] = data.get('error') if isinstance(data, dict) else str(data)[:200]
+    result = {'ok': not failed, 'status': 200 if not failed else 400,
+              'data': {'changed': changed, 'scan_enabled': enable}}
+    if failed:
+        result['data']['failed'] = failed
+    return result
 
 
 def _chat_dispatch(tool, args, cookie):
@@ -31017,6 +31036,12 @@ def _chat_dispatch(tool, args, cookie):
     route = _CHAT_TOOL_ROUTES.get(tool)
     if not route:
         return {'ok': False, 'error': f'unknown tool: {tool}'}
+    if tool in ('start_wifi_scan', 'stop_wifi_scan'):
+        try:
+            return _chat_wifi_toggle(tool, args, cookie)
+        except Exception as exc:
+            logger.error(f"[ai-chat] dispatch {tool} failed: {exc}")
+            return {'ok': False, 'error': str(exc)}
     method, path = route
     body = {}
     if tool == 'deep_scan_host':
@@ -31030,7 +31055,7 @@ def _chat_dispatch(tool, args, cookie):
         logger.error(f"[ai-chat] dispatch {tool} failed: {exc}")
         return {'ok': False, 'error': str(exc)}
     return {'ok': 200 <= status < 300, 'status': status,
-            'data': _chat_compact(tool, data)}
+            'data': _chat_compact(tool, data, args)}
 
 
 def _get_ragnar_chat():
@@ -31052,20 +31077,29 @@ def _get_ragnar_chat():
     return _ragnar_chat
 
 
-@app.route('/api/ai/chat', methods=['POST'])
-def ai_chat_endpoint():
-    """Conversational assistant that can answer from docs/ and take actions.
-    Body: {message: str, history: [{role, content}, ...]}. Returns
-    {success, reply, actions, docs, model}."""
+def _chat_unavailable():
+    """The error response if chat can't be used right now, else None."""
     if not shared_data.config.get('ai_enabled', False):
         return jsonify({'success': False, 'error': 'AI is not enabled. Enable it in the Config tab.'}), 400
-    # Tools run without confirmation, so "off" must stop requests, not just hide the panel.
+    # A hidden chat must not keep accepting requests that can propose actions.
     if not shared_data.config.get('ai_chat_enabled', True):
         return jsonify({'success': False, 'error': 'The chat assistant is turned off in the Config tab.'}), 400
     ai_service = getattr(shared_data, 'ai_service', None)
     if not ai_service or not ai_service.is_enabled():
         return jsonify({'success': False,
                         'error': 'AI service is not ready — check the token / endpoint in Config.'}), 503
+    return None
+
+
+@app.route('/api/ai/chat', methods=['POST'])
+def ai_chat_endpoint():
+    """Conversational assistant that can answer from docs/ and propose actions.
+    Body: {message: str, history: [{role, content}, ...]}. Returns
+    {success, reply, actions, docs, model}, plus pending: {id, label} when an
+    action is waiting for /api/ai/chat/confirm."""
+    blocked = _chat_unavailable()
+    if blocked:
+        return blocked
 
     data = request.get_json(silent=True) or {}
     message = str(data.get('message', '')).strip()
@@ -31082,6 +31116,28 @@ def ai_chat_endpoint():
         result = chat.run(history, message, cookie=cookie)
     except Exception as exc:
         logger.error(f"[ai-chat] turn failed: {exc}")
+        return jsonify({'success': False, 'error': str(exc)}), 500
+    return jsonify({'success': True, **result})
+
+
+@app.route('/api/ai/chat/confirm', methods=['POST'])
+def ai_chat_confirm_endpoint():
+    """Run or cancel an action the assistant proposed.
+    Body: {id: str, approve: bool}. Only an explicit approve: true runs it."""
+    blocked = _chat_unavailable()
+    if blocked:
+        return blocked
+
+    chat = _get_ragnar_chat()
+    if not chat:
+        return jsonify({'success': False, 'error': 'Chat assistant unavailable.'}), 503
+
+    data = request.get_json(silent=True) or {}
+    cookie = request.headers.get('Cookie', '')
+    try:
+        result = chat.confirm(data.get('id'), data.get('approve') is True, cookie=cookie)
+    except Exception as exc:
+        logger.error(f"[ai-chat] confirm failed: {exc}")
         return jsonify({'success': False, 'error': str(exc)}), 500
     return jsonify({'success': True, **result})
 

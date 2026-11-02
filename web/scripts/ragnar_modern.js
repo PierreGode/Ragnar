@@ -31838,7 +31838,7 @@ function toggleRagnarChat() {
             _appendRagnarChat('assistant',
                 "Hi — I'm Ragnar. Ask me how a feature works, or tell me to do "
                 + "something like “scan the network”, “deep scan 192.168.1.20”, "
-                + "or “show me the latest vulnerabilities”. I'll run it and explain the results.",
+                + "or “show me the latest vulnerabilities”. You approve each action before it runs.",
                 []);
         }
         const input = document.getElementById('ragnar-chat-input');
@@ -31918,30 +31918,19 @@ function _ragnarChatTyping(on) {
     }
 }
 
-async function sendRagnarChat(event) {
-    if (event) event.preventDefault();
-    if (_ragnarChatBusy) return false;
+// Send one request and render the answer.
+async function _ragnarChatRequest(url, body) {
     const input = document.getElementById('ragnar-chat-input');
     const sendBtn = document.getElementById('ragnar-chat-send');
-    if (!input) return false;
-    const message = input.value.trim();
-    if (!message) return false;
-
-    input.value = '';
-    _appendRagnarChat('user', message, []);
-    _ragnarChatHistory.push({ role: 'user', content: message });
-
     _ragnarChatBusy = true;
     if (sendBtn) { sendBtn.disabled = true; sendBtn.style.opacity = '0.6'; }
     _ragnarChatTyping(true);
 
     try {
-        // Send prior turns (excluding the message we just added) as context.
-        const history = _ragnarChatHistory.slice(0, -1).slice(-12);
-        const resp = await networkAwareFetch('/api/ai/chat', {
+        const resp = await networkAwareFetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message, history })
+            body: JSON.stringify(body)
         });
         const data = await resp.json().catch(() => ({}));
         _ragnarChatTyping(false);
@@ -31953,15 +31942,59 @@ async function sendRagnarChat(event) {
             const reply = data.reply || '(no response)';
             _appendRagnarChat('assistant', reply, data.actions || []);
             _ragnarChatHistory.push({ role: 'assistant', content: reply });
+            if (data.pending) _ragnarChatAskToRun(data.pending);
         }
     } catch (e) {
         _ragnarChatTyping(false);
-        _appendRagnarChat('assistant', '⚠️ Could not reach the assistant: ' + _esc(e.message || String(e)), []);
+        _appendRagnarChat('assistant', '⚠️ Could not reach the assistant: ' + (e.message || String(e)), []);
     } finally {
         _ragnarChatBusy = false;
         if (sendBtn) { sendBtn.disabled = false; sendBtn.style.opacity = '1'; }
         if (input) input.focus();
     }
+}
+
+// Actions wait here for the operator. The label comes from the server, not the model.
+function _ragnarChatAskToRun(pending) {
+    const log = document.getElementById('ragnar-chat-log');
+    if (!log || !pending || !pending.id) return;
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;align-self:flex-start;';
+
+    const button = (text, approve, background) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = text;
+        btn.style.cssText = 'min-height:36px;padding:6px 16px;border:none;border-radius:10px;color:#fff;'
+            + 'font-weight:600;font-size:13px;cursor:pointer;background:' + background + ';';
+        btn.onclick = () => {
+            if (_ragnarChatBusy) return;
+            row.remove();
+            _appendRagnarChat('user', approve ? 'Run' : 'Cancel', []);
+            _ragnarChatRequest('/api/ai/chat/confirm', { id: pending.id, approve });
+        };
+        return btn;
+    };
+    row.appendChild(button('Run', true, 'linear-gradient(135deg,#7c3aed,#4f46e5)'));
+    row.appendChild(button('Cancel', false, 'rgba(71,85,105,.9)'));
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+}
+
+async function sendRagnarChat(event) {
+    if (event) event.preventDefault();
+    if (_ragnarChatBusy) return false;
+    const input = document.getElementById('ragnar-chat-input');
+    if (!input) return false;
+    const message = input.value.trim();
+    if (!message) return false;
+
+    input.value = '';
+    _appendRagnarChat('user', message, []);
+    // Send prior turns (excluding this message) as context.
+    const history = _ragnarChatHistory.slice(-12);
+    _ragnarChatHistory.push({ role: 'user', content: message });
+    await _ragnarChatRequest('/api/ai/chat', { message, history });
     return false;
 }
 
