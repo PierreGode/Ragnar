@@ -892,8 +892,8 @@ def detect():
     tools = {"rtl_433": _have(_RTL_433), "rtl_power": _have(_RTL_POWER),
              "rtl_test": _have(_RTL_TEST), "rtl_sdr": _have(_RTL_SDR)}
     # Cheap USB-bus probe first, so we can tell "no dongle plugged in" apart from
-    # "dongle present but tools missing / DVB driver holding it" (RaspyJack does
-    # the same). It never opens the radio, so it's safe alongside rtl_test.
+    # "dongle present but tools missing / DVB driver holding it". It never opens
+    # the radio, so it's safe alongside rtl_test.
     usb_id, usb_desc = probe_usb()
     if not any(tools.values()):
         if usb_id:
@@ -4653,7 +4653,7 @@ def _selftest_body(_saved_globals=None):
     check("id: empty strings never crash",
           identify_model(None, None)["model_name"] == "RTL-SDR")
 
-    # --- lsusb VID:PID fallback probe (RaspyJack-style) ---
+    # --- lsusb VID:PID fallback probe ---
     lsusb = ("Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub\n"
              "Bus 001 Device 004: ID 0bda:2838 Realtek Semiconductor Corp. RTL2838 DVB-T\n")
     uid, udesc = parse_lsusb_for_rtl(lsusb)
