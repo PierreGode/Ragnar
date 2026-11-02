@@ -1744,6 +1744,7 @@ function revealNetCard(id) {
 // ============================================================================
 const _wifiState = { iface: '', band: 'all', view: 'dome', data: null, selected: null, auto: null, inited: false, bt: null, btOn: false, btBusy: false, btSelected: null,
     zb: null, zbOn: false, zbBusy: false, zbSelected: null, zbAvailable: false,
+    ble: null, bleOn: false, bleBusy: false, bleSelected: null, bleAvailable: false,
     hoverBssid: null, radius: null, fs: { open: false, wired: false, native: false },
     sdr: { available: false, running: false, band: '2.4', bandMhz: null, floor: -120, seq: 0, rows: [], maxhold: null, poll: null, statusPoll: null, error: null } };
 
@@ -1806,6 +1807,16 @@ function wifiInit() {
             if (_wifiState.zbOn) wifiZbScan();
             else { if (_wifiState.data) _wifiDrawSpectrum(); }
         });
+        // BLE Watch overlay toggle (gated on an nRF / Bluefruit LE sniffer being present)
+        const bleChk = document.getElementById('wifi-ble');
+        if (bleChk) bleChk.addEventListener('change', (e) => {
+            if (bleChk.disabled) { e.target.checked = false; return; }
+            _wifiState.bleOn = e.target.checked;
+            const panel = document.getElementById('wifi-ble-panel');
+            if (panel) panel.classList.toggle('hidden', !_wifiState.bleOn);
+            if (_wifiState.bleOn) wifiBleScan();
+            else { if (_wifiState.data) _wifiDrawSpectrum(); }
+        });
         ['wifi-tx', 'wifi-ple'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.addEventListener('change', () => { if (_wifiState.selected) wifiSelectAp(_wifiState.selected); });
@@ -1820,10 +1831,11 @@ function wifiInit() {
     _wifiFillIfaces();
     _wifiSdrCheck();
     _wifiZbCheck();
+    _wifiBleCheck();
     _wifiRtlCheck();
     _wifiRfwfDemoInit();
     if (!_wifiState.sdr.statusPoll)
-        _wifiState.sdr.statusPoll = setInterval(() => { _wifiSdrCheck(); _wifiZbCheck(); _wifiRtlCheck(); }, 15000);
+        _wifiState.sdr.statusPoll = setInterval(() => { _wifiSdrCheck(); _wifiZbCheck(); _wifiBleCheck(); _wifiRtlCheck(); }, 15000);
     window.addEventListener('beforeunload', () => { if (_wifiState.sdr.running) _wifiSdrStop(); });
 }
 
@@ -2094,6 +2106,7 @@ function _wifiAutoTick() {
     if (_wifiState.view !== 'waterfall') wifiScan();
     if (_wifiState.btOn) wifiBtScan();
     if (_wifiState.zbOn && _wifiState.zbAvailable) wifiZbScan();
+    if (_wifiState.bleOn && _wifiState.bleAvailable) wifiBleScan();
 }
 
 // ---- Bluetooth / BLE 2.4 GHz overlay ---------------------------------------
@@ -2247,6 +2260,113 @@ function wifiZbSelect(id) {
     _wifiState.zbSelected = (_wifiState.zbSelected === id) ? null : id;
     _wifiFsRenderSide();
     _wifiZbRender();
+    if (_wifiState.data) _wifiDrawSpectrum();
+}
+
+// ---- BLE Watch 2.4 GHz overlay (via an on-demand nRF-sniffer link-layer sniff)
+// Unlike the 📶 Bluetooth overlay (a BlueZ device-discovery estimate), this uses
+// the external nRF / Bluefruit LE sniffer to hear BLE advertising on channels
+// 37/38/39 directly — real energy on the band — and marks any advertiser BLE
+// Watch flags as a clone, spoof or advertising flood in red. The toggle stays
+// greyed until a sniffer is on USB (the status poll writes nothing to any port).
+const _BLE_FREQ = { 37: 2402, 38: 2426, 39: 2480 };
+const _BLE_PRESSURE_COLOR = { low: '#64748b', moderate: '#f59e0b', high: '#ef4444' };
+
+function _wifiBleCheck() {
+    if (_wifiState.bleBusy) return;            // never probe a port mid-capture
+    fetch('/api/net/ble-watch/status').then(r => r.json()).then(st => {
+        const ok = !!(st && st.available);
+        _wifiState.bleAvailable = ok;
+        const chk = document.getElementById('wifi-ble'), lab = document.getElementById('wifi-ble-label');
+        if (chk) chk.disabled = !ok;
+        if (lab) {
+            lab.classList.toggle('opacity-40', !ok);
+            lab.classList.toggle('cursor-not-allowed', !ok);
+            lab.classList.toggle('cursor-pointer', ok);
+            lab.title = ok ? ('Passive BLE link-layer sniff — ' + (st.note || 'sniffer ready'))
+                : (st && st.note ? st.note : 'Attach an nRF / Bluefruit LE sniffer to monitor BLE advertising');
+        }
+        _wifiFsSyncGates();
+    }).catch(() => {});
+}
+
+function wifiBleScan() {
+    if (_wifiState.bleBusy) return;
+    _wifiState.bleBusy = true;
+    const st = document.getElementById('wifi-ble-status');
+    if (st) st.textContent = 'Sniffing BLE advertising (37/38/39)…';
+    // quick=1 suppresses the Watchtower incident export for this short overlay sniff.
+    fetch('/api/net/ble-watch?seconds=8&quick=1').then(r => r.json()).then(d => {
+        _wifiState.bleBusy = false;
+        if (!d.success) {
+            if (st) st.textContent = '⚠ ' + ((d.error || 'BLE sniff failed').split('.')[0]);
+            _wifiState.ble = null;
+            if (_wifiState.data) _wifiDrawSpectrum();
+            return;
+        }
+        const ov = d.overlay || { devices: [], markers: [], device_count: 0 };
+        _wifiState.ble = ov;
+        // Drop a selection that dropped off the air this sniff.
+        if (_wifiState.bleSelected && !(ov.devices || []).some(v => v.addr === _wifiState.bleSelected))
+            _wifiState.bleSelected = null;
+        const fl = ov.flagged_count || 0;
+        if (st) st.textContent = `${ov.device_count || 0} advertiser(s)` +
+            (fl ? ` · ${fl} flagged` : '') + ` · ${d.packet_count || 0} pkt`;
+        _wifiBleRender();
+        _wifiFsRenderSide();
+        if (_wifiState.data) _wifiDrawSpectrum();
+    }).catch(() => { _wifiState.bleBusy = false; if (st) st.textContent = 'BLE sniff failed'; });
+}
+
+// A short label for the status cell: the flagged finding codes, or "clean".
+function _wifiBleStatusCell(v) {
+    if (v.flagged) {
+        const codes = (v.codes || []).join(', ');
+        return `<span style="color:#f87171" title="${_esc(codes)}">⚠ ${_esc(codes || (v.severity || 'finding'))}</span>`;
+    }
+    return '<span style="color:#4ade80">clean</span>';
+}
+
+function _wifiBleRender() {
+    const ov = _wifiState.ble; if (!ov) return;
+    const sum = document.getElementById('wifi-ble-summary');
+    if (sum) sum.textContent = `${ov.device_count || 0} advertiser(s) · ${ov.flagged_count || 0} flagged` +
+        (ov.verdict ? ` · ${ov.verdict}` : '');
+    const note = document.getElementById('wifi-ble-note');
+    if (note) note.textContent = ov.note || '';
+    const pr = document.getElementById('wifi-ble-pressure');
+    if (pr) pr.innerHTML = (ov.wifi_channels || []).map(c => {
+        const col = _BLE_PRESSURE_COLOR[c.level] || '#64748b';
+        return `<span class="px-1.5 py-0.5 rounded" style="background:${col}22;color:${col};border:1px solid ${col}55" title="BLE advertising pressure near Wi-Fi ch ${c.wifi_channel}">ch${c.wifi_channel}: ${c.level}</span>`;
+    }).join('');
+    const tb = document.getElementById('wifi-ble-tbody');
+    if (!tb) return;
+    if (!(ov.devices || []).length) {
+        tb.innerHTML = '<tr><td colspan="5" class="py-3 text-gray-500">No BLE advertising heard this sniff.</td></tr>';
+        return;
+    }
+    tb.innerHTML = ov.devices.map(v => {
+        const sel = _wifiState.bleSelected === v.addr;
+        const rssi = (v.rssi == null) ? '—' : `${v.rssi}`;
+        const rcol = (v.rssi == null) ? '#64748b' : _wifiSignalColor(v.rssi);
+        const name = v.name ? _esc(v.name) : '<span class="text-gray-600">(no name)</span>';
+        const chans = (v.channels || []).join('/') || '—';
+        const atype = v.rpa_class === 'public' ? 'public' : v.rpa_class === 'static' ? 'static'
+            : v.rpa_class === 'rpa' ? 'random (RPA)' : 'random';
+        return `<tr class="border-b border-slate-800/60 cursor-pointer hover:bg-slate-800/40${sel ? ' bg-fuchsia-500/15' : ''}" onclick="wifiBleSelect('${v.addr}')" title="Click to highlight this advertiser on the spectrum">
+            <td class="py-1 pr-3">${sel ? '<span class="text-fuchsia-400">▸</span> ' : ''}${name}<div class="text-[10px] text-gray-600 font-mono">${_esc(v.addr)}</div></td>
+            <td class="py-1 pr-3">${atype}</td>
+            <td class="py-1 pr-3 font-mono">${chans}</td>
+            <td class="py-1 pr-3">${_wifiBleStatusCell(v)}</td>
+            <td class="py-1 pr-3 text-right font-mono" style="color:${rcol}">${rssi}</td>
+        </tr>`;
+    }).join('');
+}
+
+function wifiBleSelect(addr) {
+    _wifiState.bleSelected = (_wifiState.bleSelected === addr) ? null : addr;
+    _wifiFsRenderSide();
+    _wifiBleRender();
     if (_wifiState.data) _wifiDrawSpectrum();
 }
 
@@ -3190,6 +3310,66 @@ function _wifiDrawSpectrumInto(canvas, opts) {
     if (_wifiState.zbOn && _wifiState.zb && ranges['2.4']) {
         _wifiDrawZbOverlay(ctx, ranges['2.4'], xFor, { padT, padB, H, plotH, yFor });
     }
+    // BLE Watch overlay on the 2.4 GHz segment (real sniffed advertising activity)
+    if (_wifiState.bleOn && _wifiState.ble && ranges['2.4']) {
+        _wifiDrawBleOverlay(ctx, ranges['2.4'], xFor, { padT, padB, H, plotH, yFor });
+    }
+}
+
+// Draw BLE Watch advertising-channel markers (37/38/39, from a real link-layer
+// sniff) on the 2.4 GHz segment: a solid fuchsia bar per channel, height scaled
+// by activity, turning red on any channel carrying a flagged advertiser (clone /
+// spoof / flood). A selected advertiser draws its RSSI level across the band.
+function _wifiDrawBleOverlay(ctx, r24, xFor, g) {
+    const ov = _wifiState.ble || {};
+    const baseY = g.H - g.padB;
+    const bleX = (freqMhz) => {
+        const chFrac = (freqMhz - 2407) / 5;
+        return Math.max(r24.x0 + 2, Math.min(r24.x1 - 2, xFor('2.4', chFrac)));
+    };
+    // Which advertising channels carry a flagged advertiser → draw those red.
+    const flaggedCh = new Set();
+    (ov.devices || []).forEach(v => { if (v.flagged) (v.channels || []).forEach(c => flaggedCh.add(c)); });
+    const sel = _wifiState.bleSelected
+        ? (ov.devices || []).find(v => v.addr === _wifiState.bleSelected) : null;
+    const dim = sel ? 0.35 : 1.0;
+    // Per advertising-channel markers. Offset +3px so they sit beside (not under)
+    // the 📶 Bluetooth overlay's dashed markers when both are shown.
+    (ov.markers || []).forEach(m => {
+        if (!m.freq_mhz) return;
+        const x = bleX(m.freq_mhz) + 3;
+        const intensity = Math.max(0, Math.min(100, m.intensity || 0));
+        const h = (g.plotH || (baseY - g.padT)) * (0.18 + 0.32 * intensity / 100);
+        const yTop = baseY - h;
+        const red = flaggedCh.has(m.adv_channel);
+        const rgb = red ? '239,68,68' : '232,121,249';
+        ctx.strokeStyle = `rgba(${rgb},${(0.4 + intensity / 100 * 0.5) * dim})`;
+        ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(x, yTop); ctx.lineTo(x, baseY); ctx.stroke();
+        ctx.fillStyle = `rgba(${red ? '254,202,202' : '245,208,254'},${dim})`;
+        ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText((red ? '⚠' : '🛡') + m.adv_channel, x, yTop - 3);
+    });
+    // Selected advertiser: RSSI level line + emphasis on the channels it used.
+    if (sel && sel.rssi != null) {
+        const yR = g.yFor(sel.rssi);
+        const col = sel.flagged ? '#f87171' : _wifiSignalColor(sel.rssi);
+        ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+        ctx.beginPath(); ctx.moveTo(r24.x0, yR); ctx.lineTo(r24.x1, yR); ctx.stroke(); ctx.setLineDash([]);
+        (sel.channels || []).forEach(c => {
+            const x = bleX(_BLE_FREQ[c]) + 3;
+            ctx.strokeStyle = col; ctx.lineWidth = 2.5;
+            ctx.beginPath(); ctx.moveTo(x, yR); ctx.lineTo(x, baseY); ctx.stroke();
+            ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, yR, 4, 0, 2 * Math.PI); ctx.fill();
+            ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+        });
+        const nm = sel.name || sel.addr;
+        const tag = `${nm.length > 18 ? nm.slice(0, 17) + '…' : nm}  ${sel.rssi} dBm${sel.flagged ? '  ⚠ ' + (sel.codes || []).join(', ') : '  (BLE adv)'}`;
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'left';
+        ctx.fillText(tag, r24.x0 + 3, yR - 5);
+    } else if (sel) {
+        ctx.fillStyle = '#f5d0fe'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'left';
+        ctx.fillText(`${sel.addr} — RSSI not heard this sniff`, r24.x0 + 3, g.padT + 26);
+    }
 }
 
 // Draw Zigbee channel markers (11–26) on the 2.4 GHz segment: a labelled tick
@@ -3382,7 +3562,8 @@ function _wifiFsWire() {
         b.addEventListener('click', () => { if (!b.disabled) wifiSetView(b.dataset.view); }));
     // Overlay toggles mirror the in-page checkboxes, so the existing change
     // handlers stay the single implementation.
-    [['wifi-auto', 'wifi-fs-auto'], ['wifi-bt', 'wifi-fs-bt'], ['wifi-zb', 'wifi-fs-zb']].forEach(([mainId, fsId]) => {
+    [['wifi-auto', 'wifi-fs-auto'], ['wifi-bt', 'wifi-fs-bt'], ['wifi-zb', 'wifi-fs-zb'],
+     ['wifi-ble', 'wifi-fs-ble']].forEach(([mainId, fsId]) => {
         const m = document.getElementById(mainId), f = document.getElementById(fsId);
         if (!m || !f) return;
         f.addEventListener('change', () => {
@@ -3460,6 +3641,12 @@ function _wifiFsSyncGates() {
     if (zb && zbMain) {
         zb.disabled = zbMain.disabled;
         if (zbl) { zbl.style.opacity = zbMain.disabled ? '.4' : '1'; zbl.style.cursor = zbMain.disabled ? 'not-allowed' : 'pointer'; }
+    }
+    const ble = document.getElementById('wifi-fs-ble'), blel = document.getElementById('wifi-fs-ble-label');
+    const bleMain = document.getElementById('wifi-ble');
+    if (ble && bleMain) {
+        ble.disabled = bleMain.disabled;
+        if (blel) { blel.style.opacity = bleMain.disabled ? '.4' : '1'; blel.style.cursor = bleMain.disabled ? 'not-allowed' : 'pointer'; }
     }
     const wf = document.getElementById('wifi-fs-view-wf'), wfMain = document.getElementById('wifi-view-wf');
     if (wf && wfMain) {
@@ -3596,6 +3783,16 @@ function _wifiFsRenderSide() {
                     <span>${_esc(v.vendor || id)} <span style="color:#64748b">ch${v.channel}</span></span>
                     <span style="color:${_wifiSignalColor(v.rssi)}">${v.rssi == null ? '—' : v.rssi}</span></div>`; }).join('')
                 || '<div class="wifi-fs-empty">No devices heard.</div>'}</div>`;
+    }
+    if (_wifiState.bleOn && _wifiState.ble) {
+        const ov = _wifiState.ble;
+        const devs = (ov.devices || []).slice(0, 40);
+        html += `<div class="wifi-fs-card"><h4>🛡 BLE Watch (${ov.device_count || devs.length}${ov.flagged_count ? ' · ' + ov.flagged_count + ' flagged' : ''})</h4>
+            <div style="font-size:11px;color:#64748b;margin-bottom:5px">${_esc(ov.verdict || '')}${ov.verdict ? ' · ' : ''}adv channels 37/38/39</div>
+            ${devs.map(v => `<div class="wifi-fs-devrow ${_wifiState.bleSelected === v.addr ? 'sel' : ''}" onclick="wifiBleSelect('${v.addr}')">
+                <span>${v.flagged ? '<span style="color:#f87171">⚠</span> ' : ''}${_esc(v.name || v.addr)} <span style="color:#64748b">${(v.channels || []).join('/')}</span></span>
+                <span style="color:${v.flagged ? '#f87171' : _wifiSignalColor(v.rssi)}">${v.rssi == null ? '—' : v.rssi}</span></div>`).join('')
+                || '<div class="wifi-fs-empty">No advertising heard.</div>'}</div>`;
     }
     side.innerHTML = html;
 }

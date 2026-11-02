@@ -3488,6 +3488,8 @@
                         <span id="wifi-bt-status" class="text-xs text-sky-500/70"></span>
                         <label id="wifi-zb-label" class="flex items-center gap-2 text-xs opacity-40 cursor-not-allowed select-none" title="Connect a HuginnESP (ESP32-C5) companion to sniff Zigbee / 802.15.4"><input type="checkbox" id="wifi-zb" disabled class="accent-amber-500"> <span class="text-amber-400">🐝 Zigbee</span></label>
                         <span id="wifi-zb-status" class="text-xs text-amber-500/70"></span>
+                        <label id="wifi-ble-label" class="flex items-center gap-2 text-xs opacity-40 cursor-not-allowed select-none" title="Passive BLE link-layer monitor — hears advertising on channels 37/38/39 via an nRF / Bluefruit LE sniffer, and flags clones, spoofs and advertising floods right on the band"><input type="checkbox" id="wifi-ble" disabled style="accent-color:#e879f9"> <span class="text-fuchsia-400">🛡 BLE Watch</span></label>
+                        <span id="wifi-ble-status" class="text-xs text-fuchsia-300/70"></span>
                         <span id="wifi-scan-status" class="text-xs text-gray-500"></span>
                     </div>
                     <!-- Other RF tools: each opens its own page (all link back to Signal Intelligence). RF Waterfall is always shown (its page collapses absent radios); the rest appear as their radio is detected, or with the RF Waterfall demo toggle on. -->
@@ -3594,6 +3596,28 @@
                                 </tr>
                             </thead>
                             <tbody id="wifi-zb-tbody" class="text-gray-300"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- BLE Watch (nRF sniffer link-layer) 2.4 GHz overlay (hidden until toggled) -->
+                <div id="wifi-ble-panel" class="hidden glass rounded-xl p-4 mb-4">
+                    <div class="flex flex-wrap items-center gap-3 mb-3">
+                        <h3 class="text-sm font-semibold text-fuchsia-300">🛡 BLE Watch — advertisers on 2.4 GHz</h3>
+                        <span id="wifi-ble-summary" class="text-xs text-gray-400"></span>
+                        <span id="wifi-ble-pressure" class="flex flex-wrap gap-2 text-xs ml-auto"></span>
+                    </div>
+                    <p class="text-[11px] text-gray-500 mb-3" id="wifi-ble-note"></p>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-xs">
+                            <thead class="text-gray-500 border-b border-slate-700">
+                                <tr class="text-left">
+                                    <th class="py-1 pr-3">Advertiser</th><th class="py-1 pr-3">Addr type</th>
+                                    <th class="py-1 pr-3">Adv ch</th><th class="py-1 pr-3">Status</th>
+                                    <th class="py-1 pr-3 text-right">RSSI</th>
+                                </tr>
+                            </thead>
+                            <tbody id="wifi-ble-tbody" class="text-gray-300"></tbody>
                         </table>
                     </div>
                 </div>
@@ -9895,6 +9919,7 @@
             <label class="wifi-hm-chip" title="Re-run the passive survey every 8 s"><input type="checkbox" id="wifi-fs-auto" class="accent-Ragnar-500 w-3.5 h-3.5"> Auto 8s</label>
             <label class="wifi-hm-chip" title="Overlay Bluetooth / BLE activity on 2.4 GHz"><input type="checkbox" id="wifi-fs-bt" class="accent-sky-500 w-3.5 h-3.5"> <span style="color:#38bdf8">📶 BT</span></label>
             <label class="wifi-hm-chip" id="wifi-fs-zb-label" style="opacity:.4;cursor:not-allowed" title="Connect a HuginnESP companion to sniff Zigbee / 802.15.4"><input type="checkbox" id="wifi-fs-zb" disabled class="accent-amber-500 w-3.5 h-3.5"> <span style="color:#fbbf24">🐝 Zigbee</span></label>
+            <label class="wifi-hm-chip" id="wifi-fs-ble-label" style="opacity:.4;cursor:not-allowed" title="Passive BLE link-layer monitor — needs an nRF / Bluefruit LE sniffer on USB"><input type="checkbox" id="wifi-fs-ble" disabled class="w-3.5 h-3.5" style="accent-color:#e879f9"> <span style="color:#e879f9">🛡 BLE</span></label>
             <span id="wifi-fs-status" class="wifi-fs-meta wifi-fs-status"></span>
             <button onclick="wifiToggleFullscreen()" class="wifi-fs-close" title="Exit full screen (Esc)">✕</button>
         </div>
@@ -9935,7 +9960,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261101-diag-module-search"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261102-ble-watch-spectrum"></script>
 
 
 

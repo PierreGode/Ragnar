@@ -389,6 +389,35 @@ def _run_checks(verbose):
     feed(g, ll_version(0xAABBCCDD, 8, 0x000f, 0x0100), 5, channel=10)
     h.ck('benign adv/scan/connect/version are silent', not al)
 
+    # ---- 2.4 GHz spectrum overlay (Signal Intelligence) -------------------
+    # overlay() shapes the sniffed advertiser roster onto the band: one entry
+    # per AdvA with the channels it used, markers at the three adv-channel
+    # centre frequencies, and per-Wi-Fi-channel pressure. Pure bookkeeping.
+    g, al = _w()
+    for ch in (37, 38, 39):
+        feed(g, ll_adv(b.ADV_IND, 'c0:11:ec:00:00:01', ad(name_ad('Lamp'))), 1 + ch * 1e-3, channel=ch)
+    for ch in (37, 38):
+        feed(g, ll_adv(b.ADV_IND, 'c0:11:ec:00:00:02', ad(name_ad('Sensor'))), 2 + ch * 1e-3, channel=ch)
+    ov = g.overlay()
+    byaddr = {d['addr']: d for d in ov['devices']}
+    h.ck('overlay rosters every advertiser with its channels',
+         ov['device_count'] == 2
+         and byaddr['c0:11:ec:00:00:01']['channels'] == [37, 38, 39]
+         and byaddr['c0:11:ec:00:00:02']['channels'] == [37, 38]
+         and all(not d['flagged'] for d in ov['devices']))
+    h.ck('overlay markers carry adv-channel centre frequencies',
+         {m['adv_channel']: m['freq_mhz'] for m in ov['markers']} == {37: 2402, 38: 2426, 39: 2480}
+         and all(0 <= m['intensity'] <= 100 for m in ov['markers'])
+         and [w['wifi_channel'] for w in ov['wifi_channels']] == [1, 6, 11])
+    # A data-channel PDU never creates an advertiser row (overlay is adv-only).
+    g2, _ = _w()
+    feed(g2, ll_version(0x11223344, 7, 0x000f, 0x1234), 1, channel=10)
+    h.ck('overlay ignores data-channel PDUs', g2.overlay()['device_count'] == 0)
+    # sniffer_status(probe=False) writes to no serial port and reports a clean shape.
+    st = b.sniffer_status(probe=False)
+    h.ck('sniffer_status returns a gate shape without probing',
+         isinstance(st.get('available'), bool) and 'note' in st and isinstance(st.get('candidates'), list))
+
     return h
 
 

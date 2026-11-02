@@ -120,6 +120,17 @@ rather than pretending to listen. HIGH/CRITICAL findings reach
 detectors** (`do_routing_selftest`). The standalone `blewatch.service`
 (`scripts/blewatch.service`) runs it as an opt-in, least-privilege daemon.
 
+BLE Watch also appears on **Network → Signal Intelligence** as a **🛡 BLE Watch**
+overlay toggle, beside the 📶 Bluetooth and 🐝 Zigbee overlays (in both the
+in-page toolbar and the full-screen console). When enabled it runs a short sniff
+and plots the advertisers it hears onto the 2.4 GHz spectrum — markers on the
+advertising channels (37/38/39 = 2402/2426/2480 MHz), a device roster, and any
+clone/spoof/flood advertiser flagged red on the band. The toggle is gated by
+`GET /api/net/ble-watch/status` (reads USB names only — it writes nothing to any
+serial port). The overlay sniff passes `quick=1`, so its findings are **not**
+exported to Watchtower; run the Diagnostics card for monitored captures. See
+[WiFi Analyzer → BLE Watch overlay](wifi-analyzer.md) for the full description.
+
 ## Hardware reality
 
 Both generations run the **same parser and codes** — the difference is capture
