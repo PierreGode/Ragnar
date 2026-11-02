@@ -135,6 +135,7 @@ SIZE_KEY_TO_DEFAULT_DRIVER = {
     "3in5_tft": "ili9486",
     "1in28_tft": "gc9a01",
     "1in44_lcd": "st7735s",
+    "1in9_cardputer": "st7789v2",
     "1in69_tft": "whisplay",
     "0in96_oled": "ssd1306",
     "1602_lcd": "lcd1602",
@@ -191,6 +192,10 @@ DISPLAY_PROFILES = {
     # joystick). Square panel: use a square reference so the layout isn't
     # stretched; the on-screen frame/stat pages scale to fit 128x128.
     "st7735s":     {"ref_width": 128, "ref_height": 128, "default_flip": False},
+    # M5Stack CardputerZero built-in 1.9" ST7789V2, used landscape as 320x170.
+    # Landscape reference so the layout reflows to the wide panel (same "ref =
+    # panel size" approach as st7735s) instead of being stretched from portrait.
+    "st7789v2":    {"ref_width": 320, "ref_height": 170, "default_flip": False},
     # Whisplay HAT 1.69" ST7789 240x280 colour TFT LCD (ref height keeps the
     # 240:280 aspect so the layout isn't stretched: 122 * 280/240 = 142)
     "whisplay":    {"ref_width": DESIGN_REF_WIDTH, "ref_height": 142, "default_flip": False},
