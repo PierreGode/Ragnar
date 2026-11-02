@@ -52,6 +52,7 @@ browse than search.
 
 ## Hardware & displays
 - [Display Buttons & Joystick Reference](DISPLAY_CONTROLS.md) — every HAT's key/joystick map
+- [M5Stack CardputerZero](M5StackCardputerZero.md) — built-in LCD + keyboard setup
 - [Kiosk Mode](kiosk.md) — fullscreen Chromium dashboard on an attached screen
 - [Pager Guide](pager.md) — WiFi Pineapple Pager payload
 - [Gen 2 Hardware](hardware-gen2.md) — reference-build BOM & assembly

@@ -1523,7 +1523,7 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         python3 -c "import smbus2" 2>/dev/null || unusable+=("I2C displays (smbus2)")
         python3 -c "import luma.led_matrix" 2>/dev/null || unusable+=("MAX7219 (luma.led_matrix)")
         python3 -c "from waveshare_epd import epd2in13_V4" 2>/dev/null || unusable+=("e-Paper (waveshare_epd)")
-        for drv in gc9a01 st7735s ili9486 whisplay ssd1306 lcd1602 max7219; do
+        for drv in gc9a01 st7735s st7789v2 ili9486 whisplay ssd1306 lcd1602 max7219; do
             [ -f "$ragnar_PATH/resources/waveshare_epd/${drv}.py" ] \
                 || unusable+=("${drv} (driver file missing)")
         done
@@ -2112,6 +2112,12 @@ resolve_profile_unattended() {
             RAGNAR_ENTRYPOINT="Ragnar.py"
             EPD_VERSION="${RAGNAR_DISPLAY:-gc9a01}"
             ;;
+        cardputer|cardputerzero)
+            SERVER_INSTALL=false; HEADLESS_MODE=false; TFT_MODE=true; CARDPUTER_MODE=true
+            HEADLESS_VARIANT=""; HEADLESS_VARIANT_LABEL=""
+            RAGNAR_ENTRYPOINT="Ragnar.py"
+            EPD_VERSION="st7789v2"
+            ;;
         server-display|display)
             SERVER_INSTALL=true; HEADLESS_MODE=false; TFT_MODE=false
             HEADLESS_VARIANT=""; HEADLESS_VARIANT_LABEL="Server install with display"
@@ -2639,17 +2645,17 @@ main() {
             pip3 install spidev --break-system-packages >/dev/null 2>&1
             log "SUCCESS" "SPI dependencies installed for TFT display"
 
-            # M5Stack CardputerZero: display is fixed (built-in 1.9" ST7789V2),
-            # so skip the panel picker and go straight to its driver. The 46-key
-            # TCA8418 keyboard needs smbus2/I2C, both already installed + enabled
-            # by the common display-deps and raspi-config steps.
+            # M5Stack CardputerZero: display is fixed (built-in 1.9" ST7789V3),
+            # so skip the panel picker and go straight to its driver. The stock
+            # image exposes the LCD and keyboard through kernel drivers; smbus2
+            # and spidev are only for the fallback on a plain kernel.
             if [ "$CARDPUTER_MODE" = true ]; then
                 EPD_VERSION="st7789v2"
                 pip3 install smbus2 --break-system-packages >/dev/null 2>&1
                 echo -e "${GREEN}✓ M5Stack CardputerZero: built-in 1.9\" ST7789 V3 LCD (320x170)${NC}"
-                echo -e "${CYAN}  Keyboard: 46-key TCA8418 @ I2C 0x34 — arrows navigate, Enter selects.${NC}"
-                echo -e "${YELLOW}  If keys don't respond, press each nav key and check the log for its${NC}"
-                echo -e "${YELLOW}  code, then map it in config/cardputer_keymap.json (see docs).${NC}"
+                echo -e "${CYAN}  Keyboard: F/X/Z/C or arrows navigate, Enter selects, Space/Backspace/Tab = KEY1-3.${NC}"
+                echo -e "${YELLOW}  This replaces the stock launcher on the LCD and keyboard; undo it with:${NC}"
+                echo -e "${YELLOW}  sudo $ragnar_PATH/scripts/cardputer_takeover.sh revert${NC}"
                 log "INFO" "Display selected: st7789v2 (CardputerZero)"
             else
 
@@ -2931,6 +2937,11 @@ except:
 
     CURRENT_STEP=9; show_progress "Setting up services"
     setup_services
+
+    # A stock CardputerZero keeps the LCD and keyboard with its own launcher.
+    if [ "$CARDPUTER_MODE" = true ]; then
+        bash "$ragnar_PATH/scripts/cardputer_takeover.sh" apply
+    fi
 
     CURRENT_STEP=9; show_progress "Verifying installation"
     verify_installation

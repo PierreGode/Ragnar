@@ -4,10 +4,10 @@ Ragnar runs on the [M5Stack CardputerZero](https://docs.m5stack.com/en/Cardputer
 — a pocket-sized Linux computer with a built-in 1.9" LCD and a 46-key keyboard.
 
 > [!IMPORTANT]
-> CardputerZero support is **new and not yet validated on physical hardware**. The
-> display rotation/offsets, the keyboard map, and the M5IOE1 backlight/reset
-> mapping may need a one-time on-device tuning pass (all covered below, all doable
-> without editing code).
+> CardputerZero support follows M5Stack's published pin map and developer docs and
+> is tested against simulated hardware, but it has **not been run on a physical
+> unit yet**. Report anything that differs; the display, keyboard and backlight
+> settings can all be changed without editing code (see below).
 
 ---
 
@@ -19,6 +19,8 @@ Ragnar runs on the [M5Stack CardputerZero](https://docs.m5stack.com/en/Cardputer
 - The only board-specific parts are its two built-in peripherals: the **1.9" LCD**
   and the **46-key keyboard**. Ragnar drives both.
 - Install it by choosing **option 7 — "M5Stack CardputerZero"** in `install_ragnar.sh`.
+- On M5Stack's stock image this **replaces the APPLaunch launcher** on the LCD and
+  keyboard. It is reversible; see [Taking over from APPLaunch](#taking-over-from-applaunch).
 
 ---
 
@@ -62,8 +64,8 @@ capable mesh peer.
 ### The built-in 1.9" LCD — the on-device HUD
 The LCD is Ragnar's **glanceable status screen + field control surface**, the same
 on-device UI family the e-Paper and LCD-HAT builds show — just in full color at
-320×170. At that size it counts as a **"wide" display**, so it gets the **full stat
-pages**, not the stripped-down 128×128 layout reserved for the tiny ST7735S HAT.
+320×170, and it gets the **full stat pages**, not the stripped-down 128×128 layout
+reserved for the tiny ST7735S HAT.
 
 It renders all three on-device modes (see [Display Controls](DISPLAY_CONTROLS.md)):
 
@@ -82,9 +84,11 @@ control Ragnar already has works from the keys:
 
 | Key(s) | Logical action |
 |---|---|
-| Arrow keys | navigate / cycle pages (and steer the wardriving carousel) |
+| `F` `X` `Z` `C`, or the Fn arrows | up / down / left / right — cycle pages, steer the wardriving carousel |
 | Enter | press / select |
-| Three edge keys | stand in for **KEY1 / KEY2 / KEY3** — Pwnagotchi swap, rotate/flip screen, next-page / restart, toggle phone AP, etc. (mode-dependent) |
+| Space | **KEY1** — mode toggle (net-diag on/off, leave the wardriving screens) |
+| Backspace | **KEY2** — rotate screen / reconnect Wi-Fi |
+| Tab or Esc | **KEY3** — next page (hold: restart Ragnar) / toggle phone AP |
 
 See [Display Controls](DISPLAY_CONTROLS.md) for the exact per-mode key actions.
 
@@ -100,21 +104,43 @@ Run the installer and pick **option 7**:
    * 3) Server install with display
    * 4) Server install (headless, no display)
    * 5) WiFi Pineapple Pager (beta)
-   * 6) M5Stack CardputerZero (built-in LCD + keyboard)
+   * 6) Docker container (headless web UI)
+   * 7) M5Stack CardputerZero (built-in LCD + keyboard)
 ```
 
 Option 7 runs a normal Raspberry Pi install, **pinned** to the board's built-in
 display driver (`st7789v2`, 320×170 landscape) and its keyboard. It skips the panel
-picker and installs the SPI/I²C Python deps (`spidev`, `smbus2`). SPI and I²C are
-enabled by the installer's common display step.
+picker and takes the LCD and keyboard over from the stock launcher. For an unattended
+install use `RAGNAR_PROFILE=cardputer`.
 
 > The display driver key is `st7789v2` for historical reasons — V2 and V3 share the
 > register set this driver uses; only the on-screen labels say "V3".
 
 The display choice is written to `config/shared_config.json`, which is gitignored and
-survives `update_ragnar.sh`. Update-only boxes on a CardputerZero profile get the
-`spidev` + `smbus2` deps re-ensured automatically (installer fix mirrored into the
-updater).
+survives `update_ragnar.sh`. Picking the CardputerZero under **Config → Display** or
+with `installhead.sh st7789v2` sets up the same things, and the updater re-applies them.
+
+### Taking over from APPLaunch
+
+M5Stack's image runs **APPLaunch**, which draws on the LCD and grabs the keyboard
+exclusively, so nothing else can use them while it runs. Stopping it is not enough
+either: the image's `fb_load` bridge only refreshes the LCD while a process running the
+APPLaunch binary exists. `scripts/cardputer_takeover.sh` therefore:
+
+- moves the binary to `…/M5CardputerZero-APPLaunch.real` and runs `sleep infinity` under
+  its name, so `fb_load` keeps refreshing the LCD;
+- takes the kernel console off the LCD: backs up `cmdline.txt`, removes `console=tty1`,
+  adds `fbcon=map:99`, and disables `getty@tty1`. **Reboot** for this to take effect.
+
+It makes no changes on any other board. To get the stock launcher back:
+
+```bash
+sudo scripts/cardputer_takeover.sh revert    # then reboot
+sudo scripts/cardputer_takeover.sh status    # shows the current state
+```
+
+On 512 MB, also consider `sudo systemctl disable --now lightdm` if your image runs a
+desktop; Ragnar does not change this for you.
 
 ---
 
@@ -125,34 +151,36 @@ EPD-style interface, so it plugs into Ragnar's display stack transparently. It t
 two transports, in order:
 
 ### 1. Linux framebuffer (preferred)
-M5Stack ships the CardputerZero as a pocket Linux computer, so its image usually
-drives the LCD as a framebuffer device. When one is present, Ragnar blits RGB565
-frames straight to it. This is the most reliable path and needs no extra wiring.
+The stock image binds the panel to a kernel driver and exposes it as `/dev/fb0` or
+`/dev/fb1`, depending on the image. Ragnar finds it by its driver name in
+`/sys/class/graphics/fb*/name` (`st7789v_m5st` or `panel-mipi-dbi`), unblanks it, turns
+the backlight on if it is off, and writes native-endian RGB565 frames.
 
-Auto-detection **only adopts a framebuffer whose resolution matches the 1.9" LCD**
-(320×170 or 170×320), so it can never paint over an HDMI console framebuffer. If your
-LCD framebuffer reports an unexpected size or node, force it:
+Without a matching name, Ragnar **only adopts a framebuffer whose resolution matches
+the 1.9" LCD** (320×170 or 170×320), so it can never paint over an HDMI console. To
+force a node:
 
 ```bash
 RAGNAR_CARDPUTER_FB=/dev/fbN
 ```
 
 ### 2. Native SPI (fallback)
-If no matching framebuffer exists, Ragnar drives the ST7789 directly over SPI
-(MOSI=GPIO10, SCLK=GPIO11, CS=GPIO25, DC=GPIO8, TE=GPIO5). Because DC sits on SPI0's
-hardware CE0 (GPIO8), chip-select is asserted manually on GPIO25.
+For a plain kernel with no panel driver, Ragnar drives the ST7789 directly over SPI
+(MOSI=GPIO10, SCLK=GPIO11, CS=GPIO8/CE0, DC=GPIO25, TE=GPIO5). This path only runs when
+the board's M5IOE1 expander answers, because SPI has no read-back and would otherwise
+"find" this panel on any Pi. `RAGNAR_CARDPUTER_SPI=1` skips that check. Its MADCTL and
+offsets are the standard 170-wide ST7789 values and have not been confirmed on this board.
 
-The LCD **reset** and **backlight** are not on Pi GPIOs — they hang off the M5IOE1
-I²C expander (see next section). On the SPI path Ragnar does a real hardware reset and
-turns the backlight on through the expander; if the expander does not answer, it falls
-back to a software reset and relies on the power-on backlight default.
+A CardputerZero whose LCD fails to start keeps its panel setting: because the LCD is
+built in, Ragnar skips the usual auto-detect fallback, stays reachable over the web UI,
+and tries again on its next start.
 
 ---
 
 ## M5IOE1 expander — LCD reset & backlight
 
-The built-in LCD's reset and backlight lines are behind M5Stack's **M5IOE1** I/O
-expander. Ragnar controls them via `m5ioe1.py`, using the board's schematic mapping:
+On the framebuffer path the kernel owns the expander and the backlight, which appears at
+`/sys/class/backlight/*/brightness` (0–255). `m5ioe1.py` is only used on the SPI path:
 
 | Function | M5IOE1 pin | Detail |
 |---|---|---|
@@ -162,10 +190,6 @@ expander. Ragnar controls them via `m5ioe1.py`, using the board's schematic mapp
 
 > The generic M5IOE1 chip manual lists `0x6F–0x76` as the part's configurable address
 > range, but on the CardputerZero this unit is pinned at **`0x4F`**. Use `0x4F`.
-
-The expander is probed at startup; if it does not ACK, every reset/backlight call is a
-harmless no-op and the display falls back to its software path — so this can never make
-the screen *worse* than before.
 
 Read/modify/write is used on the expander's GPIO registers so Ragnar never clobbers the
 other pins on the same registers (which hold board power and peripheral-reset state).
@@ -186,29 +210,27 @@ If a board revision moves a pin, correct it without touching code:
 
 ## Keyboard calibration
 
-The keyboard is a matrix behind the **TCA8418** controller (I²C `0x34`). The controller
-reports a raw key number per key; M5Stack has **not published** which physical key sits
-at which matrix position for the CardputerZero, so Ragnar's default key map is a
-**best guess** and is calibratable **without editing code**:
+On the stock image the kernel owns the keyboard, which appears as
+`/dev/input/by-path/platform-3f804000.i2c-event`, and Ragnar reads standard Linux key
+codes from it with no extra dependency. `RAGNAR_CARDPUTER_KBD=/dev/input/eventN` forces
+a device. On a plain kernel without that driver, Ragnar talks to the TCA8418 over I²C
+(`0x34`) instead; matrix positions are unpublished, so that default map is a best guess.
 
-1. Boot Ragnar and watch the log. Every **unmapped** key press logs its raw code:
+Either map can be changed **without editing code**:
+
+1. Watch the log. Every **unmapped** key press logs its code:
    ```
-   CardputerZero keyboard: unmapped key code 37 (add to config/cardputer_keymap.json to use it)
+   CardputerZero keyboard: unmapped key code 30 (add to config/cardputer_keymap.json to use it)
    ```
-2. Press each key you want to use and note its code.
-3. Put the codes you want into `config/cardputer_keymap.json` as
-   `{"<code>": "<action>"}`:
+2. Put the codes you want into `config/cardputer_keymap.json` as `{"<code>": "<action>"}`:
    ```json
-   {
-     "31": "up", "41": "down", "40": "left", "42": "right", "43": "press",
-     "1": "key1", "11": "key2", "30": "key3"
-   }
+   { "30": "press", "31": "key2" }
    ```
    Valid actions: `up`, `down`, `left`, `right`, `press`, `key1`, `key2`, `key3`.
 
-The file is read at startup and **overrides** the defaults — no reinstall, no code
-change. Unlike the LCD-HAT joystick (mounted 90° off), the keyboard arrows already
-point the way you read them, so no direction remap is applied.
+The file is read at startup and **overrides** individual defaults. Unlike the LCD-HAT
+joystick (mounted 90° off), the keyboard arrows already point the way you read them, so
+no direction remap is applied.
 
 ---
 
@@ -216,11 +238,13 @@ point the way you read them, so no direction remap is applied.
 
 | Symptom | Try |
 |---|---|
-| **Screen stays black** | If on the SPI path, the backlight relies on the M5IOE1 expander — confirm it answers at `0x4F` (`i2cdetect -y 1`). Prefer the framebuffer path, or raise `RAGNAR_M5IOE1_BL_DUTY`. |
-| **Ragnar painted over the HDMI console** | Shouldn't happen (the fb guard rejects non-LCD sizes), but if forced, unset `RAGNAR_CARDPUTER_FB` or point it at the correct LCD `/dev/fbN`. |
-| **Image mirrored / rotated wrong** | The SPI init uses a fixed MADCTL for landscape; on-hardware this may need adjusting (try the alternate MADCTL values noted in `st7789v2.py`). |
-| **Keys do nothing / wrong action** | Calibrate the keymap (above). Check the log for `unmapped key code N`. Confirm the TCA8418 answers at `0x34` (`i2cdetect -y 1`). |
-| **No LCD/keyboard after an update** | Ensure `spidev` + `smbus2` import (`python3 -c "import spidev, smbus2"`); the updater re-ensures them for CardputerZero profiles, but a failed pip leaves them missing. |
+| **Stock launcher still on screen / LCD frozen** | Run `sudo scripts/cardputer_takeover.sh status`, then `apply` if needed. |
+| **Text console draws over Ragnar** | Reboot after the takeover; the `cmdline.txt` change only applies at boot. |
+| **Screen stays black** | Check `cat /sys/class/graphics/fb*/name` and `cat /sys/class/backlight/*/brightness`. On the SPI path, confirm the expander answers at `0x4F` (`i2cdetect -y 1`). |
+| **Ragnar painted over the HDMI console** | Shouldn't happen, but if forced, unset `RAGNAR_CARDPUTER_FB` or point it at the correct LCD `/dev/fbN`. |
+| **Image mirrored / rotated wrong (SPI path only)** | Try the alternate MADCTL values noted in `st7789v2.py`. |
+| **Keys do nothing** | Check nothing else holds the keyboard: `sudo fuser /dev/input/by-path/*i2c-event`. A grabbed device delivers no events. |
+| **Wrong action on a key** | Remap it (above). The log shows `unmapped key code N` for unmapped keys. |
 
 ---
 
@@ -228,9 +252,10 @@ point the way you read them, so no direction remap is applied.
 
 | File | Role |
 |---|---|
-| `resources/waveshare_epd/st7789v2.py` | LCD driver — framebuffer-preferred, SPI fallback |
-| `m5ioe1.py` | M5IOE1 expander driver — LCD reset + backlight |
-| `cardputer_input.py` | TCA8418 keyboard listener (reuses the LCD-HAT input layer) |
+| `resources/waveshare_epd/st7789v2.py` | LCD driver — kernel framebuffer first, SPI fallback |
+| `m5ioe1.py` | M5IOE1 expander driver — LCD reset + backlight (SPI path) |
+| `scripts/cardputer_takeover.sh` | Hands the LCD and keyboard from APPLaunch to Ragnar, and back |
+| `cardputer_input.py` | Keyboard listener — kernel input device first, TCA8418 I²C fallback (reuses the LCD-HAT input layer) |
 | `config/cardputer_keymap.json` | Optional per-board keymap override |
 | `install_ragnar.sh` / `update_ragnar.sh` | Install option 7 + dependency parity |
 | `shared.py`, `epd_helper.py`, `display.py`, `web/scripts/ragnar_modern.js` | Display profile + selector wiring |
@@ -239,7 +264,7 @@ point the way you read them, so no direction remap is applied.
 
 ## Status
 
-Implemented on branch `M5StackCardputerZero`. **Not yet validated on physical
-hardware** — expect a one-time tuning pass for the display rotation/offsets, the
-keyboard map, and (if needed) the M5IOE1 backlight polarity/brightness. Every one of
-those is adjustable from config or environment variables without code changes.
+Follows M5Stack's published pin map and developer docs, and is covered by
+`tests/test_cardputer_zero.py` against simulated hardware. **Not yet run on a physical
+unit.** The likeliest things to need attention are the launcher takeover, which depends
+on how a given M5Stack image is built, and the SPI fallback's rotation and offsets.

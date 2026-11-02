@@ -21087,8 +21087,8 @@ def get_wifi_networks():
 _VALID_DISPLAY_DRIVERS = {
     'epd2in13', 'epd2in13_V2', 'epd2in13_V3', 'epd2in13_V4', 'epd2in13b_V4',
     'epd2in7', 'epd2in7_V2', 'epd2in9_V2', 'epd3in7', 'epd4in26',
-    'gc9a01', 'st7735s', 'ili9486', 'ili9488', 'whisplay', 'ssd1306', 'lcd1602',
-    'max7219_4panel', 'max7219_8panel',
+    'gc9a01', 'st7735s', 'st7789v2', 'ili9486', 'ili9488', 'whisplay', 'ssd1306',
+    'lcd1602', 'max7219_4panel', 'max7219_8panel',
 }
 
 DISPLAY_MODE_SCRIPT = os.path.join(
@@ -30972,7 +30972,9 @@ def _chat_self_call(method, path, cookie, json_body=None):
     """Dispatch an internal API call through the WSGI app (in-process), carrying
     the caller's session cookie so before_request auth passes. Returns
     (status_code, parsed_json_or_text)."""
-    client = app.test_client()
+    # use_cookies=False: otherwise the client's empty jar replaces this header
+    # and every tool call is 401 on a password-protected unit.
+    client = app.test_client(use_cookies=False)
     headers = {'Cookie': cookie} if cookie else {}
     if method == 'GET':
         resp = client.get(path, headers=headers)

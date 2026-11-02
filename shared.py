@@ -125,6 +125,11 @@ DEFAULT_EPD_TYPE = "epd2in13_V4"
 DESIGN_REF_WIDTH = 122   # All layout coordinates are designed for this width
 DESIGN_REF_HEIGHT = 250  # All layout coordinates are designed for this height
 
+# Panels soldered to the board. A failed init means the panel isn't ready, never
+# that a different one is fitted, so auto-detect must not replace them: it would
+# save an e-paper driver (they "succeed" with nothing attached) over the config.
+BUILT_IN_PANELS = {"st7789v2"}
+
 # Map web UI size keys to default driver names
 SIZE_KEY_TO_DEFAULT_DRIVER = {
     "2in13":    "epd2in13_V4",
@@ -1285,7 +1290,9 @@ class SharedData:
             # Try auto-detection as fallback before giving up
             logger.info("Attempting auto-detection as fallback...")
             try:
-                result = EPDHelper.auto_detect()
+                result = None
+                if self.config.get("epd_type") not in BUILT_IN_PANELS:
+                    result = EPDHelper.auto_detect()
                 if result:
                     epd_type = result[0]
                     logger.info(f"Fallback auto-detected EPD: {epd_type} ({result[1]}x{result[2]})")

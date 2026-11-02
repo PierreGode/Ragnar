@@ -1,7 +1,7 @@
 # st7789v2.py
-# Driver for the M5Stack CardputerZero's built-in 1.9" ST7789V3 LCD (170x320,
-# used in landscape as 320x170; the module name keeps the historical "v2" —
-# V2/V3 share the register set this driver uses). Exposes the same interface as the Waveshare
+# Driver for the M5Stack CardputerZero's built-in 1.9" ST7789V3 LCD (320x170
+# landscape; the module name keeps the historical "v2" — V2/V3 share the
+# register set this driver uses). Exposes the same interface as the Waveshare
 # e-Paper drivers so it integrates transparently with EPDHelper and the rest of
 # Ragnar:
 #   width, height, init(), Clear(), getbuffer(image), display(buf),
@@ -10,45 +10,43 @@
 # The CardputerZero is a Raspberry Pi Compute Module Zero (BCM2837) box, so
 # Ragnar runs on it like any other Pi. Only the built-in display and 46-key
 # keyboard are board-specific; the keyboard is handled separately by
-# cardputer_input.py (TCA8418 I2C matrix), not here.
+# cardputer_input.py, not here.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # Two transports, tried in order by init():
 #
-#   1. Linux framebuffer (PRIMARY).  M5Stack ships the CardputerZero as "a
-#      pocket Linux computer", so its image drives the LCD as a framebuffer
-#      device (typically /dev/fb1, or /dev/fb0 on a headless-image variant).
-#      When one is found at ~16bpp we blit RGB565 frames straight to it. This
-#      sidesteps the board's awkward wiring entirely (see below), so it is the
-#      preferred path and the one most likely to work out of the box.
+#   1. Linux framebuffer (PRIMARY).  The stock M5Stack image binds the panel to
+#      a kernel driver (st7789v_m5stack, or panel-mipi-dbi) and exposes it as
+#      /dev/fb0 or /dev/fb1 depending on the image, so we find it by driver name
+#      in sysfs. Pixels are native-endian RGB565. On that image SPI0 and the
+#      M5IOE1 expander belong to the kernel, so this is the only working path
+#      there. See scripts/cardputer_takeover.sh for handing the LCD to Ragnar.
 #
-#   2. Native SPI (FALLBACK).  If no usable framebuffer exists we talk to the
-#      ST7789V2 directly over SPI, the same way st7735s.py does. This path has
-#      real caveats on this board and is best-effort:
+#   2. Native SPI (FALLBACK).  For a plain kernel with no panel driver. It only
+#      runs when the board's M5IOE1 expander answers: SPI has no read-back, so
+#      without that check init() would "succeed" on any Pi with SPI enabled and
+#      EPDHelper.auto_detect would misreport this panel on other boards.
+#      RAGNAR_CARDPUTER_SPI=1 skips the check.
 #
-#        * The panel CS is on GPIO25 and DC on GPIO8 (BCM). GPIO8 is SPI0's
-#          hardware CE0, so we must NOT let spidev drive chip-select — we run
-#          with no_cs and assert CS manually on GPIO25.
-#        * RST and the backlight are behind M5Stack's M5IOE1 I2C I/O expander,
-#          not on direct GPIO. We drive them through m5ioe1.py (LCD reset on
-#          expander IO12, backlight on IO10/PWM4 — see the schematic): a real
-#          hardware reset before the init sequence, and backlight explicitly on.
-#          If the expander does not answer (e.g. framebuffer-only image), we fall
-#          back to a software reset (SWRESET) and rely on the power-on backlight.
-#
-# Wiring (CardputerZero, BCM numbering — from M5Stack's schematic C154 V0.6.1):
+# Wiring (M5Stack CardputerZero docs, BCM numbering):
 #   MOSI → GPIO10 (SPI0)      SCLK → GPIO11 (SPI0)
-#   CS   → GPIO25             DC   → GPIO8
-#   TE   → GPIO5              RST  → M5IOE1 IO12 (PYG12_LCD_RST, active-low)
-#   BL   → M5IOE1 IO10 / PWM4 (PYG10_BL_PWM)
+#   CS   → GPIO8  (SPI0 CE0)  DC   → GPIO25
+#   TE   → GPIO5              RST  → M5IOE1 PYG12_LCD_RST
+#   BL   → M5IOE1 PYG10_BL_PWM
 #
-# NOTE: unvalidated on real CardputerZero hardware. Offsets/MADCTL below follow
-# the standard ST7789 170-wide panel geometry and may need on-device tuning.
+# NOTE: the framebuffer path follows M5Stack's docs and software already running
+# on this board. The SPI path's MADCTL/offsets are the standard 170-wide ST7789
+# geometry and have not been confirmed on this board.
 
+import array
+import glob
 import logging
 import os
 import struct
+import sys
 import time
+
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +61,7 @@ LCD_HEIGHT = 170
 NATIVE_SHORT_OFFSET = 35
 NATIVE_LONG_OFFSET  = 0
 
-CS_PIN = 25   # BCM — manual chip-select (GPIO8/CE0 is taken by DC)
-DC_PIN = 8    # BCM
+DC_PIN = 25   # BCM. Chip-select is SPI0 CE0 (GPIO8), driven by spidev.
 
 SPI_BUS    = 0
 SPI_DEVICE = 0
@@ -74,20 +71,27 @@ SPI_MAX_HZ = 40_000_000
 # flip may need adjusting on hardware (try 0xA0 / 0x00 / 0xC0 if mirrored).
 MADCTL = 0x60
 
-# Framebuffer devices to probe, in order. Override with RAGNAR_CARDPUTER_FB.
+# Kernel driver names for the LCD, as reported by /sys/class/graphics/fbN/name.
+_FB_DRIVER_NAMES = ("st7789v_m5st", "panel-mipi-dbi")
+
+# Framebuffer devices to probe when no driver name matches. Override with
+# RAGNAR_CARDPUTER_FB.
 _FB_CANDIDATES = ("/dev/fb1", "/dev/fb0")
 
-# Only auto-adopt a framebuffer whose resolution matches the CardputerZero LCD
-# (either orientation). Without this guard we'd happily blit Ragnar over a
+_SYS_GRAPHICS  = "/sys/class/graphics"
+_SYS_BACKLIGHT = "/sys/class/backlight"
+
+# Only adopt an unnamed framebuffer whose resolution matches the CardputerZero
+# LCD (either orientation). Without this guard we'd happily blit Ragnar over a
 # 1920x1080 HDMI console (/dev/fb0), which is exactly what we must not do. An
 # explicit RAGNAR_CARDPUTER_FB override skips this check — the user knows.
 _LCD_RES = frozenset({(320, 170), (170, 320)})
 
 
 class EPD:
-    """CardputerZero ST7789V2 LCD with an EPD-compatible interface.
+    """CardputerZero ST7789V3 LCD with an EPD-compatible interface.
 
-    Prefers the Linux framebuffer M5Stack's image exposes; falls back to
+    Prefers the kernel framebuffer M5Stack's image exposes; falls back to
     driving the panel directly over SPI.
     """
 
@@ -100,6 +104,7 @@ class EPD:
         self._fb_w = None
         self._fb_h = None
         self._fb_bpp = 16
+        self._fb_stride = None
         # spi state
         self._spi  = None
         self._gpio = {}
@@ -125,7 +130,7 @@ class EPD:
                         self.width, self.height)
         else:
             raise RuntimeError(
-                "CardputerZero display: no framebuffer and SPI init failed")
+                "CardputerZero display: no LCD framebuffer and SPI init failed")
         self._initialized = True
 
     def Clear(self, color=0xFFFF):
@@ -140,6 +145,11 @@ class EPD:
     def getbuffer(self, image):
         """Convert a PIL image (any mode) to packed RGB565 bytes at panel size."""
         img = image.convert("RGB")
+        # Screen rotation 90/270 renders a portrait canvas. Turn it onto the
+        # landscape panel, as the e-paper getbuffer does, instead of letting the
+        # resize below squash it.
+        if img.height > img.width and self.width > self.height:
+            img = img.transpose(Image.Transpose.ROTATE_270)
         if img.width != self.width or img.height != self.height:
             logger.debug("CardputerZero: resizing %dx%d → %dx%d",
                          img.width, img.height, self.width, self.height)
@@ -189,23 +199,44 @@ class EPD:
     # Framebuffer transport
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _named_framebuffers():
+        """Framebuffers whose kernel driver is the CardputerZero LCD."""
+        found = []
+        for name_path in sorted(glob.glob(f"{_SYS_GRAPHICS}/fb*/name")):
+            try:
+                with open(name_path) as f:
+                    name = f.read()
+            except OSError:
+                continue
+            if any(n in name for n in _FB_DRIVER_NAMES):
+                node = os.path.basename(os.path.dirname(name_path))
+                found.append(f"/dev/{node}")
+        return found
+
     def _init_framebuffer(self):
         override = os.environ.get("RAGNAR_CARDPUTER_FB")
-        candidates = ([override] if override else []) + list(_FB_CANDIDATES)
+        named = self._named_framebuffers()
+        candidates = ([override] if override else []) + named + list(_FB_CANDIDATES)
 
+        tried = set()
         for path in candidates:
-            if not path or not os.path.exists(path):
+            if not path or path in tried or not os.path.exists(path):
                 continue
+            tried.add(path)
             geom = self._read_fb_geometry(path)
             if not geom:
                 continue
-            fb_w, fb_h, bpp = geom
+            fb_w, fb_h, bpp, stride = geom
             forced = (path == override)
             if bpp != 16:
                 # We only pack RGB565; a 32bpp console fb would need BGRA
                 # conversion. Skip rather than paint garbage.
                 logger.info("CardputerZero: %s is %dbpp, not 16 — skipping", path, bpp)
                 continue
+            # A driver-named LCD can report a taller virtual size for panning.
+            if path in named and fb_w == LCD_WIDTH:
+                fb_h = LCD_HEIGHT
             if not forced and (fb_w, fb_h) not in _LCD_RES:
                 # Almost certainly an HDMI/console framebuffer, not the LCD —
                 # never blit over it. Point users at the override if their LCD
@@ -215,30 +246,72 @@ class EPD:
                             path, fb_w, fb_h)
                 continue
             self._fb_path, self._fb_w, self._fb_h, self._fb_bpp = path, fb_w, fb_h, bpp
+            self._fb_stride = stride
             # Render at the framebuffer's own dimensions so no scaling is needed.
             self.width, self.height = fb_w, fb_h
+            self._wake_panel(path)
             return True
         return False
 
     @staticmethod
     def _read_fb_geometry(path):
-        """Return (width, height, bpp) for /dev/fbN via its sysfs attributes."""
+        """Return (width, height, bpp, stride) for /dev/fbN via sysfs."""
         node = os.path.basename(path)
-        base = f"/sys/class/graphics/{node}"
+        base = f"{_SYS_GRAPHICS}/{node}"
         try:
             with open(f"{base}/virtual_size") as f:
                 w, h = (int(v) for v in f.read().strip().split(","))
             with open(f"{base}/bits_per_pixel") as f:
                 bpp = int(f.read().strip())
-            return (w, h, bpp)
         except Exception as e:
             logger.debug("CardputerZero: cannot read geometry for %s: %s", path, e)
             return None
+        try:
+            with open(f"{base}/stride") as f:
+                stride = int(f.read().strip())
+        except (OSError, ValueError):
+            stride = w * bpp // 8
+        return (w, h, bpp, stride)
+
+    @staticmethod
+    def _wake_panel(path):
+        """Unblank the framebuffer and light the backlight if it is off. The
+        stock launcher may have left either state behind when it stopped."""
+        node = os.path.basename(path)
+        try:
+            with open(f"{_SYS_GRAPHICS}/{node}/blank", "w") as f:
+                f.write("0")
+        except OSError:
+            pass
+        for base in glob.glob(f"{_SYS_BACKLIGHT}/*"):
+            try:
+                with open(f"{base}/brightness") as f:
+                    if int(f.read().strip()) > 0:
+                        continue
+                with open(f"{base}/max_brightness") as f:
+                    max_level = f.read().strip()
+                with open(f"{base}/brightness", "w") as f:
+                    f.write(max_level)
+            except (OSError, ValueError):
+                pass
 
     def _fb_write(self, buf):
+        # getbuffer() packs big-endian for the SPI panel; a framebuffer holds
+        # native-endian pixels. Without this the red and blue channels scramble.
+        pixels = array.array("H")
+        pixels.frombytes(buf)
+        if sys.byteorder == "little":
+            pixels.byteswap()
+        data = pixels.tobytes()
+
+        row = self._fb_w * 2
+        if self._fb_stride and self._fb_stride > row:
+            pad = bytes(self._fb_stride - row)
+            data = b"".join(data[i:i + row] + pad
+                            for i in range(0, len(data), row))
         try:
-            with open(self._fb_path, "wb") as fb:
-                fb.write(buf)
+            with open(self._fb_path, "r+b", buffering=0) as fb:
+                fb.write(data)
         except Exception as e:
             logger.error("CardputerZero framebuffer write failed: %s", e)
             raise
@@ -247,7 +320,19 @@ class EPD:
     # Native SPI transport (fallback)
     # ------------------------------------------------------------------
 
+    def _board_present(self):
+        """SPI writes cannot be read back, so confirm this is a CardputerZero
+        before claiming the panel exists."""
+        if os.environ.get("RAGNAR_CARDPUTER_SPI") == "1":
+            return True
+        ioe = self._ensure_ioe()
+        return ioe is not None and getattr(ioe, "available", False)
+
     def _init_spi(self):
+        if not self._board_present():
+            logger.info("CardputerZero: M5IOE1 expander not found — not "
+                        "attempting native SPI")
+            return False
         if not self._setup_spi_hardware():
             return False
         try:
@@ -287,6 +372,7 @@ class EPD:
     def _setup_spi_hardware(self):
         if self._spi is not None:
             return True
+        spi = None
         try:
             import spidev
             import gpiozero
@@ -295,32 +381,17 @@ class EPD:
             spi.open(SPI_BUS, SPI_DEVICE)
             spi.max_speed_hz = SPI_MAX_HZ
             spi.mode = 0
-            # DC sits on GPIO8/CE0, so spidev must not drive chip-select. We
-            # assert CS ourselves on GPIO25. Not every kernel honours no_cs;
-            # if it doesn't, the CE0 toggle would fight DC and this board needs
-            # the framebuffer path instead.
-            try:
-                spi.no_cs = True
-            except Exception as e:
-                logger.warning("CardputerZero: spidev no_cs unsupported (%s); "
-                               "SPI path may conflict with DC on CE0", e)
-            self._spi = spi
-
             self._gpio["dc"] = gpiozero.LED(DC_PIN)
-            self._gpio["cs"] = gpiozero.LED(CS_PIN)
-            self._gpio["cs"].on()   # CS idle high (active-low)
+            self._spi = spi
             return True
         except Exception as e:
             logger.info("CardputerZero: SPI hardware unavailable: %s", e)
+            if spi is not None:
+                try:
+                    spi.close()
+                except Exception:
+                    pass
             return False
-
-    def _cs_low(self):
-        if "cs" in self._gpio:
-            self._gpio["cs"].off()
-
-    def _cs_high(self):
-        if "cs" in self._gpio:
-            self._gpio["cs"].on()
 
     def _software_reset(self):
         # No GPIO reset line (RST is behind the I2C expander), so use SWRESET.
@@ -328,19 +399,15 @@ class EPD:
         time.sleep(0.15)
 
     def _write_cmd(self, cmd):
-        self._cs_low()
         self._gpio["dc"].off()
         self._spi.writebytes([cmd])
-        self._cs_high()
 
     def _write_data(self, data):
-        self._cs_low()
         self._gpio["dc"].on()
         if isinstance(data, int):
             self._spi.writebytes([data])
         else:
             self._spi.writebytes(list(data))
-        self._cs_high()
 
     def _set_window(self, x0, y0, x1, y1):
         # Landscape: the 35px short-axis offset lands on the row (y) axis.
@@ -354,16 +421,14 @@ class EPD:
 
     def _spi_write_frame(self, buf):
         self._set_window(0, 0, self.width - 1, self.height - 1)
-        self._cs_low()
         self._gpio["dc"].on()
         chunk = 4096
         view = memoryview(buf)
         for i in range(0, len(view), chunk):
             self._spi.writebytes2(view[i:i + chunk])
-        self._cs_high()
 
     def _send_init_sequence(self):
-        """Minimal ST7789V2 power-on sequence (portrait-native, rotated by MADCTL)."""
+        """Minimal ST7789V3 power-on sequence (portrait-native, rotated by MADCTL)."""
         self._write_cmd(0x11)   # SLPOUT
         time.sleep(0.12)
 

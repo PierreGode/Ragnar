@@ -193,45 +193,21 @@ Raspberry Pi with a screen and keys already attached. Pick **option 7** in the
 installer (`M5Stack CardputerZero`). That runs a normal Pi install pinned to the
 board's built-in display (`st7789v2`, 320×170 landscape) and wires up its keyboard.
 
-**Display.** The driver tries two transports, in order:
+**Stock launcher.** On M5Stack's image this option replaces the APPLaunch launcher so
+Ragnar gets the LCD and keyboard, then asks for a reboot. Undo it with
+`sudo scripts/cardputer_takeover.sh revert`.
 
-1. **Linux framebuffer (preferred).** M5Stack ships the CardputerZero as a pocket
-   Linux computer, so its image drives the LCD as a framebuffer. Ragnar blits
-   frames straight to it — this is the most reliable path and needs no extra
-   wiring. Auto-detection only adopts a framebuffer whose resolution matches the
-   1.9" LCD (320×170 / 170×320), so it will never paint over an HDMI console. If
-   your LCD framebuffer reports an unexpected size, force it with
-   `RAGNAR_CARDPUTER_FB=/dev/fbN`.
-2. **Native SPI (fallback).** If no matching framebuffer exists, Ragnar drives the
-   ST7789 (V3) directly over SPI (CS on GPIO25, DC on GPIO8). The board's reset
-   and backlight sit behind M5Stack's M5IOE1 I2C I/O expander (`0x4F`); Ragnar
-   drives them through it — a hardware reset on expander IO12 and the backlight on
-   IO10/PWM4. If the expander does not answer, this path falls back to a software
-   reset and relies on the power-on backlight; if the panel then stays dark, use
-   the framebuffer path. The expander pins/address are overridable via the
-   `RAGNAR_M5IOE1_ADDR`, `RAGNAR_M5IOE1_BL_PWM`, `RAGNAR_M5IOE1_RST_IO`, and
-   `RAGNAR_M5IOE1_BL_DUTY` environment variables.
+**Display.** Ragnar uses the kernel's LCD framebuffer, which it finds by driver name.
+On a plain kernel without that driver it falls back to native SPI (CS on GPIO8, DC on
+GPIO25), with reset and backlight through the M5IOE1 expander at `0x4F`.
 
-**Keyboard.** The 46-key keyboard is a TCA8418 matrix controller on I2C (`0x34`).
-Arrow keys page the display / navigate the on-device menus, Enter selects, and
-three edge keys stand in for the HAT buttons (mode toggle, rotate/reconnect,
-next-page / AP) — the same controls documented in [Display Controls](DISPLAY_CONTROLS.md).
-Because M5Stack has not published which physical key sits at which matrix
-position, the default key map is a best guess. To calibrate: press a key and read
-the log line `unmapped key code N`, then map the codes you want in
-`config/cardputer_keymap.json`:
+**Keyboard.** `F` `X` `Z` `C` or the Fn arrows navigate, Enter selects, and Space,
+Backspace and Tab stand in for the HAT's KEY1, KEY2 and KEY3 — the same controls
+documented in [Display Controls](DISPLAY_CONTROLS.md). Any key can be remapped in
+`config/cardputer_keymap.json`; unmapped keys log their code.
 
-```json
-{ "31": "up", "41": "down", "40": "left", "42": "right", "43": "press",
-  "1": "key1", "11": "key2", "30": "key3" }
-```
-
-Valid actions are `up`, `down`, `left`, `right`, `press`, `key1`, `key2`, `key3`.
-The file is read at startup and overrides the defaults — no reinstall needed.
-
-> The CardputerZero support is new and has not yet been validated on the physical
-> device; the display offsets/rotation and the keyboard map may need on-device
-> tuning as above.
+> CardputerZero support follows M5Stack's published docs and is tested against simulated
+> hardware, but has not been run on a physical unit yet.
 
 ### 📶 Connecting Ragnar to a network
 

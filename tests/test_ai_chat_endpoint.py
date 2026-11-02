@@ -159,3 +159,32 @@ def test_chat_plain_answer_no_tools(client, monkeypatch):
     assert "Watchtower" in data["reply"]
 
     webapp._ragnar_chat = None
+
+
+def _logged_in_cookie(monkeypatch):
+    """A real session cookie on a unit with a password set."""
+    monkeypatch.setattr(webapp.auth_mgr, "is_configured", lambda: True)
+    client = webapp.app.test_client()
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+    name = webapp.app.config["SESSION_COOKIE_NAME"]
+    return name, f"{name}={client.get_cookie(name).value}"
+
+
+def test_tools_run_for_a_logged_in_user_on_a_password_protected_unit(monkeypatch):
+    _, cookie = _logged_in_cookie(monkeypatch)
+    result = webapp._chat_dispatch("get_scan_status", {}, cookie)
+    assert result.get("status") != 401, result
+
+
+def test_tools_stay_blocked_without_a_valid_session(monkeypatch):
+    name, _ = _logged_in_cookie(monkeypatch)
+    for cookie in ("", f"{name}=forged"):
+        result = webapp._chat_dispatch("get_scan_status", {}, cookie)
+        assert result["ok"] is False and result["status"] == 401
+
+
+def test_chat_endpoint_requires_login_when_a_password_is_set(monkeypatch):
+    monkeypatch.setattr(webapp.auth_mgr, "is_configured", lambda: True)
+    response = webapp.app.test_client().post("/api/ai/chat", json={"message": "scan"})
+    assert response.status_code == 401

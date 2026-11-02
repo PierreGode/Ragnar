@@ -549,11 +549,12 @@ else
 fi
 
 echo -e "${BLUE}Step 5.4c: Ensuring CardputerZero display dependencies...${NC}"
-# The M5Stack CardputerZero (epd_type "st7789v2") drives its built-in 1.9" LCD
-# over SPI (spidev) and its 46-key TCA8418 keyboard + M5IOE1 backlight/reset over
-# I2C (smbus2). The installer pins these when option 7 is chosen; mirror them here
-# so a box that only ever updates still gets a working screen + keyboard. Gated on
-# the persisted display profile and idempotent (an importable module is left alone).
+# The M5Stack CardputerZero (epd_type "st7789v2") normally uses the kernel's LCD
+# framebuffer and keyboard device, which needs the stock launcher out of the way;
+# on a plain kernel it falls back to SPI (spidev) and I2C (smbus2). The installer
+# sets this up when option 7 is chosen; mirror it here so a box that only ever
+# updates still gets a working screen + keyboard. Gated on the persisted display
+# profile and idempotent (an importable module is left alone).
 _disp_cfg="$(dirname "$0")/config/shared_config.json"
 if grep -q '"epd_type"[[:space:]]*:[[:space:]]*"st7789v2"' "$_disp_cfg" 2>/dev/null; then
     for _mod in spidev smbus2; do
@@ -563,8 +564,9 @@ if grep -q '"epd_type"[[:space:]]*:[[:space:]]*"st7789v2"' "$_disp_cfg" 2>/dev/n
     if python3 -c "import spidev, smbus2" 2>/dev/null; then
         echo -e "  ${GREEN}✓${NC} CardputerZero display deps present (spidev, smbus2)"
     else
-        echo -e "  ${YELLOW}⚠${NC} CardputerZero needs spidev + smbus2 — install failed; LCD/keyboard may not work"
+        echo -e "  ${YELLOW}⚠${NC} spidev + smbus2 failed to install — needed only on a plain kernel without the LCD/keyboard drivers"
     fi
+    bash "$(dirname "$0")/scripts/cardputer_takeover.sh" apply
 else
     echo -e "  ${GREEN}✓${NC} Not a CardputerZero display profile — nothing to do"
 fi

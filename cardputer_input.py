@@ -1,39 +1,41 @@
 # cardputer_input.py — 46-key keyboard for the M5Stack CardputerZero.
 #
-# The CardputerZero's keyboard is a matrix behind a TCA8418 I2C keypad
-# controller (address 0x34, INT on GPIO27), not a GPIO joystick like the 1.44"
-# LCD HAT. This listener reads key events off the TCA8418 and feeds them into
-# the exact same page / wardriving / net-diag state machine the LCD HAT uses, so
-# every on-device control Ragnar already has works from the keyboard.
+# The CardputerZero's keyboard is a matrix behind a TCA8418 keypad controller
+# (I2C address 0x34, INT on GPIO27), not a GPIO joystick like the 1.44" LCD HAT.
+# This listener feeds key events into the exact same page / wardriving / net-diag
+# state machine the LCD HAT uses, so every on-device control Ragnar already has
+# works from the keyboard.
 #
 # It subclasses LCDHATInputListener to reuse all of that layer logic and only
 # changes two things:
-#   1. the input source — a TCA8418 poll loop instead of gpiozero Buttons;
+#   1. the input source — a keyboard reader instead of gpiozero Buttons;
 #   2. _visual_dir is made an identity map — the LCD HAT remaps directions
 #      because its joystick is mounted 90° off, but keyboard arrows already point
 #      the way the user reads them.
 #
 # Logical inputs handed to the base class (same names as the LCD HAT):
 #   up / down / left / right / press / key1 / key2 / key3
-# Default key mapping (see DEFAULT_KEYMAP) — arrows navigate, Enter = press,
-# and three letter/edge keys stand in for KEY1..KEY3 (the mode/rotate/AP keys).
 #
-# ── Matrix codes are board-specific ──────────────────────────────────────────
-# The TCA8418 reports a raw key number (1..80 = row*10 + col + 1), and M5Stack
-# has not published which physical key sits at which matrix position for the
-# CardputerZero. So DEFAULT_KEYMAP is a best guess and this module is written to
-# be *calibratable without code changes*:
-#   * every unmapped key press is logged at INFO with its raw code, so you can
-#     read the log, press each key you want, and note its number;
-#   * drop those into config/cardputer_keymap.json as {"<code>": "<action>"}
-#     (actions: up/down/left/right/press/key1/key2/key3) — it overrides the
-#     defaults at startup. No restart-to-recompile loop.
+# ── Two sources, tried in order ──────────────────────────────────────────────
+#   1. evdev. The stock M5Stack image binds the TCA8418 to a kernel driver, so
+#      the chip is busy on I2C and the keyboard is a normal Linux input device.
+#      DEFAULT_EVDEV_KEYMAP uses Linux KEY_* codes and matches a layout already
+#      in use on this board. Events are read as raw input_event structs, so no
+#      python-evdev dependency is needed.
+#   2. Direct I2C. For a plain kernel with no keypad driver. Matrix positions are
+#      unpublished, so DEFAULT_KEYMAP there is a best guess.
 #
-# UNVALIDATED on real CardputerZero hardware.
+# Either map can be replaced without code changes: every unmapped key press is
+# logged at INFO with its code, and config/cardputer_keymap.json holds
+# {"<code>": "<action>"} overrides using the codes of the active source (actions:
+# up/down/left/right/press/key1/key2/key3).
 
+import glob
 import json
 import logging
 import os
+import select
+import struct
 import threading
 import time
 
@@ -56,9 +58,8 @@ REG_KP_GPIO3       = 0x1F     # cols C8-C9 into the keypad matrix
 
 POLL_INTERVAL = 0.02          # 50 Hz — also the resolution of long-press timing
 
-# Raw TCA8418 key code → logical action. Best-effort default; override per board
-# via config/cardputer_keymap.json. Codes here are placeholders for the arrow
-# cluster + Enter and three edge keys and are expected to need calibration.
+# Raw TCA8418 key code → logical action, used only on the direct I2C path.
+# Best-effort default; override per board via config/cardputer_keymap.json.
 DEFAULT_KEYMAP = {
     # arrow cluster (guess: bottom-right of the CardputerZero keyboard)
     "31": "up",
@@ -72,19 +73,71 @@ DEFAULT_KEYMAP = {
     "30": "key3",    # Fn/Shift → next page (long: restart) / toggle AP
 }
 
+# --- Kernel input device -------------------------------------------------------
+EVDEV_BY_PATH = "/dev/input/by-path/platform-3f804000.i2c-event"
+_SYS_INPUT = "/sys/class/input"
+_EVENT_FORMAT = "llHHi"       # struct input_event: sec, usec, type, code, value
+_EVENT_SIZE = struct.calcsize(_EVENT_FORMAT)
+EV_KEY = 1
+EV_PRESS = 1
+EV_RELEASE = 0                # value 2 is autorepeat, which we ignore
+
+EVDEV_WAIT_SECONDS = 60       # the device node can appear after we start at boot
+EVDEV_RETRY_SECONDS = 2
+
+# Linux KEY_* code → logical action.
+DEFAULT_EVDEV_KEYMAP = {
+    # Fn-layer arrows
+    "103": "up",     # KEY_UP
+    "108": "down",   # KEY_DOWN
+    "105": "left",   # KEY_LEFT
+    "106": "right",  # KEY_RIGHT
+    # Unshifted arrow cluster
+    "33": "up",      # F
+    "45": "down",    # X
+    "44": "left",    # Z
+    "46": "right",   # C
+    "28": "press",   # Enter
+    "57": "key1",    # Space     → mode toggle (net-diag / exit wardriving)
+    "14": "key2",    # Backspace → rotate screen / reconnect WiFi
+    "15": "key3",    # Tab       → next page (long: restart) / toggle AP
+    "1":  "key3",    # Esc       → same as Tab
+}
+
 _VALID_ACTIONS = {"up", "down", "left", "right", "press", "key1", "key2", "key3"}
 _KEYMAP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "config", "cardputer_keymap.json")
 
 
+def find_keyboard_device():
+    """Return the keyboard's /dev/input path, or None if it is not there yet."""
+    override = os.environ.get("RAGNAR_CARDPUTER_KBD")
+    if override:
+        return override if os.path.exists(override) else None
+    if os.path.exists(EVDEV_BY_PATH):
+        return EVDEV_BY_PATH
+    for name_path in sorted(glob.glob(f"{_SYS_INPUT}/event*/device/name")):
+        try:
+            with open(name_path) as f:
+                name = f.read()
+        except OSError:
+            continue
+        if "tca8418" in name.lower():
+            event = os.path.basename(os.path.dirname(os.path.dirname(name_path)))
+            return f"/dev/input/{event}"
+    return None
+
+
 class CardputerInputListener(LCDHATInputListener):
-    """TCA8418 keyboard listener for the CardputerZero, reusing the LCD HAT's
+    """Keyboard listener for the CardputerZero, reusing the LCD HAT's
     page / wardriving / net-diag layers."""
 
     def __init__(self, shared_data):
         super().__init__(shared_data)
         self._bus = None
-        self._keymap = dict(DEFAULT_KEYMAP)
+        self._ev_fd = None
+        self._source = None        # 'evdev' | 'i2c'
+        self._keymap = dict(DEFAULT_EVDEV_KEYMAP)
         self._press_times = {}     # logical name -> monotonic time of press
         self._fired_hold = set()   # names whose long-press already fired
         self._stop = False
@@ -92,34 +145,70 @@ class CardputerInputListener(LCDHATInputListener):
     # --- Lifecycle --------------------------------------------------------
 
     def start(self):
-        """Open I2C, initialise the TCA8418, start the poll + autoscroll loops."""
+        """Attach to the keyboard and start the read + autoscroll loops."""
+        if self._open_evdev():
+            self._run_source("evdev")
+        elif self._open_i2c():
+            self._run_source("i2c")
+        else:
+            threading.Thread(target=self._wait_for_keyboard,
+                             name="cardputer-kbd-wait", daemon=True).start()
+
+    def _wait_for_keyboard(self):
+        """Neither source was ready. The kernel device can appear late at boot,
+        so keep looking for a while before giving up."""
+        deadline = time.monotonic() + EVDEV_WAIT_SECONDS
+        while not self._stop and time.monotonic() < deadline:
+            time.sleep(EVDEV_RETRY_SECONDS)
+            if self._open_evdev():
+                self._run_source("evdev")
+                return
+        if not self._stop:
+            logger.warning("CardputerZero keyboard: no input device appeared "
+                           "after %ds — keyboard disabled", EVDEV_WAIT_SECONDS)
+
+    def _run_source(self, source):
+        self._source = source
+        self._keymap = dict(DEFAULT_EVDEV_KEYMAP if source == "evdev"
+                            else DEFAULT_KEYMAP)
         self._load_keymap_override()
+        self.available = True
+        self._start_autoscroll_thread()
+        target = self._evdev_loop if source == "evdev" else self._poll_loop
+        threading.Thread(target=target, name="cardputer-kbd",
+                         daemon=True).start()
+        logger.info("CardputerZero keyboard listener started (%s)", source)
+
+    def _open_evdev(self):
+        path = find_keyboard_device()
+        if not path:
+            return False
+        try:
+            self._ev_fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError as e:
+            logger.warning("CardputerZero keyboard: cannot open %s (%s)", path, e)
+            return False
+        logger.info("CardputerZero keyboard: reading %s", path)
+        return True
+
+    def _open_i2c(self):
         try:
             import smbus2
             self._bus = smbus2.SMBus(I2C_BUS)
             self._init_tca8418()
+            return True
         except FileNotFoundError:
             logger.info("CardputerZero keyboard: I2C bus %d not available "
-                        "(is I2C enabled?) — keyboard disabled", I2C_BUS)
-            return
+                        "(is I2C enabled?)", I2C_BUS)
         except OSError as e:
-            logger.warning("CardputerZero keyboard: TCA8418 not responding at "
-                           "0x%02X (%s) — keyboard disabled", TCA8418_ADDR, e)
-            return
+            logger.info("CardputerZero keyboard: TCA8418 not reachable at "
+                        "0x%02X (%s)", TCA8418_ADDR, e)
         except ImportError:
-            logger.info("CardputerZero keyboard: smbus2 not installed — "
-                        "keyboard disabled")
-            return
+            logger.info("CardputerZero keyboard: smbus2 not installed")
         except Exception as e:
             logger.warning("CardputerZero keyboard init failed: %s", e)
-            return
-
-        self.available = True
-        self._start_autoscroll_thread()
-        threading.Thread(target=self._poll_loop, name="cardputer-kbd",
-                         daemon=True).start()
-        logger.info("CardputerZero keyboard listener started (TCA8418 @ 0x%02X)",
-                    TCA8418_ADDR)
+        self._bus = None
+        return False
 
     def _load_keymap_override(self):
         """Merge config/cardputer_keymap.json over the defaults, if present."""
@@ -163,7 +252,58 @@ class CardputerInputListener(LCDHATInputListener):
     def _read(self, reg):
         return self._bus.read_byte_data(TCA8418_ADDR, reg)
 
-    # --- Poll loop --------------------------------------------------------
+    # --- evdev loop -------------------------------------------------------
+
+    def _evdev_loop(self):
+        while not self._stop:
+            try:
+                ready, _, _ = select.select([self._ev_fd], [], [], POLL_INTERVAL)
+                if ready:
+                    self._read_events()
+                self._check_holds()
+            except OSError as e:
+                logger.warning("CardputerZero keyboard: device lost (%s)", e)
+                if not self._reopen_evdev():
+                    return
+            except Exception as e:
+                logger.debug("CardputerZero keyboard loop error: %s", e)
+                time.sleep(POLL_INTERVAL)
+        self._close_evdev()
+
+    def _read_events(self):
+        try:
+            data = os.read(self._ev_fd, _EVENT_SIZE * 32)
+        except BlockingIOError:
+            return
+        if not data:
+            raise OSError("end of input device")
+        usable = len(data) - (len(data) % _EVENT_SIZE)
+        for _, _, ev_type, code, value in struct.iter_unpack(_EVENT_FORMAT,
+                                                             data[:usable]):
+            if ev_type == EV_KEY and value in (EV_PRESS, EV_RELEASE):
+                self._handle_event(code, value == EV_PRESS)
+
+    def _close_evdev(self):
+        if self._ev_fd is None:
+            return
+        try:
+            os.close(self._ev_fd)
+        except OSError:
+            pass
+        self._ev_fd = None
+
+    def _reopen_evdev(self):
+        self._close_evdev()
+        self._press_times.clear()
+        self._fired_hold.clear()
+        deadline = time.monotonic() + EVDEV_WAIT_SECONDS
+        while not self._stop and time.monotonic() < deadline:
+            if self._open_evdev():
+                return True
+            time.sleep(EVDEV_RETRY_SECONDS)
+        return False
+
+    # --- I2C poll loop ----------------------------------------------------
 
     def _poll_loop(self):
         while not self._stop:
@@ -190,6 +330,8 @@ class CardputerInputListener(LCDHATInputListener):
             self._bus.write_byte_data(TCA8418_ADDR, REG_INT_STAT, 0x01)
         except OSError:
             pass
+
+    # --- Shared event handling --------------------------------------------
 
     def _handle_event(self, code, pressed):
         name = self._keymap.get(str(code))
