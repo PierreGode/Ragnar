@@ -2,6 +2,18 @@
 
 ## Releases
 
+### 2026-11-02
+
+#### [#1042](https://github.com/PierreGode/Ragnar/pull/1042) — feat(net): BLE Watch overlay on the Signal Intelligence spectrum
+*branch `feature/ble-watch-spectrum-overlay`*
+
+- **[BLE Watch](blewatch.md) now rides the [Signal Intelligence](wifi-analyzer.md) spectrum** as a **🛡 BLE Watch** overlay toggle, beside the 📶 Bluetooth and 🐝 Zigbee overlays — in **both** the in-page toolbar and the full-screen console. When enabled it runs a short BLE **link-layer** sniff and plots the advertisers it hears onto the 2.4 GHz band, flagging any clone / spoof / advertising-flood advertiser red right on the spectrum.
+  - Distinct from the 📶 Bluetooth overlay (a BlueZ discovery estimate off the Pi's own radio): this uses the external **nRF / Bluefruit LE sniffer** to hear the actual advertising PDUs on channels **37/38/39 (2402/2426/2480 MHz)**, so it sees devices a scan never discovers and reads their security posture. Both overlays can be on at once.
+  - **Device-gated** — the toggle stays greyed until a sniffer is on USB (`/api/net/ble-watch/status`, which reads USB names only and **writes nothing** to any serial port, so the gate poll never disturbs a device). The short overlay sniff passes `quick=1`, so its findings are **not** exported to Watchtower — the Diagnostics → BLE Watch card is still the monitored path.
+  - **Draws** a per-advertising-channel bar (height by activity, red ⚠ when a flagged advertiser sits on it), a device roster (address, address type, channels, clone/spoof/flood status, RSSI — click to highlight), and a per-Wi-Fi-channel BLE pressure estimate (ch 1/6/11).
+- **Backend:** `blewatch.py` gains per-advertiser RSSI/channel bookkeeping (pure roster, feeds no detector), `BleWatch.overlay()` (band shaping) and `sniffer_status()` (light gate); `do_ble_watch()` returns an `overlay` block with each device flagged from the run's alerts. **Frontend:** toggle + panel + full-screen chip + side roster + spectrum draw mirroring the BT/Zigbee overlays; JS cache-bust bumped.
+- **Validation:** self-test **40 → 44** (overlay shaping, data-channel exclusion, gate shape); a **live nRF52840 capture** (532 packets / 8 s, 63 advertisers, real RSSI, correct channels, floods flagged); UI render + canvas draw exercised headless against the served JS. Engine/codes unchanged; **no new CVEs**. `docs/wifi-analyzer.md`, `docs/blewatch.md`, `README.md` updated.
+
 ### 2026-11-01
 
 #### [#1039](https://github.com/PierreGode/Ragnar/pull/1039) — feat(net): live module search in the Diagnostics tab

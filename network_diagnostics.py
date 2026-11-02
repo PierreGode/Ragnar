@@ -30348,6 +30348,36 @@ def do_ble_watch(device=None, seconds=20, replay=None, config=None, quick=False)
               'trusted_count': len(getattr(guard, 'trusted', {}) or {}),
               'alerts': len(alerts), 'by_severity': by_sev,
               'packet_count': guard.frames}
+    # 2.4 GHz spectrum overlay (Signal Intelligence page) — the sniffed advertiser
+    # roster shaped onto the band, with each device flagged from this run's alerts
+    # so a clone / spoof / flood lights up red right on the spectrum.
+    try:
+        overlay = guard.overlay()
+        flag = {}
+        for a in alerts:
+            addr = (a.get('adva') or '').lower()
+            if not addr:
+                continue
+            rank = _BLE_SEV_RANK.get(a.get('severity'), 0)
+            cur = flag.get(addr)
+            if cur is None or rank > cur[0]:
+                flag[addr] = (rank, a.get('severity'), list(a.get('codes') or []))
+            elif rank == cur[0]:
+                cur[2].extend(c for c in (a.get('codes') or []) if c not in cur[2])
+        flagged_n = 0
+        for d in overlay['devices']:
+            f = flag.get((d['addr'] or '').lower())
+            if f:
+                d['flagged'] = True
+                d['severity'] = f[1]
+                d['codes'] = f[2]
+                flagged_n += 1
+        overlay['flagged_count'] = flagged_n
+        overlay['verdict'] = verdict
+        result['overlay'] = overlay
+    except Exception as e:                       # overlay must never break a scan
+        result['overlay'] = {'error': '%s: %s' % (type(e).__name__, e),
+                             'devices': [], 'device_count': 0, 'markers': []}
     hi = [f for f in findings if f['severity'] in ('HIGH', 'CRITICAL')]
     if not quick and hi:
         _guard_emit_jsonl('ble_watch', {'device': source, 'findings': hi})
@@ -32399,8 +32429,26 @@ def register_network_diagnostics(app, logger=None):
         if device is not None and not re.fullmatch(r'[\w./:+-]{1,128}', device):
             return _bad('Invalid device')
         secs = _clamp_int(request.args.get('seconds'), 20, 5, 120)
-        _log(f"net/ble-watch device={device or 'autodetect'} secs={secs}")
-        return jsonify(do_ble_watch(device=device, seconds=secs))
+        # quick=1 (the Signal Intelligence overlay's short auto-refreshing sniff)
+        # suppresses the Watchtower JSONL export so an 8 s overlay poll doesn't
+        # spam HIGH/CRIT incidents; the Diagnostics card calls it without quick.
+        quick = request.args.get('quick') in ('1', 'true', 'yes')
+        _log(f"net/ble-watch device={device or 'autodetect'} secs={secs}{' quick' if quick else ''}")
+        return jsonify(do_ble_watch(device=device, seconds=secs, quick=quick))
+
+    @app.route('/api/net/ble-watch/status', methods=['GET'])
+    def net_ble_status():
+        # Light gate for the Signal Intelligence 'BLE Watch' overlay toggle. Reads
+        # USB names only by default (probe=0) so the 15 s poll writes nothing to
+        # any serial port; probe=1 does the full firmware probe on demand.
+        probe = request.args.get('probe') in ('1', 'true', 'yes')
+        try:
+            blewatch = _ble_module()
+        except Exception as e:
+            return jsonify({'available': False, 'note': 'blewatch unavailable: %s' % e,
+                            'candidates': []})
+        _log(f"net/ble-watch/status probe={int(probe)}")
+        return jsonify(blewatch.sniffer_status(probe=probe))
 
     @app.route('/api/net/ble-watch/baseline', methods=['GET', 'POST'])
     def net_ble_baseline():

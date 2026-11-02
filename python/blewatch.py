@@ -50,6 +50,9 @@ DLT_NORDIC_BLE = 272
 
 ADV_ACCESS_ADDR = 0x8E89BED6          # fixed AA of the advertising physical channel
 ADV_CHANNELS = (37, 38, 39)
+# Centre frequency (MHz) of each primary advertising channel, for the 2.4 GHz
+# spectrum overlay on the Signal Intelligence page.
+ADV_CHANNEL_FREQ = {37: 2402, 38: 2426, 39: 2480}
 
 # Advertising PDU types (header low nibble).
 ADV_IND, ADV_DIRECT_IND, ADV_NONCONN_IND = 0x0, 0x1, 0x2
@@ -561,6 +564,22 @@ class BleWatch:
                     # Non-conflicting refinement (e.g. the name appeared in this
                     # frame): adopt the latest concrete identity as the baseline.
                     prev['ident'] = ident
+
+        # --- overlay roster: strongest RSSI + advertising channels seen -------
+        # Pure bookkeeping for the 2.4 GHz spectrum overlay (Signal Intelligence).
+        # It feeds NO detector — it just records, per advertiser, the primary
+        # advertising channels (37/38/39) it used and the strongest (closest to 0)
+        # RSSI heard, so overlay() can place real sniffed activity on the band.
+        rec = self._adv[akey]
+        rec['count'] = rec.get('count', 0) + 1
+        rec['last_ts'] = ts
+        ch = pkt.get('channel')
+        if ch in ADV_CHANNELS:
+            rec.setdefault('channels', set()).add(ch)
+        rssi = pkt.get('rssi')
+        if rssi is not None and (rec.get('rssi') is None or rssi > rec['rssi']):
+            rec['rssi'] = rssi
+
         # A configured trusted device whose advertised identity does not match its
         # baseline is always a clone, even on the first drift.
         if trusted_here:
@@ -756,6 +775,51 @@ class BleWatch:
             out[addr] = {'name': name, 'services': list(svcs),
                          'rpa_class': rec.get('rpa_class', 'random')}
         return out
+
+    def overlay(self):
+        """A 2.4 GHz spectrum-overlay view of the advertisers heard this run, for
+        the Signal Intelligence page — the BLE counterpart of the Bluetooth and
+        Zigbee overlays. Pure shaping of state already collected (no new capture,
+        no detection): one entry per advertiser with its strongest RSSI and the
+        advertising channels (37/38/39) it used, per-channel activity markers
+        mapped to their centre frequency, a band-wide hopping-pressure estimate,
+        and per-Wi-Fi-channel pressure. `flagged`/`severity`/`codes` are left
+        empty here and filled in by the caller from the run's alerts."""
+        devices, chan_count, chan_rssi = [], {}, {}
+        for addr, rec in self._adv.items():
+            chans = sorted(rec.get('channels') or ())
+            rssi = rec.get('rssi')
+            cnt = rec.get('count', 0)
+            ident = rec.get('ident')
+            name = ident[0] if isinstance(ident, tuple) and ident else None
+            devices.append({'addr': addr, 'name': name, 'rssi': rssi,
+                            'channels': chans, 'count': cnt,
+                            'rpa_class': rec.get('rpa_class', 'random'),
+                            'flagged': False, 'severity': None, 'codes': []})
+            for c in chans:
+                chan_count[c] = chan_count.get(c, 0) + max(1, cnt)
+                if rssi is not None and (chan_rssi.get(c) is None or rssi > chan_rssi[c]):
+                    chan_rssi[c] = rssi
+        # Strongest advertisers first; unheard RSSI sinks to the bottom.
+        devices.sort(key=lambda d: (d['rssi'] is None, -(d['rssi'] if d['rssi'] is not None else -999)))
+        maxc = max(chan_count.values()) if chan_count else 0
+        markers = [{'adv_channel': c, 'freq_mhz': ADV_CHANNEL_FREQ[c],
+                    'count': chan_count[c], 'rssi': chan_rssi.get(c),
+                    'intensity': round(100 * chan_count[c] / maxc) if maxc else 0}
+                   for c in sorted(chan_count)]
+        total_events = sum(chan_count.values())
+        hopping_pressure = round(100 * total_events / (total_events + 60)) if total_events else 0
+        # Advertising channels fall on the three non-overlapping Wi-Fi channels:
+        # 37=2402≈ch1, 38=2426≈ch6, 39=2480≈ch11. Report pressure on each.
+        def _level(n):
+            return 'high' if n >= 12 else 'moderate' if n >= 4 else 'low'
+        wifi_channels = [{'wifi_channel': wc, 'level': _level(chan_count.get(ac, 0))}
+                         for ac, wc in ((37, 1), (38, 6), (39, 11)) if ac in chan_count]
+        return {'devices': devices, 'device_count': len(devices),
+                'markers': markers, 'hopping_pressure': hopping_pressure,
+                'wifi_channels': wifi_channels,
+                'note': ('BLE link-layer sniff — real advertising activity on the '
+                         'primary channels (37/38/39), not a device-discovery estimate.')}
 
 
 # ===========================================================================
@@ -1142,6 +1206,42 @@ def find_sniffer(probe=True, candidates=None):
         if c['kind'] == 'nrf-sniffer':
             return c['path']
     return None
+
+
+def sniffer_status(probe=False):
+    """Light presence check for gating the Signal Intelligence 'BLE Watch' overlay
+    toggle. Defaults to probe=False: it reads USB names / VIDs only and writes
+    nothing to any serial port, so it is safe to poll and never disturbs a device
+    mid-capture (the toggle's own scan does the full firmware probe). `available`
+    is True only when a port is positively a sniffer (an nRF52 dongle whose
+    firmware names itself 'nRF Sniffer', or a probed port that answered the
+    protocol). A bare CP210x bridge stays unavailable with a hint to run BLE Watch
+    from Diagnostics, which probes it."""
+    if os.environ.get('RAGNAR_BLE_SNIFFER'):
+        dev = os.environ['RAGNAR_BLE_SNIFFER']
+        ok = os.path.exists(dev)
+        return {'available': ok, 'pinned': dev,
+                'note': ('pinned via $RAGNAR_BLE_SNIFFER' if ok
+                         else '$RAGNAR_BLE_SNIFFER points at a missing device'),
+                'candidates': []}
+    try:
+        cands = detect_sniffers(probe=probe)
+    except Exception as e:
+        return {'available': False, 'note': 'detection failed: %s' % e, 'candidates': []}
+    sniffers = [c for c in cands if c['kind'] == 'nrf-sniffer']
+    maybe = [c for c in cands if c['kind'] in ('unknown', 'bluefruit-friend', 'nrf-other-fw')]
+    if sniffers:
+        note = '%s ready' % sniffers[0]['path']
+    elif maybe and not probe:
+        note = ('a USB serial bridge is present — if it is a Bluefruit LE Sniffer, '
+                'run BLE Watch from Diagnostics to probe and confirm it')
+    elif maybe:
+        note = maybe[0].get('note') or 'a candidate port is not running sniffer firmware'
+    else:
+        note = 'no BLE sniffer detected on USB'
+    return {'available': bool(sniffers), 'note': note,
+            'candidates': [{'path': c['path'], 'kind': c['kind'],
+                            'note': c.get('note', '')} for c in cands]}
 
 
 # Nordic's nRF Sniffer extcap (MIT) is vendored in python/nrf_sniffer, so live
