@@ -1978,6 +1978,52 @@ class Display:
                 bb = sd.font_arialbold.getbbox(line)
                 y += (bb[3] - bb[1]) + 2
 
+    def _get_ap_credentials(self):
+        """Return AP credentials from the active WiFi manager or saved config."""
+        config = getattr(self.shared_data, "config", {}) or {}
+        ragnar = getattr(self.shared_data, "ragnar_instance", None)
+        wifi_manager = getattr(ragnar, "wifi_manager", None) if ragnar else None
+        ssid = getattr(wifi_manager, "ap_ssid", None) or config.get("wifi_ap_ssid", "")
+        password = getattr(wifi_manager, "ap_password", None) or config.get("wifi_ap_password", "")
+        return str(ssid or ""), str(password or "")
+
+    def _get_captive_portal_qr(self, size):
+        """Return a cached, scaled QR code for Ragnar's AP captive portal."""
+        try:
+            ragnar = getattr(self.shared_data, "ragnar_instance", None)
+            wifi_manager = getattr(ragnar, "wifi_manager", None) if ragnar else None
+            ap_ip = getattr(wifi_manager, "ap_ip", None)
+            if not ap_ip:
+                return None
+            portal_url = f"http://{ap_ip}:8000/portal"
+
+            qr_image = getattr(self, "_captive_portal_qr_image", None)
+            if (qr_image is None
+                    or getattr(self, "_captive_portal_qr_url", None) != portal_url):
+                import qrcode
+
+                qr = qrcode.QRCode(
+                    error_correction=qrcode.constants.ERROR_CORRECT_M,
+                    border=2,
+                    box_size=1,
+                )
+                qr.add_data(portal_url)
+                qr.make(fit=True)
+                matrix = qr.get_matrix()
+                qr_image = Image.new("1", (len(matrix[0]), len(matrix)), 1)
+                pixels = qr_image.load()
+                for y, row in enumerate(matrix):
+                    for x, dark in enumerate(row):
+                        if dark:
+                            pixels[x, y] = 0
+                self._captive_portal_qr_image = qr_image
+                self._captive_portal_qr_url = portal_url
+
+            return qr_image.resize((size, size), Image.Resampling.NEAREST)
+        except Exception as e:
+            logger.debug(f"Unable to create captive-portal QR code: {e}")
+            return None
+
     def _render_main_horizontal(self, image, draw, W, H):
         """Landscape PAGE_MAIN layout for a small e-paper rotated 90°/270°
         (e.g. the 2.13" 122x250 panel lying down → ~250x122).
@@ -4716,10 +4762,18 @@ class Display:
                     image.paste(img, img_pos)
                     draw.text(text_pos, text, font=self.shared_data.font_arial9, fill=0)
 
+                ap_mode = bool(getattr(self.shared_data, 'ap_mode_active', False))
                 self.shared_data.update_ragnarstatus()
                 image.paste(self.shared_data.ragnarstatusimage, (int(3 * sx), int(60 * sy)))
-                draw.text((int(35 * sx), int(65 * sy)), self.shared_data.ragnarstatustext, font=self.shared_data.font_arial9, fill=0)
-                draw.text((int(35 * sx), int(75 * sy)), self.shared_data.ragnarstatustext2, font=self.shared_data.font_arial9, fill=0)
+                if ap_mode:
+                    ap_ssid, ap_password = self._get_ap_credentials()
+                    draw.text((int(35 * sx), int(65 * sy)), f"SSID: {ap_ssid}",
+                              font=self.shared_data.font_arial9, fill=0)
+                    draw.text((int(35 * sx), int(75 * sy)), f"P: {ap_password}",
+                              font=self.shared_data.font_arial9, fill=0)
+                else:
+                    draw.text((int(35 * sx), int(65 * sy)), self.shared_data.ragnarstatustext, font=self.shared_data.font_arial9, fill=0)
+                    draw.text((int(35 * sx), int(75 * sy)), self.shared_data.ragnarstatustext2, font=self.shared_data.font_arial9, fill=0)
 
                 # Frise ribbon
                 if self.shared_data.frise is not None:
@@ -4728,13 +4782,28 @@ class Display:
                         frise_img = frise_img.resize((W - 2, frise_img.height), Image.NEAREST)
                     image.paste(frise_img, (1, int(160 * sy)))
 
+                if ap_mode:
+                    qr_size = max(1, min(int(58 * sx), int(58 * sy), W - 8))
+                    qr_image = self._get_captive_portal_qr(qr_size)
+                    if qr_image is not None:
+                        qr_x = (W - qr_size) // 2
+                        image.paste(qr_image, (qr_x, int(91 * sy)))
+                    portal_label = "SCAN FOR PORTAL"
+                    label_width = self.shared_data.font_arial9.getlength(portal_label)
+                    draw.text(((W - label_width) / 2, int(150 * sy)), portal_label,
+                              font=self.shared_data.font_arial9, fill=0)
+
                 # Frame & dividers — span full physical width
                 draw.rectangle((1, 1, W - 1, H - 1), outline=0)
                 draw.line((1, int(20 * sy), W - 1, int(20 * sy)), fill=0)
                 draw.line((1, int(59 * sy), W - 1, int(59 * sy)), fill=0)
                 draw.line((1, int(87 * sy), W - 1, int(87 * sy)), fill=0)
 
-                lines = self.shared_data.wrap_text(self.shared_data.ragnarsays, self.shared_data.font_arialbold, W - 4)
+                lines = [] if ap_mode else self.shared_data.wrap_text(
+                    self.shared_data.ragnarsays,
+                    self.shared_data.font_arialbold,
+                    W - 4,
+                )
                 y_text = int(90 * sy)
 
                 # Character image — centred on the full canvas

@@ -1,6 +1,7 @@
 RPi.GPIO==0.7.1
 spidev==3.5
 Pillow>=10.0.0
+qrcode>=7.4
 numpy>=1.24.0
 rich>=13.0.0
 pandas>=2.0.0
