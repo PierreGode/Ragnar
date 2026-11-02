@@ -904,6 +904,7 @@ class SharedData:
             "ai_analysis_enabled": True,
             "ai_vulnerability_summaries": True,
             "ai_network_insights": True,
+            "ai_chat_enabled": True,
             "ai_max_tokens": 500,
             "ai_temperature": 0.7,
 

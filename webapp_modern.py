@@ -30366,6 +30366,7 @@ def get_ai_status():
             'model': getattr(ai_service, 'model', None),
             'endpoint': getattr(ai_service, 'base_url', '') or 'openai',
             'fallback_active': bool(getattr(ai_service, 'fallback_active', False)),
+            'chat_enabled': bool(shared_data.config.get('ai_chat_enabled', True)),
             'capabilities': {
                 'network_insights': getattr(ai_service, 'network_insights', False),
                 'vulnerability_summaries': getattr(ai_service, 'vulnerability_summaries', False)
@@ -31058,6 +31059,9 @@ def ai_chat_endpoint():
     {success, reply, actions, docs, model}."""
     if not shared_data.config.get('ai_enabled', False):
         return jsonify({'success': False, 'error': 'AI is not enabled. Enable it in the Config tab.'}), 400
+    # Tools run without confirmation, so "off" must stop requests, not just hide the panel.
+    if not shared_data.config.get('ai_chat_enabled', True):
+        return jsonify({'success': False, 'error': 'The chat assistant is turned off in the Config tab.'}), 400
     ai_service = getattr(shared_data, 'ai_service', None)
     if not ai_service or not ai_service.is_enabled():
         return jsonify({'success': False,

@@ -43,6 +43,7 @@ Identifies potential attack vectors and security gaps in your network:
 - **ai_analysis_enabled**: Enable/disable AI analysis
 - **ai_vulnerability_summaries**: Enable vulnerability summaries
 - **ai_network_insights**: Enable network insights
+- **ai_chat_enabled**: Show the Dashboard chat assistant and accept chat requests (default: true)
 - **ai_max_tokens**: Maximum tokens per response (default: 500)
 - **ai_temperature**: Creativity setting (default: 0.7)
 
@@ -132,6 +133,10 @@ When AI is enabled, a **floating chat button** appears in the bottom-right of th
 that both **understands Ragnar** (it answers from this repo's own `docs/` folder)
 and can **take real actions** on the unit, then read the results back and explain
 them in plain language.
+
+To hide it, untick **Show chat assistant** under **Config → AI Integration**. This
+removes the button and also stops `/api/ai/chat`, so nothing can run tools through chat
+while it is off. AI Insights keep working.
 
 ### What it can do
 

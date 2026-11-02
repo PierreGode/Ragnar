@@ -188,3 +188,35 @@ def test_chat_endpoint_requires_login_when_a_password_is_set(monkeypatch):
     monkeypatch.setattr(webapp.auth_mgr, "is_configured", lambda: True)
     response = webapp.app.test_client().post("/api/ai/chat", json={"message": "scan"})
     assert response.status_code == 401
+
+
+def _chat_ready(monkeypatch, ai):
+    monkeypatch.setattr(webapp.shared_data, "ai_service", ai, raising=False)
+    monkeypatch.setitem(webapp.shared_data.config, "ai_enabled", True)
+    monkeypatch.setattr(webapp, "_ragnar_chat", None)
+
+
+def test_turning_chat_off_stops_requests_before_the_model_runs(client, monkeypatch):
+    ai = ScriptedAI(["should never be used"])
+    _chat_ready(monkeypatch, ai)
+    monkeypatch.setitem(webapp.shared_data.config, "ai_chat_enabled", False)
+    response = client.post("/api/ai/chat", json={"message": "scan the network"})
+    assert response.status_code == 400
+    assert "turned off" in response.get_json()["error"]
+    assert ai._replies == ["should never be used"]
+
+
+def test_chat_stays_on_for_configs_saved_before_the_setting_existed(client, monkeypatch):
+    _chat_ready(monkeypatch, ScriptedAI(["hello"]))
+    monkeypatch.delitem(webapp.shared_data.config, "ai_chat_enabled", raising=False)
+    response = client.post("/api/ai/chat", json={"message": "hi"})
+    assert response.status_code == 200
+    assert response.get_json()["reply"] == "hello"
+
+
+@pytest.mark.parametrize("setting", [True, False])
+def test_status_reports_the_chat_setting(client, monkeypatch, setting):
+    _chat_ready(monkeypatch, ScriptedAI([]))
+    monkeypatch.setitem(webapp.shared_data.config, "ai_chat_enabled", setting)
+    assert client.get("/api/ai/status").get_json()["chat_enabled"] is setting
+

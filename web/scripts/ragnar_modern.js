@@ -25920,6 +25920,11 @@ async function loadAIConfiguration(config) {
         aiEnabledCheckbox.checked = aiEnabled;
     }
 
+    const aiChatCheckbox = document.getElementById('ai-chat-toggle');
+    if (aiChatCheckbox) {
+        aiChatCheckbox.checked = !config || config.ai_chat_enabled !== false;
+    }
+
     // Self-hosted endpoint + model (issue #462)
     const baseUrlInput = document.getElementById('ai-base-url');
     if (baseUrlInput) {
@@ -26179,6 +26184,35 @@ async function toggleAIEnabled() {
             statusDiv.classList.add('hidden');
         }, 5000);
     }
+}
+
+async function toggleAIChat() {
+    const checkbox = document.getElementById('ai-chat-toggle');
+    const statusDiv = document.getElementById('ai-config-status');
+    const statusMessage = document.getElementById('ai-config-status-message');
+    if (!checkbox || !statusDiv || !statusMessage) {
+        return;
+    }
+
+    const desiredState = checkbox.checked;
+    try {
+        await postAPI('/api/config', { ai_chat_enabled: desiredState });
+        // Update the panel directly: the dashboard's insights cache can return
+        // early without re-reading /api/ai/status.
+        ragnarChatAllowed = desiredState;
+        updateRagnarChatAvailability(ragnarChatAiReady, null);
+        statusDiv.className = 'p-3 rounded-lg text-sm bg-blue-900/30 border border-blue-700';
+        statusMessage.textContent = desiredState
+            ? 'ℹ Chat assistant shown on the Dashboard.'
+            : 'ℹ Chat assistant hidden and chat requests stopped.';
+    } catch (error) {
+        console.error('Failed to save chat assistant setting:', error);
+        checkbox.checked = !desiredState;  // Revert UI state on failure
+        statusDiv.className = 'p-3 rounded-lg text-sm bg-red-900/30 border border-red-700';
+        statusMessage.textContent = '✗ Could not save the chat assistant setting.';
+    }
+    statusDiv.classList.remove('hidden');
+    setTimeout(() => statusDiv.classList.add('hidden'), 4000);
 }
 
 async function saveAIToken() {
@@ -31762,10 +31796,17 @@ let _ragnarChatGreeted = false;
 
 // Show/hide the floating chat launcher based on AI status, and reflect the
 // active model in the panel header.
+let ragnarChatAiReady = false;   // AI is enabled and configured
+let ragnarChatAllowed = true;    // Config: "Show chat assistant"
+
 function updateRagnarChatAvailability(available, status) {
+    ragnarChatAiReady = available;
+    if (status && typeof status.chat_enabled === 'boolean') {
+        ragnarChatAllowed = status.chat_enabled;
+    }
     const root = document.getElementById('ragnar-chat');
     if (!root) return;
-    if (available) {
+    if (available && ragnarChatAllowed) {
         root.style.display = 'block';
         const modelEl = document.getElementById('ragnar-chat-model');
         if (modelEl && status) {
