@@ -551,7 +551,7 @@ fi
 echo -e "${BLUE}Step 5.4c: Ensuring CardputerZero display dependencies...${NC}"
 # The M5Stack CardputerZero (epd_type "st7789v2") drives its built-in 1.9" LCD
 # over SPI (spidev) and its 46-key TCA8418 keyboard + M5IOE1 backlight/reset over
-# I2C (smbus2). The installer pins these when option 6 is chosen; mirror them here
+# I2C (smbus2). The installer pins these when option 7 is chosen; mirror them here
 # so a box that only ever updates still gets a working screen + keyboard. Gated on
 # the persisted display profile and idempotent (an importable module is left alone).
 _disp_cfg="$(dirname "$0")/config/shared_config.json"

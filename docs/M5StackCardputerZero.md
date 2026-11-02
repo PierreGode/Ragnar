@@ -18,7 +18,7 @@ Ragnar runs on the [M5Stack CardputerZero](https://docs.m5stack.com/en/Cardputer
   It is **not** a cut-down "app" build.
 - The only board-specific parts are its two built-in peripherals: the **1.9" LCD**
   and the **46-key keyboard**. Ragnar drives both.
-- Install it by choosing **option 6 — "M5Stack CardputerZero"** in `install_ragnar.sh`.
+- Install it by choosing **option 7 — "M5Stack CardputerZero"** in `install_ragnar.sh`.
 
 ---
 
@@ -92,7 +92,7 @@ See [Display Controls](DISPLAY_CONTROLS.md) for the exact per-mode key actions.
 
 ## Installing
 
-Run the installer and pick **option 6**:
+Run the installer and pick **option 7**:
 
 ```
    * 1) Raspberry Pi with e-Paper display
@@ -103,7 +103,7 @@ Run the installer and pick **option 6**:
    * 6) M5Stack CardputerZero (built-in LCD + keyboard)
 ```
 
-Option 6 runs a normal Raspberry Pi install, **pinned** to the board's built-in
+Option 7 runs a normal Raspberry Pi install, **pinned** to the board's built-in
 display driver (`st7789v2`, 320×170 landscape) and its keyboard. It skips the panel
 picker and installs the SPI/I²C Python deps (`spidev`, `smbus2`). SPI and I²C are
 enabled by the installer's common display step.
@@ -232,7 +232,7 @@ point the way you read them, so no direction remap is applied.
 | `m5ioe1.py` | M5IOE1 expander driver — LCD reset + backlight |
 | `cardputer_input.py` | TCA8418 keyboard listener (reuses the LCD-HAT input layer) |
 | `config/cardputer_keymap.json` | Optional per-board keymap override |
-| `install_ragnar.sh` / `update_ragnar.sh` | Install option 6 + dependency parity |
+| `install_ragnar.sh` / `update_ragnar.sh` | Install option 7 + dependency parity |
 | `shared.py`, `epd_helper.py`, `display.py`, `web/scripts/ragnar_modern.js` | Display profile + selector wiring |
 
 ---
