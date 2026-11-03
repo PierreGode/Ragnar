@@ -169,6 +169,7 @@ EOF
 # is unused and would only add another wlan0mon-hardcoded unit to fail.
 install_bettercap_service() {
     local monitor_if="$1"
+    local station_if="$2"
 
     local bettercap_bin
     bettercap_bin="$(command -v bettercap 2>/dev/null || true)"
@@ -188,7 +189,22 @@ install_bettercap_service() {
 # NOT the upstream-hardcoded wlan0mon.
 set -u
 
+STA_IF="${station_if}"
 MON_IF="${monitor_if}"
+
+# Fail-loud preflight (GitHub #1023). Pwnagotchi mode runs monitor mode on an
+# external USB adapter (\$STA_IF); the onboard wlan0 is deliberately left on the
+# home-WiFi STA connection for the Web UI. With no such adapter present, monstart
+# cannot build \$MON_IF and bettercap would loop forever on "-iface \$MON_IF" —
+# leaving the screen/Web UI stuck on "Reading last session logs". Stop here with
+# a readable reason instead of hanging on a cryptic bind failure.
+if [[ ! -e "/sys/class/net/\$STA_IF" ]]; then
+    echo "bettercap-launcher: FATAL: station interface '\$STA_IF' not found." >&2
+    echo "bettercap-launcher: Pwnagotchi mode needs an EXTERNAL USB WiFi adapter that supports monitor mode." >&2
+    echo "bettercap-launcher: The onboard wlan0 stays on your home WiFi for the Web UI and is NOT used for monitor mode." >&2
+    echo "bettercap-launcher: Plug in a supported adapter (it should appear as '\$STA_IF'), then restart Pwnagotchi mode." >&2
+    exit 1
+fi
 
 if [[ -x /usr/bin/monstart ]]; then
     /usr/bin/monstart || echo "bettercap-launcher: monstart reported a problem (continuing)" >&2
@@ -231,7 +247,7 @@ EOF
         rmdir /etc/systemd/system/bettercap.service.d 2>/dev/null || true
     fi
 
-    echo "[INFO] Staged bettercap.service + /usr/bin/bettercap-launcher (iface: ${monitor_if}, binary: ${bettercap_bin})"
+    echo "[INFO] Staged bettercap.service + /usr/bin/bettercap-launcher (station: ${station_if}, monitor: ${monitor_if}, binary: ${bettercap_bin})"
 }
 
 # Helper: check if all packages in a list are already installed
@@ -501,6 +517,18 @@ write_status "installing" "Detecting WiFi interfaces" "interface_detect"
 STATION_IFACE="${PWN_DATA_IFACE:-$(select_station_interface)}"
 MONITOR_IFACE_NAME="${PWN_MON_IFACE:-mon0}"
 echo "[INFO] Using managed iface: ${STATION_IFACE} (monitor alias: ${MONITOR_IFACE_NAME})"
+
+# Fail-loud visibility (GitHub #1023): a device with only the onboard wlan0 (e.g.
+# a Pi Zero 2 W with no USB adapter) has no station interface for monitor mode.
+# The install still continues so the adapter can be plugged in later, but we warn
+# clearly here rather than silently defaulting to a phantom wlan1 — otherwise
+# bettercap loops at boot and the UI hangs on "Reading last session logs".
+if [[ ! -e "/sys/class/net/${STATION_IFACE}" ]]; then
+    echo "[WARN] Station interface '${STATION_IFACE}' is not present right now."
+    echo "[WARN] Pwnagotchi mode needs an EXTERNAL USB WiFi adapter with monitor-mode support;"
+    echo "[WARN] the onboard wlan0 is reserved for the home-WiFi Web UI and is not used for monitor mode."
+    echo "[WARN] Install will continue — plug the adapter in before switching to Pwnagotchi mode."
+fi
 
 write_status "installing" "Installing monitor mode scripts" "monitor_scripts"
 install_monitor_scripts "$STATION_IFACE" "$MONITOR_IFACE_NAME"
@@ -868,7 +896,7 @@ find "$PWN_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null
 # monitor interface (mon0), not the upstream-hardcoded wlan0mon.
 echo "[INFO] Staging bettercap service layer..."
 write_status "installing" "Staging bettercap service" "bettercap_service"
-install_bettercap_service "$MONITOR_IFACE_NAME"
+install_bettercap_service "$MONITOR_IFACE_NAME" "$STATION_IFACE"
 timeout 15 systemctl daemon-reload || echo "[WARN] daemon-reload slow"
 # Started on demand by the Ragnar→Pwnagotchi swap, not enabled at boot (Ragnar
 # is the default mode). Make sure a stale enable from an older install is gone.
