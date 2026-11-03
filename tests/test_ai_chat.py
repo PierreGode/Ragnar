@@ -194,6 +194,50 @@ def test_silent_model_after_run_still_reports_the_action():
     assert "deep scan host" in res["reply"] and "did not respond" in res["reply"]
 
 
+@pytest.mark.parametrize("message,tool,args", [
+    ("Scan the network", "run_network_scan", {}),
+    ("scan my network.", "run_network_scan", {}),
+    ("Please rescan the network now", "run_network_scan", {}),
+    ("Run a network scan now.", "run_network_scan", {}),
+    ("Skanna nätverket", "run_network_scan", {}),
+    ("Start a vulnerability scan", "start_vulnerability_scan", {}),
+    ("Run a vuln scan on all hosts.", "start_vulnerability_scan", {}),
+    ("Stop the Wi-Fi scan.", "stop_wifi_scan", {}),
+    ("Turn off Wi-Fi scanning", "stop_wifi_scan", {}),
+    ("Enable the wifi scanner", "start_wifi_scan", {}),
+    ("Turn on Wi-Fi scanning on wlan1", "start_wifi_scan", {"interface": "wlan1"}),
+    ("Stop scanning on wlan0", "stop_wifi_scan", {"interface": "wlan0"}),
+    ("Deep scan 192.168.1.20", "deep_scan_host", {"ip": "192.168.1.20"}),
+    ("Run a deep scan on 10.0.0.5 please", "deep_scan_host", {"ip": "10.0.0.5"}),
+])
+def test_plain_commands_reach_the_prompt_without_the_model(message, tool, args):
+    chat = make_chat([])
+    res = chat.run([], message, cookie="")
+    assert chat.ai.calls == 0
+    entry = list(chat._pending.values())[0]
+    assert (entry["tool"], entry["args"]) == (tool, args)
+    assert res["pending"]["id"]
+
+
+@pytest.mark.parametrize("message", [
+    "How do I scan the network?", "Should I scan the network", "Is a scan running?",
+    "What does a network scan do?", "Scan the network for a printer and tell me its IP",
+    "deep scan the router", "Why did the Wi-Fi scan stop?",
+])
+def test_questions_about_actions_are_left_to_the_model(message):
+    chat = make_chat(["An answer."])
+    res = chat.run([], message, cookie="")
+    assert "pending" not in res and chat.ai.calls == 1
+
+
+def test_direct_prompt_still_explains_the_result_after_run():
+    chat = make_chat(["The scan found 3 hosts."])
+    token = chat.run([], "Scan the network", cookie="")["pending"]["id"]
+    res = chat.confirm(token, True, cookie="")
+    assert res["reply"] == "The scan found 3 hosts."
+    assert res["actions"][0]["tool"] == "run_network_scan"
+
+
 # --------------------------------------------------------------------------- #
 # Hostile network text
 # --------------------------------------------------------------------------- #
@@ -246,7 +290,7 @@ def test_totals_are_true_and_severe_findings_come_first():
     assert out["network_total"] == 622
     assert out["network_by_severity"] == {"critical": 22, "low": 600}
     assert out["findings"][0].startswith("critical")
-    assert out["complete"] is False and len(out["findings"]) < out["matching"]
+    assert out["all_rows_shown"] is False and len(out["findings"]) < out["matching"]
     assert out["findings_per_host"]["10.0.1.0"]["critical"] == 1
 
 
@@ -271,8 +315,8 @@ def test_device_search_matches_hostname_vendor_and_port():
 def test_rows_are_never_cut_mid_item():
     hosts = [{"ip": f"10.0.{i}.1", "hostname": "h" * 25, "vendor": "v", "status": "alive"} for i in range(300)]
     out = compact_result("get_network_devices", hosts)
-    assert out["total"] == 300 and out["complete"] is False
-    assert all(row.endswith("alive") for row in out["devices"])
+    assert out["total"] == 300 and out["all_rows_shown"] is False
+    assert all(row.endswith("threat: none") for row in out["devices"])
     assert len(json.dumps(out)) < RagnarChat.OBS_LIMIT
 
 
@@ -280,7 +324,7 @@ def test_vulnerability_search_finds_a_cve_beyond_the_visible_rows():
     vulns = [_vuln(f"10.0.0.{i}", "high", f"CVE-2020-{i:04d}") for i in range(500)]
     vulns.append(_vuln("10.0.9.9", "low", "CVE-1999-0001 (Score: 2.1)"))
     out = compact_result("get_vulnerabilities", {"vulnerabilities": vulns}, {"search": "cve-1999-0001"})
-    assert out["matching"] == 1 and out["complete"] is True
+    assert out["matching"] == 1 and out["all_rows_shown"] is True
     assert compact_result("get_vulnerabilities", {"vulnerabilities": vulns},
                           {"search": "CVE-1999-9999"})["matching"] == 0
 
@@ -302,6 +346,14 @@ def test_query_word_inside_a_joined_filename_ranks_that_file_first(tmp_path):
     (tmp_path / "M5StackZebraZero.md").write_text("# Installing\nPick option 7\n")
     (tmp_path / "INSTALL.md").write_text("# Installing\nPick option 1 for zebrazero\n" + "install " * 3)
     assert DocIndex(str(tmp_path)).search("install zebrazero", k=1)[0]["file"]
+
+
+@pytest.mark.parametrize("search,count", [("ssh", 1), ("ssh service", 1), ("port 22", 1), ("the ssh service", 1),
+                                          ("ssh 22", 1), ("telnet", 0)])
+def test_filler_words_in_a_search_do_not_hide_matches(search, count):
+    vulns = [_vuln("10.0.0.1", "high"), _vuln("10.0.0.2", "low") | {"service": "dns", "port": 53}]
+    assert compact_result("get_vulnerabilities", {"vulnerabilities": vulns},
+                          {"search": search})["matching"] == count
 
 
 def test_vulnerability_search_by_port_is_exact():
@@ -332,9 +384,74 @@ def test_per_host_severity_is_not_the_network_total():
 
 
 def test_long_section_excerpt_reaches_a_fact_far_down(tmp_path):
-    (tmp_path / "a.md").write_text("# Big\n" + "filler words here\n" * 400 + "The zebraterm is off by default.\n")
+    (tmp_path / "a.md").write_text("# Intro\nhello\n# Big\n" + "filler words here\n" * 400
+                                   + "The zebraterm is off by default.\n")
     text = DocIndex(str(tmp_path)).search("zebraterm", k=1, max_chars=300)[0]["text"]
     assert "off by default" in text
+
+
+def test_document_opening_section_is_read_from_the_top(tmp_path):
+    (tmp_path / "zebra.md").write_text("# Zebra\nZebra needs an external dongle.\n"
+                                       + "more text\n" * 300 + "hardware zebra detail\n")
+    text = DocIndex(str(tmp_path)).search("zebra hardware", k=1, max_chars=200)[0]["text"]
+    assert "external dongle" in text
+
+
+def test_all_ports_of_a_looked_up_host_are_listed():
+    ports = [str(p) for p in range(1000, 1030)]
+    hosts = [{"ip": "10.0.0.5", "ports": ports, "status": "alive"}]
+    row = compact_result("get_network_devices", hosts, {"search": "10.0.0.5"})["devices"][0]
+    assert all(p in row for p in ports)
+
+
+def test_a_long_port_list_says_how_many_are_left_out():
+    hosts = [{"ip": f"10.0.0.{i}", "ports": [str(p) for p in range(1000, 1030)], "status": "alive"}
+             for i in range(5)]
+    assert "and 20 more" in compact_result("get_network_devices", hosts)["devices"][0]
+
+
+def test_exact_phrase_beats_scattered_words(tmp_path):
+    (tmp_path / "a.md").write_text("# Other\nsignal signal signal and later intelligence intelligence\n")
+    (tmp_path / "b.md").write_text("# Analyzer\nThis page is called Signal Intelligence in the UI.\n" + "padding " * 60)
+    assert DocIndex(str(tmp_path)).search("signal intelligence", k=1)[0]["file"] == "b.md"
+
+
+def test_a_host_lookup_carries_no_network_wide_stats():
+    hosts = [{"ip": "10.0.0.1", "ports": ["80"], "status": "alive"},
+             {"ip": "10.0.0.2", "status": "alive", "threats": [{"name": "Rogue Pi"}]}]
+    out = compact_result("get_network_devices", hosts, {"search": "10.0.0.1"})
+    assert "with_threats" not in out and "devices_per_port" not in out
+    assert out["matching"] == 1 and out["network_total"] == 2
+
+
+@pytest.mark.parametrize("reply", [
+    '<tool>{"tool":"search_docs","args":{"query":"x"}<result></result>\nI have no docs on that.',
+    '<result>{"ok":true}</result>I have no docs on that.',
+])
+def test_broken_protocol_text_never_reaches_the_user(reply):
+    chat = make_chat([reply, reply, reply, reply, reply, reply])
+    res = chat.run([], "how long does it take", cookie="")
+    assert "<" not in res["reply"] and "tool" not in res["reply"].lower().replace("tools", "")
+
+
+def test_a_broken_call_gets_one_chance_to_answer_properly():
+    chat = make_chat(['<tool>{"tool":"search_docs"', "It depends on the network size."])
+    assert chat.run([], "how long", cookie="")["reply"] == "It depends on the network size."
+
+
+def test_excerpt_picks_the_place_where_query_words_meet(tmp_path):
+    (tmp_path / "a.md").write_text("# Intro\nhi\n# Big\n" + "alpha only here\n" + "pad\n" * 500
+                                   + "alpha and bravo together\n")
+    text = DocIndex(str(tmp_path)).search("alpha bravo", k=1, max_chars=120)[0]["text"]
+    assert "alpha and bravo together" in text
+
+
+def test_a_clean_device_says_it_has_no_threat():
+    hosts = [{"ip": "10.0.0.1", "status": "alive"},
+             {"ip": "10.0.0.2", "status": "alive", "threats": [{"name": "Rogue Pi"}]}]
+    rows = compact_result("get_network_devices", hosts)["devices"]
+    assert sum("threat: none" in r for r in rows) == 1
+    assert sum("Rogue Pi" in r for r in rows) == 1
 
 
 def test_threat_names_are_shown():

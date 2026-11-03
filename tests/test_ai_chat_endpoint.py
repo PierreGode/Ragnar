@@ -65,7 +65,11 @@ def test_compact_vulnerabilities_passes_filters_through():
 
 
 def test_compact_passthrough_for_unknown_shape():
-    assert webapp._chat_compact("get_scan_status", {"a": 1}) == {"a": 1}
+    assert webapp._chat_compact("get_wifi_status", {"a": 1}) == {"a": 1}
+
+
+def test_scan_status_says_it_has_no_history():
+    assert "not recorded" in webapp._chat_compact("get_scan_status", {"scanning": False})["note"]
 
 
 # --------------------------------------------------------------------------- #
