@@ -5,6 +5,7 @@ browse than search.
 
 ## Getting started
 - [Install Guide](INSTALL.md) — the full installation walkthrough
+- [Knowledge Base](knowledgebase.md) — short verified answers, used by the chat assistant
 - [Ragnar OS image](ragnar-os.md) — prebuilt Raspberry Pi image, flash-and-go
 - [Updating Ragnar](updates.md) — updating from the web UI or the terminal
 - [Docker Guide](DOCKER.md) — headless web UI in a container
@@ -52,6 +53,7 @@ browse than search.
 
 ## Hardware & displays
 - [Display Buttons & Joystick Reference](DISPLAY_CONTROLS.md) — every HAT's key/joystick map
+- [M5Stack CardputerZero](M5StackCardputerZero.md) — built-in LCD + keyboard setup
 - [Kiosk Mode](kiosk.md) — fullscreen Chromium dashboard on an attached screen
 - [Pager Guide](pager.md) — WiFi Pineapple Pager payload
 - [Gen 2 Hardware](hardware-gen2.md) — reference-build BOM & assembly

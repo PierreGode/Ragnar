@@ -1,7 +1,7 @@
-# 📊 WiFi Spectrum Analyzer
+# 📊 Signal Intelligence (WiFi Spectrum Analyzer)
 
 A passive, tri-band Wi-Fi RF troubleshooter built into Ragnar's web UI —
-**Network → WiFi Analyzer** (the sub-tab after *Interfaces*). Think of it as a
+**Network → Signal Intelligence** (the sub-tab after *Interfaces*). Think of it as a
 software [Ekahau Sidekick 2](https://www.ekahau.com/products/sidekick/): the
 same survey-and-heatmap workflow a wireless engineer expects, on a Raspberry Pi
 Zero 2 W with an off-the-shelf Wi-Fi 6E dongle instead of a $4,000 instrument.

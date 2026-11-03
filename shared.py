@@ -125,6 +125,11 @@ DEFAULT_EPD_TYPE = "epd2in13_V4"
 DESIGN_REF_WIDTH = 122   # All layout coordinates are designed for this width
 DESIGN_REF_HEIGHT = 250  # All layout coordinates are designed for this height
 
+# Panels soldered to the board. A failed init means the panel isn't ready, never
+# that a different one is fitted, so auto-detect must not replace them: it would
+# save an e-paper driver (they "succeed" with nothing attached) over the config.
+BUILT_IN_PANELS = {"st7789v2"}
+
 # Map web UI size keys to default driver names
 SIZE_KEY_TO_DEFAULT_DRIVER = {
     "2in13":    "epd2in13_V4",
@@ -135,6 +140,7 @@ SIZE_KEY_TO_DEFAULT_DRIVER = {
     "3in5_tft": "ili9486",
     "1in28_tft": "gc9a01",
     "1in44_lcd": "st7735s",
+    "1in9_cardputer": "st7789v2",
     "1in69_tft": "whisplay",
     "0in96_oled": "ssd1306",
     "1602_lcd": "lcd1602",
@@ -191,6 +197,10 @@ DISPLAY_PROFILES = {
     # joystick). Square panel: use a square reference so the layout isn't
     # stretched; the on-screen frame/stat pages scale to fit 128x128.
     "st7735s":     {"ref_width": 128, "ref_height": 128, "default_flip": False},
+    # M5Stack CardputerZero built-in 1.9" ST7789V2, used landscape as 320x170.
+    # Landscape reference so the layout reflows to the wide panel (same "ref =
+    # panel size" approach as st7735s) instead of being stretched from portrait.
+    "st7789v2":    {"ref_width": 320, "ref_height": 170, "default_flip": False},
     # Whisplay HAT 1.69" ST7789 240x280 colour TFT LCD (ref height keeps the
     # 240:280 aspect so the layout isn't stretched: 122 * 280/240 = 142)
     "whisplay":    {"ref_width": DESIGN_REF_WIDTH, "ref_height": 142, "default_flip": False},
@@ -894,6 +904,7 @@ class SharedData:
             "ai_analysis_enabled": True,
             "ai_vulnerability_summaries": True,
             "ai_network_insights": True,
+            "ai_chat_enabled": True,
             "ai_max_tokens": 500,
             "ai_temperature": 0.7,
 
@@ -1280,7 +1291,9 @@ class SharedData:
             # Try auto-detection as fallback before giving up
             logger.info("Attempting auto-detection as fallback...")
             try:
-                result = EPDHelper.auto_detect()
+                result = None
+                if self.config.get("epd_type") not in BUILT_IN_PANELS:
+                    result = EPDHelper.auto_detect()
                 if result:
                     epd_type = result[0]
                     logger.info(f"Fallback auto-detected EPD: {epd_type} ({result[1]}x{result[2]})")

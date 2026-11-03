@@ -626,6 +626,7 @@ function epdTypeToSizeKey(epd_type) {
     if (epd_type === 'ili9486' || epd_type === 'ili9488') return '3in5_tft';
     if (epd_type === 'gc9a01') return '1in28_tft';
     if (epd_type === 'st7735s') return '1in44_lcd';
+    if (epd_type === 'st7789v2') return '1in9_cardputer';
     if (epd_type === 'whisplay') return '1in69_tft';
     if (epd_type === 'ssd1306') return '0in96_oled';
     if (epd_type === 'lcd1602') return 'lcd1602';
@@ -644,6 +645,7 @@ const displaySelectOptions = {
         { value: '3in5_tft', label: '3.5" SPI TFT — ILI9486/ILI9488 (320x480)' },
         { value: '1in28_tft', label: '1.28" GC9A01 Round TFT (240x240)' },
         { value: '1in44_lcd', label: '1.44" ST7735S LCD HAT + joystick (128x128)' },
+        { value: '1in9_cardputer', label: '1.9" M5Stack CardputerZero ST7789 V3 (320x170)' },
         { value: '1in69_tft', label: '1.69" Whisplay ST7789 TFT (240x280)' },
         { value: '0in96_oled', label: '0.96" SSD1306 OLED (128x64)' },
         { value: 'lcd1602', label: '16×2 LCD1602 Character LCD (I2C)' },
@@ -25918,6 +25920,11 @@ async function loadAIConfiguration(config) {
         aiEnabledCheckbox.checked = aiEnabled;
     }
 
+    const aiChatCheckbox = document.getElementById('ai-chat-toggle');
+    if (aiChatCheckbox) {
+        aiChatCheckbox.checked = !config || config.ai_chat_enabled !== false;
+    }
+
     // Self-hosted endpoint + model (issue #462)
     const baseUrlInput = document.getElementById('ai-base-url');
     if (baseUrlInput) {
@@ -26177,6 +26184,35 @@ async function toggleAIEnabled() {
             statusDiv.classList.add('hidden');
         }, 5000);
     }
+}
+
+async function toggleAIChat() {
+    const checkbox = document.getElementById('ai-chat-toggle');
+    const statusDiv = document.getElementById('ai-config-status');
+    const statusMessage = document.getElementById('ai-config-status-message');
+    if (!checkbox || !statusDiv || !statusMessage) {
+        return;
+    }
+
+    const desiredState = checkbox.checked;
+    try {
+        await postAPI('/api/config', { ai_chat_enabled: desiredState });
+        // Update the panel directly: the dashboard's insights cache can return
+        // early without re-reading /api/ai/status.
+        ragnarChatAllowed = desiredState;
+        updateRagnarChatAvailability(ragnarChatAiReady, null);
+        statusDiv.className = 'p-3 rounded-lg text-sm bg-blue-900/30 border border-blue-700';
+        statusMessage.textContent = desiredState
+            ? 'ℹ Chat assistant shown on the Dashboard.'
+            : 'ℹ Chat assistant hidden and chat requests stopped.';
+    } catch (error) {
+        console.error('Failed to save chat assistant setting:', error);
+        checkbox.checked = !desiredState;  // Revert UI state on failure
+        statusDiv.className = 'p-3 rounded-lg text-sm bg-red-900/30 border border-red-700';
+        statusMessage.textContent = '✗ Could not save the chat assistant setting.';
+    }
+    statusDiv.classList.remove('hidden');
+    setTimeout(() => statusDiv.classList.add('hidden'), 4000);
 }
 
 async function saveAIToken() {
@@ -31656,15 +31692,17 @@ async function loadAIInsights(force = false) {
             // Show configuration message
             if (aiSection) aiSection.style.display = 'none';
             if (aiNotConfigured) aiNotConfigured.style.display = 'block';
+            updateRagnarChatAvailability(false, status);
             // Clear cache
             aiInsightsCache.data = null;
             aiInsightsCache.timestamp = null;
             return;
         }
-        
+
         // Show AI insights section
         if (aiSection) aiSection.style.display = 'block';
         if (aiNotConfigured) aiNotConfigured.style.display = 'none';
+        updateRagnarChatAvailability(true, status);
         
         // Update model name — adapt the heading and the footer to whichever
         // model is actually configured (self-hosted tag or OpenAI). When the
@@ -31743,6 +31781,221 @@ async function loadAIInsights(force = false) {
             const el = document.getElementById(id); if (el) el.innerHTML = errHtml;
         });
     }
+}
+
+// ============================================================================
+// RAGNAR CHAT ASSISTANT (dashboard)
+// A conversational assistant that answers from the docs/ folder and can take
+// real actions (start scans, read results) via /api/ai/chat. Shown only when
+// AI is enabled + configured; gated by updateRagnarChatAvailability(), called
+// from the AI status check in loadAIInsights().
+// ============================================================================
+let _ragnarChatHistory = [];   // [{role:'user'|'assistant', content}]
+let _ragnarChatBusy = false;
+let _ragnarChatGreeted = false;
+
+// Show/hide the floating chat launcher based on AI status, and reflect the
+// active model in the panel header.
+let ragnarChatAiReady = false;   // AI is enabled and configured
+let ragnarChatAllowed = true;    // Config: "Show chat assistant"
+
+function updateRagnarChatAvailability(available, status) {
+    ragnarChatAiReady = available;
+    if (status && typeof status.chat_enabled === 'boolean') {
+        ragnarChatAllowed = status.chat_enabled;
+    }
+    const root = document.getElementById('ragnar-chat');
+    if (!root) return;
+    if (available && ragnarChatAllowed) {
+        root.style.display = 'block';
+        const modelEl = document.getElementById('ragnar-chat-model');
+        if (modelEl && status) {
+            const fb = Boolean(status.fallback_active);
+            const m = status.model || 'AI';
+            modelEl.textContent = fb ? (m + ' → OpenAI fallback') : m;
+        }
+    } else {
+        root.style.display = 'none';
+        // Also close the panel if it was open.
+        const panel = document.getElementById('ragnar-chat-panel');
+        if (panel) panel.style.display = 'none';
+    }
+}
+
+function toggleRagnarChat() {
+    const panel = document.getElementById('ragnar-chat-panel');
+    const fab = document.getElementById('ragnar-chat-fab');
+    if (!panel) return;
+    const open = panel.style.display !== 'none' && panel.style.display !== '';
+    if (open) {
+        panel.style.display = 'none';
+        if (fab) fab.style.display = 'flex';
+    } else {
+        panel.style.display = 'flex';
+        if (fab) fab.style.display = 'none';
+        if (!_ragnarChatGreeted) {
+            _ragnarChatGreeted = true;
+            _appendRagnarChat('assistant',
+                "Hi — I'm Ragnar. Ask me how a feature works, or tell me to do "
+                + "something like “scan the network”, “deep scan 192.168.1.20”, "
+                + "or “show me the latest vulnerabilities”. You approve each action before it runs.",
+                []);
+        }
+        const input = document.getElementById('ragnar-chat-input');
+        if (input) setTimeout(() => input.focus(), 50);
+    }
+}
+
+function clearRagnarChat() {
+    _ragnarChatHistory = [];
+    _ragnarChatGreeted = false;
+    const log = document.getElementById('ragnar-chat-log');
+    if (log) log.innerHTML = '';
+    _ragnarChatGreeted = true;
+    _appendRagnarChat('assistant', "New chat. What can I do for you?", []);
+}
+
+// Render one message bubble. `actions` (assistant only) is an array of
+// {tool, ok, summary} run during that turn, shown as small chips.
+function _appendRagnarChat(role, text, actions) {
+    const log = document.getElementById('ragnar-chat-log');
+    if (!log) return null;
+    const isUser = role === 'user';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;flex-direction:column;max-width:88%;'
+        + (isUser ? 'align-self:flex-end;align-items:flex-end;' : 'align-self:flex-start;align-items:flex-start;');
+
+    if (Array.isArray(actions) && actions.length) {
+        const chips = document.createElement('div');
+        chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-bottom:5px;';
+        actions.forEach(a => {
+            const chip = document.createElement('span');
+            const ok = a && a.ok;
+            chip.textContent = (a && a.summary) ? a.summary : (a && a.tool) || 'action';
+            chip.style.cssText = 'font-size:11px;padding:2px 8px;border-radius:999px;'
+                + (ok ? 'background:rgba(16,185,129,.16);color:#6ee7b7;border:1px solid rgba(16,185,129,.35);'
+                      : 'background:rgba(239,68,68,.16);color:#fca5a5;border:1px solid rgba(239,68,68,.35);');
+            chips.appendChild(chip);
+        });
+        row.appendChild(chips);
+    }
+
+    const bubble = document.createElement('div');
+    bubble.style.cssText = 'padding:9px 12px;border-radius:12px;white-space:pre-wrap;word-break:break-word;'
+        + (isUser
+            ? 'background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;border-bottom-right-radius:4px;'
+            : 'background:rgba(30,41,59,.92);color:#e2e8f0;border:1px solid rgba(148,163,184,.16);border-bottom-left-radius:4px;');
+    bubble.innerHTML = _ragnarChatFormat(text);
+    row.appendChild(bubble);
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+    return bubble;
+}
+
+// Minimal, safe markdown-ish formatting: escape first, then **bold**, `code`,
+// and newlines are preserved by white-space:pre-wrap on the bubble.
+function _ragnarChatFormat(text) {
+    let s = _esc(String(text == null ? '' : text));
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/`([^`]+)`/g, '<code style="background:rgba(148,163,184,.18);padding:1px 4px;border-radius:4px;">$1</code>');
+    return s;
+}
+
+function _ragnarChatTyping(on) {
+    const log = document.getElementById('ragnar-chat-log');
+    if (!log) return;
+    let el = document.getElementById('ragnar-chat-typing');
+    if (on) {
+        if (el) return;
+        el = document.createElement('div');
+        el.id = 'ragnar-chat-typing';
+        el.style.cssText = 'align-self:flex-start;color:#94a3b8;font-size:12px;font-style:italic;padding:4px 6px;';
+        el.textContent = 'Ragnar is thinking…';
+        log.appendChild(el);
+        log.scrollTop = log.scrollHeight;
+    } else if (el) {
+        el.remove();
+    }
+}
+
+// Send one request and render the answer.
+async function _ragnarChatRequest(url, body) {
+    const input = document.getElementById('ragnar-chat-input');
+    const sendBtn = document.getElementById('ragnar-chat-send');
+    _ragnarChatBusy = true;
+    if (sendBtn) { sendBtn.disabled = true; sendBtn.style.opacity = '0.6'; }
+    _ragnarChatTyping(true);
+
+    try {
+        const resp = await networkAwareFetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        const data = await resp.json().catch(() => ({}));
+        _ragnarChatTyping(false);
+
+        if (!resp.ok || !data.success) {
+            const err = (data && data.error) ? data.error : ('Request failed (HTTP ' + resp.status + ')');
+            _appendRagnarChat('assistant', '⚠️ ' + err, []);
+        } else {
+            const reply = data.reply || '(no response)';
+            _appendRagnarChat('assistant', reply, data.actions || []);
+            _ragnarChatHistory.push({ role: 'assistant', content: reply });
+            if (data.pending) _ragnarChatAskToRun(data.pending);
+        }
+    } catch (e) {
+        _ragnarChatTyping(false);
+        _appendRagnarChat('assistant', '⚠️ Could not reach the assistant: ' + (e.message || String(e)), []);
+    } finally {
+        _ragnarChatBusy = false;
+        if (sendBtn) { sendBtn.disabled = false; sendBtn.style.opacity = '1'; }
+        if (input) input.focus();
+    }
+}
+
+// Actions wait here for the operator. The label comes from the server, not the model.
+function _ragnarChatAskToRun(pending) {
+    const log = document.getElementById('ragnar-chat-log');
+    if (!log || !pending || !pending.id) return;
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;align-self:flex-start;';
+
+    const button = (text, approve, background) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = text;
+        btn.style.cssText = 'min-height:36px;padding:6px 16px;border:none;border-radius:10px;color:#fff;'
+            + 'font-weight:600;font-size:13px;cursor:pointer;background:' + background + ';';
+        btn.onclick = () => {
+            if (_ragnarChatBusy) return;
+            row.remove();
+            _appendRagnarChat('user', approve ? 'Run' : 'Cancel', []);
+            _ragnarChatRequest('/api/ai/chat/confirm', { id: pending.id, approve });
+        };
+        return btn;
+    };
+    row.appendChild(button('Run', true, 'linear-gradient(135deg,#7c3aed,#4f46e5)'));
+    row.appendChild(button('Cancel', false, 'rgba(71,85,105,.9)'));
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+}
+
+async function sendRagnarChat(event) {
+    if (event) event.preventDefault();
+    if (_ragnarChatBusy) return false;
+    const input = document.getElementById('ragnar-chat-input');
+    if (!input) return false;
+    const message = input.value.trim();
+    if (!message) return false;
+
+    input.value = '';
+    _appendRagnarChat('user', message, []);
+    // Send prior turns (excluding this message) as context.
+    const history = _ragnarChatHistory.slice(-12);
+    _ragnarChatHistory.push({ role: 'user', content: message });
+    await _ragnarChatRequest('/api/ai/chat', { message, history });
+    return false;
 }
 
 // True when the server attempted this analysis but it came back empty (a

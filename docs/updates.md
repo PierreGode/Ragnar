@@ -5,7 +5,7 @@ behave identically:
 
 | | |
 |---|---|
-| **Web UI** | **Settings → System Updates → Update System** |
+| **Web UI** | **Config → System → Update System** |
 | **Terminal** | `sudo /home/ragnar/Ragnar/update_ragnar.sh` |
 
 The web path is handled by [`git_updater.py`](../git_updater.py), a dedicated

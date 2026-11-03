@@ -54,6 +54,7 @@ DISPLAYS=(
     "epd3in7|epd3in7      3.7\"  e-Paper 280x480"
     "epd4in26|epd4in26     4.26\" e-Paper 800x480"
     "gc9a01|GC9A01       1.28\" round TFT 240x240"
+    "st7789v2|ST7789V3     1.9\" M5Stack CardputerZero 320x170"
     "ili9486|ILI9486/9488 3.5\" SPI TFT 320x480"
     "whisplay|Whisplay     1.69\" ST7789 240x280 (PiSugar HAT)"
     "ssd1306|SSD1306      0.96\" OLED 128x64 (I2C)"
@@ -280,6 +281,11 @@ if systemctl is-active --quiet ragnar.service; then
     ok "ragnar.service running"
 else
     warn "ragnar.service is not running — check: sudo journalctl -u ragnar.service -n 50"
+fi
+
+if [ "$SELECTED" = "st7789v2" ]; then
+    bash "$ragnar_PATH/scripts/cardputer_takeover.sh" apply
+    warn "Reboot to take the kernel console off the CardputerZero LCD."
 fi
 
 if [ "$SELECTED" = "st7735s" ]; then

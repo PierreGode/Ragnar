@@ -21087,8 +21087,8 @@ def get_wifi_networks():
 _VALID_DISPLAY_DRIVERS = {
     'epd2in13', 'epd2in13_V2', 'epd2in13_V3', 'epd2in13_V4', 'epd2in13b_V4',
     'epd2in7', 'epd2in7_V2', 'epd2in9_V2', 'epd3in7', 'epd4in26',
-    'gc9a01', 'st7735s', 'ili9486', 'ili9488', 'whisplay', 'ssd1306', 'lcd1602',
-    'max7219_4panel', 'max7219_8panel',
+    'gc9a01', 'st7735s', 'st7789v2', 'ili9486', 'ili9488', 'whisplay', 'ssd1306',
+    'lcd1602', 'max7219_4panel', 'max7219_8panel',
 }
 
 DISPLAY_MODE_SCRIPT = os.path.join(
@@ -30366,6 +30366,7 @@ def get_ai_status():
             'model': getattr(ai_service, 'model', None),
             'endpoint': getattr(ai_service, 'base_url', '') or 'openai',
             'fallback_active': bool(getattr(ai_service, 'fallback_active', False)),
+            'chat_enabled': bool(shared_data.config.get('ai_chat_enabled', True)),
             'capabilities': {
                 'network_insights': getattr(ai_service, 'network_insights', False),
                 'vulnerability_summaries': getattr(ai_service, 'vulnerability_summaries', False)
@@ -30936,6 +30937,209 @@ def clear_ai_cache():
     except Exception as e:
         logger.error(f"Error clearing AI cache: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+# ============================================================================
+# RAGNAR CHAT ASSISTANT
+# The dashboard chat box (only shown when AI is enabled). ai_chat.RagnarChat
+# runs a small agentic loop: it retrieves from docs/, and executes a curated
+# allowlist of tools. Each tool maps to one of this app's own API endpoints,
+# dispatched IN-PROCESS via Flask's test_client with the caller's session
+# cookie forwarded — so every action reuses the real, already-authenticated
+# handler (no self-HTTP, no ports, no auth bypass) and inherits its behaviour.
+# ============================================================================
+_ragnar_chat = None
+_ragnar_chat_lock = threading.Lock()
+
+# tool name -> (HTTP method, path). Only these endpoints are reachable from the
+# chat. deep_scan_host adds a JSON body (the target ip) in the dispatcher.
+_CHAT_TOOL_ROUTES = {
+    'get_network_devices':      ('GET',  '/api/network'),
+    'get_vulnerabilities':      ('GET',  '/api/vulnerabilities'),
+    'get_ai_insights':          ('GET',  '/api/ai/insights'),
+    'get_watchtower':           ('GET',  '/api/net/watchtower'),
+    'get_incidents':            ('GET',  '/api/net/incidents'),
+    'get_scan_status':          ('GET',  '/api/scan/status'),
+    'get_wifi_status':          ('GET',  '/api/wifi/scan-control'),
+    'run_network_scan':         ('GET',  '/api/scan/combined-network'),
+    'start_vulnerability_scan': ('POST', '/api/manual/scan/vulnerability'),
+    'deep_scan_host':           ('POST', '/api/scan/deep'),
+    'start_wifi_scan':          ('POST', '/api/wifi/scan-control/start'),
+    'stop_wifi_scan':           ('POST', '/api/wifi/scan-control/stop'),
+}
+
+
+def _chat_self_call(method, path, cookie, json_body=None):
+    """Dispatch an internal API call through the WSGI app (in-process), carrying
+    the caller's session cookie so before_request auth passes. Returns
+    (status_code, parsed_json_or_text)."""
+    # use_cookies=False: otherwise the client's empty jar replaces this header
+    # and every tool call is 401 on a password-protected unit.
+    client = app.test_client(use_cookies=False)
+    headers = {'Cookie': cookie} if cookie else {}
+    if method == 'GET':
+        resp = client.get(path, headers=headers)
+    else:
+        resp = client.post(path, json=(json_body or {}), headers=headers)
+    data = resp.get_json(silent=True)
+    if data is None:
+        data = resp.get_data(as_text=True)[:1500]
+    return resp.status_code, data
+
+
+def _chat_compact(tool, data, args=None):
+    """Shrink an endpoint payload to true totals plus the rows that matter."""
+    from ai_chat import compact_result
+    return compact_result(tool, data, args)
+
+
+def _chat_wifi_toggle(tool, args, cookie):
+    """The endpoint works on one named interface; chat usually names none."""
+    enable = tool == 'start_wifi_scan'
+    status, state = _chat_self_call('GET', '/api/wifi/scan-control', cookie)
+    if status != 200 or not isinstance(state, dict):
+        return {'ok': False, 'status': status, 'error': 'could not read Wi-Fi state'}
+    interfaces = state.get('interfaces') or []
+    names = [i.get('name') for i in interfaces if i.get('name')]
+    active = [i.get('name') for i in interfaces if i.get('name') and i.get('scan_enabled')]
+    wanted = str((args or {}).get('interface') or '').strip()
+    if wanted:
+        targets = [wanted]
+    elif enable:
+        targets = [] if active else names[:1]
+    else:
+        targets = active
+    if not targets:
+        word = 'on' if enable else 'off'
+        detail = f" on {', '.join(active)}" if active else ''
+        return {'ok': True, 'status': 200,
+                'data': {'changed': [], 'note': f'Wi-Fi scanning is already {word}{detail}'}}
+
+    path = _CHAT_TOOL_ROUTES[tool][1]
+    changed, failed = [], {}
+    for name in targets:
+        code, data = _chat_self_call('POST', path, cookie, {'interface': name})
+        if 200 <= code < 300:
+            changed.append(name)
+        else:
+            failed[name] = data.get('error') if isinstance(data, dict) else str(data)[:200]
+    result = {'ok': not failed, 'status': 200 if not failed else 400,
+              'data': {'changed': changed, 'scan_enabled': enable}}
+    if failed:
+        result['data']['failed'] = failed
+    return result
+
+
+def _chat_dispatch(tool, args, cookie):
+    """Execute one chat tool against the allowlisted endpoint. Returns a
+    JSON-able dict for the model. Never raises (errors become {ok:False})."""
+    route = _CHAT_TOOL_ROUTES.get(tool)
+    if not route:
+        return {'ok': False, 'error': f'unknown tool: {tool}'}
+    if tool in ('start_wifi_scan', 'stop_wifi_scan'):
+        try:
+            return _chat_wifi_toggle(tool, args, cookie)
+        except Exception as exc:
+            logger.error(f"[ai-chat] dispatch {tool} failed: {exc}")
+            return {'ok': False, 'error': str(exc)}
+    method, path = route
+    body = {}
+    if tool == 'deep_scan_host':
+        ip = str((args or {}).get('ip', '')).strip()
+        if not ip:
+            return {'ok': False, 'error': 'deep_scan_host requires an "ip" argument'}
+        body = {'ip': ip}
+    try:
+        status, data = _chat_self_call(method, path, cookie, body)
+    except Exception as exc:
+        logger.error(f"[ai-chat] dispatch {tool} failed: {exc}")
+        return {'ok': False, 'error': str(exc)}
+    return {'ok': 200 <= status < 300, 'status': status,
+            'data': _chat_compact(tool, data, args)}
+
+
+def _get_ragnar_chat():
+    """Lazily build the RagnarChat singleton, rebinding if the AI service object
+    was replaced (e.g. after the operator toggled AI off and on)."""
+    global _ragnar_chat
+    ai_service = getattr(shared_data, 'ai_service', None)
+    if not ai_service:
+        return None
+    with _ragnar_chat_lock:
+        if _ragnar_chat is None or getattr(_ragnar_chat, 'ai', None) is not ai_service:
+            try:
+                from ai_chat import RagnarChat
+            except Exception as exc:
+                logger.error(f"[ai-chat] import failed: {exc}")
+                return None
+            docs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'docs')
+            _ragnar_chat = RagnarChat(ai_service, docs_dir, _chat_dispatch)
+    return _ragnar_chat
+
+
+def _chat_unavailable():
+    """The error response if chat can't be used right now, else None."""
+    if not shared_data.config.get('ai_enabled', False):
+        return jsonify({'success': False, 'error': 'AI is not enabled. Enable it in the Config tab.'}), 400
+    # A hidden chat must not keep accepting requests that can propose actions.
+    if not shared_data.config.get('ai_chat_enabled', True):
+        return jsonify({'success': False, 'error': 'The chat assistant is turned off in the Config tab.'}), 400
+    ai_service = getattr(shared_data, 'ai_service', None)
+    if not ai_service or not ai_service.is_enabled():
+        return jsonify({'success': False,
+                        'error': 'AI service is not ready — check the token / endpoint in Config.'}), 503
+    return None
+
+
+@app.route('/api/ai/chat', methods=['POST'])
+def ai_chat_endpoint():
+    """Conversational assistant that can answer from docs/ and propose actions.
+    Body: {message: str, history: [{role, content}, ...]}. Returns
+    {success, reply, actions, docs, model}, plus pending: {id, label} when an
+    action is waiting for /api/ai/chat/confirm."""
+    blocked = _chat_unavailable()
+    if blocked:
+        return blocked
+
+    data = request.get_json(silent=True) or {}
+    message = str(data.get('message', '')).strip()
+    history = data.get('history') if isinstance(data.get('history'), list) else []
+    if not message:
+        return jsonify({'success': False, 'error': 'Empty message.'}), 400
+
+    chat = _get_ragnar_chat()
+    if not chat:
+        return jsonify({'success': False, 'error': 'Chat assistant unavailable.'}), 503
+
+    cookie = request.headers.get('Cookie', '')
+    try:
+        result = chat.run(history, message, cookie=cookie)
+    except Exception as exc:
+        logger.error(f"[ai-chat] turn failed: {exc}")
+        return jsonify({'success': False, 'error': str(exc)}), 500
+    return jsonify({'success': True, **result})
+
+
+@app.route('/api/ai/chat/confirm', methods=['POST'])
+def ai_chat_confirm_endpoint():
+    """Run or cancel an action the assistant proposed.
+    Body: {id: str, approve: bool}. Only an explicit approve: true runs it."""
+    blocked = _chat_unavailable()
+    if blocked:
+        return blocked
+
+    chat = _get_ragnar_chat()
+    if not chat:
+        return jsonify({'success': False, 'error': 'Chat assistant unavailable.'}), 503
+
+    data = request.get_json(silent=True) or {}
+    cookie = request.headers.get('Cookie', '')
+    try:
+        result = chat.confirm(data.get('id'), data.get('approve') is True, cookie=cookie)
+    except Exception as exc:
+        logger.error(f"[ai-chat] confirm failed: {exc}")
+        return jsonify({'success': False, 'error': str(exc)}), 500
+    return jsonify({'success': True, **result})
 
 
 @app.route('/api/ai/models', methods=['POST'])

@@ -4,6 +4,26 @@
 
 ### 2026-11-02
 
+#### [#1043](https://github.com/PierreGode/Ragnar/pull/1043) — feat: revive dashboard AI chat assistant + M5Stack CardputerZero support
+*branch `feature/revive-ai-chat-and-cardputer`*
+
+- **Two well-developed features rescued from stale branches** (~1,180–1,370 commits behind `main`), squash-merged onto current `main` with the conflicts resolved by hand. The diff against `main` is additive; no existing code was removed.
+- **🤖 Dashboard AI chat assistant** — a floating assistant (shown only when AI is enabled) that answers from `docs/` and can take actions via an **allowlisted** set of existing endpoints (scans, Watchtower, incidents, Wi-Fi control, deep scan). New `ai_chat.py` engine, `ai_service.chat_messages()` (parallel to the existing `_ask_*` path), `/api/ai/chat` route + `_CHAT_TOOL_ROUTES` self-call dispatcher, floating chat panel in the UI, and `docs/AI_INTEGRATION.md`. All 12 dispatched endpoints exist in `main`. **Show chat assistant** under Config → Integrations hides the button and stops chat requests; AI Insights are unaffected. It is on by default.
+  - **Every action needs a click.** The assistant proposes an action and shows **Run** / **Cancel**; nothing runs until Run (`/api/ai/chat/confirm`, server-held pending, single-use, 5-minute TTL). Read tools (device list, vulnerabilities, Watchtower…) still run on their own to answer a question.
+  - **Hardened from ~60 rounds of live testing against a self-hosted model.** Tool results now carry the true network-wide totals and per-host/service/port counts (a filtered lookup no longer implies the whole network), results are marked present-tense (no claims about history), and untrusted text from the network (hostnames, alert titles) can't act as an instruction. The vulnerability scan was firing on the wrong endpoint and reporting success; fixed.
+  - **Safety:** the assistant never emits the kill-switch command or token (it's stripped from everything the model reads), points to **Config → System → Data Management** for clearing scan data, and won't suggest deleting anything the user didn't name.
+- **📖 Knowledge base (`docs/knowledgebase.md`)** — 173 short, verified answers to common questions, read first by the assistant so a small local model gives tight, correct answers and calls fewer tools. Each entry names its source and carries a hidden proof phrase; `tests/test_knowledgebase.py` fails if a doc or the UI stops saying it, so answers can't go stale. A reworded question that keyword search misses ("where can I watch planes?" → ADS-B) is matched to an entry by one short, token-capped model call under an 8-second guard that falls back to keyword search if the endpoint is slow. Corrected several docs the assistant was quoting (`Settings →` paths that are really **Config →**, the wardriving **Start** button, the display **EPD Type** location).
+- **🖥 M5Stack CardputerZero support** — a Pi CM0 with a built-in 1.9" ST7789V3 LCD (320×170) and a 46-key keyboard, installed as a normal Pi pinned to that panel via installer **option 7** (Docker stays 6) or `RAGNAR_PROFILE=cardputer`. Checking the stale branch against M5Stack's published docs changed the design:
+  - **LCD** — uses the kernel framebuffer, found by driver name, with native-endian RGB565. The SPI fallback's swapped DC/CS pins are corrected and it now needs the board's M5IOE1 expander to answer, because SPI has no read-back and would otherwise "find" this panel on any Pi.
+  - **Keyboard** — reads the kernel input device with Linux key codes, since the stock kernel owns the TCA8418 and direct I²C cannot reach it. Direct I²C remains the fallback on a plain kernel.
+  - **Stock launcher** — new `scripts/cardputer_takeover.sh apply|revert|status` hands the LCD and keyboard from APPLaunch to Ragnar. It makes no changes on other boards, and runs from the installer, updater, `installhead.sh` and Config → Display.
+  - **Rotation and config safety** — screen rotation 90/270 now rotates instead of squashing the image, and a failed LCD start no longer lets auto-detect overwrite the saved panel with an e-paper driver.
+  - Added to the portal's driver validation, the captive-portal dropdown, `installhead.sh` and the docs index. `docs/M5StackCardputerZero.md` and `docs/INSTALL.md` are rewritten to match.
+- **Fixed in this PR before merge:**
+  - Keeping both the Device Console card and the chat panel had left one `</div>` short, which nested all 18 other tabs inside the Dashboard tab. The DOM now matches `main`.
+  - Chat tools returned 401 for logged-in users on password-protected units, because the in-process test client dropped the forwarded session cookie. They now run with the caller's session, and a forged cookie is still refused.
+- **Validation:** the full test suite matches `main`, with the same 2 existing failures and no new ones. New `tests/test_cardputer_zero.py` covers the driver, keyboard, takeover and installer against simulated hardware, and each bug above was reintroduced to confirm a test catches it. Every display page was rendered through the real `Display` class at 320×170. **Not run on a physical CardputerZero.**
+
 #### [#1042](https://github.com/PierreGode/Ragnar/pull/1042) — feat(net): BLE Watch overlay on the Signal Intelligence spectrum
 *branch `feature/ble-watch-spectrum-overlay`*
 

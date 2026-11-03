@@ -280,7 +280,7 @@ onboard buttons**, so it behaves like the other button-less panels — Default a
 Wardriving screens render, but there are no keys or joystick to drive Network
 Diagnostic mode from the panel (use the web UI toggles instead).
 
-Select **3.5" SPI TFT — ILI9486/ILI9488 (320×480)** under **Settings → Display**,
+Select **3.5" SPI TFT — ILI9486/ILI9488 (320x480)** as **EPD Type** under **Config → Advanced → Display**,
 or set `"epd_type": "ili9486"` (or `"ili9488"`) in the config, then let the
 service restart.
 
@@ -333,7 +333,7 @@ the defaults target the common ILI9486 320×480 HAT:
 
 ## 1.28" GC9A01 round TFT (240×240)
 
-Select **GC9A01 1.28" round** under **Settings → Display**, or set
+Select **1.28" GC9A01 Round TFT (240x240)** as **EPD Type** under **Config → Advanced → Display**, or set
 `"epd_type": "gc9a01"` in the config. Ragnar renders a full-colour round
 dashboard (Viking mascot, status ring, SSID/GPS line). SPI must be enabled
 (`raspi-config` → Interfaces → SPI, or `dtparam=spi=on`).
