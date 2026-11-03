@@ -798,7 +798,7 @@ are marked *(not set up)*.
   decides later, so Ragnar follows each upload
   (`GET /v1/wardrive/uploads/{id}`) to *succeeded* or *failed* for up to
   45 minutes.
-- **Pushover summary.** With Pushover set up (Settings → Notifications),
+- **Pushover summary.** With Pushover set up (Config → Integrations),
   each auto-uploaded drive sends one notification once every service has a
   final result, including Wardrift's verdict. It gives the drive (start time,
   duration, networks, GPS-pinned rows) and each service's response, e.g.:
@@ -815,7 +815,7 @@ are marked *(not set up)*.
   offline is retried, and the summary waits until it gets through. A 4xx
   rejection (bad key, unconfigured service) is final and reported right
   away. The switch is *Pushover summary after each upload* in the
-  Auto-upload card, or *Wardrive Auto-upload* in Settings → Notifications
+  Auto-upload card, or *Wardrive Auto-upload* in Config → Integrations
   (`pushover_notify_wardrive_upload`, on by default). Manual ↑ uploads
   don't notify.
 - **Recent uploads.** Every outcome, manual or automatic, is kept in
@@ -993,7 +993,7 @@ In modes 2 and 4 the companion has no GPS, so Ragnar's GPS is the only source.
 
 ### 4. Start Wardriving
 
-Click **Start Wardriving** in the web UI. Ragnar begins scanning with all
+Click **Start** in the **Wardriving** tab of the web UI. Ragnar begins scanning with all
 active wlan interfaces and ingesting whatever is on the serial port.
 
 ### Adapter detection — "I plugged in a third adapter but only see wlan0/wlan1"

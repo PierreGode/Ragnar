@@ -98,7 +98,7 @@ you to supply input first (a hash file, a capture, an interface).
 
 **Or let AI write it.** Still in the Arsenal, describe the engagement in plain
 language under **Generate with AI** and click **Generate with AI**. Ragnar calls
-the AI you configured in **Settings → AI** — the OpenAI cloud or a self-hosted
+the AI you configured in **Config → Integrations** — the OpenAI cloud or a self-hosted
 OpenAI-compatible endpoint (Ollama, LocalAI, vLLM, LM Studio) on your LAN/mesh —
 sending it the exact playbook schema, the action catalog, the tool allowlist, the
 argv/no-shell safety rules, your selected tools and your instruction, plus a

@@ -11,6 +11,8 @@ bare environment we skip the whole module rather than error.
 
 import pytest
 
+from ai_chat import _MATCH_PROMPT
+
 try:
     import webapp_modern as webapp
 except Exception as exc:  # pragma: no cover - environment-dependent
@@ -35,6 +37,8 @@ class ScriptedAI:
         return True
 
     def chat_messages(self, messages, max_tokens=None):
+        if messages[0]["content"].startswith(_MATCH_PROMPT):
+            return "0"
         return self._replies.pop(0) if self._replies else "done"
 
 

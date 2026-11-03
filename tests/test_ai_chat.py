@@ -16,7 +16,8 @@ import json
 
 import pytest
 
-from ai_chat import RagnarChat, DocIndex, TOOLS, compact_result
+import ai_chat
+from ai_chat import RagnarChat, DocIndex, TOOLS, compact_result, _MATCH_PROMPT
 
 DOCS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs")
 
@@ -31,8 +32,13 @@ class ScriptedAI:
         self._replies = list(replies)
         self.calls = 0
         self.seen = []   # the messages list handed to each call
+        self.matches = 0   # entry-match calls, kept apart from the conversation
+        self.match_reply = "0"
 
     def chat_messages(self, messages, max_tokens=None):
+        if messages[0]["content"].startswith(_MATCH_PROMPT):
+            self.matches += 1
+            return self.match_reply
         self.calls += 1
         self.seen.append([dict(m) for m in messages])
         if self._replies:
@@ -700,3 +706,119 @@ def test_every_action_tool_is_documented():
     for name, spec in TOOLS.items():
         assert spec.get("desc"), f"{name} missing description"
         assert "action" in spec, f"{name} missing action flag"
+
+
+# -- matching a reworded question to the knowledge base ------------------------
+REWORDED = "Where can I watch planes?"
+ENTRY = "Where is the ADS-B Radar?"
+
+
+def number_of(question):
+    index = DocIndex(DOCS_DIR)
+    titles = [ch["title"].split(" — ", 1)[-1] for ch in index.kb_entries()]
+    return str(titles.index(question) + 1)
+
+
+def titles_given_to_model(chat):
+    return chat.ai.seen[0][0]["content"]
+
+
+def test_keyword_search_alone_misses_a_reworded_question():
+    hits = DocIndex(DOCS_DIR).search(REWORDED, k=3)
+    assert not any(h["file"] == "knowledgebase.md" for h in hits)
+
+
+def test_reworded_question_reaches_its_entry():
+    chat = make_chat(["See the radar."])
+    chat.ai.match_reply = number_of(ENTRY)
+    out = chat.run([], REWORDED)
+    assert chat.ai.matches == 1
+    assert out["docs"][0] == {"file": "knowledgebase.md",
+                              "title": f"knowledgebase.md — {ENTRY}"}
+    assert "Network → Signal Intelligence → ADS-B Radar" in titles_given_to_model(chat)
+
+
+def test_two_picks_keep_best_first_and_drop_repeats():
+    chat = make_chat(["ok"])
+    first, second = number_of(ENTRY), number_of("How do I reboot Ragnar?")
+    chat.ai.match_reply = f"{first}, {second}, {first}"
+    out = chat.run([], REWORDED)
+    assert [d["title"].split(" — ")[-1] for d in out["docs"][:2]] == [ENTRY, "How do I reboot Ragnar?"]
+
+
+def test_question_with_an_entry_skips_the_extra_call():
+    chat = make_chat(["ok"])
+    chat.run([], ENTRY)
+    assert chat.ai.matches == 0
+
+
+def test_direct_command_skips_the_extra_call():
+    chat = make_chat([])
+    out = chat.run([], "scan the network")
+    assert out["pending"] and chat.ai.matches == 0
+
+
+def test_greeting_skips_the_extra_call():
+    chat = make_chat(["Hi!"])
+    chat.run([], "hello")
+    assert chat.ai.matches == 0
+
+
+@pytest.mark.parametrize("reply", [None, "", "0", "9999", "-", "none of these",
+                                   "I think number 12 is the best fit here"])
+def test_useless_match_reply_keeps_keyword_results(reply):
+    chat = make_chat(["ok"])
+    expected = chat.docs.search(REWORDED, k=chat.DOC_HITS, max_chars=chat.DOC_CHARS)
+    chat.ai.match_reply = reply
+    out = chat.run([], REWORDED)
+    assert out["docs"] == [{"file": h["file"], "title": h["title"]} for h in expected]
+
+
+def test_match_call_is_token_capped():
+    """The matcher must bound its output; an uncapped generation can be far slower."""
+    chat = make_chat(["ok"])
+    seen = {}
+    real = chat.ai.chat_messages
+
+    def record(messages, max_tokens=None):
+        if messages[0]["content"].startswith(_MATCH_PROMPT):
+            seen["max_tokens"] = max_tokens
+        return real(messages, max_tokens)
+
+    chat.ai.chat_messages = record
+    chat.run([], REWORDED)
+    assert isinstance(seen.get("max_tokens"), int) and 0 < seen["max_tokens"] <= 32
+
+
+def test_slow_match_falls_back_to_keyword_without_waiting(monkeypatch):
+    """A match slower than the guard must not hold up the turn."""
+    monkeypatch.setattr(ai_chat, "_MATCH_TIMEOUT", 0.2)
+    chat = make_chat(["answered from keywords"])
+    expected = chat.docs.search(REWORDED, k=chat.DOC_HITS, max_chars=chat.DOC_CHARS)
+    real = chat.ai.chat_messages
+
+    def slow(messages, max_tokens=None):
+        if messages[0]["content"].startswith(_MATCH_PROMPT):
+            time.sleep(2.0)
+            return number_of(ENTRY)
+        return real(messages, max_tokens)
+
+    chat.ai.chat_messages = slow
+    started = time.time()
+    out = chat.run([], REWORDED)
+    assert time.time() - started < 1.5  # didn't wait the full 2s match
+    assert out["reply"] == "answered from keywords"
+    assert out["docs"] == [{"file": h["file"], "title": h["title"]} for h in expected]
+
+
+def test_failed_match_call_does_not_fail_the_turn():
+    chat = make_chat(["still here"])
+    real = chat.ai.chat_messages
+
+    def flaky(messages, max_tokens=None):
+        if messages[0]["content"].startswith(_MATCH_PROMPT):
+            raise RuntimeError("endpoint went away")
+        return real(messages, max_tokens)
+
+    chat.ai.chat_messages = flaky
+    assert chat.run([], REWORDED)["reply"] == "still here"

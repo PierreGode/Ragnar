@@ -51,7 +51,7 @@ Identifies potential attack vectors and security gaps in your network:
 
 Ragnar can talk to any **OpenAI-compatible** server instead of OpenAI's cloud —
 [Ollama](https://ollama.com/), [LocalAI](https://localai.io/), vLLM, or LM Studio.
-Set **ai_base_url** (in Settings → AI → *Self-Hosted / Custom Endpoint*) to the
+Set **ai_base_url** (in Config → Integrations → *Self-Hosted / Custom Endpoint*) to the
 server's `/v1` URL, e.g. `http://192.168.1.50:11434/v1`, and set **ai_model** to
 that server's model tag. When a base URL is present:
 
@@ -134,7 +134,7 @@ that both **understands Ragnar** (it answers from this repo's own `docs/` folder
 and can **take real actions** on the unit, then read the results back and explain
 them in plain language.
 
-To hide it, untick **Show chat assistant** under **Config → AI Integration**. This
+To hide it, untick **Show chat assistant** under **Config → Integrations**. This
 removes the button and also stops chat requests, so nothing can be proposed or run through
 chat while it is off. AI Insights keep working.
 
@@ -175,6 +175,22 @@ search over `docs/*.md` (no embeddings), so it runs even on a Pi Zero.
 
 The chat button only shows when the AI service is enabled **and** configured
 (same gate as the dashboard insight cards).
+
+### Knowledge base
+
+[`docs/knowledgebase.md`](knowledgebase.md) holds short, verified answers to common
+questions. The assistant reads a matching entry first and falls back to the rest of
+`docs/` and `README.md` when none fits. Short, specific answers suit a small local
+model better than long pages, and they keep the assistant from calling extra tools.
+
+Each entry names its source and carries a hidden proof phrase from that source.
+`tests/test_knowledgebase.py` fails if the phrase disappears, so a doc or UI change
+can't leave a stale answer behind. To add an entry, follow the format of the others,
+then run that test. Each question must be the top search hit for itself.
+
+The kill switch command is removed from everything the model reads. The kill switch
+erases the whole install, so the assistant points to **Data Management** when asked
+to clear scan data, and to `docs/KILL_SWITCH.md` when asked about the switch itself.
 
 ## API Endpoints
 
