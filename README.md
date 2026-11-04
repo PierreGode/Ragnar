@@ -58,6 +58,7 @@ Every feature below has a full guide in [`docs/`](docs). Short version here, det
 - **Advanced vulnerability scanning** — the **Adv Scan** tab: Nuclei, Nikto, SQLMap, WhatWeb and Nmap vuln scripts run on any board with `nmap`; OWASP ZAP and parallel scanning need 8GB+ RAM. RAM-gated scanners are **delegated to a capable mesh peer** instead of dead-ending. See [Advanced Vulnerability Scanning](docs/adv-scan.md).
 - **Multi-source threat intelligence** — real-time fusion from CISA KEV, NVD CVE, AlienVault OTX, and MITRE, used to prioritize findings. See [Scanning & Actions](docs/scanning-and-attacks.md#multi-source-threat-intelligence).
 - **AI-powered analysis** — security summaries, vulnerability prioritization and remediation advice, with support for **self-hosted / OpenAI-compatible** endpoints (Ollama, LocalAI, vLLM, LM Studio) so inference can stay on your hardware. Includes a **dashboard chat assistant** that answers from `docs/`, reads your results, and starts scans once you approve them. See [AI Integration](docs/AI_INTEGRATION.md).
+- **Four languages** — the web UI and every AI answer in English, Spanish, French or German, switched live from Config > System. See [Languages](docs/i18n.md).
 - **Traffic analysis** — live `tcpdump` capture with top-talkers, protocol mix, DNS logging, and detection of port scans, DNS tunnelling and C2 beacons; also drives passive host discovery. Detection-only; runs on any board (Pi Zero 2W included). See [Traffic Analysis](docs/traffic-analysis.md).
 
 ### Network defense & authority verification

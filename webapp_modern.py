@@ -14,6 +14,7 @@ import sys
 import json
 import csv
 import glob
+import gzip
 import hmac
 import secrets
 import collections
@@ -936,6 +937,9 @@ def check_authentication():
     # Whitelist: paths that must be accessible without authentication
     whitelist_prefixes = ['/login', '/api/auth/', '/api/kill', '/api/provenance']
     if any(path.startswith(p) for p in whitelist_prefixes):
+        return
+    # Public read so the login page renders in the configured language.
+    if path == '/api/i18n/language' and request.method == 'GET':
         return
 
     # Static assets needed for login page (CSS, JS, images, fonts)
@@ -11071,6 +11075,121 @@ def update_config():
         return jsonify({'error': str(e)}), 500
 
 
+# ============================================================================
+# UI LANGUAGE
+# ============================================================================
+UI_LANGUAGES = {'en': 'English', 'es': 'Español', 'fr': 'Français', 'de': 'Deutsch'}
+_I18N_DIR = os.path.join(app.root_path, 'web', 'scripts', 'i18n')
+_i18n_cache = {}
+_i18n_cache_lock = threading.Lock()
+
+
+def _ui_language():
+    code = str(shared_data.config.get('language', 'en') or 'en').strip().lower()
+    return code if code in UI_LANGUAGES else 'en'
+
+
+def _i18n_version():
+    stamp = 0
+    for code in UI_LANGUAGES:
+        try:
+            stamp = max(stamp, os.stat(os.path.join(_I18N_DIR, f'{code}.json')).st_mtime_ns)
+        except OSError:
+            pass
+    return format(stamp, 'x')
+
+
+def _i18n_bodies(code):
+    path = os.path.join(_I18N_DIR, f'{code}.json')
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    sig = (st.st_mtime_ns, st.st_size)
+    with _i18n_cache_lock:
+        hit = _i18n_cache.get(code)
+    if hit and hit[0] == sig:
+        return hit[1]
+    try:
+        with open(path, 'rb') as fh:
+            raw = fh.read()
+        if not isinstance(json.loads(raw.decode('utf-8')), dict):
+            raise ValueError('language pack is not a JSON object')
+    except Exception as exc:
+        logger.warning(f"[i18n] ignoring language pack {path}: {exc}")
+        return None
+    boot = (b'window.__RAGNAR_I18N__={"lang":' + json.dumps(code).encode() +
+            b',"v":' + json.dumps(_i18n_version()).encode() + b',"dict":' + raw + b'};')
+
+    def _variant(body):
+        return body, gzip.compress(body, 6), hashlib.sha1(body).hexdigest()[:20]
+
+    bodies = {'json': _variant(raw), 'boot': _variant(boot)}
+    with _i18n_cache_lock:
+        _i18n_cache[code] = (sig, bodies)
+    return bodies
+
+
+def _send_i18n(variant, mimetype):
+    raw, gz, etag = variant
+    use_gzip = 'gzip' in (request.headers.get('Accept-Encoding') or '').lower()
+    resp = Response(gz if use_gzip else raw, mimetype=mimetype)
+    if use_gzip:
+        resp.headers['Content-Encoding'] = 'gzip'
+        etag += '-gz'
+    resp.headers['Vary'] = 'Accept-Encoding'
+    resp.headers['Cache-Control'] = 'no-cache'
+    resp.set_etag(etag)
+    return resp.make_conditional(request)
+
+
+@app.route('/scripts/i18n/active.js')
+def i18n_boot_script():
+    code = _ui_language()
+    bodies = _i18n_bodies(code) if code != 'en' else None
+    if bodies is None:
+        body = ('window.__RAGNAR_I18N__=' +
+                json.dumps({'lang': 'en', 'v': _i18n_version()}) + ';').encode()
+        variant = (body, gzip.compress(body, 6), hashlib.sha1(body).hexdigest()[:20])
+    else:
+        variant = bodies['boot']
+    return _send_i18n(variant, 'application/javascript')
+
+
+@app.route('/scripts/i18n/<code>.json')
+def i18n_pack(code):
+    bodies = _i18n_bodies(code) if code in UI_LANGUAGES and code != 'en' else None
+    if bodies is None:
+        return jsonify({'error': 'Unknown language pack'}), 404
+    return _send_i18n(bodies['json'], 'application/json')
+
+
+@app.route('/api/i18n/language', methods=['GET'])
+def get_ui_language():
+    return jsonify({
+        'success': True,
+        'language': _ui_language(),
+        'languages': [{'code': c, 'name': n} for c, n in UI_LANGUAGES.items()],
+    })
+
+
+@app.route('/api/i18n/language', methods=['POST'])
+def set_ui_language():
+    data = request.get_json(silent=True) or {}
+    code = str(data.get('language', '') or '').strip().lower()
+    if code not in UI_LANGUAGES:
+        return jsonify({'success': False, 'error': 'Unsupported language'}), 400
+    previous = _ui_language()
+    with getattr(shared_data, '_config_lock', threading.RLock()):
+        shared_data.config['language'] = code
+    shared_data.language = code
+    shared_data.save_config()
+    if code != previous:
+        logger.info(f"[i18n] UI language set to {code}")
+        socketio.emit('language_changed', {'language': code})
+    return jsonify({'success': True, 'language': code})
+
+
 def _apply_config_update(data):
     """Apply a dict of config changes to shared_data and fire the side effects.
 
@@ -12514,7 +12633,7 @@ def _batch_ai_classify(nodes, indices, ai_service, labels, valid_types):
     original_model = ai_service.model
     try:
         ai_service.model = "gpt-5.4-nano"
-        answer = ai_service._ask(system, user)
+        answer = ai_service._ask(system, user, localize=False)
     finally:
         ai_service.model = original_model
 
@@ -27569,6 +27688,11 @@ def ulfberht_extras_install_log():
 # ULFBERHT ENGAGEMENT ENGINE  (official Ulfberht image only -- marker-gated)
 # ============================================================================
 
+def _playbook_language_note():
+    from ai_service import json_fields_language_directive
+    return json_fields_language_directive(_ui_language(), ('name', 'description'))
+
+
 @app.route('/api/ulfberht/playbooks', methods=['GET', 'POST'])
 def ulfberht_playbooks_api():
     """GET: list engagement playbooks (built-in + uploaded, with validity).
@@ -27590,6 +27714,7 @@ def ulfberht_playbooks_api():
                     data.get('name'), data.get('tools') or [], data.get('instruction') or '')
                 if err:
                     return jsonify({"success": False, "error": err}), 400
+                prompt += _playbook_language_note()
                 ai = getattr(shared_data, 'ai_service', None)
                 if not ai:
                     try:
@@ -27624,7 +27749,7 @@ def ulfberht_playbooks_api():
                     data.get('name'), data.get('tools') or [], data.get('instruction') or '')
                 if err:
                     return jsonify({"success": False, "error": err}), 400
-                return jsonify({"success": True, "prompt": prompt})
+                return jsonify({"success": True, "prompt": prompt + _playbook_language_note()})
             name = data.get('name') or (data.get('playbook') or {}).get('name') \
                 or (data.get('playbook') or {}).get('id')
             # Arsenal builder: {name, tools:[bin,...]} -> generate a playbook.
@@ -30463,6 +30588,7 @@ def get_ai_status():
 _ai_insights_state = {
     'data': None,        # last completed insights dict (with posture_data)
     'ts': 0.0,           # when it completed
+    'lang': None,        # UI language the completed result was written in
     'computing': False,  # a background run is in flight
     'started': 0.0,      # when the current run started (for the stale watchdog)
     'lock': threading.Lock(),
@@ -30480,6 +30606,7 @@ def _compute_ai_insights_bg():
     dashboard would poll "Analyzing…" forever (the exact wedge seen on a Pi Zero
     whose OpenAI calls were failing)."""
     result = None
+    lang = _ui_language()
     try:
         ai_service = getattr(shared_data, 'ai_service', None)
         if not ai_service or not ai_service.is_enabled():
@@ -30504,6 +30631,7 @@ def _compute_ai_insights_bg():
             if result is not None:
                 _ai_insights_state['data'] = result
                 _ai_insights_state['ts'] = time.time()
+                _ai_insights_state['lang'] = lang
             _ai_insights_state['computing'] = False
 
 
@@ -30524,9 +30652,12 @@ def get_ai_insights():
 
         force = request.args.get('refresh') == '1'
         now = time.time()
+        lang = _ui_language()
         with _ai_insights_state['lock']:
             data = _ai_insights_state['data']
             ts = _ai_insights_state['ts']
+            if data is not None and _ai_insights_state['lang'] != lang:
+                data = None
             # A result where some analyses failed (rate-limited) expires fast so
             # it recomputes soon; a clean result is held for the full hour.
             ttl = 120 if (data and data.get('failed')) else _AI_INSIGHTS_TTL

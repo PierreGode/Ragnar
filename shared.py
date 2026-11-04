@@ -642,6 +642,7 @@ class SharedData:
         default_profile = DISPLAY_PROFILES.get(DEFAULT_EPD_TYPE, {"ref_width": 122, "ref_height": 250, "default_flip": False})
         return {
             "__title_Ragnar__": "Settings",
+            "language": "en",  # en | es | fr | de
             "manual_mode": False,
             "websrv": True,
             "web_bind_interface": "",
