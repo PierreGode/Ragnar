@@ -27,7 +27,14 @@ unit does not.
 Safety choices:
   * `apt-get upgrade --with-new-pkgs`, never `full-upgrade`: it may install new
     dependencies (new kernels need them) but it never removes a package, so an
-    upgrade cannot uninstall a tool Ragnar depends on.
+    upgrade cannot uninstall a tool Ragnar depends on. Targeted upgrades run with
+    `--no-remove` for the same reason.
+  * A package that can only be upgraded by removing another one is "held back".
+    After every run the runner works out why (what it would remove, what it
+    would add, or that it is on hold / in a phased rollout) so the card can say
+    so instead of listing it as upgradable forever. Upgrading it anyway takes an
+    explicit list of removals the operator approved, and the run stops if apt
+    wants to remove anything beyond that list.
   * Download first, install second. A dropped connection during the download
     leaves the system untouched; the free-space check runs between the two,
     using apt's own estimate of how much the install will add.
@@ -49,6 +56,7 @@ REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(REPO_ROOT, 'data', 'logs')
 STATUS_PATH = os.path.join(LOG_DIR, 'os_update.json')
 LOG_PATH = os.path.join(LOG_DIR, 'os_update.log')
+PREV_LOG_PATH = os.path.join(LOG_DIR, 'os_update.prev.log')
 
 UNIT_NAME = 'ragnar-os-update'
 APT_LISTS_DIR = '/var/lib/apt/lists'
@@ -73,6 +81,8 @@ LIST_TIMEOUT = 180          # `apt list` on a Pi Zero with Kali-size lists
 UPDATE_TIMEOUT = 20 * 60    # `apt-get update` over a slow uplink
 
 MAX_PACKAGES = 64
+MAX_HELD = 20              # held-back packages analysed per run (one simulation each)
+SIM_TIMEOUT = 10 * 60      # the upgrade solver on a Pi Zero with hundreds of packages
 _PKG_NAME = re.compile(r'^[a-z0-9][a-z0-9+.\-]{0,127}$')
 
 # Packages whose upgrade only takes effect after a reboot. Matched by prefix.
@@ -258,6 +268,154 @@ def find_package(packages, name):
 
 
 # ---------------------------------------------------------------------------
+# Held-back packages
+# ---------------------------------------------------------------------------
+# `apt list --upgradable` lists every package with a newer candidate, including
+# ones `upgrade --with-new-pkgs` will never install. Without this the card
+# offered "Upgrade All (1)" for a package that each run then quietly skipped
+# (rpd-common 1.35 on Raspberry Pi OS, which needs pcmanfm replaced by
+# pcmanfm-pi), so the box looked stuck.
+
+KEPT_BACK_HEADER = 'The following packages have been kept back:'
+PHASED_HEADER = 'The following upgrades have been deferred due to phasing:'
+
+_SIM_INST = re.compile(r'^Inst (?P<name>[a-z0-9][a-z0-9+.\-]*)(?::\S+)? '
+                       r'(?:\[(?P<old>[^\]]*)\] )?\((?P<new>\S+)')
+_SIM_REMV = re.compile(r'^Remv (?P<name>[a-z0-9][a-z0-9+.\-]*)(?::\S+)?(?: |$)')
+
+HELD_REASONS = {
+    'needs_removal': 'Upgrading it means removing another package.',
+    'solver': 'Upgrade All leaves it alone, but it can be upgraded on its own.',
+    'hold': 'It is on hold (apt-mark hold), so apt will not upgrade it.',
+    'phased': ('Phased rollout: the distribution is releasing it gradually. It installs '
+               'by itself once this box is included.'),
+    'unresolvable': 'apt cannot upgrade it without breaking another package.',
+}
+
+
+def apt_block(lines, header):
+    """Package names listed under an apt header line ("... kept back:")."""
+    names = []
+    inside = False
+    for line in lines or []:
+        if inside:
+            if line.startswith(' '):
+                for token in line.split():
+                    token = token.rstrip('*').split(':', 1)[0]
+                    if _PKG_NAME.match(token) and token not in names:
+                        names.append(token)
+                continue
+            inside = False
+        if line.strip().startswith(header):
+            inside = True
+    return names
+
+
+def _simulate(args, timeout=SIM_TIMEOUT):
+    """apt-get -s: never needs the lock and never changes anything."""
+    cmd = ['apt-get', '-s', '-o', 'Debug::NoLocking=1', '-o', 'APT::Color=0'] + list(args)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                              env=_env(), stdin=subprocess.DEVNULL, errors='replace')
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return None, [str(exc)]
+    return proc.returncode, (proc.stdout + '\n' + proc.stderr).splitlines()
+
+
+def apt_holds():
+    try:
+        proc = subprocess.run(['apt-mark', 'showhold'], capture_output=True, text=True,
+                              timeout=60, env=_env(), stdin=subprocess.DEVNULL)
+    except (subprocess.TimeoutExpired, OSError):
+        return set()
+    return {l.strip().split(':', 1)[0] for l in proc.stdout.splitlines() if l.strip()}
+
+
+def simulate_install(packages, simulate=_simulate):
+    """What `install --only-upgrade <packages>` would do: (rc, removes, new, versions, errors)."""
+    rc, lines = simulate(['install', '--only-upgrade'] + list(packages))
+    removes, new, versions = [], [], {}
+    for line in lines:
+        m = _SIM_REMV.match(line)
+        if m:
+            removes.append(m.group('name'))
+            continue
+        m = _SIM_INST.match(line)
+        if m:
+            versions[m.group('name')] = m.group('new')
+            if m.group('old') is None and m.group('name') not in packages:
+                new.append(m.group('name'))
+    errors = [l.strip() for l in lines if l.startswith('E:')][:3]
+    return rc, removes, new, versions, errors
+
+
+def analyze_held_back(simulate=_simulate, holds=None, limit=MAX_HELD):
+    """Which upgradable packages Upgrade All will skip, and why.
+
+    Returns a list of {name, candidate, reason, removes, new, detail}, or None
+    when the simulation itself failed (callers then keep what they knew).
+    """
+    rc, lines = simulate(['upgrade', '--with-new-pkgs'])
+    if rc is None or rc != 0:
+        return None
+    holds = apt_holds() if holds is None else set(holds)
+    held = []
+    for name in apt_block(lines, KEPT_BACK_HEADER)[:limit]:
+        entry = {'name': name, 'candidate': '', 'removes': [], 'new': [], 'detail': ''}
+        if name in holds:
+            entry['reason'] = 'hold'
+            held.append(entry)
+            continue
+        rc2, removes, new, versions, errors = simulate_install([name], simulate)
+        entry.update(candidate=versions.get(name, ''), removes=removes, new=new)
+        if rc2 == 0 and removes:
+            entry['reason'] = 'needs_removal'
+        elif rc2 == 0:
+            entry['reason'] = 'solver'
+        else:
+            entry['reason'] = 'unresolvable'
+            entry['detail'] = ' '.join(errors)
+        held.append(entry)
+    for name in apt_block(lines, PHASED_HEADER)[:limit]:
+        held.append({'name': name, 'candidate': '', 'reason': 'phased', 'removes': [],
+                     'new': [], 'detail': ''})
+    return held
+
+
+def annotate_held(available, held):
+    """Copy of `available` with each held-back package marked.
+
+    A held entry only applies while the candidate is the version that was
+    analysed: once a newer one appears it has to be looked at again, so it is
+    shown as an ordinary upgrade until the next run says otherwise.
+    """
+    by_name = {h.get('name'): h for h in held or [] if h.get('name')}
+    packages = []
+    held_count = held_security = 0
+    for pkg in available.get('packages') or []:
+        pkg = dict(pkg)
+        info = by_name.get(pkg['name'])
+        if info and (not info.get('candidate') or info.get('candidate') == pkg['candidate']):
+            pkg['held'] = {
+                'reason': info.get('reason', 'solver'),
+                'explanation': HELD_REASONS.get(info.get('reason'), ''),
+                'removes': list(info.get('removes') or []),
+                'new': list(info.get('new') or []),
+                'detail': info.get('detail', ''),
+                'can_force': info.get('reason') in ('needs_removal', 'solver'),
+            }
+            held_count += 1
+            held_security += 1 if pkg.get('security') else 0
+        packages.append(pkg)
+    out = dict(available)
+    out['packages'] = packages
+    out['held_count'] = held_count
+    out['upgradable_now'] = max(0, len(packages) - held_count)
+    out['security_now'] = max(0, int(available.get('security_count') or 0) - held_security)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Reboot state
 # ---------------------------------------------------------------------------
 
@@ -414,9 +572,9 @@ def last_checked():
     return best or None
 
 
-def read_log(max_chars=12000):
+def read_log(max_chars=12000, previous=False):
     try:
-        with open(LOG_PATH, 'r', errors='replace') as fh:
+        with open(PREV_LOG_PATH if previous else LOG_PATH, 'r', errors='replace') as fh:
             text = fh.read()
     except OSError:
         return ''
@@ -436,10 +594,11 @@ def overview():
     }
     if not ok:
         payload.update({'available': {'ok': False, 'packages': [], 'count': 0,
-                                      'security_count': 0},
+                                      'security_count': 0, 'held_count': 0,
+                                      'upgradable_now': 0, 'security_now': 0},
                         'tailscale': None, 'reboot_required': False, 'reboot_reason': ''})
         return payload
-    available = list_upgradable()
+    available = annotate_held(list_upgradable(), status.get('held_back'))
     payload['available'] = available
     ts = find_package(available.get('packages'), 'tailscale')
     payload['tailscale'] = ({'current': ts['current'], 'candidate': ts['candidate']}
@@ -447,6 +606,7 @@ def overview():
     required, why = reboot_required()
     payload['reboot_required'] = required
     payload['reboot_reason'] = why
+    payload['has_previous_log'] = os.path.exists(PREV_LOG_PATH)
     return payload
 
 
@@ -480,7 +640,32 @@ def validate_packages(packages, available_packages):
     return clean, ''
 
 
-def launch(action, packages=None):
+def validate_removals(allow_remove, packages):
+    """(clean_list, error) for the removals an operator approved.
+
+    Approval is a ceiling, not a command: the runner never asks apt to remove
+    anything, it only lets apt go ahead when every removal it plans is on this
+    list. It only makes sense together with named packages.
+    """
+    if not allow_remove:
+        return [], ''
+    if not isinstance(allow_remove, (list, tuple)):
+        return None, 'allow_remove must be a list of package names.'
+    if not packages:
+        return None, 'Approving removals needs the packages to upgrade named as well.'
+    if len(allow_remove) > 32:
+        return None, 'Too many removals in one run.'
+    clean = []
+    for raw in allow_remove:
+        name = str(raw).strip().lower()
+        if not _PKG_NAME.match(name):
+            return None, f'"{raw}" is not a valid package name.'
+        if name not in clean:
+            clean.append(name)
+    return clean, ''
+
+
+def launch(action, packages=None, allow_remove=None):
     """Start a run. Returns (ok, code, message).
 
     code: '' on success, else unsupported / invalid / busy / launch_failed.
@@ -491,27 +676,45 @@ def launch(action, packages=None):
     if action not in ('check', 'upgrade'):
         return False, 'invalid', 'Unknown action.'
     clean = []
+    removals = []
+    previous = _read_json(STATUS_PATH)
     if action == 'upgrade':
-        available = list_upgradable()
+        available = annotate_held(list_upgradable(), previous.get('held_back'))
         clean, error = validate_packages(packages, available.get('packages'))
         if clean is None:
             return False, 'invalid', error
+        removals, error = validate_removals(allow_remove, clean)
+        if removals is None:
+            return False, 'invalid', error
         if not clean and not available.get('count'):
             return False, 'invalid', 'Nothing to upgrade - the system is up to date.'
+        if not clean and not available.get('upgradable_now'):
+            return False, 'invalid', ('Nothing to upgrade automatically: the remaining '
+                                      'packages are held back. Each one says why on the card.')
     if is_running() or _unit_active():
         return False, 'busy', 'A package run is already in progress.'
 
     _write_json_atomic(STATUS_PATH, {
-        'state': 'running', 'action': action, 'packages': clean,
+        'state': 'running', 'action': action, 'packages': clean, 'allow_remove': removals,
         'step': 'Starting', 'started': time.time(), 'pid': None, 'boot_id': boot_id(),
-        'last_check': float(_read_json(STATUS_PATH).get('last_check') or 0),
+        'last_check': float(previous.get('last_check') or 0),
+        'held_back': previous.get('held_back'),
     })
+    # Keep the previous run's output: a quick follow-up run (a check right after
+    # a big upgrade) used to overwrite the only record of how the upgrade went.
+    try:
+        if os.path.getsize(LOG_PATH) > 0:
+            os.replace(LOG_PATH, PREV_LOG_PATH)
+    except OSError:
+        pass
     try:
         open(LOG_PATH, 'w').close()
     except OSError:
         pass
 
     args = [sys.executable or '/usr/bin/python3', os.path.abspath(__file__), 'run', action]
+    if removals:
+        args.append('--allow-remove=' + ','.join(removals))
     args += clean
 
     systemd_run = shutil.which('systemd-run')
@@ -573,6 +776,8 @@ _SPACE = re.compile(r'After this operation, ([\d.,]+)\s*([kMG]?B) of additional 
 _DOWNLOAD = re.compile(r'Need to get ([\d.,]+)\s*([kMG]?B)', re.I)
 _SUMMARY = re.compile(r'(\d+) upgraded, (\d+) newly installed, (\d+) to remove and '
                       r'(\d+) not upgraded')
+_NO_REMOVE = re.compile(r'Packages need to be removed but remove is disabled', re.I)
+_REMOVING = re.compile(r'^Removing ([a-z0-9][a-z0-9+.\-]*)(?::\S+)? \(')
 _SETTING_UP = re.compile(r'^Setting up ([a-z0-9][a-z0-9+.\-]*)(?::\S+)? \(')
 _UNPACKING = re.compile(r'^Unpacking ([a-z0-9][a-z0-9+.\-]*)(?::\S+)? ')
 
@@ -593,9 +798,13 @@ class Runner:
     """One check or upgrade, logging everything and keeping the status file current."""
 
     def __init__(self, action, packages, status_path=STATUS_PATH, log_path=LOG_PATH,
-                 disk_path='/'):
+                 disk_path='/', allow_remove=None):
         self.action = action
         self.packages = list(packages or [])
+        self.allow_remove = list(allow_remove or [])
+        # Removals are refused unless the operator approved them; flipped off only
+        # once the plan has been checked against the approved list.
+        self.no_remove = True
         self.status_path = status_path
         self.log_path = log_path
         self.disk_path = disk_path
@@ -606,6 +815,10 @@ class Runner:
             'boot_id': boot_id(),
             'last_check': float(previous.get('last_check') or 0),
             'progress': None, 'warnings': [],
+            'allow_remove': self.allow_remove,
+            # What the last successful analysis found; replaced at the end of
+            # this run, kept if this run fails before getting there.
+            'held_back': previous.get('held_back'),
         }
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         self._log = open(log_path, 'a', buffering=1)
@@ -718,11 +931,44 @@ class Runner:
         cmd = ['apt-get', '-y'] + _APT_OPTS
         if download_only:
             cmd.append('-d')
+        if self.no_remove:
+            cmd.append('--no-remove')
         if self.packages:
             cmd += ['install', '--only-upgrade'] + self.packages
         else:
             cmd += ['upgrade', '--with-new-pkgs']
         return cmd
+
+    def analyze_held(self):
+        """Refresh status['held_back']; on a failed analysis keep the last one."""
+        self.step('Checking for held-back packages')
+        held = analyze_held_back()
+        if held is None:
+            self.log('held-back analysis failed; keeping the previous result')
+            return self.status.get('held_back')
+        for entry in held:
+            extra = ''
+            if entry.get('removes'):
+                extra = f" (would remove: {', '.join(entry['removes'])})"
+            self.log(f"held back: {entry['name']} - {entry['reason']}{extra}")
+        self.status['held_back'] = held
+        self._save(force=True)
+        return held
+
+    def check_removals(self):
+        """For an approved targeted upgrade: (ok, error). Only planned removals that
+        are all on the approved list let the run proceed with removals allowed."""
+        rc, removes, _new, _versions, errors = simulate_install(self.packages)
+        if rc != 0:
+            return False, ' '.join(errors) or 'apt could not plan the upgrade.'
+        extra = sorted(set(removes) - set(self.allow_remove))
+        if extra:
+            return False, ('apt now also wants to remove ' + ', '.join(extra) +
+                           ', which was not approved.')
+        self.no_remove = not removes
+        self.status['planned_removals'] = removes
+        self.log('planned removals: ' + (', '.join(removes) if removes else 'none'))
+        return True, ''
 
     def execute(self):
         try:
@@ -741,7 +987,7 @@ class Runner:
             return self.finish('failed', error, hint, code=code)
 
         if self.action == 'check':
-            self.step('Reading available updates')
+            self.analyze_held()
             return self.finish('ok')
 
         self.step('Finishing any interrupted install')
@@ -752,11 +998,26 @@ class Runner:
                                'Run "sudo dpkg --configure -a" over SSH to see why.',
                                code='dpkg_broken')
 
+        if self.packages and self.allow_remove:
+            self.step('Checking what the upgrade removes')
+            ok, error = self.check_removals()
+            if not ok:
+                return self.finish('failed', error,
+                                   'Nothing was changed. Check for updates again and review '
+                                   'what the upgrade removes before approving it.',
+                                   code='removal_changed')
+
         self.step('Downloading packages')
         rc, lines = self.run_cmd(self.upgrade_command(download_only=True),
                                  timeout=2 * 60 * 60)
         text = '\n'.join(lines)
         if rc != 0:
+            if _NO_REMOVE.search(text):
+                names = ', '.join(self.packages) or 'these packages'
+                return self.finish('failed', f'Upgrading {names} would remove other packages.',
+                                   'Nothing was changed. The card lists it as held back, with '
+                                   'what it removes, and an Upgrade anyway button.',
+                                   code='needs_removal')
             if re.search(r"You don't have enough free space", text):
                 return self.finish('failed', 'Not enough free space to download the updates.',
                                    'Free some space (sudo apt-get clean removes old '
@@ -784,7 +1045,9 @@ class Runner:
 
         if summary and total == 0:
             self.step('Nothing to install')
-            return self.finish('ok', upgraded=[], upgraded_count=0)
+            held = self.analyze_held()
+            return self.finish('ok', upgraded=[], upgraded_count=0,
+                               held_count=len(held or []))
 
         free_mb = shutil.disk_usage(self.disk_path).free / (1024.0 * 1024.0)
         if free_mb < need_mb + FREE_SPACE_MARGIN_MB:
@@ -797,8 +1060,13 @@ class Runner:
         self.step('Installing updates')
         configured = []
         unpacked = []
+        removed = []
 
         def on_line(line):
+            m = _REMOVING.match(line)
+            if m:
+                removed.append(m.group(1))
+                return
             m = _SETTING_UP.match(line)
             if m:
                 configured.append(m.group(1))
@@ -817,6 +1085,7 @@ class Runner:
 
         rc, lines = self.run_cmd(self.upgrade_command(), on_line=on_line)
         upgraded = sorted(set(unpacked) | set(configured))
+        self.status['removed'] = sorted(set(removed))
         if rc != 0:
             return self.finish('failed', 'The install stopped with an error.',
                                'Start the upgrade again: Ragnar first runs '
@@ -828,8 +1097,9 @@ class Runner:
         self.run_cmd(['apt-get', '-q', 'clean'], timeout=10 * 60)
 
         reboot = needs_reboot_for(upgraded) or reboot_required()[0]
+        held = self.analyze_held()
         return self.finish('ok', upgraded=upgraded, upgraded_count=len(upgraded),
-                           reboot_recommended=reboot,
+                           reboot_recommended=reboot, held_count=len(held or []),
                            tailscale_upgraded='tailscale' in upgraded)
 
 
@@ -850,14 +1120,21 @@ def main(argv=None):
         if action not in ('check', 'upgrade'):
             print(f'unknown action {action}', file=sys.stderr)
             return 2
-        packages = [p for p in argv[2:] if _PKG_NAME.match(p)]
-        runner = Runner(action, packages)
+        allow_remove = []
+        packages = []
+        for arg in argv[2:]:
+            if arg.startswith('--allow-remove='):
+                allow_remove = [p for p in arg.split('=', 1)[1].split(',') if _PKG_NAME.match(p)]
+            elif _PKG_NAME.match(arg):
+                packages.append(arg)
+        runner = Runner(action, packages, allow_remove=allow_remove)
         _install_signal_handlers(runner)
         return runner.execute()
     if argv and argv[0] == 'status':
         print(json.dumps(overview(), indent=2, default=str))
         return 0
-    print('usage: os_updates.py run check|upgrade [package ...] | status', file=sys.stderr)
+    print('usage: os_updates.py run check|upgrade [--allow-remove=a,b] [package ...] | status',
+          file=sys.stderr)
     return 2
 
 

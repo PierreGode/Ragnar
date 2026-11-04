@@ -653,6 +653,16 @@ Use **Update Tailscale** in the banner on the **Ragnar Mesh** tab, or **Update T
 Source: mesh.md
 <!-- proof: docs/mesh.md | Both run `apt-get install --only-upgrade tailscale` -->
 
+### Why does a package stay in the OS Packages list after Upgrade All?
+It is held back: Upgrade All never removes a package, and upgrading this one would. The card lists it under **Held back** with what it removes and adds, and an **Upgrade anyway** button.
+Source: updates.md
+<!-- proof: docs/updates.md | lists them under **Held back** on the -->
+
+### Why is rpd-common held back?
+`rpd-common` 1.35 needs `pcmanfm` replaced by Raspberry Pi's `pcmanfm-pi`. Upgrade All never removes a package, so it waits for you to press **Upgrade anyway**. Ragnar doesn't use either package.
+Source: updates.md
+<!-- proof: docs/updates.md | `Breaks/Replaces: pcmanfm` -->
+
 ### Does updating Ragnar also update Tailscale?
 No. `update_ragnar.sh` and **Update System** keep Tailscale installed but never upgrade it. Upgrade it from the Mesh tab or **Config → System → OS Packages**.
 Source: mesh.md

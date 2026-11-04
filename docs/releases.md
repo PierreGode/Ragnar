@@ -4,6 +4,17 @@
 
 ### 2026-11-04
 
+#### [#1046](https://github.com/PierreGode/Ragnar/pull/1046) — fix(system): OS Packages explains held-back packages instead of looking stuck
+*branch `fix/os-updates-held-back`*
+
+- **The card looked stuck on `rpd-common` 1.18 → 1.35.** After the first real Upgrade All on the dev box (328 upgraded, 30 new, about 9.5 min, clean), `apt list --upgradable` still listed `rpd-common`. The card offered **Upgrade All (1)**, and each run finished "ok, nothing to install". apt holds it back because 1.35 depends on `pcmanfm-pi`, which `Breaks/Replaces: pcmanfm`, and Upgrade All never removes a package.
+- **Held-back analysis after every check and upgrade.** The runner simulates the upgrade (`apt-get -s`, no lock, no changes) and, for each kept-back package, what installing it would do. Each one gets a reason: needs a removal (with what it removes and adds), solver-only, `apt-mark hold`, Ubuntu phased rollout, or unresolvable (with the apt error). Held-back packages get their own **Held back** block on the card, a tag in the list, and are excluded from the **Upgrade All (N)** count. With only held-back packages left, the badge reads *N held back* and Upgrade All is disabled; the server refuses it too.
+- **Upgrade anyway** (removal or solver cases only) shows exactly what goes and what comes. The run re-plans first and changes nothing (`removal_changed`) if apt wants to remove anything not approved (`{"packages": [...], "allow_remove": [...]}`).
+- **Closed a gap:** targeted upgrades (Update Tailscale only) used `install --only-upgrade` with `-y`, which would have removed packages if apt needed to. Every run now passes `--no-remove` unless removals were approved. A targeted upgrade that needs one fails with `needs_removal` and changes nothing.
+- **Run before:** the previous run's log is kept (`data/logs/os_update.prev.log`, `GET …/log?previous=1`), so a follow-up run no longer overwrites the record of a big upgrade.
+- **Docs:** [updates.md](updates.md#held-back-packages), [knowledgebase.md](knowledgebase.md) (+2 entries)
+- **Validation:** `tests/test_os_updates.py` 30 → 44 tests; 11 more reintroduced bugs (no `--no-remove`, approving any removal, ignoring the candidate version, upgrade-all with only held-back, no log rotation, …) are each caught. The analysis was run against the real box and found `rpd-common` → removes `pcmanfm`, adds `pcmanfm-pi`, `qt6gtk2`, `brightnessctl`, `brightness-udev`. apt 3.0.3 was confirmed to refuse that upgrade under `--no-remove` (exit 100) and accept Upgrade All and Tailscale. Routes checked with auth on; card rendered at 390 px and 1280 px with no overflow; DOM parent chains match `main`.
+
 #### [#1045](https://github.com/PierreGode/Ragnar/pull/1045) — feat(system): OS package updates (apt) from the web UI, with a Tailscale shortcut
 *branch `feature/os-package-updates`*
 

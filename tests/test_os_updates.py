@@ -148,6 +148,7 @@ def sandbox(tmp_path, monkeypatch):
     """Point the module's state files at tmp and stub the system probes."""
     monkeypatch.setattr(os_updates, 'STATUS_PATH', str(tmp_path / 'logs' / 'os_update.json'))
     monkeypatch.setattr(os_updates, 'LOG_PATH', str(tmp_path / 'logs' / 'os_update.log'))
+    monkeypatch.setattr(os_updates, 'PREV_LOG_PATH', str(tmp_path / 'logs' / 'os_update.prev.log'))
     monkeypatch.setattr(os_updates, 'supported', lambda: (True, ''))
     monkeypatch.setattr(os_updates, '_unit_active', lambda: False)
     monkeypatch.setattr(os_updates, 'list_upgradable', lambda force=False: {
@@ -239,6 +240,15 @@ def test_launch_unit_exists_is_busy(sandbox):
 # ---------------------------------------------------------------------------
 
 FAKE_APT = r'''
+if [[ " $* " == *" -s "* ]]; then
+  # Simulations: canned solver output, never touches anything.
+  if [[ " $* " == *" upgrade "* ]]; then
+    printf '%b\n' "${FAKE_SIM_UPGRADE:-0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.}"
+  else
+    printf '%b\n' "${FAKE_SIM_INSTALL:-}"
+  fi
+  exit ${FAKE_SIM_RC:-0}
+fi
 case " $* " in
   *" update "*)
     if [ -n "$FAKE_UPDATE_FAIL" ]; then echo "$FAKE_UPDATE_FAIL"; exit 100; fi
@@ -266,12 +276,18 @@ exit ${FAKE_INSTALL_RC:-0}
 '''
 
 
-def _runner(sandbox, action, packages=()):
+def _runner(sandbox, action, packages=(), allow_remove=()):
     _fake(sandbox / 'bin', 'apt-get', FAKE_APT)
     _fake(sandbox / 'bin', 'dpkg', 'exit 0\n')
+    _fake(sandbox / 'bin', 'apt-mark', 'printf "%b" "${FAKE_HOLDS:-}"\n')
     return os_updates.Runner(action, list(packages),
                              status_path=os_updates.STATUS_PATH, log_path=os_updates.LOG_PATH,
-                             disk_path=str(sandbox))
+                             disk_path=str(sandbox), allow_remove=list(allow_remove))
+
+
+def _real(calls):
+    """apt-get calls that could change something (everything but -s simulations)."""
+    return [c for c in calls if c.startswith('apt-get') and ' -s ' not in c]
 
 
 def _final(sandbox):
@@ -285,7 +301,9 @@ def test_runner_check(sandbox):
     assert st['last_check'] > 0 and st['pid'] is None
     calls = _calls(sandbox)
     assert any(' update' in c for c in calls)
-    assert not any(' upgrade' in c or ' install' in c for c in calls)
+    assert not any(' upgrade' in c or ' install' in c for c in _real(calls))
+    assert any(' -s ' in c and 'upgrade --with-new-pkgs' in c for c in calls)  # held-back analysis
+    assert st['held_back'] == []
 
 
 def test_runner_upgrade_all(sandbox, monkeypatch):
@@ -300,8 +318,9 @@ def test_runner_upgrade_all(sandbox, monkeypatch):
     assert st['kept_back'] == 2 and st['download_mb'] == 41.5
     assert st['progress'] == {'done': 4, 'total': 4, 'current': 'agnostics'}
     calls = _calls(sandbox)
-    upgrade_calls = [c for c in calls if 'upgrade --with-new-pkgs' in c]
+    upgrade_calls = [c for c in _real(calls) if 'upgrade --with-new-pkgs' in c]
     assert len(upgrade_calls) == 2 and ' -d ' in upgrade_calls[0] and ' -d ' not in upgrade_calls[1]
+    assert all('--no-remove' in c for c in upgrade_calls)
     assert not any('full-upgrade' in c or 'dist-upgrade' in c or 'autoremove' in c for c in calls)
     assert any(c.startswith('dpkg --configure -a') for c in calls)
     # Non-interactive and keep-local-config on every apt call
@@ -316,15 +335,16 @@ def test_runner_targeted_upgrade(sandbox, monkeypatch):
     rc = _runner(sandbox, 'upgrade', ['tailscale']).execute()
     st = _final(sandbox)
     assert rc == 0 and st['upgraded'] == ['tailscale'] and st['reboot_recommended'] is False
-    calls = [c for c in _calls(sandbox) if 'install --only-upgrade tailscale' in c]
+    calls = [c for c in _real(_calls(sandbox)) if 'install --only-upgrade tailscale' in c]
     assert len(calls) == 2
+    assert all('--no-remove' in c for c in calls)   # a targeted upgrade never removes on its own
 
 
 def test_runner_nothing_to_install(sandbox, monkeypatch):
     monkeypatch.setenv('FAKE_SUMMARY', '0 upgraded, 0 newly installed, 0 to remove and 1 not upgraded.')
     rc = _runner(sandbox, 'upgrade').execute()
     assert rc == 0 and _final(sandbox)['upgraded_count'] == 0
-    assert len([c for c in _calls(sandbox) if 'upgrade --with-new-pkgs' in c]) == 1  # download only
+    assert len([c for c in _real(_calls(sandbox)) if 'upgrade --with-new-pkgs' in c]) == 1  # download only
 
 
 def test_runner_disk_full_installs_nothing(sandbox, monkeypatch):
@@ -332,7 +352,7 @@ def test_runner_disk_full_installs_nothing(sandbox, monkeypatch):
     rc = _runner(sandbox, 'upgrade').execute()
     st = _final(sandbox)
     assert rc == 1 and st['code'] == 'disk_full' and 'Not enough free space' in st['error']
-    upgrade_calls = [c for c in _calls(sandbox) if 'upgrade --with-new-pkgs' in c]
+    upgrade_calls = [c for c in _real(_calls(sandbox)) if 'upgrade --with-new-pkgs' in c]
     assert len(upgrade_calls) == 1 and ' -d ' in upgrade_calls[0]   # never reached install
 
 
@@ -373,3 +393,192 @@ def test_overview_unsupported(monkeypatch):
     ov = os_updates.overview()
     assert ov['supported'] is False and ov['reason'] == 'no apt'
     assert ov['available']['count'] == 0 and ov['tailscale'] is None
+
+
+# ---------------------------------------------------------------------------
+# Held-back packages (rpd-common needing pcmanfm replaced, on Raspberry Pi OS)
+# ---------------------------------------------------------------------------
+
+SIM_UPGRADE_KEPT = """Reading package lists...
+Calculating upgrade...
+The following packages have been kept back:
+  rpd-common pinned-thing
+  stuck-pkg
+The following upgrades have been deferred due to phasing:
+  ubuntu-phased
+0 upgraded, 0 newly installed, 0 to remove and 4 not upgraded."""
+
+SIM_INSTALL_RPD = """The following packages will be REMOVED:
+  pcmanfm
+Remv pcmanfm [1.4.0-1+rpt9] []
+Inst rpd-common [1.18] (1.35 Raspberry Pi Foundation:stable [arm64]) []
+Inst pcmanfm-pi (1.11 Raspberry Pi Foundation:stable [arm64]) []
+Inst qt6gtk2 (0.3-1+rpt1 Raspberry Pi Foundation:stable [arm64]) []
+Conf rpd-common (1.35 Raspberry Pi Foundation:stable [arm64])"""
+
+
+def _fake_sim(outputs):
+    """simulate() stand-in: picks canned output by the package being simulated."""
+    def simulate(args):
+        if args[0] == 'upgrade':
+            return 0, SIM_UPGRADE_KEPT.splitlines()
+        name = args[-1]
+        rc, text = outputs[name]
+        return rc, text.splitlines()
+    return simulate
+
+
+def test_apt_block_parses_multi_line_lists():
+    lines = SIM_UPGRADE_KEPT.splitlines()
+    assert os_updates.apt_block(lines, os_updates.KEPT_BACK_HEADER) == ['rpd-common', 'pinned-thing', 'stuck-pkg']
+    assert os_updates.apt_block(lines, os_updates.PHASED_HEADER) == ['ubuntu-phased']
+    assert os_updates.apt_block(['The following packages have been kept back:', '  a:arm64 b*'],
+                                os_updates.KEPT_BACK_HEADER) == ['a', 'b']
+
+
+def test_analyze_held_back_reasons():
+    sim = _fake_sim({
+        'rpd-common': (0, SIM_INSTALL_RPD),
+        'stuck-pkg': (100, 'E: Unable to correct problems, you have held broken packages.'),
+    })
+    held = {h['name']: h for h in os_updates.analyze_held_back(sim, holds={'pinned-thing'})}
+    rpd = held['rpd-common']
+    assert rpd['reason'] == 'needs_removal' and rpd['removes'] == ['pcmanfm']
+    assert rpd['new'] == ['pcmanfm-pi', 'qt6gtk2'] and rpd['candidate'] == '1.35'
+    assert held['pinned-thing']['reason'] == 'hold'
+    assert held['stuck-pkg']['reason'] == 'unresolvable' and 'held broken' in held['stuck-pkg']['detail']
+    assert held['ubuntu-phased']['reason'] == 'phased'
+
+
+def test_analyze_held_back_solver_only_and_failed_simulation():
+    sim = _fake_sim({'rpd-common': (0, 'Inst rpd-common [1.18] (1.35 x [arm64])'),
+                     'stuck-pkg': (0, ''), 'pinned-thing': (0, '')})
+    held = {h['name']: h for h in os_updates.analyze_held_back(sim, holds=set())}
+    assert held['rpd-common']['reason'] == 'solver' and held['rpd-common']['removes'] == []
+    assert os_updates.analyze_held_back(lambda a: (None, ['boom']), holds=set()) is None
+
+
+def test_annotate_held_counts_and_version_match():
+    available = {'ok': True, 'count': 3, 'security_count': 1, 'packages': [
+        {'name': 'rpd-common', 'current': '1.18', 'candidate': '1.35', 'security': False},
+        {'name': 'curl', 'current': '1', 'candidate': '2', 'security': True},
+        {'name': 'stale', 'current': '1', 'candidate': '3', 'security': False}]}
+    held = [{'name': 'rpd-common', 'candidate': '1.35', 'reason': 'needs_removal', 'removes': ['pcmanfm'], 'new': []},
+            {'name': 'stale', 'candidate': '2', 'reason': 'needs_removal', 'removes': ['x'], 'new': []}]
+    out = os_updates.annotate_held(available, held)
+    by = {p['name']: p for p in out['packages']}
+    assert by['rpd-common']['held']['can_force'] is True and by['rpd-common']['held']['removes'] == ['pcmanfm']
+    assert 'held' not in by['stale']          # newer candidate than the one analysed
+    assert 'held' not in by['curl']
+    assert out['held_count'] == 1 and out['upgradable_now'] == 2 and out['security_now'] == 1
+    assert 'held' not in available['packages'][0]     # the cached list is not mutated
+
+
+def test_upgrade_all_refused_when_only_held_back_remains(sandbox, monkeypatch):
+    monkeypatch.setattr(os_updates, 'list_upgradable', lambda force=False: {
+        'ok': True, 'count': 1, 'security_count': 0, 'packages': [
+            {'name': 'rpd-common', 'current': '1.18', 'candidate': '1.35', 'security': False}]})
+    os.makedirs(os.path.dirname(os_updates.STATUS_PATH))
+    with open(os_updates.STATUS_PATH, 'w') as fh:
+        json.dump({'state': 'finished', 'held_back': [
+            {'name': 'rpd-common', 'candidate': '1.35', 'reason': 'needs_removal', 'removes': ['pcmanfm']}]}, fh)
+    ok, code, msg = os_updates.launch('upgrade')
+    assert not ok and code == 'invalid' and 'held back' in msg
+
+
+def test_launch_passes_approved_removals(sandbox):
+    _fake(sandbox / 'bin', 'systemd-run', 'exit 0\n')
+    assert os_updates.launch('upgrade', ['tailscale'], ['pcmanfm'])[0]
+    call = [c for c in _calls(sandbox) if c.startswith('systemd-run')][-1]
+    assert call.endswith('os_updates.py run upgrade --allow-remove=pcmanfm tailscale')
+    assert json.load(open(os_updates.STATUS_PATH))['allow_remove'] == ['pcmanfm']
+
+
+def test_validate_removals():
+    assert os_updates.validate_removals(None, ['a']) == ([], '')
+    assert os_updates.validate_removals(['pcmanfm'], [])[0] is None        # removals need named packages
+    assert os_updates.validate_removals('pcmanfm', ['a'])[0] is None
+    assert os_updates.validate_removals(['x; rm -rf'], ['a'])[0] is None
+    assert os_updates.validate_removals(['PCManFM', 'pcmanfm'], ['a']) == (['pcmanfm'], '')
+
+
+def test_main_parses_allow_remove(monkeypatch):
+    seen = {}
+
+    class FakeRunner:
+        def __init__(self, action, packages, allow_remove=None):
+            seen.update(action=action, packages=packages, allow_remove=allow_remove)
+
+        def execute(self):
+            return 0
+    monkeypatch.setattr(os_updates, 'Runner', FakeRunner)
+    monkeypatch.setattr(os_updates, '_install_signal_handlers', lambda r: None)
+    assert os_updates.main(['run', 'upgrade', '--allow-remove=pcmanfm,bad;x', 'rpd-common']) == 0
+    assert seen == {'action': 'upgrade', 'packages': ['rpd-common'], 'allow_remove': ['pcmanfm']}
+
+
+def test_runner_upgrade_anyway_with_approved_removal(sandbox, monkeypatch):
+    monkeypatch.setenv('FAKE_SIM_INSTALL', SIM_INSTALL_RPD.replace('\n', '\\n'))
+    monkeypatch.setenv('FAKE_PKGS', 'rpd-common pcmanfm-pi')
+    monkeypatch.setenv('FAKE_SUMMARY', '1 upgraded, 1 newly installed, 1 to remove and 0 not upgraded.')
+    rc = _runner(sandbox, 'upgrade', ['rpd-common'], ['pcmanfm']).execute()
+    st = _final(sandbox)
+    assert rc == 0 and st['outcome'] == 'ok', st
+    assert st['planned_removals'] == ['pcmanfm']
+    real = [c for c in _real(_calls(sandbox)) if 'install --only-upgrade rpd-common' in c]
+    assert len(real) == 2 and not any('--no-remove' in c for c in real)
+
+
+def test_runner_refuses_unapproved_removal(sandbox, monkeypatch):
+    sim = SIM_INSTALL_RPD.replace('Remv pcmanfm', 'Remv lxterminal [1] []\nRemv pcmanfm')
+    monkeypatch.setenv('FAKE_SIM_INSTALL', sim.replace('\n', '\\n'))
+    rc = _runner(sandbox, 'upgrade', ['rpd-common'], ['pcmanfm']).execute()
+    st = _final(sandbox)
+    assert rc == 1 and st['code'] == 'removal_changed' and 'lxterminal' in st['error']
+    assert not any('install' in c for c in _real(_calls(sandbox)))   # nothing downloaded or installed
+
+
+def test_runner_targeted_needing_removal_fails_clearly(sandbox, monkeypatch):
+    _runner(sandbox, 'upgrade', ['rpd-common'])   # writes the fakes
+    _fake(sandbox / 'bin', 'apt-get', FAKE_APT.replace(
+        'if [[ " $* " == *" -d "* ]]; then',
+        'if [[ " $* " == *" --no-remove "* && " $* " == *" -d "* ]]; then\n'
+        '  echo "E: Packages need to be removed but remove is disabled."; exit 100\nfi\n'
+        'if [[ " $* " == *" -d "* ]]; then'))
+    runner = os_updates.Runner('upgrade', ['rpd-common'], status_path=os_updates.STATUS_PATH,
+                               log_path=os_updates.LOG_PATH, disk_path=str(sandbox))
+    assert runner.execute() == 1
+    st = _final(sandbox)
+    assert st['code'] == 'needs_removal' and 'rpd-common' in st['error']
+
+
+def test_runner_upgrade_all_records_held_back(sandbox, monkeypatch):
+    monkeypatch.setenv('FAKE_SIM_UPGRADE', 'The following packages have been kept back:\\n  rpd-common\\n'
+                                           '0 upgraded, 0 newly installed, 0 to remove and 1 not upgraded.')
+    monkeypatch.setenv('FAKE_SIM_INSTALL', SIM_INSTALL_RPD.replace('\n', '\\n'))
+    monkeypatch.setenv('FAKE_SUMMARY', '0 upgraded, 0 newly installed, 0 to remove and 1 not upgraded.')
+    rc = _runner(sandbox, 'upgrade').execute()
+    st = _final(sandbox)
+    assert rc == 0 and st['held_count'] == 1
+    assert st['held_back'][0]['name'] == 'rpd-common' and st['held_back'][0]['removes'] == ['pcmanfm']
+
+
+def test_failed_run_keeps_previous_held_back(sandbox, monkeypatch):
+    os.makedirs(os.path.dirname(os_updates.STATUS_PATH))
+    with open(os_updates.STATUS_PATH, 'w') as fh:
+        json.dump({'state': 'finished', 'held_back': [{'name': 'rpd-common'}]}, fh)
+    monkeypatch.setenv('FAKE_UPDATE_FAIL', 'Temporary failure resolving deb.debian.org')
+    _runner(sandbox, 'check').execute()
+    assert _final(sandbox)['held_back'] == [{'name': 'rpd-common'}]
+
+
+def test_launch_keeps_previous_log(sandbox):
+    _fake(sandbox / 'bin', 'systemd-run', 'exit 0\n')
+    os.makedirs(os.path.dirname(os_updates.LOG_PATH))
+    with open(os_updates.LOG_PATH, 'w') as fh:
+        fh.write('328 upgraded\n')
+    monkeypatch_prev = os_updates.PREV_LOG_PATH
+    assert os_updates.launch('check')[0]
+    assert open(os_updates.LOG_PATH).read() == ''
+    assert open(monkeypatch_prev).read() == '328 upgraded\n'
+    assert os_updates.read_log(previous=True) == '328 upgraded\n'

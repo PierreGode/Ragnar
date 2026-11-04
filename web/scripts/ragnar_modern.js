@@ -19454,6 +19454,7 @@ let osUpdatesLast = null;
 let osUpdatesLastFetch = 0;
 let osUpdatesPollFailures = 0;
 let osUpdatesWatching = false;      // this page started (or attached to) the current run
+let osUpdatesLogPrevious = false;   // log panel shows the run before the last one
 const OS_UPDATES_POLL_MS = 3000;
 const OS_UPDATES_MAX_FAILURES = 600; // ~30 min of failed polls before giving up
 
@@ -19490,13 +19491,19 @@ function renderOsUpdates(data) {
     const status = data.status || {};
     const available = data.available || {};
     const count = available.count || 0;
-    const security = available.security_count || 0;
+    const packagesAll = available.packages || [];
+    const heldPkgs = packagesAll.filter(p => p.held);
+    // "Upgrade All" never installs a held-back package, so it is not counted as
+    // something to upgrade - it is listed on its own with the reason.
+    const upgradableNow = available.upgradable_now ?? count;
+    const security = available.security_now ?? (available.security_count || 0);
     const running = !!data.running;
+    const heldBox = document.getElementById('os-updates-held');
 
     if (!data.supported) {
         osUpdatesSetBadge('Unavailable', 'bg-gray-700 text-gray-300');
         summary.textContent = data.reason || 'OS package updates are not available on this system.';
-        [reboot, tsBox, progress, result, listWrap].forEach(el => el && el.classList.add('hidden'));
+        [reboot, tsBox, heldBox, progress, result, listWrap].forEach(el => el && el.classList.add('hidden'));
         checkBtn.disabled = true;
         upgradeBtn.disabled = true;
         return;
@@ -19510,10 +19517,12 @@ function renderOsUpdates(data) {
         osUpdatesSetBadge('Error', 'bg-red-900 text-red-300');
     } else if (count === 0) {
         osUpdatesSetBadge('Up to date', 'bg-green-900 text-green-300');
+    } else if (upgradableNow === 0) {
+        osUpdatesSetBadge(`${heldPkgs.length} held back`, 'bg-amber-900 text-amber-200');
     } else if (security > 0) {
-        osUpdatesSetBadge(`${count} updates`, 'bg-red-900 text-red-300');
+        osUpdatesSetBadge(`${upgradableNow} updates`, 'bg-red-900 text-red-300');
     } else {
-        osUpdatesSetBadge(`${count} updates`, 'bg-amber-900 text-amber-200');
+        osUpdatesSetBadge(`${upgradableNow} updates`, 'bg-amber-900 text-amber-200');
     }
     const checked = `Package lists refreshed ${osUpdatesAgo(data.last_checked)}.`;
     const stale = data.last_checked && (Date.now() / 1000 - data.last_checked) > 7 * 86400
@@ -19522,9 +19531,42 @@ function renderOsUpdates(data) {
         summary.textContent = `Could not read the package list: ${available.error}`;
     } else if (count === 0) {
         summary.textContent = `Everything apt manages is up to date. ${checked}${stale}`;
+    } else if (upgradableNow === 0) {
+        const n = heldPkgs.length;
+        summary.textContent = `Nothing left for Upgrade All. ${n} package${n === 1 ? ' is' : 's are'} held back; see why below. ${checked}${stale}`;
     } else {
         const sec = security ? ` (${security} security fix${security === 1 ? '' : 'es'})` : '';
-        summary.textContent = `${count} package${count === 1 ? '' : 's'} can be upgraded${sec}. ${checked}${stale}`;
+        const heldNote = heldPkgs.length ? ` ${heldPkgs.length} more held back.` : '';
+        summary.textContent = `${upgradableNow} package${upgradableNow === 1 ? '' : 's'} can be upgraded${sec}.${heldNote} ${checked}${stale}`;
+    }
+
+    // Held back: each with the reason and, where it is safe to offer, a
+    // deliberate "Upgrade anyway" that names exactly what it removes.
+    if (heldPkgs.length && heldBox) {
+        heldBox.innerHTML = `<div class="text-sm font-medium text-amber-200 mb-1">Held back (${heldPkgs.length})</div>
+            <p class="text-xs text-gray-400 mb-2">Upgrade All skips these. Ragnar never removes a package unless you approve it here.</p>` +
+            heldPkgs.map(p => {
+                const h = p.held || {};
+                const bits = [];
+                if (h.removes && h.removes.length) bits.push(`<span class="text-red-300">removes ${escapeHtml(h.removes.join(', '))}</span>`);
+                if (h.new && h.new.length) bits.push(`adds ${escapeHtml(h.new.join(', '))}`);
+                if (h.detail) bits.push(escapeHtml(h.detail));
+                const btn = h.can_force
+                    ? `<button data-held-pkg="${escapeHtml(p.name)}" onclick="upgradeHeldPackage(this.dataset.heldPkg)" class="os-held-btn px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-600 text-white text-xs font-medium whitespace-nowrap disabled:bg-gray-600 disabled:cursor-not-allowed"${running ? ' disabled' : ''}>Upgrade anyway</button>`
+                    : '';
+                return `<div class="flex items-start justify-between gap-2 flex-wrap py-2 border-t border-slate-700">
+                    <div class="min-w-0 text-xs">
+                        <div><span class="font-mono text-gray-200 break-all">${escapeHtml(p.name)}</span>
+                            <span class="font-mono text-gray-400 ml-2 break-all">${escapeHtml(p.current)} \u2192 ${escapeHtml(p.candidate)}</span></div>
+                        <div class="text-gray-400 mt-1">${escapeHtml(h.explanation || '')}</div>
+                        ${bits.length ? `<div class="text-gray-500 mt-1 break-all">${bits.join(' \u00b7 ')}</div>` : ''}
+                    </div>
+                    ${btn}
+                </div>`;
+            }).join('');
+        heldBox.classList.remove('hidden');
+    } else if (heldBox) {
+        heldBox.classList.add('hidden');
     }
 
     // Reboot recommendation
@@ -19576,8 +19618,12 @@ function renderOsUpdates(data) {
                 html = `Package lists refreshed ${escapeHtml(osUpdatesAgo(status.finished))}.`;
             } else {
                 const n = status.upgraded_count || 0;
-                html = `Upgraded ${n} package${n === 1 ? '' : 's'} ${escapeHtml(osUpdatesAgo(status.finished))}.`;
+                html = n
+                    ? `Upgraded ${n} package${n === 1 ? '' : 's'} ${escapeHtml(osUpdatesAgo(status.finished))}.`
+                    : `Nothing to install ${escapeHtml(osUpdatesAgo(status.finished))}.`;
+                if (status.removed && status.removed.length) html += ` Removed (as approved): ${escapeHtml(status.removed.join(', '))}.`;
                 if (status.tailscale_upgraded) html += ' Tailscale was updated.';
+                if (status.held_count) html += ` ${status.held_count} held back (see above).`;
             }
         } else {
             result.className = 'mb-3 p-3 rounded-lg text-xs bg-red-900 text-red-300';
@@ -19595,12 +19641,13 @@ function renderOsUpdates(data) {
 
     // Buttons
     checkBtn.disabled = running;
-    upgradeBtn.disabled = running || count === 0;
-    upgradeBtn.textContent = count ? `Upgrade All (${count})` : 'Upgrade All';
+    upgradeBtn.disabled = running || upgradableNow === 0;
+    upgradeBtn.textContent = upgradableNow ? `Upgrade All (${upgradableNow})` : 'Upgrade All';
     if (tsBtn) tsBtn.disabled = running;
 
     // Package list
-    const packages = available.packages || [];
+    // Held-back packages go last: they are not part of Upgrade All.
+    const packages = packagesAll.filter(p => !p.held).concat(heldPkgs);
     document.getElementById('os-updates-list-count').textContent = String(packages.length);
     listWrap.classList.toggle('hidden', packages.length === 0);
     list.innerHTML = packages.map(p => `
@@ -19608,12 +19655,15 @@ function renderOsUpdates(data) {
             <span class="min-w-0">
                 <span class="font-mono text-gray-200 break-all">${escapeHtml(p.name)}</span>
                 ${p.security ? '<span class="ml-2 px-1.5 py-0.5 rounded bg-red-900 text-red-300 text-[10px] uppercase">security</span>' : ''}
+                ${p.held ? '<span class="ml-2 px-1.5 py-0.5 rounded bg-amber-900 text-amber-200 text-[10px] uppercase">held back</span>' : ''}
             </span>
             <span class="font-mono text-gray-400 break-all">${escapeHtml(p.current)} → ${escapeHtml(p.candidate)}</span>
         </div>`).join('');
 
+    const prevBtn = document.getElementById('os-updates-log-previous');
+    if (prevBtn) prevBtn.classList.toggle('hidden', !data.has_previous_log);
     const logWrap = document.getElementById('os-updates-log-wrap');
-    if (running && logWrap && logWrap.open) loadOsUpdateLog();
+    if (running && logWrap && logWrap.open && !osUpdatesLogPrevious) loadOsUpdateLog(false);
 }
 
 // Mesh tab: only the Tailscale part, for this unit.
@@ -19699,16 +19749,24 @@ async function loadOsUpdates(opts = {}) {
             showNotification(status.error || 'The OS package run failed.', 'error');
         }
         const logWrap = document.getElementById('os-updates-log-wrap');
-        if (logWrap && logWrap.open) loadOsUpdateLog();
+        if (logWrap && logWrap.open) loadOsUpdateLog(false);
     }
     return data;
 }
 
-async function loadOsUpdateLog() {
+async function loadOsUpdateLog(previous) {
     const pre = document.getElementById('os-updates-log');
     if (!pre) return;
+    if (typeof previous === 'boolean') osUpdatesLogPrevious = previous;
+    const cur = document.getElementById('os-updates-log-current');
+    const prev = document.getElementById('os-updates-log-previous');
+    const on = 'px-2 py-1 rounded bg-slate-700 text-white';
+    const off = 'px-2 py-1 rounded bg-slate-800 text-gray-300 hover:bg-slate-700';
+    if (cur) cur.className = osUpdatesLogPrevious ? off : on;
+    if (prev) prev.className = (osUpdatesLogPrevious ? on : off) +
+        (prev.classList.contains('hidden') ? ' hidden' : '');
     try {
-        const data = await fetchAPI('/api/system/os-updates/log');
+        const data = await fetchAPI('/api/system/os-updates/log' + (osUpdatesLogPrevious ? '?previous=1' : ''));
         const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
         pre.textContent = data.log || '(no output yet)';
         if (atBottom) pre.scrollTop = pre.scrollHeight;
@@ -19754,8 +19812,9 @@ async function upgradeOsPackages(packages) {
             'tailscaled restarts at the end. If you are reaching this page over Tailscale it ' +
             'drops for a few seconds and reconnects; the mesh reconnects by itself.';
     } else {
-        const count = available.count || 0;
-        const sec = available.security_count ? ` (${available.security_count} security fixes)` : '';
+        const count = available.upgradable_now ?? (available.count || 0);
+        const secN = available.security_now ?? available.security_count;
+        const sec = secN ? ` (${secN} security fixes)` : '';
         message = `Upgrade ${count} OS package${count === 1 ? '' : 's'}${sec}?\n\n` +
             'Large upgrades can take a long time on a Pi. Wi-Fi, Bluetooth and Tailscale may ' +
             'restart briefly; the upgrade keeps running on the box if this page disconnects. ' +
@@ -19766,6 +19825,29 @@ async function upgradeOsPackages(packages) {
         .forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true; });
     const ok = await osUpdatesStart('/api/system/os-updates/upgrade',
         packages && packages.length ? { packages } : {});
+    if (!ok) loadOsUpdates({ quiet: true });
+}
+
+// A held-back package that needs another one removed: the operator sees exactly
+// what goes and what comes, and the box refuses to remove anything beyond that.
+async function upgradeHeldPackage(name) {
+    const pkg = ((osUpdatesLast && osUpdatesLast.available && osUpdatesLast.available.packages) || [])
+        .find(p => p.name === name);
+    if (!pkg || !pkg.held) return;
+    const h = pkg.held;
+    const removes = h.removes || [];
+    let message = `Upgrade ${pkg.name} from ${pkg.current} to ${pkg.candidate}?\n\n`;
+    if (removes.length) message += `This REMOVES: ${removes.join(', ')}\n`;
+    if (h.new && h.new.length) message += `and installs: ${h.new.join(', ')}\n`;
+    message += removes.length
+        ? '\nThe box checks the plan again first and changes nothing if apt wants to remove anything else.'
+        : '\nNothing is removed.';
+    if (!confirm(message)) return;
+    document.querySelectorAll('.os-held-btn').forEach(b => { b.disabled = true; });
+    ['os-updates-upgrade-btn', 'os-updates-ts-btn', 'mesh-ts-update-btn', 'os-updates-check-btn']
+        .forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true; });
+    const ok = await osUpdatesStart('/api/system/os-updates/upgrade',
+        { packages: [pkg.name], allow_remove: removes });
     if (!ok) loadOsUpdates({ quiet: true });
 }
 
