@@ -8396,6 +8396,9 @@
                                     </button>
                                 </div>
                             </div>
+                            <!-- Held back: upgradable, but Upgrade All will not install them
+                                 (needs a package removed, on hold, phased rollout...). -->
+                            <div id="os-updates-held" class="hidden mb-3 p-3 rounded-lg border border-amber-700 bg-slate-900"></div>
                             <div id="os-updates-progress" class="hidden mb-3">
                                 <div class="flex items-center justify-between gap-2 text-xs text-gray-300 mb-1">
                                     <span id="os-updates-step" class="min-w-0 truncate">Starting...</span>
@@ -8424,6 +8427,10 @@
                             </details>
                             <details id="os-updates-log-wrap" class="mt-2" ontoggle="if (this.open) loadOsUpdateLog()">
                                 <summary class="text-xs text-gray-500 cursor-pointer hover:text-gray-300">Last run output</summary>
+                                <div class="flex items-center gap-2 mt-2 text-xs">
+                                    <button id="os-updates-log-current" onclick="loadOsUpdateLog(false)" class="px-2 py-1 rounded bg-slate-700 text-white">This run</button>
+                                    <button id="os-updates-log-previous" onclick="loadOsUpdateLog(true)" class="hidden px-2 py-1 rounded bg-slate-800 text-gray-300 hover:bg-slate-700">Run before</button>
+                                </div>
                                 <pre id="os-updates-log" class="mt-2 max-h-64 overflow-auto text-xs text-gray-400 bg-slate-900 p-2 rounded whitespace-pre-wrap break-all"></pre>
                             </details>
                         </div>
@@ -10119,7 +10126,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261104-os-updates"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261104-os-held-back"></script>
 
 
 

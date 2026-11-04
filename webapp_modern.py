@@ -18763,10 +18763,14 @@ def os_updates_upgrade():
 
     Body: {"packages": ["tailscale"]} for a targeted upgrade; omit or send an
     empty list for everything. Named packages must currently be upgradable.
+    A held-back package that needs another one removed is upgraded with
+    {"packages": ["rpd-common"], "allow_remove": ["pcmanfm"]}: the run stops,
+    changing nothing, if apt plans any removal not on that list.
     """
     data = request.get_json(silent=True) or {}
     packages = data.get('packages') or None
-    ok, code, message = os_updates.launch('upgrade', packages)
+    allow_remove = data.get('allow_remove') or None
+    ok, code, message = os_updates.launch('upgrade', packages, allow_remove)
     if ok:
         logger.info(f"OS package upgrade started: {', '.join(packages) if packages else 'all'}")
     return _os_update_launch_response(ok, code, message)
@@ -18774,9 +18778,10 @@ def os_updates_upgrade():
 
 @app.route('/api/system/os-updates/log')
 def os_updates_log():
-    """Tail of the current/last run's apt output."""
-    return jsonify({'success': True, 'log': os_updates.read_log(),
-                    'status': os_updates.read_status()})
+    """Tail of the current/last run's apt output (?previous=1: the run before)."""
+    previous = request.args.get('previous') in ('1', 'true', 'yes')
+    return jsonify({'success': True, 'log': os_updates.read_log(previous=previous),
+                    'previous': previous, 'status': os_updates.read_status()})
 
 
 @app.route('/api/system/stash-update', methods=['POST'])
