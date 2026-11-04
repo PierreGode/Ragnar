@@ -4348,6 +4348,28 @@
                 <!-- Problems the mesh detects about itself -->
                 <div id="mesh-warnings" class="space-y-2 mb-4"></div>
 
+                <!-- Tailscale package update for THIS unit (from apt, via the
+                     OS Packages card's backend). Hidden when Tailscale is current. -->
+                <div id="mesh-ts-update" class="hidden mb-4 p-3 rounded-lg border border-slate-700 bg-slate-900">
+                    <div class="flex items-center justify-between gap-2 flex-wrap">
+                        <div class="text-sm min-w-0">
+                            <span class="font-medium text-cyan-300">Tailscale update available</span>
+                            <span id="mesh-ts-update-versions" class="font-mono text-xs text-gray-400 ml-2"></span>
+                            <span id="mesh-ts-update-state" class="block text-xs text-gray-500 mt-1"></span>
+                        </div>
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <button id="mesh-ts-update-btn" onclick="upgradeOsPackages(['tailscale'])"
+                                    class="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-medium whitespace-nowrap disabled:bg-gray-600 disabled:cursor-not-allowed">
+                                Update Tailscale
+                            </button>
+                            <button onclick="showTab('config'); showConfigSubtab('system'); setTimeout(() => document.getElementById('os-updates-card')?.scrollIntoView({behavior: 'smooth'}), 200)"
+                                    class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-xs font-medium whitespace-nowrap">
+                                All OS updates
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Sub-view nav: Overview vs File Transfer -->
                 <div class="flex flex-wrap items-center gap-2 mt-2">
                     <button id="mesh-nav-overview" onclick="showMeshView('overview')" class="px-3 py-1.5 rounded-lg text-sm bg-Ragnar-600 text-white transition-colors">Overview</button>
@@ -8348,6 +8370,64 @@
 
 
 
+                        <!-- OS Packages Card: apt updates (kernel, security fixes,
+                             Tailscale). "Ragnar Updates" moves Ragnar's code only;
+                             this covers everything apt owns. The run lives in the
+                             ragnar-os-update transient unit, so it survives a
+                             tailscaled / Wi-Fi / service restart mid-upgrade. -->
+                        <div id="os-updates-card" class="glass rounded-lg p-4 md:col-span-2">
+                            <div class="flex items-center justify-between gap-2 mb-3 flex-wrap">
+                                <h4 class="font-medium">OS Packages</h4>
+                                <span id="os-updates-badge" class="text-sm px-2 py-1 rounded bg-gray-700 text-gray-300">Checking...</span>
+                            </div>
+                            <div id="os-updates-summary" class="text-sm text-gray-400 mb-3">
+                                Operating-system updates from apt: the kernel, security fixes, and Tailscale.
+                            </div>
+                            <div id="os-updates-reboot" class="hidden mb-3 p-3 rounded-lg bg-amber-900 border border-amber-700 text-amber-200 text-xs"></div>
+                            <div id="os-updates-tailscale" class="hidden mb-3 p-3 rounded-lg border border-slate-700 bg-slate-900">
+                                <div class="flex items-center justify-between gap-2 flex-wrap">
+                                    <div class="text-sm min-w-0">
+                                        <span class="font-medium text-gray-200">Tailscale</span>
+                                        <span id="os-updates-ts-versions" class="font-mono text-xs text-gray-400 ml-2"></span>
+                                    </div>
+                                    <button id="os-updates-ts-btn" onclick="upgradeOsPackages(['tailscale'])"
+                                            class="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-medium whitespace-nowrap disabled:bg-gray-600 disabled:cursor-not-allowed">
+                                        Update Tailscale only
+                                    </button>
+                                </div>
+                            </div>
+                            <div id="os-updates-progress" class="hidden mb-3">
+                                <div class="flex items-center justify-between gap-2 text-xs text-gray-300 mb-1">
+                                    <span id="os-updates-step" class="min-w-0 truncate">Starting...</span>
+                                    <span id="os-updates-pct" class="shrink-0 font-mono"></span>
+                                </div>
+                                <div class="w-full h-2 rounded bg-slate-700 overflow-hidden">
+                                    <div id="os-updates-bar" class="h-2 bg-blue-600 transition-all" style="width:0%"></div>
+                                </div>
+                                <p class="text-xs text-gray-500 mt-1">The run continues on the box if this page disconnects (Tailscale and Wi-Fi may restart during an upgrade). It reconnects by itself.</p>
+                            </div>
+                            <div id="os-updates-result" class="hidden mb-3 p-3 rounded-lg text-xs"></div>
+                            <div class="flex flex-col sm:flex-row gap-2">
+                                <button id="os-updates-check-btn" onclick="checkOsUpdates()"
+                                        class="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded transition-colors disabled:bg-gray-600 disabled:cursor-not-allowed">
+                                    Check for Updates
+                                </button>
+                                <button id="os-updates-upgrade-btn" onclick="upgradeOsPackages()"
+                                        class="flex-1 bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors disabled:bg-gray-600 disabled:cursor-not-allowed"
+                                        disabled>
+                                    Upgrade All
+                                </button>
+                            </div>
+                            <details id="os-updates-list-wrap" class="mt-3 hidden">
+                                <summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-200">Upgradable packages (<span id="os-updates-list-count">0</span>)</summary>
+                                <div id="os-updates-list" class="mt-2 max-h-64 overflow-auto rounded border border-slate-700 divide-y divide-slate-700/50 text-xs"></div>
+                            </details>
+                            <details id="os-updates-log-wrap" class="mt-2" ontoggle="if (this.open) loadOsUpdateLog()">
+                                <summary class="text-xs text-gray-500 cursor-pointer hover:text-gray-300">Last run output</summary>
+                                <pre id="os-updates-log" class="mt-2 max-h-64 overflow-auto text-xs text-gray-400 bg-slate-900 p-2 rounded whitespace-pre-wrap break-all"></pre>
+                            </details>
+                        </div>
+
                         <!-- Service Control Card -->
                         <div class="glass rounded-lg p-4">
                             <div class="flex items-center justify-between mb-3">
@@ -10039,7 +10119,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261103-ai-chat-confirm"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261104-os-updates"></script>
 
 
 

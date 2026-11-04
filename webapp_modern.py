@@ -56,6 +56,7 @@ except ImportError:
     pandas_available = False
 from init_shared import shared_data
 import git_updater
+import os_updates
 import cyd_node
 import cyd_serial_bridge
 import cyd_sensor
@@ -18713,6 +18714,69 @@ def perform_update():
 
     _finalize_update(update_result)
     return _update_response(update_result)
+
+
+# ---------------------------------------------------------------------------
+# Operating-system packages (apt)
+# ---------------------------------------------------------------------------
+# "Update System" above moves Ragnar's code only. These routes cover everything
+# apt owns - kernel, security fixes, and third-party repos such as Tailscale -
+# which otherwise needed an SSH session. The slow work runs in the
+# ragnar-os-update transient unit (see os_updates.py), so a tailscaled or
+# ragnar.service restart during the upgrade cannot cut dpkg off mid-install.
+# All four routes are session-gated like the rest of /api/system/*.
+
+@app.route('/api/system/os-updates')
+def os_updates_overview():
+    """Upgradable packages, the current/last run, and reboot state.
+
+    Polled while a run is active, so it only reads: the package list is cached
+    against apt's state and never recomputed mid-install.
+    """
+    try:
+        return jsonify(dict(os_updates.overview(), success=True))
+    except Exception as e:
+        logger.error(f"OS updates overview failed: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+def _os_update_launch_response(ok, code, message):
+    status = {'busy': 409, 'unsupported': 400, 'invalid': 400}.get(code, 500)
+    if ok:
+        return jsonify({'success': True, 'message': message,
+                        'status': os_updates.read_status()})
+    return jsonify({'success': False, 'code': code, 'error': message}), status
+
+
+@app.route('/api/system/os-updates/check', methods=['POST'])
+def os_updates_check():
+    """Refresh apt's package lists (apt-get update) in the background."""
+    ok, code, message = os_updates.launch('check')
+    if ok:
+        logger.info("OS package check started")
+    return _os_update_launch_response(ok, code, message)
+
+
+@app.route('/api/system/os-updates/upgrade', methods=['POST'])
+def os_updates_upgrade():
+    """Upgrade every upgradable package, or only the named ones.
+
+    Body: {"packages": ["tailscale"]} for a targeted upgrade; omit or send an
+    empty list for everything. Named packages must currently be upgradable.
+    """
+    data = request.get_json(silent=True) or {}
+    packages = data.get('packages') or None
+    ok, code, message = os_updates.launch('upgrade', packages)
+    if ok:
+        logger.info(f"OS package upgrade started: {', '.join(packages) if packages else 'all'}")
+    return _os_update_launch_response(ok, code, message)
+
+
+@app.route('/api/system/os-updates/log')
+def os_updates_log():
+    """Tail of the current/last run's apt output."""
+    return jsonify({'success': True, 'log': os_updates.read_log(),
+                    'status': os_updates.read_status()})
 
 
 @app.route('/api/system/stash-update', methods=['POST'])

@@ -16650,6 +16650,7 @@ async function loadConfigData() {
 
         // Also check for updates when loading config tab
         checkForUpdates();
+        loadOsUpdates({ quiet: true });
 
         // Load security configuration
         await loadSecurityConfig();
@@ -19437,6 +19438,347 @@ async function restartService() {
         updateElement('service-status', 'Error');
         document.getElementById('service-status').className = 'text-sm px-2 py-1 rounded bg-red-700 text-red-300';
     }
+}
+
+// ============================================================================
+// OS PACKAGES (apt): Config -> System "OS Packages" card + Mesh-tab banner
+// ============================================================================
+// "Update System" above pulls Ragnar's code. This drives apt for the rest of the
+// box: kernel, security fixes and third-party repos such as Tailscale. The run
+// itself happens on the box in a transient systemd unit (os_updates.py), so the
+// page only starts it and polls. Failed polls are expected mid-upgrade - an
+// upgrade can restart tailscaled or Wi-Fi, which drops this page for a few
+// seconds - so they are retried quietly instead of being reported as errors.
+let osUpdatesPollTimer = null;
+let osUpdatesLast = null;
+let osUpdatesLastFetch = 0;
+let osUpdatesPollFailures = 0;
+let osUpdatesWatching = false;      // this page started (or attached to) the current run
+const OS_UPDATES_POLL_MS = 3000;
+const OS_UPDATES_MAX_FAILURES = 600; // ~30 min of failed polls before giving up
+
+function osUpdatesAgo(ts) {
+    if (!ts) return 'never';
+    const secs = Math.max(0, Date.now() / 1000 - ts);
+    if (secs < 90) return 'just now';
+    if (secs < 3600) return `${Math.round(secs / 60)} min ago`;
+    if (secs < 172800) return `${Math.round(secs / 3600)} h ago`;
+    return `${Math.round(secs / 86400)} days ago`;
+}
+
+function osUpdatesSetBadge(text, cls) {
+    const badge = document.getElementById('os-updates-badge');
+    if (!badge) return;
+    badge.textContent = text;
+    badge.className = 'text-sm px-2 py-1 rounded ' + cls;
+}
+
+function renderOsUpdates(data) {
+    const card = document.getElementById('os-updates-card');
+    if (!card || !data) return;
+    const summary = document.getElementById('os-updates-summary');
+    const reboot = document.getElementById('os-updates-reboot');
+    const tsBox = document.getElementById('os-updates-tailscale');
+    const progress = document.getElementById('os-updates-progress');
+    const result = document.getElementById('os-updates-result');
+    const checkBtn = document.getElementById('os-updates-check-btn');
+    const upgradeBtn = document.getElementById('os-updates-upgrade-btn');
+    const tsBtn = document.getElementById('os-updates-ts-btn');
+    const listWrap = document.getElementById('os-updates-list-wrap');
+    const list = document.getElementById('os-updates-list');
+
+    const status = data.status || {};
+    const available = data.available || {};
+    const count = available.count || 0;
+    const security = available.security_count || 0;
+    const running = !!data.running;
+
+    if (!data.supported) {
+        osUpdatesSetBadge('Unavailable', 'bg-gray-700 text-gray-300');
+        summary.textContent = data.reason || 'OS package updates are not available on this system.';
+        [reboot, tsBox, progress, result, listWrap].forEach(el => el && el.classList.add('hidden'));
+        checkBtn.disabled = true;
+        upgradeBtn.disabled = true;
+        return;
+    }
+
+    // Badge + summary line
+    if (running) {
+        osUpdatesSetBadge(status.action === 'check' ? 'Checking...' : 'Upgrading...',
+            'bg-blue-700 text-blue-200');
+    } else if (!available.ok && available.error) {
+        osUpdatesSetBadge('Error', 'bg-red-900 text-red-300');
+    } else if (count === 0) {
+        osUpdatesSetBadge('Up to date', 'bg-green-900 text-green-300');
+    } else if (security > 0) {
+        osUpdatesSetBadge(`${count} updates`, 'bg-red-900 text-red-300');
+    } else {
+        osUpdatesSetBadge(`${count} updates`, 'bg-amber-900 text-amber-200');
+    }
+    const checked = `Package lists refreshed ${osUpdatesAgo(data.last_checked)}.`;
+    const stale = data.last_checked && (Date.now() / 1000 - data.last_checked) > 7 * 86400
+        ? ' Check for updates to see what is new.' : '';
+    if (!available.ok && available.error) {
+        summary.textContent = `Could not read the package list: ${available.error}`;
+    } else if (count === 0) {
+        summary.textContent = `Everything apt manages is up to date. ${checked}${stale}`;
+    } else {
+        const sec = security ? ` (${security} security fix${security === 1 ? '' : 'es'})` : '';
+        summary.textContent = `${count} package${count === 1 ? '' : 's'} can be upgraded${sec}. ${checked}${stale}`;
+    }
+
+    // Reboot recommendation
+    if (data.reboot_required && !running) {
+        reboot.innerHTML = `<div class="flex items-center justify-between gap-2 flex-wrap">
+            <span><strong>Reboot recommended.</strong> ${escapeHtml(data.reboot_reason || '')}</span>
+            <button onclick="rebootSystem()" class="px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-600 text-white text-xs font-medium whitespace-nowrap">Reboot now</button>
+        </div>`;
+        reboot.classList.remove('hidden');
+    } else {
+        reboot.classList.add('hidden');
+    }
+
+    // Tailscale shortcut
+    if (data.tailscale) {
+        document.getElementById('os-updates-ts-versions').textContent =
+            `${data.tailscale.current} → ${data.tailscale.candidate}`;
+        tsBox.classList.remove('hidden');
+    } else {
+        tsBox.classList.add('hidden');
+    }
+
+    // Live progress
+    if (running) {
+        progress.classList.remove('hidden');
+        const p = status.progress;
+        let stepText = status.step || 'Working...';
+        let pct = null;
+        if (p && p.total) {
+            pct = Math.min(100, Math.round((p.done / p.total) * 100));
+            stepText = `${status.step || 'Installing'}: ${p.current || ''} (${p.done}/${p.total})`;
+        }
+        document.getElementById('os-updates-step').textContent = stepText;
+        document.getElementById('os-updates-pct').textContent = pct === null ? '' : `${pct}%`;
+        // Before the install starts there is no count to measure against; show
+        // a partial bar so the step text does not look stalled.
+        document.getElementById('os-updates-bar').style.width = pct === null ? '15%' : `${pct}%`;
+    } else {
+        progress.classList.add('hidden');
+    }
+
+    // Outcome of the last run (kept visible for a day, failures until the next run)
+    const finishedAgo = status.finished ? Date.now() / 1000 - status.finished : Infinity;
+    if (!running && status.state === 'finished' && (status.outcome !== 'ok' || finishedAgo < 86400)) {
+        let html;
+        if (status.outcome === 'ok') {
+            result.className = 'mb-3 p-3 rounded-lg text-xs bg-green-900 text-green-300';
+            if (status.action === 'check') {
+                html = `Package lists refreshed ${escapeHtml(osUpdatesAgo(status.finished))}.`;
+            } else {
+                const n = status.upgraded_count || 0;
+                html = `Upgraded ${n} package${n === 1 ? '' : 's'} ${escapeHtml(osUpdatesAgo(status.finished))}.`;
+                if (status.tailscale_upgraded) html += ' Tailscale was updated.';
+            }
+        } else {
+            result.className = 'mb-3 p-3 rounded-lg text-xs bg-red-900 text-red-300';
+            html = `<strong>${escapeHtml(status.error || 'The last package run failed.')}</strong>`;
+            if (status.hint) html += `<br>${escapeHtml(status.hint)}`;
+        }
+        if (status.warnings && status.warnings.length) {
+            html += `<br><span class="text-amber-200">${status.warnings.length} repository warning${status.warnings.length === 1 ? '' : 's'}; see the output below.</span>`;
+        }
+        result.innerHTML = html;
+        result.classList.remove('hidden');
+    } else {
+        result.classList.add('hidden');
+    }
+
+    // Buttons
+    checkBtn.disabled = running;
+    upgradeBtn.disabled = running || count === 0;
+    upgradeBtn.textContent = count ? `Upgrade All (${count})` : 'Upgrade All';
+    if (tsBtn) tsBtn.disabled = running;
+
+    // Package list
+    const packages = available.packages || [];
+    document.getElementById('os-updates-list-count').textContent = String(packages.length);
+    listWrap.classList.toggle('hidden', packages.length === 0);
+    list.innerHTML = packages.map(p => `
+        <div class="flex items-center justify-between gap-2 flex-wrap px-2 py-1">
+            <span class="min-w-0">
+                <span class="font-mono text-gray-200 break-all">${escapeHtml(p.name)}</span>
+                ${p.security ? '<span class="ml-2 px-1.5 py-0.5 rounded bg-red-900 text-red-300 text-[10px] uppercase">security</span>' : ''}
+            </span>
+            <span class="font-mono text-gray-400 break-all">${escapeHtml(p.current)} → ${escapeHtml(p.candidate)}</span>
+        </div>`).join('');
+
+    const logWrap = document.getElementById('os-updates-log-wrap');
+    if (running && logWrap && logWrap.open) loadOsUpdateLog();
+}
+
+// Mesh tab: only the Tailscale part, for this unit.
+function renderMeshTailscaleUpdate(data) {
+    const box = document.getElementById('mesh-ts-update');
+    if (!box || !data) return;
+    const status = data.status || {};
+    const tsRun = data.running && status.action === 'upgrade' &&
+        (!status.packages || !status.packages.length || status.packages.includes('tailscale'));
+    if (!data.supported || (!data.tailscale && !tsRun)) {
+        box.classList.add('hidden');
+        return;
+    }
+    box.classList.remove('hidden');
+    const versions = document.getElementById('mesh-ts-update-versions');
+    versions.textContent = data.tailscale ? `${data.tailscale.current} → ${data.tailscale.candidate}` : '';
+    const state = document.getElementById('mesh-ts-update-state');
+    const btn = document.getElementById('mesh-ts-update-btn');
+    if (data.running) {
+        state.textContent = tsRun
+            ? 'Updating... tailscaled restarts at the end; the mesh drops for a few seconds.'
+            : 'Another package run is in progress.';
+        btn.disabled = true;
+    } else {
+        state.textContent = 'Installed from the Tailscale apt repository. The mesh reconnects by itself after the update.';
+        btn.disabled = false;
+    }
+}
+
+function scheduleOsUpdatesPoll(delay = OS_UPDATES_POLL_MS) {
+    if (osUpdatesPollTimer) clearTimeout(osUpdatesPollTimer);
+    osUpdatesPollTimer = setTimeout(() => {
+        osUpdatesPollTimer = null;
+        loadOsUpdates({ fromPoll: true });
+    }, delay);
+}
+
+async function loadOsUpdates(opts = {}) {
+    const wasRunning = !!(osUpdatesLast && osUpdatesLast.running);
+    let data;
+    try {
+        data = await fetchAPI('/api/system/os-updates');
+    } catch (error) {
+        if (opts.fromPoll && osUpdatesWatching) {
+            // Expected while tailscaled / Wi-Fi / the service restarts.
+            osUpdatesPollFailures += 1;
+            const step = document.getElementById('os-updates-step');
+            if (step) step.textContent = 'Reconnecting to the box... (the upgrade keeps running)';
+            if (osUpdatesPollFailures < OS_UPDATES_MAX_FAILURES) {
+                scheduleOsUpdatesPoll(5000);
+            } else {
+                osUpdatesWatching = false;
+                showNotification('Lost contact with the box during the OS upgrade. Reload the page to see how it ended.', 'error');
+            }
+            return null;
+        }
+        if (!opts.quiet) {
+            osUpdatesSetBadge('Error', 'bg-red-900 text-red-300');
+            const summary = document.getElementById('os-updates-summary');
+            if (summary) summary.textContent = `Could not load OS update status: ${error.message}`;
+        }
+        return null;
+    }
+    osUpdatesPollFailures = 0;
+    osUpdatesLast = data;
+    osUpdatesLastFetch = Date.now();
+    renderOsUpdates(data);
+    renderMeshTailscaleUpdate(data);
+
+    if (data.running) {
+        osUpdatesWatching = true;
+        scheduleOsUpdatesPoll();
+    } else if (osUpdatesWatching && (wasRunning || opts.fromPoll)) {
+        osUpdatesWatching = false;
+        const status = data.status || {};
+        if (status.outcome === 'ok') {
+            const msg = status.action === 'check'
+                ? `Package lists refreshed: ${data.available?.count || 0} update(s) available.`
+                : `OS upgrade finished: ${status.upgraded_count || 0} package(s) upgraded.` +
+                  (status.reboot_recommended ? ' A reboot is recommended.' : '');
+            showNotification(msg, 'success');
+        } else if (status.state === 'finished') {
+            showNotification(status.error || 'The OS package run failed.', 'error');
+        }
+        const logWrap = document.getElementById('os-updates-log-wrap');
+        if (logWrap && logWrap.open) loadOsUpdateLog();
+    }
+    return data;
+}
+
+async function loadOsUpdateLog() {
+    const pre = document.getElementById('os-updates-log');
+    if (!pre) return;
+    try {
+        const data = await fetchAPI('/api/system/os-updates/log');
+        const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+        pre.textContent = data.log || '(no output yet)';
+        if (atBottom) pre.scrollTop = pre.scrollHeight;
+    } catch (error) {
+        // A dropped connection mid-upgrade; the next poll refreshes it.
+    }
+}
+
+async function osUpdatesStart(endpoint, body) {
+    try {
+        const data = await postAPI(endpoint, body);
+        osUpdatesWatching = true;
+        if (data.status) {
+            renderOsUpdates(Object.assign({}, osUpdatesLast || { supported: true }, {
+                running: true, status: data.status }));
+        }
+        scheduleOsUpdatesPoll(1000);
+        return true;
+    } catch (error) {
+        if (error.status === 409) {
+            // Already running (another tab, or the chat assistant): follow it.
+            osUpdatesWatching = true;
+            showNotification('A package run is already in progress. Showing its progress.', 'info');
+            scheduleOsUpdatesPoll(500);
+            return true;
+        }
+        showNotification(error.message || 'Could not start the package run.', 'error');
+        return false;
+    }
+}
+
+async function checkOsUpdates() {
+    await osUpdatesStart('/api/system/os-updates/check', {});
+}
+
+async function upgradeOsPackages(packages) {
+    const data = osUpdatesLast || {};
+    const available = data.available || {};
+    let message;
+    if (packages && packages.length === 1 && packages[0] === 'tailscale') {
+        const ts = data.tailscale;
+        message = `Update Tailscale${ts ? ` from ${ts.current} to ${ts.candidate}` : ''}?\n\n` +
+            'tailscaled restarts at the end. If you are reaching this page over Tailscale it ' +
+            'drops for a few seconds and reconnects; the mesh reconnects by itself.';
+    } else {
+        const count = available.count || 0;
+        const sec = available.security_count ? ` (${available.security_count} security fixes)` : '';
+        message = `Upgrade ${count} OS package${count === 1 ? '' : 's'}${sec}?\n\n` +
+            'Large upgrades can take a long time on a Pi. Wi-Fi, Bluetooth and Tailscale may ' +
+            'restart briefly; the upgrade keeps running on the box if this page disconnects. ' +
+            'Packages are only upgraded or added, never removed.';
+    }
+    if (!confirm(message)) return;
+    ['os-updates-upgrade-btn', 'os-updates-ts-btn', 'mesh-ts-update-btn', 'os-updates-check-btn']
+        .forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true; });
+    const ok = await osUpdatesStart('/api/system/os-updates/upgrade',
+        packages && packages.length ? { packages } : {});
+    if (!ok) loadOsUpdates({ quiet: true });
+}
+
+// The Mesh tab refreshes often; the package list only changes after a check or
+// an upgrade, so re-read it at most every five minutes from there.
+function meshMaybeLoadOsUpdates(meshData) {
+    if (!meshData || !meshData.installed) return;
+    if (osUpdatesPollTimer) return;  // a run is being polled already
+    if (osUpdatesLast && Date.now() - osUpdatesLastFetch < 5 * 60 * 1000) {
+        renderMeshTailscaleUpdate(osUpdatesLast);
+        return;
+    }
+    loadOsUpdates({ quiet: true });
 }
 
 async function rebootSystem() {
@@ -41627,6 +41969,7 @@ async function refreshMesh(force) {
         const data = await resp.json();
         renderMesh(data);
         applyHeaderBrand(data);
+        meshMaybeLoadOsUpdates(data);
     } catch (err) {
         console.warn('Mesh refresh failed:', err);
     } finally {

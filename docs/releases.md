@@ -2,6 +2,25 @@
 
 ## Releases
 
+### 2026-11-04
+
+#### [#1045](https://github.com/PierreGode/Ragnar/pull/1045) — feat(system): OS package updates (apt) from the web UI, with a Tailscale shortcut
+*branch `feature/os-package-updates`*
+
+- **New Config → System → OS Packages card.** Ragnar's **Update System** only moves Ragnar's code, and `update_ragnar.sh` installs Tailscale but never upgrades it, so until now the kernel, security fixes and Tailscale releases needed an SSH session. The dev box had 330 pending packages, 64 of them security fixes. The card shows what apt can upgrade (security fixes tagged and listed first), when the lists were last refreshed, and **Check for Updates** / **Upgrade All** / **Update Tailscale only**.
+- **Tailscale banner on the Ragnar Mesh tab** with the installed and available version and an **Update Tailscale** button (`apt-get install --only-upgrade tailscale`).
+- **New `os_updates.py` engine.** Runs in a transient `ragnar-os-update` systemd unit, so a `tailscaled`, Wi-Fi or service restart caused by the upgrade cannot kill dpkg part-way. Uses `upgrade --with-new-pkgs`, never `full-upgrade`, so nothing is ever removed. Downloads before installing, checks free space against apt's own estimate before dpkg starts, runs fully non-interactive while keeping local config files, starts each upgrade with `dpkg --configure -a`, and runs `apt-get clean` afterwards. Failures come back as a code plus a hint (`offline`, `repo_key`, `locked`, `disk_full`, `dpkg_error`, `interrupted`). A run that died, even across a reboot, shows as interrupted instead of busy forever. Recommends a reboot when a newer kernel is waiting or core libraries changed.
+- **Endpoints** (session-gated): `GET /api/system/os-updates`, `POST …/check`, `POST …/upgrade` (named packages must be on the upgradable list), `GET …/log`. Unsupported in Docker and on non-apt systems, with a message saying why.
+- **Docs:** [updates.md](updates.md#operating-system-packages-apt), [mesh.md](mesh.md#keeping-tailscale-up-to-date) (corrected: it said updates keep Tailscale "current"), [knowledgebase.md](knowledgebase.md) (+3 entries), [README (root)](../README.md)
+- **Validation:** new `tests/test_os_updates.py` (30 tests) drives the real runner against fake `apt-get` / `dpkg` binaries; 10 reintroduced bugs (full-upgrade, no disk check, no download phase, PID reuse after reboot, …) are each caught by the relevant test. Routes checked with auth on (401 without a session). The card was rendered at 390 px and 1280 px with no horizontal overflow, and the DOM parent chains match `main`. The real launch path ran on the dev box (transient unit, `apt-get update`, `dpkg --configure -a`, download) and was stopped before dpkg installed anything.
+
+### 2026-11-03
+
+#### [#1044](https://github.com/PierreGode/Ragnar/pull/1044) — fix(pwnagotchi): fail loud when no monitor-mode adapter is present (#1023)
+*Merged 2026-11-03 · branch `fix/pwnagotchi-fail-loud-missing-adapter` · 1 file, +30 / −2*
+
+- On a board with only `wlan0` (e.g. a Pi Zero 2 W with no USB adapter), interface selection silently defaulted to a phantom `wlan1`, so bettercap looped on `-iface mon0` and Pwnagotchi hung on "Reading last session logs". The bettercap launcher now preflights the station interface and exits with a clear message, and the installer warns at interface-detect time (non-fatal, so the adapter can be plugged in later).
+
 ### 2026-11-02
 
 #### [#1043](https://github.com/PierreGode/Ragnar/pull/1043) — feat: revive dashboard AI chat assistant + M5Stack CardputerZero support

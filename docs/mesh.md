@@ -33,6 +33,7 @@ be logged into renders the mesh; so would any other.
   - [Path 1 — during imaging (unattended)](#path-1--during-imaging-unattended)
   - [Path 2 — during install](#path-2--during-install)
   - [Path 3 — later, from the web UI](#path-3--later-from-the-web-ui)
+  - [Keeping Tailscale up to date](#keeping-tailscale-up-to-date)
 - [Reaching the whole far-side LAN](#reaching-the-whole-far-side-lan)
 - [Backup access when Ragnar itself is wedged](#backup-access-when-ragnar-itself-is-wedged)
 - [The Ragnar Mobile app](#the-ragnar-mobile-app)
@@ -464,7 +465,8 @@ Open the **Ragnar Mesh** tab. It is a two-step funnel:
    advertise. Leave **Mesh name** blank for the main mesh, or name a
    [separate mesh](#separate-meshes-on-one-tailnet). Joining sets `mesh_enabled`,
    which is what makes every subsequent `update_ragnar.sh` keep Tailscale
-   installed and current.
+   installed. Upgrading it to a newer release is a separate step; see
+   [Keeping Tailscale up to date](#keeping-tailscale-up-to-date).
 
 ### Why `update` does not install Tailscale by itself
 
@@ -474,7 +476,30 @@ installs it only once a unit has opted in — an auth key in the environment, a
 purpose: a security tool should not silently add an outbound mesh dependency to
 every box on every update. So on a fresh unit that has never touched the mesh,
 "I ran update and Tailscale still isn't there" is expected — use the **Install
-Tailscale** button (or join once), and updates maintain it from then on.
+Tailscale** button (or join once), and updates keep it installed from then on.
+
+### Keeping Tailscale up to date
+
+Tailscale is installed from its own apt repository (`pkgs.tailscale.com`), so new
+releases arrive like any other OS package. When the Tailscale admin console shows
+**Update available** for a unit:
+
+- **Ragnar Mesh tab:** a *Tailscale update available* banner shows the installed
+  and new version, with an **Update Tailscale** button.
+- **Config → System → OS Packages:** the same **Update Tailscale only** button,
+  next to **Upgrade All** for the rest of the system.
+
+Both run `apt-get install --only-upgrade tailscale` in the background
+(`ragnar-os-update` unit). `tailscaled` restarts at the end: a browser reaching the
+unit over the tailnet drops for a few seconds and reconnects, and the unit rejoins
+the mesh by itself. Node keys, tags and the mesh name are untouched. The banner
+only appears once apt knows about the new version, so press **Check for Updates**
+on the OS Packages card if the console shows an update the unit doesn't. Details:
+[Operating-system packages (apt)](updates.md#operating-system-packages-apt).
+
+`update_ragnar.sh` does **not** upgrade Tailscale, and neither does the Ragnar
+**Update System** button. Those move Ragnar's code; the client stays at whatever
+version is installed until you upgrade it here or with `sudo apt upgrade`.
 
 ---
 
