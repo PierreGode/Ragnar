@@ -12,6 +12,11 @@ The web path is handled by [`git_updater.py`](../git_updater.py), a dedicated
 update engine, plus [`scripts/post_update.sh`](../scripts/post_update.sh) which
 finishes the job and restarts the service.
 
+This updates **Ragnar's code**. The operating system underneath it (the kernel,
+security fixes, and third-party packages such as **Tailscale**) comes from apt
+and is updated separately: see
+[Operating-system packages (apt)](#operating-system-packages-apt).
+
 ---
 
 ## What an update actually does
@@ -137,6 +142,99 @@ Transcripts live on the box:
 data/logs/post_update.log     # full output of the post-update run
 data/logs/post_update.json    # machine-readable state, step and outcome
 ```
+
+---
+
+## Operating-system packages (apt)
+
+**Config → System → OS Packages** updates everything apt manages: the kernel and
+firmware, Debian / Raspberry Pi OS / Kali security fixes, and the third-party
+repositories the installer adds (Tailscale from `pkgs.tailscale.com`, Docker,
+cloudflared, ...). Before this card existed none of that was reachable from the
+web UI. `update_ragnar.sh` does not do it either: it installs Tailscale when the
+mesh is enabled, but never upgrades a copy that is already there.
+
+| Button | What it runs |
+|---|---|
+| **Check for Updates** | `apt-get update`, then lists what can be upgraded. Security fixes are tagged and listed first |
+| **Upgrade All (N)** | `apt-get upgrade --with-new-pkgs`: every upgradable package, plus any new dependency they need (new kernels do) |
+| **Update Tailscale only** | `apt-get install --only-upgrade tailscale`. Shown when a Tailscale update is waiting; the **Ragnar Mesh** tab shows the same button |
+
+The list is read from apt's own state, so updates that `apt-get update` found
+elsewhere (in an SSH session, or apt-daily) show up too. "Package lists
+refreshed ... ago" says how current it is.
+
+### Safe by design
+
+- **Nothing is ever removed.** Ragnar uses `upgrade --with-new-pkgs`, never
+  `full-upgrade`. An upgrade can add a dependency, but it can never uninstall a
+  tool Ragnar relies on. A package that would need something removed stays
+  *kept back* and is reported as such.
+- **Download first, install second.** Everything is downloaded before dpkg
+  touches the system, so a dropped connection mid-download changes nothing.
+- **Disk-space check.** Between download and install, apt's own estimate of the
+  space the install adds is compared with what is free (plus 300 MB headroom).
+  If it doesn't fit, nothing is installed. A root filesystem filling up halfway
+  through dpkg is the one way an upgrade really breaks a box.
+- **Non-interactive.** No debconf questions, no conffile prompts: every changed
+  config file keeps **your** version (`--force-confold`). `needrestart` only
+  lists services; it never restarts them on its own.
+- **Survives the restarts it causes.** The run executes in a transient systemd
+  unit, `ragnar-os-update`, not inside the web service. An upgrade can restart
+  `tailscaled` (a browser on the tailnet drops for a few seconds), NetworkManager
+  or wpa_supplicant (Wi-Fi blips), or Ragnar's own dependencies. The run carries
+  on regardless, and the card reconnects and picks up the progress by itself.
+- **Interrupted runs are repaired.** Every upgrade starts with
+  `dpkg --configure -a`, so a run cut short by a power loss is finished by the
+  next one. A run whose process vanished, including across a reboot, shows as
+  *interrupted* instead of leaving the card stuck on "Upgrading...".
+- **Cleans up after itself.** `apt-get clean` drops the downloaded `.deb` files
+  afterwards; on a 16 GB card a big upgrade can otherwise leave hundreds of MB
+  behind.
+
+### After an upgrade
+
+The card says **Reboot recommended** when a newer kernel is installed than the
+one running, when a package raised Debian's `/run/reboot-required` flag, or when
+the kernel, firmware, libc, systemd, dbus or OpenSSL was upgraded. Rebooting is
+up to you; the button is right there.
+
+A large first upgrade on an old image (hundreds of packages) can take tens of
+minutes on a Pi 4/5 and much longer on a Pi Zero 2 W. Leave the box powered.
+You can close the page: the run continues, and reopening the card shows where it
+is. **Last run output** on the card is the full apt log
+(`data/logs/os_update.log`).
+
+### When a check or upgrade fails
+
+The card shows one sentence on what happened and one on what to do:
+
+| Code | Meaning |
+|---|---|
+| `offline` | The package mirrors could not be reached. Nothing was installed |
+| `repo_key` | A repository's signing key is missing or expired (the card names the repo). For Tailscale, `sudo bash scripts/setup_mesh.sh install` re-adds it |
+| `locked` | Another apt run (SSH, apt-daily) held the lock for 10 minutes |
+| `disk_full` | Not enough space for the download or the install. Nothing was installed |
+| `dpkg_broken` / `dpkg_error` | dpkg stopped part-way. Run the upgrade again: it starts with `dpkg --configure -a` |
+| `interrupted` | The run was stopped (power loss, reboot, unit stopped) before it finished |
+
+In a Docker container the card says OS updates are not available there: the
+packages come with the image, so pull or rebuild it instead. On a distribution
+without apt the card explains that too.
+
+### Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/system/os-updates` | Upgradable packages (cached against apt's state), current/last run, Tailscale versions, reboot state |
+| `POST /api/system/os-updates/check` | Start `apt-get update` in the `ragnar-os-update` unit |
+| `POST /api/system/os-updates/upgrade` | Upgrade everything, or `{"packages": ["tailscale"]}` for named packages. Names must be on the upgradable list |
+| `GET /api/system/os-updates/log` | Tail of the run's apt output |
+
+All four need a logged-in session. A second run while one is active returns
+**409** `busy`. The engine is [`os_updates.py`](../os_updates.py); its tests,
+[`tests/test_os_updates.py`](../tests/test_os_updates.py), drive the real
+runner against fake `apt-get` / `dpkg` binaries through every failure above.
 
 ---
 

@@ -643,6 +643,21 @@ Use **Config → System → Update System**, or run `sudo /home/ragnar/Ragnar/up
 Source: updates.md
 <!-- proof: docs/updates.md | sudo /home/ragnar/Ragnar/update_ragnar.sh -->
 
+### How do I update the operating system packages?
+**Config → System → OS Packages**. **Check for Updates** lists what apt can upgrade, security fixes first; **Upgrade All** installs them. Ragnar's own **Update System** button does not touch OS packages.
+Source: updates.md
+<!-- proof: docs/updates.md | **Config → System → OS Packages** updates everything apt manages -->
+
+### How do I update Tailscale?
+Use **Update Tailscale** in the banner on the **Ragnar Mesh** tab, or **Update Tailscale only** on **Config → System → OS Packages**. tailscaled restarts, so the mesh drops for a few seconds and then reconnects by itself.
+Source: mesh.md
+<!-- proof: docs/mesh.md | Both run `apt-get install --only-upgrade tailscale` -->
+
+### Does updating Ragnar also update Tailscale?
+No. `update_ragnar.sh` and **Update System** keep Tailscale installed but never upgrade it. Upgrade it from the Mesh tab or **Config → System → OS Packages**.
+Source: mesh.md
+<!-- proof: docs/mesh.md | `update_ragnar.sh` does **not** upgrade Tailscale -->
+
 ### What is Ragnar OS?
 A prebuilt image: Raspberry Pi OS Lite with Ragnar already installed. Flash it, boot it and open the web UI.
 Source: ragnar-os.md
