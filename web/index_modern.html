@@ -3,6 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="/scripts/i18n/active.js"></script>
+    <script src="/scripts/i18n.js?v=20261104-i18n"></script>
     <title>Ragnar Cyberviking - Modern Dashboard</title>
     <link rel="icon" href="/web/images/ragnar.ico" type="image/x-icon">
     
@@ -927,19 +929,19 @@
                                 <span class="text-sm text-gray-400 whitespace-nowrap"></span>
                             </div>
                                 <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2 text-xs text-gray-300">
-                                <div class="flex items-center space-x-1">
+                                <div class="flex flex-wrap items-center space-x-1">
                                     <span class="text-gray-400">Tot</span>
                                     <span id="target-total-count" class="font-semibold text-gray-100">0</span>
                                 </div>
-                                <div class="flex items-center space-x-1">
-                                    <span class="text-gray-400 whitespace-nowrap">Offline</span>
+                                <div class="flex flex-wrap items-center space-x-1">
+                                    <span class="text-gray-400">Offline</span>
                                     <span id="target-inactive-count" class="font-semibold text-red-300 whitespace-nowrap">0</span>
                                 </div>
-                                <div class="flex items-center space-x-1">
-                                    <span class="text-gray-400 whitespace-nowrap">New</span>
+                                <div class="flex flex-wrap items-center space-x-1">
+                                    <span class="text-gray-400">New</span>
                                     <span id="target-new-count" class="font-semibold text-green-300 whitespace-nowrap" title="No recent additions">0</span>
                                 </div>
-                                <div class="flex items-center space-x-1">
+                                <div class="flex flex-wrap items-center space-x-1">
                                     <span class="text-gray-400">Lost</span>
                                     <span id="target-lost-count" class="font-semibold text-orange-300" title="No recent drops">0</span>
                                 </div>
@@ -8340,7 +8342,27 @@
                 <div class="mb-8">
                     <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">System Management</h3>
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                        
+
+                        <!-- Language Card -->
+                        <div class="glass rounded-lg p-4">
+                            <div class="flex items-center justify-between mb-3">
+                                <h4 class="font-medium">Language</h4>
+                                <span class="text-sm px-2 py-1 rounded bg-gray-700 text-gray-300" aria-hidden="true">🌐</span>
+                            </div>
+                            <div class="text-sm text-gray-400 mb-3">
+                                Language of this web interface and of every AI answer. Saved on this unit and applied right away.
+                            </div>
+                            <label for="ui-language-select" class="sr-only">Language</label>
+                            <select id="ui-language-select" onchange="onUiLanguageChanged(this)" translate="no"
+                                    class="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200">
+                                <option value="en">English</option>
+                                <option value="es">Español</option>
+                                <option value="fr">Français</option>
+                                <option value="de">Deutsch</option>
+                            </select>
+                            <p id="ui-language-status" class="text-xs mt-2 hidden"></p>
+                        </div>
+
                         <!-- Update Status Card -->
                         <div class="glass rounded-lg p-4">
                             <div class="flex items-center justify-between mb-3">
@@ -10126,7 +10148,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261104-os-held-back"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261104-i18n"></script>
 
 
 

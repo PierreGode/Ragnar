@@ -731,7 +731,20 @@ class RagnarChat:
             'Ragnar: <tool>{"tool":"run_network_scan","args":{}}</tool>\n\n'
             "DOCS (may be empty):\n"
             f"{doc_context or '(none found — call search_docs for how-to questions)'}"
+            f"{self._language_rule()}"
         )
+
+    def _language_rule(self) -> str:
+        directive = getattr(self.ai, "language_directive", None)
+        try:
+            text = directive() if callable(directive) else ""
+        except Exception:  # noqa: BLE001
+            text = ""
+        if not text:
+            return ""
+        return (text + " Tool lines are the exception: write them exactly as "
+                '<tool>{"tool":"NAME","args":{}}</tool> with the English tool name '
+                "and argument keys.")
 
     @staticmethod
     def _format_docs(hits: List[Dict[str, str]]) -> str:

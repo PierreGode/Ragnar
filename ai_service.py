@@ -29,6 +29,47 @@ from logger import Logger
 from env_manager import EnvManager, load_env
 
 
+RESPONSE_LANGUAGES = {
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+}
+
+
+def response_language(config) -> str:
+    try:
+        code = str((config or {}).get("language", "en") or "en").strip().lower()
+    except Exception:  # noqa: BLE001
+        return "en"
+    return code if code in RESPONSE_LANGUAGES else "en"
+
+
+def prose_language_directive(code: str) -> str:
+    if code not in RESPONSE_LANGUAGES or code == "en":
+        return ""
+    name = RESPONSE_LANGUAGES[code]
+    return (
+        f"\n\nRESPONSE LANGUAGE: Write your entire reply in {name}, including "
+        "headings, labels and list items, whatever language the data or the "
+        "instructions above are written in. Keep these exactly as they are: "
+        "code and JSON blocks (keys and values), commands, file paths, display "
+        "filters, protocol, tool and product names, CVE IDs, IP and MAC addresses, "
+        "SSIDs, hostnames, and any value quoted from the data."
+    )
+
+
+def json_fields_language_directive(code: str, fields) -> str:
+    if code not in RESPONSE_LANGUAGES or code == "en" or not fields:
+        return ""
+    names = ", ".join(f'"{f}"' for f in fields)
+    return (
+        f"\n\nLANGUAGE: write the values of {names} in {RESPONSE_LANGUAGES[code]}. "
+        "Every JSON key, phase, action, parameter name, tool name, argument and "
+        "other value stays exactly as specified above, in English."
+    )
+
+
 def normalize_base_url(url: str) -> str:
     """Tidy an OpenAI-compatible base URL so common shorthands just work.
 
@@ -225,7 +266,7 @@ class AIService:
         if system_msg is None:
             system_msg = ("You are a security automation assistant. Output exactly one "
                           "JSON object and nothing else — no prose, no markdown fences.")
-        return self._ask(system_msg, user_msg)
+        return self._ask(system_msg, user_msg, localize=False)
 
 
 
@@ -236,6 +277,15 @@ class AIService:
     def is_enabled(self):
         """Return True when the service is enabled and the client is ready."""
         return self.ensure_ready()
+
+    def response_language(self) -> str:
+        return response_language(getattr(self.shared_data, "config", None))
+
+    def language_directive(self) -> str:
+        return prose_language_directive(self.response_language())
+
+    def json_language_directive(self, fields) -> str:
+        return json_fields_language_directive(self.response_language(), fields)
 
     def ensure_ready(self):
         """Lazily initialize the OpenAI client if configuration says AI is enabled."""
@@ -272,7 +322,7 @@ class AIService:
 
     def _cache_key(self, name: str, content: Any):
         import hashlib
-        raw = f"{name}:{json.dumps(content, sort_keys=True)}"
+        raw = f"{name}:{self.response_language()}:{json.dumps(content, sort_keys=True)}"
         return hashlib.md5(raw.encode()).hexdigest()
 
     def _cache_get(self, key: str):
@@ -293,7 +343,7 @@ class AIService:
     #   CORE GPT-5 CALL — NEW RESPONSES API
     # ===================================================================
 
-    def _ask(self, system_msg: str, user_msg: str) -> Optional[str]:
+    def _ask(self, system_msg: str, user_msg: str, localize: bool = True) -> Optional[str]:
         """
         Unified GPT-5 call with temperature fallback (required for tests).
         """
@@ -304,6 +354,9 @@ class AIService:
         if self.client is None:
             self.logger.error("AI client unavailable despite service being enabled.")
             return None
+
+        if localize:
+            system_msg = (system_msg or "") + self.language_directive()
 
         # Self-hosted / OpenAI-compatible servers speak Chat Completions, not
         # the proprietary Responses API — route them separately.

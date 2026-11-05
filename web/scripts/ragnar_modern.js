@@ -798,8 +798,13 @@ function initializeSocket() {
         }
     });
 
+    socket.on('language_changed', function(data) {
+        applyServerLanguage(data && data.language);
+    });
+
     socket.on('config_updated', function(config) {
         addConsoleMessage('Configuration updated successfully', 'info');
+        if (config && config.language) applyServerLanguage(config.language);
         if (currentTab === 'config') {
             displayConfigForm(config);
         }
@@ -6603,7 +6608,7 @@ async function runIperf() {
 async function toggleIperfServer() {
     const btn = document.getElementById('iperf-server-btn');
     const status = document.getElementById('iperf-server-status');
-    const starting = btn.textContent.indexOf('Start') !== -1;
+    const starting = _i18nText(btn).indexOf('Start') !== -1;
     _ndBusy(btn, true, starting ? 'Starting…' : 'Stopping…');
     try {
         const d = await postAPI('/api/net/iperf3-server', { action: starting ? 'start' : 'stop' });
@@ -21645,11 +21650,12 @@ async function toggleBluetoothPower() {
     if (!powerBtn || !powerText) return;
     
     const originalText = powerText.textContent;
+    const originalSource = _i18nText(powerText);
     powerText.textContent = 'Processing...';
     powerBtn.disabled = true;
     
     try {
-        const isEnabled = originalText === 'Disable Bluetooth';
+        const isEnabled = originalSource === 'Disable Bluetooth';
         const endpoint = isEnabled ? '/api/bluetooth/disable' : '/api/bluetooth/enable';
         
         const response = await postAPI(endpoint, {});
@@ -21666,7 +21672,7 @@ async function toggleBluetoothPower() {
         powerText.textContent = originalText;
     } finally {
         powerBtn.disabled = false;
-        if (powerText.textContent === 'Processing...') {
+        if (_i18nText(powerText) === 'Processing...') {
             powerText.textContent = originalText;
         }
     }
@@ -21679,11 +21685,12 @@ async function toggleBluetoothDiscoverable() {
     if (!discoverableBtn || !discoverableText) return;
     
     const originalText = discoverableText.textContent;
+    const originalSource = _i18nText(discoverableText);
     discoverableText.textContent = 'Processing...';
     discoverableBtn.disabled = true;
     
     try {
-        const isDiscoverable = originalText === 'Hide Device';
+        const isDiscoverable = originalSource === 'Hide Device';
         const endpoint = isDiscoverable ? '/api/bluetooth/discoverable/off' : '/api/bluetooth/discoverable/on';
         
         const response = await postAPI(endpoint, {});
@@ -21700,7 +21707,7 @@ async function toggleBluetoothDiscoverable() {
         discoverableText.textContent = originalText;
     } finally {
         discoverableBtn.disabled = false;
-        if (discoverableText.textContent === 'Processing...') {
+        if (_i18nText(discoverableText) === 'Processing...') {
             discoverableText.textContent = originalText;
         }
     }
@@ -25260,7 +25267,7 @@ function updateElement(id, value) {
     const element = document.getElementById(id);
     if (element) {
         const str = String(value ?? '');
-        if (element.textContent !== str) {
+        if (_i18nText(element) !== str) {
             element.textContent = str;
         }
     }
@@ -25326,7 +25333,7 @@ function updateConnectivityIndicator(id, active, ssid = null, apMode = false) {
                 text = 'Not connected';
                 cls = 'text-xs text-gray-500 truncate';
             }
-            if (ssidDisplay.textContent !== text) ssidDisplay.textContent = text;
+            if (_i18nText(ssidDisplay) !== text) ssidDisplay.textContent = text;
             if (ssidDisplay.className !== cls) ssidDisplay.className = cls;
         }
     }
@@ -25345,14 +25352,14 @@ function updateLanIndicator(data) {
             const ip = data.ethernet_ip || '';
             const text = ip ? `${iface}: ${ip}` : iface;
             const cls = 'text-xs text-green-400 truncate';
-            if (info.textContent !== text) info.textContent = text;
+            if (_i18nText(info) !== text) info.textContent = text;
             if (info.className !== cls) info.className = cls;
         }
     } else {
         const targetClass = 'w-3 h-3 bg-gray-600 rounded-full';
         if (dot && dot.className !== targetClass) dot.className = targetClass;
         if (info) {
-            if (info.textContent !== 'Not connected') info.textContent = 'Not connected';
+            if (_i18nText(info) !== 'Not connected') info.textContent = 'Not connected';
             const cls = 'text-xs text-gray-500 truncate';
             if (info.className !== cls) info.className = cls;
         }
@@ -25641,7 +25648,7 @@ function renderLogPanel() {
     // read isn't interrupted by new lines.
     const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 40;
     out.innerHTML = rows.map(e =>
-        `<div class="${e.colorClass}"><span class="text-gray-600">[${e.tsLabel}]</span> ` +
+        `<div class="${e.colorClass}"${e.source === 'Actions' ? '' : ' translate="no"'}><span class="text-gray-600">[${e.tsLabel}]</span> ` +
         `<span class="text-Ragnar-400">${escapeHtml(e.source)}</span> ${escapeHtml(e.message)}</div>`
     ).join('');
     if (atBottom) out.scrollTop = out.scrollHeight;
@@ -25661,6 +25668,77 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+// ============================================================================
+// UI LANGUAGE
+// ============================================================================
+function _i18nText(el) {
+    if (!el) return '';
+    return window.RagnarI18n ? window.RagnarI18n.source(el) : el.textContent;
+}
+
+function _setUiLanguageStatus(text, cls) {
+    const el = document.getElementById('ui-language-status');
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'text-xs mt-2 ' + cls;
+    el.classList.toggle('hidden', !text);
+}
+
+function _onUiLanguageApplied(lang) {
+    const select = document.getElementById('ui-language-select');
+    if (select && select.value !== lang) select.value = lang;
+    aiInsightsCache.data = null;
+    aiInsightsCache.timestamp = null;
+    if (currentTab === 'dashboard') loadAIInsights();
+}
+
+function initLanguageSelector() {
+    const i18n = window.RagnarI18n;
+    const select = document.getElementById('ui-language-select');
+    if (!i18n) {
+        if (select) select.disabled = true;
+        return;
+    }
+    if (select) select.value = i18n.lang;
+    i18n.onChange(_onUiLanguageApplied);
+}
+
+async function onUiLanguageChanged(select) {
+    const i18n = window.RagnarI18n;
+    if (!i18n || !select) return;
+    const code = select.value;
+    const previous = i18n.lang;
+    if (code === previous) return;
+    select.disabled = true;
+    _setUiLanguageStatus('Switching language…', 'text-gray-400');
+    try {
+        await i18n.setLanguage(code);
+        _setUiLanguageStatus('Language saved on this unit. AI answers now use it too.', 'text-green-400');
+    } catch (error) {
+        if (i18n.lang !== previous) {
+            try { await i18n.setLanguage(previous, { persist: false }); } catch (e) { /* keep current */ }
+        }
+        select.value = i18n.lang;
+        _setUiLanguageStatus(`Could not change the language: ${error && error.message ? error.message : error}`, 'text-red-400');
+    } finally {
+        select.disabled = false;
+    }
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initLanguageSelector);
+} else {
+    initLanguageSelector();
+}
+
+function applyServerLanguage(code) {
+    const i18n = window.RagnarI18n;
+    if (!i18n || !code || code === i18n.lang) return;
+    i18n.setLanguage(code, { persist: false }).catch(error => {
+        console.warn('Could not apply UI language', code, error);
+    });
 }
 
 // ============================================================================
@@ -32309,6 +32387,7 @@ function _appendRagnarChat(role, text, actions) {
         + (isUser
             ? 'background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;border-bottom-right-radius:4px;'
             : 'background:rgba(30,41,59,.92);color:#e2e8f0;border:1px solid rgba(148,163,184,.16);border-bottom-left-radius:4px;');
+    if (isUser) bubble.setAttribute('translate', 'no');
     bubble.innerHTML = _ragnarChatFormat(text);
     row.appendChild(bubble);
     log.appendChild(row);
@@ -32394,7 +32473,7 @@ function _ragnarChatAskToRun(pending) {
         btn.onclick = () => {
             if (_ragnarChatBusy) return;
             row.remove();
-            _appendRagnarChat('user', approve ? 'Run' : 'Cancel', []);
+            _appendRagnarChat('user', btn.textContent, []);
             _ragnarChatRequest('/api/ai/chat/confirm', { id: pending.id, approve });
         };
         return btn;
@@ -36183,7 +36262,7 @@ async function toggleSerialListener() {
     const portInput = document.getElementById('wd-serial-port');
     const statusEl = document.getElementById('wd-serial-status');
     const btn = document.getElementById('wd-serial-btn');
-    const isConnected = statusEl && statusEl.textContent === 'Connected';
+    const isConnected = statusEl && _i18nText(statusEl) === 'Connected';
 
     try {
         if (isConnected) {

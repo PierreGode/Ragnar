@@ -6,6 +6,7 @@ browse than search.
 ## Getting started
 - [Install Guide](INSTALL.md) — the full installation walkthrough
 - [Knowledge Base](knowledgebase.md) — short verified answers, used by the chat assistant
+- [Languages](i18n.md) — the web UI and AI answers in English, Spanish, French or German
 - [Ragnar OS image](ragnar-os.md) — prebuilt Raspberry Pi image, flash-and-go
 - [Updating Ragnar](updates.md) — updating from the web UI or the terminal
 - [Docker Guide](DOCKER.md) — headless web UI in a container

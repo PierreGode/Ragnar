@@ -119,6 +119,12 @@ Once configured, AI insights appear automatically on the Dashboard tab:
 2. **Vulnerability Assessment** - Prioritized vulnerability analysis
 3. **Network Weaknesses** - Identified attack vectors and security gaps
 
+### Answer language
+
+Every prose answer (dashboard insights, analyses, the chat assistant) is written
+in the UI language picked in **Config > System > Language**. Changing it reruns
+the dashboard insights in the new language. See [Languages](i18n.md).
+
 ### Refresh Insights
 
 Click the "Refresh" button in the AI Insights section to:
