@@ -2,6 +2,15 @@
 
 ## Releases
 
+### 2026-11-08
+
+#### [#1050](https://github.com/PierreGode/Ragnar/pull/1050) — fix(i18n): keep "Watch" module names as "Watch", not "Monitor"
+*branch `fix/i18n-watch-consistency`*
+
+- **Inconsistent translation of "Watch".** Switching the UI language turned some diagnostic-module names from `<X> Watch` into the local word for *Monitor*, while others kept *Watch*. In German, **DNS Watch** showed as "DNS-Monitor" and **ARP Watch** as "ARP-Monitor", but **FTP Watch** / **EIGRP Watch** stayed "Watch"; Spanish and French had the same split (*Monitor/Vigilancia*, *Moniteur/Surveillance*). The packs had machine-translated "Watch" in 17 of the 129 `<X> Watch` strings and left the other 112 alone.
+- **Fix:** restored **"Watch"** as the module name in all 17 strings across `de`/`es`/`fr` (51 values), matching the existing majority. Only the name token changed — translated descriptive text (e.g. the `(KeyTrap / NSEC3 / cache-poisoning)` parenthetical) is kept. Covers ARP, Aircraft, BFD, BGP Path, BLE (incl. the `🛡 BLE Watch` dashboard headers), CDP, CFM, Cert, DNS, DTP and IPsec / IKE Watch. The English **verb** "watch" ("Watch the switch/console/panel") is deliberately left translated.
+- **Validation:** `tests/test_i18n.py` 33 passed (valid JSON, placeholders intact, no edge whitespace, packs cover identical keys). Diff is exactly 17 lines per pack (51 total); verified no other `<X> Watch` value drops "Watch" except the 4 intended verb-sense strings.
+
 ### 2026-11-04
 
 #### [#1046](https://github.com/PierreGode/Ragnar/pull/1046) — fix(system): OS Packages explains held-back packages instead of looking stuck
