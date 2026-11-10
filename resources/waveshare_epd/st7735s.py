@@ -60,15 +60,12 @@ SPI_BUS    = 0
 SPI_DEVICE = 0
 SPI_MAX_HZ = 24_000_000
 
-# MADCTL (0x36): memory access control — scan direction (MY|MX) plus the
-# colour-order bit. The Waveshare 1.44" LCD HAT panel is wired BGR, so bit 3
-# (0x08) must be set or every colour comes out with red and blue swapped
-# (a blonde viking turns blue). This was unnoticed while the UI was monochrome
-# — greys have R=G=B, so the bit does not affect them — and only shows now that
-# the panel draws full colour. Override per panel with RAGNAR_ST7735S_MADCTL
-# (e.g. 0xC0 for a rare RGB-wired unit, or 0x08/0x48/0x88/0xE8 to also change
-# rotation/mirroring); accepts decimal or 0x-hex.
-def _env_madctl(default=0xC8):
+# MADCTL (0x36): memory access control — the scan-direction bits (MY|MX = 0xC0)
+# that orient the 128x128 window. The panel's red/blue swap is handled in the
+# pixel packing (see RB_SWAP), not here, because this panel ignores the MADCTL
+# colour-order bit (0x08). Override per panel with RAGNAR_ST7735S_MADCTL (e.g.
+# 0x08/0x48/0x88/0xE8 to change rotation/mirroring); accepts decimal or 0x-hex.
+def _env_madctl(default=0xC0):
     raw = os.environ.get("RAGNAR_ST7735S_MADCTL")
     if not raw:
         return default
@@ -80,6 +77,20 @@ def _env_madctl(default=0xC8):
 
 
 MADCTL = _env_madctl()
+
+
+# Some ST7735S 1.44" panels swap red and blue no matter what the MADCTL
+# colour-order bit says, so a blonde viking comes out blue. When that happens,
+# swap the channels in the pixel packing instead (see getbuffer). Default on for
+# this panel; set RAGNAR_ST7735S_RB_SWAP=0 for a panel that does honour MADCTL.
+def _env_bool(name, default):
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+RB_SWAP = _env_bool("RAGNAR_ST7735S_RB_SWAP", True)
 
 
 class EPD:
@@ -140,11 +151,21 @@ class EPD:
         pixels = img.getdata()
         buf = bytearray(self.width * self.height * 2)
         idx = 0
-        for r, g, b in pixels:
-            rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
-            buf[idx]     = (rgb565 >> 8) & 0xFF
-            buf[idx + 1] = rgb565 & 0xFF
-            idx += 2
+        if RB_SWAP:
+            # This panel swaps red and blue regardless of the MADCTL colour-order
+            # bit, so do it in the pixel packing: blue into the high (red) field,
+            # red into the low (blue) field. See RB_SWAP.
+            for r, g, b in pixels:
+                rgb565 = ((b & 0xF8) << 8) | ((g & 0xFC) << 3) | (r >> 3)
+                buf[idx]     = (rgb565 >> 8) & 0xFF
+                buf[idx + 1] = rgb565 & 0xFF
+                idx += 2
+        else:
+            for r, g, b in pixels:
+                rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+                buf[idx]     = (rgb565 >> 8) & 0xFF
+                buf[idx + 1] = rgb565 & 0xFF
+                idx += 2
         return bytes(buf)
 
     def display(self, buf):
