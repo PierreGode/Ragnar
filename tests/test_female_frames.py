@@ -64,11 +64,21 @@ def test_shipped_frames_are_ready_made_and_match_the_generator():
     spec.loader.exec_module(gen)
     woman = os.path.join(STATUS_DIR, 'woman')
     names = sorted(n for n in os.listdir(woman) if n.endswith('.png'))
-    assert names == sorted(n for n in os.listdir(os.path.join(woman, 'src')) if n.endswith('.png'))
+    sources = sorted(n for n in os.listdir(os.path.join(woman, 'src')) if n.endswith('.png'))
+    expected = {n: (n, None) for n in sources}
+    for base, kinds in gen.IDLE_VARIANTS.items():
+        for kind in kinds:
+            expected[f'idle_{base}_{kind}.png'] = (base + '.png', kind)
+    assert names == sorted(expected)
     for name in names:
         shipped = Image.open(os.path.join(woman, name))
         assert shipped.mode == '1' and shipped.size == (78, 78)
-        built = gen.render_frame(Image.open(os.path.join(woman, 'src', name)))
+        src_name, kind = expected[name]
+        src = Image.open(os.path.join(woman, 'src', src_name))
+        if kind:
+            built = gen.render_idle_frame(src, src_name[:-4], kind)
+        else:
+            built = gen.render_frame(src)
         # Not byte-exact: resampling rounds differently across Pillow versions.
         diff = sum(bin(a ^ b).count('1') for a, b in zip(shipped.tobytes(), built.tobytes()))
         assert diff < 0.03 * 78 * 78, f'{name}: {diff} pixels differ'
@@ -152,3 +162,39 @@ def test_female_frames_sized_without_default_frames():
     sd.image_series = {}
     sd.load_female_images(1.0)
     assert {f.height for f in sd.female_image_series['IDLE']} == {78}
+
+
+def test_idle_draws_extra_expression_frames_other_statuses_do_not():
+    sd = _unit(mesh_enabled=True, mesh_viking_gender='female')
+    woman = os.path.join(STATUS_DIR, 'woman')
+    files = [n for n in os.listdir(woman) if n.endswith('.png')]
+    extras = [n for n in files if n.startswith('idle_')]
+    assert len(extras) >= 10
+    idle = sd.female_image_series['IDLE']
+    busy = sd.female_image_series['SSHBruteforce']
+    assert len(idle) == len(files)
+    assert len(busy) == len(files) - len(extras)
+    # The plain portraits are in both pools; the extras only in IDLE.
+    assert {id(f) for f in busy} < {id(f) for f in idle}
+    # A status the loader has never heard of falls back to the IDLE pool.
+    sd.ragnarstatustext = 'SomethingNew'
+    sd.update_image_randomizer()
+    assert id(sd.imagegen) in {id(f) for f in idle}
+
+
+def test_idle_variants_change_only_the_face():
+    """An expression variant must differ from its base portrait, but only
+    around the eyes: helmet, hair and shoulders stay pixel-identical."""
+    woman = os.path.join(STATUS_DIR, 'woman')
+    for name in sorted(os.listdir(woman)):
+        if not name.startswith('idle_'):
+            continue
+        base = name.split('_')[1] + '.png'
+        a = Image.open(os.path.join(woman, base))
+        b = Image.open(os.path.join(woman, name))
+        from PIL import ImageChops
+        box = ImageChops.difference(a.convert('L'), b.convert('L')).getbbox()
+        assert box is not None, f'{name} is identical to {base}'
+        x0, y0, x1, y1 = box
+        assert y0 >= 38 and y1 <= 64, f'{name}: changed rows {y0}-{y1}'
+        assert x1 - x0 <= 60, name

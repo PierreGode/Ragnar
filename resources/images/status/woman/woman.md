@@ -12,8 +12,14 @@ of the default viking — see `SharedData.load_female_images` /
 - `src/*.png` — the head-and-shoulders portrait crops (greyscale, 296 px) the
   frames are rendered from.
 
-All frames belong to one **IDLE pool**, and IDLE is the fallback for every scan
-status, so every status draws a random frame from the whole set.
+- `idle_<portrait>_<kind>.png` — idle-only expression variants of the calm,
+  front-facing portraits: `happy` (both eyes closed in a smile), `blink` (eyes
+  shut with lashes) and `wink_l` / `wink_r`. The generator draws them; only the
+  eyes differ from the base portrait, pixel for pixel.
+
+Every scan status draws a random frame from the eight plain portraits. **IDLE**
+draws from those plus the `idle_*` variants, so a unit doing nothing has the
+most variety.
 
 ## How the frames are made
 
@@ -32,12 +38,14 @@ python3 scripts/gen_female_frames.py
 ```
 
 The knobs (`GAMMA`, `CONTRAST`, `LINE_DARK`, `LINE_COVER`) are at the top of the
-script. To add or re-crop a pose from an original illustration, add it to
+script. To add an idle expression, add it to `IDLE_VARIANTS` (the portrait needs
+its eye positions in `EYES`). To add or re-crop a pose from an original illustration, add it to
 `PORTRAITS` and run with `--from-originals <dir>`.
 
 ## Adding a frame by hand
 
 Drop a 78×78 black-and-white `.png` in this folder; it joins the pool
-automatically. To pin specific frames to a specific status, add an entry to
+automatically (name it `idle_…` to show it only while idle). Note that
+re-running the generator deletes and rebuilds every `idle_*.png`. To pin specific frames to a specific status, add an entry to
 `SharedData.WOMAN_STATUS_IMAGES` (`shared.py`), e.g.
 `'SSHBruteforce': ('axe', 'swords')`.

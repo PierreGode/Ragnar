@@ -204,12 +204,12 @@ Viking name (or you pin `mesh_viking_gender = female`), the **e-paper / LCD
 character changes too**: instead of the default frames it draws the shieldmaiden
 art from `resources/images/status/woman/`.
 
-- All of the shieldmaiden frames form one **IDLE pool**, and every status draws
-  a **random** frame from it — the same per-status + random selection the
-  default character animation uses, just sharing one art set across statuses.
-- The pool lives in `SharedData.WOMAN_STATUS_IMAGES` (`shared.py`), which is
-  empty by default (all art is IDLE). Add a status entry there to pin specific
-  art to a specific status later.
+- Every status draws a **random** frame from the eight shieldmaiden portraits.
+  While the unit is **idle** it also draws from ten expression variants of the
+  calm portraits (eyes closed in a smile, a blink, a wink), the same way the
+  default viking has extra idle frames.
+- To pin specific frames to a specific status, add an entry to
+  `SharedData.WOMAN_STATUS_IMAGES` (`shared.py`), which is empty by default.
 - The frames are **78×78, 1-bit**, the same footprint as the default frames,
   so no screen layout changes. They are head-and-shoulders portraits rendered
   from detailed colour illustrations by `scripts/gen_female_frames.py`, which

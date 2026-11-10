@@ -1945,11 +1945,10 @@ class SharedData:
             logger.error(f"Error loading images: {e}")
             raise
 
-    # Which woman/*.png stands in for each scan status. Every image belongs to
-    # the IDLE pool, and because IDLE is also the fallback for any status with
-    # no explicit entry (see load_female_images), all statuses draw from the
-    # whole set — a random shieldmaiden frame regardless of activity. Add a
-    # status entry here later to pin specific art to a specific status.
+    # Which woman/*.png stands in for each scan status. With no entry, a status
+    # draws a random frame from the plain portraits, and IDLE draws from those
+    # plus the idle_*.png expression variants (see load_female_images). Add a
+    # status entry here to pin specific art to a specific status.
     WOMAN_STATUS_IMAGES = {}
 
     def _prepare_female_image(self, img, img_scale):
@@ -2009,15 +2008,19 @@ class SharedData:
         if not prepared:
             logger.warning("status/woman has no usable .png frames.")
             return
+        # idle_*.png are expression variants (closed eyes, blink, wink) meant
+        # for a unit that is doing nothing: only IDLE draws them. Every other
+        # status shares the plain portraits.
+        names_sorted = sorted(prepared)
+        shared_pool = [prepared[b] for b in names_sorted if not b.startswith('idle_')] \
+            or list(prepared.values())
         idle_pool = [prepared[b] for b in self.WOMAN_STATUS_IMAGES.get('IDLE', ())
-                     if b in prepared] or list(prepared.values())
+                     if b in prepared] or [prepared[b] for b in names_sorted]
         for status in self.status_list:
             names = self.WOMAN_STATUS_IMAGES.get(status)
             pool = [prepared[b] for b in names if b in prepared] if names else []
-            self.female_image_series[status] = pool or idle_pool
-        # Always keep an IDLE entry so the randomizer has a fallback even if the
-        # status isn't in status_list yet.
-        self.female_image_series.setdefault('IDLE', idle_pool)
+            self.female_image_series[status] = pool or shared_pool
+        self.female_image_series['IDLE'] = idle_pool
         logger.info(f"Loaded female frames for {len(self.female_image_series)} statuses "
                     f"from {len(prepared)} woman images.")
 

@@ -19,7 +19,9 @@ Two stages, so the frames can be re-tuned without the 17 MB of original art:
       Writes the portrait crops to woman/src/<name>.png (greyscale, 296 px).
 
   gen_female_frames.py
-      Renders woman/<name>.png (78x78, 1-bit) from woman/src/.
+      Renders woman/<name>.png (78x78, 1-bit) from woman/src/, plus the
+      idle-only expression variants woman/idle_<name>_<kind>.png (closed
+      smiling eyes, a blink, a wink) drawn onto the calm portraits.
 
 Tuning knobs are the constants below. Needs Pillow.
 """
@@ -64,6 +66,85 @@ PAINT_OUT = {
          (406, 172), (423, 110), (400, 45)],
     ],
 }
+
+
+# Extra frames shown only while the unit is idle: the calm, front-facing
+# portraits with a different expression drawn on. Named idle_<portrait>_<kind>.
+#   happy = both eyes closed in a smile, blink = eyes shut with lashes,
+#   wink_l / wink_r = one eye closed (left / right as seen on screen).
+IDLE_VARIANTS = {
+    'laptop':    ('happy', 'blink', 'wink_r'),
+    'wifi':      ('happy', 'wink_r'),
+    'bluetooth': ('happy', 'blink'),
+    'swords':    ('happy', 'blink', 'wink_l'),
+}
+
+# Where the eyes are in each woman/src/ portrait: (left edge, top, right edge)
+# of the dark part of the left and the right eye, in the 296 px crop.
+EYES = {
+    'laptop':    ((68, 171, 113), (147, 165, 194)),
+    'swords':    ((73, 160, 124), (167, 164, 220)),
+    'wifi':      ((55, 170, 108), (156, 171, 209)),
+    'bluetooth': ((63, 158, 113), (157, 160, 212)),
+}
+EYE_LINE = 8         # stroke width in the 296 px crop (about 2 px on the sprite)
+
+
+def _eye_box(eye):
+    x0, y0, x1 = eye
+    return (x0 - 7, y0 - 9, x1 + 7, y0 + 50)
+
+
+def _close_eye(im, eye, skin, kind):
+    """Paint one open eye out with the skin tone and draw it closed."""
+    x0, y0, x1, y1 = _eye_box(eye)
+    mask = Image.new('L', im.size, 0)
+    ImageDraw.Draw(mask).ellipse((x0, y0, x1, y1), fill=255)
+    im.paste(skin, mask=mask.filter(ImageFilter.GaussianBlur(3)))
+    draw = ImageDraw.Draw(im)
+    cx, cy, rx = (x0 + x1) // 2, (y0 + y1) // 2 + 6, (x1 - x0) // 2 - 6
+    if kind == 'blink':     # lower-lid curve with lashes
+        draw.arc((cx - rx, cy - 22, cx + rx, cy + 12), 25, 155, fill=0, width=EYE_LINE)
+        for dx in (-rx + 4, 0, rx - 4):
+            draw.line((cx + dx, cy + 8, cx + dx * 1.25, cy + 19), fill=0, width=5)
+    else:                   # smiling upward arc
+        draw.arc((cx - rx, cy - 14, cx + rx, cy + 26), 200, 340, fill=0, width=EYE_LINE)
+
+
+def _eyes_for(name, kind):
+    left, right = EYES[name]
+    return {'happy': (left, right), 'blink': (left, right),
+            'wink_l': (left,), 'wink_r': (right,)}[kind]
+
+
+def idle_variant(src, name, kind):
+    """A portrait crop with the expression `kind` drawn on (see IDLE_VARIANTS)."""
+    im = src.convert('L').copy()
+    left, right = EYES[name]
+    skin = im.getpixel(((left[2] + right[0]) // 2, left[1] + 30))   # between the eyes
+    for eye in _eyes_for(name, kind):
+        _close_eye(im, eye, skin, 'blink' if kind == 'blink' else 'smile')
+    return im
+
+
+def render_idle_frame(src, name, kind):
+    """The display frame for an idle variant.
+
+    Rendering the edited crop on its own would re-dither the whole portrait
+    (the contrast step and the error diffusion both spread a local change), so
+    helmet and hair would flicker between frames. Instead only the eye regions
+    are taken from the edited render and laid over the plain frame: everything
+    but the eyes stays pixel-identical to the base portrait."""
+    frame = render_frame(src)
+    edited = render_frame(idle_variant(src, name, kind))
+    scale = SRC_SIZE // ART
+    ox, oy = (FRAME - ART) // 2, FRAME - ART
+    for eye in _eyes_for(name, kind):
+        x0, y0, x1, y1 = _eye_box(eye)
+        box = (ox + x0 // scale - 1, oy + y0 // scale - 1,
+               ox + -(-x1 // scale) + 1, oy + -(-y1 // scale) + 1)
+        frame.paste(edited.crop(box), box[:2])
+    return frame
 
 
 def _character(path):
@@ -116,10 +197,19 @@ def build_frames():
     names = sorted(n for n in os.listdir(SRC_DIR) if n.endswith('.png'))
     if not names:
         sys.exit(f'no portrait crops in {SRC_DIR} — run with --from-originals first')
+    for stale in os.listdir(WOMAN_DIR):
+        if stale.startswith('idle_') and stale.endswith('.png'):
+            os.remove(os.path.join(WOMAN_DIR, stale))
     for name in names:
-        render_frame(Image.open(os.path.join(SRC_DIR, name))) \
-            .save(os.path.join(WOMAN_DIR, name), optimize=True)
+        src = Image.open(os.path.join(SRC_DIR, name))
+        render_frame(src).save(os.path.join(WOMAN_DIR, name), optimize=True)
         print(f'  {name}')
+        base = name[:-4]
+        for kind in IDLE_VARIANTS.get(base, ()):
+            out = f'idle_{base}_{kind}.png'
+            render_idle_frame(src, base, kind) \
+                .save(os.path.join(WOMAN_DIR, out), optimize=True)
+            print(f'  {out}')
 
 
 def main():
