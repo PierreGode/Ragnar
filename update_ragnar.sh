@@ -548,6 +548,27 @@ else
     echo -e "  ${YELLOW}⚠${NC} tcpdump missing — Traffic Analysis tab stays hidden (apt install tcpdump)"
 fi
 
+echo -e "${BLUE}Step 5.4d: Ensuring GPIO display support on this Pi...${NC}"
+# Raspberry Pi OS ships what the e-Paper / SPI TFT / I2C drivers need; a Kali
+# base (the Ulfberht edition) does not: SPI/I2C are off, spidev / gpiozero /
+# lgpio are missing and the Pi 5 has no gpiochip4 alias, so the screen stayed
+# dark. The installer runs the same script; mirror it here so units that were
+# imaged before the fix get a working screen from an update. A no-op on
+# Raspberry Pi OS and on boards that are not a Pi. Skipped for a headless unit
+# (its service runs headlessRagnar.py), which has no screen to drive.
+_gpio_disp_script="$(dirname "$0")/scripts/pi_gpio_displays.sh"
+if [ ! -f "$_gpio_disp_script" ]; then
+    echo -e "  ${YELLOW}⚠${NC} scripts/pi_gpio_displays.sh missing — skipped"
+elif grep -q 'headlessRagnar\.py' /etc/systemd/system/ragnar.service 2>/dev/null; then
+    echo -e "  ${GREEN}✓${NC} Headless unit — no GPIO display to prepare"
+else
+    _gpio_disp_out="$(bash "$_gpio_disp_script" 2>&1)"
+    echo "$_gpio_disp_out" | grep -v '^REBOOT_REQUIRED$'
+    if echo "$_gpio_disp_out" | grep -q '^REBOOT_REQUIRED$'; then
+        echo -e "  ${YELLOW}⚠${NC} SPI/I2C were just enabled — reboot this unit for the display to come up"
+    fi
+fi
+
 echo -e "${BLUE}Step 5.4c: Ensuring CardputerZero display dependencies...${NC}"
 # The M5Stack CardputerZero (epd_type "st7789v2") normally uses the kernel's LCD
 # framebuffer and keyboard device, which needs the stock launcher out of the way;
