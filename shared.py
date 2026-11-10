@@ -1398,6 +1398,9 @@ class SharedData:
         # woman's Viking name (see load_female_images / update_image_randomizer).
         self.female_image_series = {}
         self._female_unit_cache = None
+        # Full-colour versions of the character frames, built on demand for
+        # colour panels (see color_sprite).
+        self._color_sprite_cache = {}
         self.x_center = 0  # Initialize x_center for image positioning
         self.y_bottom = 0  # Initialize y_bottom for image positioning
         self.x_center1 = 0  # Alternative positioning
@@ -1992,6 +1995,7 @@ class SharedData:
         re-decoding. Runs whether or not the unit is currently female — cheap,
         and the unit's name can change at runtime."""
         self.female_image_series = {}
+        self._color_sprite_cache = {}
         woman_dir = os.path.join(self.statuspicdir, 'woman')
         if not os.path.isdir(woman_dir):
             logger.info("No status/woman directory — female frames unavailable.")
@@ -2005,6 +2009,9 @@ class SharedData:
             img = self._prepare_female_image(img, img_scale)
             if img is not None:
                 prepared[base] = img
+                color_path = os.path.join(woman_dir, 'color', name)
+                if os.path.exists(color_path):
+                    img.info['ragnar_color_path'] = color_path
         if not prepared:
             logger.warning("status/woman has no usable .png frames.")
             return
@@ -2023,6 +2030,90 @@ class SharedData:
         self.female_image_series['IDLE'] = idle_pool
         logger.info(f"Loaded female frames for {len(self.female_image_series)} statuses "
                     f"from {len(prepared)} woman images.")
+
+    # Colour panels (the 1.44" LCD HAT) show the character in full colour on
+    # a dark background, so they need the frame without its white backdrop.
+    COLOR_SPRITE_BG_TOLERANCE = 30   # how far from white still counts as backdrop
+
+    def color_sprite(self, frame=None):
+        """The full-colour RGBA version of a character frame (default: the
+        frame on screen now, imagegen), with a transparent background. None
+        when there is no colour version, so the caller keeps its 1-bit path.
+
+        The shieldmaiden frames have ready-made colour twins in
+        status/woman/color/. The default viking's frames are already colour
+        .bmp files on a white backdrop, which is cut away here. Built on first
+        use and cached, so 1-bit panels never pay for it."""
+        if frame is None:
+            frame = getattr(self, 'imagegen', None)
+        if frame is None or Image is None:
+            return None
+        key = id(frame)
+        # The entry keeps the frame itself: that pins its id (no reuse by a
+        # later image) and lets a recycled id be told apart.
+        hit = self._color_sprite_cache.get(key)
+        if hit is not None and hit[0] is frame:
+            return hit[1]
+        sprite = None
+        try:
+            path = getattr(frame, 'info', {}).get('ragnar_color_path')
+            if path:
+                sprite = Image.open(path).convert('RGBA')
+            elif frame.mode in ('RGB', 'RGBA', 'P'):
+                sprite = self._cut_out_backdrop(frame)
+        except Exception as e:
+            logger.debug(f"colour sprite unavailable: {e}")
+            sprite = None
+        if len(self._color_sprite_cache) > 400:      # frames reloaded: drop stale ids
+            self._color_sprite_cache.clear()
+        self._color_sprite_cache[key] = (frame, sprite)
+        return sprite
+
+    def _cut_out_backdrop(self, frame):
+        """A colour frame drawn on white -> RGBA with the white backdrop
+        transparent. Only white connected to the image border is removed, so
+        white inside the figure (eyes, teeth, highlights) stays."""
+        from PIL import ImageDraw, ImageFilter
+        rgb = frame.convert('RGB')
+        w, h = rgb.size
+        # The frames end in a one-pixel floor line; it is a ruling for the
+        # white e-paper layout, not part of the character.
+        last = [rgb.getpixel((x, h - 1)) for x in range(w)]
+        floor = sum(1 for p in last if max(p) < 110 and max(p) - min(p) < 12) > w * 0.8
+        if floor:
+            rgb.paste((255, 255, 255), (0, h - 1, w, h))
+        marker = (255, 0, 255)
+        work = rgb.copy()
+        for x in range(w):
+            for y in (0, h - 1):
+                if work.getpixel((x, y)) != marker:
+                    ImageDraw.floodfill(work, (x, y), marker, thresh=self.COLOR_SPRITE_BG_TOLERANCE) \
+                        if sum(255 - c for c in work.getpixel((x, y))) <= self.COLOR_SPRITE_BG_TOLERANCE else None
+        for y in range(h):
+            for x in (0, w - 1):
+                if work.getpixel((x, y)) != marker:
+                    ImageDraw.floodfill(work, (x, y), marker, thresh=self.COLOR_SPRITE_BG_TOLERANCE) \
+                        if sum(255 - c for c in work.getpixel((x, y))) <= self.COLOR_SPRITE_BG_TOLERANCE else None
+        bg = Image.new('L', (w, h), 0)
+        bpx, wpx = bg.load(), work.load()
+        for y in range(h):
+            for x in range(w):
+                if wpx[x, y] == marker:
+                    bpx[x, y] = 255
+        alpha = bg.point(lambda v: 255 - v)
+        # The anti-aliased rim between figure and backdrop is a pale blend
+        # with white; on a dark background it would glow. Fade rim pixels by
+        # how light they are instead of keeping them opaque.
+        rim = bg.filter(ImageFilter.MaxFilter(3))
+        apx, rpx, cpx = alpha.load(), rim.load(), rgb.load()
+        for y in range(h):
+            for x in range(w):
+                if apx[x, y] and rpx[x, y]:
+                    cr, cg, cb = cpx[x, y]
+                    apx[x, y] = max(0, min(255, int((255 - min(cr, cg, cb)) * 2.2)))
+        out = rgb.convert('RGBA')
+        out.putalpha(alpha)
+        return out
 
     def _unit_is_female(self):
         """True when mesh_viking_gender is pinned to female, or this unit is on

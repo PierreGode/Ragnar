@@ -4,6 +4,17 @@
 
 ### 2026-11-10
 
+#### [#1056](https://github.com/PierreGode/Ragnar/pull/1056) — feat(display): blonde vikings and a full-colour 1.44" LCD HAT
+*branch `feat/blonde-vikings-lcd-colour`*
+
+- **The default viking is blonde.** The web portrait has a blonde beard; the on-device frames had a brown one. All 90 animation frames and the static mascot are recoloured, beard only: `scripts/recolor_male_blonde.py` treats a pixel as beard when it matches the plain idle frame, so shields, laptops, bottles, pets, swords and hoods keep their colours. On 1-bit panels the beard simply dithers lighter.
+- **The 1.44" ST7735S LCD HAT renders in full colour.** The main screen, the five info pages (Network, Vuln, Discovered, Advanced, Traffic) and the wardriving screens all use a dark theme: gold title, each stat icon or label in its own colour, light values, and the viking drawn in **full colour** — the blonde male, or the shieldmaiden on a female unit. Colour routes through one helper (`_wd_c`), so every other panel keeps its 1-bit black-on-white look unchanged. Network Diagnostic mode stays 1-bit for now.
+- **Colour characters.** The default viking's frames are colour bitmaps on a white backdrop, which is cut away on first use (only white connected to the border, so eye highlights stay, and the pale rim is faded so he does not glow on black). The shieldmaiden gets a full-colour twin of each of her 18 frames in `woman/color/`, rendered from the original illustrations by `scripts/gen_female_frames.py`.
+- **Panel fixes found on real hardware.** This LCD swaps red and blue regardless of the MADCTL colour-order bit (a blonde viking came out blue), so the channels are swapped in the pixel packing instead (`RB_SWAP`, default on). Its 128×128 visible area sits a few pixels into the controller's 132×162 RAM, so the window offset is tuned (default col 3, row 3) to stop the far edges showing unwritten RAM as a colour band. The outer border frame is dropped on the LCD, where an edge-hugging line looked ragged against that offset (kept on the wider e-paper). All three are overridable: `RAGNAR_ST7735S_RB_SWAP`, `RAGNAR_ST7735S_COL_OFFSET` / `RAGNAR_ST7735S_ROW_OFFSET`, `RAGNAR_ST7735S_MADCTL`.
+- **Switches.** `lcd_color: false` restores the black-on-white main screen and `wardriving_lcd_color: false` the wardriving screens. Only the `st7735s` panel changes.
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md#colour), [mesh.md](mesh.md#the-shieldmaiden-shows-on-the-panel-not-just-the-web), [knowledgebase.md](knowledgebase.md) (+1 entry)
+- **Validation:** new `tests/test_lcd_color.py` (20 tests: backdrop cut-out, no pale halo, a colour twin per female frame, cache safety, colour main screen + five info pages for both characters, both switches, other panels stay 1-bit). Verified on a physical 1.44" LCD HAT (ST7735S on a Pi 5): colour correct, edges clean, all pages legible.
+
 #### [#1055](https://github.com/PierreGode/Ragnar/pull/1055) — feat(display): shieldmaiden character on the e-paper and screens for female units
 *branch `feat/female-viking-display`*
 

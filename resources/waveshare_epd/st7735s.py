@@ -23,6 +23,7 @@
 # (1, 2), so the visible area maps to the correct RAM location.
 
 import logging
+import os
 import time
 import struct
 
@@ -31,9 +32,25 @@ logger = logging.getLogger(__name__)
 LCD_WIDTH  = 128
 LCD_HEIGHT = 128
 
-# Visible-window offset into the ST7735S 132x162 RAM for this panel.
-COL_OFFSET = 1
-ROW_OFFSET = 2
+# Visible-window offset into the ST7735S 132x162 RAM for this panel. The 128x128
+# visible area sits a few pixels into the larger RAM, so the window must be
+# shifted or the panel's far edges show unwritten RAM as a band of coloured
+# noise. The right value depends on the panel batch and the MADCTL scan
+# direction; override per panel with RAGNAR_ST7735S_COL_OFFSET /
+# RAGNAR_ST7735S_ROW_OFFSET (decimal or 0x-hex).
+def _env_int(name, default):
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return int(raw, 0)
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s=%r; using %d", name, raw, default)
+        return default
+
+
+COL_OFFSET = _env_int("RAGNAR_ST7735S_COL_OFFSET", 3)
+ROW_OFFSET = _env_int("RAGNAR_ST7735S_ROW_OFFSET", 3)
 
 RST_PIN = 27
 DC_PIN  = 25
@@ -43,10 +60,37 @@ SPI_BUS    = 0
 SPI_DEVICE = 0
 SPI_MAX_HZ = 24_000_000
 
-# MADCTL (0x36): MY|MX set, RGB colour order. Ragnar renders mostly monochrome
-# content, so a red/blue swap would be invisible anyway; RGB keeps colour icons
-# faithful on the panels that honour it.
-MADCTL = 0xC0
+# MADCTL (0x36): memory access control — the scan-direction bits (MY|MX = 0xC0)
+# that orient the 128x128 window. The panel's red/blue swap is handled in the
+# pixel packing (see RB_SWAP), not here, because this panel ignores the MADCTL
+# colour-order bit (0x08). Override per panel with RAGNAR_ST7735S_MADCTL (e.g.
+# 0x08/0x48/0x88/0xE8 to change rotation/mirroring); accepts decimal or 0x-hex.
+def _env_madctl(default=0xC0):
+    raw = os.environ.get("RAGNAR_ST7735S_MADCTL")
+    if not raw:
+        return default
+    try:
+        return int(raw, 0) & 0xFF
+    except (TypeError, ValueError):
+        logger.warning("Invalid RAGNAR_ST7735S_MADCTL=%r; using 0x%02X", raw, default)
+        return default
+
+
+MADCTL = _env_madctl()
+
+
+# Some ST7735S 1.44" panels swap red and blue no matter what the MADCTL
+# colour-order bit says, so a blonde viking comes out blue. When that happens,
+# swap the channels in the pixel packing instead (see getbuffer). Default on for
+# this panel; set RAGNAR_ST7735S_RB_SWAP=0 for a panel that does honour MADCTL.
+def _env_bool(name, default):
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+RB_SWAP = _env_bool("RAGNAR_ST7735S_RB_SWAP", True)
 
 
 class EPD:
@@ -107,11 +151,21 @@ class EPD:
         pixels = img.getdata()
         buf = bytearray(self.width * self.height * 2)
         idx = 0
-        for r, g, b in pixels:
-            rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
-            buf[idx]     = (rgb565 >> 8) & 0xFF
-            buf[idx + 1] = rgb565 & 0xFF
-            idx += 2
+        if RB_SWAP:
+            # This panel swaps red and blue regardless of the MADCTL colour-order
+            # bit, so do it in the pixel packing: blue into the high (red) field,
+            # red into the low (blue) field. See RB_SWAP.
+            for r, g, b in pixels:
+                rgb565 = ((b & 0xF8) << 8) | ((g & 0xFC) << 3) | (r >> 3)
+                buf[idx]     = (rgb565 >> 8) & 0xFF
+                buf[idx + 1] = rgb565 & 0xFF
+                idx += 2
+        else:
+            for r, g, b in pixels:
+                rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+                buf[idx]     = (rgb565 >> 8) & 0xFF
+                buf[idx + 1] = rgb565 & 0xFF
+                idx += 2
         return bytes(buf)
 
     def display(self, buf):
