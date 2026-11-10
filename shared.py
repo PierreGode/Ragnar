@@ -1974,13 +1974,14 @@ class SharedData:
         pastes onto the panel as a direct 1-bit copy."""
         if img is None or Image is None:
             return None
-        # Match the standard frame height (IDLE frames are 78px), scaled up on
-        # large displays exactly like the .bmp frames are.
-        base_h = 78
-        ref = getattr(self, 'IDLE', None)
-        if isinstance(getattr(ref, 'height', None), int) and ref.height > 0 and img_scale <= 1.05:
-            base_h = ref.height
-        target_h = max(1, int(base_h * (img_scale if img_scale and img_scale > 1.05 else 1.0)))
+        # Match the height of the standard animation frames as loaded (78px,
+        # already scaled up on large displays). Note self.IDLE is the small
+        # 28px status icon, not an animation frame, so it is not a reference.
+        target_h = max(1, int(78 * (img_scale if img_scale and img_scale > 1.05 else 1.0)))
+        for frames in (getattr(self, 'image_series', None) or {}).values():
+            if frames:
+                target_h = frames[0].height
+                break
         # Flatten transparency onto white, then work in grayscale at frame size.
         if img.mode == 'RGBA':
             bg = Image.new('RGB', img.size, (255, 255, 255))

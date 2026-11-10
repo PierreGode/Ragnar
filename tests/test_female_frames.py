@@ -33,7 +33,8 @@ def _unit(**cfg):
     sd.imagegen = None
     sd.ragnarstatustext = 'IDLE'
     male = Image.open(os.path.join(STATUS_DIR, 'IDLE', 'IDLE1.bmp'))
-    sd.IDLE = male
+    # The per-status icon (28px), as load_images sets it. Not a frame.
+    sd.IDLE = Image.open(os.path.join(STATUS_DIR, 'IDLE', 'IDLE.bmp'))
     sd.image_series = {s: [male] for s in sd.status_list}
     sd.load_female_images(1.0)
     return sd
@@ -104,3 +105,18 @@ def test_missing_female_art_falls_back_to_default_frames():
     sd.update_image_randomizer()
     assert sd.imagegen is sd.image_series['IDLE'][0]
     assert sd.active_image_series() is sd.image_series
+
+
+def test_female_frames_follow_scaled_default_frames():
+    sd = _unit()
+    big = sd.image_series['IDLE'][0].resize((117, 117))
+    sd.image_series = {s: [big] for s in sd.status_list}
+    sd.load_female_images(1.5)
+    assert {f.height for f in sd.female_image_series['IDLE']} == {117}
+
+
+def test_female_frames_sized_without_default_frames():
+    sd = _unit()
+    sd.image_series = {}
+    sd.load_female_images(1.0)
+    assert {f.height for f in sd.female_image_series['IDLE']} == {78}

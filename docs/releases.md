@@ -12,7 +12,7 @@
 - **Gender rule.** An explicit `mesh_viking_gender` wins, on or off the mesh; otherwise the Viking name decides, and only while the mesh is on. A change takes effect on the next animation frame with no restart. Male and non-mesh units are unchanged, and a unit with no female art falls back to the default frames.
 - **Not covered:** the WiFi Pineapple Pager port draws no character animation, so nothing changes there. The small per-action status icons are not character art and stay as they are.
 - **Docs:** [mesh.md](mesh.md#the-shieldmaiden-shows-on-the-panel-not-just-the-web)
-- **Validation:** new `tests/test_female_frames.py` (12 tests: frame loading, gender resolution, per-status selection, runtime gender change, fallback). Each screen's paste path was rendered offline at native size with the female frames. Not yet seen on a physical panel: the dev box is headless.
+- **Validation:** new `tests/test_female_frames.py` (14 tests: frame loading, gender resolution, per-status selection, runtime gender change, fallback). Each screen's paste path was rendered offline at native size with the female frames. Not yet seen on a physical panel: the dev box is headless.
 
 #### [#1051](https://github.com/PierreGode/Ragnar/pull/1051) — fix(network): live Online/Offline status for Discovered Hosts + lighter status loop
 *branch `fix/host-presence-realtime`*
