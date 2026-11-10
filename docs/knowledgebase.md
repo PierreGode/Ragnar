@@ -735,6 +735,11 @@ e-Paper, TFT and OLED panels, MAX7219 LED matrices, the WiFi Pineapple Pager, an
 Source: README.md
 <!-- proof: README.md | 2.13" e-Paper HAT -->
 
+### Why is my e-Paper or TFT screen dark on Ragnar OS Ulfberht?
+Units imaged before the fix lack SPI, the GPIO Python modules and the Pi 5 GPIO alias. Run Update, then reboot once.
+Source: ragnar-os-ulfberht.md
+<!-- proof: docs/ragnar-os-ulfberht.md | then **reboot once** so SPI and I2C come up -->
+
 ### What is kiosk mode?
 It shows the Ragnar web UI fullscreen in Chromium on a screen attached to the Pi, and starts on every boot.
 Source: kiosk.md

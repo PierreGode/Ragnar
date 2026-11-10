@@ -86,6 +86,33 @@ The Kali base keeps its own console login (`kali` / `kali` by default — change
 it); Ragnar itself runs as the `ragnar` service user, exactly as on the standard
 image.
 
+## GPIO displays (e-Paper, TFT, OLED)
+
+Raspberry Pi OS ships everything a GPIO-attached screen needs; the Kali base
+ships none of it. `scripts/pi_gpio_displays.sh` closes the gap, and both
+`install_ragnar.sh` (also in `--image-build`) and `update_ragnar.sh` (Step 5.4d)
+run it:
+
+| Missing on the Kali base | What the script does |
+|---|---|
+| SPI and I2C are off, and there is no `raspi-config` to switch them on | Sets `dtparam=spi=on` and `dtparam=i2c_arm=on` in `/boot/firmware/config.txt` (backup in `config.txt.ragnar-bak`) and loads `i2c-dev` at boot |
+| No `spidev`, `smbus2` or `gpiozero` Python modules | Installs the distro packages, falling back to pip |
+| No `lgpio`, the only `gpiozero` backend that works on a Pi 5, and no package for it | Builds the pinned `lg` v0.2.2 release from source and installs the Python binding |
+| No `/dev/gpiochip4`, which `gpiozero` opens on a Pi 5 | Adds a udev alias for the Pi 5 header (`/etc/udev/rules.d/99-ragnar-pi5-gpiochip4.rules`) |
+
+A unit imaged before this fix has a dark screen. Run **Update** from the web UI
+(or `sudo ./update_ragnar.sh`), then **reboot once** so SPI and I2C come up.
+The first run takes about two minutes on a Pi 5 because `lgpio` is compiled;
+later runs find everything in place and change nothing. To run only this step:
+
+```bash
+sudo bash /home/ragnar/Ragnar/scripts/pi_gpio_displays.sh
+```
+
+Every line it prints is `[ok]` or `[!!]`; on a Pi 5 the last check opens the
+GPIO header through `lgpio`, so an `[ok]` there means the screen can be driven.
+On Raspberry Pi OS the script finds everything present and is a no-op.
+
 ## How the image is built
 
 The recipe lives in the **private** `PierreGode/RagnarOS` pipeline (the app stays

@@ -96,6 +96,16 @@ def test_gpiochip4_rule_written_once_and_matches_only_rp1(tmp_path):
     assert rule.read_text() == body
 
 
+def test_i2c_dev_modules_load_written_once(tmp_path):
+    conf = tmp_path / 'modules-load.d' / 'ragnar-i2c.conf'
+    snippet = f'I2C_MODLOAD="{conf}"; IMAGE_BUILD=true; ensure_i2c_dev'
+    first = _sh(snippet)
+    if 'loads at boot' in first.stdout:
+        pytest.skip('host already loads i2c-dev at boot')
+    assert 'set to load at boot' in first.stdout
+    assert [l for l in conf.read_text().splitlines() if not l.startswith('#')] == ['i2c-dev']
+
+
 def test_not_a_pi_is_a_noop():
     if os.path.exists('/proc/device-tree/model') and 'Raspberry Pi' in open('/proc/device-tree/model').read():
         pytest.skip('running on a Raspberry Pi')

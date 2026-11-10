@@ -5,6 +5,7 @@
 # Raspberry Pi OS ships everything the display drivers need. A Kali base (the
 # Ragnar OS "Ulfberht" edition) ships none of it, so a screen stayed dark:
 #   1. no raspi-config, so SPI/I2C were never switched on in config.txt
+#      (and i2c-dev was never loaded, so there was no /dev/i2c-1)
 #   2. no spidev / gpiozero / smbus2 Python modules
 #   3. no lgpio, the only gpiozero backend that works on a Pi 5, and no
 #      package for it (it is built from source here)
@@ -87,6 +88,24 @@ enable_dtparam() {
     return 0
 }
 
+# dtparam=i2c_arm=on brings the bus up, but /dev/i2c-1 only appears once the
+# i2c-dev module is loaded. raspi-config adds it to /etc/modules; do the same
+# through modules-load.d and load it now on a live system.
+I2C_MODLOAD="/etc/modules-load.d/ragnar-i2c.conf"
+ensure_i2c_dev() {
+    if grep -qsxE '[[:space:]]*i2c[-_]dev[[:space:]]*' /etc/modules /etc/modules-load.d/*.conf; then
+        ok "i2c-dev loads at boot"
+    else
+        mkdir -p "$(dirname "$I2C_MODLOAD")" 2>/dev/null
+        if printf '# Ragnar: /dev/i2c-* for I2C displays\ni2c-dev\n' > "$I2C_MODLOAD"; then
+            ok "i2c-dev set to load at boot"
+        else
+            warn "could not write $I2C_MODLOAD — I2C displays need 'modprobe i2c-dev'"
+        fi
+    fi
+    [ "$IMAGE_BUILD" = true ] || modprobe i2c-dev >/dev/null 2>&1
+}
+
 enable_interfaces() {
     if command -v raspi-config >/dev/null 2>&1; then
         ok "raspi-config present — SPI/I2C are managed by it"
@@ -103,6 +122,7 @@ enable_interfaces() {
             warn "could not set dtparam=${p}=on in $cfg"
         fi
     done
+    ensure_i2c_dev
     # Changed the file but the bus is already live (or there is no live
     # hardware to speak of): nothing to reboot for.
     if [ "$IMAGE_BUILD" = true ] || { [ -e /dev/spidev0.0 ] && ls /dev/i2c-1 >/dev/null 2>&1; }; then
