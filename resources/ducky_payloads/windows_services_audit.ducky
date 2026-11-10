@@ -1,0 +1,10 @@
+REM Windows services, scheduled tasks and autoruns to the Desktop (services.txt).
+REM Authorized testing only — persistence/misconfiguration review.
+DELAY 1000
+GUI r
+DELAY 500
+STRING cmd
+ENTER
+DELAY 1000
+STRING (sc query state= all & echo. & tasklist /svc & echo. & schtasks /query /fo LIST /v & echo. & wmic startup get Caption,Command,Location) > "%USERPROFILE%\Desktop\services.txt"
+ENTER

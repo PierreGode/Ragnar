@@ -1,0 +1,10 @@
+REM Windows installed-software + hotfix inventory to the Desktop (software.txt).
+REM Authorized testing only — useful for patch/version triage.
+DELAY 1000
+GUI r
+DELAY 500
+STRING powershell -w hidden -nop
+ENTER
+DELAY 1000
+STRING $o="$env:USERPROFILE\Desktop\software.txt"; Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*,HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* | Select DisplayName,DisplayVersion,Publisher | Sort DisplayName | Format-Table -Auto | Out-File $o; Get-HotFix | Sort InstalledOn -Desc | Format-Table -Auto | Out-File -Append $o
+ENTER
