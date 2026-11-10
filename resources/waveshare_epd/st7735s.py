@@ -49,8 +49,8 @@ def _env_int(name, default):
         return default
 
 
-COL_OFFSET = _env_int("RAGNAR_ST7735S_COL_OFFSET", 1)
-ROW_OFFSET = _env_int("RAGNAR_ST7735S_ROW_OFFSET", 2)
+COL_OFFSET = _env_int("RAGNAR_ST7735S_COL_OFFSET", 3)
+ROW_OFFSET = _env_int("RAGNAR_ST7735S_ROW_OFFSET", 3)
 
 RST_PIN = 27
 DC_PIN  = 25
