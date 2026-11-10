@@ -1919,12 +1919,12 @@ class Display:
         # every element gets a theme colour; on a 1-bit canvas c() is plain
         # black ink, exactly as before.
         c = lambda key: self._wd_c(draw, key)
-        # --- frame + header ---
-        # The header keeps a small connection glyph in the top-left corner and
-        # the battery in the top-right, so the centred title is fitted to the
-        # middle strip only (never colliding with either) and the divider sits
-        # below all three.
-        draw.rectangle((0, 0, W - 1, H - 1), outline=c('frame'))
+        # --- header ---
+        # No outer border frame: a line hugging the panel edge collides with the
+        # ST7735S's few-pixel visible-area offset and looks ragged. The section
+        # dividers below are kept. The header keeps a small connection glyph in
+        # the top-left corner and the battery in the top-right, so the centred
+        # title is fitted to the middle strip only (never colliding with either).
         # Left connection glyph + IP octet, confined to the top-left so they
         # clear the title. `left_used` grows to whatever they occupy so the
         # title padding can step around them.
@@ -2716,7 +2716,9 @@ class Display:
         h = getattr(self, 'render_h', self.shared_data.height)
         font = self.shared_data.font_arial9
 
-        draw.rectangle((1, 1, w - 1, h - 1), outline=self._wd_c(draw, 'frame'))
+        # No outer border frame — it hugs the panel edge where the ST7735S's
+        # visible-area offset makes it look ragged; the footer divider below and
+        # the per-page dividers are kept.
 
         ap_on = getattr(self.shared_data, 'wardrive_ap_active', False)
         hint = "K1Exit K2WiFi K3APoff" if ap_on else "K1Exit K2WiFi K3AP"
