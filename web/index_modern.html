@@ -1564,7 +1564,10 @@
                         </svg>
                         <div class="flex-1 text-sm">
                             <p class="text-blue-200 font-semibold mb-1">Host Status Detection</p>
-                            <p class="text-blue-300/80">
+                            <p id="network-status-live" class="text-blue-300/80 hidden">
+                                Every known host is ARP-probed every 2 seconds while this page is open. A host turns Offline (🔴 red dot) within about 10 seconds of going silent, and Online again within seconds of answering. Dashboard target counts still follow the slower Max Failed Pings rule.
+                            </p>
+                            <p id="network-status-legacy" class="text-blue-300/80">
                                 ARP scans run every <strong>60 seconds</strong>. A host shows as offline (🔴 red dot) after <strong id="network-status-failed-pings">15</strong> consecutive failed pings 
                                 (~<strong id="network-status-offline-time">15 minutes</strong>). Configure <em>Max Failed Pings Before Offline</em> in <a href="#" onclick="showTab('config'); return false;" class="text-blue-400 hover:text-blue-300 underline">Config</a>.
                             </p>
@@ -10148,7 +10151,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261104-i18n"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261110-presence"></script>
 
 
 

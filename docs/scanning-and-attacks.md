@@ -23,6 +23,51 @@ still show up if [Traffic Analysis](traffic-analysis.md) sees them on the wire.
   ("Honor Scan Blacklists") lives in Settings.
 - Results and every nmap invocation are logged (see **Logging** below).
 
+### Discovered Hosts: live Online / Offline status
+
+The **Status** column of the Discovered Hosts table is a live presence
+verdict, not the stored scan result. A small in-process monitor
+(`host_presence.py`) keeps asking every known host on the LAN "are you still
+there?" and pushes each change to the open page over the WebSocket, so only
+the affected Status cell is redrawn.
+
+- **How it checks.** Each known host gets a unicast ARP request to its last
+  known MAC. A host cannot use the network without answering ARP, so this
+  works on firewalled devices too, and an access point buffers unicast frames
+  for a sleeping Wi-Fi client where a broadcast is often lost. A host that
+  misses a reply is also pinged (ICMP echo) and ARPed by broadcast; an answer
+  on any channel keeps it Online.
+- **How fast.** While a dashboard is open, hosts are probed every 2 seconds
+  and a silent host turns **Offline within about 10 seconds** (6 seconds of
+  silence after the first unanswered probe, at least 4 probes). With no
+  dashboard open the monitor idles: a probe every 10 seconds, Offline after
+  about 30.
+- **Coming back.** The monitor listens to every ARP frame on the segment. A
+  device that powers on announces itself by ARP (including the `0.0.0.0`
+  probe a DHCP client sends), so it turns Online at once. Offline hosts are
+  also re-probed every 4 seconds, and every 12 seconds once they have been
+  gone for 10 minutes.
+- **What it costs.** No subprocesses and no disk writes: one 42-byte frame
+  per host per interval over a single raw socket. It needs root (the service
+  already runs as root) and an IPv4 address on the LAN interface. At most
+  1024 hosts are tracked.
+- **What it does not change.** The hosts database keeps its slower
+  alive/degraded bookkeeping (see
+  [Asset Inventory](asset-inventory.md#how-a-hosts-alivedegraded-status-is-decided)),
+  which decides what the orchestrator scans and what the Dashboard target
+  counts show. Presence is kept in memory only.
+- **Sleeping devices.** A phone or battery device that stops answering for
+  more than about 8 seconds shows Offline until it wakes. That is the
+  trade-off of a 10 second verdict.
+- **Fallback.** If the monitor cannot run (not root, no address yet,
+  `host_presence_enabled` set to `false` in the config), the column falls back
+  to the stored status and the banner above the table says so. A saved network
+  other than the one Ragnar is attached to always shows its stored status.
+
+Endpoint: `GET /api/network/presence` returns the verdict per IP plus the
+monitor's mode and counters. `GET /api/network/stable` carries the same
+verdict in each host's `status` (`up`, `down`, or `unknown`).
+
 ### IP range scan (host discovery)
 
 On the **Networking → Hosts** tab, the **IP Range Scan** card sweeps a whole

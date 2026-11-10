@@ -429,6 +429,7 @@ _Ground truth: `webapp_modern.py` as of December 2025. Methods shown exactly as 
 | `/api/logs/activity` | GET | Activity feed summarizing recent actions. |
 | `/api/network` | GET | Current network snapshot (hosts, ports, tags). |
 | `/api/network/stable` | GET | Debounced network stats for widgets that poll less frequently. |
+| `/api/network/presence` | GET | Live up/down verdict per host from the ARP presence monitor, with its mode and counters. |
 
 ### 20.4 Configuration & Profile Management
 | Path | Methods | Purpose |
