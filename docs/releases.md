@@ -4,6 +4,16 @@
 
 ### 2026-11-10
 
+#### [#1055](https://github.com/PierreGode/Ragnar/pull/1055) — feat(display): shieldmaiden character on the e-paper and screens for female units
+*branch `feat/female-viking-display`*
+
+- **The on-device viking is now a woman on female units.** A mesh unit named after a woman (or with `mesh_viking_gender = female`) already showed the female portrait in the web header, but its own display kept animating the default bearded viking. It now animates the shieldmaiden frames from `resources/images/status/woman/` (8 line-art frames, one shared pool, a random frame per tick for every status).
+- **Screens covered:** the e-paper main screen, the compact LCD/TFT layouts, the 1.44" wardriving pages (including the gold viking page on the colour theme) and the round GC9A01, which tints her with the configured mascot colour. The frames are portrait (52×78) rather than square, so the round display centres them instead of stretching them.
+- **Same gender rule as the web header.** An explicit `mesh_viking_gender` wins, otherwise the Viking name decides, and only while the mesh is on. A change takes effect on the next animation frame with no restart. Male and non-mesh units are unchanged, and a unit with no female art falls back to the default frames.
+- **Not covered:** the WiFi Pineapple Pager port draws no character animation, so nothing changes there. The small per-action status icons are not character art and stay as they are.
+- **Docs:** [mesh.md](mesh.md#the-shieldmaiden-shows-on-the-panel-not-just-the-web)
+- **Validation:** new `tests/test_female_frames.py` (10 tests: frame loading, gender resolution, per-status selection, runtime gender change, fallback). Each screen's paste path was rendered offline at native size with the female frames. Not yet seen on a physical panel: the dev box is headless.
+
 #### [#1051](https://github.com/PierreGode/Ragnar/pull/1051) — fix(network): live Online/Offline status for Discovered Hosts + lighter status loop
 *branch `fix/host-presence-realtime`*
 
