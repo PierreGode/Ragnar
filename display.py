@@ -3514,11 +3514,21 @@ class Display:
         # ── frame cache: (status, frame_idx, tint) → RGBA sprite ─────────
         _frame_cache = {}
 
+        def _active_series():
+            # Shieldmaiden frames for a female mesh unit, default ones otherwise.
+            sd = self.shared_data
+            try:
+                return sd.active_image_series()
+            except Exception:
+                return getattr(sd, "image_series", {})
+
         def _get_colorized_frame(status, idx, tint):
-            key = (status, idx, tint)
+            series = _active_series()
+            # id(series) keeps male and female frames apart if the unit's
+            # gender is changed while the display is running.
+            key = (id(series), status, idx, tint)
             if key in _frame_cache:
                 return _frame_cache[key]
-            series = getattr(self.shared_data, "image_series", {})
             frames = series.get(status) or series.get("IDLE") or []
             if not frames:
                 _frame_cache[key] = None
@@ -3526,7 +3536,15 @@ class Display:
             src = frames[idx % len(frames)]
             tint = _tint_for(status)
             try:
-                gray  = src.convert("L").resize((MASCOT_SZ, MASCOT_SZ), _Image.LANCZOS)
+                gray = src.convert("L")
+                if gray.width != gray.height:
+                    # Portrait frames (the shieldmaiden) are centred on a white
+                    # square so they are not stretched to the mascot box.
+                    side = max(gray.size)
+                    sq = _Image.new("L", (side, side), 255)
+                    sq.paste(gray, ((side - gray.width) // 2, (side - gray.height) // 2))
+                    gray = sq
+                gray  = gray.resize((MASCOT_SZ, MASCOT_SZ), _Image.LANCZOS)
                 alpha = _ImageOps.invert(gray)   # dark pixels → opaque, white → transparent
                 sprite = _Image.new("RGBA", (MASCOT_SZ, MASCOT_SZ), tint + (255,))
                 sprite.putalpha(alpha)
@@ -3537,7 +3555,7 @@ class Display:
             return _frame_cache[key]
 
         def _frame_count(status):
-            series = getattr(self.shared_data, "image_series", {})
+            series = _active_series()
             frames = series.get(status) or series.get("IDLE") or []
             return max(1, len(frames))
 

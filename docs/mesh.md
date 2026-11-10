@@ -197,6 +197,43 @@ Override from the shell with `mesh_viking_name` if you would rather choose:
 python3 -c "import mesh_manager; print(mesh_manager.derive_viking_name())"
 ```
 
+### The shieldmaiden shows on the panel, not just the web
+
+Gender isn't only a web-UI portrait swap. When a mesh unit carries a woman's
+Viking name (or you pin `mesh_viking_gender = female`), the **e-paper / LCD
+character changes too**: instead of the default frames it draws the shieldmaiden
+art from `resources/images/status/woman/`.
+
+- All of the shieldmaiden frames form one **IDLE pool**, and every status draws
+  a **random** frame from it — the same per-status + random selection the
+  default character animation uses, just sharing one art set across statuses.
+- The pool lives in `SharedData.WOMAN_STATUS_IMAGES` (`shared.py`), which is
+  empty by default (all art is IDLE). Add a status entry there to pin specific
+  art to a specific status later.
+- The whole Ragnar UI is **1-bit black/white** (the render canvas is
+  `Image.new('1', …)` for the LCD/TFT as well as e-paper), so the `woman/*.png`
+  art must be **simple, high-contrast black-on-white line art** — the same
+  style as the built-in male frames. Detailed or photographic art cannot render
+  legibly once reduced to a ~52×78 monochrome sprite (it becomes noise or a
+  blob). At load each frame is just flattened onto white, scaled to the standard
+  frame height, and thresholded to 1-bit (no dithering), so a well-drawn line-art
+  icon drops straight in on every panel size with no layout change. Tune the
+  black/white cut point with `SharedData.WOMAN_BW_THRESHOLD` (higher = heavier
+  lines).
+- **Every screen that shows the viking follows suit**: the e-paper main screen,
+  the compact LCD/TFT layouts, the 1.44" wardriving pages (including the gold
+  viking page on the colour theme) and the round GC9A01, which tints the
+  shieldmaiden with the configured mascot colour just like the default
+  character. The frames are portrait rather than square; the round display
+  centres them instead of stretching them.
+- Changing the name or `mesh_viking_gender` takes effect on the next animation
+  frame, with no restart. With the mesh off, the unit keeps the default
+  character (the web header does the same).
+- Gender is resolved from the **same source of truth as the fleet portrait**
+  (`is_female_viking` / `mesh_viking_gender`), so what a unit shows on its own
+  screen matches how it appears in every peer's mesh list. A male or
+  non-mesh unit is unaffected and keeps the default frames.
+
 ### Clashes are detected, not prevented
 
 Both identifiers are set independently on each unit, so nothing *prevents* a

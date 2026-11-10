@@ -1393,6 +1393,11 @@ class SharedData:
         self.lost_target_ips = []
         self.last_sync_timestamp = 0.0
         self.imagegen = None  # Initialize imagegen variable
+        # Female (shieldmaiden) status frames, loaded from status/woman/. Used
+        # for the on-screen character when this unit is on the mesh with a
+        # woman's Viking name (see load_female_images / update_image_randomizer).
+        self.female_image_series = {}
+        self._female_unit_cache = None
         self.x_center = 0  # Initialize x_center for image positioning
         self.y_bottom = 0  # Initialize y_bottom for image positioning
         self.x_center1 = 0  # Alternative positioning
@@ -1928,9 +1933,142 @@ class SharedData:
                 self.x_center1 = self.width // 2  # Center horizontally
                 self.y_bottom1 = self.height - 20  # Default bottom position
 
+            # Female (shieldmaiden) character frames for mesh units named after
+            # a woman. Loaded here so they share the same scale as the standard
+            # frames and are ready before the first randomizer tick.
+            try:
+                self.load_female_images(img_scale)
+            except Exception as e:
+                logger.error(f"Error loading female (woman) images: {e}")
+
         except Exception as e:
             logger.error(f"Error loading images: {e}")
             raise
+
+    # Which woman/*.png stands in for each scan status. Every image belongs to
+    # the IDLE pool, and because IDLE is also the fallback for any status with
+    # no explicit entry (see load_female_images), all statuses draw from the
+    # whole set — a random shieldmaiden frame regardless of activity. Add a
+    # status entry here later to pin specific art to a specific status.
+    WOMAN_STATUS_IMAGES = {}
+
+    # Grayscale cut point (0-255) for reducing woman/*.png to 1-bit black/white
+    # on the monochrome panel: a pixel brighter than this goes white, the rest
+    # black. Set high (200) so anti-aliased line edges from the downscale still
+    # count as black and thin lines don't break up. Lower it for a lighter
+    # figure, raise it toward 255 for heavier/thicker lines. See
+    # _prepare_female_image. (Source art should be simple black-on-white line
+    # art — detailed/photographic art can't render legibly at sprite size.)
+    WOMAN_BW_THRESHOLD = 200
+
+    def _prepare_female_image(self, img, img_scale):
+        """Turn a status/woman/*.png into a clean 1-bit character frame sized to
+        match the standard frames.
+
+        The whole Ragnar UI is 1-bit black/white, so the source art is expected
+        to be *simple, high-contrast line art* (black on white, like the male
+        frames) — detailed/photographic art cannot render legibly at sprite
+        size on a 1-bit panel. We just flatten onto white, scale to the frame
+        height, and threshold to pure black/white with NO dithering (dithering
+        is what turns tones into random-pixel noise on e-paper). The result
+        pastes onto the panel as a direct 1-bit copy."""
+        if img is None or Image is None:
+            return None
+        # Match the standard frame height (IDLE frames are 78px), scaled up on
+        # large displays exactly like the .bmp frames are.
+        base_h = 78
+        ref = getattr(self, 'IDLE', None)
+        if isinstance(getattr(ref, 'height', None), int) and ref.height > 0 and img_scale <= 1.05:
+            base_h = ref.height
+        target_h = max(1, int(base_h * (img_scale if img_scale and img_scale > 1.05 else 1.0)))
+        # Flatten transparency onto white, then work in grayscale at frame size.
+        if img.mode == 'RGBA':
+            bg = Image.new('RGB', img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[-1])
+            img = bg
+        gray = img.convert('L')
+        if gray.height != target_h:
+            ratio = target_h / float(gray.height)
+            resample = getattr(Image, 'Resampling', Image).LANCZOS
+            gray = gray.resize((max(1, int(gray.width * ratio)), target_h), resample)
+        # Threshold to 1-bit, no dithering (mode '1' via point()). A fairly high
+        # cut keeps anti-aliased line edges (mid-grays from the downscale) as
+        # black, so thin lines survive instead of breaking up.
+        return gray.point(lambda p: 255 if p > self.WOMAN_BW_THRESHOLD else 0, mode='1')
+
+    def load_female_images(self, img_scale):
+        """Build the per-status female frame pool from status/woman/*.png.
+
+        Each PNG is loaded and prepared once; the status map then references the
+        prepared copies, so a status with several images shares them rather than
+        re-decoding. Runs whether or not the unit is currently female — cheap,
+        and the unit's name can change at runtime."""
+        self.female_image_series = {}
+        woman_dir = os.path.join(self.statuspicdir, 'woman')
+        if not os.path.isdir(woman_dir):
+            logger.info("No status/woman directory — female frames unavailable.")
+            return
+        prepared = {}
+        for name in os.listdir(woman_dir):
+            if not name.lower().endswith('.png'):
+                continue
+            base = os.path.splitext(name)[0]
+            img = self.load_image(os.path.join(woman_dir, name))
+            img = self._prepare_female_image(img, img_scale)
+            if img is not None:
+                prepared[base] = img
+        if not prepared:
+            logger.warning("status/woman has no usable .png frames.")
+            return
+        idle_pool = [prepared[b] for b in self.WOMAN_STATUS_IMAGES.get('IDLE', ())
+                     if b in prepared] or list(prepared.values())
+        for status in self.status_list:
+            names = self.WOMAN_STATUS_IMAGES.get(status)
+            pool = [prepared[b] for b in names if b in prepared] if names else []
+            self.female_image_series[status] = pool or idle_pool
+        # Always keep an IDLE entry so the randomizer has a fallback even if the
+        # status isn't in status_list yet.
+        self.female_image_series.setdefault('IDLE', idle_pool)
+        logger.info(f"Loaded female frames for {len(self.female_image_series)} statuses "
+                    f"from {len(prepared)} woman images.")
+
+    def _unit_is_female(self):
+        """True when this unit is on the mesh and carries a woman's Viking name
+        (or an explicit female gender override). Mirrors webapp _mesh_viking_female
+        so the e-paper/LCD character matches the fleet portrait. Cached on the
+        configured name+gender so the per-frame randomizer never re-derives it."""
+        cfg = self.config
+        if not cfg.get('mesh_enabled'):
+            return False
+        gender = (cfg.get('mesh_viking_gender') or '').strip().lower()
+        name = (cfg.get('mesh_viking_name') or '').strip()
+        cache = self._female_unit_cache
+        if cache is not None and cache[0] == (name, gender):
+            return cache[1]
+        result = False
+        if gender == 'female':
+            result = True
+        elif gender == 'male':
+            result = False
+        else:
+            try:
+                import mesh_manager
+                resolved = name or mesh_manager.derive_viking_name()
+                result = mesh_manager.is_female_viking(resolved)
+            except Exception:
+                result = False
+        self._female_unit_cache = ((name, gender), result)
+        return result
+
+    def active_image_series(self):
+        """The per-status frame pools the on-device character should animate
+        from right now: the shieldmaiden pools for a female mesh unit, the
+        default ones otherwise. Screens that walk the frames themselves (the
+        round GC9A01) read this instead of image_series so they follow the
+        unit's gender exactly like update_image_randomizer does."""
+        if self.female_image_series and self._unit_is_female():
+            return self.female_image_series
+        return getattr(self, 'image_series', {})
 
     def update_ragnarstatus(self):
         """ Using getattr to obtain the reference of the attribute with the name stored in self.ragnarorch_status"""
@@ -1967,6 +2105,18 @@ class SharedData:
         """Update the image randomizer and the imagegen variable."""
         try:
             status = self.ragnarstatustext
+            # A mesh unit named after a shieldmaiden draws the female frames
+            # (status/woman/) instead of the default character. Same per-status
+            # + random pick, just a different pool; falls through to the normal
+            # frames when this unit isn't female or no female art is loaded.
+            if self._unit_is_female():
+                female_pool = self.female_image_series.get(status) or \
+                    self.female_image_series.get('IDLE')
+                if female_pool:
+                    self.imagegen = random.choice(female_pool)
+                    self.x_center = (self.width - self.imagegen.width) // 2
+                    self.y_bottom = self.height - self.imagegen.height
+                    return
             if status in self.image_series and self.image_series[status]:
                 random_index = random.randint(0, len(self.image_series[status]) - 1)
                 self.imagegen = self.image_series[status][random_index]
