@@ -163,6 +163,26 @@ Up to 1024 addresses, as a CIDR or a start-end range.
 Source: scanning-and-attacks.md
 <!-- proof: docs/scanning-and-attacks.md | bounded server-side to **1024 addresses** -->
 
+### How fast does a host show as Offline on the Network tab?
+Within about 10 seconds while a dashboard is open. With no dashboard open the check idles and takes about 30 seconds.
+Source: scanning-and-attacks.md
+<!-- proof: docs/scanning-and-attacks.md | Offline within about 10 seconds -->
+
+### How does Ragnar know a host is online right now?
+It sends each known host a unicast ARP request every 2 seconds, and pings a host that misses a reply before marking it Offline.
+Source: scanning-and-attacks.md
+<!-- proof: docs/scanning-and-attacks.md | Each known host gets a unicast ARP request -->
+
+### Why does my phone show Offline when it is only asleep?
+A device that stops answering for more than about 8 seconds shows Offline until it wakes. That is the trade-off of a 10 second verdict.
+Source: scanning-and-attacks.md
+<!-- proof: docs/scanning-and-attacks.md | shows Offline until it wakes -->
+
+### What do the numbers on the Dashboard Targets card mean?
+The large number is hosts Online right now, **Tot** is every known host, **Offline** is the difference, **New** is hosts first seen in the last 24 hours and **Lost** is hosts that went Offline in the last 24 hours.
+Source: scanning-and-attacks.md
+<!-- proof: docs/scanning-and-attacks.md | hosts first seen in the last 24 hours -->
+
 ### What does a deep scan do?
 It is a TCP port scan of one host, covering the top 3000 ports. Results appear later.
 Source: scanning-and-attacks.md

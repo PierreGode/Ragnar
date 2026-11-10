@@ -9199,6 +9199,98 @@ def sync_vulnerability_count():
         return safe_int(shared_data.vulnnbr)
 
 
+# ---------------------------------------------------------------------------
+# Dashboard "Targets" card
+# ---------------------------------------------------------------------------
+# How far back the card's New and Lost numbers look.
+TARGET_RECENT_HOURS = 24
+
+
+def _parse_host_timestamp(value):
+    """Parse a hosts-table timestamp (ISO or SQLite 'YYYY-MM-DD HH:MM:SS')."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).strip().replace(' ', 'T'))
+    except (ValueError, TypeError):
+        return None
+
+
+def _live_target_counts(hosts, presence=None, now=None):
+    """Count the Targets card from one rule, for every code path that fills it.
+
+    The card used to count a host as an active target whenever the stored
+    status said 'alive'. Nothing records a failed probe there, so the number
+    always equalled the total, Offline was always 0, and New/Lost only ever
+    held the difference between two consecutive 15 second syncs.
+
+    active / inactive: the live presence verdict where there is one, the
+        stored status otherwise (Ragnar's own address, another saved network,
+        the first seconds after start).
+    new:  hosts first seen within TARGET_RECENT_HOURS.
+    lost: hosts that were answering and went Offline within
+        TARGET_RECENT_HOURS, and are still Offline.
+    """
+    presence = presence or {}
+    now = now or datetime.now()
+    wall_now = time.time()
+    recent = timedelta(hours=TARGET_RECENT_HOURS)
+    active = total = 0
+    new_ips, lost_ips = [], []
+    for host in hosts:
+        ip = (host.get('ip') or '').strip()
+        if not ip or ip == 'STANDALONE' or (host.get('mac') or '').strip() == 'STANDALONE':
+            continue
+        total += 1
+        verdict = presence.get(ip)
+        if verdict:
+            is_up = verdict.get('status') == 'up'
+            if (not is_up and verdict.get('seen_ago') is not None
+                    and wall_now - (verdict.get('since') or 0) < recent.total_seconds()):
+                lost_ips.append(ip)
+        else:
+            is_up = (host.get('status') or 'alive') == 'alive'
+        if is_up:
+            active += 1
+        first_seen = _parse_host_timestamp(host.get('first_seen'))
+        if first_seen and timedelta(0) <= now - first_seen < recent:
+            new_ips.append(ip)
+
+    def _ip_key(value):
+        try:
+            return (0, tuple(int(part) for part in value.split('.')))
+        except ValueError:
+            return (1, value)
+
+    return {
+        'active': active,
+        'total': total,
+        'inactive': total - active,
+        'new_ips': sorted(new_ips, key=_ip_key),
+        'lost_ips': sorted(lost_ips, key=_ip_key),
+    }
+
+
+def _target_card_fields():
+    """The rest of the Targets card, from the last sync.
+
+    Status payloads are what the dashboard falls back to when its stats
+    request fails. Carrying only target_count there made the card redraw as
+    "N targets, N total, 0 offline" in that case.
+    """
+    new_ips = list(getattr(shared_data, 'new_target_ips', []) or [])
+    lost_ips = list(getattr(shared_data, 'lost_target_ips', []) or [])
+    return {
+        'active_target_count': safe_int(shared_data.targetnbr),
+        'total_target_count': safe_int(getattr(shared_data, 'total_targetnbr', 0)),
+        'inactive_target_count': safe_int(getattr(shared_data, 'inactive_targetnbr', 0)),
+        'new_target_count': len(new_ips),
+        'lost_target_count': len(lost_ips),
+        'new_target_ips': new_ips,
+        'lost_target_ips': lost_ips,
+    }
+
+
 def sync_all_counts():
     """Synchronize all counts (targets, ports, vulnerabilities, credentials) across data sources.
     
@@ -9317,6 +9409,17 @@ def sync_all_counts():
                 logger.error(f"[SQLITE SYNC] ❌ Error reading from SQLite database: {e}")
                 traceback.print_exc()
 
+            # The card numbers follow live presence; the stored-status counts
+            # above still drive the port total and the notification snapshot.
+            try:
+                live_counts = _live_target_counts(hosts, _presence_snapshot_for_request())
+                aggregated_targets = live_counts['active']
+                total_target_count = live_counts['total']
+                inactive_target_count = live_counts['inactive']
+            except Exception as e:
+                live_counts = None
+                logger.debug(f"Live target count unavailable, using stored status: {e}")
+
             old_targets = shared_data.targetnbr
             old_ports = shared_data.portnbr
 
@@ -9344,8 +9447,14 @@ def sync_all_counts():
             lost_active_hosts = previous_active_hosts - current_active_hosts
 
             shared_data.network_hosts_snapshot = current_snapshot
-            shared_data.new_target_ips = sorted(new_active_hosts)
-            shared_data.lost_target_ips = sorted(lost_active_hosts)
+            if live_counts is not None:
+                # A diff between two consecutive syncs is gone 15 seconds
+                # later; the card shows the last TARGET_RECENT_HOURS instead.
+                shared_data.new_target_ips = live_counts['new_ips']
+                shared_data.lost_target_ips = live_counts['lost_ips']
+            else:
+                shared_data.new_target_ips = sorted(new_active_hosts)
+                shared_data.lost_target_ips = sorted(lost_active_hosts)
             shared_data.new_targets = len(shared_data.new_target_ips)
             shared_data.lost_targets = len(shared_data.lost_target_ips)
 
@@ -9636,6 +9745,23 @@ def _load_intelligence_vulnerability_counts(intelligence_dir: Optional[str]) -> 
         return None, None
 
 
+# One DatabaseManager per network database, reused across requests. Building
+# a new one re-runs the whole schema/migration pass, and the dashboard asks
+# for these stats every few seconds.
+_network_db_handles: Dict[str, DatabaseManager] = {}
+_network_db_handles_lock = threading.Lock()
+
+
+def _network_db_handle(db_path, network_dir):
+    with _network_db_handles_lock:
+        handle = _network_db_handles.get(db_path)
+        if handle is None:
+            handle = DatabaseManager(db_path=db_path, currentdir=shared_data.currentdir,
+                                     data_root=network_dir)
+            _network_db_handles[db_path] = handle
+        return handle
+
+
 def _calculate_dashboard_stats_from_context(context: Dict[str, str]) -> Dict:
     network_dir = context.get('network_dir')
     db_path = context.get('db_path')
@@ -9668,8 +9794,7 @@ def _calculate_dashboard_stats_from_context(context: Dict[str, str]) -> Dict:
     hosts = []
     if db_path and os.path.exists(db_path):
         try:
-            temp_db = DatabaseManager(db_path=db_path, currentdir=shared_data.currentdir, data_root=network_dir)
-            hosts = temp_db.get_all_hosts()
+            hosts = _network_db_handle(db_path, network_dir).get_all_hosts()
         except Exception as exc:
             logger.error(f"Unable to read hosts for network context {context.get('slug')}: {exc}")
 
@@ -9680,15 +9805,10 @@ def _calculate_dashboard_stats_from_context(context: Dict[str, str]) -> Dict:
     vuln_count_override, vuln_hosts_override = _load_intelligence_vulnerability_counts(intelligence_dir)
 
     for host in hosts:
-        stats['total_target_count'] += 1
         status = (host.get('status') or '').lower()
         failed = safe_int(host.get('failed_ping_count'), 0)
-        is_active = status == 'alive' or failed < max_failed
-        if is_active:
-            stats['active_target_count'] += 1
+        if status == 'alive' or failed < max_failed:
             stats['port_count'] += len(_split_port_field(host.get('ports')))
-        else:
-            stats['inactive_target_count'] += 1
 
         vuln_field = host.get('vulnerabilities') or host.get('nmap_vuln_scanner') or host.get('scanner_status')
         if vuln_field:
@@ -9709,6 +9829,16 @@ def _calculate_dashboard_stats_from_context(context: Dict[str, str]) -> Dict:
 
     stats['credential_count'] = _count_credentials_in_dir(credentials_dir)
     stats['data_count'] = _count_files_in_tree(context.get('data_stolen_dir'))
+
+    live_counts = _live_target_counts(hosts, _presence_snapshot_for_request(context.get('slug')))
+    stats['active_target_count'] = live_counts['active']
+    stats['inactive_target_count'] = live_counts['inactive']
+    stats['total_target_count'] = live_counts['total']
+    stats['new_target_ips'] = live_counts['new_ips']
+    stats['lost_target_ips'] = live_counts['lost_ips']
+    stats['new_target_count'] = len(live_counts['new_ips'])
+    stats['lost_target_count'] = len(live_counts['lost_ips'])
+    stats['target_recent_hours'] = TARGET_RECENT_HOURS
     stats['target_count'] = stats['active_target_count']
 
     # Derive timestamps from DB modification time when available
@@ -11004,6 +11134,7 @@ def get_status():
             'orchestrator_status': safe_str(shared_data.ragnarorch_status),
             'automation_enabled': is_orchestrator_running(),
             'target_count': safe_int(shared_data.targetnbr),
+            **_target_card_fields(),
             'port_count': safe_int(shared_data.portnbr),
             'vulnerability_count': safe_int(shared_data.vulnnbr),
             'credential_count': safe_int(shared_data.crednbr),
@@ -12395,20 +12526,36 @@ def load_persistent_network_data():
     return network_data
 
 
+def _apply_presence(host_data, presence):
+    """Overlay the live presence verdict onto one Discovered Hosts row."""
+    verdict = presence.get(host_data['ip']) if presence else None
+    if not verdict:
+        return
+    host_data['status'] = verdict['status']          # 'up' or 'down'
+    host_data['presence'] = 'live'
+    host_data['seen_ago'] = verdict.get('seen_ago')
+    if verdict.get('mac') and host_data.get('mac') in ('Unknown', '', '00:00:00:00:00:00'):
+        host_data['mac'] = verdict['mac']
+
+
 @app.route('/api/network/stable')
 def get_stable_network_data():
     """Get stable, aggregated network data for the Network tab from SQLite database"""
-    with _network_context_from_request():
+    with _network_context_from_request() as requested_slug:
         try:
             db = get_db(currentdir=shared_data.currentdir)
         
             # Get all hosts from SQLite database
             hosts = db.get_all_hosts()
+
+            # Live ARP presence. The stored status only ever records
+            # successes, so on its own it shows every known host as up.
+            presence = _presence_snapshot_for_request(requested_slug)
         
             # Also get any recent ARP scan cache data for real-time enrichment
             recent_arp_data = network_scan_cache.get('arp_hosts', {})
         
-            logger.info(f"Loaded {len(hosts)} entries from SQLite database for stable API")
+            logger.debug(f"Loaded {len(hosts)} entries from SQLite database for stable API")
         
             # Merge and enrich the data
             enriched_hosts = []
@@ -12464,7 +12611,8 @@ def get_stable_network_data():
                     if host_status != 'up':  # ARP means it's definitely up
                         host_data['status'] = 'up'
                     host_data['source'] = 'sqlite+arp'
-            
+
+                _apply_presence(host_data, presence)
                 enriched_hosts.append(host_data)
         
             # Add any new ARP discoveries not in database
@@ -12484,9 +12632,10 @@ def get_stable_network_data():
                         'failed_pings': 0,
                         'source': 'arp_discovery'
                     }
+                    _apply_presence(host_data, presence)
                     enriched_hosts.append(host_data)
         
-            logger.info(f"Returning {len(enriched_hosts)} enriched hosts from SQLite database")
+            logger.debug(f"Returning {len(enriched_hosts)} enriched hosts from SQLite database")
         
             # Sort by IP address for consistent display
             def safe_ip_sort_key(host):
@@ -12505,7 +12654,9 @@ def get_stable_network_data():
                 'hosts': enriched_hosts,
                 'count': len(enriched_hosts),
                 'timestamp': datetime.now().isoformat(),
-                'source': 'sqlite_database'
+                'source': 'sqlite_database',
+                'presence_live': bool(presence),
+                'online_count': sum(1 for h in enriched_hosts if h['status'] == 'up')
             })
             response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
             response.headers['Pragma'] = 'no-cache'
@@ -24378,6 +24529,27 @@ def handle_activity_request():
 # BACKGROUND TASKS
 # ============================================================================
 
+# WifiManager.get_status() shells out to nmcli about six times. The status
+# broadcast wants it every 2 seconds and the dashboard polls it as well, which
+# on a Pi Zero 2 W kept a core busy just re-reading an unchanged Wi-Fi state.
+_WIFI_STATUS_TTL = 6.0
+_wifi_status_lock = threading.Lock()
+_wifi_status_cache = {'at': 0.0, 'value': {}}
+
+
+def _wifi_status_cached():
+    """Wi-Fi manager status, re-read at most every _WIFI_STATUS_TTL seconds."""
+    ragnar = getattr(shared_data, 'ragnar_instance', None)
+    manager = getattr(ragnar, 'wifi_manager', None) if ragnar else None
+    if manager is None:
+        return {}
+    with _wifi_status_lock:
+        if time.monotonic() - _wifi_status_cache['at'] >= _WIFI_STATUS_TTL:
+            _wifi_status_cache['value'] = manager.get_status() or {}
+            _wifi_status_cache['at'] = time.monotonic()
+        return dict(_wifi_status_cache['value'])
+
+
 def get_current_status():
     """Get current status data"""
     try:
@@ -24388,9 +24560,7 @@ def get_current_status():
     # Get WiFi status details from WiFi manager
     wifi_status = {}
     try:
-        wifi_manager = getattr(shared_data, 'ragnar_instance', None)
-        if wifi_manager and hasattr(wifi_manager, 'wifi_manager'):
-            wifi_status = wifi_manager.wifi_manager.get_status()
+        wifi_status = _wifi_status_cached()
     except Exception as e:
         logger.debug(f"Could not get WiFi status from manager: {e}")
 
@@ -24401,6 +24571,7 @@ def get_current_status():
         'orchestrator_status': safe_str(shared_data.ragnarorch_status),
         'automation_enabled': is_orchestrator_running(),
         'target_count': safe_int(shared_data.targetnbr),
+        **_target_card_fields(),
         'port_count': safe_int(shared_data.portnbr),
         'vulnerability_count': safe_int(shared_data.vulnnbr),
         'vulnerable_hosts_count': safe_int(getattr(shared_data, 'vulnerable_host_count', 0)),
@@ -24613,6 +24784,99 @@ def background_sync_loop(interval=SYNC_BACKGROUND_INTERVAL):
                 time.sleep(30)  # Wait longer after multiple failures
         
         time.sleep(max(1, interval))
+
+# ---------------------------------------------------------------------------
+# Real-time host presence (Network tab "Status" column)
+# ---------------------------------------------------------------------------
+host_presence_monitor = None
+
+
+def _presence_ifaces():
+    """Interfaces worth ARP-monitoring: the LAN uplink and the Wi-Fi client."""
+    names = []
+    for getter in (_get_lan_iface, _get_wifi_iface):
+        try:
+            name = getter()
+        except Exception:                                       # noqa: BLE001
+            name = None
+        if name and name not in names and not _is_cellular_iface(name):
+            names.append(name)
+    return names
+
+
+def _presence_targets():
+    """{ip: mac} for every host the Discovered Hosts table can show."""
+    targets = {}
+    try:
+        for host in shared_data.db.get_all_hosts():
+            ip = (host.get('ip') or '').strip()
+            if ip and _is_valid_ipv4(ip):
+                targets[ip] = host.get('mac') or ''
+    except Exception as exc:                                    # noqa: BLE001
+        logger.debug(f"presence targets: database read failed: {exc}")
+    for ip, entry in list(network_scan_cache.get('arp_hosts', {}).items()):
+        if not targets.get(ip):
+            targets[ip] = (entry or {}).get('mac') or ''
+    return targets
+
+
+def _presence_on_change(changes):
+    if clients_connected > 0:
+        socketio.emit('host_presence', {'changes': changes})
+
+
+def start_host_presence_monitor():
+    """Start the in-process ARP presence monitor (idempotent)."""
+    global host_presence_monitor
+    if host_presence_monitor is not None:
+        return host_presence_monitor
+    if not shared_data.config.get('host_presence_enabled', True):
+        logger.info("Host presence monitor disabled by config (host_presence_enabled)")
+        return None
+    try:
+        from host_presence import HostPresenceMonitor
+        host_presence_monitor = HostPresenceMonitor(
+            get_ifaces=_presence_ifaces,
+            get_targets=_presence_targets,
+            is_fast=lambda: clients_connected > 0,
+            on_change=_presence_on_change,
+            should_exit=lambda: shared_data.webapp_should_exit,
+        )
+        host_presence_monitor.start()
+    except Exception as exc:                                    # noqa: BLE001
+        logger.warning(f"Host presence monitor unavailable: {exc}")
+        host_presence_monitor = None
+    return host_presence_monitor
+
+
+def _presence_snapshot_for_request(requested_slug=None):
+    """Presence verdicts, or {} when they do not apply to this request.
+
+    Presence describes the network Ragnar is attached to right now. A request
+    for another saved network must keep that network's stored status.
+    """
+    monitor = host_presence_monitor
+    if monitor is None or not monitor.running:
+        return {}
+    active = getattr(shared_data, 'active_network_slug', None)
+    if requested_slug and active and requested_slug != active:
+        return {}
+    try:
+        return monitor.snapshot()
+    except Exception as exc:                                    # noqa: BLE001
+        logger.debug(f"presence snapshot failed: {exc}")
+        return {}
+
+
+@app.route('/api/network/presence')
+def get_network_presence():
+    """Live up/down verdict per host from the ARP presence monitor."""
+    monitor = host_presence_monitor
+    if monitor is None:
+        return jsonify({'success': True, 'running': False, 'hosts': {}})
+    info = monitor.info()
+    return jsonify({'success': True, 'hosts': monitor.snapshot(), **info})
+
 
 def background_arp_scan_loop():
     """Continuously run ARP scans to keep network data fresh"""
@@ -30200,9 +30464,7 @@ def get_dashboard_quick():
 
         wifi_status = {}
         try:
-            wifi_manager = getattr(shared_data, 'ragnar_instance', None)
-            if wifi_manager and hasattr(wifi_manager, 'wifi_manager'):
-                wifi_status = wifi_manager.wifi_manager.get_status()
+            wifi_status = _wifi_status_cached()
         except Exception:
             pass  # Silently fail - non-critical for dashboard
 
@@ -32280,6 +32542,7 @@ def run_server(host='0.0.0.0', port=8000, ssl_cert=None, ssl_key=None, https_por
         socketio.start_background_task(broadcast_status_updates)
         socketio.start_background_task(background_sync_loop)
         socketio.start_background_task(background_arp_scan_loop)
+        start_host_presence_monitor()
         socketio.start_background_task(background_health_monitor)
         socketio.start_background_task(_rusense_notify_loop)
         socketio.start_background_task(net_integrity_monitor_loop)

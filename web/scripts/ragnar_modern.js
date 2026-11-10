@@ -786,6 +786,11 @@ function initializeSocket() {
         }
     });
 
+    // Live presence: only the hosts that flipped, patched in place.
+    socket.on('host_presence', function(data) {
+        applyHostPresenceChanges(data && data.changes);
+    });
+
     socket.on('credentials_update', function(data) {
         if (currentTab === 'discovered') {
             displayCredentialsTable(data);
@@ -13785,12 +13790,12 @@ function updateDashboardStats(stats) {
 
     const newCountElement = document.getElementById('target-new-count');
     if (newCountElement) {
-        newCountElement.title = newTargetList.length > 0 ? newTargetList.join(', ') : 'No recent additions';
+        newCountElement.title = newTargetList.length > 0 ? newTargetList.join(', ') : 'No new hosts in the last 24 hours';
     }
 
     const lostCountElement = document.getElementById('target-lost-count');
     if (lostCountElement) {
-        lostCountElement.title = lostTargetList.length > 0 ? lostTargetList.join(', ') : 'No recent drops';
+        lostCountElement.title = lostTargetList.length > 0 ? lostTargetList.join(', ') : 'No hosts lost in the last 24 hours';
     }
 
     updateElement('port-count', portCount);
@@ -13822,22 +13827,6 @@ async function loadNetworkData() {
     try {
         // Use the new stable network data endpoint
         await loadStableNetworkData();
-        
-        // Update the status detection info banner with current config
-        updateNetworkStatusBanner();
-    } catch (error) {
-        console.error('Error loading network data:', error);
-        addConsoleMessage('Failed to load network data', 'error');
-    }
-}
-
-async function loadNetworkData() {
-    try {
-        // Use the new stable network data endpoint
-        await loadStableNetworkData();
-        
-        // Update the status detection info banner with current config
-        updateNetworkStatusBanner();
     } catch (error) {
         console.error('Error loading network data:', error);
         addConsoleMessage('Failed to load network data', 'error');
@@ -14147,6 +14136,7 @@ async function loadStableNetworkData() {
         
         if (data.success) {
             displayStableNetworkTable(data);
+            setHostPresenceBanner(!!data.presence_live);
             addConsoleMessage(`Network data loaded: ${data.count} hosts`, 'info');
         } else {
             addConsoleMessage(`Failed to load network data: ${data.error}`, 'error');
@@ -14189,23 +14179,14 @@ function displayStableNetworkTable(data) {
     // Use DocumentFragment for better performance
     const fragment = document.createDocumentFragment();
     
-    data.hosts.forEach((host, index) => {
-        // DEBUG: Log first few host objects to see structure
-        if (index < 5) {
-            console.log(`🔍 Host ${index}:`, host);
-            console.log(`   IP field:`, host.ip, typeof host.ip);
-            console.log(`   All fields:`, Object.keys(host));
-        }
-        
+    data.hosts.forEach((host) => {
         const row = document.createElement('tr');
         const ignored = isHostIgnored(host.ip, host.mac);
         row.className = 'border-b border-slate-700 hover:bg-slate-700/50 transition-colors' +
             (ignored ? ' opacity-50' : '');
 
         // Status indicator
-        const statusIcon = host.status === 'up' ?
-            '<span class="flex items-center"><div class="w-2 h-2 bg-green-500 rounded-full mr-2"></div>Online</span>' :
-            '<span class="flex items-center"><div class="w-2 h-2 bg-gray-500 rounded-full mr-2"></div>Unknown</span>';
+        const statusIcon = hostStatusBadge(host.status);
         
         // Format MAC address
         let macDisplay = host.mac === 'Unknown' ? 
@@ -14228,7 +14209,7 @@ function displayStableNetworkTable(data) {
             `<span class="text-xs">${formatTimeAgo(host.last_scan)}</span>`;
         
         row.innerHTML = `
-            <td class="py-3 px-4">${statusIcon}</td>
+            <td class="py-3 px-4" data-host-status="${host.status}">${statusIcon}</td>
             <td class="py-3 px-4 font-mono text-sm">${host.ip}</td>
             <td class="py-3 px-4">${host.hostname === 'Unknown' ? '<span class="text-gray-500">Unknown</span>' : host.hostname}</td>
             <td class="py-3 px-4">${macDisplay}</td>
@@ -14277,13 +14258,84 @@ function displayStableNetworkTable(data) {
     });
     
     // Update host count
-    if (hostCountSpan) {
-        hostCountSpan.textContent = `${data.hosts.length} hosts`;
-    }
-    
+    updateStableHostCount();
+
     // Cleanup old button states for removed hosts
     cleanupOldDeepScanStates();
 }
+
+// ---------------------------------------------------------------------------
+// Live host presence (Discovered Hosts "Status" column)
+// ---------------------------------------------------------------------------
+
+function hostStatusBadge(status) {
+    if (status === 'up') {
+        return '<span class="flex items-center"><div class="w-2 h-2 bg-green-500 rounded-full mr-2"></div>Online</span>';
+    }
+    if (status === 'down') {
+        return '<span class="flex items-center text-gray-400"><div class="w-2 h-2 bg-red-500 rounded-full mr-2"></div>Offline</span>';
+    }
+    return '<span class="flex items-center"><div class="w-2 h-2 bg-gray-500 rounded-full mr-2"></div>Unknown</span>';
+}
+
+function updateStableHostCount() {
+    const tableBody = document.getElementById('network-hosts-table');
+    const hostCountSpan = document.getElementById('host-count');
+    if (!tableBody || !hostCountSpan) return;
+    const cells = tableBody.querySelectorAll('td[data-host-status]');
+    if (!cells.length) return;          // table drawn by another renderer
+    let online = 0;
+    cells.forEach(cell => { if (cell.dataset.hostStatus === 'up') online++; });
+    hostCountSpan.textContent = `${cells.length} hosts`;
+    // Separate nodes so each piece still matches its own translation key.
+    hostCountSpan.appendChild(document.createTextNode(' \u00b7 '));
+    const onlineSpan = document.createElement('span');
+    onlineSpan.className = 'text-green-400';
+    onlineSpan.textContent = `${online} online`;
+    hostCountSpan.appendChild(onlineSpan);
+}
+
+// Patch only the Status cells that changed; the table is never rebuilt here.
+function applyHostPresenceChanges(changes) {
+    if (!Array.isArray(changes) || !changes.length) return;
+    const tableBody = document.getElementById('network-hosts-table');
+    if (!tableBody) return;
+    let touched = false;
+    changes.forEach(change => {
+        if (!change || !change.ip) return;
+        const row = tableBody.querySelector(`tr[data-ip="${escapeSelector(change.ip)}"]`);
+        const cell = row && row.querySelector('td[data-host-status]');
+        if (!cell || cell.dataset.hostStatus === change.status) return;
+        cell.dataset.hostStatus = change.status;
+        cell.innerHTML = hostStatusBadge(change.status);
+        touched = true;
+    });
+    if (touched) updateStableHostCount();
+}
+
+function setHostPresenceBanner(live) {
+    const liveEl = document.getElementById('network-status-live');
+    const legacyEl = document.getElementById('network-status-legacy');
+    if (!liveEl || !legacyEl) return;
+    liveEl.classList.toggle('hidden', !live);
+    legacyEl.classList.toggle('hidden', live);
+    if (!live) updateNetworkStatusBanner();
+}
+
+// Safety net for when the WebSocket is down: poll the small presence
+// endpoint instead, and only while the hosts table is actually on screen.
+setInterval(async () => {
+    if (currentTab !== 'network' || document.hidden) return;
+    if (typeof socket !== 'undefined' && socket && socket.connected) return;
+    if (!document.querySelector('#network-hosts-table td[data-host-status]')) return;
+    try {
+        const data = await fetchAPI('/api/network/presence');
+        if (!data || !data.hosts) return;
+        applyHostPresenceChanges(Object.keys(data.hosts).map(ip => ({ ip, status: data.hosts[ip].status })));
+    } catch (error) {
+        console.debug('Presence poll failed:', error);
+    }
+}, 3000);
 
 function formatTimeAgo(timeString) {
     try {

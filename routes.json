@@ -589,6 +589,13 @@
     "handler": "add_vulnerability"
   },
   {
+    "route": "/api/network/presence",
+    "methods": [
+      "GET"
+    ],
+    "handler": "get_network_presence"
+  },
+  {
     "route": "/api/network/stable",
     "methods": [
       "GET"
