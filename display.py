@@ -141,6 +141,25 @@ NETDIAG_CYCLE_SECONDS = 5
 #   0=STATS  1=MAP  2=GPS  3=SKY  4=SESSION  5=VIKING
 # The 2.7" e-paper HAT is unaffected — it keeps its KEY3 stats/map toggle.
 WARDRIVE_PAGE_COUNT = 6
+
+# Dark colour theme for those screens on the colour LCD HAT (see
+# Display._wd_color_panel / _wd_c). Unused on 1-bit panels.
+_WD_COLORS = {
+    'bg':    (0, 0, 0),
+    'ink':   (236, 236, 228),   # values
+    'dim':   (140, 146, 156),   # row labels, footer key hints
+    'frame': (70, 78, 90),      # border + dividers
+    'grid':  (70, 78, 90),      # sky-view rings / crosshair
+    'title': (255, 200, 90),    # page title, page counter, viking
+    'b24':   (255, 176, 60),    # 2.4 GHz  - amber
+    'b5':    (60, 210, 255),    # 5 GHz    - cyan
+    'b6':    (205, 135, 255),   # 6 GHz    - violet
+    'wifi':  (90, 235, 130),    # Wi-Fi total - green
+    'ble':   (95, 160, 255),    # BLE total   - blue
+    'good':  (90, 235, 130),
+    'warn':  (255, 190, 70),
+    'bad':   (255, 95, 85),
+}
 (WD_PAGE_STATS, WD_PAGE_MAP, WD_PAGE_GPS, WD_PAGE_SKY,
  WD_PAGE_SESSION, WD_PAGE_VIKING) = range(6)
 
@@ -2582,6 +2601,26 @@ class Display:
         except Exception:
             return None
 
+    def _wd_color_panel(self, render_w=None, render_h=None):
+        """True when the compact wardriving screens should render in colour:
+        the 1.44" ST7735S LCD HAT (a 128x128 RGB TFT). Every other panel that
+        reaches these screens is 1-bit. `wardriving_lcd_color: false` in the
+        config keeps the old black-on-white look."""
+        if self.config.get("epd_type") != "st7735s":
+            return False
+        if not self.config.get("wardriving_lcd_color", True):
+            return False
+        w = render_w if render_w is not None else getattr(self, 'render_w', self.shared_data.width)
+        h = render_h if render_h is not None else getattr(self, 'render_h', self.shared_data.height)
+        return w < 150 and h < 150
+
+    def _wd_c(self, draw, key):
+        """Colour for a compact wardriving screen element. On a 1-bit canvas
+        everything is plain black ink (0), exactly as before."""
+        if getattr(draw, 'mode', '1') != 'RGB':
+            return 0
+        return _WD_COLORS.get(key, _WD_COLORS['ink'])
+
     def _wd_compact_page(self):
         """Which wardriving screen the LCD joystick has paged to (0..N-1)."""
         try:
@@ -2620,28 +2659,28 @@ class Display:
         h = getattr(self, 'render_h', self.shared_data.height)
         font = self.shared_data.font_arial9
 
-        draw.rectangle((1, 1, w - 1, h - 1), outline=0)
+        draw.rectangle((1, 1, w - 1, h - 1), outline=self._wd_c(draw, 'frame'))
 
         ap_on = getattr(self.shared_data, 'wardrive_ap_active', False)
         hint = "K1Exit K2WiFi K3APoff" if ap_on else "K1Exit K2WiFi K3AP"
         page_str = f"{self._wd_compact_page() + 1}/{WARDRIVE_PAGE_COUNT}"
 
         footer_y = h - int(18 * sy)
-        draw.line((1, footer_y, w - 1, footer_y), fill=0)
+        draw.line((1, footer_y, w - 1, footer_y), fill=self._wd_c(draw, 'frame'))
 
         # Page counter is pinned right; the hint is trimmed to whatever is left
         # so a longer hint never overruns it on the 128 px panel.
         pw = font.getlength(page_str)
-        draw.text((w - int(4 * sx) - pw, h - int(16 * sy)), page_str, font=font, fill=0)
+        draw.text((w - int(4 * sx) - pw, h - int(16 * sy)), page_str, font=font, fill=self._wd_c(draw, 'title'))
         avail = w - int(8 * sx) - pw - int(4 * sx)
         _hint = hint
         while _hint and font.getlength(_hint) > avail:
             _hint = _hint[:-1]
-        draw.text((int(4 * sx), h - int(16 * sy)), _hint, font=font, fill=0)
+        draw.text((int(4 * sx), h - int(16 * sy)), _hint, font=font, fill=self._wd_c(draw, 'dim'))
 
         if title:
             tw = font.getlength(title)
-            draw.text(((w - tw) / 2, int(3 * sy)), title, font=font, fill=0)
+            draw.text(((w - tw) / 2, int(3 * sy)), title, font=font, fill=self._wd_c(draw, 'title'))
 
         return footer_y
 
@@ -2659,8 +2698,8 @@ class Display:
             msg1, msg2 = "Starting...", "Waiting for engine"
         else:
             msg1, msg2 = "Stopped", "Enable in WebUI"
-        draw.text(((w - font_row.getlength(msg1)) / 2, int(45 * sy)), msg1, font=font_row, fill=0)
-        draw.text(((w - font.getlength(msg2)) / 2, int(62 * sy)), msg2, font=font, fill=0)
+        draw.text(((w - font_row.getlength(msg1)) / 2, int(45 * sy)), msg1, font=font_row, fill=self._wd_c(draw, 'warn'))
+        draw.text(((w - font.getlength(msg2)) / 2, int(62 * sy)), msg2, font=font, fill=self._wd_c(draw, 'dim'))
         return True
 
     def _render_wd_compact_stats(self, image, draw, wd):
@@ -2693,10 +2732,11 @@ class Display:
         gps = wd.get('gps', {})
 
         # --- Band counts: 2.4 / 5 / 6 GHz as a three-column grid ---
+        # (label, count, colour key) — one hue per band on a colour panel.
         bands = [
-            ("2.4G", st.get('band_2_4ghz', 0)),
-            ("5G",   st.get('band_5ghz', 0)),
-            ("6G",   st.get('band_6ghz', 0)),
+            ("2.4G", st.get('band_2_4ghz', 0), 'b24'),
+            ("5G",   st.get('band_5ghz', 0), 'b5'),
+            ("6G",   st.get('band_6ghz', 0), 'b6'),
         ]
         col_w = (w - 2) / 3.0
         y_lbl = int(4 * sy)
@@ -2705,7 +2745,7 @@ class Display:
         # number font until the widest of the three fits its column — one size
         # for all three so they stay visually consistent.
         max_num_w = col_w - int(4 * sx)
-        widest = max((str(v) for _, v in bands), key=font_num.getlength)
+        widest = max((str(v) for _, v, _c in bands), key=font_num.getlength)
         num_size = int(19 * sy)
         font_num = self._font_at('Arial.ttf', num_size)
         while num_size > 8 and font_num.getlength(widest) > max_num_w:
@@ -2716,95 +2756,106 @@ class Display:
         # row stays balanced at whatever size the fit above settled on.
         band_top = int(16 * sy)
         band_bot = int(38 * sy)
-        for i, (label, val) in enumerate(bands):
+        for i, (label, val, ckey) in enumerate(bands):
+            col = self._wd_c(draw, ckey)
             cx = 1 + col_w * (i + 0.5)
             lw = font_lbl.getlength(label)
-            draw.text((cx - lw / 2, y_lbl), label, font=font_lbl, fill=0)
+            draw.text((cx - lw / 2, y_lbl), label, font=font_lbl, fill=col)
             vs = str(val)
             bbox = font_num.getbbox(vs)
             vw, vh = bbox[2] - bbox[0], bbox[3] - bbox[1]
             ty = band_top + (band_bot - band_top - vh) / 2 - bbox[1]
-            draw.text((cx - vw / 2 - bbox[0], ty), vs, font=font_num, fill=0)
+            draw.text((cx - vw / 2 - bbox[0], ty), vs, font=font_num, fill=col)
 
         y = int(41 * sy)
-        draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=0)
+        draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=self._wd_c(draw, 'frame'))
 
         # --- Session totals: all Wi-Fi networks + Bluetooth/BLE devices ---
         # The band columns above only split Wi-Fi by band; the grand total and
         # the BLE tally (the bulk of what a Huginn/Piglet companion reports)
         # were only reachable by paging to SESSION. Show both here, on the
         # screen the panel sits on while driving.
+        # These two are the headline numbers, so they are set in bold; the
+        # band columns above stay in the regular weight.
         totals = [
-            ("WIFI", st.get('total_networks', 0)),
-            ("BLE",  st.get('bluetooth_devices', 0)),
+            ("WIFI", st.get('total_networks', 0), 'wifi'),
+            ("BLE",  st.get('bluetooth_devices', 0), 'ble'),
         ]
         tcol_w = (w - 2) / 2.0
         y_tlbl = int(43 * sy)
         tot_size = int(16 * sy)
-        font_tot = self._font_at('Arial.ttf', tot_size)
-        t_widest = max((str(v) for _, v in totals), key=font_tot.getlength)
+        font_tot = self._font_at('ArialB.TTF', tot_size)
+        t_widest = max((str(v) for _, v, _c in totals), key=font_tot.getlength)
         while tot_size > 8 and font_tot.getlength(t_widest) > tcol_w - int(6 * sx):
             tot_size -= 1
-            font_tot = self._font_at('Arial.ttf', tot_size)
+            font_tot = self._font_at('ArialB.TTF', tot_size)
         tot_top = int(52 * sy)
         tot_bot = int(69 * sy)
-        for i, (label, val) in enumerate(totals):
+        for i, (label, val, ckey) in enumerate(totals):
+            col = self._wd_c(draw, ckey)
             cx = 1 + tcol_w * (i + 0.5)
             lw = font_lbl.getlength(label)
-            draw.text((cx - lw / 2, y_tlbl), label, font=font_lbl, fill=0)
+            draw.text((cx - lw / 2, y_tlbl), label, font=font_lbl, fill=col)
             vs = str(val)
             bbox = font_tot.getbbox(vs)
             vw, vh = bbox[2] - bbox[0], bbox[3] - bbox[1]
             ty = tot_top + (tot_bot - tot_top - vh) / 2 - bbox[1]
-            draw.text((cx - vw / 2 - bbox[0], ty), vs, font=font_tot, fill=0)
-        draw.line((w / 2, int(45 * sy), w / 2, int(68 * sy)), fill=0)
+            draw.text((cx - vw / 2 - bbox[0], ty), vs, font=font_tot, fill=col)
+        draw.line((w / 2, int(45 * sy), w / 2, int(68 * sy)), fill=self._wd_c(draw, 'frame'))
 
         y = int(71 * sy)
-        draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=0)
+        draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=self._wd_c(draw, 'frame'))
         y += int(2 * sy)
 
         # --- GPS + Companion rows (right-aligned key/value, roomy font) ---
+        # Value colour doubles as a status light: green = good, amber =
+        # working on it, red = missing.
         if gps.get('has_fix'):
             gps_str = f"{gps.get('latitude', 0):.3f},{gps.get('longitude', 0):.3f}"
+            gps_col = 'good'
         elif gps.get('connected'):
             in_view = gps.get('satellites_in_view')
             if isinstance(in_view, (int, float)) and in_view > 0:
                 gps_str = f"Search {int(in_view)}v"
             else:
                 gps_str = "Searching"
+            gps_col = 'warn'
         else:
             gps_str = "No GPS"
+            gps_col = 'bad'
 
         companions = wd.get('companions') or []
         active = [c for c in companions if c.get('connected')]
         if active:
             first = active[0].get('name') or 'Companion'
             comp_str = first if len(active) == 1 else f"{first}+{len(active) - 1}"
+            comp_col = 'good'
         else:
             comp_str = "None"
+            comp_col = 'dim'
 
         # Speed row: only while we have a fix and are actually moving, so a
         # stationary stop doesn't waste one of the few rows this panel affords.
-        rows = [("GPS", gps_str)]
+        rows = [("GPS", gps_str, gps_col)]
         spd = gps.get('speed_kmh')
         if gps.get('has_fix') and spd is not None and spd > 0:
             unit = self.config.get('wardriving_speed_unit', 'kmh')
-            rows.append(("Spd", _fmt_wd_speed(spd, unit)))
-        rows.append(("Comp", comp_str))
+            rows.append(("Spd", _fmt_wd_speed(spd, unit), 'ink'))
+        rows.append(("Comp", comp_str, comp_col))
 
         # 12 px lines: three rows (GPS / Spd / Comp) fit between the totals
         # block and the footer divider.
         pad_x = int(6 * sx)
         line_h = int(12 * sy)
-        for label, value in rows:
+        for label, value, ckey in rows:
             val_str = str(value)
             vw = font_row.getlength(val_str)
             # Trim the value if it would collide with the label.
             while val_str and pad_x + font_row.getlength(label) + int(6 * sx) > w - pad_x - vw:
                 val_str = val_str[:-1]
                 vw = font_row.getlength(val_str)
-            draw.text((pad_x, y), label, font=font_row, fill=0)
-            draw.text((w - pad_x - vw, y), val_str, font=font_row, fill=0)
+            draw.text((pad_x, y), label, font=font_row, fill=self._wd_c(draw, 'dim'))
+            draw.text((w - pad_x - vw, y), val_str, font=font_row, fill=self._wd_c(draw, ckey))
             y += line_h
 
     def _wd_compact_rows(self, draw, rows, top, footer_y):
@@ -2828,8 +2879,8 @@ class Display:
             while val_str and pad_x + font_row.getlength(label) + int(6 * sx) > w - pad_x - vw:
                 val_str = val_str[:-1]
                 vw = font_row.getlength(val_str)
-            draw.text((pad_x, y), label, font=font_row, fill=0)
-            draw.text((w - pad_x - vw, y), val_str, font=font_row, fill=0)
+            draw.text((pad_x, y), label, font=font_row, fill=self._wd_c(draw, 'dim'))
+            draw.text((w - pad_x - vw, y), val_str, font=font_row, fill=self._wd_c(draw, 'ink'))
             y += line_h
         return y
 
@@ -2912,24 +2963,24 @@ class Display:
 
         # Horizon + a mid ring at elevation 45°, then the N/E/S/W crosshairs so
         # the azimuth of each satellite is readable.
-        draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius), outline=0)
+        draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius), outline=self._wd_c(draw, 'grid'))
         mid = radius / 2.0
-        draw.ellipse((cx - mid, cy - mid, cx + mid, cy + mid), outline=0)
-        draw.line((cx, cy - radius, cx, cy + radius), fill=0)
-        draw.line((cx - radius, cy, cx + radius, cy), fill=0)
+        draw.ellipse((cx - mid, cy - mid, cx + mid, cy + mid), outline=self._wd_c(draw, 'grid'))
+        draw.line((cx, cy - radius, cx, cy + radius), fill=self._wd_c(draw, 'grid'))
+        draw.line((cx - radius, cy, cx + radius, cy), fill=self._wd_c(draw, 'grid'))
 
         for lbl, dx, dy in (("N", 0, -1), ("S", 0, 1), ("E", 1, 0), ("W", -1, 0)):
             lw = font.getlength(lbl)
             lx = cx + dx * (radius + int(6 * sx)) - lw / 2.0
             ly = cy + dy * (radius + int(6 * sy)) - int(5 * sy)
-            draw.text((lx, ly), lbl, font=font, fill=0)
+            draw.text((lx, ly), lbl, font=font, fill=self._wd_c(draw, 'dim'))
 
         sats = self._wd_sky_data()
         if not sats:
             gps = (wd.get('gps') or {})
             msg = "Searching..." if gps.get('connected') else "No GPS"
             draw.text(((w - font.getlength(msg)) / 2, cy - int(4 * sy)),
-                      msg, font=font, fill=0)
+                      msg, font=font, fill=self._wd_c(draw, 'warn'))
             return
 
         plotted = 0
@@ -2946,13 +2997,13 @@ class Display:
             strong = isinstance(snr, (int, float)) and snr >= 25
             dot = int(2 * sx)
             if strong:
-                draw.ellipse((x - dot, y - dot, x + dot, y + dot), fill=0)
+                draw.ellipse((x - dot, y - dot, x + dot, y + dot), fill=self._wd_c(draw, 'good'))
             else:
-                draw.ellipse((x - dot, y - dot, x + dot, y + dot), outline=0)
+                draw.ellipse((x - dot, y - dot, x + dot, y + dot), outline=self._wd_c(draw, 'warn'))
             plotted += 1
 
         cnt = f"{plotted} sat"
-        draw.text((int(3 * sx), top), cnt, font=font, fill=0)
+        draw.text((int(3 * sx), top), cnt, font=font, fill=self._wd_c(draw, 'ink'))
 
     def _render_wd_compact_session(self, image, draw, wd):
         """Compact session totals — the running tally the stats page's band
@@ -3007,7 +3058,7 @@ class Display:
         if not pts:
             msg = "Waiting for GPS..."
             draw.text(((w - font.getlength(msg)) / 2, (top + bottom) / 2),
-                      msg, font=font, fill=0)
+                      msg, font=font, fill=self._wd_c(draw, 'warn'))
             return
 
         lats = [p[0] for p in pts]
@@ -3030,14 +3081,14 @@ class Display:
         # Networks first so the track draws over them.
         for lat, lon in nets:
             x, y = X(lon), Y(lat)
-            draw.point((x, y), fill=0)
+            draw.point((x, y), fill=self._wd_c(draw, 'b5'))
         if len(track) > 1:
-            draw.line([(X(p[1]), Y(p[0])) for p in track], fill=0, width=1)
+            draw.line([(X(p[1]), Y(p[0])) for p in track], fill=self._wd_c(draw, 'b24'), width=1)
         if here:
             x, y = X(here[1]), Y(here[0])
             r = int(3 * sx)
-            draw.ellipse((x - r, y - r, x + r, y + r), outline=0)
-            draw.ellipse((x - 1, y - 1, x + 1, y + 1), fill=0)
+            draw.ellipse((x - r, y - r, x + r, y + r), outline=self._wd_c(draw, 'bad'))
+            draw.ellipse((x - 1, y - 1, x + 1, y + 1), fill=self._wd_c(draw, 'ink'))
 
     def _render_wd_compact_viking(self, image, draw, wd):
         """Full-screen Ragnar viking — the 'am I still alive?' glance screen.
@@ -3057,7 +3108,7 @@ class Display:
         band_h = footer_y - top - int(2 * sy)
         if vk is None or band_h <= 0:
             msg = self._unit_display_title()
-            draw.text(((w - font.getlength(msg)) / 2, footer_y / 2), msg, font=font, fill=0)
+            draw.text(((w - font.getlength(msg)) / 2, footer_y / 2), msg, font=font, fill=self._wd_c(draw, 'ink'))
             return
         try:
             # Fill the band on the tighter axis so the whole viking stays visible.
@@ -3065,7 +3116,14 @@ class Display:
             if ratio > 0:
                 vk = vk.resize((max(1, int(vk.width * ratio)),
                                 max(1, int(vk.height * ratio))), Image.NEAREST)
-            image.paste(vk, ((w - vk.width) // 2, top + (band_h - vk.height) // 2))
+            pos = ((w - vk.width) // 2, top + (band_h - vk.height) // 2)
+            if image.mode == 'RGB':
+                # The sprite is black ink on white. On the dark colour theme,
+                # use its ink as a stencil and lay the viking down in gold.
+                from PIL import ImageOps
+                image.paste(self._wd_c(draw, 'title'), pos, mask=ImageOps.invert(vk.convert('L')))
+            else:
+                image.paste(vk, pos)
         except Exception as e:
             logger.debug(f"viking page render failed: {e}")
 
@@ -4616,6 +4674,12 @@ class Display:
                         if show_map:
                             self._render_wardriving_map_page(image, draw)
                         else:
+                            # Colour LCD HAT: swap the 1-bit canvas for an RGB
+                            # one so the compact screens can use colour. The
+                            # panel driver and the web preview take any mode.
+                            if self._wd_color_panel(render_w, render_h):
+                                image = Image.new('RGB', (render_w, render_h), _WD_COLORS['bg'])
+                                draw = ImageDraw.Draw(image)
                             self._render_wardriving_page(image, draw)
                         _wd_override = True
 
