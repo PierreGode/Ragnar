@@ -1858,6 +1858,54 @@ class Display:
         except Exception:
             pass
 
+    def _lcd_color_panel(self, render_w=None, render_h=None):
+        """True when the main screen should render in colour: the 1.44"
+        ST7735S LCD HAT (a 128x128 RGB TFT). Every other panel that uses the
+        compact layout is 1-bit. `lcd_color: false` in the config keeps the
+        black-on-white look (the wardriving screens have their own switch,
+        `wardriving_lcd_color`)."""
+        if self.config.get("epd_type") != "st7735s":
+            return False
+        if not self.config.get("lcd_color", True):
+            return False
+        w = render_w if render_w is not None else getattr(self, 'render_w', self.shared_data.width)
+        h = render_h if render_h is not None else getattr(self, 'render_h', self.shared_data.height)
+        return w < 150 and h < 170
+
+    def _paste_ink(self, image, art, pos, color):
+        """Paste a black-on-white icon. On a colour canvas its ink is used as
+        a stencil and laid down in `color`; on a 1-bit canvas it is pasted
+        as-is."""
+        if getattr(image, 'mode', '1') == 'RGB' and color != 0:
+            from PIL import ImageOps
+            image.paste(color, pos, mask=ImageOps.invert(art.convert('L')))
+        else:
+            image.paste(art, pos)
+
+    def _color_character(self, image, frame, target_h=None, max_w=None):
+        """The current character as a full-colour RGBA sprite sized for a
+        colour canvas, or None (1-bit canvas, colour off, no colour art) so
+        the caller falls back to its 1-bit drawing. Fits `target_h`, and
+        `max_w` when given, preserving the aspect ratio."""
+        if getattr(image, 'mode', '1') != 'RGB' or frame is None:
+            return None
+        try:
+            sprite = self.shared_data.color_sprite(frame)
+            if sprite is None:
+                return None
+            ratio = (target_h or sprite.height) / sprite.height
+            if max_w:
+                ratio = min(ratio, max_w / sprite.width)
+            size = (max(1, int(round(sprite.width * ratio))), max(1, int(round(sprite.height * ratio))))
+            if size != sprite.size:
+                # Smooth when shrinking; keep the pixels crisp when enlarging.
+                resample = Image.LANCZOS if ratio < 1 else Image.NEAREST
+                sprite = sprite.resize(size, resample)
+            return sprite
+        except Exception as e:
+            logger.debug(f"colour character unavailable: {e}")
+            return None
+
     def _render_main_compact(self, image, draw, W, H):
         """Compact PAGE_MAIN layout for a small square panel (e.g. the 128x128
         LCD HAT). The default dashboard is authored for a ~122x250 canvas, so on
@@ -1867,12 +1915,16 @@ class Display:
         the speech line beside a shrunk character, all inside 128x128."""
         sd = self.shared_data
         font = sd.font_arial9
+        # On the colour LCD HAT the canvas is RGB with a dark background and
+        # every element gets a theme colour; on a 1-bit canvas c() is plain
+        # black ink, exactly as before.
+        c = lambda key: self._wd_c(draw, key)
         # --- frame + header ---
         # The header keeps a small connection glyph in the top-left corner and
         # the battery in the top-right, so the centred title is fitted to the
         # middle strip only (never colliding with either) and the divider sits
         # below all three.
-        draw.rectangle((0, 0, W - 1, H - 1), outline=0)
+        draw.rectangle((0, 0, W - 1, H - 1), outline=c('frame'))
         # Left connection glyph + IP octet, confined to the top-left so they
         # clear the title. `left_used` grows to whatever they occupy so the
         # title padding can step around them.
@@ -1882,7 +1934,7 @@ class Display:
                 ap_text = "AP"
                 if getattr(sd, 'ap_client_count', 0) > 0:
                     ap_text = f"AP:{sd.ap_client_count}"
-                draw.text((2, 3), ap_text, font=font, fill=0)
+                draw.text((2, 3), ap_text, font=font, fill=c('warn'))
                 left_used = 2 + int(font.getlength(ap_text))
             elif getattr(sd, 'wifi_connected', False):
                 try:
@@ -1895,14 +1947,14 @@ class Display:
                 cx, cy = 4, 13
                 for i in range(waves):
                     r = 3 + i * 3
-                    draw.arc((cx - r, cy - r, cx + r, cy + r), start=225, end=315, fill=0, width=1)
+                    draw.arc((cx - r, cy - r, cx + r, cy + r), start=225, end=315, fill=c('good'), width=1)
                 left_used = 14
                 try:
                     ip_octet = self.get_wifi_ip_last_octet()
                 except Exception:
                     ip_octet = None
                 if ip_octet:
-                    draw.text((15, 4), ip_octet, font=font, fill=0)
+                    draw.text((15, 4), ip_octet, font=font, fill=c('dim'))
                     left_used = 15 + int(font.getlength(ip_octet))
         except Exception:
             pass
@@ -1916,7 +1968,7 @@ class Display:
                 if bl is not None:
                     bt = f"{int(round(bl))}%{'+' if _ps.is_charging() else ''}"
                     bat_w = int(font.getlength(bt)) + 3
-                    draw.text((W - bat_w + 1, 3), bt, font=font, fill=0)
+                    draw.text((W - bat_w + 1, 3), bt, font=font, fill=c('good'))
         except Exception:
             pass
         # Centre the title in the strip between the glyph/IP and the battery.
@@ -1926,8 +1978,8 @@ class Display:
         _title = self._unit_display_title()
         title_font = self._fit_font('Viking.TTF', sd.font_viking, _title, avail)
         tw = title_font.getlength(_title)
-        draw.text((left_pad + (avail - tw) / 2, 1), _title, font=title_font, fill=0)
-        draw.line((1, 16, W - 1, 16), fill=0)
+        draw.text((left_pad + (avail - tw) / 2, 1), _title, font=title_font, fill=c('title'))
+        draw.line((1, 16, W - 1, 16), fill=c('frame'))
 
         # --- two icon+count stat rows (icons ~30% smaller so they fit) ---
         icon_h = 13   # 18px source icons scaled down ~30%
@@ -1945,43 +1997,48 @@ class Display:
 
         def _row(y, items):
             slot = W // len(items)
-            for i, (icon, val) in enumerate(items):
+            for i, (icon, val, tint) in enumerate(items):
                 x = i * slot + 2
                 icon = _fit_icon(icon)
                 if icon is not None:
                     try:
-                        image.paste(icon, (x, y))
+                        self._paste_ink(image, icon, (x, y), c(tint))
                         tx = x + icon.width + 1
                     except Exception:
                         tx = x + icon_h + 1
                 else:
                     tx = x
-                draw.text((tx, y + 2), str(val), font=font, fill=0)
+                draw.text((tx, y + 2), str(val), font=font, fill=c('ink'))
 
-        _row(20, [(getattr(sd, 'target', None), sd.targetnbr),
-                  (getattr(sd, 'port', None),   sd.portnbr),
-                  (getattr(sd, 'vuln', None),   sd.vulnnbr),
-                  (getattr(sd, 'cred', None),   sd.crednbr)])
-        _row(37, [(getattr(sd, 'zombie', None),  sd.zombiesnbr),
-                  (getattr(sd, 'data', None),    sd.datanbr),
-                  (getattr(sd, 'money', None),   sd.coinnbr),
-                  (getattr(sd, 'attacks', None), sd.attacksnbr)])
-        draw.line((1, 54, W - 1, 54), fill=0)
+        _row(20, [(getattr(sd, 'target', None), sd.targetnbr, 'good'),
+                  (getattr(sd, 'port', None),   sd.portnbr,   'b5'),
+                  (getattr(sd, 'vuln', None),   sd.vulnnbr,   'bad'),
+                  (getattr(sd, 'cred', None),   sd.crednbr,   'warn')])
+        _row(37, [(getattr(sd, 'zombie', None),  sd.zombiesnbr, 'b6'),
+                  (getattr(sd, 'data', None),    sd.datanbr,    'ble'),
+                  (getattr(sd, 'money', None),   sd.coinnbr,    'title'),
+                  (getattr(sd, 'attacks', None), sd.attacksnbr, 'b24')])
+        draw.line((1, 54, W - 1, 54), fill=c('frame'))
 
         # --- mood / status lines ---
         try:
             sd.update_ragnarstatus()
         except Exception:
             pass
-        draw.text((3, 56), str(getattr(sd, 'ragnarstatustext', '') or '')[:24], font=font, fill=0)
-        draw.text((3, 66), str(getattr(sd, 'ragnarstatustext2', '') or '')[:24], font=font, fill=0)
+        draw.text((3, 56), str(getattr(sd, 'ragnarstatustext', '') or '')[:24], font=font, fill=c('title'))
+        draw.text((3, 66), str(getattr(sd, 'ragnarstatustext2', '') or '')[:24], font=font, fill=c('dim'))
 
         # --- character sprite, shrunk into the bottom-right corner ---
         vk_w = 0
         vk = getattr(sd, 'imagegen', None)
-        if vk is not None:
+        target_h = 46
+        # Colour canvas: the full-colour character, cut out of its backdrop.
+        sprite = self._color_character(image, vk, target_h)
+        if sprite is not None:
+            vk_w = sprite.width
+            image.paste(sprite, (W - vk_w - 1, H - sprite.height - 1), sprite)
+        elif vk is not None:
             try:
-                target_h = 46
                 if vk.height > target_h:
                     ratio = target_h / vk.height
                     vk = vk.resize((max(1, int(vk.width * ratio)), target_h), Image.NEAREST)
@@ -2002,7 +2059,7 @@ class Display:
             for line in lines:
                 if y > H - 12:
                     break
-                draw.text((3, y), line, font=sd.font_arialbold, fill=0)
+                draw.text((3, y), line, font=sd.font_arialbold, fill=c('ink'))
                 bb = sd.font_arialbold.getbbox(line)
                 y += (bb[3] - bb[1]) + 2
 
@@ -3109,6 +3166,11 @@ class Display:
         if vk is None or band_h <= 0:
             msg = self._unit_display_title()
             draw.text(((w - font.getlength(msg)) / 2, footer_y / 2), msg, font=font, fill=self._wd_c(draw, 'ink'))
+            return
+        # Colour canvas: the full-colour character instead of a gold stencil.
+        sprite = self._color_character(image, getattr(sd, 'imagegen', None), band_h, w - 4)
+        if sprite is not None:
+            image.paste(sprite, ((w - sprite.width) // 2, top + (band_h - sprite.height) // 2), sprite)
             return
         try:
             # Fill the band on the tighter axis so the whole viking stays visible.
@@ -4739,6 +4801,11 @@ class Display:
                 # dedicated compact layout instead and commit it directly.
                 if render_w < 150 and 100 <= render_h < 170:
                     try:
+                        # Colour LCD HAT: swap the 1-bit canvas for an RGB one
+                        # with the dark theme, as the wardriving screens do.
+                        if self._lcd_color_panel(render_w, render_h):
+                            image = Image.new('RGB', (render_w, render_h), _WD_COLORS['bg'])
+                            draw = ImageDraw.Draw(image)
                         self._render_main_compact(image, draw, W, H)
                     except Exception as e:
                         logger.debug(f"compact main render error: {e}")

@@ -4,6 +4,16 @@
 
 ### 2026-11-10
 
+#### [#1056](https://github.com/PierreGode/Ragnar/pull/1056) — feat(display): blonde vikings and a colour main screen on the 1.44" LCD HAT
+*branch `feat/blonde-vikings-lcd-colour`*
+
+- **The default viking is blonde.** The web portrait has a blonde beard; the on-device frames had a brown one. All 90 animation frames and the static mascot are recoloured, beard only: `scripts/recolor_male_blonde.py` treats a pixel as beard when it matches the plain idle frame, so shields, laptops, bottles, pets, swords and hoods keep their colours. On 1-bit panels the beard simply dithers lighter.
+- **Colour main screen on the 1.44" LCD HAT.** The wardriving screens were already colour; the main screen was black on white. It now uses the same dark theme: gold title, each stat icon in its own colour, and the character in full colour. The wardriving VIKING screen shows the full-colour character instead of a gold stencil.
+- **Colour characters.** The default viking's frames are colour bitmaps on a white backdrop, which is cut away on first use (only white connected to the border, so eye highlights stay, and the pale rim is faded so he does not glow on black). The shieldmaiden gets a full-colour twin of each of her 18 frames in `woman/color/`, rendered from the original illustrations by `scripts/gen_female_frames.py`, which now keeps its portrait crops in colour.
+- **Scope and switches.** Only the `st7735s` panel changes; e-paper and every other display render as before. `lcd_color: false` restores the black-on-white main screen and `wardriving_lcd_color: false` the wardriving screens. The other LCD pages (network, vulnerabilities, hosts, traffic, Network Diagnostic mode) are still black on white.
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md#colour), [mesh.md](mesh.md#the-shieldmaiden-shows-on-the-panel-not-just-the-web), [knowledgebase.md](knowledgebase.md) (+1 entry)
+- **Validation:** new `tests/test_lcd_color.py` (15 tests: backdrop cut-out, no pale halo, a colour twin per female frame, cache safety, colour main screen for both characters, both switches, other panels stay 1-bit). The main screen and the VIKING screen were rendered offline at 128×128 through the real drawing code for both characters, in colour and with colour off.
+
 #### [#1055](https://github.com/PierreGode/Ragnar/pull/1055) — feat(display): shieldmaiden character on the e-paper and screens for female units
 *branch `feat/female-viking-display`*
 

@@ -222,6 +222,9 @@ art from `resources/images/status/woman/`.
   viking page on the colour theme) and the round GC9A01, which tints the
   shieldmaiden with the configured mascot colour just like the default
   character.
+- On the colour 1.44" LCD HAT she is drawn in **full colour** from the twin
+  frames in `resources/images/status/woman/color/` (see
+  [Display Controls](DISPLAY_CONTROLS.md#colour)).
 - Changing the name or `mesh_viking_gender` takes effect on the next animation
   frame, with no restart. An explicit `mesh_viking_gender = female` shows the
   shieldmaiden on the panel even with the mesh off; a gender derived from the

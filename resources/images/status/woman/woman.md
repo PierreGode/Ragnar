@@ -9,8 +9,12 @@ of the default viking — see `SharedData.load_female_images` /
 
 - `*.png` — the display frames: **78×78, 1-bit**, the same footprint as the
   default frames. They are loaded as-is (scaled with NEAREST on large displays).
-- `src/*.png` — the head-and-shoulders portrait crops (greyscale, 296 px) the
-  frames are rendered from.
+- `color/*.png` — a full-colour twin of every frame (**156×156, RGBA**,
+  transparent background, the portrait in the same place at twice the size).
+  Colour panels draw these instead (the 1.44" LCD HAT; see
+  `SharedData.color_sprite`).
+- `src/*.png` — the head-and-shoulders portrait crops (colour on a transparent
+  background, 296 px) both sets are rendered from.
 
 - `idle_<portrait>_<kind>.png` — idle-only expression variants of the calm,
   front-facing portraits: `happy` (both eyes closed in a smile), `blink` (eyes
@@ -45,7 +49,8 @@ its eye positions in `EYES`). To add or re-crop a pose from an original illustra
 ## Adding a frame by hand
 
 Drop a 78×78 black-and-white `.png` in this folder; it joins the pool
-automatically (name it `idle_…` to show it only while idle). Note that
+automatically (name it `idle_…` to show it only while idle). Add a 156×156
+RGBA file of the same name under `color/` if it should show in colour. Note that
 re-running the generator deletes and rebuilds every `idle_*.png`. To pin specific frames to a specific status, add an entry to
 `SharedData.WOMAN_STATUS_IMAGES` (`shared.py`), e.g.
 `'SSHBruteforce': ('axe', 'swords')`.

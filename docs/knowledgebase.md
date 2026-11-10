@@ -735,6 +735,11 @@ e-Paper, TFT and OLED panels, MAX7219 LED matrices, the WiFi Pineapple Pager, an
 Source: README.md
 <!-- proof: README.md | 2.13" e-Paper HAT -->
 
+### Can the 1.44" LCD HAT show colour?
+Yes. Its main screen and wardriving screens use a dark colour theme with a full-colour viking. Set `lcd_color` to false to turn it off.
+Source: DISPLAY_CONTROLS.md
+<!-- proof: docs/DISPLAY_CONTROLS.md | The LCD HAT is a colour panel, and two kinds of screen use it -->
+
 ### Why is my e-Paper or TFT screen dark on Ragnar OS Ulfberht?
 Units imaged before the fix lack SPI, the GPIO Python modules and the Pi 5 GPIO alias. Run Update, then reboot once.
 Source: ragnar-os-ulfberht.md

@@ -110,6 +110,31 @@ GPIO pins (BCM), fixed by the HAT: `KEY1=21`, `KEY2=20`, `KEY3=16`; joystick
 > screen** — and re‑aligns automatically when **KEY2** rotates the display.
 > The directions in the tables below are always relative to the upright text.
 
+### Colour
+
+The LCD HAT is a colour panel, and two kinds of screen use it:
+
+- **Main screen** — dark background, gold title, each stat icon in its own
+  colour, and the character in **full colour**: the blonde-bearded viking, or
+  the shieldmaiden on a female unit (see
+  [mesh.md](mesh.md#the-shieldmaiden-shows-on-the-panel-not-just-the-web)).
+- **Wardriving screens** — the same dark theme; the VIKING screen shows the
+  full-colour character too.
+
+The other pages (network, vulnerabilities, discovered hosts, traffic, Network
+Diagnostic mode) are still black on white.
+
+Two config keys in `config/shared_config.json` switch it off, each defaulting
+to on; restart the service after changing one:
+
+| Key | `false` gives |
+|-----|---------------|
+| `lcd_color` | The black-on-white main screen |
+| `wardriving_lcd_color` | Black-on-white wardriving screens |
+
+Colour applies only to the 1.44" LCD HAT. E-paper and every other panel render
+exactly as before.
+
 ### Default mode
 
 | Input | Action |
