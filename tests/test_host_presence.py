@@ -342,6 +342,12 @@ def test_switching_from_idle_to_fast_does_not_flip_live_hosts():
     assert [c['status'] for c in mon._test[3]] == ['up']
 
 
+def test_first_verdict_is_fast_even_in_idle_mode():
+    mon = make({HOST: '02:aa:bb:cc:dd:02', '192.168.1.51': ''}, fast=False)
+    run(mon, 9)                       # nothing answers, nobody is watching
+    assert status(mon) == 'down' and status(mon, '192.168.1.51') == 'down'
+
+
 def test_idle_mode_is_slower_to_declare_offline():
     mon = make({HOST: '02:aa:bb:cc:dd:02'}, fast=False)
     run(mon, 30, reply_from=ALIVE)

@@ -368,6 +368,10 @@ class HostPresenceMonitor:
                         gap *= 3
                 elif host.online and host.unanswered == 0:
                     gap = mode['interval']
+                elif host.online is None:
+                    # No verdict yet: settle it at the fast pace even when
+                    # idle, so counts are right within seconds of starting.
+                    gap = self.fast_mode['retry']
                 else:
                     gap = mode['retry']
                 if now - host.last_probe >= gap - 0.05:
@@ -505,9 +509,10 @@ class HostPresenceMonitor:
         changes = []
         with self._lock:
             for host in self._hosts.values():
-                if host.online is False or host.unanswered < mode['min_unanswered']:
+                rule = self.fast_mode if host.online is None else mode
+                if host.online is False or host.unanswered < rule['min_unanswered']:
                     continue
-                if now - host.pending_since < mode['window']:
+                if now - host.pending_since < rule['window']:
                     continue
                 host.online = False
                 host.down_since = now

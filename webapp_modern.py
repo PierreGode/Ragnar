@@ -9271,6 +9271,26 @@ def _live_target_counts(hosts, presence=None, now=None):
     }
 
 
+def _target_card_fields():
+    """The rest of the Targets card, from the last sync.
+
+    Status payloads are what the dashboard falls back to when its stats
+    request fails. Carrying only target_count there made the card redraw as
+    "N targets, N total, 0 offline" in that case.
+    """
+    new_ips = list(getattr(shared_data, 'new_target_ips', []) or [])
+    lost_ips = list(getattr(shared_data, 'lost_target_ips', []) or [])
+    return {
+        'active_target_count': safe_int(shared_data.targetnbr),
+        'total_target_count': safe_int(getattr(shared_data, 'total_targetnbr', 0)),
+        'inactive_target_count': safe_int(getattr(shared_data, 'inactive_targetnbr', 0)),
+        'new_target_count': len(new_ips),
+        'lost_target_count': len(lost_ips),
+        'new_target_ips': new_ips,
+        'lost_target_ips': lost_ips,
+    }
+
+
 def sync_all_counts():
     """Synchronize all counts (targets, ports, vulnerabilities, credentials) across data sources.
     
@@ -11114,6 +11134,7 @@ def get_status():
             'orchestrator_status': safe_str(shared_data.ragnarorch_status),
             'automation_enabled': is_orchestrator_running(),
             'target_count': safe_int(shared_data.targetnbr),
+            **_target_card_fields(),
             'port_count': safe_int(shared_data.portnbr),
             'vulnerability_count': safe_int(shared_data.vulnnbr),
             'credential_count': safe_int(shared_data.crednbr),
@@ -24550,6 +24571,7 @@ def get_current_status():
         'orchestrator_status': safe_str(shared_data.ragnarorch_status),
         'automation_enabled': is_orchestrator_running(),
         'target_count': safe_int(shared_data.targetnbr),
+        **_target_card_fields(),
         'port_count': safe_int(shared_data.portnbr),
         'vulnerability_count': safe_int(shared_data.vulnnbr),
         'vulnerable_hosts_count': safe_int(getattr(shared_data, 'vulnerable_host_count', 0)),
