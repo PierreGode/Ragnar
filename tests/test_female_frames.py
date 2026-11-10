@@ -58,8 +58,10 @@ def test_female_frames_load_as_1bit_at_frame_height():
     ({'mesh_enabled': True, 'mesh_viking_gender': 'male', 'mesh_viking_name': 'Lagertha'}, False),
     ({'mesh_enabled': True, 'mesh_viking_gender': '', 'mesh_viking_name': 'Lagertha Ironside'}, True),
     ({'mesh_enabled': True, 'mesh_viking_gender': '', 'mesh_viking_name': 'Bjorn Ironside'}, False),
-    # Off the mesh the web header keeps the default portrait, so the panel does too.
-    ({'mesh_enabled': False, 'mesh_viking_gender': 'female', 'mesh_viking_name': 'Lagertha'}, False),
+    # An explicit pin holds off the mesh; a name alone does not.
+    ({'mesh_enabled': False, 'mesh_viking_gender': 'female', 'mesh_viking_name': ''}, True),
+    ({'mesh_enabled': False, 'mesh_viking_gender': '', 'mesh_viking_name': 'Lagertha Ironside'}, False),
+    ({'mesh_enabled': False, 'mesh_viking_gender': None, 'mesh_viking_name': ''}, False),
 ])
 def test_gender_resolution_matches_web_portrait(cfg, expected):
     assert _unit(**cfg)._unit_is_female() is expected
@@ -88,6 +90,9 @@ def test_gender_change_at_runtime_switches_frames():
     sd = _unit(mesh_enabled=True, mesh_viking_gender='male')
     assert sd.active_image_series() is sd.image_series
     sd.config['mesh_viking_gender'] = 'female'
+    assert sd.active_image_series() is sd.female_image_series
+    sd.config['mesh_viking_gender'] = ''
+    sd.config['mesh_viking_name'] = 'Lagertha Ironside'
     assert sd.active_image_series() is sd.female_image_series
     sd.config['mesh_enabled'] = False
     assert sd.active_image_series() is sd.image_series

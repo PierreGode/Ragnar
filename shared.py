@@ -2033,30 +2033,28 @@ class SharedData:
                     f"from {len(prepared)} woman images.")
 
     def _unit_is_female(self):
-        """True when this unit is on the mesh and carries a woman's Viking name
-        (or an explicit female gender override). Mirrors webapp _mesh_viking_female
+        """True when mesh_viking_gender is pinned to female, or this unit is on
+        the mesh and carries a woman's Viking name. Mirrors webapp _mesh_viking_female
         so the e-paper/LCD character matches the fleet portrait. Cached on the
         configured name+gender so the per-frame randomizer never re-derives it."""
         cfg = self.config
-        if not cfg.get('mesh_enabled'):
-            return False
         gender = (cfg.get('mesh_viking_gender') or '').strip().lower()
+        # An explicit pin is the operator's choice and holds on or off the
+        # mesh; a gender derived from the Viking name only exists on the mesh.
+        if gender == 'female':
+            return True
+        if gender == 'male' or not cfg.get('mesh_enabled'):
+            return False
         name = (cfg.get('mesh_viking_name') or '').strip()
         cache = self._female_unit_cache
         if cache is not None and cache[0] == (name, gender):
             return cache[1]
-        result = False
-        if gender == 'female':
-            result = True
-        elif gender == 'male':
+        try:
+            import mesh_manager
+            resolved = name or mesh_manager.derive_viking_name()
+            result = mesh_manager.is_female_viking(resolved)
+        except Exception:
             result = False
-        else:
-            try:
-                import mesh_manager
-                resolved = name or mesh_manager.derive_viking_name()
-                result = mesh_manager.is_female_viking(resolved)
-            except Exception:
-                result = False
         self._female_unit_cache = ((name, gender), result)
         return result
 

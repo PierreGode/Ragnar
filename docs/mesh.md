@@ -227,8 +227,9 @@ art from `resources/images/status/woman/`.
   character. The frames are portrait rather than square; the round display
   centres them instead of stretching them.
 - Changing the name or `mesh_viking_gender` takes effect on the next animation
-  frame, with no restart. With the mesh off, the unit keeps the default
-  character (the web header does the same).
+  frame, with no restart. An explicit `mesh_viking_gender = female` shows the
+  shieldmaiden on the panel even with the mesh off; a gender derived from the
+  name applies only while the mesh is on.
 - Gender is resolved from the **same source of truth as the fleet portrait**
   (`is_female_viking` / `mesh_viking_gender`), so what a unit shows on its own
   screen matches how it appears in every peer's mesh list. A male or
