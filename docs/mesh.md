@@ -210,22 +210,18 @@ art from `resources/images/status/woman/`.
 - The pool lives in `SharedData.WOMAN_STATUS_IMAGES` (`shared.py`), which is
   empty by default (all art is IDLE). Add a status entry there to pin specific
   art to a specific status later.
-- The whole Ragnar UI is **1-bit black/white** (the render canvas is
-  `Image.new('1', …)` for the LCD/TFT as well as e-paper), so the `woman/*.png`
-  art must be **simple, high-contrast black-on-white line art** — the same
-  style as the built-in male frames. Detailed or photographic art cannot render
-  legibly once reduced to a ~52×78 monochrome sprite (it becomes noise or a
-  blob). At load each frame is just flattened onto white, scaled to the standard
-  frame height, and thresholded to 1-bit (no dithering), so a well-drawn line-art
-  icon drops straight in on every panel size with no layout change. Tune the
-  black/white cut point with `SharedData.WOMAN_BW_THRESHOLD` (higher = heavier
-  lines).
+- The frames are **78×78, 1-bit**, the same footprint as the default frames,
+  so no screen layout changes. They are head-and-shoulders portraits rendered
+  from detailed colour illustrations by `scripts/gen_female_frames.py`, which
+  crops to the face, brightens, dithers and keeps the ink outlines solid — a
+  whole-body illustration shrunk to 78 px on a 1-bit panel is just noise. The
+  portrait crops it works from are in `resources/images/status/woman/src/`;
+  re-tune the look with the constants at the top of the script and re-run it.
 - **Every screen that shows the viking follows suit**: the e-paper main screen,
   the compact LCD/TFT layouts, the 1.44" wardriving pages (including the gold
   viking page on the colour theme) and the round GC9A01, which tints the
   shieldmaiden with the configured mascot colour just like the default
-  character. The frames are portrait rather than square; the round display
-  centres them instead of stretching them.
+  character.
 - Changing the name or `mesh_viking_gender` takes effect on the next animation
   frame, with no restart. An explicit `mesh_viking_gender = female` shows the
   shieldmaiden on the panel even with the mesh off; a gender derived from the

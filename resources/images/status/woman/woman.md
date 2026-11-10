@@ -1,36 +1,43 @@
 # Female (shieldmaiden) status frames — e-paper + LCD
 
-These PNGs are the on-device character for a **mesh unit named after a woman**
-(or one with `mesh_viking_gender = female`). When such a unit is active the
-e-paper / LCD draws these instead of the default frames — see
-`SharedData.load_female_images` / `update_image_randomizer` in `shared.py`.
+These PNGs are the on-device character for a unit with a woman's Viking name on
+the mesh, or with `mesh_viking_gender = female`. Such a unit draws these instead
+of the default viking — see `SharedData.load_female_images` /
+`update_image_randomizer` in `shared.py`.
 
-All of these images belong to the **IDLE pool**, and IDLE is the fallback for
-every scan status, so **every status draws a random frame from the whole set**
-(per-status selection, but one shared art pool — a random shieldmaiden frame
-regardless of activity).
+## What is here
 
-Notes for adding/replacing art:
-## Art spec — READ THIS before adding images
+- `*.png` — the display frames: **78×78, 1-bit**, the same footprint as the
+  default frames. They are loaded as-is (scaled with NEAREST on large displays).
+- `src/*.png` — the head-and-shoulders portrait crops (greyscale, 296 px) the
+  frames are rendered from.
 
-The **entire Ragnar UI is 1-bit black/white** (e-paper *and* LCD/TFT), and each
-frame is shown as a tiny ~52×78 sprite. So the art here must be drawn for that:
+All frames belong to one **IDLE pool**, and IDLE is the fallback for every scan
+status, so every status draws a random frame from the whole set.
 
-- **Simple black-on-white line art.** Bold outlines, few interior lines, lots of
-  white space — the same style as the built-in male frames in the sibling
-  status folders (`../IDLE/`, etc.). Think icon, not illustration.
-- **High contrast, no shading/gradients.** Grayscale shading, photographic
-  detail and painted rendering all collapse into noise or a black blob when
-  reduced to 1-bit at sprite size. (This is why the original detailed uploads
-  looked like "random pixels" — no conversion can fix over-detailed source art.)
-- Square-ish or portrait, any resolution — it's scaled down to the frame height.
+## How the frames are made
 
-Processing on load (`_prepare_female_image`): flatten onto white → scale to the
-standard frame height → threshold to 1-bit, **no dithering**. Tune the cut point
-with `SharedData.WOMAN_BW_THRESHOLD` in `shared.py` (higher = heavier lines;
-default 200 keeps thin lines from breaking up when downscaled).
-- Add a new frame by dropping a `.png` in this folder — it joins the shared
-  pool automatically.
-- To pin a specific image to a specific status instead of the shared pool, add
-  an entry to `SharedData.WOMAN_STATUS_IMAGES` (`shared.py`) keyed by status
-  name, e.g. `'SSHBruteforce': ('axe', 'swords')`.
+The art is a set of detailed full-colour, full-body illustrations. Shrunk whole
+to 78 px on a 1-bit panel they turn into noise, so `scripts/gen_female_frames.py`:
+
+1. crops each illustration to a head-and-shoulders portrait, so the face fills
+   the frame the way the default viking's does;
+2. brightens and adds contrast so pale hair and skin go white, then dithers;
+3. forces the ink outlines to solid black so the dither does not break them up.
+
+Re-tune and rebuild the frames from the committed crops:
+
+```bash
+python3 scripts/gen_female_frames.py
+```
+
+The knobs (`GAMMA`, `CONTRAST`, `LINE_DARK`, `LINE_COVER`) are at the top of the
+script. To add or re-crop a pose from an original illustration, add it to
+`PORTRAITS` and run with `--from-originals <dir>`.
+
+## Adding a frame by hand
+
+Drop a 78×78 black-and-white `.png` in this folder; it joins the pool
+automatically. To pin specific frames to a specific status, add an entry to
+`SharedData.WOMAN_STATUS_IMAGES` (`shared.py`), e.g.
+`'SSHBruteforce': ('axe', 'swords')`.

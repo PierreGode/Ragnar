@@ -1952,26 +1952,16 @@ class SharedData:
     # status entry here later to pin specific art to a specific status.
     WOMAN_STATUS_IMAGES = {}
 
-    # Grayscale cut point (0-255) for reducing woman/*.png to 1-bit black/white
-    # on the monochrome panel: a pixel brighter than this goes white, the rest
-    # black. Set high (200) so anti-aliased line edges from the downscale still
-    # count as black and thin lines don't break up. Lower it for a lighter
-    # figure, raise it toward 255 for heavier/thicker lines. See
-    # _prepare_female_image. (Source art should be simple black-on-white line
-    # art — detailed/photographic art can't render legibly at sprite size.)
-    WOMAN_BW_THRESHOLD = 200
-
     def _prepare_female_image(self, img, img_scale):
-        """Turn a status/woman/*.png into a clean 1-bit character frame sized to
-        match the standard frames.
+        """Turn a status/woman/*.png into a 1-bit character frame the same
+        height as the default animation frames.
 
-        The whole Ragnar UI is 1-bit black/white, so the source art is expected
-        to be *simple, high-contrast line art* (black on white, like the male
-        frames) — detailed/photographic art cannot render legibly at sprite
-        size on a 1-bit panel. We just flatten onto white, scale to the frame
-        height, and threshold to pure black/white with NO dithering (dithering
-        is what turns tones into random-pixel noise on e-paper). The result
-        pastes onto the panel as a direct 1-bit copy."""
+        The frames are shipped ready-made: 78x78, 1-bit, already dithered and
+        outlined by scripts/gen_female_frames.py. So this only flattens any
+        transparency onto white, converts to 1-bit with a plain threshold (no
+        second dither), and scales with NEAREST on large displays — the same
+        way the default .bmp frames are scaled — so the dither pattern stays
+        crisp instead of being smeared."""
         if img is None or Image is None:
             return None
         # Match the height of the standard animation frames as loaded (78px,
@@ -1982,20 +1972,18 @@ class SharedData:
             if frames:
                 target_h = frames[0].height
                 break
-        # Flatten transparency onto white, then work in grayscale at frame size.
-        if img.mode == 'RGBA':
+        if img.mode in ('RGBA', 'LA', 'P'):
+            img = img.convert('RGBA')
             bg = Image.new('RGB', img.size, (255, 255, 255))
             bg.paste(img, mask=img.split()[-1])
             img = bg
-        gray = img.convert('L')
-        if gray.height != target_h:
-            ratio = target_h / float(gray.height)
-            resample = getattr(Image, 'Resampling', Image).LANCZOS
-            gray = gray.resize((max(1, int(gray.width * ratio)), target_h), resample)
-        # Threshold to 1-bit, no dithering (mode '1' via point()). A fairly high
-        # cut keeps anti-aliased line edges (mid-grays from the downscale) as
-        # black, so thin lines survive instead of breaking up.
-        return gray.point(lambda p: 255 if p > self.WOMAN_BW_THRESHOLD else 0, mode='1')
+        if img.mode != '1':
+            img = img.convert('L').point(lambda p: 255 if p > 127 else 0, mode='1')
+        if img.height != target_h:
+            ratio = target_h / float(img.height)
+            resample = getattr(Image, 'Resampling', Image).NEAREST
+            img = img.resize((max(1, int(round(img.width * ratio))), target_h), resample)
+        return img
 
     def load_female_images(self, img_scale):
         """Build the per-status female frame pool from status/woman/*.png.

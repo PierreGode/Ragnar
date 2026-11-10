@@ -47,11 +47,43 @@ def test_female_frames_load_as_1bit_at_frame_height():
     assert len(pool) >= 8
     for frame in pool:
         assert frame.mode == '1'
-        assert frame.height == 78
-        assert frame.width <= 78
-        # Line art: mostly white with some ink, never blank or a solid blob.
+        # Same footprint as the default frames, so no screen layout changes.
+        assert frame.size == (78, 78)
+        # A shaded portrait: plenty of ink, but never blank or a solid blob.
         ink = frame.histogram()[0] / (frame.width * frame.height)
-        assert 0.02 < ink < 0.5
+        assert 0.15 < ink < 0.6
+
+
+def test_shipped_frames_are_ready_made_and_match_the_generator():
+    """woman/*.png are the generator's output for woman/src/*.png, so the art
+    can be re-tuned from the committed portrait crops."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'gen_female_frames', os.path.join(REPO, 'scripts', 'gen_female_frames.py'))
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    woman = os.path.join(STATUS_DIR, 'woman')
+    names = sorted(n for n in os.listdir(woman) if n.endswith('.png'))
+    assert names == sorted(n for n in os.listdir(os.path.join(woman, 'src')) if n.endswith('.png'))
+    for name in names:
+        shipped = Image.open(os.path.join(woman, name))
+        assert shipped.mode == '1' and shipped.size == (78, 78)
+        built = gen.render_frame(Image.open(os.path.join(woman, 'src', name)))
+        # Not byte-exact: resampling rounds differently across Pillow versions.
+        diff = sum(bin(a ^ b).count('1') for a, b in zip(shipped.tobytes(), built.tobytes()))
+        assert diff < 0.03 * 78 * 78, f'{name}: {diff} pixels differ'
+
+
+def test_scaled_frames_keep_the_dither_crisp():
+    # Large displays scale with NEAREST: 2x must be an exact pixel doubling.
+    sd = _unit()
+    base = sd.female_image_series['IDLE'][0]
+    big = sd.image_series['IDLE'][0].resize((156, 156))
+    sd.image_series = {s: [big] for s in sd.status_list}
+    sd.load_female_images(2.0)
+    doubled = sd.female_image_series['IDLE'][0]
+    assert doubled.size == (156, 156)
+    assert doubled.tobytes() == base.resize((156, 156), Image.NEAREST).tobytes()
 
 
 @pytest.mark.parametrize('cfg,expected', [
