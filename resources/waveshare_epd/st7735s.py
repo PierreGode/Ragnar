@@ -32,9 +32,25 @@ logger = logging.getLogger(__name__)
 LCD_WIDTH  = 128
 LCD_HEIGHT = 128
 
-# Visible-window offset into the ST7735S 132x162 RAM for this panel.
-COL_OFFSET = 1
-ROW_OFFSET = 2
+# Visible-window offset into the ST7735S 132x162 RAM for this panel. The 128x128
+# visible area sits a few pixels into the larger RAM, so the window must be
+# shifted or the panel's far edges show unwritten RAM as a band of coloured
+# noise. The right value depends on the panel batch and the MADCTL scan
+# direction; override per panel with RAGNAR_ST7735S_COL_OFFSET /
+# RAGNAR_ST7735S_ROW_OFFSET (decimal or 0x-hex).
+def _env_int(name, default):
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return int(raw, 0)
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s=%r; using %d", name, raw, default)
+        return default
+
+
+COL_OFFSET = _env_int("RAGNAR_ST7735S_COL_OFFSET", 2)
+ROW_OFFSET = _env_int("RAGNAR_ST7735S_ROW_OFFSET", 1)
 
 RST_PIN = 27
 DC_PIN  = 25
