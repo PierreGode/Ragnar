@@ -1203,9 +1203,48 @@ configure_interfaces() {
         raspi-config nonint do_spi 0
         raspi-config nonint do_i2c 0
         check_success "Interface configuration completed"
+    elif [ "$IS_PI" = true ]; then
+        # A Pi without raspi-config (Kali base — the Ulfberht edition):
+        # ensure_pi_gpio_displays switches SPI/I2C on in config.txt instead.
+        log "INFO" "raspi-config not available on this Pi; SPI/I2C are enabled in config.txt by the display setup step"
     else
         log "WARNING" "raspi-config not available; skipping SPI/I2C configuration (non-Raspberry Pi hardware)"
     fi
+}
+
+# Everything a GPIO display needs that Raspberry Pi OS ships and other Pi
+# distros (Kali / the Ulfberht edition) do not: SPI/I2C in config.txt, the
+# spidev/smbus2/gpiozero modules, lgpio (the only gpiozero backend that works
+# on a Pi 5, built from source where unpackaged) and the gpiochip4 alias
+# gpiozero opens on a Pi 5. A no-op on Raspberry Pi OS. See
+# scripts/pi_gpio_displays.sh; update_ragnar.sh runs the same script.
+ensure_pi_gpio_displays() {
+    if [ "$IS_PI" != true ]; then
+        return 0
+    fi
+    if [ "$HEADLESS_MODE" = true ] && [ "${RAGNAR_INSTALL_ALL_DISPLAYS:-0}" != "1" ]; then
+        log "INFO" "Headless mode - skipping GPIO display platform setup"
+        return 0
+    fi
+    local script="$ragnar_PATH/scripts/pi_gpio_displays.sh"
+    if [ ! -f "$script" ]; then
+        log "WARNING" "scripts/pi_gpio_displays.sh not found - GPIO display platform setup skipped"
+        return 0
+    fi
+    log "INFO" "Preparing GPIO display support (SPI/I2C, gpiozero, lgpio, Pi 5 gpiochip alias)..."
+    local out args=()
+    [ "$IMAGE_BUILD" = true ] && args+=(--image-build)
+    out="$(RAGNAR_FORCE_PI=1 bash "$script" "${args[@]}" 2>&1)"
+    echo "$out" | grep -v '^REBOOT_REQUIRED$' | tee -a "$LOG_FILE"
+    if echo "$out" | grep -q '\[!!\]'; then
+        log "WARNING" "GPIO display setup reported problems (see above) - a GPIO screen may stay dark"
+    else
+        log "SUCCESS" "GPIO display support ready"
+    fi
+    if echo "$out" | grep -q '^REBOOT_REQUIRED$'; then
+        log "WARNING" "SPI/I2C were enabled in config.txt - the display works after the reboot"
+    fi
+    return 0
 }
 
 # Setup ragnar
@@ -1481,13 +1520,18 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         [ "$HEADLESS_MODE" = true ] && log "INFO" "Headless profile, but RAGNAR_INSTALL_ALL_DISPLAYS=1 — installing every display driver so a screen can be enabled later"
         log "INFO" "Installing display driver support for all screen types..."
 
+        # Platform layer first (SPI/I2C on, gpiozero + lgpio, Pi 5 gpiochip
+        # alias) — it prefers distro packages, so the pip installs below only
+        # fill in what is still missing.
+        ensure_pi_gpio_displays
+
         # SPI transport: e-Paper, GC9A01 / ST7735S / ILI9486 3.5" / Whisplay TFT, MAX7219.
-        pip3 install spidev --break-system-packages >/dev/null 2>&1 \
+        python3 -c "import spidev" 2>/dev/null || pip3 install spidev --break-system-packages >/dev/null 2>&1 \
             && log "SUCCESS" "spidev installed (SPI displays)" \
             || log "WARNING" "spidev failed to install — SPI displays will not work"
 
         # I2C transport: SSD1306 OLED, LCD1602 character LCD.
-        pip3 install smbus2 --break-system-packages >/dev/null 2>&1 \
+        { python3 -c "import smbus2" 2>/dev/null || pip3 install smbus2 --break-system-packages >/dev/null 2>&1; } \
             && log "SUCCESS" "smbus2 installed (I2C displays)" \
             || log "WARNING" "smbus2 failed to install — I2C displays will not work"
 
@@ -1523,6 +1567,12 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         python3 -c "import smbus2" 2>/dev/null || unusable+=("I2C displays (smbus2)")
         python3 -c "import luma.led_matrix" 2>/dev/null || unusable+=("MAX7219 (luma.led_matrix)")
         python3 -c "from waveshare_epd import epd2in13_V4" 2>/dev/null || unusable+=("e-Paper (waveshare_epd)")
+        if [ "$IS_PI" = true ]; then
+            # The e-Paper and SPI TFT drivers toggle their pins through gpiozero,
+            # which on a Pi 5 can only use the lgpio backend.
+            python3 -c "import gpiozero" 2>/dev/null || unusable+=("e-Paper / SPI TFTs (gpiozero)")
+            python3 -c "import lgpio" 2>/dev/null || unusable+=("GPIO displays on a Pi 5 (lgpio)")
+        fi
         for drv in gc9a01 st7735s st7789v2 ili9486 whisplay ssd1306 lcd1602 max7219; do
             [ -f "$ragnar_PATH/resources/waveshare_epd/${drv}.py" ] \
                 || unusable+=("${drv} (driver file missing)")

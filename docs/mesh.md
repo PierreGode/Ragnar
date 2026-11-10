@@ -197,6 +197,40 @@ Override from the shell with `mesh_viking_name` if you would rather choose:
 python3 -c "import mesh_manager; print(mesh_manager.derive_viking_name())"
 ```
 
+### The shieldmaiden shows on the panel, not just the web
+
+Gender isn't only a web-UI portrait swap. When a mesh unit carries a woman's
+Viking name (or you pin `mesh_viking_gender = female`), the **e-paper / LCD
+character changes too**: instead of the default frames it draws the shieldmaiden
+art from `resources/images/status/woman/`.
+
+- Every status draws a **random** frame from the eight shieldmaiden portraits.
+  While the unit is **idle** it also draws from ten expression variants of the
+  calm portraits (eyes closed in a smile, a blink, a wink), the same way the
+  default viking has extra idle frames.
+- To pin specific frames to a specific status, add an entry to
+  `SharedData.WOMAN_STATUS_IMAGES` (`shared.py`), which is empty by default.
+- The frames are **78×78, 1-bit**, the same footprint as the default frames,
+  so no screen layout changes. They are head-and-shoulders portraits rendered
+  from detailed colour illustrations by `scripts/gen_female_frames.py`, which
+  crops to the face, brightens, dithers and keeps the ink outlines solid — a
+  whole-body illustration shrunk to 78 px on a 1-bit panel is just noise. The
+  portrait crops it works from are in `resources/images/status/woman/src/`;
+  re-tune the look with the constants at the top of the script and re-run it.
+- **Every screen that shows the viking follows suit**: the e-paper main screen,
+  the compact LCD/TFT layouts, the 1.44" wardriving pages (including the gold
+  viking page on the colour theme) and the round GC9A01, which tints the
+  shieldmaiden with the configured mascot colour just like the default
+  character.
+- Changing the name or `mesh_viking_gender` takes effect on the next animation
+  frame, with no restart. An explicit `mesh_viking_gender = female` shows the
+  shieldmaiden on the panel even with the mesh off; a gender derived from the
+  name applies only while the mesh is on.
+- Gender is resolved from the **same source of truth as the fleet portrait**
+  (`is_female_viking` / `mesh_viking_gender`), so what a unit shows on its own
+  screen matches how it appears in every peer's mesh list. A male or
+  non-mesh unit is unaffected and keeps the default frames.
+
 ### Clashes are detected, not prevented
 
 Both identifiers are set independently on each unit, so nothing *prevents* a
