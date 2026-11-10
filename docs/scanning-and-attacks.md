@@ -54,8 +54,7 @@ the affected Status cell is redrawn.
 - **What it does not change.** The hosts database keeps its slower
   alive/degraded bookkeeping (see
   [Asset Inventory](asset-inventory.md#how-a-hosts-alivedegraded-status-is-decided)),
-  which decides what the orchestrator scans and what the Dashboard target
-  counts show. Presence is kept in memory only.
+  which decides what the orchestrator scans. Presence is kept in memory only.
 - **Sleeping devices.** A phone or battery device that stops answering for
   more than about 8 seconds shows Offline until it wakes. That is the
   trade-off of a 10 second verdict.
@@ -67,6 +66,26 @@ the affected Status cell is redrawn.
 Endpoint: `GET /api/network/presence` returns the verdict per IP plus the
 monitor's mode and counters. `GET /api/network/stable` carries the same
 verdict in each host's `status` (`up`, `down`, or `unknown`).
+
+### Dashboard Targets card
+
+The first Dashboard card uses the same live verdict, so it always agrees with
+the Discovered Hosts table:
+
+| Number | Meaning |
+| --- | --- |
+| **Targets** (large) | hosts that are Online right now, Ragnar itself included |
+| **Tot** | every host Ragnar knows on this network |
+| **Offline** | Tot minus Targets |
+| **New** | hosts first seen in the last 24 hours |
+| **Lost** | hosts that were answering and went Offline in the last 24 hours, and are still Offline |
+
+Hover **New** or **Lost** for the addresses. A host with no live verdict
+(another saved network, or the first seconds after start) is counted from its
+stored status. **Lost** is kept in memory, so it starts again from 0 when
+Ragnar restarts; hosts that were already silent at start are Offline, not Lost.
+The e-paper target count follows the same Online number. Push notifications
+for new and lost devices are unchanged and still follow the stored status.
 
 ### IP range scan (host discovery)
 

@@ -13790,12 +13790,12 @@ function updateDashboardStats(stats) {
 
     const newCountElement = document.getElementById('target-new-count');
     if (newCountElement) {
-        newCountElement.title = newTargetList.length > 0 ? newTargetList.join(', ') : 'No recent additions';
+        newCountElement.title = newTargetList.length > 0 ? newTargetList.join(', ') : 'No new hosts in the last 24 hours';
     }
 
     const lostCountElement = document.getElementById('target-lost-count');
     if (lostCountElement) {
-        lostCountElement.title = lostTargetList.length > 0 ? lostTargetList.join(', ') : 'No recent drops';
+        lostCountElement.title = lostTargetList.length > 0 ? lostTargetList.join(', ') : 'No hosts lost in the last 24 hours';
     }
 
     updateElement('port-count', portCount);

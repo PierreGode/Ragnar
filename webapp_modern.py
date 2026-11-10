@@ -9199,6 +9199,78 @@ def sync_vulnerability_count():
         return safe_int(shared_data.vulnnbr)
 
 
+# ---------------------------------------------------------------------------
+# Dashboard "Targets" card
+# ---------------------------------------------------------------------------
+# How far back the card's New and Lost numbers look.
+TARGET_RECENT_HOURS = 24
+
+
+def _parse_host_timestamp(value):
+    """Parse a hosts-table timestamp (ISO or SQLite 'YYYY-MM-DD HH:MM:SS')."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).strip().replace(' ', 'T'))
+    except (ValueError, TypeError):
+        return None
+
+
+def _live_target_counts(hosts, presence=None, now=None):
+    """Count the Targets card from one rule, for every code path that fills it.
+
+    The card used to count a host as an active target whenever the stored
+    status said 'alive'. Nothing records a failed probe there, so the number
+    always equalled the total, Offline was always 0, and New/Lost only ever
+    held the difference between two consecutive 15 second syncs.
+
+    active / inactive: the live presence verdict where there is one, the
+        stored status otherwise (Ragnar's own address, another saved network,
+        the first seconds after start).
+    new:  hosts first seen within TARGET_RECENT_HOURS.
+    lost: hosts that were answering and went Offline within
+        TARGET_RECENT_HOURS, and are still Offline.
+    """
+    presence = presence or {}
+    now = now or datetime.now()
+    wall_now = time.time()
+    recent = timedelta(hours=TARGET_RECENT_HOURS)
+    active = total = 0
+    new_ips, lost_ips = [], []
+    for host in hosts:
+        ip = (host.get('ip') or '').strip()
+        if not ip or ip == 'STANDALONE' or (host.get('mac') or '').strip() == 'STANDALONE':
+            continue
+        total += 1
+        verdict = presence.get(ip)
+        if verdict:
+            is_up = verdict.get('status') == 'up'
+            if (not is_up and verdict.get('seen_ago') is not None
+                    and wall_now - (verdict.get('since') or 0) < recent.total_seconds()):
+                lost_ips.append(ip)
+        else:
+            is_up = (host.get('status') or 'alive') == 'alive'
+        if is_up:
+            active += 1
+        first_seen = _parse_host_timestamp(host.get('first_seen'))
+        if first_seen and timedelta(0) <= now - first_seen < recent:
+            new_ips.append(ip)
+
+    def _ip_key(value):
+        try:
+            return (0, tuple(int(part) for part in value.split('.')))
+        except ValueError:
+            return (1, value)
+
+    return {
+        'active': active,
+        'total': total,
+        'inactive': total - active,
+        'new_ips': sorted(new_ips, key=_ip_key),
+        'lost_ips': sorted(lost_ips, key=_ip_key),
+    }
+
+
 def sync_all_counts():
     """Synchronize all counts (targets, ports, vulnerabilities, credentials) across data sources.
     
@@ -9317,6 +9389,17 @@ def sync_all_counts():
                 logger.error(f"[SQLITE SYNC] ❌ Error reading from SQLite database: {e}")
                 traceback.print_exc()
 
+            # The card numbers follow live presence; the stored-status counts
+            # above still drive the port total and the notification snapshot.
+            try:
+                live_counts = _live_target_counts(hosts, _presence_snapshot_for_request())
+                aggregated_targets = live_counts['active']
+                total_target_count = live_counts['total']
+                inactive_target_count = live_counts['inactive']
+            except Exception as e:
+                live_counts = None
+                logger.debug(f"Live target count unavailable, using stored status: {e}")
+
             old_targets = shared_data.targetnbr
             old_ports = shared_data.portnbr
 
@@ -9344,8 +9427,14 @@ def sync_all_counts():
             lost_active_hosts = previous_active_hosts - current_active_hosts
 
             shared_data.network_hosts_snapshot = current_snapshot
-            shared_data.new_target_ips = sorted(new_active_hosts)
-            shared_data.lost_target_ips = sorted(lost_active_hosts)
+            if live_counts is not None:
+                # A diff between two consecutive syncs is gone 15 seconds
+                # later; the card shows the last TARGET_RECENT_HOURS instead.
+                shared_data.new_target_ips = live_counts['new_ips']
+                shared_data.lost_target_ips = live_counts['lost_ips']
+            else:
+                shared_data.new_target_ips = sorted(new_active_hosts)
+                shared_data.lost_target_ips = sorted(lost_active_hosts)
             shared_data.new_targets = len(shared_data.new_target_ips)
             shared_data.lost_targets = len(shared_data.lost_target_ips)
 
@@ -9696,15 +9785,10 @@ def _calculate_dashboard_stats_from_context(context: Dict[str, str]) -> Dict:
     vuln_count_override, vuln_hosts_override = _load_intelligence_vulnerability_counts(intelligence_dir)
 
     for host in hosts:
-        stats['total_target_count'] += 1
         status = (host.get('status') or '').lower()
         failed = safe_int(host.get('failed_ping_count'), 0)
-        is_active = status == 'alive' or failed < max_failed
-        if is_active:
-            stats['active_target_count'] += 1
+        if status == 'alive' or failed < max_failed:
             stats['port_count'] += len(_split_port_field(host.get('ports')))
-        else:
-            stats['inactive_target_count'] += 1
 
         vuln_field = host.get('vulnerabilities') or host.get('nmap_vuln_scanner') or host.get('scanner_status')
         if vuln_field:
@@ -9725,6 +9809,16 @@ def _calculate_dashboard_stats_from_context(context: Dict[str, str]) -> Dict:
 
     stats['credential_count'] = _count_credentials_in_dir(credentials_dir)
     stats['data_count'] = _count_files_in_tree(context.get('data_stolen_dir'))
+
+    live_counts = _live_target_counts(hosts, _presence_snapshot_for_request(context.get('slug')))
+    stats['active_target_count'] = live_counts['active']
+    stats['inactive_target_count'] = live_counts['inactive']
+    stats['total_target_count'] = live_counts['total']
+    stats['new_target_ips'] = live_counts['new_ips']
+    stats['lost_target_ips'] = live_counts['lost_ips']
+    stats['new_target_count'] = len(live_counts['new_ips'])
+    stats['lost_target_count'] = len(live_counts['lost_ips'])
+    stats['target_recent_hours'] = TARGET_RECENT_HOURS
     stats['target_count'] = stats['active_target_count']
 
     # Derive timestamps from DB modification time when available

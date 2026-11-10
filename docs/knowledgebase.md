@@ -178,6 +178,11 @@ A device that stops answering for more than about 8 seconds shows Offline until 
 Source: scanning-and-attacks.md
 <!-- proof: docs/scanning-and-attacks.md | shows Offline until it wakes -->
 
+### What do the numbers on the Dashboard Targets card mean?
+The large number is hosts Online right now, **Tot** is every known host, **Offline** is the difference, **New** is hosts first seen in the last 24 hours and **Lost** is hosts that went Offline in the last 24 hours.
+Source: scanning-and-attacks.md
+<!-- proof: docs/scanning-and-attacks.md | hosts first seen in the last 24 hours -->
+
 ### What does a deep scan do?
 It is a TCP port scan of one host, covering the top 3000 ports. Results appear later.
 Source: scanning-and-attacks.md
