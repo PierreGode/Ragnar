@@ -2668,7 +2668,8 @@ class Display:
 
         The square panel is too small for the full stat page, so we drop the
         "WARDRIVING" header entirely and show only what matters on the move:
-        the 2.4 / 5 / 6 GHz network counts, GPS fix, and companion status.
+        the 2.4 / 5 / 6 GHz network counts, the session totals (all Wi-Fi
+        networks and Bluetooth/BLE devices), GPS fix, and companion status.
         The key controls stay in the footer.
         """
         sx = getattr(self, 'render_sx', self.scale_factor_x)
@@ -2698,22 +2699,23 @@ class Display:
             ("6G",   st.get('band_6ghz', 0)),
         ]
         col_w = (w - 2) / 3.0
-        y_lbl = int(6 * sy)
+        y_lbl = int(4 * sy)
         # A long drive pushes counts into the thousands, and a fixed size would
         # spill each number into its neighbour's column. Shrink the shared
         # number font until the widest of the three fits its column — one size
         # for all three so they stay visually consistent.
         max_num_w = col_w - int(4 * sx)
         widest = max((str(v) for _, v in bands), key=font_num.getlength)
-        num_size = int(22 * sy)
+        num_size = int(19 * sy)
+        font_num = self._font_at('Arial.ttf', num_size)
         while num_size > 8 and font_num.getlength(widest) > max_num_w:
             num_size -= 1
             font_num = self._font_at('Arial.ttf', num_size)
 
         # Vertically centre the numbers in the band under the labels, so the
         # row stays balanced at whatever size the fit above settled on.
-        band_top = int(18 * sy)
-        band_bot = int(46 * sy)
+        band_top = int(16 * sy)
+        band_bot = int(38 * sy)
         for i, (label, val) in enumerate(bands):
             cx = 1 + col_w * (i + 0.5)
             lw = font_lbl.getlength(label)
@@ -2724,9 +2726,42 @@ class Display:
             ty = band_top + (band_bot - band_top - vh) / 2 - bbox[1]
             draw.text((cx - vw / 2 - bbox[0], ty), vs, font=font_num, fill=0)
 
-        y = int(48 * sy)
+        y = int(41 * sy)
         draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=0)
-        y += int(6 * sy)
+
+        # --- Session totals: all Wi-Fi networks + Bluetooth/BLE devices ---
+        # The band columns above only split Wi-Fi by band; the grand total and
+        # the BLE tally (the bulk of what a Huginn/Piglet companion reports)
+        # were only reachable by paging to SESSION. Show both here, on the
+        # screen the panel sits on while driving.
+        totals = [
+            ("WIFI", st.get('total_networks', 0)),
+            ("BLE",  st.get('bluetooth_devices', 0)),
+        ]
+        tcol_w = (w - 2) / 2.0
+        y_tlbl = int(43 * sy)
+        tot_size = int(16 * sy)
+        font_tot = self._font_at('Arial.ttf', tot_size)
+        t_widest = max((str(v) for _, v in totals), key=font_tot.getlength)
+        while tot_size > 8 and font_tot.getlength(t_widest) > tcol_w - int(6 * sx):
+            tot_size -= 1
+            font_tot = self._font_at('Arial.ttf', tot_size)
+        tot_top = int(52 * sy)
+        tot_bot = int(69 * sy)
+        for i, (label, val) in enumerate(totals):
+            cx = 1 + tcol_w * (i + 0.5)
+            lw = font_lbl.getlength(label)
+            draw.text((cx - lw / 2, y_tlbl), label, font=font_lbl, fill=0)
+            vs = str(val)
+            bbox = font_tot.getbbox(vs)
+            vw, vh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            ty = tot_top + (tot_bot - tot_top - vh) / 2 - bbox[1]
+            draw.text((cx - vw / 2 - bbox[0], ty), vs, font=font_tot, fill=0)
+        draw.line((w / 2, int(45 * sy), w / 2, int(68 * sy)), fill=0)
+
+        y = int(71 * sy)
+        draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=0)
+        y += int(2 * sy)
 
         # --- GPS + Companion rows (right-aligned key/value, roomy font) ---
         if gps.get('has_fix'):
@@ -2757,8 +2792,10 @@ class Display:
             rows.append(("Spd", _fmt_wd_speed(spd, unit)))
         rows.append(("Comp", comp_str))
 
+        # 12 px lines: three rows (GPS / Spd / Comp) fit between the totals
+        # block and the footer divider.
         pad_x = int(6 * sx)
-        line_h = int(18 * sy)
+        line_h = int(12 * sy)
         for label, value in rows:
             val_str = str(value)
             vw = font_row.getlength(val_str)
