@@ -3,6 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="/scripts/i18n/active.js"></script>
+    <script src="/scripts/i18n.js?v=20261104-i18n"></script>
     <title>Ragnar Cyberviking - Modern Dashboard</title>
     <link rel="icon" href="/web/images/ragnar.ico" type="image/x-icon">
     
@@ -37,6 +39,10 @@
             word-break: break-word;
             min-width: 0;
         }
+
+        /* Diagnostics module search hides non-matching cards via its own marker
+           class (not Tailwind .hidden) so it never clobbers a card's real state. */
+        .diag-search-hidden { display: none !important; }
         
         .scrollbar-thin::-webkit-scrollbar {
             width: 6px;
@@ -923,21 +929,21 @@
                                 <span class="text-sm text-gray-400 whitespace-nowrap"></span>
                             </div>
                                 <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2 text-xs text-gray-300">
-                                <div class="flex items-center space-x-1">
+                                <div class="flex flex-wrap items-center space-x-1">
                                     <span class="text-gray-400">Tot</span>
                                     <span id="target-total-count" class="font-semibold text-gray-100">0</span>
                                 </div>
-                                <div class="flex items-center space-x-1">
-                                    <span class="text-gray-400 whitespace-nowrap">Offline</span>
+                                <div class="flex flex-wrap items-center space-x-1">
+                                    <span class="text-gray-400">Offline</span>
                                     <span id="target-inactive-count" class="font-semibold text-red-300 whitespace-nowrap">0</span>
                                 </div>
-                                <div class="flex items-center space-x-1">
-                                    <span class="text-gray-400 whitespace-nowrap">New</span>
-                                    <span id="target-new-count" class="font-semibold text-green-300 whitespace-nowrap" title="No recent additions">0</span>
+                                <div class="flex flex-wrap items-center space-x-1">
+                                    <span class="text-gray-400">New</span>
+                                    <span id="target-new-count" class="font-semibold text-green-300 whitespace-nowrap" title="No new hosts in the last 24 hours">0</span>
                                 </div>
-                                <div class="flex items-center space-x-1">
+                                <div class="flex flex-wrap items-center space-x-1">
                                     <span class="text-gray-400">Lost</span>
-                                    <span id="target-lost-count" class="font-semibold text-orange-300" title="No recent drops">0</span>
+                                    <span id="target-lost-count" class="font-semibold text-orange-300" title="No hosts lost in the last 24 hours">0</span>
                                 </div>
                             </div>
                         </div>
@@ -1441,6 +1447,78 @@
                     </div>
                 </details>
             </div>
+
+            <!-- ============================================================ -->
+            <!-- Ragnar AI Chat — floating assistant, shown only when AI is    -->
+            <!-- enabled (see updateRagnarChatAvailability). Lives inside the  -->
+            <!-- dashboard tab so it auto-hides on other tabs.                 -->
+            <!-- ============================================================ -->
+            <div id="ragnar-chat" style="display:none;">
+                <!-- Launcher bubble -->
+                <button id="ragnar-chat-fab" onclick="toggleRagnarChat()" title="Chat with Ragnar"
+                        style="position:fixed; right:22px; bottom:22px; z-index:60; width:58px; height:58px;
+                               border-radius:50%; border:none; cursor:pointer; color:#fff;
+                               background:linear-gradient(135deg,#7c3aed,#4f46e5);
+                               box-shadow:0 8px 24px rgba(79,70,229,.45); display:flex;
+                               align-items:center; justify-content:center;">
+                    <svg width="26" height="26" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.86 9.86 0 01-4-.84L3 20l1.09-3.27A7.6 7.6 0 013 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+                    </svg>
+                </button>
+
+                <!-- Chat panel -->
+                <div id="ragnar-chat-panel" style="display:none; position:fixed; right:22px; bottom:22px;
+                        z-index:61; width:min(400px,calc(100vw - 32px)); height:min(600px,calc(100vh - 90px));
+                        background:rgba(15,23,42,.97); backdrop-filter:blur(12px);
+                        border:1px solid rgba(124,58,237,.35); border-radius:16px;
+                        box-shadow:0 18px 50px rgba(0,0,0,.55); flex-direction:column; overflow:hidden;">
+                    <!-- Header -->
+                    <div style="display:flex; align-items:center; gap:10px; padding:12px 14px;
+                                border-bottom:1px solid rgba(124,58,237,.28);
+                                background:linear-gradient(135deg,rgba(124,58,237,.25),rgba(79,70,229,.12));">
+                        <div style="width:34px; height:34px; border-radius:50%; flex:0 0 auto;
+                                    background:linear-gradient(135deg,#7c3aed,#4f46e5); display:flex;
+                                    align-items:center; justify-content:center;">
+                            <svg width="18" height="18" fill="none" stroke="#fff" stroke-width="2" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                        </div>
+                        <div style="flex:1; min-width:0;">
+                            <div style="font-weight:700; color:#fff; font-size:14px;">Ragnar Assistant</div>
+                            <div id="ragnar-chat-model" style="font-size:11px; color:#a5b4fc;">AI</div>
+                        </div>
+                        <button onclick="clearRagnarChat()" title="New chat"
+                                style="background:none;border:none;color:#94a3b8;cursor:pointer;padding:4px;">
+                            <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M12 4v16m8-8H4"></path></svg>
+                        </button>
+                        <button onclick="toggleRagnarChat()" title="Close"
+                                style="background:none;border:none;color:#94a3b8;cursor:pointer;padding:4px;">
+                            <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M6 18L18 6M6 6l12 12"></path></svg>
+                        </button>
+                    </div>
+                    <!-- Message log -->
+                    <div id="ragnar-chat-log" style="flex:1; overflow-y:auto; padding:14px;
+                            display:flex; flex-direction:column; gap:10px; font-size:13.5px; line-height:1.5;"></div>
+                    <!-- Composer -->
+                    <form onsubmit="return sendRagnarChat(event)"
+                          style="display:flex; gap:8px; padding:10px 12px; border-top:1px solid rgba(148,163,184,.18);">
+                        <input id="ragnar-chat-input" type="text" autocomplete="off"
+                               placeholder="Ask Ragnar, or say 'scan the network'…"
+                               style="flex:1; background:rgba(30,41,59,.9); border:1px solid rgba(148,163,184,.25);
+                                      border-radius:10px; padding:9px 12px; color:#e2e8f0; font-size:13.5px; outline:none;">
+                        <button id="ragnar-chat-send" type="submit"
+                                style="background:linear-gradient(135deg,#7c3aed,#4f46e5); border:none; color:#fff;
+                                       border-radius:10px; padding:0 16px; font-weight:600; cursor:pointer; font-size:13.5px;">
+                            Send
+                        </button>
+                    </form>
+                </div>
+            </div>
         </div>
 
         <!-- Network Tab -->
@@ -1486,7 +1564,10 @@
                         </svg>
                         <div class="flex-1 text-sm">
                             <p class="text-blue-200 font-semibold mb-1">Host Status Detection</p>
-                            <p class="text-blue-300/80">
+                            <p id="network-status-live" class="text-blue-300/80 hidden">
+                                Every known host is ARP-probed every 2 seconds while this page is open. A host turns Offline (🔴 red dot) within about 10 seconds of going silent, and Online again within seconds of answering. Dashboard target counts still follow the slower Max Failed Pings rule.
+                            </p>
+                            <p id="network-status-legacy" class="text-blue-300/80">
                                 ARP scans run every <strong>60 seconds</strong>. A host shows as offline (🔴 red dot) after <strong id="network-status-failed-pings">15</strong> consecutive failed pings 
                                 (~<strong id="network-status-offline-time">15 minutes</strong>). Configure <em>Max Failed Pings Before Offline</em> in <a href="#" onclick="showTab('config'); return false;" class="text-blue-400 hover:text-blue-300 underline">Config</a>.
                             </p>
@@ -1919,6 +2000,19 @@
             <div id="net-sub-diagnostics" class="net-subview hidden">
                 <!-- OSI layer navigation: every Diagnostics module sits at the layer it mostly watches -->
                 <div class="glass rounded-xl p-3 sm:p-4 mb-6">
+                    <!-- Module search: live-filters every Diagnostics card across all OSI layers as you type -->
+                    <div class="relative mb-2">
+                        <svg class="w-4 h-4 text-gray-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35M11 19a8 8 0 100-16 8 8 0 000 16z"/></svg>
+                        <input id="net-diag-search" type="search" autocomplete="off" spellcheck="false"
+                               oninput="netDiagSearch(this.value)"
+                               onkeydown="if(event.key==='Escape'){netDiagSearch('');this.blur();}"
+                               placeholder="Search modules — protocol, vendor or CVE (BLE, OSPF, Zerologon, MikroTik…)"
+                               aria-label="Search diagnostics modules"
+                               class="w-full pl-9 pr-16 py-2 bg-slate-900/70 border border-slate-700 focus:border-Ragnar-500 focus:outline-none rounded-lg text-sm text-gray-200 placeholder-gray-500">
+                        <button id="net-diag-search-clear" type="button" onclick="netDiagSearch('')"
+                                class="hidden absolute right-2 top-1/2 -translate-y-1/2 text-gray-300 hover:text-white bg-slate-700/70 hover:bg-slate-600 rounded px-2 py-0.5 text-xs">Clear</button>
+                    </div>
+                    <p id="net-diag-search-count" class="hidden text-xs text-Ragnar-300 mb-2" aria-live="polite"></p>
                     <div id="net-layer-bar" class="flex flex-wrap items-center gap-1">
                         <button id="net-layer-btn-overview" data-layer="overview" onclick="showNetLayer('overview')" class="net-layer-btn px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap bg-Ragnar-600 text-white">Overview</button>
                         <button id="net-layer-btn-l7" data-layer="l7" onclick="showNetLayer('l7')" class="net-layer-btn px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap text-slate-400 hover:bg-slate-700 hover:text-white">L7 Application <span class="opacity-60 font-normal">31</span></button>
@@ -3471,6 +3565,8 @@
                         <span id="wifi-bt-status" class="text-xs text-sky-500/70"></span>
                         <label id="wifi-zb-label" class="flex items-center gap-2 text-xs opacity-40 cursor-not-allowed select-none" title="Connect a HuginnESP (ESP32-C5) companion to sniff Zigbee / 802.15.4"><input type="checkbox" id="wifi-zb" disabled class="accent-amber-500"> <span class="text-amber-400">🐝 Zigbee</span></label>
                         <span id="wifi-zb-status" class="text-xs text-amber-500/70"></span>
+                        <label id="wifi-ble-label" class="flex items-center gap-2 text-xs opacity-40 cursor-not-allowed select-none" title="Passive BLE link-layer monitor — hears advertising on channels 37/38/39 via an nRF / Bluefruit LE sniffer, and flags clones, spoofs and advertising floods right on the band"><input type="checkbox" id="wifi-ble" disabled style="accent-color:#e879f9"> <span class="text-fuchsia-400">🛡 BLE Watch</span></label>
+                        <span id="wifi-ble-status" class="text-xs text-fuchsia-300/70"></span>
                         <span id="wifi-scan-status" class="text-xs text-gray-500"></span>
                     </div>
                     <!-- Other RF tools: each opens its own page (all link back to Signal Intelligence). RF Waterfall is always shown (its page collapses absent radios); the rest appear as their radio is detected, or with the RF Waterfall demo toggle on. -->
@@ -3577,6 +3673,28 @@
                                 </tr>
                             </thead>
                             <tbody id="wifi-zb-tbody" class="text-gray-300"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- BLE Watch (nRF sniffer link-layer) 2.4 GHz overlay (hidden until toggled) -->
+                <div id="wifi-ble-panel" class="hidden glass rounded-xl p-4 mb-4">
+                    <div class="flex flex-wrap items-center gap-3 mb-3">
+                        <h3 class="text-sm font-semibold text-fuchsia-300">🛡 BLE Watch — advertisers on 2.4 GHz</h3>
+                        <span id="wifi-ble-summary" class="text-xs text-gray-400"></span>
+                        <span id="wifi-ble-pressure" class="flex flex-wrap gap-2 text-xs ml-auto"></span>
+                    </div>
+                    <p class="text-[11px] text-gray-500 mb-3" id="wifi-ble-note"></p>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-xs">
+                            <thead class="text-gray-500 border-b border-slate-700">
+                                <tr class="text-left">
+                                    <th class="py-1 pr-3">Advertiser</th><th class="py-1 pr-3">Addr type</th>
+                                    <th class="py-1 pr-3">Adv ch</th><th class="py-1 pr-3">Status</th>
+                                    <th class="py-1 pr-3 text-right">RSSI</th>
+                                </tr>
+                            </thead>
+                            <tbody id="wifi-ble-tbody" class="text-gray-300"></tbody>
                         </table>
                     </div>
                 </div>
@@ -4234,6 +4352,28 @@
 
                 <!-- Problems the mesh detects about itself -->
                 <div id="mesh-warnings" class="space-y-2 mb-4"></div>
+
+                <!-- Tailscale package update for THIS unit (from apt, via the
+                     OS Packages card's backend). Hidden when Tailscale is current. -->
+                <div id="mesh-ts-update" class="hidden mb-4 p-3 rounded-lg border border-slate-700 bg-slate-900">
+                    <div class="flex items-center justify-between gap-2 flex-wrap">
+                        <div class="text-sm min-w-0">
+                            <span class="font-medium text-cyan-300">Tailscale update available</span>
+                            <span id="mesh-ts-update-versions" class="font-mono text-xs text-gray-400 ml-2"></span>
+                            <span id="mesh-ts-update-state" class="block text-xs text-gray-500 mt-1"></span>
+                        </div>
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <button id="mesh-ts-update-btn" onclick="upgradeOsPackages(['tailscale'])"
+                                    class="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-medium whitespace-nowrap disabled:bg-gray-600 disabled:cursor-not-allowed">
+                                Update Tailscale
+                            </button>
+                            <button onclick="showTab('config'); showConfigSubtab('system'); setTimeout(() => document.getElementById('os-updates-card')?.scrollIntoView({behavior: 'smooth'}), 200)"
+                                    class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-xs font-medium whitespace-nowrap">
+                                All OS updates
+                            </button>
+                        </div>
+                    </div>
+                </div>
 
                 <!-- Sub-view nav: Overview vs File Transfer -->
                 <div class="flex flex-wrap items-center gap-2 mt-2">
@@ -8205,7 +8345,27 @@
                 <div class="mb-8">
                     <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">System Management</h3>
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                        
+
+                        <!-- Language Card -->
+                        <div class="glass rounded-lg p-4">
+                            <div class="flex items-center justify-between mb-3">
+                                <h4 class="font-medium">Language</h4>
+                                <span class="text-sm px-2 py-1 rounded bg-gray-700 text-gray-300" aria-hidden="true">🌐</span>
+                            </div>
+                            <div class="text-sm text-gray-400 mb-3">
+                                Language of this web interface and of every AI answer. Saved on this unit and applied right away.
+                            </div>
+                            <label for="ui-language-select" class="sr-only">Language</label>
+                            <select id="ui-language-select" onchange="onUiLanguageChanged(this)" translate="no"
+                                    class="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-200">
+                                <option value="en">English</option>
+                                <option value="es">Español</option>
+                                <option value="fr">Français</option>
+                                <option value="de">Deutsch</option>
+                            </select>
+                            <p id="ui-language-status" class="text-xs mt-2 hidden"></p>
+                        </div>
+
                         <!-- Update Status Card -->
                         <div class="glass rounded-lg p-4">
                             <div class="flex items-center justify-between mb-3">
@@ -8234,6 +8394,71 @@
                         </div>
 
 
+
+                        <!-- OS Packages Card: apt updates (kernel, security fixes,
+                             Tailscale). "Ragnar Updates" moves Ragnar's code only;
+                             this covers everything apt owns. The run lives in the
+                             ragnar-os-update transient unit, so it survives a
+                             tailscaled / Wi-Fi / service restart mid-upgrade. -->
+                        <div id="os-updates-card" class="glass rounded-lg p-4 md:col-span-2">
+                            <div class="flex items-center justify-between gap-2 mb-3 flex-wrap">
+                                <h4 class="font-medium">OS Packages</h4>
+                                <span id="os-updates-badge" class="text-sm px-2 py-1 rounded bg-gray-700 text-gray-300">Checking...</span>
+                            </div>
+                            <div id="os-updates-summary" class="text-sm text-gray-400 mb-3">
+                                Operating-system updates from apt: the kernel, security fixes, and Tailscale.
+                            </div>
+                            <div id="os-updates-reboot" class="hidden mb-3 p-3 rounded-lg bg-amber-900 border border-amber-700 text-amber-200 text-xs"></div>
+                            <div id="os-updates-tailscale" class="hidden mb-3 p-3 rounded-lg border border-slate-700 bg-slate-900">
+                                <div class="flex items-center justify-between gap-2 flex-wrap">
+                                    <div class="text-sm min-w-0">
+                                        <span class="font-medium text-gray-200">Tailscale</span>
+                                        <span id="os-updates-ts-versions" class="font-mono text-xs text-gray-400 ml-2"></span>
+                                    </div>
+                                    <button id="os-updates-ts-btn" onclick="upgradeOsPackages(['tailscale'])"
+                                            class="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-medium whitespace-nowrap disabled:bg-gray-600 disabled:cursor-not-allowed">
+                                        Update Tailscale only
+                                    </button>
+                                </div>
+                            </div>
+                            <!-- Held back: upgradable, but Upgrade All will not install them
+                                 (needs a package removed, on hold, phased rollout...). -->
+                            <div id="os-updates-held" class="hidden mb-3 p-3 rounded-lg border border-amber-700 bg-slate-900"></div>
+                            <div id="os-updates-progress" class="hidden mb-3">
+                                <div class="flex items-center justify-between gap-2 text-xs text-gray-300 mb-1">
+                                    <span id="os-updates-step" class="min-w-0 truncate">Starting...</span>
+                                    <span id="os-updates-pct" class="shrink-0 font-mono"></span>
+                                </div>
+                                <div class="w-full h-2 rounded bg-slate-700 overflow-hidden">
+                                    <div id="os-updates-bar" class="h-2 bg-blue-600 transition-all" style="width:0%"></div>
+                                </div>
+                                <p class="text-xs text-gray-500 mt-1">The run continues on the box if this page disconnects (Tailscale and Wi-Fi may restart during an upgrade). It reconnects by itself.</p>
+                            </div>
+                            <div id="os-updates-result" class="hidden mb-3 p-3 rounded-lg text-xs"></div>
+                            <div class="flex flex-col sm:flex-row gap-2">
+                                <button id="os-updates-check-btn" onclick="checkOsUpdates()"
+                                        class="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded transition-colors disabled:bg-gray-600 disabled:cursor-not-allowed">
+                                    Check for Updates
+                                </button>
+                                <button id="os-updates-upgrade-btn" onclick="upgradeOsPackages()"
+                                        class="flex-1 bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors disabled:bg-gray-600 disabled:cursor-not-allowed"
+                                        disabled>
+                                    Upgrade All
+                                </button>
+                            </div>
+                            <details id="os-updates-list-wrap" class="mt-3 hidden">
+                                <summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-200">Upgradable packages (<span id="os-updates-list-count">0</span>)</summary>
+                                <div id="os-updates-list" class="mt-2 max-h-64 overflow-auto rounded border border-slate-700 divide-y divide-slate-700/50 text-xs"></div>
+                            </details>
+                            <details id="os-updates-log-wrap" class="mt-2" ontoggle="if (this.open) loadOsUpdateLog()">
+                                <summary class="text-xs text-gray-500 cursor-pointer hover:text-gray-300">Last run output</summary>
+                                <div class="flex items-center gap-2 mt-2 text-xs">
+                                    <button id="os-updates-log-current" onclick="loadOsUpdateLog(false)" class="px-2 py-1 rounded bg-slate-700 text-white">This run</button>
+                                    <button id="os-updates-log-previous" onclick="loadOsUpdateLog(true)" class="hidden px-2 py-1 rounded bg-slate-800 text-gray-300 hover:bg-slate-700">Run before</button>
+                                </div>
+                                <pre id="os-updates-log" class="mt-2 max-h-64 overflow-auto text-xs text-gray-400 bg-slate-900 p-2 rounded whitespace-pre-wrap break-all"></pre>
+                            </details>
+                        </div>
 
                         <!-- Service Control Card -->
                         <div class="glass rounded-lg p-4">
@@ -9367,6 +9592,13 @@
                                         <p class="text-xs text-gray-500 ml-0 sm:ml-8 mt-1">Activate AI-powered vulnerability analysis and network intelligence</p>
                                     </div>
                                     <div>
+                                        <label class="flex items-center space-x-3 cursor-pointer">
+                                            <input type="checkbox" id="ai-chat-toggle" onchange="toggleAIChat()" class="w-5 h-5 rounded border-gray-600 text-purple-600 focus:ring-purple-500 focus:ring-offset-gray-900">
+                                            <span class="text-sm font-medium">Show chat assistant</span>
+                                        </label>
+                                        <p class="text-xs text-gray-500 ml-0 sm:ml-8 mt-1">Show the chat bubble on the Dashboard. Turning this off also stops chat requests.</p>
+                                    </div>
+                                    <div>
                                         <label for="openai-api-token" class="block text-sm font-medium text-gray-300 mb-2">OpenAI API Token</label>
                                         <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
                                             <input type="password" id="openai-api-token" autocomplete="off" placeholder="sk-..."
@@ -9878,6 +10110,7 @@
             <label class="wifi-hm-chip" title="Re-run the passive survey every 8 s"><input type="checkbox" id="wifi-fs-auto" class="accent-Ragnar-500 w-3.5 h-3.5"> Auto 8s</label>
             <label class="wifi-hm-chip" title="Overlay Bluetooth / BLE activity on 2.4 GHz"><input type="checkbox" id="wifi-fs-bt" class="accent-sky-500 w-3.5 h-3.5"> <span style="color:#38bdf8">📶 BT</span></label>
             <label class="wifi-hm-chip" id="wifi-fs-zb-label" style="opacity:.4;cursor:not-allowed" title="Connect a HuginnESP companion to sniff Zigbee / 802.15.4"><input type="checkbox" id="wifi-fs-zb" disabled class="accent-amber-500 w-3.5 h-3.5"> <span style="color:#fbbf24">🐝 Zigbee</span></label>
+            <label class="wifi-hm-chip" id="wifi-fs-ble-label" style="opacity:.4;cursor:not-allowed" title="Passive BLE link-layer monitor — needs an nRF / Bluefruit LE sniffer on USB"><input type="checkbox" id="wifi-fs-ble" disabled class="w-3.5 h-3.5" style="accent-color:#e879f9"> <span style="color:#e879f9">🛡 BLE</span></label>
             <span id="wifi-fs-status" class="wifi-fs-meta wifi-fs-status"></span>
             <button onclick="wifiToggleFullscreen()" class="wifi-fs-close" title="Exit full screen (Esc)">✕</button>
         </div>
@@ -9918,7 +10151,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261031-cert-active-cves-cards"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261110-targets"></script>
 
 
 
@@ -9972,8 +10205,6 @@ function changeI2CAddress(val) {
 runBatteryTelemetry();
 setInterval(runBatteryTelemetry, 60000);
 </script>
-
-
 
 </body>
 </html>

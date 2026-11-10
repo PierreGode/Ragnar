@@ -5,12 +5,17 @@ behave identically:
 
 | | |
 |---|---|
-| **Web UI** | **Settings → System Updates → Update System** |
+| **Web UI** | **Config → System → Update System** |
 | **Terminal** | `sudo /home/ragnar/Ragnar/update_ragnar.sh` |
 
 The web path is handled by [`git_updater.py`](../git_updater.py), a dedicated
 update engine, plus [`scripts/post_update.sh`](../scripts/post_update.sh) which
 finishes the job and restarts the service.
+
+This updates **Ragnar's code**. The operating system underneath it (the kernel,
+security fixes, and third-party packages such as **Tailscale**) comes from apt
+and is updated separately: see
+[Operating-system packages (apt)](#operating-system-packages-apt).
 
 ---
 
@@ -137,6 +142,137 @@ Transcripts live on the box:
 data/logs/post_update.log     # full output of the post-update run
 data/logs/post_update.json    # machine-readable state, step and outcome
 ```
+
+---
+
+## Operating-system packages (apt)
+
+**Config → System → OS Packages** updates everything apt manages: the kernel and
+firmware, Debian / Raspberry Pi OS / Kali security fixes, and the third-party
+repositories the installer adds (Tailscale from `pkgs.tailscale.com`, Docker,
+cloudflared, ...). Before this card existed none of that was reachable from the
+web UI. `update_ragnar.sh` does not do it either: it installs Tailscale when the
+mesh is enabled, but never upgrades a copy that is already there.
+
+| Button | What it runs |
+|---|---|
+| **Check for Updates** | `apt-get update`, then lists what can be upgraded. Security fixes are tagged and listed first |
+| **Upgrade All (N)** | `apt-get upgrade --with-new-pkgs`: every upgradable package, plus any new dependency they need (new kernels do) |
+| **Update Tailscale only** | `apt-get install --only-upgrade --no-remove tailscale`. Shown when a Tailscale update is waiting; the **Ragnar Mesh** tab shows the same button |
+| **Upgrade anyway** | On a *held-back* package only: upgrades it and lets apt remove the packages the card names, nothing else. See [Held-back packages](#held-back-packages) |
+
+The list is read from apt's own state, so updates that `apt-get update` found
+elsewhere (in an SSH session, or apt-daily) show up too. "Package lists
+refreshed ... ago" says how current it is.
+
+### Safe by design
+
+- **Nothing is removed unless you approve it.** Ragnar uses
+  `upgrade --with-new-pkgs`, never `full-upgrade`, and every run passes
+  `--no-remove`. An upgrade can add a dependency, but it can never uninstall a
+  tool Ragnar relies on. A package that would need something removed is
+  [held back](#held-back-packages), and the card says what it would remove.
+- **Download first, install second.** Everything is downloaded before dpkg
+  touches the system, so a dropped connection mid-download changes nothing.
+- **Disk-space check.** Between download and install, apt's own estimate of the
+  space the install adds is compared with what is free (plus 300 MB headroom).
+  If it doesn't fit, nothing is installed. A root filesystem filling up halfway
+  through dpkg is the one way an upgrade really breaks a box.
+- **Non-interactive.** No debconf questions, no conffile prompts: every changed
+  config file keeps **your** version (`--force-confold`). `needrestart` only
+  lists services; it never restarts them on its own.
+- **Survives the restarts it causes.** The run executes in a transient systemd
+  unit, `ragnar-os-update`, not inside the web service. An upgrade can restart
+  `tailscaled` (a browser on the tailnet drops for a few seconds), NetworkManager
+  or wpa_supplicant (Wi-Fi blips), or Ragnar's own dependencies. The run carries
+  on regardless, and the card reconnects and picks up the progress by itself.
+- **Interrupted runs are repaired.** Every upgrade starts with
+  `dpkg --configure -a`, so a run cut short by a power loss is finished by the
+  next one. A run whose process vanished, including across a reboot, shows as
+  *interrupted* instead of leaving the card stuck on "Upgrading...".
+- **Cleans up after itself.** `apt-get clean` drops the downloaded `.deb` files
+  afterwards; on a 16 GB card a big upgrade can otherwise leave hundreds of MB
+  behind.
+
+### Held-back packages
+
+`apt list --upgradable` shows every package with a newer version, including some
+that **Upgrade All** will never install. After every check and upgrade, Ragnar
+works out which ones those are and why, lists them under **Held back** on the
+card, and leaves them out of the **Upgrade All (N)** count. If only held-back
+packages are left, the badge reads *N held back* and Upgrade All is disabled.
+Before this, the card offered "Upgrade All (1)" and each run quietly skipped it,
+so the box looked stuck.
+
+| Reason on the card | What it means | Button |
+|---|---|---|
+| Upgrading it means removing another package | The new version conflicts with something installed. The card lists what it **removes** and what it **adds** | **Upgrade anyway** |
+| Upgrade All leaves it alone, but it can be upgraded on its own | apt's upgrade solver is conservative; a direct install works and removes nothing | **Upgrade anyway** |
+| It is on hold (`apt-mark hold`) | Someone pinned it. Ragnar respects the hold | none; `sudo apt-mark unhold <pkg>` lifts it |
+| Phased rollout | Ubuntu is releasing it to a share of machines at a time. It installs by itself later | none |
+| apt cannot upgrade it without breaking another package | Unresolvable right now; the apt error is shown | none |
+
+**Upgrade anyway** shows exactly what goes and what comes before it starts. The
+run then re-plans the upgrade and **changes nothing** (`removal_changed`) if apt
+now wants to remove anything that wasn't on that list.
+
+The common case on Raspberry Pi OS (trixie, late 2026) is **`rpd-common`
+1.18 → 1.35**. The new desktop settings package depends on `pcmanfm-pi`,
+Raspberry Pi's fork of the PCManFM file manager, which declares
+`Breaks/Replaces: pcmanfm`. Upgrading means `pcmanfm` is removed and
+`pcmanfm-pi`, `qt6gtk2`, `brightnessctl` and `brightness-udev` come in. That's a
+planned package swap, and the desktop file manager keeps working. Ragnar itself
+doesn't use any of these packages, so it's safe either way. A headless unit
+doesn't need it at all.
+
+### After an upgrade
+
+The card says **Reboot recommended** when a newer kernel is installed than the
+one running, when a package raised Debian's `/run/reboot-required` flag, or when
+the kernel, firmware, libc, systemd, dbus or OpenSSL was upgraded. Rebooting is
+up to you; the button is right there.
+
+A large first upgrade on an old image (hundreds of packages) can take tens of
+minutes on a Pi 4/5 and much longer on a Pi Zero 2 W. Leave the box powered.
+You can close the page: the run continues, and reopening the card shows where it
+is. **Last run output** on the card is the full apt log
+(`data/logs/os_update.log`); **Run before** shows the one before it
+(`data/logs/os_update.prev.log`), so a quick check right after a big upgrade no
+longer replaces the only record of how the upgrade went. apt keeps its own
+history in `/var/log/apt/history.log` as well.
+
+### When a check or upgrade fails
+
+The card shows one sentence on what happened and one on what to do:
+
+| Code | Meaning |
+|---|---|
+| `offline` | The package mirrors could not be reached. Nothing was installed |
+| `repo_key` | A repository's signing key is missing or expired (the card names the repo). For Tailscale, `sudo bash scripts/setup_mesh.sh install` re-adds it |
+| `locked` | Another apt run (SSH, apt-daily) held the lock for 10 minutes |
+| `disk_full` | Not enough space for the download or the install. Nothing was installed |
+| `dpkg_broken` / `dpkg_error` | dpkg stopped part-way. Run the upgrade again: it starts with `dpkg --configure -a` |
+| `needs_removal` | A targeted upgrade (e.g. Update Tailscale only) would have to remove another package. Nothing was changed; it shows up as held back |
+| `removal_changed` | **Upgrade anyway**: apt now plans to remove something you didn't approve. Nothing was changed. Check again and review |
+| `interrupted` | The run was stopped (power loss, reboot, unit stopped) before it finished |
+
+In a Docker container the card says OS updates are not available there: the
+packages come with the image, so pull or rebuild it instead. On a distribution
+without apt the card explains that too.
+
+### Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/system/os-updates` | Upgradable packages (cached against apt's state), current/last run, Tailscale versions, reboot state |
+| `POST /api/system/os-updates/check` | Start `apt-get update` in the `ragnar-os-update` unit |
+| `POST /api/system/os-updates/upgrade` | Upgrade everything, or `{"packages": ["tailscale"]}` for named packages. Names must be on the upgradable list. `"allow_remove": ["pcmanfm"]` approves removals for a held-back package (a ceiling: the run stops if apt plans any other) |
+| `GET /api/system/os-updates/log` | Tail of the run's apt output; `?previous=1` for the run before |
+
+All four need a logged-in session. A second run while one is active returns
+**409** `busy`. The engine is [`os_updates.py`](../os_updates.py); its tests,
+[`tests/test_os_updates.py`](../tests/test_os_updates.py), drive the real
+runner against fake `apt-get` / `dpkg` binaries through every failure above.
 
 ---
 

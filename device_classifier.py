@@ -836,7 +836,7 @@ def _ask_ai_classify(ai_service, vendor, ports, hostname, mac):
     original_model = ai_service.model
     try:
         ai_service.model = "gpt-5.4-nano"
-        answer = ai_service._ask(system, user)
+        answer = ai_service._ask(system, user, localize=False)
     finally:
         ai_service.model = original_model
 

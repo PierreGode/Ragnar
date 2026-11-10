@@ -120,6 +120,17 @@ rather than pretending to listen. HIGH/CRITICAL findings reach
 detectors** (`do_routing_selftest`). The standalone `blewatch.service`
 (`scripts/blewatch.service`) runs it as an opt-in, least-privilege daemon.
 
+BLE Watch also appears on **Network → Signal Intelligence** as a **🛡 BLE Watch**
+overlay toggle, beside the 📶 Bluetooth and 🐝 Zigbee overlays (in both the
+in-page toolbar and the full-screen console). When enabled it runs a short sniff
+and plots the advertisers it hears onto the 2.4 GHz spectrum — markers on the
+advertising channels (37/38/39 = 2402/2426/2480 MHz), a device roster, and any
+clone/spoof/flood advertiser flagged red on the band. The toggle is gated by
+`GET /api/net/ble-watch/status` (reads USB names only — it writes nothing to any
+serial port). The overlay sniff passes `quick=1`, so its findings are **not**
+exported to Watchtower; run the Diagnostics card for monitored captures. See
+[WiFi Analyzer → BLE Watch overlay](wifi-analyzer.md) for the full description.
+
 ## Hardware reality
 
 Both generations run the **same parser and codes** — the difference is capture
@@ -134,6 +145,54 @@ quality:
   connection-layer findings are far more dependable. Prefer it if you have one.
 - An **Ubertooth** is an alternative for heavy connection-following; again the
   parser and codes are unchanged, only the capture front end differs.
+
+### Flood/churn thresholds are tuned for the nRF52
+
+Because the nRF52 hears so much more of the air, the flood and churn detectors
+(`BLE-004`, `BLE-006`, `BLE-007`, `BLE-013`) are calibrated for it, not for the
+lossy nRF51 they were first prototyped against. Two things matter:
+
+- **Channel-copy collapse.** A full-coverage sniffer reports the *same*
+  advertising event once per primary channel (37/38/39). Those copies share the
+  AdvA and payload and land within a few milliseconds, so blewatch collapses them
+  into one logical event (`channel_dedup_window_s`, default 12 ms) before
+  counting. Without this, a healthy beacon on an nRF52 counts three times and
+  reads as a flood — the original cause of the false `BLE-006`/`BLE-007` alerts
+  users saw after moving from an nRF51 to an nRF52840.
+- **Per-event counts set above a busy room.** The thresholds count *logical*
+  events over a 10 s window: `adv_flood_count` 150 (one AdvA), `advertiser_flood_count`
+  60 (distinct AdvAs), `rpa_count` 80 (distinct resolvable-private addresses). A
+  crowded office or street full of phones, wearables and tags — every modern
+  device rotating RPAs and emitting Apple/Fast-Pair/Swift-Pair proximity payloads
+  — stays below them, while BLE-spam tooling (which churns dozens of fresh
+  addresses per second) and a single hammered/cloned advertiser still trip. All
+  of these are overridable per deployment in `data/ble_watch.json`.
+
+### Identity churn is not a clone, and the output is de-duplicated
+
+The clone/impersonation detectors (`BLE-001`/`BLE-002`) compare an advertiser's
+**identity** — its name plus its advertised service UUIDs — not its raw payload
+bytes. This matters on a full-coverage sniffer:
+
+- A **sensor beacon streaming changing telemetry** (temperature, humidity,
+  battery in the manufacturer/service data) keeps one identity, so it no longer
+  reads as "two radios advertising conflicting payloads".
+- A field that is simply **absent in some frame types** — a device that puts its
+  name in `ADV_IND` but not in a scan response or a non-connectable frame — is
+  "not advertised here", not a competing identity, so the name blinking in and
+  out stops raising clone alerts. Only a real name-vs-name or service-set change
+  is flagged.
+
+The findings table is also **de-duplicated to one row per (address, code)**: a
+passive scan sees each advertiser on every PDU, so the raw stream repeats the
+same finding (and a flapping device emits both the `A -> B` and `B -> A` row).
+Each row now carries a "(seen *N* times)" count and keeps the most recent detail
+(e.g. the highest "*N* conflicting identities" figure). The same collapse feeds
+the Watchtower `ble_watch.jsonl` export, so one device no longer floods it.
+
+If a device you trust still shows up (a beacon that legitimately rotates a
+service UUID, say), use **Trust current** after a scan to add the advertisers on
+air to `data/ble_watch.json` so they stop being flagged.
 
 ## Which board, and how to plug it in
 

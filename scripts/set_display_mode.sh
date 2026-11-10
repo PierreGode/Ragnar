@@ -85,6 +85,10 @@ PY
         sed -i "s/\"epd_type\": \"[^\"]*\"/\"epd_type\": \"$EPD\"/" "$RAGNAR_PATH/shared.py" 2>/dev/null || true
     chown -R "$RAGNAR_USER:$RAGNAR_USER" "$RAGNAR_PATH/config" 2>/dev/null || true
     log "Enabling display mode (driver '$EPD')"
+    # A stock CardputerZero keeps the LCD and keyboard with its launcher.
+    if [ "$EPD" = "st7789v2" ]; then
+        bash "$RAGNAR_PATH/scripts/cardputer_takeover.sh" apply || log "CardputerZero takeover failed"
+    fi
 else
     CONF_JSON="$RAGNAR_PATH/config/shared_config.json"
     if [ -f "$CONF_JSON" ]; then

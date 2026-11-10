@@ -84,7 +84,7 @@ display=epd2in13_V4
 ```
 
 `display=` takes the same driver ids as **Config → Display** in the web UI
-(e-Paper `epd*`, TFT/OLED `gc9a01` `ili9486` `ssd1306` `lcd1602` …, LED matrix
+(e-Paper `epd*`, TFT/OLED `gc9a01` `st7789v2` `ili9486` `ssd1306` `lcd1602` …, LED matrix
 `max7219_*`). Setting it switches the service out of headless mode and lights up
 the panel on that first boot. The file is read once and then ignored.
 

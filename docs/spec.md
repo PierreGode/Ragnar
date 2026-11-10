@@ -273,7 +273,7 @@
   | `steal_file_names` | [...] | Keyword list used by loot modules. |
   | `mac_scan_blacklist` | [] | MACs excluded from scanning/attacks. Managed from the Network tab's per-host **Ignore** button (or Settings) via `POST/DELETE /api/config/scan-blacklist`. |
   | `ip_scan_blacklist` | [] | IPs excluded from scanning/attacks. Same management path as `mac_scan_blacklist`. |
-- The `blacklistcheck` toggle ("Honor Scan Blacklists", Settings → General) is the master switch that enables/disables enforcement of both ignore lists.
+- The `blacklistcheck` toggle ("Honor Scan Blacklists", Config → Advanced → General) is the master switch that enables/disables enforcement of both ignore lists.
 - Runtime modules reference `shared_data.config` live; writes through the Web UI call `SharedData.save_config()` which flushes JSON, updates in-memory attributes, and triggers downstream watchers (e.g., Wi-Fi manager reloading known networks, display toggling `screen_reversed`).
 - Config headings (`__title_*`) are used purely for UI grouping; the parser strips these keys automatically when exporting to Python dicts.
 
@@ -429,6 +429,7 @@ _Ground truth: `webapp_modern.py` as of December 2025. Methods shown exactly as 
 | `/api/logs/activity` | GET | Activity feed summarizing recent actions. |
 | `/api/network` | GET | Current network snapshot (hosts, ports, tags). |
 | `/api/network/stable` | GET | Debounced network stats for widgets that poll less frequently. |
+| `/api/network/presence` | GET | Live up/down verdict per host from the ARP presence monitor, with its mode and counters. |
 
 ### 20.4 Configuration & Profile Management
 | Path | Methods | Purpose |

@@ -1,7 +1,7 @@
-# 📊 WiFi Spectrum Analyzer
+# 📊 Signal Intelligence (WiFi Spectrum Analyzer)
 
 A passive, tri-band Wi-Fi RF troubleshooter built into Ragnar's web UI —
-**Network → WiFi Analyzer** (the sub-tab after *Interfaces*). Think of it as a
+**Network → Signal Intelligence** (the sub-tab after *Interfaces*). Think of it as a
 software [Ekahau Sidekick 2](https://www.ekahau.com/products/sidekick/): the
 same survey-and-heatmap workflow a wireless engineer expects, on a Raspberry Pi
 Zero 2 W with an off-the-shelf Wi-Fi 6E dongle instead of a $4,000 instrument.
@@ -421,6 +421,41 @@ the scan briefly switches the Huginn into zigbee mode (a board without an
 802.15.4 radio answers with a "not compiled in" notice). If wardriving is
 running it owns the serial port — stop it first to sniff on demand. Receive-only.
 
+## BLE Watch overlay (via an nRF / Bluefruit LE sniffer)
+
+Tick **🛡 BLE Watch** to overlay **real BLE advertising activity** onto the
+2.4 GHz spectrum, and flag any advertiser the [BLE Watch](blewatch.md) monitor
+marks as a clone, spoof or advertising flood — right on the band picture.
+
+This is *not* the **📶 Bluetooth** overlay. That one is a BlueZ device-discovery
+estimate off the Pi's own controller. This uses the external **nRF / Bluefruit
+LE sniffer** to hear the BLE **link layer** directly — the actual advertising
+PDUs on the three primary channels (**37 = 2402 MHz, 38 = 2426 MHz, 39 = 2480
+MHz**) — so it sees devices a scan never discovers and reads their security
+posture. The two overlays can be on at once (BLE Watch markers sit beside the
+Bluetooth ones).
+
+On toggle, Ragnar runs a short ~8 s link-layer sniff (`/api/net/ble-watch?quick=1`)
+and draws the result. **The toggle stays greyed out until a sniffer is detected
+on USB** (`/api/net/ble-watch/status`, which only reads USB names — it writes
+nothing to any serial port, so it never disturbs a device). A bare CP210x bridge
+that *might* be a Bluefruit LE Sniffer stays greyed with a hint to confirm it
+from the **Diagnostics → BLE Watch** card, which does the full firmware probe.
+
+**What it draws** — a solid fuchsia bar per advertising channel (🛡37/🛡38/🛡39),
+height scaled by how busy the channel is, **turning red (⚠)** on any channel
+carrying a flagged advertiser; a **device table** (advertiser address, address
+type — public / static / random (RPA), the advertising channels it used, a
+clone/spoof/flood **status**, RSSI) — **click a row to highlight it** on the
+spectrum; and an estimated **per-Wi-Fi-channel BLE pressure** (ch 1/6/11, since
+37/38/39 fall on the three non-overlapping Wi-Fi channels).
+
+**Caveats.** The sniffer follows advertising on all three primary channels but
+one radio can follow only one data connection at a time, so connection-layer
+findings are best-effort (see [BLE Watch](blewatch.md)). The short overlay sniff
+sets `quick=1` so its findings are **not** exported as Watchtower incidents — run
+the full **Diagnostics → BLE Watch** card for that. Receive-only; never transmits.
+
 ## True-RF Waterfall (HackRF SDR)
 
 The Bar and Dome views draw the *beacon* picture (what APs announce). The
@@ -500,6 +535,8 @@ All endpoints are passive and read-only except the heatmap store.
 | `GET /api/net/zigbee/status` | HuginnESP detection (gates the Zigbee toggle) |
 | `GET /api/net/zigbee/scan?duration=&port=` | on-demand Huginn 802.15.4 sniff → channel markers + devices |
 | `GET /api/net/zigbee/selftest` | Zigbee line-parser + overlay-model self-test |
+| `GET /api/net/ble-watch/status?probe=` | nRF/Bluefruit sniffer detection (gates the 🛡 BLE Watch toggle; `probe=0` reads USB names only, writes nothing) |
+| `GET /api/net/ble-watch?seconds=&quick=` | BLE link-layer sniff → findings + a `overlay` block (advertiser roster + adv-channel markers) for the 2.4 GHz overlay |
 
 ```bash
 python3 wifi_analyzer.py interfaces
@@ -521,6 +558,10 @@ python3 sdr_spectrum.py selftest
 python3 zigbee_scan.py detect
 python3 zigbee_scan.py scan --duration 8
 python3 zigbee_scan.py selftest      # + zigbee_overlay.py selftest
+
+# BLE Watch overlay (needs an nRF / Bluefruit LE sniffer)
+python3 python/blewatch.py --list-devices      # sniffer detection (gates 🛡 BLE Watch)
+python3 python/blewatch.py --self-test          # parser + overlay-shaping self-test
 ```
 
 The Bluetooth scanner ships its own offline self-test — **28 checks** covering

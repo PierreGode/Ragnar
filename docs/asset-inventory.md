@@ -85,6 +85,10 @@ A host only drops to **degraded** after `network_max_failed_pings` (default 15)
 - a repeat read of a sweep that has already been accounted for, so polling the
   dashboard cannot burn through the failure budget.
 
+This is the *stored* status, which changes over minutes. The Network tab's
+Status column uses a separate live check with a 10 second verdict; see
+[Discovered Hosts: live Online / Offline status](scanning-and-attacks.md#discovered-hosts-live-online--offline-status).
+
 If every target flaps Offline and back on a cycle, check `arp-scan` is
 installed and that passwordless `sudo` works for it — the log line
 `Host discovery returned 0 hosts` names that condition directly.

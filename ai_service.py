@@ -29,6 +29,47 @@ from logger import Logger
 from env_manager import EnvManager, load_env
 
 
+RESPONSE_LANGUAGES = {
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+}
+
+
+def response_language(config) -> str:
+    try:
+        code = str((config or {}).get("language", "en") or "en").strip().lower()
+    except Exception:  # noqa: BLE001
+        return "en"
+    return code if code in RESPONSE_LANGUAGES else "en"
+
+
+def prose_language_directive(code: str) -> str:
+    if code not in RESPONSE_LANGUAGES or code == "en":
+        return ""
+    name = RESPONSE_LANGUAGES[code]
+    return (
+        f"\n\nRESPONSE LANGUAGE: Write your entire reply in {name}, including "
+        "headings, labels and list items, whatever language the data or the "
+        "instructions above are written in. Keep these exactly as they are: "
+        "code and JSON blocks (keys and values), commands, file paths, display "
+        "filters, protocol, tool and product names, CVE IDs, IP and MAC addresses, "
+        "SSIDs, hostnames, and any value quoted from the data."
+    )
+
+
+def json_fields_language_directive(code: str, fields) -> str:
+    if code not in RESPONSE_LANGUAGES or code == "en" or not fields:
+        return ""
+    names = ", ".join(f'"{f}"' for f in fields)
+    return (
+        f"\n\nLANGUAGE: write the values of {names} in {RESPONSE_LANGUAGES[code]}. "
+        "Every JSON key, phase, action, parameter name, tool name, argument and "
+        "other value stays exactly as specified above, in English."
+    )
+
+
 def normalize_base_url(url: str) -> str:
     """Tidy an OpenAI-compatible base URL so common shorthands just work.
 
@@ -225,7 +266,7 @@ class AIService:
         if system_msg is None:
             system_msg = ("You are a security automation assistant. Output exactly one "
                           "JSON object and nothing else — no prose, no markdown fences.")
-        return self._ask(system_msg, user_msg)
+        return self._ask(system_msg, user_msg, localize=False)
 
 
 
@@ -236,6 +277,15 @@ class AIService:
     def is_enabled(self):
         """Return True when the service is enabled and the client is ready."""
         return self.ensure_ready()
+
+    def response_language(self) -> str:
+        return response_language(getattr(self.shared_data, "config", None))
+
+    def language_directive(self) -> str:
+        return prose_language_directive(self.response_language())
+
+    def json_language_directive(self, fields) -> str:
+        return json_fields_language_directive(self.response_language(), fields)
 
     def ensure_ready(self):
         """Lazily initialize the OpenAI client if configuration says AI is enabled."""
@@ -272,7 +322,7 @@ class AIService:
 
     def _cache_key(self, name: str, content: Any):
         import hashlib
-        raw = f"{name}:{json.dumps(content, sort_keys=True)}"
+        raw = f"{name}:{self.response_language()}:{json.dumps(content, sort_keys=True)}"
         return hashlib.md5(raw.encode()).hexdigest()
 
     def _cache_get(self, key: str):
@@ -293,7 +343,7 @@ class AIService:
     #   CORE GPT-5 CALL — NEW RESPONSES API
     # ===================================================================
 
-    def _ask(self, system_msg: str, user_msg: str) -> Optional[str]:
+    def _ask(self, system_msg: str, user_msg: str, localize: bool = True) -> Optional[str]:
         """
         Unified GPT-5 call with temperature fallback (required for tests).
         """
@@ -305,12 +355,111 @@ class AIService:
             self.logger.error("AI client unavailable despite service being enabled.")
             return None
 
+        if localize:
+            system_msg = (system_msg or "") + self.language_directive()
+
         # Self-hosted / OpenAI-compatible servers speak Chat Completions, not
         # the proprietary Responses API — route them separately.
         if self.use_chat_api:
             return self._ask_chat(system_msg, user_msg)
 
         return self._ask_responses(system_msg, user_msg)
+
+    # ===================================================================
+    #   MULTI-TURN CHAT — used by the interactive assistant (ai_chat.py)
+    # ===================================================================
+
+    def chat_messages(self, messages, max_tokens=None):
+        """Multi-turn chat completion for the interactive dashboard assistant.
+
+        Takes a full ``[{"role": ..., "content": ...}]`` list (system / user /
+        assistant turns) and returns the model's text reply. Routes to the
+        Responses API on OpenAI's cloud and to Chat Completions on self-hosted
+        endpoints — mirroring :meth:`_ask` — so the assistant works the same on
+        the cloud and on a local Ollama/LocalAI server. The agentic loop that
+        drives tool use lives in ai_chat.py; this method is just the raw call.
+        """
+        if not self.ensure_ready() or self.client is None:
+            return None
+        if self.use_chat_api:
+            return self._chat_messages_chat(messages, max_tokens)
+        return self._chat_messages_responses(messages, max_tokens)
+
+    def _chat_messages_responses(self, messages, max_tokens=None, client=None, model=None):
+        """Responses-API path for :meth:`chat_messages` (OpenAI cloud + the
+        self-hosted cloud fallback). Passes the message list straight through as
+        ``input`` — the Responses API accepts system/user/assistant roles."""
+        client = client or self.client
+        model = model or self.model
+        payload = {
+            "model": model,
+            "input": messages,
+            "reasoning": {"effort": "low"},
+            "text": {"verbosity": "low"},
+        }
+        if max_tokens:
+            payload["max_output_tokens"] = int(max_tokens)
+        if self.temperature_supported and self.temperature is not None:
+            payload["temperature"] = self.temperature
+        try:
+            return self._extract_output(client.responses.create(**payload))
+        except Exception as e:
+            err = str(e).lower()
+            if "temperature" in err and "unsupported" in err:
+                self.temperature_supported = False
+                payload.pop("temperature", None)
+                try:
+                    return self._extract_output(client.responses.create(**payload))
+                except Exception as e2:
+                    self.logger.error(f"[chat] responses retry failed: {e2}")
+                    return None
+            self.logger.error(f"[chat] responses call failed: {e}")
+            return None
+
+    def _chat_messages_chat(self, messages, max_tokens=None):
+        """Chat-Completions path for :meth:`chat_messages` (self-hosted). Falls
+        back to OpenAI's cloud when the endpoint looks unreachable, exactly like
+        :meth:`_ask_chat` does."""
+        payload = {"model": self.model, "messages": messages}
+        if max_tokens:
+            payload["max_tokens"] = int(max_tokens)
+        if self.temperature_supported and self.temperature is not None:
+            payload["temperature"] = self.temperature
+        try:
+            result = self.client.chat.completions.create(**payload)
+        except Exception as e:
+            err = str(e).lower()
+            if "temperature" in err and payload.pop("temperature", None) is not None:
+                self.temperature_supported = False
+                try:
+                    result = self.client.chat.completions.create(**payload)
+                except Exception as e2:
+                    return self._chat_messages_fallback(messages, max_tokens, e2)
+            else:
+                return self._chat_messages_fallback(messages, max_tokens, e)
+        self.fallback_active = False
+        try:
+            content = result.choices[0].message.content
+            return content.strip() if content else None
+        except (AttributeError, IndexError, TypeError):
+            self.logger.error("[chat] self-hosted response had no message content.")
+            return None
+
+    def _chat_messages_fallback(self, messages, max_tokens, error):
+        """Retry a failed self-hosted chat on OpenAI's cloud when the endpoint
+        looks unreachable and a token is configured (mirrors _maybe_fallback)."""
+        if self._should_fallback(error):
+            fb = self._ensure_fallback_client()
+            if fb is not None:
+                self.logger.warning(
+                    f"[chat] self-hosted endpoint unavailable ({error}); falling "
+                    f"back to OpenAI cloud (model: {self._fallback_model})."
+                )
+                self.fallback_active = True
+                return self._chat_messages_responses(
+                    messages, max_tokens, client=fb, model=self._fallback_model)
+        self.logger.error(f"[chat] self-hosted chat failed: {error}")
+        return None
 
     def _ask_responses(self, system_msg, user_msg, client=None, model=None):
         """OpenAI Responses-API call (GPT-5 family). Reused for both the primary

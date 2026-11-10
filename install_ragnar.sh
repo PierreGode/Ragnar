@@ -35,6 +35,7 @@ HEADLESS_VARIANT_LABEL=""
 RAGNAR_ENTRYPOINT="Ragnar.py"
 SERVER_INSTALL=false
 TFT_MODE=false
+CARDPUTER_MODE=false
 GIT_WORKS=true
 
 # Platform detection variables
@@ -1522,7 +1523,7 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         python3 -c "import smbus2" 2>/dev/null || unusable+=("I2C displays (smbus2)")
         python3 -c "import luma.led_matrix" 2>/dev/null || unusable+=("MAX7219 (luma.led_matrix)")
         python3 -c "from waveshare_epd import epd2in13_V4" 2>/dev/null || unusable+=("e-Paper (waveshare_epd)")
-        for drv in gc9a01 st7735s ili9486 whisplay ssd1306 lcd1602 max7219; do
+        for drv in gc9a01 st7735s st7789v2 ili9486 whisplay ssd1306 lcd1602 max7219; do
             [ -f "$ragnar_PATH/resources/waveshare_epd/${drv}.py" ] \
                 || unusable+=("${drv} (driver file missing)")
         done
@@ -2111,6 +2112,12 @@ resolve_profile_unattended() {
             RAGNAR_ENTRYPOINT="Ragnar.py"
             EPD_VERSION="${RAGNAR_DISPLAY:-gc9a01}"
             ;;
+        cardputer|cardputerzero)
+            SERVER_INSTALL=false; HEADLESS_MODE=false; TFT_MODE=true; CARDPUTER_MODE=true
+            HEADLESS_VARIANT=""; HEADLESS_VARIANT_LABEL=""
+            RAGNAR_ENTRYPOINT="Ragnar.py"
+            EPD_VERSION="st7789v2"
+            ;;
         server-display|display)
             SERVER_INSTALL=true; HEADLESS_MODE=false; TFT_MODE=false
             HEADLESS_VARIANT=""; HEADLESS_VARIANT_LABEL="Server install with display"
@@ -2350,6 +2357,7 @@ BANNER
         echo -e "   ${CYAN}*${YELLOW} 4)${CYAN} Server install (headless, no display)           ${NC}"
         echo -e "   ${CYAN}*${YELLOW} 5)${CYAN} WiFi Pineapple Pager ${RED}(beta)                    ${NC}"
         echo -e "   ${CYAN}*${YELLOW} 6)${CYAN} Docker container (headless web UI)             ${NC}"
+        echo -e "   ${CYAN}*${YELLOW} 7)${CYAN} M5Stack CardputerZero ${RED}(built-in LCD + keyboard)${NC}"
     else
         echo -e "   ${CYAN}*${YELLOW} 1)${CYAN} Server install with display                    ${NC}"
         echo -e "   ${CYAN}*${YELLOW} 2)${CYAN} Server install (headless, no display)           ${NC}"
@@ -2523,6 +2531,22 @@ main() {
                     log "INFO" "Server install (headless) selected on Raspberry Pi hardware"
                     break
                     ;;
+                7)
+                    # M5Stack CardputerZero — a Raspberry Pi CM0 (BCM2837) box,
+                    # so this is a normal Pi install pinned to its built-in 1.9"
+                    # ST7789V2 LCD + TCA8418 keyboard. TFT_MODE routes through the
+                    # SPI-display path; CARDPUTER_MODE short-circuits the panel
+                    # sub-menu to st7789v2 and prints the keyboard note.
+                    SERVER_INSTALL=false
+                    HEADLESS_MODE=false
+                    TFT_MODE=true
+                    CARDPUTER_MODE=true
+                    HEADLESS_VARIANT=""
+                    HEADLESS_VARIANT_LABEL=""
+                    RAGNAR_ENTRYPOINT="Ragnar.py"
+                    log "INFO" "M5Stack CardputerZero installation selected"
+                    break
+                    ;;
                 5)
                     log "INFO" "WiFi Pineapple Pager installation selected"
                     echo ""
@@ -2552,7 +2576,7 @@ main() {
                     clean_exit $docker_exit_code
                     ;;
                 *)
-                    echo -e "\n   ${RED}Invalid option. Please select 1, 2, 3, 4, 5, or 6.${NC}"
+                    echo -e "\n   ${RED}Invalid option. Please select 1, 2, 3, 4, 5, 6, or 7.${NC}"
                     sleep 1
                     ;;
             esac
@@ -2621,6 +2645,20 @@ main() {
             pip3 install spidev --break-system-packages >/dev/null 2>&1
             log "SUCCESS" "SPI dependencies installed for TFT display"
 
+            # M5Stack CardputerZero: display is fixed (built-in 1.9" ST7789V3),
+            # so skip the panel picker and go straight to its driver. The stock
+            # image exposes the LCD and keyboard through kernel drivers; smbus2
+            # and spidev are only for the fallback on a plain kernel.
+            if [ "$CARDPUTER_MODE" = true ]; then
+                EPD_VERSION="st7789v2"
+                pip3 install smbus2 --break-system-packages >/dev/null 2>&1
+                echo -e "${GREEN}✓ M5Stack CardputerZero: built-in 1.9\" ST7789 V3 LCD (320x170)${NC}"
+                echo -e "${CYAN}  Keyboard: F/X/Z/C or arrows navigate, Enter selects, Space/Backspace/Tab = KEY1-3.${NC}"
+                echo -e "${YELLOW}  This replaces the stock launcher on the LCD and keyboard; undo it with:${NC}"
+                echo -e "${YELLOW}  sudo $ragnar_PATH/scripts/cardputer_takeover.sh revert${NC}"
+                log "INFO" "Display selected: st7789v2 (CardputerZero)"
+            else
+
             echo -e "\n${BLUE}Select your TFT/OLED display:${NC}"
             echo "1. GC9A01      (1.28\" Round 240x240)"
             echo "2. ST7735S     (1.44\" LCD HAT + joystick 128x128)"
@@ -2658,6 +2696,7 @@ main() {
                 echo -e "${GREEN}✓ Selected display: $EPD_VERSION${NC}"
                 log "INFO" "Display selected: $EPD_VERSION"
             fi
+            fi  # end CARDPUTER_MODE else (TFT panel picker)
 
         # ── E-Paper display path ──────────────────────────────────────────────
         else
@@ -2898,6 +2937,11 @@ except:
 
     CURRENT_STEP=9; show_progress "Setting up services"
     setup_services
+
+    # A stock CardputerZero keeps the LCD and keyboard with its own launcher.
+    if [ "$CARDPUTER_MODE" = true ]; then
+        bash "$ragnar_PATH/scripts/cardputer_takeover.sh" apply
+    fi
 
     CURRENT_STEP=9; show_progress "Verifying installation"
     verify_installation

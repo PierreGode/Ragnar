@@ -135,12 +135,12 @@ without reinstalling. The choice is written to `config/shared_config.json`, whic
 is gitignored — it survives both reboots and `update_ragnar.sh`, so the screen
 you select stays selected.
 
-All 17 profiles are offered in both places:
+All 18 profiles are offered in both places:
 
 | Type | Screens |
 |---|---|
 | e-Paper | `epd2in13`, `_V2`, `_V3`, `_V4`, `epd2in13b_V4`, `epd2in7`, `epd2in7_V2`, `epd2in9_V2`, `epd3in7`, `epd4in26` |
-| TFT | `gc9a01` (1.28" round), `st7735s` (1.44" HAT + joystick), `whisplay` (1.69" PiSugar) |
+| TFT | `gc9a01` (1.28" round), `st7735s` (1.44" HAT + joystick), `st7789v2` (1.9" M5Stack CardputerZero), `whisplay` (1.69" PiSugar) |
 | OLED | `ssd1306` (0.96") |
 | Character LCD | `lcd1602` (16×2 I2C) |
 | LED matrix | `max7219_8panel`, `max7219_4panel` |
@@ -179,6 +179,35 @@ had to be enabled it offers a reboot, otherwise it restarts Ragnar.
 `sudo ./installhead.sh headless` reverses it (back to web-only). Do **not** use
 it on boards with a built-in DPI/HDMI panel (see above) — those must stay
 headless.
+
+#### M5Stack CardputerZero
+
+> Full guide: [docs/M5StackCardputerZero.md](M5StackCardputerZero.md) — hardware,
+> the on-device screen/keyboard, M5IOE1 backlight/reset, keymap calibration, and
+> troubleshooting. The essentials are below.
+
+The [M5Stack CardputerZero](https://shop.m5stack.com/pages/m5-cardputerzero) is a
+Raspberry Pi Compute Module Zero (CM0 / BCM2837) in a pocket case with a built-in
+1.9" LCD and a 46-key keyboard — so from Ragnar's point of view it is just a
+Raspberry Pi with a screen and keys already attached. Pick **option 7** in the
+installer (`M5Stack CardputerZero`). That runs a normal Pi install pinned to the
+board's built-in display (`st7789v2`, 320×170 landscape) and wires up its keyboard.
+
+**Stock launcher.** On M5Stack's image this option replaces the APPLaunch launcher so
+Ragnar gets the LCD and keyboard, then asks for a reboot. Undo it with
+`sudo scripts/cardputer_takeover.sh revert`.
+
+**Display.** Ragnar uses the kernel's LCD framebuffer, which it finds by driver name.
+On a plain kernel without that driver it falls back to native SPI (CS on GPIO8, DC on
+GPIO25), with reset and backlight through the M5IOE1 expander at `0x4F`.
+
+**Keyboard.** `F` `X` `Z` `C` or the Fn arrows navigate, Enter selects, and Space,
+Backspace and Tab stand in for the HAT's KEY1, KEY2 and KEY3 — the same controls
+documented in [Display Controls](DISPLAY_CONTROLS.md). Any key can be remapped in
+`config/cardputer_keymap.json`; unmapped keys log their code.
+
+> CardputerZero support follows M5Stack's published docs and is tested against simulated
+> hardware, but has not been run on a physical unit yet.
 
 ### 📶 Connecting Ragnar to a network
 

@@ -626,6 +626,7 @@ function epdTypeToSizeKey(epd_type) {
     if (epd_type === 'ili9486' || epd_type === 'ili9488') return '3in5_tft';
     if (epd_type === 'gc9a01') return '1in28_tft';
     if (epd_type === 'st7735s') return '1in44_lcd';
+    if (epd_type === 'st7789v2') return '1in9_cardputer';
     if (epd_type === 'whisplay') return '1in69_tft';
     if (epd_type === 'ssd1306') return '0in96_oled';
     if (epd_type === 'lcd1602') return 'lcd1602';
@@ -644,6 +645,7 @@ const displaySelectOptions = {
         { value: '3in5_tft', label: '3.5" SPI TFT — ILI9486/ILI9488 (320x480)' },
         { value: '1in28_tft', label: '1.28" GC9A01 Round TFT (240x240)' },
         { value: '1in44_lcd', label: '1.44" ST7735S LCD HAT + joystick (128x128)' },
+        { value: '1in9_cardputer', label: '1.9" M5Stack CardputerZero ST7789 V3 (320x170)' },
         { value: '1in69_tft', label: '1.69" Whisplay ST7789 TFT (240x280)' },
         { value: '0in96_oled', label: '0.96" SSD1306 OLED (128x64)' },
         { value: 'lcd1602', label: '16×2 LCD1602 Character LCD (I2C)' },
@@ -784,6 +786,11 @@ function initializeSocket() {
         }
     });
 
+    // Live presence: only the hosts that flipped, patched in place.
+    socket.on('host_presence', function(data) {
+        applyHostPresenceChanges(data && data.changes);
+    });
+
     socket.on('credentials_update', function(data) {
         if (currentTab === 'discovered') {
             displayCredentialsTable(data);
@@ -796,8 +803,13 @@ function initializeSocket() {
         }
     });
 
+    socket.on('language_changed', function(data) {
+        applyServerLanguage(data && data.language);
+    });
+
     socket.on('config_updated', function(config) {
         addConsoleMessage('Configuration updated successfully', 'info');
+        if (config && config.language) applyServerLanguage(config.language);
         if (currentTab === 'config') {
             displayConfigForm(config);
         }
@@ -1602,7 +1614,104 @@ function _netLayerSaved() {
     } catch (e) { return 'overview'; }
 }
 
+// --- Diagnostics module search ----------------------------------------------
+// There are ~70 Diagnostics cards spread across the OSI-layer panels, so a live
+// search that reveals matching modules from every layer at once (not just the
+// open one) is far quicker than hunting tab by tab. It filters on each card's
+// visible text (title + description), which already carries protocol names, CVE
+// ids and vendor names, so "ble", "nrf", "zerologon" or "mikrotik" all hit.
+const _NET_LAYER_LABELS = {
+    overview: 'Overview', l7: 'L7 · Application', l6: 'L6 · Presentation',
+    l5: 'L5 · Session', l4: 'L4 · Transport', l3: 'L3 · Network',
+    l2: 'L2 · Data Link', l1: 'L1 · Physical'
+};
+let _netDiagSearching = false;
+
+function _netDiagLayerCards(layer) {
+    const panel = document.getElementById('net-layer-' + layer);
+    const grid = panel && panel.querySelector(':scope > .grid');
+    return grid ? Array.from(grid.children) : [];
+}
+
+function _netDiagSetLayerLabel(panel, layer, show) {
+    let lbl = panel.querySelector(':scope > .diag-search-layerlabel');
+    if (show) {
+        if (!lbl) {
+            lbl = document.createElement('div');
+            lbl.className = 'diag-search-layerlabel text-[11px] uppercase tracking-wide font-semibold text-Ragnar-300/80 mb-2 mt-1';
+            panel.insertBefore(lbl, panel.firstChild);
+        }
+        lbl.textContent = _NET_LAYER_LABELS[layer] || layer;
+    } else if (lbl) {
+        lbl.remove();
+    }
+}
+
+// Drop out of search mode without re-selecting a layer (the caller does that).
+function _netDiagClearSearchState() {
+    _netDiagSearching = false;
+    const input = document.getElementById('net-diag-search');
+    if (input) input.value = '';
+    const clearBtn = document.getElementById('net-diag-search-clear');
+    if (clearBtn) clearBtn.classList.add('hidden');
+    const count = document.getElementById('net-diag-search-count');
+    if (count) { count.textContent = ''; count.classList.add('hidden'); }
+    document.querySelectorAll('#net-sub-diagnostics .diag-search-hidden')
+        .forEach(e => e.classList.remove('diag-search-hidden'));
+    document.querySelectorAll('#net-sub-diagnostics .diag-search-layerlabel')
+        .forEach(e => e.remove());
+}
+
+function netDiagSearch(q) {
+    const terms = (q || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) {                       // cleared -> back to normal layer view
+        _netDiagClearSearchState();
+        showNetLayer(_netLayerSaved());
+        return;
+    }
+    _netDiagSearching = true;
+    const clearBtn = document.getElementById('net-diag-search-clear');
+    if (clearBtn) clearBtn.classList.remove('hidden');
+    // Match each term at a WORD BOUNDARY (start of a word, prefix allowed) so
+    // "ble" finds BLE Watch but not "ta[ble]", and "router" still matches
+    // "RouterOS". Non-alphanumerics (/, -, .) count as separators, so "mac",
+    // "cve" or "1472" (from CVE-2020-1472) all hit.
+    const res = terms.map(t =>
+        new RegExp('(^|[^a-z0-9])' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    let total = 0;
+    NET_LAYERS.forEach(layer => {
+        const panel = document.getElementById('net-layer-' + layer);
+        if (!panel) return;
+        let shown = 0;
+        _netDiagLayerCards(layer).forEach(card => {
+            const txt = (card.textContent || '').toLowerCase();
+            const match = res.every(re => re.test(txt));
+            card.classList.toggle('diag-search-hidden', !match);
+            if (match) shown++;
+        });
+        total += shown;
+        panel.classList.toggle('hidden', shown === 0);
+        _netDiagSetLayerLabel(panel, layer, shown > 0);
+        const btn = document.getElementById('net-layer-btn-' + layer);
+        if (btn) {                             // no single layer is "active" while searching
+            _NET_LAYER_ON.forEach(c => btn.classList.remove(c));
+            _NET_LAYER_OFF.forEach(c => btn.classList.add(c));
+            btn.setAttribute('aria-pressed', 'false');
+        }
+    });
+    const count = document.getElementById('net-diag-search-count');
+    if (count) {
+        count.textContent = total
+            ? (total + ' module' + (total === 1 ? '' : 's') + ' match — across every layer')
+            : 'No modules match — try a protocol, vendor or CVE name';
+        count.classList.remove('hidden');
+    }
+    const desc = document.getElementById('net-layer-desc');
+    if (desc) desc.textContent = 'Showing modules from every OSI layer that match your search. Clear the search to return to the layer view.';
+}
+
 function showNetLayer(layer) {
+    if (_netDiagSearching) _netDiagClearSearchState();   // a layer click exits search
     if (!NET_LAYERS.includes(layer)) layer = 'overview';
     NET_LAYERS.forEach(l => {
         const panel = document.getElementById('net-layer-' + l);
@@ -1647,6 +1756,7 @@ function revealNetCard(id) {
 // ============================================================================
 const _wifiState = { iface: '', band: 'all', view: 'dome', data: null, selected: null, auto: null, inited: false, bt: null, btOn: false, btBusy: false, btSelected: null,
     zb: null, zbOn: false, zbBusy: false, zbSelected: null, zbAvailable: false,
+    ble: null, bleOn: false, bleBusy: false, bleSelected: null, bleAvailable: false,
     hoverBssid: null, radius: null, fs: { open: false, wired: false, native: false },
     sdr: { available: false, running: false, band: '2.4', bandMhz: null, floor: -120, seq: 0, rows: [], maxhold: null, poll: null, statusPoll: null, error: null } };
 
@@ -1709,6 +1819,16 @@ function wifiInit() {
             if (_wifiState.zbOn) wifiZbScan();
             else { if (_wifiState.data) _wifiDrawSpectrum(); }
         });
+        // BLE Watch overlay toggle (gated on an nRF / Bluefruit LE sniffer being present)
+        const bleChk = document.getElementById('wifi-ble');
+        if (bleChk) bleChk.addEventListener('change', (e) => {
+            if (bleChk.disabled) { e.target.checked = false; return; }
+            _wifiState.bleOn = e.target.checked;
+            const panel = document.getElementById('wifi-ble-panel');
+            if (panel) panel.classList.toggle('hidden', !_wifiState.bleOn);
+            if (_wifiState.bleOn) wifiBleScan();
+            else { if (_wifiState.data) _wifiDrawSpectrum(); }
+        });
         ['wifi-tx', 'wifi-ple'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.addEventListener('change', () => { if (_wifiState.selected) wifiSelectAp(_wifiState.selected); });
@@ -1723,10 +1843,11 @@ function wifiInit() {
     _wifiFillIfaces();
     _wifiSdrCheck();
     _wifiZbCheck();
+    _wifiBleCheck();
     _wifiRtlCheck();
     _wifiRfwfDemoInit();
     if (!_wifiState.sdr.statusPoll)
-        _wifiState.sdr.statusPoll = setInterval(() => { _wifiSdrCheck(); _wifiZbCheck(); _wifiRtlCheck(); }, 15000);
+        _wifiState.sdr.statusPoll = setInterval(() => { _wifiSdrCheck(); _wifiZbCheck(); _wifiBleCheck(); _wifiRtlCheck(); }, 15000);
     window.addEventListener('beforeunload', () => { if (_wifiState.sdr.running) _wifiSdrStop(); });
 }
 
@@ -1997,6 +2118,7 @@ function _wifiAutoTick() {
     if (_wifiState.view !== 'waterfall') wifiScan();
     if (_wifiState.btOn) wifiBtScan();
     if (_wifiState.zbOn && _wifiState.zbAvailable) wifiZbScan();
+    if (_wifiState.bleOn && _wifiState.bleAvailable) wifiBleScan();
 }
 
 // ---- Bluetooth / BLE 2.4 GHz overlay ---------------------------------------
@@ -2150,6 +2272,113 @@ function wifiZbSelect(id) {
     _wifiState.zbSelected = (_wifiState.zbSelected === id) ? null : id;
     _wifiFsRenderSide();
     _wifiZbRender();
+    if (_wifiState.data) _wifiDrawSpectrum();
+}
+
+// ---- BLE Watch 2.4 GHz overlay (via an on-demand nRF-sniffer link-layer sniff)
+// Unlike the 📶 Bluetooth overlay (a BlueZ device-discovery estimate), this uses
+// the external nRF / Bluefruit LE sniffer to hear BLE advertising on channels
+// 37/38/39 directly — real energy on the band — and marks any advertiser BLE
+// Watch flags as a clone, spoof or advertising flood in red. The toggle stays
+// greyed until a sniffer is on USB (the status poll writes nothing to any port).
+const _BLE_FREQ = { 37: 2402, 38: 2426, 39: 2480 };
+const _BLE_PRESSURE_COLOR = { low: '#64748b', moderate: '#f59e0b', high: '#ef4444' };
+
+function _wifiBleCheck() {
+    if (_wifiState.bleBusy) return;            // never probe a port mid-capture
+    fetch('/api/net/ble-watch/status').then(r => r.json()).then(st => {
+        const ok = !!(st && st.available);
+        _wifiState.bleAvailable = ok;
+        const chk = document.getElementById('wifi-ble'), lab = document.getElementById('wifi-ble-label');
+        if (chk) chk.disabled = !ok;
+        if (lab) {
+            lab.classList.toggle('opacity-40', !ok);
+            lab.classList.toggle('cursor-not-allowed', !ok);
+            lab.classList.toggle('cursor-pointer', ok);
+            lab.title = ok ? ('Passive BLE link-layer sniff — ' + (st.note || 'sniffer ready'))
+                : (st && st.note ? st.note : 'Attach an nRF / Bluefruit LE sniffer to monitor BLE advertising');
+        }
+        _wifiFsSyncGates();
+    }).catch(() => {});
+}
+
+function wifiBleScan() {
+    if (_wifiState.bleBusy) return;
+    _wifiState.bleBusy = true;
+    const st = document.getElementById('wifi-ble-status');
+    if (st) st.textContent = 'Sniffing BLE advertising (37/38/39)…';
+    // quick=1 suppresses the Watchtower incident export for this short overlay sniff.
+    fetch('/api/net/ble-watch?seconds=8&quick=1').then(r => r.json()).then(d => {
+        _wifiState.bleBusy = false;
+        if (!d.success) {
+            if (st) st.textContent = '⚠ ' + ((d.error || 'BLE sniff failed').split('.')[0]);
+            _wifiState.ble = null;
+            if (_wifiState.data) _wifiDrawSpectrum();
+            return;
+        }
+        const ov = d.overlay || { devices: [], markers: [], device_count: 0 };
+        _wifiState.ble = ov;
+        // Drop a selection that dropped off the air this sniff.
+        if (_wifiState.bleSelected && !(ov.devices || []).some(v => v.addr === _wifiState.bleSelected))
+            _wifiState.bleSelected = null;
+        const fl = ov.flagged_count || 0;
+        if (st) st.textContent = `${ov.device_count || 0} advertiser(s)` +
+            (fl ? ` · ${fl} flagged` : '') + ` · ${d.packet_count || 0} pkt`;
+        _wifiBleRender();
+        _wifiFsRenderSide();
+        if (_wifiState.data) _wifiDrawSpectrum();
+    }).catch(() => { _wifiState.bleBusy = false; if (st) st.textContent = 'BLE sniff failed'; });
+}
+
+// A short label for the status cell: the flagged finding codes, or "clean".
+function _wifiBleStatusCell(v) {
+    if (v.flagged) {
+        const codes = (v.codes || []).join(', ');
+        return `<span style="color:#f87171" title="${_esc(codes)}">⚠ ${_esc(codes || (v.severity || 'finding'))}</span>`;
+    }
+    return '<span style="color:#4ade80">clean</span>';
+}
+
+function _wifiBleRender() {
+    const ov = _wifiState.ble; if (!ov) return;
+    const sum = document.getElementById('wifi-ble-summary');
+    if (sum) sum.textContent = `${ov.device_count || 0} advertiser(s) · ${ov.flagged_count || 0} flagged` +
+        (ov.verdict ? ` · ${ov.verdict}` : '');
+    const note = document.getElementById('wifi-ble-note');
+    if (note) note.textContent = ov.note || '';
+    const pr = document.getElementById('wifi-ble-pressure');
+    if (pr) pr.innerHTML = (ov.wifi_channels || []).map(c => {
+        const col = _BLE_PRESSURE_COLOR[c.level] || '#64748b';
+        return `<span class="px-1.5 py-0.5 rounded" style="background:${col}22;color:${col};border:1px solid ${col}55" title="BLE advertising pressure near Wi-Fi ch ${c.wifi_channel}">ch${c.wifi_channel}: ${c.level}</span>`;
+    }).join('');
+    const tb = document.getElementById('wifi-ble-tbody');
+    if (!tb) return;
+    if (!(ov.devices || []).length) {
+        tb.innerHTML = '<tr><td colspan="5" class="py-3 text-gray-500">No BLE advertising heard this sniff.</td></tr>';
+        return;
+    }
+    tb.innerHTML = ov.devices.map(v => {
+        const sel = _wifiState.bleSelected === v.addr;
+        const rssi = (v.rssi == null) ? '—' : `${v.rssi}`;
+        const rcol = (v.rssi == null) ? '#64748b' : _wifiSignalColor(v.rssi);
+        const name = v.name ? _esc(v.name) : '<span class="text-gray-600">(no name)</span>';
+        const chans = (v.channels || []).join('/') || '—';
+        const atype = v.rpa_class === 'public' ? 'public' : v.rpa_class === 'static' ? 'static'
+            : v.rpa_class === 'rpa' ? 'random (RPA)' : 'random';
+        return `<tr class="border-b border-slate-800/60 cursor-pointer hover:bg-slate-800/40${sel ? ' bg-fuchsia-500/15' : ''}" onclick="wifiBleSelect('${v.addr}')" title="Click to highlight this advertiser on the spectrum">
+            <td class="py-1 pr-3">${sel ? '<span class="text-fuchsia-400">▸</span> ' : ''}${name}<div class="text-[10px] text-gray-600 font-mono">${_esc(v.addr)}</div></td>
+            <td class="py-1 pr-3">${atype}</td>
+            <td class="py-1 pr-3 font-mono">${chans}</td>
+            <td class="py-1 pr-3">${_wifiBleStatusCell(v)}</td>
+            <td class="py-1 pr-3 text-right font-mono" style="color:${rcol}">${rssi}</td>
+        </tr>`;
+    }).join('');
+}
+
+function wifiBleSelect(addr) {
+    _wifiState.bleSelected = (_wifiState.bleSelected === addr) ? null : addr;
+    _wifiFsRenderSide();
+    _wifiBleRender();
     if (_wifiState.data) _wifiDrawSpectrum();
 }
 
@@ -3093,6 +3322,66 @@ function _wifiDrawSpectrumInto(canvas, opts) {
     if (_wifiState.zbOn && _wifiState.zb && ranges['2.4']) {
         _wifiDrawZbOverlay(ctx, ranges['2.4'], xFor, { padT, padB, H, plotH, yFor });
     }
+    // BLE Watch overlay on the 2.4 GHz segment (real sniffed advertising activity)
+    if (_wifiState.bleOn && _wifiState.ble && ranges['2.4']) {
+        _wifiDrawBleOverlay(ctx, ranges['2.4'], xFor, { padT, padB, H, plotH, yFor });
+    }
+}
+
+// Draw BLE Watch advertising-channel markers (37/38/39, from a real link-layer
+// sniff) on the 2.4 GHz segment: a solid fuchsia bar per channel, height scaled
+// by activity, turning red on any channel carrying a flagged advertiser (clone /
+// spoof / flood). A selected advertiser draws its RSSI level across the band.
+function _wifiDrawBleOverlay(ctx, r24, xFor, g) {
+    const ov = _wifiState.ble || {};
+    const baseY = g.H - g.padB;
+    const bleX = (freqMhz) => {
+        const chFrac = (freqMhz - 2407) / 5;
+        return Math.max(r24.x0 + 2, Math.min(r24.x1 - 2, xFor('2.4', chFrac)));
+    };
+    // Which advertising channels carry a flagged advertiser → draw those red.
+    const flaggedCh = new Set();
+    (ov.devices || []).forEach(v => { if (v.flagged) (v.channels || []).forEach(c => flaggedCh.add(c)); });
+    const sel = _wifiState.bleSelected
+        ? (ov.devices || []).find(v => v.addr === _wifiState.bleSelected) : null;
+    const dim = sel ? 0.35 : 1.0;
+    // Per advertising-channel markers. Offset +3px so they sit beside (not under)
+    // the 📶 Bluetooth overlay's dashed markers when both are shown.
+    (ov.markers || []).forEach(m => {
+        if (!m.freq_mhz) return;
+        const x = bleX(m.freq_mhz) + 3;
+        const intensity = Math.max(0, Math.min(100, m.intensity || 0));
+        const h = (g.plotH || (baseY - g.padT)) * (0.18 + 0.32 * intensity / 100);
+        const yTop = baseY - h;
+        const red = flaggedCh.has(m.adv_channel);
+        const rgb = red ? '239,68,68' : '232,121,249';
+        ctx.strokeStyle = `rgba(${rgb},${(0.4 + intensity / 100 * 0.5) * dim})`;
+        ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(x, yTop); ctx.lineTo(x, baseY); ctx.stroke();
+        ctx.fillStyle = `rgba(${red ? '254,202,202' : '245,208,254'},${dim})`;
+        ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText((red ? '⚠' : '🛡') + m.adv_channel, x, yTop - 3);
+    });
+    // Selected advertiser: RSSI level line + emphasis on the channels it used.
+    if (sel && sel.rssi != null) {
+        const yR = g.yFor(sel.rssi);
+        const col = sel.flagged ? '#f87171' : _wifiSignalColor(sel.rssi);
+        ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+        ctx.beginPath(); ctx.moveTo(r24.x0, yR); ctx.lineTo(r24.x1, yR); ctx.stroke(); ctx.setLineDash([]);
+        (sel.channels || []).forEach(c => {
+            const x = bleX(_BLE_FREQ[c]) + 3;
+            ctx.strokeStyle = col; ctx.lineWidth = 2.5;
+            ctx.beginPath(); ctx.moveTo(x, yR); ctx.lineTo(x, baseY); ctx.stroke();
+            ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, yR, 4, 0, 2 * Math.PI); ctx.fill();
+            ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+        });
+        const nm = sel.name || sel.addr;
+        const tag = `${nm.length > 18 ? nm.slice(0, 17) + '…' : nm}  ${sel.rssi} dBm${sel.flagged ? '  ⚠ ' + (sel.codes || []).join(', ') : '  (BLE adv)'}`;
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'left';
+        ctx.fillText(tag, r24.x0 + 3, yR - 5);
+    } else if (sel) {
+        ctx.fillStyle = '#f5d0fe'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'left';
+        ctx.fillText(`${sel.addr} — RSSI not heard this sniff`, r24.x0 + 3, g.padT + 26);
+    }
 }
 
 // Draw Zigbee channel markers (11–26) on the 2.4 GHz segment: a labelled tick
@@ -3285,7 +3574,8 @@ function _wifiFsWire() {
         b.addEventListener('click', () => { if (!b.disabled) wifiSetView(b.dataset.view); }));
     // Overlay toggles mirror the in-page checkboxes, so the existing change
     // handlers stay the single implementation.
-    [['wifi-auto', 'wifi-fs-auto'], ['wifi-bt', 'wifi-fs-bt'], ['wifi-zb', 'wifi-fs-zb']].forEach(([mainId, fsId]) => {
+    [['wifi-auto', 'wifi-fs-auto'], ['wifi-bt', 'wifi-fs-bt'], ['wifi-zb', 'wifi-fs-zb'],
+     ['wifi-ble', 'wifi-fs-ble']].forEach(([mainId, fsId]) => {
         const m = document.getElementById(mainId), f = document.getElementById(fsId);
         if (!m || !f) return;
         f.addEventListener('change', () => {
@@ -3363,6 +3653,12 @@ function _wifiFsSyncGates() {
     if (zb && zbMain) {
         zb.disabled = zbMain.disabled;
         if (zbl) { zbl.style.opacity = zbMain.disabled ? '.4' : '1'; zbl.style.cursor = zbMain.disabled ? 'not-allowed' : 'pointer'; }
+    }
+    const ble = document.getElementById('wifi-fs-ble'), blel = document.getElementById('wifi-fs-ble-label');
+    const bleMain = document.getElementById('wifi-ble');
+    if (ble && bleMain) {
+        ble.disabled = bleMain.disabled;
+        if (blel) { blel.style.opacity = bleMain.disabled ? '.4' : '1'; blel.style.cursor = bleMain.disabled ? 'not-allowed' : 'pointer'; }
     }
     const wf = document.getElementById('wifi-fs-view-wf'), wfMain = document.getElementById('wifi-view-wf');
     if (wf && wfMain) {
@@ -3499,6 +3795,16 @@ function _wifiFsRenderSide() {
                     <span>${_esc(v.vendor || id)} <span style="color:#64748b">ch${v.channel}</span></span>
                     <span style="color:${_wifiSignalColor(v.rssi)}">${v.rssi == null ? '—' : v.rssi}</span></div>`; }).join('')
                 || '<div class="wifi-fs-empty">No devices heard.</div>'}</div>`;
+    }
+    if (_wifiState.bleOn && _wifiState.ble) {
+        const ov = _wifiState.ble;
+        const devs = (ov.devices || []).slice(0, 40);
+        html += `<div class="wifi-fs-card"><h4>🛡 BLE Watch (${ov.device_count || devs.length}${ov.flagged_count ? ' · ' + ov.flagged_count + ' flagged' : ''})</h4>
+            <div style="font-size:11px;color:#64748b;margin-bottom:5px">${_esc(ov.verdict || '')}${ov.verdict ? ' · ' : ''}adv channels 37/38/39</div>
+            ${devs.map(v => `<div class="wifi-fs-devrow ${_wifiState.bleSelected === v.addr ? 'sel' : ''}" onclick="wifiBleSelect('${v.addr}')">
+                <span>${v.flagged ? '<span style="color:#f87171">⚠</span> ' : ''}${_esc(v.name || v.addr)} <span style="color:#64748b">${(v.channels || []).join('/')}</span></span>
+                <span style="color:${v.flagged ? '#f87171' : _wifiSignalColor(v.rssi)}">${v.rssi == null ? '—' : v.rssi}</span></div>`).join('')
+                || '<div class="wifi-fs-empty">No advertising heard.</div>'}</div>`;
     }
     side.innerHTML = html;
 }
@@ -6307,7 +6613,7 @@ async function runIperf() {
 async function toggleIperfServer() {
     const btn = document.getElementById('iperf-server-btn');
     const status = document.getElementById('iperf-server-status');
-    const starting = btn.textContent.indexOf('Start') !== -1;
+    const starting = _i18nText(btn).indexOf('Start') !== -1;
     _ndBusy(btn, true, starting ? 'Starting…' : 'Stopping…');
     try {
         const d = await postAPI('/api/net/iperf3-server', { action: starting ? 'start' : 'stop' });
@@ -13484,12 +13790,12 @@ function updateDashboardStats(stats) {
 
     const newCountElement = document.getElementById('target-new-count');
     if (newCountElement) {
-        newCountElement.title = newTargetList.length > 0 ? newTargetList.join(', ') : 'No recent additions';
+        newCountElement.title = newTargetList.length > 0 ? newTargetList.join(', ') : 'No new hosts in the last 24 hours';
     }
 
     const lostCountElement = document.getElementById('target-lost-count');
     if (lostCountElement) {
-        lostCountElement.title = lostTargetList.length > 0 ? lostTargetList.join(', ') : 'No recent drops';
+        lostCountElement.title = lostTargetList.length > 0 ? lostTargetList.join(', ') : 'No hosts lost in the last 24 hours';
     }
 
     updateElement('port-count', portCount);
@@ -13521,22 +13827,6 @@ async function loadNetworkData() {
     try {
         // Use the new stable network data endpoint
         await loadStableNetworkData();
-        
-        // Update the status detection info banner with current config
-        updateNetworkStatusBanner();
-    } catch (error) {
-        console.error('Error loading network data:', error);
-        addConsoleMessage('Failed to load network data', 'error');
-    }
-}
-
-async function loadNetworkData() {
-    try {
-        // Use the new stable network data endpoint
-        await loadStableNetworkData();
-        
-        // Update the status detection info banner with current config
-        updateNetworkStatusBanner();
     } catch (error) {
         console.error('Error loading network data:', error);
         addConsoleMessage('Failed to load network data', 'error');
@@ -13846,6 +14136,7 @@ async function loadStableNetworkData() {
         
         if (data.success) {
             displayStableNetworkTable(data);
+            setHostPresenceBanner(!!data.presence_live);
             addConsoleMessage(`Network data loaded: ${data.count} hosts`, 'info');
         } else {
             addConsoleMessage(`Failed to load network data: ${data.error}`, 'error');
@@ -13888,23 +14179,14 @@ function displayStableNetworkTable(data) {
     // Use DocumentFragment for better performance
     const fragment = document.createDocumentFragment();
     
-    data.hosts.forEach((host, index) => {
-        // DEBUG: Log first few host objects to see structure
-        if (index < 5) {
-            console.log(`🔍 Host ${index}:`, host);
-            console.log(`   IP field:`, host.ip, typeof host.ip);
-            console.log(`   All fields:`, Object.keys(host));
-        }
-        
+    data.hosts.forEach((host) => {
         const row = document.createElement('tr');
         const ignored = isHostIgnored(host.ip, host.mac);
         row.className = 'border-b border-slate-700 hover:bg-slate-700/50 transition-colors' +
             (ignored ? ' opacity-50' : '');
 
         // Status indicator
-        const statusIcon = host.status === 'up' ?
-            '<span class="flex items-center"><div class="w-2 h-2 bg-green-500 rounded-full mr-2"></div>Online</span>' :
-            '<span class="flex items-center"><div class="w-2 h-2 bg-gray-500 rounded-full mr-2"></div>Unknown</span>';
+        const statusIcon = hostStatusBadge(host.status);
         
         // Format MAC address
         let macDisplay = host.mac === 'Unknown' ? 
@@ -13927,7 +14209,7 @@ function displayStableNetworkTable(data) {
             `<span class="text-xs">${formatTimeAgo(host.last_scan)}</span>`;
         
         row.innerHTML = `
-            <td class="py-3 px-4">${statusIcon}</td>
+            <td class="py-3 px-4" data-host-status="${host.status}">${statusIcon}</td>
             <td class="py-3 px-4 font-mono text-sm">${host.ip}</td>
             <td class="py-3 px-4">${host.hostname === 'Unknown' ? '<span class="text-gray-500">Unknown</span>' : host.hostname}</td>
             <td class="py-3 px-4">${macDisplay}</td>
@@ -13976,13 +14258,84 @@ function displayStableNetworkTable(data) {
     });
     
     // Update host count
-    if (hostCountSpan) {
-        hostCountSpan.textContent = `${data.hosts.length} hosts`;
-    }
-    
+    updateStableHostCount();
+
     // Cleanup old button states for removed hosts
     cleanupOldDeepScanStates();
 }
+
+// ---------------------------------------------------------------------------
+// Live host presence (Discovered Hosts "Status" column)
+// ---------------------------------------------------------------------------
+
+function hostStatusBadge(status) {
+    if (status === 'up') {
+        return '<span class="flex items-center"><div class="w-2 h-2 bg-green-500 rounded-full mr-2"></div>Online</span>';
+    }
+    if (status === 'down') {
+        return '<span class="flex items-center text-gray-400"><div class="w-2 h-2 bg-red-500 rounded-full mr-2"></div>Offline</span>';
+    }
+    return '<span class="flex items-center"><div class="w-2 h-2 bg-gray-500 rounded-full mr-2"></div>Unknown</span>';
+}
+
+function updateStableHostCount() {
+    const tableBody = document.getElementById('network-hosts-table');
+    const hostCountSpan = document.getElementById('host-count');
+    if (!tableBody || !hostCountSpan) return;
+    const cells = tableBody.querySelectorAll('td[data-host-status]');
+    if (!cells.length) return;          // table drawn by another renderer
+    let online = 0;
+    cells.forEach(cell => { if (cell.dataset.hostStatus === 'up') online++; });
+    hostCountSpan.textContent = `${cells.length} hosts`;
+    // Separate nodes so each piece still matches its own translation key.
+    hostCountSpan.appendChild(document.createTextNode(' \u00b7 '));
+    const onlineSpan = document.createElement('span');
+    onlineSpan.className = 'text-green-400';
+    onlineSpan.textContent = `${online} online`;
+    hostCountSpan.appendChild(onlineSpan);
+}
+
+// Patch only the Status cells that changed; the table is never rebuilt here.
+function applyHostPresenceChanges(changes) {
+    if (!Array.isArray(changes) || !changes.length) return;
+    const tableBody = document.getElementById('network-hosts-table');
+    if (!tableBody) return;
+    let touched = false;
+    changes.forEach(change => {
+        if (!change || !change.ip) return;
+        const row = tableBody.querySelector(`tr[data-ip="${escapeSelector(change.ip)}"]`);
+        const cell = row && row.querySelector('td[data-host-status]');
+        if (!cell || cell.dataset.hostStatus === change.status) return;
+        cell.dataset.hostStatus = change.status;
+        cell.innerHTML = hostStatusBadge(change.status);
+        touched = true;
+    });
+    if (touched) updateStableHostCount();
+}
+
+function setHostPresenceBanner(live) {
+    const liveEl = document.getElementById('network-status-live');
+    const legacyEl = document.getElementById('network-status-legacy');
+    if (!liveEl || !legacyEl) return;
+    liveEl.classList.toggle('hidden', !live);
+    legacyEl.classList.toggle('hidden', live);
+    if (!live) updateNetworkStatusBanner();
+}
+
+// Safety net for when the WebSocket is down: poll the small presence
+// endpoint instead, and only while the hosts table is actually on screen.
+setInterval(async () => {
+    if (currentTab !== 'network' || document.hidden) return;
+    if (typeof socket !== 'undefined' && socket && socket.connected) return;
+    if (!document.querySelector('#network-hosts-table td[data-host-status]')) return;
+    try {
+        const data = await fetchAPI('/api/network/presence');
+        if (!data || !data.hosts) return;
+        applyHostPresenceChanges(Object.keys(data.hosts).map(ip => ({ ip, status: data.hosts[ip].status })));
+    } catch (error) {
+        console.debug('Presence poll failed:', error);
+    }
+}, 3000);
 
 function formatTimeAgo(timeString) {
     try {
@@ -16354,6 +16707,7 @@ async function loadConfigData() {
 
         // Also check for updates when loading config tab
         checkForUpdates();
+        loadOsUpdates({ quiet: true });
 
         // Load security configuration
         await loadSecurityConfig();
@@ -19143,6 +19497,429 @@ async function restartService() {
     }
 }
 
+// ============================================================================
+// OS PACKAGES (apt): Config -> System "OS Packages" card + Mesh-tab banner
+// ============================================================================
+// "Update System" above pulls Ragnar's code. This drives apt for the rest of the
+// box: kernel, security fixes and third-party repos such as Tailscale. The run
+// itself happens on the box in a transient systemd unit (os_updates.py), so the
+// page only starts it and polls. Failed polls are expected mid-upgrade - an
+// upgrade can restart tailscaled or Wi-Fi, which drops this page for a few
+// seconds - so they are retried quietly instead of being reported as errors.
+let osUpdatesPollTimer = null;
+let osUpdatesLast = null;
+let osUpdatesLastFetch = 0;
+let osUpdatesPollFailures = 0;
+let osUpdatesWatching = false;      // this page started (or attached to) the current run
+let osUpdatesLogPrevious = false;   // log panel shows the run before the last one
+const OS_UPDATES_POLL_MS = 3000;
+const OS_UPDATES_MAX_FAILURES = 600; // ~30 min of failed polls before giving up
+
+function osUpdatesAgo(ts) {
+    if (!ts) return 'never';
+    const secs = Math.max(0, Date.now() / 1000 - ts);
+    if (secs < 90) return 'just now';
+    if (secs < 3600) return `${Math.round(secs / 60)} min ago`;
+    if (secs < 172800) return `${Math.round(secs / 3600)} h ago`;
+    return `${Math.round(secs / 86400)} days ago`;
+}
+
+function osUpdatesSetBadge(text, cls) {
+    const badge = document.getElementById('os-updates-badge');
+    if (!badge) return;
+    badge.textContent = text;
+    badge.className = 'text-sm px-2 py-1 rounded ' + cls;
+}
+
+function renderOsUpdates(data) {
+    const card = document.getElementById('os-updates-card');
+    if (!card || !data) return;
+    const summary = document.getElementById('os-updates-summary');
+    const reboot = document.getElementById('os-updates-reboot');
+    const tsBox = document.getElementById('os-updates-tailscale');
+    const progress = document.getElementById('os-updates-progress');
+    const result = document.getElementById('os-updates-result');
+    const checkBtn = document.getElementById('os-updates-check-btn');
+    const upgradeBtn = document.getElementById('os-updates-upgrade-btn');
+    const tsBtn = document.getElementById('os-updates-ts-btn');
+    const listWrap = document.getElementById('os-updates-list-wrap');
+    const list = document.getElementById('os-updates-list');
+
+    const status = data.status || {};
+    const available = data.available || {};
+    const count = available.count || 0;
+    const packagesAll = available.packages || [];
+    const heldPkgs = packagesAll.filter(p => p.held);
+    // "Upgrade All" never installs a held-back package, so it is not counted as
+    // something to upgrade - it is listed on its own with the reason.
+    const upgradableNow = available.upgradable_now ?? count;
+    const security = available.security_now ?? (available.security_count || 0);
+    const running = !!data.running;
+    const heldBox = document.getElementById('os-updates-held');
+
+    if (!data.supported) {
+        osUpdatesSetBadge('Unavailable', 'bg-gray-700 text-gray-300');
+        summary.textContent = data.reason || 'OS package updates are not available on this system.';
+        [reboot, tsBox, heldBox, progress, result, listWrap].forEach(el => el && el.classList.add('hidden'));
+        checkBtn.disabled = true;
+        upgradeBtn.disabled = true;
+        return;
+    }
+
+    // Badge + summary line
+    if (running) {
+        osUpdatesSetBadge(status.action === 'check' ? 'Checking...' : 'Upgrading...',
+            'bg-blue-700 text-blue-200');
+    } else if (!available.ok && available.error) {
+        osUpdatesSetBadge('Error', 'bg-red-900 text-red-300');
+    } else if (count === 0) {
+        osUpdatesSetBadge('Up to date', 'bg-green-900 text-green-300');
+    } else if (upgradableNow === 0) {
+        osUpdatesSetBadge(`${heldPkgs.length} held back`, 'bg-amber-900 text-amber-200');
+    } else if (security > 0) {
+        osUpdatesSetBadge(`${upgradableNow} updates`, 'bg-red-900 text-red-300');
+    } else {
+        osUpdatesSetBadge(`${upgradableNow} updates`, 'bg-amber-900 text-amber-200');
+    }
+    const checked = `Package lists refreshed ${osUpdatesAgo(data.last_checked)}.`;
+    const stale = data.last_checked && (Date.now() / 1000 - data.last_checked) > 7 * 86400
+        ? ' Check for updates to see what is new.' : '';
+    if (!available.ok && available.error) {
+        summary.textContent = `Could not read the package list: ${available.error}`;
+    } else if (count === 0) {
+        summary.textContent = `Everything apt manages is up to date. ${checked}${stale}`;
+    } else if (upgradableNow === 0) {
+        const n = heldPkgs.length;
+        summary.textContent = `Nothing left for Upgrade All. ${n} package${n === 1 ? ' is' : 's are'} held back; see why below. ${checked}${stale}`;
+    } else {
+        const sec = security ? ` (${security} security fix${security === 1 ? '' : 'es'})` : '';
+        const heldNote = heldPkgs.length ? ` ${heldPkgs.length} more held back.` : '';
+        summary.textContent = `${upgradableNow} package${upgradableNow === 1 ? '' : 's'} can be upgraded${sec}.${heldNote} ${checked}${stale}`;
+    }
+
+    // Held back: each with the reason and, where it is safe to offer, a
+    // deliberate "Upgrade anyway" that names exactly what it removes.
+    if (heldPkgs.length && heldBox) {
+        heldBox.innerHTML = `<div class="text-sm font-medium text-amber-200 mb-1">Held back (${heldPkgs.length})</div>
+            <p class="text-xs text-gray-400 mb-2">Upgrade All skips these. Ragnar never removes a package unless you approve it here.</p>` +
+            heldPkgs.map(p => {
+                const h = p.held || {};
+                const bits = [];
+                if (h.removes && h.removes.length) bits.push(`<span class="text-red-300">removes ${escapeHtml(h.removes.join(', '))}</span>`);
+                if (h.new && h.new.length) bits.push(`adds ${escapeHtml(h.new.join(', '))}`);
+                if (h.detail) bits.push(escapeHtml(h.detail));
+                const btn = h.can_force
+                    ? `<button data-held-pkg="${escapeHtml(p.name)}" onclick="upgradeHeldPackage(this.dataset.heldPkg)" class="os-held-btn px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-600 text-white text-xs font-medium whitespace-nowrap disabled:bg-gray-600 disabled:cursor-not-allowed"${running ? ' disabled' : ''}>Upgrade anyway</button>`
+                    : '';
+                return `<div class="flex items-start justify-between gap-2 flex-wrap py-2 border-t border-slate-700">
+                    <div class="min-w-0 text-xs">
+                        <div><span class="font-mono text-gray-200 break-all">${escapeHtml(p.name)}</span>
+                            <span class="font-mono text-gray-400 ml-2 break-all">${escapeHtml(p.current)} \u2192 ${escapeHtml(p.candidate)}</span></div>
+                        <div class="text-gray-400 mt-1">${escapeHtml(h.explanation || '')}</div>
+                        ${bits.length ? `<div class="text-gray-500 mt-1 break-all">${bits.join(' \u00b7 ')}</div>` : ''}
+                    </div>
+                    ${btn}
+                </div>`;
+            }).join('');
+        heldBox.classList.remove('hidden');
+    } else if (heldBox) {
+        heldBox.classList.add('hidden');
+    }
+
+    // Reboot recommendation
+    if (data.reboot_required && !running) {
+        reboot.innerHTML = `<div class="flex items-center justify-between gap-2 flex-wrap">
+            <span><strong>Reboot recommended.</strong> ${escapeHtml(data.reboot_reason || '')}</span>
+            <button onclick="rebootSystem()" class="px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-600 text-white text-xs font-medium whitespace-nowrap">Reboot now</button>
+        </div>`;
+        reboot.classList.remove('hidden');
+    } else {
+        reboot.classList.add('hidden');
+    }
+
+    // Tailscale shortcut
+    if (data.tailscale) {
+        document.getElementById('os-updates-ts-versions').textContent =
+            `${data.tailscale.current} → ${data.tailscale.candidate}`;
+        tsBox.classList.remove('hidden');
+    } else {
+        tsBox.classList.add('hidden');
+    }
+
+    // Live progress
+    if (running) {
+        progress.classList.remove('hidden');
+        const p = status.progress;
+        let stepText = status.step || 'Working...';
+        let pct = null;
+        if (p && p.total) {
+            pct = Math.min(100, Math.round((p.done / p.total) * 100));
+            stepText = `${status.step || 'Installing'}: ${p.current || ''} (${p.done}/${p.total})`;
+        }
+        document.getElementById('os-updates-step').textContent = stepText;
+        document.getElementById('os-updates-pct').textContent = pct === null ? '' : `${pct}%`;
+        // Before the install starts there is no count to measure against; show
+        // a partial bar so the step text does not look stalled.
+        document.getElementById('os-updates-bar').style.width = pct === null ? '15%' : `${pct}%`;
+    } else {
+        progress.classList.add('hidden');
+    }
+
+    // Outcome of the last run (kept visible for a day, failures until the next run)
+    const finishedAgo = status.finished ? Date.now() / 1000 - status.finished : Infinity;
+    if (!running && status.state === 'finished' && (status.outcome !== 'ok' || finishedAgo < 86400)) {
+        let html;
+        if (status.outcome === 'ok') {
+            result.className = 'mb-3 p-3 rounded-lg text-xs bg-green-900 text-green-300';
+            if (status.action === 'check') {
+                html = `Package lists refreshed ${escapeHtml(osUpdatesAgo(status.finished))}.`;
+            } else {
+                const n = status.upgraded_count || 0;
+                html = n
+                    ? `Upgraded ${n} package${n === 1 ? '' : 's'} ${escapeHtml(osUpdatesAgo(status.finished))}.`
+                    : `Nothing to install ${escapeHtml(osUpdatesAgo(status.finished))}.`;
+                if (status.removed && status.removed.length) html += ` Removed (as approved): ${escapeHtml(status.removed.join(', '))}.`;
+                if (status.tailscale_upgraded) html += ' Tailscale was updated.';
+                if (status.held_count) html += ` ${status.held_count} held back (see above).`;
+            }
+        } else {
+            result.className = 'mb-3 p-3 rounded-lg text-xs bg-red-900 text-red-300';
+            html = `<strong>${escapeHtml(status.error || 'The last package run failed.')}</strong>`;
+            if (status.hint) html += `<br>${escapeHtml(status.hint)}`;
+        }
+        if (status.warnings && status.warnings.length) {
+            html += `<br><span class="text-amber-200">${status.warnings.length} repository warning${status.warnings.length === 1 ? '' : 's'}; see the output below.</span>`;
+        }
+        result.innerHTML = html;
+        result.classList.remove('hidden');
+    } else {
+        result.classList.add('hidden');
+    }
+
+    // Buttons
+    checkBtn.disabled = running;
+    upgradeBtn.disabled = running || upgradableNow === 0;
+    upgradeBtn.textContent = upgradableNow ? `Upgrade All (${upgradableNow})` : 'Upgrade All';
+    if (tsBtn) tsBtn.disabled = running;
+
+    // Package list
+    // Held-back packages go last: they are not part of Upgrade All.
+    const packages = packagesAll.filter(p => !p.held).concat(heldPkgs);
+    document.getElementById('os-updates-list-count').textContent = String(packages.length);
+    listWrap.classList.toggle('hidden', packages.length === 0);
+    list.innerHTML = packages.map(p => `
+        <div class="flex items-center justify-between gap-2 flex-wrap px-2 py-1">
+            <span class="min-w-0">
+                <span class="font-mono text-gray-200 break-all">${escapeHtml(p.name)}</span>
+                ${p.security ? '<span class="ml-2 px-1.5 py-0.5 rounded bg-red-900 text-red-300 text-[10px] uppercase">security</span>' : ''}
+                ${p.held ? '<span class="ml-2 px-1.5 py-0.5 rounded bg-amber-900 text-amber-200 text-[10px] uppercase">held back</span>' : ''}
+            </span>
+            <span class="font-mono text-gray-400 break-all">${escapeHtml(p.current)} → ${escapeHtml(p.candidate)}</span>
+        </div>`).join('');
+
+    const prevBtn = document.getElementById('os-updates-log-previous');
+    if (prevBtn) prevBtn.classList.toggle('hidden', !data.has_previous_log);
+    const logWrap = document.getElementById('os-updates-log-wrap');
+    if (running && logWrap && logWrap.open && !osUpdatesLogPrevious) loadOsUpdateLog(false);
+}
+
+// Mesh tab: only the Tailscale part, for this unit.
+function renderMeshTailscaleUpdate(data) {
+    const box = document.getElementById('mesh-ts-update');
+    if (!box || !data) return;
+    const status = data.status || {};
+    const tsRun = data.running && status.action === 'upgrade' &&
+        (!status.packages || !status.packages.length || status.packages.includes('tailscale'));
+    if (!data.supported || (!data.tailscale && !tsRun)) {
+        box.classList.add('hidden');
+        return;
+    }
+    box.classList.remove('hidden');
+    const versions = document.getElementById('mesh-ts-update-versions');
+    versions.textContent = data.tailscale ? `${data.tailscale.current} → ${data.tailscale.candidate}` : '';
+    const state = document.getElementById('mesh-ts-update-state');
+    const btn = document.getElementById('mesh-ts-update-btn');
+    if (data.running) {
+        state.textContent = tsRun
+            ? 'Updating... tailscaled restarts at the end; the mesh drops for a few seconds.'
+            : 'Another package run is in progress.';
+        btn.disabled = true;
+    } else {
+        state.textContent = 'Installed from the Tailscale apt repository. The mesh reconnects by itself after the update.';
+        btn.disabled = false;
+    }
+}
+
+function scheduleOsUpdatesPoll(delay = OS_UPDATES_POLL_MS) {
+    if (osUpdatesPollTimer) clearTimeout(osUpdatesPollTimer);
+    osUpdatesPollTimer = setTimeout(() => {
+        osUpdatesPollTimer = null;
+        loadOsUpdates({ fromPoll: true });
+    }, delay);
+}
+
+async function loadOsUpdates(opts = {}) {
+    const wasRunning = !!(osUpdatesLast && osUpdatesLast.running);
+    let data;
+    try {
+        data = await fetchAPI('/api/system/os-updates');
+    } catch (error) {
+        if (opts.fromPoll && osUpdatesWatching) {
+            // Expected while tailscaled / Wi-Fi / the service restarts.
+            osUpdatesPollFailures += 1;
+            const step = document.getElementById('os-updates-step');
+            if (step) step.textContent = 'Reconnecting to the box... (the upgrade keeps running)';
+            if (osUpdatesPollFailures < OS_UPDATES_MAX_FAILURES) {
+                scheduleOsUpdatesPoll(5000);
+            } else {
+                osUpdatesWatching = false;
+                showNotification('Lost contact with the box during the OS upgrade. Reload the page to see how it ended.', 'error');
+            }
+            return null;
+        }
+        if (!opts.quiet) {
+            osUpdatesSetBadge('Error', 'bg-red-900 text-red-300');
+            const summary = document.getElementById('os-updates-summary');
+            if (summary) summary.textContent = `Could not load OS update status: ${error.message}`;
+        }
+        return null;
+    }
+    osUpdatesPollFailures = 0;
+    osUpdatesLast = data;
+    osUpdatesLastFetch = Date.now();
+    renderOsUpdates(data);
+    renderMeshTailscaleUpdate(data);
+
+    if (data.running) {
+        osUpdatesWatching = true;
+        scheduleOsUpdatesPoll();
+    } else if (osUpdatesWatching && (wasRunning || opts.fromPoll)) {
+        osUpdatesWatching = false;
+        const status = data.status || {};
+        if (status.outcome === 'ok') {
+            const msg = status.action === 'check'
+                ? `Package lists refreshed: ${data.available?.count || 0} update(s) available.`
+                : `OS upgrade finished: ${status.upgraded_count || 0} package(s) upgraded.` +
+                  (status.reboot_recommended ? ' A reboot is recommended.' : '');
+            showNotification(msg, 'success');
+        } else if (status.state === 'finished') {
+            showNotification(status.error || 'The OS package run failed.', 'error');
+        }
+        const logWrap = document.getElementById('os-updates-log-wrap');
+        if (logWrap && logWrap.open) loadOsUpdateLog(false);
+    }
+    return data;
+}
+
+async function loadOsUpdateLog(previous) {
+    const pre = document.getElementById('os-updates-log');
+    if (!pre) return;
+    if (typeof previous === 'boolean') osUpdatesLogPrevious = previous;
+    const cur = document.getElementById('os-updates-log-current');
+    const prev = document.getElementById('os-updates-log-previous');
+    const on = 'px-2 py-1 rounded bg-slate-700 text-white';
+    const off = 'px-2 py-1 rounded bg-slate-800 text-gray-300 hover:bg-slate-700';
+    if (cur) cur.className = osUpdatesLogPrevious ? off : on;
+    if (prev) prev.className = (osUpdatesLogPrevious ? on : off) +
+        (prev.classList.contains('hidden') ? ' hidden' : '');
+    try {
+        const data = await fetchAPI('/api/system/os-updates/log' + (osUpdatesLogPrevious ? '?previous=1' : ''));
+        const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+        pre.textContent = data.log || '(no output yet)';
+        if (atBottom) pre.scrollTop = pre.scrollHeight;
+    } catch (error) {
+        // A dropped connection mid-upgrade; the next poll refreshes it.
+    }
+}
+
+async function osUpdatesStart(endpoint, body) {
+    try {
+        const data = await postAPI(endpoint, body);
+        osUpdatesWatching = true;
+        if (data.status) {
+            renderOsUpdates(Object.assign({}, osUpdatesLast || { supported: true }, {
+                running: true, status: data.status }));
+        }
+        scheduleOsUpdatesPoll(1000);
+        return true;
+    } catch (error) {
+        if (error.status === 409) {
+            // Already running (another tab, or the chat assistant): follow it.
+            osUpdatesWatching = true;
+            showNotification('A package run is already in progress. Showing its progress.', 'info');
+            scheduleOsUpdatesPoll(500);
+            return true;
+        }
+        showNotification(error.message || 'Could not start the package run.', 'error');
+        return false;
+    }
+}
+
+async function checkOsUpdates() {
+    await osUpdatesStart('/api/system/os-updates/check', {});
+}
+
+async function upgradeOsPackages(packages) {
+    const data = osUpdatesLast || {};
+    const available = data.available || {};
+    let message;
+    if (packages && packages.length === 1 && packages[0] === 'tailscale') {
+        const ts = data.tailscale;
+        message = `Update Tailscale${ts ? ` from ${ts.current} to ${ts.candidate}` : ''}?\n\n` +
+            'tailscaled restarts at the end. If you are reaching this page over Tailscale it ' +
+            'drops for a few seconds and reconnects; the mesh reconnects by itself.';
+    } else {
+        const count = available.upgradable_now ?? (available.count || 0);
+        const secN = available.security_now ?? available.security_count;
+        const sec = secN ? ` (${secN} security fixes)` : '';
+        message = `Upgrade ${count} OS package${count === 1 ? '' : 's'}${sec}?\n\n` +
+            'Large upgrades can take a long time on a Pi. Wi-Fi, Bluetooth and Tailscale may ' +
+            'restart briefly; the upgrade keeps running on the box if this page disconnects. ' +
+            'Packages are only upgraded or added, never removed.';
+    }
+    if (!confirm(message)) return;
+    ['os-updates-upgrade-btn', 'os-updates-ts-btn', 'mesh-ts-update-btn', 'os-updates-check-btn']
+        .forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true; });
+    const ok = await osUpdatesStart('/api/system/os-updates/upgrade',
+        packages && packages.length ? { packages } : {});
+    if (!ok) loadOsUpdates({ quiet: true });
+}
+
+// A held-back package that needs another one removed: the operator sees exactly
+// what goes and what comes, and the box refuses to remove anything beyond that.
+async function upgradeHeldPackage(name) {
+    const pkg = ((osUpdatesLast && osUpdatesLast.available && osUpdatesLast.available.packages) || [])
+        .find(p => p.name === name);
+    if (!pkg || !pkg.held) return;
+    const h = pkg.held;
+    const removes = h.removes || [];
+    let message = `Upgrade ${pkg.name} from ${pkg.current} to ${pkg.candidate}?\n\n`;
+    if (removes.length) message += `This REMOVES: ${removes.join(', ')}\n`;
+    if (h.new && h.new.length) message += `and installs: ${h.new.join(', ')}\n`;
+    message += removes.length
+        ? '\nThe box checks the plan again first and changes nothing if apt wants to remove anything else.'
+        : '\nNothing is removed.';
+    if (!confirm(message)) return;
+    document.querySelectorAll('.os-held-btn').forEach(b => { b.disabled = true; });
+    ['os-updates-upgrade-btn', 'os-updates-ts-btn', 'mesh-ts-update-btn', 'os-updates-check-btn']
+        .forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true; });
+    const ok = await osUpdatesStart('/api/system/os-updates/upgrade',
+        { packages: [pkg.name], allow_remove: removes });
+    if (!ok) loadOsUpdates({ quiet: true });
+}
+
+// The Mesh tab refreshes often; the package list only changes after a check or
+// an upgrade, so re-read it at most every five minutes from there.
+function meshMaybeLoadOsUpdates(meshData) {
+    if (!meshData || !meshData.installed) return;
+    if (osUpdatesPollTimer) return;  // a run is being polled already
+    if (osUpdatesLast && Date.now() - osUpdatesLastFetch < 5 * 60 * 1000) {
+        renderMeshTailscaleUpdate(osUpdatesLast);
+        return;
+    }
+    loadOsUpdates({ quiet: true });
+}
+
 async function rebootSystem() {
     if (!confirm('This will reboot the entire system. The device will be offline for several minutes. Continue?')) {
         return;
@@ -20925,11 +21702,12 @@ async function toggleBluetoothPower() {
     if (!powerBtn || !powerText) return;
     
     const originalText = powerText.textContent;
+    const originalSource = _i18nText(powerText);
     powerText.textContent = 'Processing...';
     powerBtn.disabled = true;
     
     try {
-        const isEnabled = originalText === 'Disable Bluetooth';
+        const isEnabled = originalSource === 'Disable Bluetooth';
         const endpoint = isEnabled ? '/api/bluetooth/disable' : '/api/bluetooth/enable';
         
         const response = await postAPI(endpoint, {});
@@ -20946,7 +21724,7 @@ async function toggleBluetoothPower() {
         powerText.textContent = originalText;
     } finally {
         powerBtn.disabled = false;
-        if (powerText.textContent === 'Processing...') {
+        if (_i18nText(powerText) === 'Processing...') {
             powerText.textContent = originalText;
         }
     }
@@ -20959,11 +21737,12 @@ async function toggleBluetoothDiscoverable() {
     if (!discoverableBtn || !discoverableText) return;
     
     const originalText = discoverableText.textContent;
+    const originalSource = _i18nText(discoverableText);
     discoverableText.textContent = 'Processing...';
     discoverableBtn.disabled = true;
     
     try {
-        const isDiscoverable = originalText === 'Hide Device';
+        const isDiscoverable = originalSource === 'Hide Device';
         const endpoint = isDiscoverable ? '/api/bluetooth/discoverable/off' : '/api/bluetooth/discoverable/on';
         
         const response = await postAPI(endpoint, {});
@@ -20980,7 +21759,7 @@ async function toggleBluetoothDiscoverable() {
         discoverableText.textContent = originalText;
     } finally {
         discoverableBtn.disabled = false;
-        if (discoverableText.textContent === 'Processing...') {
+        if (_i18nText(discoverableText) === 'Processing...') {
             discoverableText.textContent = originalText;
         }
     }
@@ -24540,7 +25319,7 @@ function updateElement(id, value) {
     const element = document.getElementById(id);
     if (element) {
         const str = String(value ?? '');
-        if (element.textContent !== str) {
+        if (_i18nText(element) !== str) {
             element.textContent = str;
         }
     }
@@ -24606,7 +25385,7 @@ function updateConnectivityIndicator(id, active, ssid = null, apMode = false) {
                 text = 'Not connected';
                 cls = 'text-xs text-gray-500 truncate';
             }
-            if (ssidDisplay.textContent !== text) ssidDisplay.textContent = text;
+            if (_i18nText(ssidDisplay) !== text) ssidDisplay.textContent = text;
             if (ssidDisplay.className !== cls) ssidDisplay.className = cls;
         }
     }
@@ -24625,14 +25404,14 @@ function updateLanIndicator(data) {
             const ip = data.ethernet_ip || '';
             const text = ip ? `${iface}: ${ip}` : iface;
             const cls = 'text-xs text-green-400 truncate';
-            if (info.textContent !== text) info.textContent = text;
+            if (_i18nText(info) !== text) info.textContent = text;
             if (info.className !== cls) info.className = cls;
         }
     } else {
         const targetClass = 'w-3 h-3 bg-gray-600 rounded-full';
         if (dot && dot.className !== targetClass) dot.className = targetClass;
         if (info) {
-            if (info.textContent !== 'Not connected') info.textContent = 'Not connected';
+            if (_i18nText(info) !== 'Not connected') info.textContent = 'Not connected';
             const cls = 'text-xs text-gray-500 truncate';
             if (info.className !== cls) info.className = cls;
         }
@@ -24921,7 +25700,7 @@ function renderLogPanel() {
     // read isn't interrupted by new lines.
     const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 40;
     out.innerHTML = rows.map(e =>
-        `<div class="${e.colorClass}"><span class="text-gray-600">[${e.tsLabel}]</span> ` +
+        `<div class="${e.colorClass}"${e.source === 'Actions' ? '' : ' translate="no"'}><span class="text-gray-600">[${e.tsLabel}]</span> ` +
         `<span class="text-Ragnar-400">${escapeHtml(e.source)}</span> ${escapeHtml(e.message)}</div>`
     ).join('');
     if (atBottom) out.scrollTop = out.scrollHeight;
@@ -24941,6 +25720,77 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+// ============================================================================
+// UI LANGUAGE
+// ============================================================================
+function _i18nText(el) {
+    if (!el) return '';
+    return window.RagnarI18n ? window.RagnarI18n.source(el) : el.textContent;
+}
+
+function _setUiLanguageStatus(text, cls) {
+    const el = document.getElementById('ui-language-status');
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'text-xs mt-2 ' + cls;
+    el.classList.toggle('hidden', !text);
+}
+
+function _onUiLanguageApplied(lang) {
+    const select = document.getElementById('ui-language-select');
+    if (select && select.value !== lang) select.value = lang;
+    aiInsightsCache.data = null;
+    aiInsightsCache.timestamp = null;
+    if (currentTab === 'dashboard') loadAIInsights();
+}
+
+function initLanguageSelector() {
+    const i18n = window.RagnarI18n;
+    const select = document.getElementById('ui-language-select');
+    if (!i18n) {
+        if (select) select.disabled = true;
+        return;
+    }
+    if (select) select.value = i18n.lang;
+    i18n.onChange(_onUiLanguageApplied);
+}
+
+async function onUiLanguageChanged(select) {
+    const i18n = window.RagnarI18n;
+    if (!i18n || !select) return;
+    const code = select.value;
+    const previous = i18n.lang;
+    if (code === previous) return;
+    select.disabled = true;
+    _setUiLanguageStatus('Switching language…', 'text-gray-400');
+    try {
+        await i18n.setLanguage(code);
+        _setUiLanguageStatus('Language saved on this unit. AI answers now use it too.', 'text-green-400');
+    } catch (error) {
+        if (i18n.lang !== previous) {
+            try { await i18n.setLanguage(previous, { persist: false }); } catch (e) { /* keep current */ }
+        }
+        select.value = i18n.lang;
+        _setUiLanguageStatus(`Could not change the language: ${error && error.message ? error.message : error}`, 'text-red-400');
+    } finally {
+        select.disabled = false;
+    }
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initLanguageSelector);
+} else {
+    initLanguageSelector();
+}
+
+function applyServerLanguage(code) {
+    const i18n = window.RagnarI18n;
+    if (!i18n || !code || code === i18n.lang) return;
+    i18n.setLanguage(code, { persist: false }).catch(error => {
+        console.warn('Could not apply UI language', code, error);
+    });
 }
 
 // ============================================================================
@@ -25624,6 +26474,11 @@ async function loadAIConfiguration(config) {
         aiEnabledCheckbox.checked = aiEnabled;
     }
 
+    const aiChatCheckbox = document.getElementById('ai-chat-toggle');
+    if (aiChatCheckbox) {
+        aiChatCheckbox.checked = !config || config.ai_chat_enabled !== false;
+    }
+
     // Self-hosted endpoint + model (issue #462)
     const baseUrlInput = document.getElementById('ai-base-url');
     if (baseUrlInput) {
@@ -25883,6 +26738,35 @@ async function toggleAIEnabled() {
             statusDiv.classList.add('hidden');
         }, 5000);
     }
+}
+
+async function toggleAIChat() {
+    const checkbox = document.getElementById('ai-chat-toggle');
+    const statusDiv = document.getElementById('ai-config-status');
+    const statusMessage = document.getElementById('ai-config-status-message');
+    if (!checkbox || !statusDiv || !statusMessage) {
+        return;
+    }
+
+    const desiredState = checkbox.checked;
+    try {
+        await postAPI('/api/config', { ai_chat_enabled: desiredState });
+        // Update the panel directly: the dashboard's insights cache can return
+        // early without re-reading /api/ai/status.
+        ragnarChatAllowed = desiredState;
+        updateRagnarChatAvailability(ragnarChatAiReady, null);
+        statusDiv.className = 'p-3 rounded-lg text-sm bg-blue-900/30 border border-blue-700';
+        statusMessage.textContent = desiredState
+            ? 'ℹ Chat assistant shown on the Dashboard.'
+            : 'ℹ Chat assistant hidden and chat requests stopped.';
+    } catch (error) {
+        console.error('Failed to save chat assistant setting:', error);
+        checkbox.checked = !desiredState;  // Revert UI state on failure
+        statusDiv.className = 'p-3 rounded-lg text-sm bg-red-900/30 border border-red-700';
+        statusMessage.textContent = '✗ Could not save the chat assistant setting.';
+    }
+    statusDiv.classList.remove('hidden');
+    setTimeout(() => statusDiv.classList.add('hidden'), 4000);
 }
 
 async function saveAIToken() {
@@ -31362,15 +32246,17 @@ async function loadAIInsights(force = false) {
             // Show configuration message
             if (aiSection) aiSection.style.display = 'none';
             if (aiNotConfigured) aiNotConfigured.style.display = 'block';
+            updateRagnarChatAvailability(false, status);
             // Clear cache
             aiInsightsCache.data = null;
             aiInsightsCache.timestamp = null;
             return;
         }
-        
+
         // Show AI insights section
         if (aiSection) aiSection.style.display = 'block';
         if (aiNotConfigured) aiNotConfigured.style.display = 'none';
+        updateRagnarChatAvailability(true, status);
         
         // Update model name — adapt the heading and the footer to whichever
         // model is actually configured (self-hosted tag or OpenAI). When the
@@ -31449,6 +32335,222 @@ async function loadAIInsights(force = false) {
             const el = document.getElementById(id); if (el) el.innerHTML = errHtml;
         });
     }
+}
+
+// ============================================================================
+// RAGNAR CHAT ASSISTANT (dashboard)
+// A conversational assistant that answers from the docs/ folder and can take
+// real actions (start scans, read results) via /api/ai/chat. Shown only when
+// AI is enabled + configured; gated by updateRagnarChatAvailability(), called
+// from the AI status check in loadAIInsights().
+// ============================================================================
+let _ragnarChatHistory = [];   // [{role:'user'|'assistant', content}]
+let _ragnarChatBusy = false;
+let _ragnarChatGreeted = false;
+
+// Show/hide the floating chat launcher based on AI status, and reflect the
+// active model in the panel header.
+let ragnarChatAiReady = false;   // AI is enabled and configured
+let ragnarChatAllowed = true;    // Config: "Show chat assistant"
+
+function updateRagnarChatAvailability(available, status) {
+    ragnarChatAiReady = available;
+    if (status && typeof status.chat_enabled === 'boolean') {
+        ragnarChatAllowed = status.chat_enabled;
+    }
+    const root = document.getElementById('ragnar-chat');
+    if (!root) return;
+    if (available && ragnarChatAllowed) {
+        root.style.display = 'block';
+        const modelEl = document.getElementById('ragnar-chat-model');
+        if (modelEl && status) {
+            const fb = Boolean(status.fallback_active);
+            const m = status.model || 'AI';
+            modelEl.textContent = fb ? (m + ' → OpenAI fallback') : m;
+        }
+    } else {
+        root.style.display = 'none';
+        // Also close the panel if it was open.
+        const panel = document.getElementById('ragnar-chat-panel');
+        if (panel) panel.style.display = 'none';
+    }
+}
+
+function toggleRagnarChat() {
+    const panel = document.getElementById('ragnar-chat-panel');
+    const fab = document.getElementById('ragnar-chat-fab');
+    if (!panel) return;
+    const open = panel.style.display !== 'none' && panel.style.display !== '';
+    if (open) {
+        panel.style.display = 'none';
+        if (fab) fab.style.display = 'flex';
+    } else {
+        panel.style.display = 'flex';
+        if (fab) fab.style.display = 'none';
+        if (!_ragnarChatGreeted) {
+            _ragnarChatGreeted = true;
+            _appendRagnarChat('assistant',
+                "Hi — I'm Ragnar. Ask me how a feature works, or tell me to do "
+                + "something like “scan the network”, “deep scan 192.168.1.20”, "
+                + "or “show me the latest vulnerabilities”. You approve each action before it runs.",
+                []);
+        }
+        const input = document.getElementById('ragnar-chat-input');
+        if (input) setTimeout(() => input.focus(), 50);
+    }
+}
+
+function clearRagnarChat() {
+    _ragnarChatHistory = [];
+    _ragnarChatGreeted = false;
+    const log = document.getElementById('ragnar-chat-log');
+    if (log) log.innerHTML = '';
+    _ragnarChatGreeted = true;
+    _appendRagnarChat('assistant', "New chat. What can I do for you?", []);
+}
+
+// Render one message bubble. `actions` (assistant only) is an array of
+// {tool, ok, summary} run during that turn, shown as small chips.
+function _appendRagnarChat(role, text, actions) {
+    const log = document.getElementById('ragnar-chat-log');
+    if (!log) return null;
+    const isUser = role === 'user';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;flex-direction:column;max-width:88%;'
+        + (isUser ? 'align-self:flex-end;align-items:flex-end;' : 'align-self:flex-start;align-items:flex-start;');
+
+    if (Array.isArray(actions) && actions.length) {
+        const chips = document.createElement('div');
+        chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-bottom:5px;';
+        actions.forEach(a => {
+            const chip = document.createElement('span');
+            const ok = a && a.ok;
+            chip.textContent = (a && a.summary) ? a.summary : (a && a.tool) || 'action';
+            chip.style.cssText = 'font-size:11px;padding:2px 8px;border-radius:999px;'
+                + (ok ? 'background:rgba(16,185,129,.16);color:#6ee7b7;border:1px solid rgba(16,185,129,.35);'
+                      : 'background:rgba(239,68,68,.16);color:#fca5a5;border:1px solid rgba(239,68,68,.35);');
+            chips.appendChild(chip);
+        });
+        row.appendChild(chips);
+    }
+
+    const bubble = document.createElement('div');
+    bubble.style.cssText = 'padding:9px 12px;border-radius:12px;white-space:pre-wrap;word-break:break-word;'
+        + (isUser
+            ? 'background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;border-bottom-right-radius:4px;'
+            : 'background:rgba(30,41,59,.92);color:#e2e8f0;border:1px solid rgba(148,163,184,.16);border-bottom-left-radius:4px;');
+    if (isUser) bubble.setAttribute('translate', 'no');
+    bubble.innerHTML = _ragnarChatFormat(text);
+    row.appendChild(bubble);
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+    return bubble;
+}
+
+// Minimal, safe markdown-ish formatting: escape first, then **bold**, `code`,
+// and newlines are preserved by white-space:pre-wrap on the bubble.
+function _ragnarChatFormat(text) {
+    let s = _esc(String(text == null ? '' : text));
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/`([^`]+)`/g, '<code style="background:rgba(148,163,184,.18);padding:1px 4px;border-radius:4px;">$1</code>');
+    return s;
+}
+
+function _ragnarChatTyping(on) {
+    const log = document.getElementById('ragnar-chat-log');
+    if (!log) return;
+    let el = document.getElementById('ragnar-chat-typing');
+    if (on) {
+        if (el) return;
+        el = document.createElement('div');
+        el.id = 'ragnar-chat-typing';
+        el.style.cssText = 'align-self:flex-start;color:#94a3b8;font-size:12px;font-style:italic;padding:4px 6px;';
+        el.textContent = 'Ragnar is thinking…';
+        log.appendChild(el);
+        log.scrollTop = log.scrollHeight;
+    } else if (el) {
+        el.remove();
+    }
+}
+
+// Send one request and render the answer.
+async function _ragnarChatRequest(url, body) {
+    const input = document.getElementById('ragnar-chat-input');
+    const sendBtn = document.getElementById('ragnar-chat-send');
+    _ragnarChatBusy = true;
+    if (sendBtn) { sendBtn.disabled = true; sendBtn.style.opacity = '0.6'; }
+    _ragnarChatTyping(true);
+
+    try {
+        const resp = await networkAwareFetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        const data = await resp.json().catch(() => ({}));
+        _ragnarChatTyping(false);
+
+        if (!resp.ok || !data.success) {
+            const err = (data && data.error) ? data.error : ('Request failed (HTTP ' + resp.status + ')');
+            _appendRagnarChat('assistant', '⚠️ ' + err, []);
+        } else {
+            const reply = data.reply || '(no response)';
+            _appendRagnarChat('assistant', reply, data.actions || []);
+            _ragnarChatHistory.push({ role: 'assistant', content: reply });
+            if (data.pending) _ragnarChatAskToRun(data.pending);
+        }
+    } catch (e) {
+        _ragnarChatTyping(false);
+        _appendRagnarChat('assistant', '⚠️ Could not reach the assistant: ' + (e.message || String(e)), []);
+    } finally {
+        _ragnarChatBusy = false;
+        if (sendBtn) { sendBtn.disabled = false; sendBtn.style.opacity = '1'; }
+        if (input) input.focus();
+    }
+}
+
+// Actions wait here for the operator. The label comes from the server, not the model.
+function _ragnarChatAskToRun(pending) {
+    const log = document.getElementById('ragnar-chat-log');
+    if (!log || !pending || !pending.id) return;
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;align-self:flex-start;';
+
+    const button = (text, approve, background) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = text;
+        btn.style.cssText = 'min-height:36px;padding:6px 16px;border:none;border-radius:10px;color:#fff;'
+            + 'font-weight:600;font-size:13px;cursor:pointer;background:' + background + ';';
+        btn.onclick = () => {
+            if (_ragnarChatBusy) return;
+            row.remove();
+            _appendRagnarChat('user', btn.textContent, []);
+            _ragnarChatRequest('/api/ai/chat/confirm', { id: pending.id, approve });
+        };
+        return btn;
+    };
+    row.appendChild(button('Run', true, 'linear-gradient(135deg,#7c3aed,#4f46e5)'));
+    row.appendChild(button('Cancel', false, 'rgba(71,85,105,.9)'));
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+}
+
+async function sendRagnarChat(event) {
+    if (event) event.preventDefault();
+    if (_ragnarChatBusy) return false;
+    const input = document.getElementById('ragnar-chat-input');
+    if (!input) return false;
+    const message = input.value.trim();
+    if (!message) return false;
+
+    input.value = '';
+    _appendRagnarChat('user', message, []);
+    // Send prior turns (excluding this message) as context.
+    const history = _ragnarChatHistory.slice(-12);
+    _ragnarChatHistory.push({ role: 'user', content: message });
+    await _ragnarChatRequest('/api/ai/chat', { message, history });
+    return false;
 }
 
 // True when the server attempted this analysis but it came back empty (a
@@ -35212,7 +36314,7 @@ async function toggleSerialListener() {
     const portInput = document.getElementById('wd-serial-port');
     const statusEl = document.getElementById('wd-serial-status');
     const btn = document.getElementById('wd-serial-btn');
-    const isConnected = statusEl && statusEl.textContent === 'Connected';
+    const isConnected = statusEl && _i18nText(statusEl) === 'Connected';
 
     try {
         if (isConnected) {
@@ -41080,6 +42182,7 @@ async function refreshMesh(force) {
         const data = await resp.json();
         renderMesh(data);
         applyHeaderBrand(data);
+        meshMaybeLoadOsUpdates(data);
     } catch (err) {
         console.warn('Mesh refresh failed:', err);
     } finally {

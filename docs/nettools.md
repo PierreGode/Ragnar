@@ -17,6 +17,14 @@ each layer lists its passive detectors first and its active tools after. A modul
 acts on more than one layer sits at the one it mostly watches (the matrix below). The
 over-the-air RF tools live in **Signal Intelligence**.
 
+With ~70 modules across the layers, a **search box** sits above the layer buttons:
+type any protocol, vendor or CVE (`BLE`, `OSPF`, `Zerologon`, `MikroTik`, `CVE-2020-1472`)
+and the matching module cards from **every** layer appear instantly, each under its
+layer label, with a running match count. It matches each term at a word boundary
+(so `ble` finds **BLE Watch** but not "ta*ble*") across the card's title and
+description, and multiple words are AND-ed. Clear the box (the **Clear** button or
+*Esc*) — or tap any layer button — to return to the normal single-layer view.
+
 > **Co-authored by [Solarflere](https://www.instagram.com/solarflere).** The
 > Authority Verification suite was designed and built in collaboration with Solarflere.
 ### Module visibility matrix

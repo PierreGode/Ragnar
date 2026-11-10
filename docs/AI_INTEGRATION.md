@@ -43,6 +43,7 @@ Identifies potential attack vectors and security gaps in your network:
 - **ai_analysis_enabled**: Enable/disable AI analysis
 - **ai_vulnerability_summaries**: Enable vulnerability summaries
 - **ai_network_insights**: Enable network insights
+- **ai_chat_enabled**: Show the Dashboard chat assistant and accept chat requests (default: true)
 - **ai_max_tokens**: Maximum tokens per response (default: 500)
 - **ai_temperature**: Creativity setting (default: 0.7)
 
@@ -50,7 +51,7 @@ Identifies potential attack vectors and security gaps in your network:
 
 Ragnar can talk to any **OpenAI-compatible** server instead of OpenAI's cloud —
 [Ollama](https://ollama.com/), [LocalAI](https://localai.io/), vLLM, or LM Studio.
-Set **ai_base_url** (in Settings → AI → *Self-Hosted / Custom Endpoint*) to the
+Set **ai_base_url** (in Config → Integrations → *Self-Hosted / Custom Endpoint*) to the
 server's `/v1` URL, e.g. `http://192.168.1.50:11434/v1`, and set **ai_model** to
 that server's model tag. When a base URL is present:
 
@@ -118,6 +119,12 @@ Once configured, AI insights appear automatically on the Dashboard tab:
 2. **Vulnerability Assessment** - Prioritized vulnerability analysis
 3. **Network Weaknesses** - Identified attack vectors and security gaps
 
+### Answer language
+
+Every prose answer (dashboard insights, analyses, the chat assistant) is written
+in the UI language picked in **Config > System > Language**. Changing it reruns
+the dashboard insights in the new language. See [Languages](i18n.md).
+
 ### Refresh Insights
 
 Click the "Refresh" button in the AI Insights section to:
@@ -125,9 +132,90 @@ Click the "Refresh" button in the AI Insights section to:
 - Generate new analysis with latest data
 - Get updated recommendations
 
+## Chat Assistant (Dashboard)
+
+When AI is enabled, a **floating chat button** appears in the bottom-right of the
+**Dashboard** tab. Click it to open a conversation with **Ragnar** — an assistant
+that both **understands Ragnar** (it answers from this repo's own `docs/` folder)
+and can **take real actions** on the unit, then read the results back and explain
+them in plain language.
+
+To hide it, untick **Show chat assistant** under **Config → Integrations**. This
+removes the button and also stops chat requests, so nothing can be proposed or run through
+chat while it is off. AI Insights keep working.
+
+### What it can do
+
+Ask it questions ("how does wardriving GPS work?", "what is Watchtower?") or give
+it commands. It reads your data straight away, but **every action needs your approval**:
+it shows what it wants to do with **Run** and **Cancel** buttons, and nothing happens
+until you click Run. A prompt expires after 5 minutes and works once.
+Available tools (a curated allowlist):
+
+| Intent | Tools |
+| --- | --- |
+| **Docs** | `search_docs` — search the `docs/` folder |
+| **Read state** | `get_network_devices`, `get_vulnerabilities`, `get_ai_insights`, `get_watchtower`, `get_incidents`, `get_scan_status`, `get_wifi_status` |
+| **Network scans** | `run_network_scan` (ARP + nmap sweep), `deep_scan_host` (single host), `start_vulnerability_scan` |
+| **Wi-Fi** | `start_wifi_scan`, `stop_wifi_scan` |
+
+Example prompts: *"scan the network and tell me what's new"*, *"deep scan
+192.168.1.20"*, *"show me the latest vulnerabilities and which to fix first"*,
+*"start a vulnerability scan"*.
+
+### How it works
+
+`ai_chat.py` runs a small **agentic loop** on top of `ai_service.py`. It is
+deliberately **model-agnostic**: instead of native function-calling (which the
+OpenAI Responses API and self-hosted Ollama/LocalAI servers all express
+differently), the assistant emits a tiny text protocol —
+`<tool>{"tool":"name","args":{...}}</tool>` — which the server executes and feeds
+back as `<result>…</result>`. This works identically on **OpenAI's cloud and on a
+local model**.
+
+Each action tool maps to one of Ragnar's **existing API endpoints**, dispatched
+**in-process** with the caller's session cookie forwarded — so every action reuses
+the real, already-authenticated handler (no self-HTTP, no auth bypass) and
+inherits its exact behaviour. Documentation retrieval is a lightweight keyword
+search over `docs/*.md` (no embeddings), so it runs even on a Pi Zero.
+
+The chat button only shows when the AI service is enabled **and** configured
+(same gate as the dashboard insight cards).
+
+### Knowledge base
+
+[`docs/knowledgebase.md`](knowledgebase.md) holds short, verified answers to common
+questions. The assistant reads a matching entry first and falls back to the rest of
+`docs/` and `README.md` when none fits. Short, specific answers suit a small local
+model better than long pages, and they keep the assistant from calling extra tools.
+
+Each entry names its source and carries a hidden proof phrase from that source.
+`tests/test_knowledgebase.py` fails if the phrase disappears, so a doc or UI change
+can't leave a stale answer behind. To add an entry, follow the format of the others,
+then run that test. Each question must be the top search hit for itself.
+
+The kill switch command is removed from everything the model reads. The kill switch
+erases the whole install, so the assistant points to **Data Management** when asked
+to clear scan data, and to `docs/KILL_SWITCH.md` when asked about the switch itself.
+
 ## API Endpoints
 
 The following API endpoints are available for programmatic access:
+
+### POST /api/ai/chat
+Backs the dashboard **Chat Assistant**. Body:
+`{ "message": "<user text>", "history": [{"role":"user|assistant","content":"…"}] }`.
+Returns `{ success, reply, actions, docs, model }`, where `actions` lists the
+tools the assistant ran this turn (`{tool, args, ok, summary}`) and `docs` lists
+the documentation sections it consulted. When it wants to run an action it also
+returns `pending: { id, label }` and runs nothing. Requires `ai_enabled`,
+`ai_chat_enabled` and a ready AI service (token or self-hosted endpoint), otherwise
+returns 400/503 with a reason.
+
+### POST /api/ai/chat/confirm
+Runs or cancels a pending action. Body: `{ "id": "<pending id>", "approve": true }`.
+Only `approve: true` runs it. Ids work once and expire after 5 minutes. Returns the
+same shape as `/api/ai/chat`.
 
 ### POST /api/ai/models
 Lists the models offered by an OpenAI-compatible endpoint (self-hosted support).

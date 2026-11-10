@@ -50,6 +50,9 @@ DLT_NORDIC_BLE = 272
 
 ADV_ACCESS_ADDR = 0x8E89BED6          # fixed AA of the advertising physical channel
 ADV_CHANNELS = (37, 38, 39)
+# Centre frequency (MHz) of each primary advertising channel, for the 2.4 GHz
+# spectrum overlay on the Signal Intelligence page.
+ADV_CHANNEL_FREQ = {37: 2402, 38: 2426, 39: 2480}
 
 # Advertising PDU types (header low nibble).
 ADV_IND, ADV_DIRECT_IND, ADV_NONCONN_IND = 0x0, 0x1, 0x2
@@ -112,9 +115,18 @@ DEFAULTS = {
     'trusted_devices': {},            # addr -> {name, services[], mitm:bool}  (or a bare list of addrs)
     'beacon_baseline': [],            # [{uuid, addr}] of legitimate iBeacon/Eddystone UUIDs
     'trusted_services': [],           # service UUIDs only a trusted AdvA may advertise
-    'adv_flood_window_s': 10.0, 'adv_flood_count': 60,          # per single AdvA
-    'advertiser_flood_window_s': 10.0, 'advertiser_flood_count': 25,  # distinct AdvAs
-    'rpa_window_s': 10.0, 'rpa_count': 40,                      # distinct RPAs
+    # Flood/churn thresholds assume a modern full-coverage sniffer (nRF52 family):
+    # it hears every advertising event on all three primary channels (37/38/39)
+    # with no packet loss, where the older single-channel nRF51 dropped most of
+    # the air and these counts were first tuned against it. channel_dedup_window_s
+    # collapses the three channel copies of one event so a healthy beacon is not
+    # counted 3x, and the counts below are then per *logical* event, set above
+    # what a normally busy room of phones / wearables / tags emits — otherwise an
+    # nRF52 reads an ordinary environment as a flood (the reported false alarms).
+    'channel_dedup_window_s': 0.012,                            # 37/38/39 copies of one event
+    'adv_flood_window_s': 10.0, 'adv_flood_count': 150,         # per single AdvA (post-dedup events)
+    'advertiser_flood_window_s': 10.0, 'advertiser_flood_count': 60,  # distinct AdvAs
+    'rpa_window_s': 10.0, 'rpa_count': 80,                      # distinct RPAs
     'clone_flap_window_s': 15.0, 'clone_flap_count': 4,         # distinct payloads / AdvA
     'connect_window_s': 10.0,
     'terminate_window_s': 20.0, 'terminate_count': 4,
@@ -404,6 +416,24 @@ def _norm_trusted(td):
     return out
 
 
+def _ident_conflict(a, b):
+    """True only when two advertised identities genuinely CONFLICT — both name a
+    concrete value that differs. Each identity is (name, sorted-service-UUIDs). A
+    field that is simply absent in one frame (name None, or an empty service
+    list) is "not advertised here", not a competing identity: many devices send
+    their name in only some frame types (ADV_IND vs a scan response / non-conn
+    frame), and a sensor that streams changing manufacturer/service data keeps
+    one identity. Only a real name-vs-name or service-set-vs-service-set
+    difference is a clone / two-radios tell, so telemetry churn and
+    present/absent name flapping stop being false positives."""
+    (name_a, svc_a), (name_b, svc_b) = a, b
+    if name_a and name_b and name_a != name_b:
+        return True
+    if svc_a and svc_b and set(svc_a) != set(svc_b):
+        return True
+    return False
+
+
 class BleWatch:
     def __init__(self, config=None, emit=None):
         c = dict(DEFAULTS)
@@ -418,6 +448,7 @@ class BleWatch:
         self._adv = {}                               # adva -> {hash,name,services,flaps}
         self._pub_names = defaultdict(set)           # public addr -> {names}
         self._adv_times = defaultdict(deque)         # adva -> ts (per-AdvA flood)
+        self._adv_evt = {}                           # adva -> (phash, ts) last counted event (channel-dedup)
         self._advertisers = deque()                  # (ts, adva) distinct-advertiser flood
         self._spam = deque()                         # (ts, adva) spam-shaped adv
         self._rpa = deque()                          # ts of distinct RPAs
@@ -503,24 +534,52 @@ class BleWatch:
         trusted_here = akey in self.trusted
 
         # --- BLE-001 / BLE-002 clone & impersonation --------------------------
+        # Count conflicting *identities* (name + service UUIDs), not raw payload
+        # bytes: a sensor beacon streaming changing telemetry keeps one identity
+        # and must not read as a clone, and a name that is simply absent in some
+        # frame types is not a competing identity (see _ident_conflict). This is
+        # what kept flooding the findings with false BLE-001/002 on churning
+        # beacons and devices that alternate ADV_IND with a scan response.
         prev = self._adv.get(akey)
         if prev is None:
             self._adv[akey] = {'hash': phash, 'ident': ident, 'flaps': deque(),
                                'rpa_class': rpa_class}
         else:
             if phash != prev['hash']:
-                fl = prev['flaps']
-                fl.append((ts, phash))
-                self._trim(fl, ts, self.cfg['clone_flap_window_s'])
-                distinct = len({h for _t, h in fl})
-                if distinct >= self.cfg['clone_flap_count']:
-                    out.append(('BLE-002', '%s is advertising %d conflicting payloads within '
-                                '%.0fs — two radios sharing one address (impersonation)'
-                                % (adva, distinct + 1, self.cfg['clone_flap_window_s'])))
-                elif ident != prev['ident']:
-                    out.append(('BLE-001', '%s identity changed %r -> %r — device clone'
-                                % (adva, prev['ident'], ident)))
-                prev['hash'], prev['ident'] = phash, ident
+                prev['hash'] = phash
+                if _ident_conflict(prev['ident'], ident):
+                    fl = prev['flaps']
+                    fl.append((ts, ident))
+                    self._trim(fl, ts, self.cfg['clone_flap_window_s'])
+                    distinct = len({i for _t, i in fl})
+                    if distinct >= self.cfg['clone_flap_count']:
+                        out.append(('BLE-002', '%s is advertising %d conflicting identities within '
+                                    '%.0fs — two radios sharing one address (impersonation)'
+                                    % (adva, distinct + 1, self.cfg['clone_flap_window_s'])))
+                    else:
+                        out.append(('BLE-001', '%s identity changed %r -> %r — device clone'
+                                    % (adva, prev['ident'], ident)))
+                    prev['ident'] = ident
+                elif ident[0] or ident[1]:
+                    # Non-conflicting refinement (e.g. the name appeared in this
+                    # frame): adopt the latest concrete identity as the baseline.
+                    prev['ident'] = ident
+
+        # --- overlay roster: strongest RSSI + advertising channels seen -------
+        # Pure bookkeeping for the 2.4 GHz spectrum overlay (Signal Intelligence).
+        # It feeds NO detector — it just records, per advertiser, the primary
+        # advertising channels (37/38/39) it used and the strongest (closest to 0)
+        # RSSI heard, so overlay() can place real sniffed activity on the band.
+        rec = self._adv[akey]
+        rec['count'] = rec.get('count', 0) + 1
+        rec['last_ts'] = ts
+        ch = pkt.get('channel')
+        if ch in ADV_CHANNELS:
+            rec.setdefault('channels', set()).add(ch)
+        rssi = pkt.get('rssi')
+        if rssi is not None and (rec.get('rssi') is None or rssi > rec['rssi']):
+            rec['rssi'] = rssi
+
         # A configured trusted device whose advertised identity does not match its
         # baseline is always a clone, even on the first drift.
         if trusted_here:
@@ -570,30 +629,45 @@ class BleWatch:
                             'rotation storm (tracking evasion / adv churn)'
                             % (len(self._rpa), self.cfg['rpa_window_s'])))
 
+        # --- channel-duplicate collapse ---------------------------------------
+        # A full-coverage sniffer (nRF52) reports the same advertising event once
+        # per primary channel (37/38/39). Those copies share the AdvA and payload
+        # and arrive within a few ms, so collapse them into one logical event
+        # before the flood counters — otherwise every healthy beacon reads as a
+        # 3x flood. A genuine fast advertiser still advances the counter because
+        # its successive events are spaced well beyond channel_dedup_window_s.
+        prev_evt = self._adv_evt.get(akey)
+        is_chan_dup = (prev_evt is not None and prev_evt[0] == phash
+                       and 0 <= (ts - prev_evt[1]) <= self.cfg['channel_dedup_window_s'])
+        if not is_chan_dup:
+            self._adv_evt[akey] = (phash, ts)
+
         # --- BLE-006 per-AdvA flood -------------------------------------------
-        dq = self._adv_times[akey]
-        dq.append(ts)
-        self._trim(dq, ts, self.cfg['adv_flood_window_s'], keyed=False)
-        if len(dq) >= self.cfg['adv_flood_count']:
-            out.append(('BLE-006', '%s advertising-interval collapse (%d adv in %.0fs) — '
-                        'beacon flood' % (adva, len(dq), self.cfg['adv_flood_window_s'])))
+        if not is_chan_dup:
+            dq = self._adv_times[akey]
+            dq.append(ts)
+            self._trim(dq, ts, self.cfg['adv_flood_window_s'], keyed=False)
+            if len(dq) >= self.cfg['adv_flood_count']:
+                out.append(('BLE-006', '%s advertising-interval collapse (%d adv in %.0fs) — '
+                            'beacon flood' % (adva, len(dq), self.cfg['adv_flood_window_s'])))
 
         # --- BLE-007 / BLE-013 advertiser flood (generic vs spam-shaped) ------
-        self._advertisers.append((ts, akey))
-        self._trim(self._advertisers, ts, self.cfg['advertiser_flood_window_s'])
-        spam = self._spam_label(ad)
-        if spam:
-            self._spam.append((ts, akey))
-            self._trim(self._spam, ts, self.cfg['advertiser_flood_window_s'])
-        distinct_adv = len({a for _t, a in self._advertisers})
-        if distinct_adv >= self.cfg['advertiser_flood_count']:
-            distinct_spam = len({a for _t, a in self._spam})
-            if spam and distinct_spam >= self.cfg['advertiser_flood_count'] // 2:
-                out.append(('BLE-013', 'advertising flood of %d addresses matching BLE-spam '
-                            'tooling (%s)' % (distinct_spam, spam)))
-            else:
-                out.append(('BLE-007', '%d distinct advertisers in %.0fs — advertising-channel '
-                            'flood' % (distinct_adv, self.cfg['advertiser_flood_window_s'])))
+        if not is_chan_dup:
+            self._advertisers.append((ts, akey))
+            self._trim(self._advertisers, ts, self.cfg['advertiser_flood_window_s'])
+            spam = self._spam_label(ad)
+            if spam:
+                self._spam.append((ts, akey))
+                self._trim(self._spam, ts, self.cfg['advertiser_flood_window_s'])
+            distinct_adv = len({a for _t, a in self._advertisers})
+            if distinct_adv >= self.cfg['advertiser_flood_count']:
+                distinct_spam = len({a for _t, a in self._spam})
+                if spam and distinct_spam >= self.cfg['advertiser_flood_count'] // 2:
+                    out.append(('BLE-013', 'advertising flood of %d addresses matching BLE-spam '
+                                'tooling (%s)' % (distinct_spam, spam)))
+                else:
+                    out.append(('BLE-007', '%d distinct advertisers in %.0fs — advertising-channel '
+                                'flood' % (distinct_adv, self.cfg['advertiser_flood_window_s'])))
         return out
 
     # -- CONNECT_IND ---------------------------------------------------------
@@ -701,6 +775,51 @@ class BleWatch:
             out[addr] = {'name': name, 'services': list(svcs),
                          'rpa_class': rec.get('rpa_class', 'random')}
         return out
+
+    def overlay(self):
+        """A 2.4 GHz spectrum-overlay view of the advertisers heard this run, for
+        the Signal Intelligence page — the BLE counterpart of the Bluetooth and
+        Zigbee overlays. Pure shaping of state already collected (no new capture,
+        no detection): one entry per advertiser with its strongest RSSI and the
+        advertising channels (37/38/39) it used, per-channel activity markers
+        mapped to their centre frequency, a band-wide hopping-pressure estimate,
+        and per-Wi-Fi-channel pressure. `flagged`/`severity`/`codes` are left
+        empty here and filled in by the caller from the run's alerts."""
+        devices, chan_count, chan_rssi = [], {}, {}
+        for addr, rec in self._adv.items():
+            chans = sorted(rec.get('channels') or ())
+            rssi = rec.get('rssi')
+            cnt = rec.get('count', 0)
+            ident = rec.get('ident')
+            name = ident[0] if isinstance(ident, tuple) and ident else None
+            devices.append({'addr': addr, 'name': name, 'rssi': rssi,
+                            'channels': chans, 'count': cnt,
+                            'rpa_class': rec.get('rpa_class', 'random'),
+                            'flagged': False, 'severity': None, 'codes': []})
+            for c in chans:
+                chan_count[c] = chan_count.get(c, 0) + max(1, cnt)
+                if rssi is not None and (chan_rssi.get(c) is None or rssi > chan_rssi[c]):
+                    chan_rssi[c] = rssi
+        # Strongest advertisers first; unheard RSSI sinks to the bottom.
+        devices.sort(key=lambda d: (d['rssi'] is None, -(d['rssi'] if d['rssi'] is not None else -999)))
+        maxc = max(chan_count.values()) if chan_count else 0
+        markers = [{'adv_channel': c, 'freq_mhz': ADV_CHANNEL_FREQ[c],
+                    'count': chan_count[c], 'rssi': chan_rssi.get(c),
+                    'intensity': round(100 * chan_count[c] / maxc) if maxc else 0}
+                   for c in sorted(chan_count)]
+        total_events = sum(chan_count.values())
+        hopping_pressure = round(100 * total_events / (total_events + 60)) if total_events else 0
+        # Advertising channels fall on the three non-overlapping Wi-Fi channels:
+        # 37=2402≈ch1, 38=2426≈ch6, 39=2480≈ch11. Report pressure on each.
+        def _level(n):
+            return 'high' if n >= 12 else 'moderate' if n >= 4 else 'low'
+        wifi_channels = [{'wifi_channel': wc, 'level': _level(chan_count.get(ac, 0))}
+                         for ac, wc in ((37, 1), (38, 6), (39, 11)) if ac in chan_count]
+        return {'devices': devices, 'device_count': len(devices),
+                'markers': markers, 'hopping_pressure': hopping_pressure,
+                'wifi_channels': wifi_channels,
+                'note': ('BLE link-layer sniff — real advertising activity on the '
+                         'primary channels (37/38/39), not a device-discovery estimate.')}
 
 
 # ===========================================================================
@@ -1087,6 +1206,42 @@ def find_sniffer(probe=True, candidates=None):
         if c['kind'] == 'nrf-sniffer':
             return c['path']
     return None
+
+
+def sniffer_status(probe=False):
+    """Light presence check for gating the Signal Intelligence 'BLE Watch' overlay
+    toggle. Defaults to probe=False: it reads USB names / VIDs only and writes
+    nothing to any serial port, so it is safe to poll and never disturbs a device
+    mid-capture (the toggle's own scan does the full firmware probe). `available`
+    is True only when a port is positively a sniffer (an nRF52 dongle whose
+    firmware names itself 'nRF Sniffer', or a probed port that answered the
+    protocol). A bare CP210x bridge stays unavailable with a hint to run BLE Watch
+    from Diagnostics, which probes it."""
+    if os.environ.get('RAGNAR_BLE_SNIFFER'):
+        dev = os.environ['RAGNAR_BLE_SNIFFER']
+        ok = os.path.exists(dev)
+        return {'available': ok, 'pinned': dev,
+                'note': ('pinned via $RAGNAR_BLE_SNIFFER' if ok
+                         else '$RAGNAR_BLE_SNIFFER points at a missing device'),
+                'candidates': []}
+    try:
+        cands = detect_sniffers(probe=probe)
+    except Exception as e:
+        return {'available': False, 'note': 'detection failed: %s' % e, 'candidates': []}
+    sniffers = [c for c in cands if c['kind'] == 'nrf-sniffer']
+    maybe = [c for c in cands if c['kind'] in ('unknown', 'bluefruit-friend', 'nrf-other-fw')]
+    if sniffers:
+        note = '%s ready' % sniffers[0]['path']
+    elif maybe and not probe:
+        note = ('a USB serial bridge is present — if it is a Bluefruit LE Sniffer, '
+                'run BLE Watch from Diagnostics to probe and confirm it')
+    elif maybe:
+        note = maybe[0].get('note') or 'a candidate port is not running sniffer firmware'
+    else:
+        note = 'no BLE sniffer detected on USB'
+    return {'available': bool(sniffers), 'note': note,
+            'candidates': [{'path': c['path'], 'kind': c['kind'],
+                            'note': c.get('note', '')} for c in cands]}
 
 
 # Nordic's nRF Sniffer extcap (MIT) is vendored in python/nrf_sniffer, so live

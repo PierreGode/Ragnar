@@ -186,12 +186,30 @@ def _run_checks(verbose):
     feed(g, ll_adv(b.ADV_IND, 'c0:11:ec:00:00:01', ad(name_ad('Pwned'))), 2)
     h.ck('BLE-001 identity clone', 'BLE-001' in _codes(al))
 
-    # ---- BLE-002 impersonation (payload flap) -----------------------------
+    # ---- BLE-002 impersonation (conflicting identities) -------------------
+    # Two radios on one address = conflicting *identities* (distinct names or
+    # service sets) — not merely changing manufacturer bytes (that's telemetry,
+    # covered by the negative control below).
     g, al = _w({'clone_flap_count': 4})
     for i in range(6):
-        feed(g, ll_adv(b.ADV_NONCONN_IND, 'be:ac:00:00:00:02',
-                       ad(manuf_ad(0x0059, bytes([i, i, i])))), 1 + i * 0.1)
+        feed(g, ll_adv(b.ADV_IND, 'be:ac:00:00:00:02', ad(name_ad('Radio-%d' % i))), 1 + i * 0.1)
     h.ck('BLE-002 two radios one AdvA', 'BLE-002' in _codes(al))
+
+    # ---- negative: a sensor streaming changing telemetry is NOT a clone ----
+    g, al = _w({'clone_flap_count': 4})
+    for i in range(8):
+        feed(g, ll_adv(b.ADV_NONCONN_IND, 'be:ac:00:00:00:fd',
+                       ad(name_ad('TempSensor'), manuf_ad(0x0059, bytes([i, i * 3, i * 7, 0x11])))),
+             1 + i * 0.1)
+    h.ck('sensor telemetry churn is not a clone/impersonation',
+         not ({'BLE-001', 'BLE-002'} & _codes(al)))
+
+    # ---- negative: name present in some frame types, absent in others ------
+    g, al = _w()
+    feed(g, ll_adv(b.ADV_IND, 'c0:ff:ee:00:00:fc', ad(name_ad('Watch'))), 1)
+    feed(g, ll_adv(b.ADV_NONCONN_IND, 'c0:ff:ee:00:00:fc', ad(manuf_ad(0x004C, b'\x10\x05\x01'))), 2)
+    feed(g, ll_adv(b.ADV_IND, 'c0:ff:ee:00:00:fc', ad(name_ad('Watch'))), 3)
+    h.ck('name present/absent across frame types is not a clone', 'BLE-001' not in _codes(al))
 
     # ---- BLE-003 public address reused across names -----------------------
     g, al = _w()
@@ -218,6 +236,27 @@ def _run_checks(verbose):
     for i in range(11):
         feed(g, ll_adv(b.ADV_IND, 'f1:00:00:00:00:06', ad(name_ad('beam'))), 1 + i * 0.05)
     h.ck('BLE-006 adv-interval collapse', 'BLE-006' in _codes(al))
+
+    # ---- channel-duplicate collapse (nRF52 full-coverage sniffer) ---------
+    # The nRF52 reports every event on channels 37/38/39; the three copies share
+    # the AdvA + payload and must count once, so a healthy beacon is not a flood.
+    g, al = _w({'adv_flood_count': 25, 'channel_dedup_window_s': 0.012})
+    t = 1.0
+    for _ in range(10):                          # 10 real events, 100 ms apart
+        for ch in (37, 38, 39):                  # each mirrored on all three channels
+            feed(g, ll_adv(b.ADV_IND, 'c0:de:00:00:00:06', ad(name_ad('beam'))), t, channel=ch)
+            t += 0.002
+        t += 0.094
+    h.ck('channel copies collapse to one event (no false BLE-006)', 'BLE-006' not in _codes(al))
+    # ...but a genuinely collapsed interval is still caught across all channels.
+    g, al = _w({'adv_flood_count': 8, 'channel_dedup_window_s': 0.012})
+    t = 1.0
+    for _ in range(10):
+        for ch in (37, 38, 39):
+            feed(g, ll_adv(b.ADV_IND, 'c0:de:00:00:00:07', ad(name_ad('beam'))), t, channel=ch)
+            t += 0.002
+        t += 0.094
+    h.ck('dedup still catches a genuine single-AdvA flood', 'BLE-006' in _codes(al))
 
     # ---- BLE-007 advertiser flood (generic) -------------------------------
     g, al = _w({'advertiser_flood_count': 6})
@@ -349,6 +388,35 @@ def _run_checks(verbose):
     feed(g, ll_connect('99:99:00:00:00:fe', 'c0:ff:ee:00:00:01', 0xAABBCCDD), 4)
     feed(g, ll_version(0xAABBCCDD, 8, 0x000f, 0x0100), 5, channel=10)
     h.ck('benign adv/scan/connect/version are silent', not al)
+
+    # ---- 2.4 GHz spectrum overlay (Signal Intelligence) -------------------
+    # overlay() shapes the sniffed advertiser roster onto the band: one entry
+    # per AdvA with the channels it used, markers at the three adv-channel
+    # centre frequencies, and per-Wi-Fi-channel pressure. Pure bookkeeping.
+    g, al = _w()
+    for ch in (37, 38, 39):
+        feed(g, ll_adv(b.ADV_IND, 'c0:11:ec:00:00:01', ad(name_ad('Lamp'))), 1 + ch * 1e-3, channel=ch)
+    for ch in (37, 38):
+        feed(g, ll_adv(b.ADV_IND, 'c0:11:ec:00:00:02', ad(name_ad('Sensor'))), 2 + ch * 1e-3, channel=ch)
+    ov = g.overlay()
+    byaddr = {d['addr']: d for d in ov['devices']}
+    h.ck('overlay rosters every advertiser with its channels',
+         ov['device_count'] == 2
+         and byaddr['c0:11:ec:00:00:01']['channels'] == [37, 38, 39]
+         and byaddr['c0:11:ec:00:00:02']['channels'] == [37, 38]
+         and all(not d['flagged'] for d in ov['devices']))
+    h.ck('overlay markers carry adv-channel centre frequencies',
+         {m['adv_channel']: m['freq_mhz'] for m in ov['markers']} == {37: 2402, 38: 2426, 39: 2480}
+         and all(0 <= m['intensity'] <= 100 for m in ov['markers'])
+         and [w['wifi_channel'] for w in ov['wifi_channels']] == [1, 6, 11])
+    # A data-channel PDU never creates an advertiser row (overlay is adv-only).
+    g2, _ = _w()
+    feed(g2, ll_version(0x11223344, 7, 0x000f, 0x1234), 1, channel=10)
+    h.ck('overlay ignores data-channel PDUs', g2.overlay()['device_count'] == 0)
+    # sniffer_status(probe=False) writes to no serial port and reports a clean shape.
+    st = b.sniffer_status(probe=False)
+    h.ck('sniffer_status returns a gate shape without probing',
+         isinstance(st.get('available'), bool) and 'note' in st and isinstance(st.get('candidates'), list))
 
     return h
 

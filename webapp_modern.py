@@ -14,6 +14,7 @@ import sys
 import json
 import csv
 import glob
+import gzip
 import hmac
 import secrets
 import collections
@@ -56,6 +57,7 @@ except ImportError:
     pandas_available = False
 from init_shared import shared_data
 import git_updater
+import os_updates
 import cyd_node
 import cyd_serial_bridge
 import cyd_sensor
@@ -935,6 +937,9 @@ def check_authentication():
     # Whitelist: paths that must be accessible without authentication
     whitelist_prefixes = ['/login', '/api/auth/', '/api/kill', '/api/provenance']
     if any(path.startswith(p) for p in whitelist_prefixes):
+        return
+    # Public read so the login page renders in the configured language.
+    if path == '/api/i18n/language' and request.method == 'GET':
         return
 
     # Static assets needed for login page (CSS, JS, images, fonts)
@@ -9194,6 +9199,98 @@ def sync_vulnerability_count():
         return safe_int(shared_data.vulnnbr)
 
 
+# ---------------------------------------------------------------------------
+# Dashboard "Targets" card
+# ---------------------------------------------------------------------------
+# How far back the card's New and Lost numbers look.
+TARGET_RECENT_HOURS = 24
+
+
+def _parse_host_timestamp(value):
+    """Parse a hosts-table timestamp (ISO or SQLite 'YYYY-MM-DD HH:MM:SS')."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).strip().replace(' ', 'T'))
+    except (ValueError, TypeError):
+        return None
+
+
+def _live_target_counts(hosts, presence=None, now=None):
+    """Count the Targets card from one rule, for every code path that fills it.
+
+    The card used to count a host as an active target whenever the stored
+    status said 'alive'. Nothing records a failed probe there, so the number
+    always equalled the total, Offline was always 0, and New/Lost only ever
+    held the difference between two consecutive 15 second syncs.
+
+    active / inactive: the live presence verdict where there is one, the
+        stored status otherwise (Ragnar's own address, another saved network,
+        the first seconds after start).
+    new:  hosts first seen within TARGET_RECENT_HOURS.
+    lost: hosts that were answering and went Offline within
+        TARGET_RECENT_HOURS, and are still Offline.
+    """
+    presence = presence or {}
+    now = now or datetime.now()
+    wall_now = time.time()
+    recent = timedelta(hours=TARGET_RECENT_HOURS)
+    active = total = 0
+    new_ips, lost_ips = [], []
+    for host in hosts:
+        ip = (host.get('ip') or '').strip()
+        if not ip or ip == 'STANDALONE' or (host.get('mac') or '').strip() == 'STANDALONE':
+            continue
+        total += 1
+        verdict = presence.get(ip)
+        if verdict:
+            is_up = verdict.get('status') == 'up'
+            if (not is_up and verdict.get('seen_ago') is not None
+                    and wall_now - (verdict.get('since') or 0) < recent.total_seconds()):
+                lost_ips.append(ip)
+        else:
+            is_up = (host.get('status') or 'alive') == 'alive'
+        if is_up:
+            active += 1
+        first_seen = _parse_host_timestamp(host.get('first_seen'))
+        if first_seen and timedelta(0) <= now - first_seen < recent:
+            new_ips.append(ip)
+
+    def _ip_key(value):
+        try:
+            return (0, tuple(int(part) for part in value.split('.')))
+        except ValueError:
+            return (1, value)
+
+    return {
+        'active': active,
+        'total': total,
+        'inactive': total - active,
+        'new_ips': sorted(new_ips, key=_ip_key),
+        'lost_ips': sorted(lost_ips, key=_ip_key),
+    }
+
+
+def _target_card_fields():
+    """The rest of the Targets card, from the last sync.
+
+    Status payloads are what the dashboard falls back to when its stats
+    request fails. Carrying only target_count there made the card redraw as
+    "N targets, N total, 0 offline" in that case.
+    """
+    new_ips = list(getattr(shared_data, 'new_target_ips', []) or [])
+    lost_ips = list(getattr(shared_data, 'lost_target_ips', []) or [])
+    return {
+        'active_target_count': safe_int(shared_data.targetnbr),
+        'total_target_count': safe_int(getattr(shared_data, 'total_targetnbr', 0)),
+        'inactive_target_count': safe_int(getattr(shared_data, 'inactive_targetnbr', 0)),
+        'new_target_count': len(new_ips),
+        'lost_target_count': len(lost_ips),
+        'new_target_ips': new_ips,
+        'lost_target_ips': lost_ips,
+    }
+
+
 def sync_all_counts():
     """Synchronize all counts (targets, ports, vulnerabilities, credentials) across data sources.
     
@@ -9312,6 +9409,17 @@ def sync_all_counts():
                 logger.error(f"[SQLITE SYNC] ❌ Error reading from SQLite database: {e}")
                 traceback.print_exc()
 
+            # The card numbers follow live presence; the stored-status counts
+            # above still drive the port total and the notification snapshot.
+            try:
+                live_counts = _live_target_counts(hosts, _presence_snapshot_for_request())
+                aggregated_targets = live_counts['active']
+                total_target_count = live_counts['total']
+                inactive_target_count = live_counts['inactive']
+            except Exception as e:
+                live_counts = None
+                logger.debug(f"Live target count unavailable, using stored status: {e}")
+
             old_targets = shared_data.targetnbr
             old_ports = shared_data.portnbr
 
@@ -9339,8 +9447,14 @@ def sync_all_counts():
             lost_active_hosts = previous_active_hosts - current_active_hosts
 
             shared_data.network_hosts_snapshot = current_snapshot
-            shared_data.new_target_ips = sorted(new_active_hosts)
-            shared_data.lost_target_ips = sorted(lost_active_hosts)
+            if live_counts is not None:
+                # A diff between two consecutive syncs is gone 15 seconds
+                # later; the card shows the last TARGET_RECENT_HOURS instead.
+                shared_data.new_target_ips = live_counts['new_ips']
+                shared_data.lost_target_ips = live_counts['lost_ips']
+            else:
+                shared_data.new_target_ips = sorted(new_active_hosts)
+                shared_data.lost_target_ips = sorted(lost_active_hosts)
             shared_data.new_targets = len(shared_data.new_target_ips)
             shared_data.lost_targets = len(shared_data.lost_target_ips)
 
@@ -9631,6 +9745,23 @@ def _load_intelligence_vulnerability_counts(intelligence_dir: Optional[str]) -> 
         return None, None
 
 
+# One DatabaseManager per network database, reused across requests. Building
+# a new one re-runs the whole schema/migration pass, and the dashboard asks
+# for these stats every few seconds.
+_network_db_handles: Dict[str, DatabaseManager] = {}
+_network_db_handles_lock = threading.Lock()
+
+
+def _network_db_handle(db_path, network_dir):
+    with _network_db_handles_lock:
+        handle = _network_db_handles.get(db_path)
+        if handle is None:
+            handle = DatabaseManager(db_path=db_path, currentdir=shared_data.currentdir,
+                                     data_root=network_dir)
+            _network_db_handles[db_path] = handle
+        return handle
+
+
 def _calculate_dashboard_stats_from_context(context: Dict[str, str]) -> Dict:
     network_dir = context.get('network_dir')
     db_path = context.get('db_path')
@@ -9663,8 +9794,7 @@ def _calculate_dashboard_stats_from_context(context: Dict[str, str]) -> Dict:
     hosts = []
     if db_path and os.path.exists(db_path):
         try:
-            temp_db = DatabaseManager(db_path=db_path, currentdir=shared_data.currentdir, data_root=network_dir)
-            hosts = temp_db.get_all_hosts()
+            hosts = _network_db_handle(db_path, network_dir).get_all_hosts()
         except Exception as exc:
             logger.error(f"Unable to read hosts for network context {context.get('slug')}: {exc}")
 
@@ -9675,15 +9805,10 @@ def _calculate_dashboard_stats_from_context(context: Dict[str, str]) -> Dict:
     vuln_count_override, vuln_hosts_override = _load_intelligence_vulnerability_counts(intelligence_dir)
 
     for host in hosts:
-        stats['total_target_count'] += 1
         status = (host.get('status') or '').lower()
         failed = safe_int(host.get('failed_ping_count'), 0)
-        is_active = status == 'alive' or failed < max_failed
-        if is_active:
-            stats['active_target_count'] += 1
+        if status == 'alive' or failed < max_failed:
             stats['port_count'] += len(_split_port_field(host.get('ports')))
-        else:
-            stats['inactive_target_count'] += 1
 
         vuln_field = host.get('vulnerabilities') or host.get('nmap_vuln_scanner') or host.get('scanner_status')
         if vuln_field:
@@ -9704,6 +9829,16 @@ def _calculate_dashboard_stats_from_context(context: Dict[str, str]) -> Dict:
 
     stats['credential_count'] = _count_credentials_in_dir(credentials_dir)
     stats['data_count'] = _count_files_in_tree(context.get('data_stolen_dir'))
+
+    live_counts = _live_target_counts(hosts, _presence_snapshot_for_request(context.get('slug')))
+    stats['active_target_count'] = live_counts['active']
+    stats['inactive_target_count'] = live_counts['inactive']
+    stats['total_target_count'] = live_counts['total']
+    stats['new_target_ips'] = live_counts['new_ips']
+    stats['lost_target_ips'] = live_counts['lost_ips']
+    stats['new_target_count'] = len(live_counts['new_ips'])
+    stats['lost_target_count'] = len(live_counts['lost_ips'])
+    stats['target_recent_hours'] = TARGET_RECENT_HOURS
     stats['target_count'] = stats['active_target_count']
 
     # Derive timestamps from DB modification time when available
@@ -10999,6 +11134,7 @@ def get_status():
             'orchestrator_status': safe_str(shared_data.ragnarorch_status),
             'automation_enabled': is_orchestrator_running(),
             'target_count': safe_int(shared_data.targetnbr),
+            **_target_card_fields(),
             'port_count': safe_int(shared_data.portnbr),
             'vulnerability_count': safe_int(shared_data.vulnnbr),
             'credential_count': safe_int(shared_data.crednbr),
@@ -11068,6 +11204,121 @@ def update_config():
     except Exception as e:
         logger.error(f"Error updating config: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+# ============================================================================
+# UI LANGUAGE
+# ============================================================================
+UI_LANGUAGES = {'en': 'English', 'es': 'Español', 'fr': 'Français', 'de': 'Deutsch'}
+_I18N_DIR = os.path.join(app.root_path, 'web', 'scripts', 'i18n')
+_i18n_cache = {}
+_i18n_cache_lock = threading.Lock()
+
+
+def _ui_language():
+    code = str(shared_data.config.get('language', 'en') or 'en').strip().lower()
+    return code if code in UI_LANGUAGES else 'en'
+
+
+def _i18n_version():
+    stamp = 0
+    for code in UI_LANGUAGES:
+        try:
+            stamp = max(stamp, os.stat(os.path.join(_I18N_DIR, f'{code}.json')).st_mtime_ns)
+        except OSError:
+            pass
+    return format(stamp, 'x')
+
+
+def _i18n_bodies(code):
+    path = os.path.join(_I18N_DIR, f'{code}.json')
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    sig = (st.st_mtime_ns, st.st_size)
+    with _i18n_cache_lock:
+        hit = _i18n_cache.get(code)
+    if hit and hit[0] == sig:
+        return hit[1]
+    try:
+        with open(path, 'rb') as fh:
+            raw = fh.read()
+        if not isinstance(json.loads(raw.decode('utf-8')), dict):
+            raise ValueError('language pack is not a JSON object')
+    except Exception as exc:
+        logger.warning(f"[i18n] ignoring language pack {path}: {exc}")
+        return None
+    boot = (b'window.__RAGNAR_I18N__={"lang":' + json.dumps(code).encode() +
+            b',"v":' + json.dumps(_i18n_version()).encode() + b',"dict":' + raw + b'};')
+
+    def _variant(body):
+        return body, gzip.compress(body, 6), hashlib.sha1(body).hexdigest()[:20]
+
+    bodies = {'json': _variant(raw), 'boot': _variant(boot)}
+    with _i18n_cache_lock:
+        _i18n_cache[code] = (sig, bodies)
+    return bodies
+
+
+def _send_i18n(variant, mimetype):
+    raw, gz, etag = variant
+    use_gzip = 'gzip' in (request.headers.get('Accept-Encoding') or '').lower()
+    resp = Response(gz if use_gzip else raw, mimetype=mimetype)
+    if use_gzip:
+        resp.headers['Content-Encoding'] = 'gzip'
+        etag += '-gz'
+    resp.headers['Vary'] = 'Accept-Encoding'
+    resp.headers['Cache-Control'] = 'no-cache'
+    resp.set_etag(etag)
+    return resp.make_conditional(request)
+
+
+@app.route('/scripts/i18n/active.js')
+def i18n_boot_script():
+    code = _ui_language()
+    bodies = _i18n_bodies(code) if code != 'en' else None
+    if bodies is None:
+        body = ('window.__RAGNAR_I18N__=' +
+                json.dumps({'lang': 'en', 'v': _i18n_version()}) + ';').encode()
+        variant = (body, gzip.compress(body, 6), hashlib.sha1(body).hexdigest()[:20])
+    else:
+        variant = bodies['boot']
+    return _send_i18n(variant, 'application/javascript')
+
+
+@app.route('/scripts/i18n/<code>.json')
+def i18n_pack(code):
+    bodies = _i18n_bodies(code) if code in UI_LANGUAGES and code != 'en' else None
+    if bodies is None:
+        return jsonify({'error': 'Unknown language pack'}), 404
+    return _send_i18n(bodies['json'], 'application/json')
+
+
+@app.route('/api/i18n/language', methods=['GET'])
+def get_ui_language():
+    return jsonify({
+        'success': True,
+        'language': _ui_language(),
+        'languages': [{'code': c, 'name': n} for c, n in UI_LANGUAGES.items()],
+    })
+
+
+@app.route('/api/i18n/language', methods=['POST'])
+def set_ui_language():
+    data = request.get_json(silent=True) or {}
+    code = str(data.get('language', '') or '').strip().lower()
+    if code not in UI_LANGUAGES:
+        return jsonify({'success': False, 'error': 'Unsupported language'}), 400
+    previous = _ui_language()
+    with getattr(shared_data, '_config_lock', threading.RLock()):
+        shared_data.config['language'] = code
+    shared_data.language = code
+    shared_data.save_config()
+    if code != previous:
+        logger.info(f"[i18n] UI language set to {code}")
+        socketio.emit('language_changed', {'language': code})
+    return jsonify({'success': True, 'language': code})
 
 
 def _apply_config_update(data):
@@ -12275,20 +12526,36 @@ def load_persistent_network_data():
     return network_data
 
 
+def _apply_presence(host_data, presence):
+    """Overlay the live presence verdict onto one Discovered Hosts row."""
+    verdict = presence.get(host_data['ip']) if presence else None
+    if not verdict:
+        return
+    host_data['status'] = verdict['status']          # 'up' or 'down'
+    host_data['presence'] = 'live'
+    host_data['seen_ago'] = verdict.get('seen_ago')
+    if verdict.get('mac') and host_data.get('mac') in ('Unknown', '', '00:00:00:00:00:00'):
+        host_data['mac'] = verdict['mac']
+
+
 @app.route('/api/network/stable')
 def get_stable_network_data():
     """Get stable, aggregated network data for the Network tab from SQLite database"""
-    with _network_context_from_request():
+    with _network_context_from_request() as requested_slug:
         try:
             db = get_db(currentdir=shared_data.currentdir)
         
             # Get all hosts from SQLite database
             hosts = db.get_all_hosts()
+
+            # Live ARP presence. The stored status only ever records
+            # successes, so on its own it shows every known host as up.
+            presence = _presence_snapshot_for_request(requested_slug)
         
             # Also get any recent ARP scan cache data for real-time enrichment
             recent_arp_data = network_scan_cache.get('arp_hosts', {})
         
-            logger.info(f"Loaded {len(hosts)} entries from SQLite database for stable API")
+            logger.debug(f"Loaded {len(hosts)} entries from SQLite database for stable API")
         
             # Merge and enrich the data
             enriched_hosts = []
@@ -12344,7 +12611,8 @@ def get_stable_network_data():
                     if host_status != 'up':  # ARP means it's definitely up
                         host_data['status'] = 'up'
                     host_data['source'] = 'sqlite+arp'
-            
+
+                _apply_presence(host_data, presence)
                 enriched_hosts.append(host_data)
         
             # Add any new ARP discoveries not in database
@@ -12364,9 +12632,10 @@ def get_stable_network_data():
                         'failed_pings': 0,
                         'source': 'arp_discovery'
                     }
+                    _apply_presence(host_data, presence)
                     enriched_hosts.append(host_data)
         
-            logger.info(f"Returning {len(enriched_hosts)} enriched hosts from SQLite database")
+            logger.debug(f"Returning {len(enriched_hosts)} enriched hosts from SQLite database")
         
             # Sort by IP address for consistent display
             def safe_ip_sort_key(host):
@@ -12385,7 +12654,9 @@ def get_stable_network_data():
                 'hosts': enriched_hosts,
                 'count': len(enriched_hosts),
                 'timestamp': datetime.now().isoformat(),
-                'source': 'sqlite_database'
+                'source': 'sqlite_database',
+                'presence_live': bool(presence),
+                'online_count': sum(1 for h in enriched_hosts if h['status'] == 'up')
             })
             response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
             response.headers['Pragma'] = 'no-cache'
@@ -12513,7 +12784,7 @@ def _batch_ai_classify(nodes, indices, ai_service, labels, valid_types):
     original_model = ai_service.model
     try:
         ai_service.model = "gpt-5.4-nano"
-        answer = ai_service._ask(system, user)
+        answer = ai_service._ask(system, user, localize=False)
     finally:
         ai_service.model = original_model
 
@@ -18715,6 +18986,74 @@ def perform_update():
     return _update_response(update_result)
 
 
+# ---------------------------------------------------------------------------
+# Operating-system packages (apt)
+# ---------------------------------------------------------------------------
+# "Update System" above moves Ragnar's code only. These routes cover everything
+# apt owns - kernel, security fixes, and third-party repos such as Tailscale -
+# which otherwise needed an SSH session. The slow work runs in the
+# ragnar-os-update transient unit (see os_updates.py), so a tailscaled or
+# ragnar.service restart during the upgrade cannot cut dpkg off mid-install.
+# All four routes are session-gated like the rest of /api/system/*.
+
+@app.route('/api/system/os-updates')
+def os_updates_overview():
+    """Upgradable packages, the current/last run, and reboot state.
+
+    Polled while a run is active, so it only reads: the package list is cached
+    against apt's state and never recomputed mid-install.
+    """
+    try:
+        return jsonify(dict(os_updates.overview(), success=True))
+    except Exception as e:
+        logger.error(f"OS updates overview failed: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+def _os_update_launch_response(ok, code, message):
+    status = {'busy': 409, 'unsupported': 400, 'invalid': 400}.get(code, 500)
+    if ok:
+        return jsonify({'success': True, 'message': message,
+                        'status': os_updates.read_status()})
+    return jsonify({'success': False, 'code': code, 'error': message}), status
+
+
+@app.route('/api/system/os-updates/check', methods=['POST'])
+def os_updates_check():
+    """Refresh apt's package lists (apt-get update) in the background."""
+    ok, code, message = os_updates.launch('check')
+    if ok:
+        logger.info("OS package check started")
+    return _os_update_launch_response(ok, code, message)
+
+
+@app.route('/api/system/os-updates/upgrade', methods=['POST'])
+def os_updates_upgrade():
+    """Upgrade every upgradable package, or only the named ones.
+
+    Body: {"packages": ["tailscale"]} for a targeted upgrade; omit or send an
+    empty list for everything. Named packages must currently be upgradable.
+    A held-back package that needs another one removed is upgraded with
+    {"packages": ["rpd-common"], "allow_remove": ["pcmanfm"]}: the run stops,
+    changing nothing, if apt plans any removal not on that list.
+    """
+    data = request.get_json(silent=True) or {}
+    packages = data.get('packages') or None
+    allow_remove = data.get('allow_remove') or None
+    ok, code, message = os_updates.launch('upgrade', packages, allow_remove)
+    if ok:
+        logger.info(f"OS package upgrade started: {', '.join(packages) if packages else 'all'}")
+    return _os_update_launch_response(ok, code, message)
+
+
+@app.route('/api/system/os-updates/log')
+def os_updates_log():
+    """Tail of the current/last run's apt output (?previous=1: the run before)."""
+    previous = request.args.get('previous') in ('1', 'true', 'yes')
+    return jsonify({'success': True, 'log': os_updates.read_log(previous=previous),
+                    'previous': previous, 'status': os_updates.read_status()})
+
+
 @app.route('/api/system/stash-update', methods=['POST'])
 def stash_and_update():
     """Update a checkout that has local edits.
@@ -21087,8 +21426,8 @@ def get_wifi_networks():
 _VALID_DISPLAY_DRIVERS = {
     'epd2in13', 'epd2in13_V2', 'epd2in13_V3', 'epd2in13_V4', 'epd2in13b_V4',
     'epd2in7', 'epd2in7_V2', 'epd2in9_V2', 'epd3in7', 'epd4in26',
-    'gc9a01', 'st7735s', 'ili9486', 'ili9488', 'whisplay', 'ssd1306', 'lcd1602',
-    'max7219_4panel', 'max7219_8panel',
+    'gc9a01', 'st7735s', 'st7789v2', 'ili9486', 'ili9488', 'whisplay', 'ssd1306',
+    'lcd1602', 'max7219_4panel', 'max7219_8panel',
 }
 
 DISPLAY_MODE_SCRIPT = os.path.join(
@@ -24190,6 +24529,27 @@ def handle_activity_request():
 # BACKGROUND TASKS
 # ============================================================================
 
+# WifiManager.get_status() shells out to nmcli about six times. The status
+# broadcast wants it every 2 seconds and the dashboard polls it as well, which
+# on a Pi Zero 2 W kept a core busy just re-reading an unchanged Wi-Fi state.
+_WIFI_STATUS_TTL = 6.0
+_wifi_status_lock = threading.Lock()
+_wifi_status_cache = {'at': 0.0, 'value': {}}
+
+
+def _wifi_status_cached():
+    """Wi-Fi manager status, re-read at most every _WIFI_STATUS_TTL seconds."""
+    ragnar = getattr(shared_data, 'ragnar_instance', None)
+    manager = getattr(ragnar, 'wifi_manager', None) if ragnar else None
+    if manager is None:
+        return {}
+    with _wifi_status_lock:
+        if time.monotonic() - _wifi_status_cache['at'] >= _WIFI_STATUS_TTL:
+            _wifi_status_cache['value'] = manager.get_status() or {}
+            _wifi_status_cache['at'] = time.monotonic()
+        return dict(_wifi_status_cache['value'])
+
+
 def get_current_status():
     """Get current status data"""
     try:
@@ -24200,9 +24560,7 @@ def get_current_status():
     # Get WiFi status details from WiFi manager
     wifi_status = {}
     try:
-        wifi_manager = getattr(shared_data, 'ragnar_instance', None)
-        if wifi_manager and hasattr(wifi_manager, 'wifi_manager'):
-            wifi_status = wifi_manager.wifi_manager.get_status()
+        wifi_status = _wifi_status_cached()
     except Exception as e:
         logger.debug(f"Could not get WiFi status from manager: {e}")
 
@@ -24213,6 +24571,7 @@ def get_current_status():
         'orchestrator_status': safe_str(shared_data.ragnarorch_status),
         'automation_enabled': is_orchestrator_running(),
         'target_count': safe_int(shared_data.targetnbr),
+        **_target_card_fields(),
         'port_count': safe_int(shared_data.portnbr),
         'vulnerability_count': safe_int(shared_data.vulnnbr),
         'vulnerable_hosts_count': safe_int(getattr(shared_data, 'vulnerable_host_count', 0)),
@@ -24425,6 +24784,99 @@ def background_sync_loop(interval=SYNC_BACKGROUND_INTERVAL):
                 time.sleep(30)  # Wait longer after multiple failures
         
         time.sleep(max(1, interval))
+
+# ---------------------------------------------------------------------------
+# Real-time host presence (Network tab "Status" column)
+# ---------------------------------------------------------------------------
+host_presence_monitor = None
+
+
+def _presence_ifaces():
+    """Interfaces worth ARP-monitoring: the LAN uplink and the Wi-Fi client."""
+    names = []
+    for getter in (_get_lan_iface, _get_wifi_iface):
+        try:
+            name = getter()
+        except Exception:                                       # noqa: BLE001
+            name = None
+        if name and name not in names and not _is_cellular_iface(name):
+            names.append(name)
+    return names
+
+
+def _presence_targets():
+    """{ip: mac} for every host the Discovered Hosts table can show."""
+    targets = {}
+    try:
+        for host in shared_data.db.get_all_hosts():
+            ip = (host.get('ip') or '').strip()
+            if ip and _is_valid_ipv4(ip):
+                targets[ip] = host.get('mac') or ''
+    except Exception as exc:                                    # noqa: BLE001
+        logger.debug(f"presence targets: database read failed: {exc}")
+    for ip, entry in list(network_scan_cache.get('arp_hosts', {}).items()):
+        if not targets.get(ip):
+            targets[ip] = (entry or {}).get('mac') or ''
+    return targets
+
+
+def _presence_on_change(changes):
+    if clients_connected > 0:
+        socketio.emit('host_presence', {'changes': changes})
+
+
+def start_host_presence_monitor():
+    """Start the in-process ARP presence monitor (idempotent)."""
+    global host_presence_monitor
+    if host_presence_monitor is not None:
+        return host_presence_monitor
+    if not shared_data.config.get('host_presence_enabled', True):
+        logger.info("Host presence monitor disabled by config (host_presence_enabled)")
+        return None
+    try:
+        from host_presence import HostPresenceMonitor
+        host_presence_monitor = HostPresenceMonitor(
+            get_ifaces=_presence_ifaces,
+            get_targets=_presence_targets,
+            is_fast=lambda: clients_connected > 0,
+            on_change=_presence_on_change,
+            should_exit=lambda: shared_data.webapp_should_exit,
+        )
+        host_presence_monitor.start()
+    except Exception as exc:                                    # noqa: BLE001
+        logger.warning(f"Host presence monitor unavailable: {exc}")
+        host_presence_monitor = None
+    return host_presence_monitor
+
+
+def _presence_snapshot_for_request(requested_slug=None):
+    """Presence verdicts, or {} when they do not apply to this request.
+
+    Presence describes the network Ragnar is attached to right now. A request
+    for another saved network must keep that network's stored status.
+    """
+    monitor = host_presence_monitor
+    if monitor is None or not monitor.running:
+        return {}
+    active = getattr(shared_data, 'active_network_slug', None)
+    if requested_slug and active and requested_slug != active:
+        return {}
+    try:
+        return monitor.snapshot()
+    except Exception as exc:                                    # noqa: BLE001
+        logger.debug(f"presence snapshot failed: {exc}")
+        return {}
+
+
+@app.route('/api/network/presence')
+def get_network_presence():
+    """Live up/down verdict per host from the ARP presence monitor."""
+    monitor = host_presence_monitor
+    if monitor is None:
+        return jsonify({'success': True, 'running': False, 'hosts': {}})
+    info = monitor.info()
+    return jsonify({'success': True, 'hosts': monitor.snapshot(), **info})
+
 
 def background_arp_scan_loop():
     """Continuously run ARP scans to keep network data fresh"""
@@ -27500,6 +27952,11 @@ def ulfberht_extras_install_log():
 # ULFBERHT ENGAGEMENT ENGINE  (official Ulfberht image only -- marker-gated)
 # ============================================================================
 
+def _playbook_language_note():
+    from ai_service import json_fields_language_directive
+    return json_fields_language_directive(_ui_language(), ('name', 'description'))
+
+
 @app.route('/api/ulfberht/playbooks', methods=['GET', 'POST'])
 def ulfberht_playbooks_api():
     """GET: list engagement playbooks (built-in + uploaded, with validity).
@@ -27521,6 +27978,7 @@ def ulfberht_playbooks_api():
                     data.get('name'), data.get('tools') or [], data.get('instruction') or '')
                 if err:
                     return jsonify({"success": False, "error": err}), 400
+                prompt += _playbook_language_note()
                 ai = getattr(shared_data, 'ai_service', None)
                 if not ai:
                     try:
@@ -27555,7 +28013,7 @@ def ulfberht_playbooks_api():
                     data.get('name'), data.get('tools') or [], data.get('instruction') or '')
                 if err:
                     return jsonify({"success": False, "error": err}), 400
-                return jsonify({"success": True, "prompt": prompt})
+                return jsonify({"success": True, "prompt": prompt + _playbook_language_note()})
             name = data.get('name') or (data.get('playbook') or {}).get('name') \
                 or (data.get('playbook') or {}).get('id')
             # Arsenal builder: {name, tools:[bin,...]} -> generate a playbook.
@@ -30006,9 +30464,7 @@ def get_dashboard_quick():
 
         wifi_status = {}
         try:
-            wifi_manager = getattr(shared_data, 'ragnar_instance', None)
-            if wifi_manager and hasattr(wifi_manager, 'wifi_manager'):
-                wifi_status = wifi_manager.wifi_manager.get_status()
+            wifi_status = _wifi_status_cached()
         except Exception:
             pass  # Silently fail - non-critical for dashboard
 
@@ -30366,6 +30822,7 @@ def get_ai_status():
             'model': getattr(ai_service, 'model', None),
             'endpoint': getattr(ai_service, 'base_url', '') or 'openai',
             'fallback_active': bool(getattr(ai_service, 'fallback_active', False)),
+            'chat_enabled': bool(shared_data.config.get('ai_chat_enabled', True)),
             'capabilities': {
                 'network_insights': getattr(ai_service, 'network_insights', False),
                 'vulnerability_summaries': getattr(ai_service, 'vulnerability_summaries', False)
@@ -30393,6 +30850,7 @@ def get_ai_status():
 _ai_insights_state = {
     'data': None,        # last completed insights dict (with posture_data)
     'ts': 0.0,           # when it completed
+    'lang': None,        # UI language the completed result was written in
     'computing': False,  # a background run is in flight
     'started': 0.0,      # when the current run started (for the stale watchdog)
     'lock': threading.Lock(),
@@ -30410,6 +30868,7 @@ def _compute_ai_insights_bg():
     dashboard would poll "Analyzing…" forever (the exact wedge seen on a Pi Zero
     whose OpenAI calls were failing)."""
     result = None
+    lang = _ui_language()
     try:
         ai_service = getattr(shared_data, 'ai_service', None)
         if not ai_service or not ai_service.is_enabled():
@@ -30434,6 +30893,7 @@ def _compute_ai_insights_bg():
             if result is not None:
                 _ai_insights_state['data'] = result
                 _ai_insights_state['ts'] = time.time()
+                _ai_insights_state['lang'] = lang
             _ai_insights_state['computing'] = False
 
 
@@ -30454,9 +30914,12 @@ def get_ai_insights():
 
         force = request.args.get('refresh') == '1'
         now = time.time()
+        lang = _ui_language()
         with _ai_insights_state['lock']:
             data = _ai_insights_state['data']
             ts = _ai_insights_state['ts']
+            if data is not None and _ai_insights_state['lang'] != lang:
+                data = None
             # A result where some analyses failed (rate-limited) expires fast so
             # it recomputes soon; a clean result is held for the full hour.
             ttl = 120 if (data and data.get('failed')) else _AI_INSIGHTS_TTL
@@ -30936,6 +31399,209 @@ def clear_ai_cache():
     except Exception as e:
         logger.error(f"Error clearing AI cache: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+# ============================================================================
+# RAGNAR CHAT ASSISTANT
+# The dashboard chat box (only shown when AI is enabled). ai_chat.RagnarChat
+# runs a small agentic loop: it retrieves from docs/, and executes a curated
+# allowlist of tools. Each tool maps to one of this app's own API endpoints,
+# dispatched IN-PROCESS via Flask's test_client with the caller's session
+# cookie forwarded — so every action reuses the real, already-authenticated
+# handler (no self-HTTP, no ports, no auth bypass) and inherits its behaviour.
+# ============================================================================
+_ragnar_chat = None
+_ragnar_chat_lock = threading.Lock()
+
+# tool name -> (HTTP method, path). Only these endpoints are reachable from the
+# chat. deep_scan_host adds a JSON body (the target ip) in the dispatcher.
+_CHAT_TOOL_ROUTES = {
+    'get_network_devices':      ('GET',  '/api/network'),
+    'get_vulnerabilities':      ('GET',  '/api/vulnerabilities'),
+    'get_ai_insights':          ('GET',  '/api/ai/insights'),
+    'get_watchtower':           ('GET',  '/api/net/watchtower'),
+    'get_incidents':            ('GET',  '/api/net/incidents'),
+    'get_scan_status':          ('GET',  '/api/scan/status'),
+    'get_wifi_status':          ('GET',  '/api/wifi/scan-control'),
+    'run_network_scan':         ('GET',  '/api/scan/combined-network'),
+    'start_vulnerability_scan': ('POST', '/api/manual/scan/vulnerability'),
+    'deep_scan_host':           ('POST', '/api/scan/deep'),
+    'start_wifi_scan':          ('POST', '/api/wifi/scan-control/start'),
+    'stop_wifi_scan':           ('POST', '/api/wifi/scan-control/stop'),
+}
+
+
+def _chat_self_call(method, path, cookie, json_body=None):
+    """Dispatch an internal API call through the WSGI app (in-process), carrying
+    the caller's session cookie so before_request auth passes. Returns
+    (status_code, parsed_json_or_text)."""
+    # use_cookies=False: otherwise the client's empty jar replaces this header
+    # and every tool call is 401 on a password-protected unit.
+    client = app.test_client(use_cookies=False)
+    headers = {'Cookie': cookie} if cookie else {}
+    if method == 'GET':
+        resp = client.get(path, headers=headers)
+    else:
+        resp = client.post(path, json=(json_body or {}), headers=headers)
+    data = resp.get_json(silent=True)
+    if data is None:
+        data = resp.get_data(as_text=True)[:1500]
+    return resp.status_code, data
+
+
+def _chat_compact(tool, data, args=None):
+    """Shrink an endpoint payload to true totals plus the rows that matter."""
+    from ai_chat import compact_result
+    return compact_result(tool, data, args)
+
+
+def _chat_wifi_toggle(tool, args, cookie):
+    """The endpoint works on one named interface; chat usually names none."""
+    enable = tool == 'start_wifi_scan'
+    status, state = _chat_self_call('GET', '/api/wifi/scan-control', cookie)
+    if status != 200 or not isinstance(state, dict):
+        return {'ok': False, 'status': status, 'error': 'could not read Wi-Fi state'}
+    interfaces = state.get('interfaces') or []
+    names = [i.get('name') for i in interfaces if i.get('name')]
+    active = [i.get('name') for i in interfaces if i.get('name') and i.get('scan_enabled')]
+    wanted = str((args or {}).get('interface') or '').strip()
+    if wanted:
+        targets = [wanted]
+    elif enable:
+        targets = [] if active else names[:1]
+    else:
+        targets = active
+    if not targets:
+        word = 'on' if enable else 'off'
+        detail = f" on {', '.join(active)}" if active else ''
+        return {'ok': True, 'status': 200,
+                'data': {'changed': [], 'note': f'Wi-Fi scanning is already {word}{detail}'}}
+
+    path = _CHAT_TOOL_ROUTES[tool][1]
+    changed, failed = [], {}
+    for name in targets:
+        code, data = _chat_self_call('POST', path, cookie, {'interface': name})
+        if 200 <= code < 300:
+            changed.append(name)
+        else:
+            failed[name] = data.get('error') if isinstance(data, dict) else str(data)[:200]
+    result = {'ok': not failed, 'status': 200 if not failed else 400,
+              'data': {'changed': changed, 'scan_enabled': enable}}
+    if failed:
+        result['data']['failed'] = failed
+    return result
+
+
+def _chat_dispatch(tool, args, cookie):
+    """Execute one chat tool against the allowlisted endpoint. Returns a
+    JSON-able dict for the model. Never raises (errors become {ok:False})."""
+    route = _CHAT_TOOL_ROUTES.get(tool)
+    if not route:
+        return {'ok': False, 'error': f'unknown tool: {tool}'}
+    if tool in ('start_wifi_scan', 'stop_wifi_scan'):
+        try:
+            return _chat_wifi_toggle(tool, args, cookie)
+        except Exception as exc:
+            logger.error(f"[ai-chat] dispatch {tool} failed: {exc}")
+            return {'ok': False, 'error': str(exc)}
+    method, path = route
+    body = {}
+    if tool == 'deep_scan_host':
+        ip = str((args or {}).get('ip', '')).strip()
+        if not ip:
+            return {'ok': False, 'error': 'deep_scan_host requires an "ip" argument'}
+        body = {'ip': ip}
+    try:
+        status, data = _chat_self_call(method, path, cookie, body)
+    except Exception as exc:
+        logger.error(f"[ai-chat] dispatch {tool} failed: {exc}")
+        return {'ok': False, 'error': str(exc)}
+    return {'ok': 200 <= status < 300, 'status': status,
+            'data': _chat_compact(tool, data, args)}
+
+
+def _get_ragnar_chat():
+    """Lazily build the RagnarChat singleton, rebinding if the AI service object
+    was replaced (e.g. after the operator toggled AI off and on)."""
+    global _ragnar_chat
+    ai_service = getattr(shared_data, 'ai_service', None)
+    if not ai_service:
+        return None
+    with _ragnar_chat_lock:
+        if _ragnar_chat is None or getattr(_ragnar_chat, 'ai', None) is not ai_service:
+            try:
+                from ai_chat import RagnarChat
+            except Exception as exc:
+                logger.error(f"[ai-chat] import failed: {exc}")
+                return None
+            docs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'docs')
+            _ragnar_chat = RagnarChat(ai_service, docs_dir, _chat_dispatch)
+    return _ragnar_chat
+
+
+def _chat_unavailable():
+    """The error response if chat can't be used right now, else None."""
+    if not shared_data.config.get('ai_enabled', False):
+        return jsonify({'success': False, 'error': 'AI is not enabled. Enable it in the Config tab.'}), 400
+    # A hidden chat must not keep accepting requests that can propose actions.
+    if not shared_data.config.get('ai_chat_enabled', True):
+        return jsonify({'success': False, 'error': 'The chat assistant is turned off in the Config tab.'}), 400
+    ai_service = getattr(shared_data, 'ai_service', None)
+    if not ai_service or not ai_service.is_enabled():
+        return jsonify({'success': False,
+                        'error': 'AI service is not ready — check the token / endpoint in Config.'}), 503
+    return None
+
+
+@app.route('/api/ai/chat', methods=['POST'])
+def ai_chat_endpoint():
+    """Conversational assistant that can answer from docs/ and propose actions.
+    Body: {message: str, history: [{role, content}, ...]}. Returns
+    {success, reply, actions, docs, model}, plus pending: {id, label} when an
+    action is waiting for /api/ai/chat/confirm."""
+    blocked = _chat_unavailable()
+    if blocked:
+        return blocked
+
+    data = request.get_json(silent=True) or {}
+    message = str(data.get('message', '')).strip()
+    history = data.get('history') if isinstance(data.get('history'), list) else []
+    if not message:
+        return jsonify({'success': False, 'error': 'Empty message.'}), 400
+
+    chat = _get_ragnar_chat()
+    if not chat:
+        return jsonify({'success': False, 'error': 'Chat assistant unavailable.'}), 503
+
+    cookie = request.headers.get('Cookie', '')
+    try:
+        result = chat.run(history, message, cookie=cookie)
+    except Exception as exc:
+        logger.error(f"[ai-chat] turn failed: {exc}")
+        return jsonify({'success': False, 'error': str(exc)}), 500
+    return jsonify({'success': True, **result})
+
+
+@app.route('/api/ai/chat/confirm', methods=['POST'])
+def ai_chat_confirm_endpoint():
+    """Run or cancel an action the assistant proposed.
+    Body: {id: str, approve: bool}. Only an explicit approve: true runs it."""
+    blocked = _chat_unavailable()
+    if blocked:
+        return blocked
+
+    chat = _get_ragnar_chat()
+    if not chat:
+        return jsonify({'success': False, 'error': 'Chat assistant unavailable.'}), 503
+
+    data = request.get_json(silent=True) or {}
+    cookie = request.headers.get('Cookie', '')
+    try:
+        result = chat.confirm(data.get('id'), data.get('approve') is True, cookie=cookie)
+    except Exception as exc:
+        logger.error(f"[ai-chat] confirm failed: {exc}")
+        return jsonify({'success': False, 'error': str(exc)}), 500
+    return jsonify({'success': True, **result})
 
 
 @app.route('/api/ai/models', methods=['POST'])
@@ -31876,6 +32542,7 @@ def run_server(host='0.0.0.0', port=8000, ssl_cert=None, ssl_key=None, https_por
         socketio.start_background_task(broadcast_status_updates)
         socketio.start_background_task(background_sync_loop)
         socketio.start_background_task(background_arp_scan_loop)
+        start_host_presence_monitor()
         socketio.start_background_task(background_health_monitor)
         socketio.start_background_task(_rusense_notify_loop)
         socketio.start_background_task(net_integrity_monitor_loop)
