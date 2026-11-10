@@ -23,6 +23,7 @@
 # (1, 2), so the visible area maps to the correct RAM location.
 
 import logging
+import os
 import time
 import struct
 
@@ -43,10 +44,26 @@ SPI_BUS    = 0
 SPI_DEVICE = 0
 SPI_MAX_HZ = 24_000_000
 
-# MADCTL (0x36): MY|MX set, RGB colour order. Ragnar renders mostly monochrome
-# content, so a red/blue swap would be invisible anyway; RGB keeps colour icons
-# faithful on the panels that honour it.
-MADCTL = 0xC0
+# MADCTL (0x36): memory access control — scan direction (MY|MX) plus the
+# colour-order bit. The Waveshare 1.44" LCD HAT panel is wired BGR, so bit 3
+# (0x08) must be set or every colour comes out with red and blue swapped
+# (a blonde viking turns blue). This was unnoticed while the UI was monochrome
+# — greys have R=G=B, so the bit does not affect them — and only shows now that
+# the panel draws full colour. Override per panel with RAGNAR_ST7735S_MADCTL
+# (e.g. 0xC0 for a rare RGB-wired unit, or 0x08/0x48/0x88/0xE8 to also change
+# rotation/mirroring); accepts decimal or 0x-hex.
+def _env_madctl(default=0xC8):
+    raw = os.environ.get("RAGNAR_ST7735S_MADCTL")
+    if not raw:
+        return default
+    try:
+        return int(raw, 0) & 0xFF
+    except (TypeError, ValueError):
+        logger.warning("Invalid RAGNAR_ST7735S_MADCTL=%r; using 0x%02X", raw, default)
+        return default
+
+
+MADCTL = _env_madctl()
 
 
 class EPD:
