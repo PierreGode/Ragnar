@@ -205,3 +205,31 @@ def test_wardriving_viking_page_shows_the_colour_character(gender):
     # Switched off, the page keeps the 1-bit viking.
     d.config['wardriving_lcd_color'] = False
     assert d._wd_color_panel(128, 128) is False
+
+
+@pytest.mark.parametrize('page_attr', ['_render_network_page', '_render_vuln_page',
+    '_render_discovered_page', '_render_advanced_page', '_render_traffic_page'])
+def test_info_pages_render_in_colour_on_the_lcd(page_attr):
+    """The carousel info pages use the dark theme with a gold title and no outer
+    border on the colour LCD, and stay 1-bit black on any other panel."""
+    sd = _sd()
+    d = _display(sd)
+    d.render_sx = d.render_sy = 1.0
+    d._get_cached_page_data = lambda *a, **k: None
+    d._fit_font = lambda font_file, font, text, avail: font
+    d._dbm_to_quality = lambda x: 50
+    sd.networkkbnbr = 3
+    # Colour LCD: RGB dark canvas, gold title row, no edge-hugging border.
+    img = Image.new('RGB', (128, 128), display._WD_COLORS['bg'])
+    getattr(d, page_attr)(img, ImageDraw.Draw(img))
+    assert img.getpixel((64, 100)) == display._WD_COLORS["bg"]
+    title_band = img.crop((2, 2, 126, 20))
+    gold = sum(1 for p in _px(title_band) if p[0] > 150 and p[1] > 110 and p[2] < 120)
+    assert gold > 20, 'expected a gold title'
+    # No outer border: the first column and row are background, not a frame line.
+    assert all(img.getpixel((0, y)) == display._WD_COLORS['bg'] for y in range(20, 108))
+    assert all(img.getpixel((x, 127)) == display._WD_COLORS['bg'] for x in range(128))
+    # Same page on a 1-bit canvas is plain black ink (other panels unchanged).
+    one = Image.new('1', (128, 128), 255)
+    getattr(d, page_attr)(one, ImageDraw.Draw(one))
+    assert one.mode == '1' and one.histogram()[0] > 80

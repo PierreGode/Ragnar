@@ -1022,16 +1022,20 @@ class Display:
         # DOCTOR") aren't clipped mid-word on the narrow LCD.
         font_title = self._fit_font('Viking.TTF', self.shared_data.font_viking,
                                     title, w - int(8 * sx))
-        draw.rectangle((1, 1, w - 1, h - 1), outline=0)
-        draw.text((int(4 * sx), int(4 * sy)), title, font=font_title, fill=0)
-        draw.line((1, int(22 * sy), w - 1, int(22 * sy)), fill=0)
-        draw.line((1, h - int(18 * sy), w - 1, h - int(18 * sy)), fill=0)
+        # Outer border: kept on the wider e-paper panels (where it sits clear of
+        # the edge), dropped on the narrow LCD HAT where the ST7735S's few-pixel
+        # visible-area offset makes an edge-hugging line look ragged.
+        if w >= 150:
+            draw.rectangle((1, 1, w - 1, h - 1), outline=self._wd_c(draw, 'frame'))
+        draw.text((int(4 * sx), int(4 * sy)), title, font=font_title, fill=self._wd_c(draw, 'title'))
+        draw.line((1, int(22 * sy), w - 1, int(22 * sy)), fill=self._wd_c(draw, 'frame'))
+        draw.line((1, h - int(18 * sy), w - 1, h - int(18 * sy)), fill=self._wd_c(draw, 'frame'))
         # Trim the footer hint so it never overflows a narrow panel (e.g. the
         # 128px LCD HAT); on wider e-paper it already fits, so this is a no-op.
         avail = w - int(8 * sx)
         while hint and font.getlength(hint) > avail:
             hint = hint[:-1]
-        draw.text((int(4 * sx), h - int(16 * sy)), hint, font=font, fill=0)
+        draw.text((int(4 * sx), h - int(16 * sy)), hint, font=font, fill=self._wd_c(draw, 'dim'))
 
     def _draw_stat_rows(self, draw, y, stats):
         """Draw key-value stat rows. Returns final y position."""
@@ -1046,8 +1050,8 @@ class Display:
         pad_x = int(6 * sx)
         for label, value in stats:
             val_str = str(value)[:22]
-            draw.text((pad_x, y), label, font=font, fill=0)
-            draw.text((w - pad_x - font.getlength(val_str), y), val_str, font=font, fill=0)
+            draw.text((pad_x, y), label, font=font, fill=self._wd_c(draw, 'dim'))
+            draw.text((w - pad_x - font.getlength(val_str), y), val_str, font=font, fill=self._wd_c(draw, 'ink'))
             y += line_h
         return y
 
@@ -1079,8 +1083,8 @@ class Display:
             available = right_edge - value_x
             while text and font.getlength(text) > available:
                 text = text[:-1]
-            draw.text((pad_x, y), label_str, font=font, fill=0)
-            draw.text((value_x, y), text, font=font, fill=0)
+            draw.text((pad_x, y), label_str, font=font, fill=self._wd_c(draw, 'ink'))
+            draw.text((value_x, y), text, font=font, fill=self._wd_c(draw, 'ink'))
             y += line_h
         return y
 
@@ -1105,7 +1109,7 @@ class Display:
             for kind, payload in row_groups:
                 if kind == 'divider':
                     y += int(2 * sy)
-                    d.line((int(4 * sx), y, w - int(4 * sx), y), fill=0)
+                    d.line((int(4 * sx), y, w - int(4 * sx), y), fill=self._wd_c(draw, 'frame'))
                     y += int(4 * sy)
                 else:
                     y = self._draw_stat_rows(d, y, payload)
@@ -1731,7 +1735,7 @@ class Display:
         # Adapter name, right-aligned on the header row (answers "which radio?").
         if iface:
             iw = font.getlength(iface)
-            draw.text((w - pad_x - iw, y), iface, font=font, fill=0)
+            draw.text((w - pad_x - iw, y), iface, font=font, fill=self._wd_c(draw, 'ink'))
             hdr_avail = w - 2 * pad_x - iw - int(4 * sx)
         else:
             hdr_avail = w - 2 * pad_x
@@ -1740,7 +1744,7 @@ class Display:
         chans = info.get('channels') or []
         if not chans:
             reason = 'not supported' if not supported.get(band, True) else 'no APs seen'
-            draw.text((pad_x, y), band_lbl, font=font, fill=0)
+            draw.text((pad_x, y), band_lbl, font=font, fill=self._wd_c(draw, 'ink'))
             self._draw_stat_rows(draw, y + int(13 * sy),
                                  [(reason, ""), ("Up/Down", "= band")])
             return
@@ -1755,7 +1759,7 @@ class Display:
             hdr += f"  ch{best.get('channel')} {int(best_sig)}"
         while hdr and font.getlength(hdr) > hdr_avail:
             hdr = hdr[:-1]
-        draw.text((pad_x, y), hdr, font=font, fill=0)
+        draw.text((pad_x, y), hdr, font=font, fill=self._wd_c(draw, 'ink'))
 
         # Plot area under the header, leaving a row for channel-axis labels
         # above the footer divider (h - 18·sy) so they don't collide with it.
@@ -1765,7 +1769,7 @@ class Display:
         x0, x1 = pad_x, w - pad_x
         if bottom - top < int(10 * sy) or x1 - x0 < 8:
             return
-        draw.line((x0, axis_y, x1, axis_y), fill=0)         # baseline
+        draw.line((x0, axis_y, x1, axis_y), fill=self._wd_c(draw, 'frame'))         # baseline
         n = len(chans)
         slot = (x1 - x0) / float(n)
         bar_w = max(1, int(slot) - 1)
@@ -1779,18 +1783,18 @@ class Display:
                 continue
             by = axis_y - bh
             if c.get('radar'):                              # DFS/radar → hollow
-                draw.rectangle([bx, by, bx + bar_w, axis_y], outline=0)
+                draw.rectangle([bx, by, bx + bar_w, axis_y], outline=self._wd_c(draw, 'frame'))
             else:
-                draw.rectangle([bx, by, bx + bar_w, axis_y], fill=0)
+                draw.rectangle([bx, by, bx + bar_w, axis_y], fill=self._wd_c(draw, 'ink'))
             if c is best and bh > 0:                        # mark the busiest
-                draw.line((bx, by - int(3 * sy), bx + bar_w, by - int(3 * sy)), fill=0)
+                draw.line((bx, by - int(3 * sy), bx + bar_w, by - int(3 * sy)), fill=self._wd_c(draw, 'frame'))
 
         # Channel-axis ticks: label first, middle and last channel numbers.
         for i in (0, n // 2, n - 1):
             lab = str(chans[i].get('channel'))
             lx = int(x0 + i * slot)
             lx = min(lx, x1 - int(font.getlength(lab)))
-            draw.text((max(x0, lx), axis_y + int(1 * sy)), lab, font=font, fill=0)
+            draw.text((max(x0, lx), axis_y + int(1 * sy)), lab, font=font, fill=self._wd_c(draw, 'ink'))
 
     def _draw_wrapped_note(self, draw, y, text, max_lines=3):
         """Word-wrap a short note across up to max_lines using the small font."""
@@ -1814,7 +1818,7 @@ class Display:
             lines.append(cur)
         line_h = int(11 * sy)
         for ln in lines[:max_lines]:
-            draw.text((pad_x, y), ln, font=font, fill=0)
+            draw.text((pad_x, y), ln, font=font, fill=self._wd_c(draw, 'ink'))
             y += line_h
         return y
 
@@ -1837,7 +1841,7 @@ class Display:
             big = str(verdict[0])
             font_big = self.shared_data.font_viking
             tw = font_big.getlength(big)
-            draw.text(((w - tw) / 2, y), big, font=font_big, fill=0)
+            draw.text(((w - tw) / 2, y), big, font=font_big, fill=self._wd_c(draw, 'ink'))
             y += int(24 * sy)
         y = self._draw_stat_rows(draw, y, result.get('rows') or [])
         note = result.get('note')
@@ -2417,7 +2421,7 @@ class Display:
 
             # Divider before host list
             y += int(2 * sy)
-            draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=0)
+            draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=self._wd_c(draw, 'frame'))
             y += int(4 * sy)
 
             # List actual discovered hosts
@@ -2430,8 +2434,8 @@ class Display:
                 port_count = len([p for p in str(ports).split(';') if p.strip()]) if ports else 0
                 line = f"{ip}"
                 extra = f"{status[:3]} p:{port_count}"
-                draw.text((pad_x, y), line, font=font, fill=0)
-                draw.text((w - pad_x - font.getlength(extra), y), extra, font=font, fill=0)
+                draw.text((pad_x, y), line, font=font, fill=self._wd_c(draw, 'ink'))
+                draw.text((w - pad_x - font.getlength(extra), y), extra, font=font, fill=self._wd_c(draw, 'ink'))
                 y += row_h
         else:
             stats = [
@@ -2472,13 +2476,13 @@ class Display:
             targets = data.get('targets', [])
             if targets:
                 y += int(2 * sy)
-                draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=0)
+                draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=self._wd_c(draw, 'frame'))
                 y += int(4 * sy)
-                draw.text((pad_x, y), "Recent targets:", font=font, fill=0)
+                draw.text((pad_x, y), "Recent targets:", font=font, fill=self._wd_c(draw, 'ink'))
                 y += row_h
                 max_rows = (h - int(18 * sy) - y) // row_h
                 for ip in targets[:max_rows]:
-                    draw.text((int(10 * sx), y), ip, font=font, fill=0)
+                    draw.text((int(10 * sx), y), ip, font=font, fill=self._wd_c(draw, 'ink'))
                     y += row_h
         else:
             stats = [
@@ -2556,18 +2560,18 @@ class Display:
                 scanner_items.append((name.capitalize(), status))
 
             for label, value in scanner_items:
-                draw.text((pad_x, y), label, font=font, fill=0)
-                draw.text((w - pad_x - font.getlength(value), y), value, font=font, fill=0)
+                draw.text((pad_x, y), label, font=font, fill=self._wd_c(draw, 'ink'))
+                draw.text((w - pad_x - font.getlength(value), y), value, font=font, fill=self._wd_c(draw, 'ink'))
                 y += line_h
 
             y += int(2 * sy)
-            draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=0)
+            draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=self._wd_c(draw, 'frame'))
             y += int(4 * sy)
 
             # Findings summary
             total = summary.get('total_findings', 0)
-            draw.text((pad_x, y), "Findings", font=font, fill=0)
-            draw.text((w - pad_x - font.getlength(str(total)), y), str(total), font=font, fill=0)
+            draw.text((pad_x, y), "Findings", font=font, fill=self._wd_c(draw, 'ink'))
+            draw.text((w - pad_x - font.getlength(str(total)), y), str(total), font=font, fill=self._wd_c(draw, 'ink'))
             y += line_h
 
             # Severity breakdown on one line each
@@ -2576,13 +2580,13 @@ class Display:
             med = sev.get('medium', 0)
             low = sev.get('low', 0)
             sev_line = f"C:{crit} H:{high} M:{med} L:{low}"
-            draw.text((pad_x, y), sev_line, font=font, fill=0)
+            draw.text((pad_x, y), sev_line, font=font, fill=self._wd_c(draw, 'ink'))
             y += line_h
 
             # Active scans
             active_count = len([s for s in active if s.get('status') == 'running'])
-            draw.text((pad_x, y), "Active scans", font=font, fill=0)
-            draw.text((w - pad_x - font.getlength(str(active_count)), y), str(active_count), font=font, fill=0)
+            draw.text((pad_x, y), "Active scans", font=font, fill=self._wd_c(draw, 'ink'))
+            draw.text((w - pad_x - font.getlength(str(active_count)), y), str(active_count), font=font, fill=self._wd_c(draw, 'ink'))
             y += line_h
 
             # Show running scan details
@@ -2591,7 +2595,7 @@ class Display:
                     stype = scan.get('scan_type', '?')[:8]
                     progress = scan.get('progress_percent', 0)
                     line = f"{stype} {progress}%"
-                    draw.text((int(10 * sx), y), line, font=font, fill=0)
+                    draw.text((int(10 * sx), y), line, font=font, fill=self._wd_c(draw, 'ink'))
                     y += row_h
         else:
             stats = [
@@ -4766,6 +4770,15 @@ class Display:
                         _wd_override = True
 
                 if not _wd_override:
+                    # Colour LCD HAT: these info pages render on an RGB dark-theme
+                    # canvas (like the main and wardriving screens); their
+                    # draw calls route colour through _wd_c, so on any other
+                    # panel the 1-bit canvas is kept and they look unchanged.
+                    if (current_page in (PAGE_NETWORK, PAGE_VULN, PAGE_DISCOVERED,
+                                         PAGE_ADVANCED, PAGE_TRAFFIC)
+                            and self._lcd_color_panel(render_w, render_h)):
+                        image = Image.new('RGB', (render_w, render_h), _WD_COLORS['bg'])
+                        draw = ImageDraw.Draw(image)
                     if current_page == PAGE_NETWORK:
                         self._render_network_page(image, draw)
                     elif current_page == PAGE_VULN:
