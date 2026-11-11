@@ -65,6 +65,14 @@ class Ragnar:
         except ImportError:
             pass
 
+        # Waveshare UPS HAT battery monitor (INA219 over I2C, auto-detected)
+        self.ups_hat_monitor = None
+        try:
+            from ups_hat import UpsHatMonitor
+            self.ups_hat_monitor = UpsHatMonitor(shared_data)
+        except Exception as e:
+            logger.debug(f"UPS HAT monitor unavailable: {e}")
+
     def run(self):
         """Main loop for Ragnar. Waits for Wi-Fi connection and starts Orchestrator."""
         logger.info("=" * 70)
@@ -74,6 +82,10 @@ class Ragnar:
         # Start PiSugar button listener (if available)
         if self.pisugar_listener:
             self.pisugar_listener.start()
+
+        # Start the Waveshare UPS HAT battery monitor (idles if no HAT answers)
+        if self.ups_hat_monitor:
+            self.ups_hat_monitor.start()
 
         # If wardriving-on-boot is enabled, kick wardriving off BEFORE the WiFi
         # manager starts. wifi_manager.start() blocks ~5s minimum (longer with
@@ -246,6 +258,8 @@ class Ragnar:
         # Stop PiSugar listener
         if self.pisugar_listener:
             self.pisugar_listener.stop()
+        if getattr(self, 'ups_hat_monitor', None):
+            self.ups_hat_monitor.stop()
 
         # Stop orchestrator
         self.stop_orchestrator()

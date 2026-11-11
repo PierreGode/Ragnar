@@ -59,6 +59,7 @@ from init_shared import shared_data
 import git_updater
 import os_updates
 import distro_cve
+from ups_hat import battery_source
 import cyd_node
 import cyd_serial_bridge
 import cyd_sensor
@@ -28232,12 +28233,11 @@ def get_system_status_api():
         except:
             temperature_data = {}
         
-        # Battery (PiSugar UPS - only if connected)
+        # Battery (PiSugar or Waveshare UPS HAT - only if connected)
         battery_data = None
         try:
-            ragnar_inst = getattr(shared_data, 'ragnar_instance', None)
-            pisugar = getattr(ragnar_inst, 'pisugar_listener', None) if ragnar_inst else None
-            if pisugar and pisugar.available:
+            pisugar = battery_source(shared_data)
+            if pisugar:
                 level = pisugar.get_battery_level()
                 if level is not None:
                     voltage = pisugar.get_battery_voltage()

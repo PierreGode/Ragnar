@@ -136,6 +136,11 @@ A badge appears on the **Dashboard** on a real warning. The **System** tab has t
 Source: power.md
 <!-- proof: docs/power.md | hidden while the supply is healthy -->
 
+### Does Ragnar show the battery of a Waveshare UPS HAT?
+Yes. A UPS HAT (C) is detected over I2C at start and its percentage shows in the display header and the **System** tab Battery card.
+Source: ups-hat.md
+<!-- proof: docs/ups-hat.md | The card stays hidden when no battery is detected -->
+
 ### Where do I control the cooling fan?
 In the **System** tab. It appears only when a fan driver exists.
 Source: fan.md
