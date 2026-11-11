@@ -281,6 +281,10 @@ const configMetadata = {
         label: "Distro-aware CVE Check",
         description: "Check the Debian / Ubuntu security trackers before surfacing a CVE. When a service banner shows the distro patch level (e.g. OpenSSH 9.2p1 Debian 2+deb12u10), CVEs the distro already fixed are tagged and hidden from the default view instead of shown as open. Downloads tracker data (about 15 MB for Debian, cached); only CVE ids are sent."
     },
+    ups_hat_monitor: {
+        label: "Waveshare UPS HAT Battery",
+        description: "Auto-detect a Waveshare UPS HAT on I2C (UPS HAT (C) for the Pi Zero at 0x43, UPS HAT / (B) at 0x42) and show its battery percentage on the display header and the System tab. Read-only; does nothing when no HAT is fitted. Needs I2C enabled and a restart to take effect."
+    },
     enable_attacks: {
         label: "Enable Automatic Attacks",
         description: "Allow Ragnar to perform automated attacks (SSH, FTP, SMB, SQL, etc.) on discovered targets. Disable to only scan without attacking."
@@ -26062,10 +26066,10 @@ function displayConfigForm(config) {
         'General': ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'distro_cve_enrichment', 'enable_attacks', 'blacklistcheck'],
         'Network': ['network_max_failed_pings'],
         'Timing': ['startup_delay', 'web_delay', 'screen_delay', 'scan_interval'],
-        'Display': ['epd_type', 'screen_reversed', 'spi_clock_mhz', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness']
+        'Display': ['epd_type', 'screen_reversed', 'spi_clock_mhz', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness', 'ups_hat_monitor']
     };
     
-    const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'distro_cve_enrichment', 'enable_attacks', 'blacklistcheck', 'wardriving_enabled', 'wardriving_display', 'wardriving_auto_export', 'wardriving_wigle_include_zigbee'];
+    const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'distro_cve_enrichment', 'enable_attacks', 'blacklistcheck', 'ups_hat_monitor', 'wardriving_enabled', 'wardriving_display', 'wardriving_auto_export', 'wardriving_wigle_include_zigbee'];
     const alwaysShowKeys = new Set(['network_max_failed_pings', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'spi_clock_mhz', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness', 'wardriving_scan_interval', 'wardriving_gps_port', 'wardriving_gps_baudrate']);
     const fallbackValues = {
         network_max_failed_pings: 15,
@@ -29999,7 +30003,7 @@ function updateSystemOverview(data) {
     if (diskDetails) diskDetails.textContent = `${data.disk.used_formatted} / ${data.disk.total_formatted}`;
     _sysBar(diskProgress, data.disk.percent);
     
-    // Battery (PiSugar - only shown when connected)
+    // Battery (PiSugar or Waveshare UPS HAT - only shown when connected)
     const batteryCard = document.getElementById('battery-card');
     if (batteryCard) {
         if (data.battery) {

@@ -29,6 +29,7 @@ from comment import Commentaireia
 from logger import Logger
 import subprocess  
 from shared import detect_wifi_interface
+from ups_hat import battery_source
 
 def _short_scan_error(err):
     """Squeeze a BT/Zigbee scanner error into the ~10 chars the net-diag card's
@@ -1972,12 +1973,11 @@ class Display:
                     left_used = 15 + int(font.getlength(ip_octet))
         except Exception:
             pass
-        # Battery %, top-right (PiSugar)
+        # Battery %, top-right (PiSugar or Waveshare UPS HAT)
         bat_w = 0
         try:
-            _ri = getattr(sd, 'ragnar_instance', None)
-            _ps = getattr(_ri, 'pisugar_listener', None) if _ri else None
-            if _ps and _ps.available:
+            _ps = battery_source(sd)
+            if _ps:
                 bl = _ps.get_battery_level()
                 if bl is not None:
                     bt = f"{int(round(bl))}%{'+' if _ps.is_charging() else ''}"
@@ -2125,12 +2125,11 @@ class Display:
                     left_used = 17 + int(font.getlength(ip_octet))
         except Exception:
             pass
-        # Battery %, top-right (PiSugar)
+        # Battery %, top-right (PiSugar or Waveshare UPS HAT)
         bat_w = 0
         try:
-            _ri = getattr(sd, 'ragnar_instance', None)
-            _ps = getattr(_ri, 'pisugar_listener', None) if _ri else None
-            if _ps and _ps.available:
+            _ps = battery_source(sd)
+            if _ps:
                 bl = _ps.get_battery_level()
                 if bl is not None:
                     bt = f"{int(round(bl))}%{'+' if _ps.is_charging() else ''}"
@@ -4880,12 +4879,11 @@ class Display:
                     sx = self.scale_factor_x
                     sy = self.scale_factor_y
 
-                # Check PiSugar once per frame for title sizing + battery text
+                # Check for a battery (PiSugar / Waveshare UPS HAT) once per frame for title sizing + battery text
                 _pisugar_available = False
                 try:
-                    _ri = getattr(self.shared_data, 'ragnar_instance', None)
-                    _ps = getattr(_ri, 'pisugar_listener', None) if _ri else None
-                    _pisugar_available = _ps and _ps.available
+                    _ps = battery_source(self.shared_data)
+                    _pisugar_available = _ps is not None
                 except Exception:
                     pass
                 _title = self._unit_display_title()
@@ -4908,7 +4906,7 @@ class Display:
                 if self.shared_data.usb_active:
                     image.paste(self.shared_data.usb, (int(90 * sx), int(4 * sy)))
 
-                # Battery percentage (PiSugar) - flush right in header
+                # Battery percentage (PiSugar / UPS HAT) - flush right in header
                 if _pisugar_available:
                     try:
                         bat_level = _ps.get_battery_level()

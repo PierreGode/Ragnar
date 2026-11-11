@@ -4,6 +4,19 @@
 
 ### 2026-11-11
 
+#### feat(display): battery percentage from a Waveshare UPS HAT (C)
+*branch `feat/waveshare-ups-hat-c`* · closes [#1049](https://github.com/PierreGode/Ragnar/issues/1049)
+
+- **Battery % on screen for the Waveshare UPS HAT (C).** The Pi Zero pogo-pin UPS is now detected at start and its percentage shown in the top-right of the display header (e-Paper, LCD HAT and TFT layouts) and on the **System** tab Battery card, in the slot that only a PiSugar could fill before. `75%+` means external power is connected.
+- **Nothing to install.** Ragnar reads the HAT's INA219 itself over I2C (`0x43`) with a plain ioctl: no `pisugar-server`, no extra service, no new Python package. I2C is already enabled by the installer.
+- **Same number as Waveshare's tool.** The percentage is the formula from their demo script (3.0 V = 0 %, 4.2 V = 100 %), averaged over 30 seconds so a scan starting does not make it jump. External power is read from the direction of the battery current, so a full battery on the charger still reads as plugged in.
+- **Read-only and guarded.** Ragnar never writes to the chip, and only accepts an address whose voltage looks like a Li-ion pack, so another I2C device on the same address, or a HAT with no battery fitted, shows nothing instead of a bogus 0 %. After six failed reads in a row the reading is dropped, and it comes back when the HAT answers again.
+- **Also recognised:** the two-cell UPS HAT / UPS HAT (B) at `0x42` (same chip, formula scaled to two cells; not tested on hardware). A PiSugar takes priority when both are present.
+- **Switch:** Config → Display → **Waveshare UPS HAT Battery** (`ups_hat_monitor`, on by default). `sudo python3 ups_hat.py` prints one reading from a shell.
+- **Not included:** automatic shutdown at low battery.
+- **Docs:** new [ups-hat.md](ups-hat.md); README, [INSTALL.md](INSTALL.md), [hardware-gen2.md](hardware-gen2.md), [knowledgebase.md](knowledgebase.md) (+1 entry)
+- **Validation:** new `tests/test_ups_hat.py` (35 tests: register decoding against the demo's arithmetic, detection at both addresses, rejection of implausible voltages, no writes, charge state from the shunt sign, smoothing, dead-bus drop and recovery, PiSugar priority, the header on the colour and 1-bit LCD layouts, and `/api/system/status` through the Flask test client). Address, register scaling, formula and current sign were taken from Waveshare's wiki and `UPS_HAT_C.7z` demo, and checked against the UPS HAT (C) schematic (INA219 strapped to `0x43`, 0.01 Ω shunt between charger and cell, bus voltage measured on the battery side). The raw I2C reader was exercised against real I2C devices on the dev box; **no UPS HAT (C) was available, so the end-to-end reading on real hardware is unverified.**
+
 #### feat(vuln): Debian/Ubuntu revision-aware CVE check to cut banner-scan false positives
 *branch `feat/debian-revision-aware-cve`* · closes [#1051](https://github.com/PierreGode/Ragnar/issues/1051)
 

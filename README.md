@@ -90,6 +90,7 @@ Every feature below has a full guide in [`docs/`](docs). Short version here, det
 - **On-Screen Kiosk** (Pi server only) — drives an attached HDMI/DSI screen as a fullscreen Chromium dashboard, with a handheld escape hatch (Hackberry Pi CM5). Needs 2GB+ RAM. See [Kiosk Mode](docs/kiosk.md).
 - **WiFi Pineapple Pager** — deploy Ragnar to the Pager as a native payload with a full-color LCD, buttons and LED status. Based on **brAinphreAk**'s [PagerBjorn / Loki](https://github.com/pineapple-pager-projects/pineapple_pager_loki). See [Pager Guide](docs/pager.md).
 - **PiSugar 3 button** — physical button to swap between Ragnar and Pwnagotchi modes (see below).
+- **Battery percentage on screen** — PiSugar, or a Waveshare UPS HAT (C) on a Pi Zero (auto-detected over I2C, nothing to install). See [UPS HAT](docs/ups-hat.md).
 
 ### Platform, safety & storage
 - **LAN-first connectivity & smart WiFi** — prefers Ethernet when present, manages WiFi as fallback, auto-connects to known networks and falls back to AP mode with a captive portal.
