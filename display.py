@@ -1380,11 +1380,13 @@ class Display:
         dbm_w = font.getlength(dbm_txt) + int(5 * sx)
         bar_x1 = x1 - dbm_w
         if bar_x1 > x0:
-            draw.rectangle([x0, y, bar_x1, y + bar_h], outline=0)
+            draw.rectangle([x0, y, bar_x1, y + bar_h], outline=self._wd_c(draw, 'frame'))
             fill_w = int((bar_x1 - x0) * q / 100.0)
             if fill_w > 0:
-                draw.rectangle([x0, y, x0 + fill_w, y + bar_h], fill=0)
-        draw.text((bar_x1 + int(4 * sx), y - int(1 * sy)), dbm_txt, font=font, fill=0)
+                # Green quality bar, matching the web GUI's signal meters; on a
+                # 1-bit panel _wd_c returns 0 so it stays a solid black bar.
+                draw.rectangle([x0, y, x0 + fill_w, y + bar_h], fill=self._wd_c(draw, 'good'))
+        draw.text((bar_x1 + int(4 * sx), y - int(1 * sy)), dbm_txt, font=font, fill=self._wd_c(draw, 'ink'))
         return y + bar_h
 
     def _draw_signal_bars(self, draw, y, aps):
@@ -1409,7 +1411,7 @@ class Display:
             s = ssid
             while s and font.getlength(s) > name_w:
                 s = s[:-1]
-            draw.text((pad_x, y), s or '·', font=font, fill=0)
+            draw.text((pad_x, y), s or '·', font=font, fill=self._wd_c(draw, 'ink'))
             self._draw_signal_bar(draw, y, ap.get('signal'),
                                   pad_x + name_w, w - pad_x)
             y += row_h
@@ -1424,16 +1426,20 @@ class Display:
         w = getattr(self, 'render_w', self.shared_data.width)
         h = getattr(self, 'render_h', self.shared_data.height)
         font = self.shared_data.font_arial9
+        rgb = getattr(draw, 'mode', '1') == 'RGB'
         # Thin border + footer hint only (no "NET CARDS" title / top divider),
-        # reclaiming that space for the list.
-        draw.rectangle((1, 1, w - 1, h - 1), outline=0)
+        # reclaiming that space for the list. The border is dropped on the narrow
+        # LCD HAT (like _draw_page_frame) where the ST7735S edge offset makes it
+        # look ragged.
+        if w >= 150:
+            draw.rectangle((1, 1, w - 1, h - 1), outline=self._wd_c(draw, 'frame'))
         foot_y = h - int(18 * sy)
-        draw.line((1, foot_y, w - 1, foot_y), fill=0)
+        draw.line((1, foot_y, w - 1, foot_y), fill=self._wd_c(draw, 'frame'))
         hint = "K2 back · press=open"
         avail_hint = w - int(8 * sx)
         while hint and font.getlength(hint) > avail_hint:
             hint = hint[:-1]
-        draw.text((int(4 * sx), h - int(16 * sy)), hint, font=font, fill=0)
+        draw.text((int(4 * sx), h - int(16 * sy)), hint, font=font, fill=self._wd_c(draw, 'dim'))
         pad_x = int(8 * sx)
         n = len(NETDIAG_CARD_NAMES)
         # Fit every card between the top and the footer divider. The lower bound
@@ -1452,11 +1458,15 @@ class Display:
             sel = (i == highlight % n)
             label = f"{i + 1}. {nm}"
             if sel:
+                # Highlighted row: amber bar with dark text on the colour LCD;
+                # the classic black bar with white text on a 1-bit panel.
                 draw.rectangle([int(3 * sx), y,
-                                w - int(3 * sx), y + row_h - int(1 * sy)], fill=0)
-                draw.text((pad_x, y + text_dy), label, font=font, fill=1)
+                                w - int(3 * sx), y + row_h - int(1 * sy)],
+                               fill=(_WD_COLORS['title'] if rgb else 0))
+                draw.text((pad_x, y + text_dy), label, font=font,
+                          fill=(_WD_COLORS['bg'] if rgb else 1))
             else:
-                draw.text((pad_x, y + text_dy), label, font=font, fill=0)
+                draw.text((pad_x, y + text_dy), label, font=font, fill=self._wd_c(draw, 'ink'))
             y += row_h
 
     def _render_netdiag_page(self, image, draw, page, frozen=False, func_idx=-1):
@@ -4684,6 +4694,13 @@ class Display:
                     bl = (self.button_listener
                           if (self.button_listener and self.button_listener.available)
                           else None)
+                    # Colour LCD HAT: swap the 1-bit canvas for an RGB dark-theme
+                    # one so the net-diag cards, menu and signal bars render in
+                    # colour. Their draw calls route through _wd_c, so on every
+                    # other panel the 1-bit canvas is kept and they look the same.
+                    if self._lcd_color_panel(render_w, render_h):
+                        image = Image.new('RGB', (render_w, render_h), _WD_COLORS['bg'])
+                        draw = ImageDraw.Draw(image)
                     seq0 = getattr(bl, 'netdiag_seq', 0) if bl else 0
                     result = getattr(bl, 'netdiag_result', None) if bl else None
                     if result is not None:

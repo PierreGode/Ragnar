@@ -233,3 +233,67 @@ def test_info_pages_render_in_colour_on_the_lcd(page_attr):
     one = Image.new('1', (128, 128), 255)
     getattr(d, page_attr)(one, ImageDraw.Draw(one))
     assert one.mode == '1' and one.histogram()[0] > 80
+
+
+# ── the Network Diagnostic screens ──────────────────────────────────────────
+
+def _netdiag_display(sd):
+    d = _display(sd)
+    d.render_sx = d.render_sy = 1.0
+    d._fit_font = lambda font_file, font, text, avail: font
+    d._dbm_to_quality = lambda dbm: 70
+    return d
+
+
+def test_netdiag_signal_bars_are_green_on_the_lcd():
+    """The per-network signal bars render green (like the web GUI) on the colour
+    LCD, and stay solid black ink on any 1-bit panel."""
+    sd = _sd()
+    d = _netdiag_display(sd)
+    aps = [{'ssid': 'home', 'signal': -45}, {'ssid': 'office', 'signal': -70}]
+    img = Image.new('RGB', (128, 128), display._WD_COLORS['bg'])
+    d._draw_signal_bars(ImageDraw.Draw(img), 10, aps)
+    g = display._WD_COLORS['good']
+    green = sum(1 for p in _px(img) if p == g)
+    assert green > 40, 'expected green signal bars'
+    # A 1-bit panel keeps the old black-on-white bars (no colour leaks in).
+    one = Image.new('1', (128, 128), 255)
+    d._draw_signal_bars(ImageDraw.Draw(one), 10, aps)
+    assert one.mode == '1' and one.histogram()[0] > 20
+
+
+def test_netdiag_card_menu_is_colour_with_a_gold_highlight():
+    """The card-selection menu highlights the current card with a gold bar on
+    the colour LCD (dark text), and with the classic black bar on a 1-bit panel."""
+    sd = _sd()
+    d = _netdiag_display(sd)
+    img = Image.new('RGB', (128, 128), display._WD_COLORS['bg'])
+    d._render_netdiag_menu(img, ImageDraw.Draw(img), highlight=0)
+    title = display._WD_COLORS['title']
+    assert sum(1 for p in _px(img) if p == title) > 30, 'expected a gold highlight bar'
+    # No outer border on the narrow LCD (the ST7735S edge offset makes it ragged).
+    assert all(img.getpixel((0, y)) == display._WD_COLORS['bg'] for y in range(24, 100))
+    # 1-bit panel: plain black bar + white text, no colour.
+    one = Image.new('1', (128, 128), 255)
+    d._render_netdiag_menu(one, ImageDraw.Draw(one), highlight=0)
+    assert one.mode == '1' and one.histogram()[0] > 80
+
+
+def test_netdiag_card_page_is_colour_on_the_lcd():
+    """A net-diag card (LINK) renders on the dark theme with a gold title on the
+    colour LCD, and stays plain black ink on any other panel."""
+    sd = _sd()
+    d = _netdiag_display(sd)
+    d._get_cached_page_data = lambda *a, **k: {
+        'eth': {'name': 'eth0', 'link_detected': True, 'speed': '1000Mb/s',
+                'duplex': 'full', 'autoneg': True, 'mac': 'aa:bb:cc:dd:ee:ff'}}
+    img = Image.new('RGB', (128, 128), display._WD_COLORS['bg'])
+    d._render_netdiag_page(img, ImageDraw.Draw(img), 0)
+    bg = sum(1 for p in _px(img) if p == display._WD_COLORS['bg'])
+    assert bg > 0.6 * 128 * 128, 'expected a dark-theme background'
+    title_band = img.crop((2, 2, 126, 20))
+    gold = sum(1 for p in _px(title_band) if p[0] > 150 and p[1] > 110 and p[2] < 120)
+    assert gold > 20, 'expected a gold title'
+    one = Image.new('1', (128, 128), 255)
+    d._render_netdiag_page(one, ImageDraw.Draw(one), 0)
+    assert one.mode == '1' and one.histogram()[0] > 80

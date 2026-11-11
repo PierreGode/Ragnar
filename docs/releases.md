@@ -2,6 +2,18 @@
 
 ## Releases
 
+### 2026-11-11
+
+#### feat(display): colour the Network Diagnostic screens on the 1.44" LCD HAT
+*branch `feat/netdiag-lcd-colour`*
+
+- **Network Diagnostic mode now renders in colour on the LCD HAT.** The last 1-bit screen on the colour panel catches up: the diagnostic cards (LINK, IP, SWITCH, DHCP, WIFI, SIGNAL, SPECTRUM, IFACE, BT, ZIGBEE), the card-selection menu and the one-shot test results all use the same dark theme as the rest of the LCD — gold title, grey labels, light values. Every other panel keeps its 1-bit black-on-white look.
+- **Wi-Fi signal bars are green**, matching the web GUI's signal meters. The SIGNAL card's per-network bars and the WIFI card's live bar fill green on the colour LCD and stay solid black ink on any 1-bit panel.
+- **Card menu highlight.** The selected card gets a gold bar with dark text on the colour LCD (the classic black bar with white text on 1-bit), and the outer border is dropped on the narrow LCD like the other screens, where the ST7735S edge offset makes an edge-hugging line look ragged.
+- **How.** The diagnostic frame now renders on the RGB dark-theme canvas when `_lcd_color_panel()` is true, and the remaining hardcoded ink values route through the same `_wd_c` helper the rest of the LCD uses — so nothing changes on e-paper or any other panel. The `lcd_color: false` switch still restores black-on-white.
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md#colour)
+- **Validation:** `tests/test_lcd_color.py` grows to 23 tests (+3: green signal bars, the gold-highlighted card menu with no outer border, a colour diagnostic card — each with its 1-bit counterpart). Rendered offline at native 128×128 and eyeballed.
+
 ### 2026-11-10
 
 #### [#1056](https://github.com/PierreGode/Ragnar/pull/1056) — feat(display): blonde vikings and a full-colour 1.44" LCD HAT
