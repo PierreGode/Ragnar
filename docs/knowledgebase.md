@@ -409,6 +409,11 @@ It raises its own access point named `Ragnar`. The password is `ragnarconnect`, 
 Source: RagnarAP.md
 <!-- proof: docs/RagnarAP.md | `ragnarconnect` -->
 
+### Why does Start AP Mode say my Wi-Fi adapter does not support Access Point mode?
+The adapter's driver cannot run a hotspot, so Ragnar does not try and leaves Wi-Fi connected. Use the Pi's built-in Wi-Fi or an AP-capable adapter.
+Source: RagnarAP.md
+<!-- proof: docs/RagnarAP.md | the AP is **not** attempted and the current Wi-Fi connection is left untouched -->
+
 ## Bluetooth
 
 ### What is BLE Watch?

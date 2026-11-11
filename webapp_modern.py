@@ -21624,6 +21624,17 @@ def connect_wifi():
         logger.error(traceback.format_exc())
         return jsonify({'success': False, 'error': str(e)}), 500
 
+def _ap_failure_fields(wm, fallback):
+    """Why AP mode did not start, for the JSON answer. `error` carries the
+    specific reason (e.g. an adapter without AP support) when there is one."""
+    reason = getattr(wm, 'ap_last_error', None)
+    fields = {'message': reason or fallback}
+    if reason:
+        fields['error'] = reason
+        fields['ap_supported'] = wm.interface_supports_ap()
+    return fields
+
+
 @app.route('/api/wifi/disconnect', methods=['POST'])
 def disconnect_wifi():
     """Disconnect from current Wi-Fi network"""
@@ -21634,10 +21645,13 @@ def disconnect_wifi():
         
         # Stop any active connection and start AP mode
         result = wifi_manager.wifi_manager.start_ap_mode()
-        
+
+        if not result:
+            return jsonify(dict({'success': False},
+                                **_ap_failure_fields(wifi_manager.wifi_manager, 'Failed to start AP mode')))
         return jsonify({
             'success': result,
-            'message': 'Disconnected and started AP mode' if result else 'Failed to start AP mode'
+            'message': 'Disconnected and started AP mode'
         })
         
     except Exception as e:
@@ -21706,9 +21720,12 @@ def enable_wifi_ap_mode():
             'cycling': wifi_manager.wifi_manager.ap_cycle_enabled
         }
         
+        if not success:
+            return jsonify(dict({'success': False, 'ap_config': ap_config},
+                                **_ap_failure_fields(wifi_manager.wifi_manager, 'Failed to enable AP mode')))
         return jsonify({
             'success': success,
-            'message': 'Smart AP mode enabled with 3-minute cycling' if success else 'Failed to enable AP mode',
+            'message': 'Smart AP mode enabled with 3-minute cycling',
             'ap_config': ap_config
         })
         
@@ -21725,10 +21742,13 @@ def start_wifi_ap():
             return jsonify({'error': 'Wi-Fi manager not available'}), 503
         
         success = wifi_manager.wifi_manager.start_ap_mode()
-        
+
+        if not success:
+            return jsonify(dict({'success': False},
+                                **_ap_failure_fields(wifi_manager.wifi_manager, 'Failed to start AP mode')))
         return jsonify({
             'success': success,
-            'message': 'AP mode started' if success else 'Failed to start AP mode'
+            'message': 'AP mode started'
         })
         
     except Exception as e:

@@ -1120,6 +1120,10 @@
 
         // Start AP mode
         async function startAPMode() {
+            if (currentWifiStatus && currentWifiStatus.ap_supported === false && !currentWifiStatus.ap_mode_active) {
+                showAlert(currentWifiStatus.ap_error || `The Wi-Fi adapter on ${currentWifiStatus.ap_interface || 'this device'} does not support Access Point mode.`, 'error', 15000);
+                return;
+            }
             if (!confirm('This will disconnect from the current network and start Access Point mode. Continue?')) {
                 return;
             }
@@ -1132,7 +1136,7 @@
                     showAlert('Access Point mode started', 'success');
                     setTimeout(refreshStatus, 2000);
                 } else {
-                    showAlert('Failed to start Access Point mode', 'error');
+                    showAlert(result.error || result.message || 'Failed to start Access Point mode', 'error', 15000);
                 }
             } catch (error) {
                 console.error('Error starting AP mode:', error);
@@ -1187,14 +1191,14 @@
         }
 
         // Show alert message
-        function showAlert(message, type) {
+        function showAlert(message, type, duration = 5000) {
             const alertElement = document.getElementById(`alert-${type}`);
             alertElement.textContent = message;
             alertElement.style.display = 'block';
             
             setTimeout(() => {
                 alertElement.style.display = 'none';
-            }, 5000);
+            }, duration);
         }
 
         // Enhanced network scanning with fallback handling for Pi Zero W2
