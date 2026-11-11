@@ -24,16 +24,41 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+# Locate the Ragnar repo root. This script lives in <repo>/scripts/ (the main
+# installer and the docs call it there) but may also be run from the repo root.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "${SCRIPT_DIR}/pager/pager_menu.py" ]; then
+    RAGNAR_DIR="${SCRIPT_DIR}"
+elif [ -f "${SCRIPT_DIR}/../pager/pager_menu.py" ]; then
+    RAGNAR_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+else
+    echo "ERROR: cannot find the Ragnar repo (no pager/pager_menu.py next to or above ${SCRIPT_DIR})." >&2
+    echo "       Run this script from a full Ragnar checkout." >&2
+    exit 1
+fi
+
+# The Pager's USB-ethernet subnet is 172.16.<N>.0/24 with the Pager at .1, and
+# <N> differs between units/firmware (42, 52, ...). If this machine has an
+# address in such a subnet, offer that Pager as the default.
+detect_pager_ip() {
+    command -v ip >/dev/null 2>&1 || return 0
+    ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 \
+        | grep -E '^172\.16\.[0-9]+\.[0-9]+$' | grep -vE '\.1$' \
+        | sed -E 's/\.[0-9]+$/.1/' | sort -u | head -1
+}
+
 # Configuration
 if [ -z "$1" ]; then
-    read -p "Enter Pager IP address [172.16.*.1]: " _pager_ip
-    PAGER_IP="${_pager_ip:-172.16.42.1}"
+    _detected_ip="$(detect_pager_ip)"
+    _default_ip="${_detected_ip:-172.16.42.1}"
+    [ -n "$_detected_ip" ] && echo "Detected a Pager USB network: ${_detected_ip}"
+    read -p "Enter Pager IP address [${_default_ip}]: " _pager_ip
+    PAGER_IP="${_pager_ip:-$_default_ip}"
 else
     PAGER_IP="$1"
 fi
 PAGER_USER="root"
 PAGER_PAYLOAD_DIR="/root/payloads/user/reconnaissance/pager_ragnar"
-RAGNAR_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 log() {
     local level=$1; shift
@@ -79,52 +104,83 @@ for key in "$REAL_USER_HOME/.ssh/id_ed25519" "$REAL_USER_HOME/.ssh/id_rsa" "$REA
     fi
 done
 
-# SSH options for Pager connection (bypass host key issues common with Pager)
-SSH_OPTS_BASE="-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $SSH_IDENTITY"
-SSH_OPTS_BATCH="${SSH_OPTS_BASE} -o BatchMode=yes"
-SSH_OPTS="${SSH_OPTS_BATCH}"
-USE_INTERACTIVE=false
+# SSH options for Pager connection (bypass host key issues common with Pager).
+# One multiplexed connection is reused for every later ssh call, so password
+# users are prompted once instead of ~20 times, and the install is much faster.
+CTRL_DIR=$(mktemp -d)
+STAGING_DIR=""
+IPK_DIR=""
+SSH_OPTS_BASE="-o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR $SSH_IDENTITY"
+SSH_MUX="-o ControlMaster=auto -o ControlPath=${CTRL_DIR}/mux -o ControlPersist=900"
+SSH_OPTS="${SSH_OPTS_BASE} ${SSH_MUX} -o BatchMode=yes"
+
+# All Pager SSH/transfer goes through these. They read $SSH_OPTS at call time,
+# so they work both before and after the key-vs-password decision below.
+pager_ssh() { ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "$@"; }
+
+# Copy files to the Pager as a tar stream over ssh. scp is avoided on purpose:
+# modern OpenSSH scp speaks SFTP, which the Pager's SSH server may not provide,
+# and a single stream is far faster than scp -r for thousands of small files.
+#   push_dir  <local-dir>  <remote-dir>   (contents of local-dir -> remote-dir)
+#   push_files <remote-dir> <file>...     (files, flat, -> remote-dir)
+push_dir() {
+    tar -C "$1" -czf - . | pager_ssh "mkdir -p '$2' && tar -xzf - -C '$2'"
+}
+push_files() {
+    local dest="$1"; shift
+    local dir; dir="$(dirname "$1")"
+    local names=(); local f
+    for f in "$@"; do names+=("$(basename "$f")"); done
+    tar -C "$dir" -czf - "${names[@]}" | pager_ssh "mkdir -p '$dest' && tar -xzf - -C '$dest'"
+}
+
+cleanup() {
+    ssh -o ControlPath="${CTRL_DIR}/mux" -O exit "${PAGER_USER}@${PAGER_IP}" >/dev/null 2>&1 || true
+    rm -rf "${CTRL_DIR}"
+    [ -n "${STAGING_DIR}" ] && rm -rf "${STAGING_DIR}"
+    [ -n "${IPK_DIR}" ] && rm -rf "${IPK_DIR}"
+    return 0
+}
+trap cleanup EXIT
+
+# Is the SSH port reachable at all? (separates "wrong IP / not plugged in"
+# from "authentication failed")
+if ! timeout 6 bash -c "exec 3<>/dev/tcp/${PAGER_IP}/22" 2>/dev/null; then
+    log "ERROR" "No SSH service reachable at ${PAGER_IP}:22"
+    echo ""
+    echo "  Make sure:"
+    echo "    1. The Pager is powered on and connected via USB"
+    echo "    2. This machine got an address on the Pager's USB network"
+    echo "       (run: ip -4 addr | grep 172.16.)  - the Pager is the .1 of that subnet"
+    _hint="$(detect_pager_ip)"
+    [ -n "$_hint" ] && [ "$_hint" != "$PAGER_IP" ] && \
+        echo "    3. A Pager network was detected here - try: $0 ${_hint}"
+    exit 1
+fi
 
 # First try with key auth (BatchMode)
-if ssh $SSH_OPTS_BATCH "${PAGER_USER}@${PAGER_IP}" "echo ok" >/dev/null 2>&1; then
+if pager_ssh "echo ok" >/dev/null 2>&1; then
     log "SUCCESS" "Connected to Pager at ${PAGER_IP} (key auth)"
 else
-    log "WARNING" "Key-based SSH auth failed. Trying interactive mode..."
+    log "WARNING" "Key-based SSH auth failed."
     echo ""
-    # Test if we can reach the host at all
-    if ssh $SSH_OPTS_BASE -o PasswordAuthentication=yes -o NumberOfPasswordPrompts=0 "${PAGER_USER}@${PAGER_IP}" "echo ok" >/dev/null 2>&1; then
-        log "SUCCESS" "Connected to Pager at ${PAGER_IP}"
-    else
-        echo -e "${YELLOW}SSH key auth is not working. You can continue with password auth.${NC}"
-        echo -e "${YELLOW}You'll be prompted for the root password multiple times during install.${NC}"
+    echo -e "${YELLOW}You can continue with the Pager's root password (asked once).${NC}"
+    echo ""
+    read -p "Continue with password authentication? (y/n): " use_password
+    if [[ ! "$use_password" =~ ^[Yy]$ ]]; then
+        log "ERROR" "Cannot connect to Pager at ${PAGER_USER}@${PAGER_IP}"
         echo ""
-        read -p "Continue with password authentication? (y/n): " use_password
-        if [[ "$use_password" =~ ^[Yy]$ ]]; then
-            USE_INTERACTIVE=true
-            SSH_OPTS="${SSH_OPTS_BASE}"
-            # Verify we can actually connect with password
-            echo "Testing connection (enter root password):"
-            if ! ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "echo ok"; then
-                log "ERROR" "Cannot connect to Pager at ${PAGER_USER}@${PAGER_IP}"
-                echo ""
-                echo "  Make sure:"
-                echo "    1. Pager is powered on and connected via USB"
-                echo "    2. SSH is accessible at ${PAGER_IP}"
-                echo "    3. You entered the correct password"
-                exit 1
-            fi
-            log "SUCCESS" "Connected to Pager at ${PAGER_IP} (password auth)"
-        else
-            log "ERROR" "Cannot connect to Pager at ${PAGER_USER}@${PAGER_IP}"
-            echo ""
-            echo "  To set up SSH key auth:"
-            echo "    ssh-copy-id ${PAGER_USER}@${PAGER_IP}"
-            echo ""
-            echo "  Debug: Try manually connecting:"
-            echo "    ssh -v ${PAGER_USER}@${PAGER_IP}"
-            exit 1
-        fi
+        echo "  To set up SSH key auth:"
+        echo "    ssh-copy-id ${PAGER_USER}@${PAGER_IP}"
+        exit 1
     fi
+    SSH_OPTS="${SSH_OPTS_BASE} ${SSH_MUX}"
+    echo "Enter the Pager root password:"
+    if ! pager_ssh "echo ok" >/dev/null; then
+        log "ERROR" "Cannot log in to ${PAGER_USER}@${PAGER_IP} (wrong password?)"
+        exit 1
+    fi
+    log "SUCCESS" "Connected to Pager at ${PAGER_IP} (password auth)"
 fi
 
 # ============================================================
@@ -145,7 +201,7 @@ elif [ -f "$BJORN_PAGERCTL_CHECK" ]; then
     PAGERCTL_SOURCE="bjorn"
 else
     # Check if it exists on the Pager already
-    PAGERCTL_FOUND=$(ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "
+    PAGERCTL_FOUND=$(pager_ssh "
         if [ -f /root/lib/pagerctl_mock.py ]; then
             echo 'mock'
         elif [ -f /root/payloads/user/utilities/PAGERCTL/libpagerctl.so ]; then
@@ -430,9 +486,9 @@ elif [ -f "$BJORN_PAGERCTL" ]; then
 elif [ "$PAGERCTL_SOURCE" = "pager" ]; then
     # Copy from an existing payload on the Pager
     log "INFO" "Copying libpagerctl.so from existing Pager payload..."
-    PAGER_LIB_PATH=$(ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "find /root/payloads -name 'libpagerctl.so' 2>/dev/null | head -1")
+    PAGER_LIB_PATH=$(pager_ssh "find /root/payloads -name 'libpagerctl.so' 2>/dev/null | head -1")
     if [ -n "$PAGER_LIB_PATH" ]; then
-        scp $SSH_OPTS "${PAGER_USER}@${PAGER_IP}:${PAGER_LIB_PATH}" "${PAYLOAD_STAGE}/"
+        pager_ssh "cat '${PAGER_LIB_PATH}'" > "${PAYLOAD_STAGE}/libpagerctl.so"
         cp "${PAYLOAD_STAGE}/libpagerctl.so" "${PAYLOAD_STAGE}/lib/" 2>/dev/null || true
         log "SUCCESS" "Copied libpagerctl.so from Pager"
     fi
@@ -460,24 +516,42 @@ fi
 # Step 6: Deploy to Pager
 # ============================================================
 
-log "INFO" "Deploying Ragnar payload to Pager..."
+# Refuse to deploy a broken package (this used to "succeed" with an empty payload)
+STAGE_MISSING=""
+for f in payload.sh pager_menu.py PagerRagnar.py pagerctl.py shared.py orchestrator.py actions web; do
+    [ -e "${PAYLOAD_STAGE}/${f}" ] || STAGE_MISSING="${STAGE_MISSING} ${f}"
+done
+if [ -n "$STAGE_MISSING" ]; then
+    log "ERROR" "Payload package is incomplete, missing:${STAGE_MISSING}"
+    log "ERROR" "Ragnar checkout used: ${RAGNAR_DIR} - is it a complete clone?"
+    exit 1
+fi
 
-# Create payload directory on Pager
-ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "mkdir -p ${PAGER_PAYLOAD_DIR}"
+STAGE_KB=$(du -sk "${PAYLOAD_STAGE}" | cut -f1)
+FREE_KB=$(pager_ssh "mkdir -p ${PAGER_PAYLOAD_DIR} && df -k ${PAGER_PAYLOAD_DIR} | tail -1 | awk '{print \$(NF-2)}'" 2>/dev/null || echo "")
+OLD_KB=$(pager_ssh "du -sk ${PAGER_PAYLOAD_DIR} 2>/dev/null | cut -f1" 2>/dev/null || echo 0)
+if [[ "$FREE_KB" =~ ^[0-9]+$ ]] && [ $((FREE_KB + ${OLD_KB:-0})) -lt $((STAGE_KB + 2048)) ]; then
+    log "ERROR" "Not enough space on the Pager: payload needs $((STAGE_KB/1024)) MB, only $((FREE_KB/1024)) MB free"
+    exit 1
+fi
 
-# Copy payload
-scp $SSH_OPTS -r "${PAYLOAD_STAGE}/"* "${PAGER_USER}@${PAGER_IP}:${PAGER_PAYLOAD_DIR}/"
+log "INFO" "Deploying Ragnar payload to Pager ($((STAGE_KB/1024)) MB, this takes a minute)..."
+
+if ! push_dir "${PAYLOAD_STAGE}" "${PAGER_PAYLOAD_DIR}"; then
+    log "ERROR" "Copying the payload to the Pager failed"
+    exit 1
+fi
 
 log "SUCCESS" "Payload deployed to ${PAGER_PAYLOAD_DIR}"
 
 # Set permissions
-ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "chmod +x ${PAGER_PAYLOAD_DIR}/payload.sh && chmod -R 755 ${PAGER_PAYLOAD_DIR}"
+pager_ssh "chmod +x ${PAGER_PAYLOAD_DIR}/payload.sh && chmod -R 755 ${PAGER_PAYLOAD_DIR}"
 
 log "SUCCESS" "Permissions set"
 
 # Fix libsodium symlinks (git on Windows stores symlinks as text files)
 log "INFO" "Fixing libsodium symlinks..."
-ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "
+pager_ssh "
     cd ${PAGER_PAYLOAD_DIR}/lib
     # If libsodium.so is a text file instead of a real symlink, recreate it
     if [ -f libsodium.so.26.1.0 ]; then
@@ -495,7 +569,7 @@ log "SUCCESS" "Library symlinks fixed"
 
 log "INFO" "Setting up system-wide libpagerctl.so..."
 
-ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "
+pager_ssh "
     # Create /root/lib if it doesn't exist
     mkdir -p /root/lib
     
@@ -520,7 +594,7 @@ log "SUCCESS" "libpagerctl.so installed to /root/lib/"
 
 log "INFO" "Installing NSE vulnerability scripts on Pager..."
 
-ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "
+pager_ssh "
     # nmap's script dir on OpenWRT (opkg install nmap puts scripts here)
     NMAP_SCRIPTS_DIR=''
     for d in /usr/share/nmap/scripts /usr/lib/nmap/scripts /opt/nmap/scripts; do
@@ -555,156 +629,142 @@ log "SUCCESS" "NSE scripts installed (vulners.nse ready for vuln scanning)"
 # ============================================================
 # Step 8: Install Python3 and dependencies on Pager
 # ============================================================
+#
+# The Pager is OpenWrt on mipsel_24kc. We never pin a package version here: the
+# OpenWrt feed drops older point releases (python 3.11.14 -> 3.11.18 ...), so a
+# hardcoded version 404s a few months later. Instead we either let the Pager's
+# own opkg resolve the current version online, or - if the Pager has no
+# internet - discover the current version from the feed index on THIS machine,
+# download the .ipk set here, and stream them over.
+
+OPENWRT_BASE="https://downloads.openwrt.org/releases/24.10.1/packages/mipsel_24kc/packages"
+
+# Fetch tool on the host (for the offline-download fallback)
+host_fetch() {  # host_fetch <url> <outfile>  -> 0 on success
+    if command -v curl >/dev/null 2>&1; then
+        curl -sfL -o "$2" "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$2" "$1"
+    else
+        return 2
+    fi
+}
 
 log "INFO" "Checking Python3 on Pager..."
 
-PYTHON3_INSTALLED=$(ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "python3 --version 2>/dev/null && echo FOUND || echo MISSING")
+PYTHON3_INSTALLED=$(pager_ssh "python3 --version 2>/dev/null && echo FOUND || echo MISSING")
 
-if echo "$PYTHON3_INSTALLED" | grep -q "MISSING"; then
-    log "INFO" "Python3 not found on Pager. Installing offline packages..."
+# Package list Ragnar needs (OpenWrt names, no versions)
+PY_PKGS="python3-base python3-light python3-logging python3-asyncio python3-codecs \
+python3-ctypes python3-email python3-urllib python3-sqlite3 python3-multiprocessing \
+python3-openssl python3-uuid python3-xml python3-decimal"
 
-    # OpenWrt package repository for the Pager's architecture
-    OPENWRT_BASE="https://downloads.openwrt.org/releases/24.10.1/packages/mipsel_24kc/packages"
-    OPENWRT_VER="3.11.14-r1"
-    IPK_DIR=$(mktemp -d)
-
-    # Core Python3 packages + modules needed by Ragnar
-    PYTHON3_PKGS=(
-        "libpython3-3.11_${OPENWRT_VER}_mipsel_24kc.ipk"
-        "python3-base_${OPENWRT_VER}_mipsel_24kc.ipk"
-        "python3-light_${OPENWRT_VER}_mipsel_24kc.ipk"
-        "python3-logging_${OPENWRT_VER}_mipsel_24kc.ipk"
-        "python3-asyncio_${OPENWRT_VER}_mipsel_24kc.ipk"
-        "python3-codecs_${OPENWRT_VER}_mipsel_24kc.ipk"
-        "python3-ctypes_${OPENWRT_VER}_mipsel_24kc.ipk"
-        "python3-email_${OPENWRT_VER}_mipsel_24kc.ipk"
-        "python3-urllib_${OPENWRT_VER}_mipsel_24kc.ipk"
-        "python3-sqlite3_${OPENWRT_VER}_mipsel_24kc.ipk"
-        "python3-multiprocessing_${OPENWRT_VER}_mipsel_24kc.ipk"
-        "python3-openssl_${OPENWRT_VER}_mipsel_24kc.ipk"
-        "python3-uuid_${OPENWRT_VER}_mipsel_24kc.ipk"
-        "python3-xml_${OPENWRT_VER}_mipsel_24kc.ipk"
-        "python3-decimal_${OPENWRT_VER}_mipsel_24kc.ipk"
-    )
-
-    log "INFO" "Downloading ${#PYTHON3_PKGS[@]} Python3 .ipk packages..."
-    DL_FAILED=false
-    for pkg in "${PYTHON3_PKGS[@]}"; do
-        if command -v wget >/dev/null 2>&1; then
-            wget -q -O "${IPK_DIR}/${pkg}" "${OPENWRT_BASE}/${pkg}" 2>/dev/null || {
-                log "WARNING" "Failed to download ${pkg}"
-                DL_FAILED=true
-            }
-        elif command -v curl >/dev/null 2>&1; then
-            curl -sfL -o "${IPK_DIR}/${pkg}" "${OPENWRT_BASE}/${pkg}" 2>/dev/null || {
-                log "WARNING" "Failed to download ${pkg}"
-                DL_FAILED=true
-            }
+# --- Strategy A: install on the Pager with its own opkg (handles versions itself)
+install_via_device_opkg() {
+    log "INFO" "Trying on-device opkg (needs internet on the Pager)..."
+    pager_ssh "
+        rm -f /var/lock/opkg.lock 2>/dev/null
+        opkg update >/dev/null 2>&1 || true
+        # -d mmc keeps the small root flash free; falls back to root if no mmc dest
+        if opkg --help 2>&1 | grep -q 'dest' && grep -q 'dest mmc' /etc/opkg.conf 2>/dev/null; then
+            opkg -d mmc install python3 ${PY_PKGS} 2>&1 | tail -20
         else
-            log "ERROR" "Neither wget nor curl found. Cannot download packages."
-            DL_FAILED=true
-            break
+            opkg install python3 ${PY_PKGS} 2>&1 | tail -20
+        fi
+    "
+    pager_ssh "python3 -c 'import ctypes,sqlite3,ssl; print(42)'" 2>/dev/null | grep -q 42
+}
+
+# --- Strategy B: download .ipk set on the host, discover version, stream over
+install_via_host_download() {
+    IPK_DIR=$(mktemp -d)
+    log "INFO" "Discovering current package versions from OpenWrt feed..."
+    local idx="${IPK_DIR}/Packages"
+    if ! host_fetch "${OPENWRT_BASE}/Packages.gz" "${idx}.gz"; then
+        log "ERROR" "Could not download the OpenWrt package index (no network, or curl/wget missing)."
+        rm -rf "${IPK_DIR}"; IPK_DIR=""
+        return 1
+    fi
+    gunzip -f "${idx}.gz" 2>/dev/null || { log "ERROR" "Package index unreadable"; rm -rf "${IPK_DIR}"; IPK_DIR=""; return 1; }
+
+    # For each package name, read its Filename: from the index and download it.
+    # libpython3-3.11 is a dependency of python3-base; include it explicitly.
+    local want="libpython3-3.11 ${PY_PKGS}"
+    local missing=0 pkg fname
+    for pkg in $want; do
+        fname=$(awk -v p="$pkg" '
+            $1=="Package:"{cur=$2}
+            $1=="Filename:" && cur==p {print $2; exit}' "${idx}")
+        if [ -z "$fname" ]; then
+            log "WARNING" "Package not in feed index: ${pkg}"
+            missing=$((missing+1)); continue
+        fi
+        if ! host_fetch "${OPENWRT_BASE}/${fname}" "${IPK_DIR}/${fname}"; then
+            log "WARNING" "Failed to download ${fname}"
+            missing=$((missing+1))
         fi
     done
 
-    if [ "$DL_FAILED" = true ]; then
-        log "WARNING" "Some Python3 packages failed to download."
-        log "WARNING" "Ragnar may have limited functionality if Python3 is not installed."
-        echo ""
-        read -p "  Continue anyway? (y/n): " choice
-        if [[ ! "$choice" =~ ^[Yy]$ ]]; then
-            rm -rf "${IPK_DIR}"
-            rm -rf "${STAGING_DIR}"
-            exit 1
-        fi
+    local count
+    count=$(ls -1 "${IPK_DIR}"/*.ipk 2>/dev/null | wc -l)
+    if [ "$count" -eq 0 ]; then
+        log "ERROR" "No Python3 packages could be downloaded."
+        rm -rf "${IPK_DIR}"; IPK_DIR=""
+        return 1
     fi
+    [ "$missing" -gt 0 ] && log "WARNING" "${missing} package(s) could not be fetched; continuing with ${count}."
 
-    # Transfer packages to Pager
-    IPK_COUNT=$(ls -1 "${IPK_DIR}"/*.ipk 2>/dev/null | wc -l)
-    if [ "$IPK_COUNT" -gt 0 ]; then
-        log "INFO" "Transferring ${IPK_COUNT} packages to Pager..."
-        scp $SSH_OPTS "${IPK_DIR}"/*.ipk "${PAGER_USER}@${PAGER_IP}:/tmp/"
+    log "INFO" "Transferring ${count} packages to Pager..."
+    push_files /tmp "${IPK_DIR}"/*.ipk || { log "ERROR" "Package transfer failed"; rm -rf "${IPK_DIR}"; IPK_DIR=""; return 1; }
 
-        log "INFO" "Installing Python3 packages on Pager..."
-        ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "
-            rm -f /var/lock/opkg.lock 2>/dev/null
-            # Install core first, then modules
-            opkg install /tmp/libpython3-3.11_*.ipk /tmp/python3-base_*.ipk /tmp/python3-light_*.ipk 2>&1 || true
-            opkg install /tmp/python3-logging_*.ipk /tmp/python3-asyncio_*.ipk /tmp/python3-codecs_*.ipk \
-                /tmp/python3-ctypes_*.ipk /tmp/python3-email_*.ipk /tmp/python3-urllib_*.ipk \
-                /tmp/python3-sqlite3_*.ipk /tmp/python3-multiprocessing_*.ipk /tmp/python3-openssl_*.ipk \
-                /tmp/python3-uuid_*.ipk /tmp/python3-xml_*.ipk /tmp/python3-decimal_*.ipk 2>&1 || true
-            # Clean up
-            rm -f /tmp/python3-*.ipk /tmp/libpython3-*.ipk 2>/dev/null
-        "
+    log "INFO" "Installing Python3 packages on Pager..."
+    pager_ssh "
+        rm -f /var/lock/opkg.lock 2>/dev/null
+        # Core first (provides the interpreter), then the stdlib modules.
+        opkg install /tmp/libpython3-3.11_*.ipk /tmp/python3-base_*.ipk /tmp/python3-light_*.ipk 2>&1 | tail -5 || true
+        opkg install /tmp/python3-*.ipk 2>&1 | tail -10 || true
+        rm -f /tmp/python3-*.ipk /tmp/libpython3-*.ipk 2>/dev/null
+    "
+    rm -rf "${IPK_DIR}"; IPK_DIR=""
+    pager_ssh "python3 -c 'import ctypes,sqlite3,ssl; print(42)'" 2>/dev/null | grep -q 42
+}
 
-        # Verify Python3
-        if ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "python3 -c 'print(42)'" 2>/dev/null | grep -q "42"; then
-            log "SUCCESS" "Python3 installed and working on Pager"
-        else
-            log "WARNING" "Python3 installation may have issues"
-        fi
-    fi
-
-    rm -rf "${IPK_DIR}"
+needs_python_install=false
+if echo "$PYTHON3_INSTALLED" | grep -q "MISSING"; then
+    needs_python_install=true
 else
-    log "SUCCESS" "Python3 already installed on Pager"
-
-    # Ensure required modules are present even if Python3 was already there
-    MISSING_MODS=$(ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "
-        python3 -c '
-import importlib, sys
-needed = [\"logging\",\"asyncio\",\"ctypes\",\"sqlite3\",\"xml.etree.ElementTree\",\"email\",\"urllib\",\"multiprocessing\",\"ssl\",\"uuid\",\"decimal\",\"codecs\"]
-missing = []
-for m in needed:
-    try:
-        importlib.import_module(m)
-    except ImportError:
-        missing.append(m)
-if missing:
-    print(\" \".join(missing))
-else:
-    print(\"NONE\")
-' 2>/dev/null || echo 'CHECK_FAILED'
-    ")
-
-    if [ "$MISSING_MODS" != "NONE" ] && [ "$MISSING_MODS" != "CHECK_FAILED" ]; then
+    log "SUCCESS" "Python3 already present on Pager"
+    # Confirm the stdlib modules Ragnar imports are actually there
+    MISSING_MODS=$(pager_ssh "python3 -c '
+import importlib
+need=[\"logging\",\"asyncio\",\"ctypes\",\"sqlite3\",\"xml.etree.ElementTree\",\"email\",\"urllib\",\"multiprocessing\",\"ssl\",\"uuid\",\"decimal\",\"codecs\"]
+miss=[]
+for m in need:
+    try: importlib.import_module(m)
+    except ImportError: miss.append(m)
+print(\" \".join(miss) if miss else \"NONE\")' 2>/dev/null || echo CHECK_FAILED")
+    if [ "$MISSING_MODS" != "NONE" ] && [ "$MISSING_MODS" != "CHECK_FAILED" ] && [ -n "$MISSING_MODS" ]; then
         log "WARNING" "Missing Python3 modules: ${MISSING_MODS}"
-        log "INFO" "Attempting to install missing modules..."
-
-        OPENWRT_BASE="https://downloads.openwrt.org/releases/24.10.1/packages/mipsel_24kc/packages"
-        OPENWRT_VER="3.11.14-r1"
-        IPK_DIR=$(mktemp -d)
-
-        # Map module names to package names
-        for mod in $MISSING_MODS; do
-            case "$mod" in
-                xml.etree.ElementTree) pkg_name="python3-xml" ;;
-                ssl) pkg_name="python3-openssl" ;;
-                *) pkg_name="python3-${mod}" ;;
-            esac
-            IPK_FILE="${pkg_name}_${OPENWRT_VER}_mipsel_24kc.ipk"
-            if command -v wget >/dev/null 2>&1; then
-                wget -q -O "${IPK_DIR}/${IPK_FILE}" "${OPENWRT_BASE}/${IPK_FILE}" 2>/dev/null || true
-            elif command -v curl >/dev/null 2>&1; then
-                curl -sfL -o "${IPK_DIR}/${IPK_FILE}" "${OPENWRT_BASE}/${IPK_FILE}" 2>/dev/null || true
-            fi
-        done
-
-        IPK_COUNT=$(ls -1 "${IPK_DIR}"/*.ipk 2>/dev/null | wc -l)
-        if [ "$IPK_COUNT" -gt 0 ]; then
-            scp $SSH_OPTS "${IPK_DIR}"/*.ipk "${PAGER_USER}@${PAGER_IP}:/tmp/"
-            ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "
-                rm -f /var/lock/opkg.lock 2>/dev/null
-                opkg install /tmp/python3-*.ipk 2>&1 || true
-                rm -f /tmp/python3-*.ipk 2>/dev/null
-            "
-            log "SUCCESS" "Installed additional Python3 modules"
-        fi
-
-        rm -rf "${IPK_DIR}"
+        needs_python_install=true
     else
         log "SUCCESS" "All required Python3 modules present"
+    fi
+fi
+
+if [ "$needs_python_install" = true ]; then
+    log "INFO" "Installing Python3 on the Pager..."
+    if install_via_device_opkg; then
+        log "SUCCESS" "Python3 installed on Pager (on-device opkg)"
+    elif install_via_host_download; then
+        log "SUCCESS" "Python3 installed on Pager (host-side download)"
+    else
+        log "WARNING" "Could not install Python3 automatically."
+        echo ""
+        echo "  Install it on the Pager manually (it needs internet), then re-run this script:"
+        echo "    ssh ${PAGER_USER}@${PAGER_IP} 'opkg update && opkg install python3 python3-ctypes python3-sqlite3 python3-openssl'"
+        echo ""
+        read -p "  Continue without Python3? (y/n): " choice
+        [[ "$choice" =~ ^[Yy]$ ]] || exit 1
     fi
 fi
 
@@ -714,42 +774,44 @@ fi
 
 log "INFO" "Checking python-nmap on Pager..."
 
-NMAP_PY_OK=$(ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "python3 -c 'import nmap; print(\"OK\")' 2>/dev/null || echo 'MISSING'")
+NMAP_PY_OK=$(pager_ssh "python3 -c 'import nmap; print(\"OK\")' 2>/dev/null || echo 'MISSING'")
 
 if [ "$NMAP_PY_OK" != "OK" ]; then
-    log "INFO" "Installing python-nmap module..."
-
-    NMAP_PY_DIR=$(mktemp -d)
-    NMAP_PY_URL="https://pypi.io/packages/source/p/python-nmap/python-nmap-0.7.1.tar.gz"
-
-    DL_OK=false
-    if command -v wget >/dev/null 2>&1; then
-        wget -q -O "${NMAP_PY_DIR}/python-nmap.tar.gz" "$NMAP_PY_URL" 2>/dev/null && DL_OK=true
-    elif command -v curl >/dev/null 2>&1; then
-        curl -sfL -o "${NMAP_PY_DIR}/python-nmap.tar.gz" "$NMAP_PY_URL" 2>/dev/null && DL_OK=true
+    # Prefer the copy bundled in the repo (works fully offline); fall back to PyPI.
+    NMAP_SRC=""
+    if [ -d "${RAGNAR_DIR}/pager_lib/nmap" ]; then
+        NMAP_SRC="${RAGNAR_DIR}/pager_lib/nmap"
+        log "INFO" "Installing python-nmap from bundled pager_lib/nmap..."
+    else
+        log "INFO" "Downloading python-nmap..."
+        NMAP_PY_DIR=$(mktemp -d)
+        if host_fetch "https://files.pythonhosted.org/packages/source/p/python-nmap/python-nmap-0.7.1.tar.gz" "${NMAP_PY_DIR}/n.tgz" \
+           || host_fetch "https://pypi.io/packages/source/p/python-nmap/python-nmap-0.7.1.tar.gz" "${NMAP_PY_DIR}/n.tgz"; then
+            tar xzf "${NMAP_PY_DIR}/n.tgz" -C "${NMAP_PY_DIR}" 2>/dev/null
+            NMAP_SRC=$(find "${NMAP_PY_DIR}" -maxdepth 2 -type d -name "nmap" | head -1)
+        fi
     fi
 
-    if [ "$DL_OK" = true ]; then
-        tar xzf "${NMAP_PY_DIR}/python-nmap.tar.gz" -C "${NMAP_PY_DIR}"
-        NMAP_SRC=$(find "${NMAP_PY_DIR}" -maxdepth 2 -type d -name "nmap" | head -1)
-        if [ -d "$NMAP_SRC" ]; then
-            scp $SSH_OPTS -r "${NMAP_SRC}" "${PAGER_USER}@${PAGER_IP}:/usr/lib/python3.11/nmap"
-            log "SUCCESS" "python-nmap installed on Pager"
+    if [ -n "$NMAP_SRC" ] && [ -d "$NMAP_SRC" ]; then
+        # Determine the Pager's python3.x site dir instead of assuming 3.11
+        PY_LIBDIR=$(pager_ssh "python3 -c 'import sys;print(\"/usr/lib/python%d.%d\"%sys.version_info[:2])' 2>/dev/null")
+        [ -z "$PY_LIBDIR" ] && PY_LIBDIR="/usr/lib/python3.11"
+        if push_dir "$NMAP_SRC" "${PY_LIBDIR}/nmap"; then
+            log "SUCCESS" "python-nmap installed to ${PY_LIBDIR}/nmap"
         else
-            log "WARNING" "Could not find nmap module in downloaded package"
+            log "WARNING" "Could not copy python-nmap to the Pager"
         fi
     else
-        log "WARNING" "Could not download python-nmap. Nmap scanning may not work."
+        log "WARNING" "python-nmap unavailable (no bundle, no network). Nmap scanning may not work."
     fi
-
-    rm -rf "${NMAP_PY_DIR}"
+    [ -n "${NMAP_PY_DIR:-}" ] && rm -rf "${NMAP_PY_DIR}"
 else
     log "SUCCESS" "python-nmap already installed on Pager"
 fi
 
 log "INFO" "Verifying installation..."
 
-VERIFY_RESULT=$(ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "
+VERIFY_RESULT=$(pager_ssh "
     errors=0
     
     # Check core files (libpagerctl.so not required on mock pager)
@@ -839,7 +901,7 @@ fi
 
 log "INFO" "Ensuring actions.json is up to date..."
 
-ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "
+pager_ssh "
     cd ${PAGER_PAYLOAD_DIR}
     export PYTHONPATH=\"${PAGER_PAYLOAD_DIR}/lib:${PAGER_PAYLOAD_DIR}:\$PYTHONPATH\"
     export LD_LIBRARY_PATH=\"/root/lib:${PAGER_PAYLOAD_DIR}/lib:${PAGER_PAYLOAD_DIR}:\$LD_LIBRARY_PATH\"
@@ -880,7 +942,7 @@ log "SUCCESS" "actions.json configured"
 
 log "INFO" "Creating /root/Ragnar symlink for compatibility..."
 
-ssh $SSH_OPTS "${PAGER_USER}@${PAGER_IP}" "
+pager_ssh "
     # Remove old symlink if exists
     [ -L /root/Ragnar ] && rm -f /root/Ragnar
     

@@ -47,6 +47,29 @@ sudo ./install_ragnar.sh
 ./scripts/install_pineapple_pager.sh [pager-ip]
 ```
 
+If you omit the IP, the installer offers the Pager it detects on this machine's
+USB network (the `172.16.<N>.1` of whichever `172.16.<N>.0/24` you have an
+address on — `N` differs between units, e.g. `42` or `52`).
+
+## Troubleshooting install
+
+- **"No SSH service reachable at …:22".** The Pager is not plugged in, not
+  powered, or you passed the wrong IP. Check with `ip -4 addr | grep 172.16.` —
+  the Pager is the `.1` of the subnet you see there, and the installer prints
+  the detected address to try.
+- **Key auth fails.** The installer falls back to the Pager's root password and
+  asks for it once (connections are multiplexed). To avoid the prompt entirely:
+  `ssh-copy-id root@<pager-ip>`.
+- **"Payload package is incomplete".** The installer refuses to deploy a broken
+  payload (it used to silently ship an empty one). It means the Ragnar checkout
+  it found is incomplete — run it from a full clone, not a tarball/partial copy.
+- **Python / nmap install.** The installer prefers the Pager's own `opkg`
+  (needs internet on the Pager). With no internet it downloads the current
+  `mipsel_24kc` Python packages on your workstation and streams them over; it
+  never pins a package version, so it will not 404 when the OpenWrt feed rolls
+  forward. If both fail, it prints the one-line `opkg` command to run on the
+  Pager yourself, then re-run the installer.
+
 ## Usage
 
 1. Launch from the Pager menu: **Reconnaissance > PagerRagnar**
