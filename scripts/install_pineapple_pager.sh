@@ -250,6 +250,7 @@ PAGER_FILES=(
     "PagerRagnar.py"
     "pager_display.py"
     "pager_menu.py"
+    "pager_spectrum.py"
     "pager_payload.sh"
     "pagerctl.py"
     "pagerctl_mock.py"

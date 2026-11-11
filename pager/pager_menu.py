@@ -188,6 +188,30 @@ class RagnarMenu:
             else:
                 time.sleep(0.016)
 
+    def _run_spectrum(self):
+        """Launch the WiFi spectrum waterfall app on the shared display.
+
+        Reuses this menu's already-initialised Pager context and returns here
+        when the user presses RED. Any failure is shown briefly rather than
+        crashing the menu."""
+        try:
+            import pager_spectrum
+            pager_spectrum.run_spectrum(self.gfx, FONT_DEJAVU)
+        except Exception as e:
+            try:
+                self.gfx.clear(Pager.BLACK)
+                self.gfx.draw_ttf_centered(80, "Spectrum error", WARNING_COLOR, FONT_DEJAVU, TTF_LARGE)
+                self.gfx.draw_ttf_centered(110, str(e)[:40], DIM_COLOR, FONT_DEJAVU, TTF_SMALL)
+                self.gfx.flip()
+                self._wait_button()
+            except Exception:
+                pass
+        finally:
+            try:
+                self.gfx.clear_input_events()
+            except Exception:
+                pass
+
     def _draw_main_menu(self, selected, iface_idx, web_ui):
         self.gfx.clear(Pager.BLACK)
 
@@ -249,6 +273,7 @@ class RagnarMenu:
             'max_value': 'ON :8000',
         })
 
+        items.append({'label': 'WiFi Spectrum'})
         items.append({'label': 'Clear Data'})
         items.append({'label': 'Exit'})
         return items
@@ -258,7 +283,7 @@ class RagnarMenu:
         selected = 0
         iface_idx = 0
         web_ui = True
-        num_options = 5
+        num_options = 6
 
         self._draw_main_menu(selected, iface_idx, web_ui)
 
@@ -291,9 +316,12 @@ class RagnarMenu:
                     web_ui = not web_ui
                     self._draw_main_menu(selected, iface_idx, web_ui)
                 elif selected == 3:
-                    self._show_clear_data_menu()
+                    self._run_spectrum()
                     self._draw_main_menu(selected, iface_idx, web_ui)
                 elif selected == 4:
+                    self._show_clear_data_menu()
+                    self._draw_main_menu(selected, iface_idx, web_ui)
+                elif selected == 5:
                     return None
             elif btn == 'BACK':
                 return None
