@@ -276,9 +276,16 @@ def tracked_files():
     # (no live Ragnar capture adapter/route — see #959), so the parser CVEs their
     # own test corpus names must keep the BGP/SR-MPLS watchers' intended CONTEXT
     # (posture-advisory) classification, not be miscounted as live-detected here.
+    # Never scan tests/ either: the pytest suites name CVE ids as fixtures (made-up
+    # ones like CVE-1999-0001, and real ones used as sample data), and none of them is
+    # a detector — scanning them inflated the index by 19 ids that nothing detects.
     return [p for p in out
             if p != 'scripts/gen_cve_list.py'
-            and not p.startswith('python/bgp_pathwatch/')]
+            and not p.startswith('python/bgp_pathwatch/')
+            and not p.startswith('tests/')
+            # The Nmap-scanner enricher looks up whatever CVE it is handed; the one id
+            # in it is a usage example, not something it detects.
+            and p != 'distro_cve.py']
 
 
 def nd_owner(name):

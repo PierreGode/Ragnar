@@ -4,6 +4,19 @@
 
 ### 2026-11-11
 
+#### fix(net): DNS Watch v12, MaginotDNS detector no longer alarms on normal reverse-DNS referrals
+*branch `feature/dns-poison-v12`*
+
+- **The problem.** The MaginotDNS detector (`DNSD-006`, critical) fired on ordinary reverse-DNS traffic. Reverse zones are delegated out to customers, so a response for `2.0.192.in-addr.arpa` legitimately carries glue for `ns1.customer.example` or a CNAME chain into the customer's domain. Both are outside the queried zone and both were reported as cache poisoning.
+- **The fix.** Every out-of-bailiwick record is now sorted from the single packet. Glue whose NS record is properly anchored, and records on the response's own CNAME/DNAME chain, become the new notice-level **`DNSD-170`** (`OUT_OF_BAILIWICK_ACCOUNTED`, no CVE). Everything else stays `DNSD-006`, critical.
+- **Not an amnesty.** A forged NS record cannot excuse its own glue: `victim.example NS ns.attacker.example` plus glue still reports both records as `DNSD-006`. The chain walk stops at 16 hops or on a loop and excuses nothing past that point.
+- **Nothing is hidden.** Accounted records are still listed, once per responder, zone and owner, with the reason (`glue` or `chain`).
+- **CVE label.** `DNSD-006` now shows `attack class: CVE-2021-25220, CVE-2025-40778`. The detector reads record structure and cannot know a server's version, so the CVEs name the attack shape, not a vulnerable build. The Watchtower feed still carries the two CVE IDs as before.
+- **Scope.** Drop-in refresh of the vendored `python/dns_doctor_passive` (4 files: `detect.py`, `engine.py`, `findings.py`, `selftest.py`). No new CVE, no new port, no new setting. The CVE index is unchanged.
+- **Docs:** [nettools.md](nettools.md) (DNS Watch, MaginotDNS), [CREDITS.md](CREDITS.md), DNS Watch card text.
+- **CVE index generator.** `scripts/gen_cve_list.py` no longer scans `tests/` or the usage example in `distro_cve.py`. The pytest suites name CVE IDs as sample data (some made up, like `CVE-1999-0001`), and a regeneration would have listed 19 of them as detected. With the fix the index regenerates byte-identical to the published one (439 IDs, 375 detected).
+- **Validation:** DNS Watch self-test 134 → 144 scenarios, all passing (10 new: the reverse-referral false positive, CNAME chain, foreign-NS and unreferenced-glue near-misses, case-insensitive match, hop cap, loop, dedupe; IPv4 and IPv6). The module's mutation test was run on a copy: three injected regressions (split removed, anchoring removed two ways) were each caught. A scapy-built pcap through the real adapter path gave `DNSD-170` for the referral and `DNSD-006` for the forged NS on both IP versions. A live capture of a `.com` referral for `example.com` reported its out-of-zone glue as `DNSD-170`.
+
 #### fix(wifi): clear error instead of losing Wi-Fi when the adapter cannot do AP mode
 *branch `fix/ap-mode-unsupported-adapter`* · closes [#1048](https://github.com/PierreGode/Ragnar/issues/1048)
 

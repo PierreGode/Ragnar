@@ -1885,5 +1885,154 @@ class TestTcpReassembly(unittest.TestCase):
             r.add(self.K, 2000, junk, 0x18, 1.0)
 
 
+class TestMaginotAccountingSplit(unittest.TestCase):
+    """DNSD-006 / DNSD-170 glue-and-chain accounting split.
+
+    Trigger/near-miss pairs from T1-T7. The split must downgrade the
+    legitimate reverse-DNS shapes WITHOUT blunting the detector: every
+    near-miss has to stay critical.
+    """
+
+    REV = "2.0.192.in-addr.arpa."
+    NS1 = "ns1.customer.example."
+
+    @staticmethod
+    def _l3(fam):
+        from scapy.all import IP, IPv6
+        return (IP(src="198.51.100.9", dst="198.51.100.1") if fam == "v4"
+                else IPv6(src="2001:db8::9", dst="2001:db8::1"))
+
+    @staticmethod
+    def _rs(name, rtype, *vals, ttl=3600):
+        import dns.rrset
+        return dns.rrset.from_text(name, ttl, "IN", rtype, *vals)
+
+    def _resp(self, answer=(), authority=(), additional=(), qname=None):
+        import dns.message
+        qn = qname or self.REV
+        m = dns.message.make_response(dns.message.make_query(qn, "PTR"))
+        m.answer.extend(answer)
+        m.authority.extend(authority)
+        m.additional.extend(additional)
+        return m.to_wire()
+
+    def _codes(self, wire, fam="v4"):
+        from scapy.all import Ether, UDP, raw
+        eng = Engine(Config())
+        fr = raw(Ether() / self._l3(fam) / UDP(sport=53, dport=50000) / wire)
+        out = eng.handle_frame(fr, now=1.0)
+        return [f["code"] for f in out], out
+
+    # -- T1: the shape that caused the production false positive -----
+    def test_T1_reverse_referral_glue_is_not_an_alarm(self):
+        for fam in ("v4", "v6"):
+            for gt, ga in (("A", "203.0.113.5"), ("AAAA", "2001:db8:c::5")):
+                codes, out = self._codes(self._resp(
+                    authority=[self._rs(self.REV, "NS", self.NS1)],
+                    additional=[self._rs(self.NS1, gt, ga)]), fam)
+                self.assertNotIn("DNSD-006", codes, f"{fam}/{gt}")
+                self.assertIn("DNSD-170", codes, f"{fam}/{gt}")
+
+    # -- T4 near-miss: the same glue with nothing referencing it -----
+    def test_T4_unreferenced_glue_stays_critical(self):
+        for fam in ("v4", "v6"):
+            for gt, ga in (("A", "203.0.113.8"), ("AAAA", "2001:db8:c::8")):
+                codes, _ = self._codes(self._resp(
+                    additional=[self._rs(self.NS1, gt, ga)]), fam)
+                self.assertIn("DNSD-006", codes, f"{fam}/{gt}")
+                self.assertNotIn("DNSD-170", codes, f"{fam}/{gt}")
+
+    # -- T2: a real out-of-bailiwick chain ---------------------------
+    def test_T2_cname_chain_is_accounted(self):
+        for fam in ("v4", "v6"):
+            codes, out = self._codes(self._resp(
+                answer=[self._rs(self.REV, "CNAME", "host.customer.example.")],
+                authority=[self._rs("customer.example.", "NS", self.NS1)],
+                additional=[self._rs(self.NS1, "A", "203.0.113.6")]), fam)
+            self.assertNotIn("DNSD-006", codes, fam)
+            reasons = sorted({f["evidence"]["reason"] for f in out
+                              if f["code"] == "DNSD-170"})
+            self.assertEqual(reasons, ["chain", "glue"], fam)
+
+    # -- T5 near-miss: a foreign NS cannot launder its own glue ------
+    def test_T5_foreign_ns_cannot_anchor_its_own_glue(self):
+        for fam in ("v4", "v6"):
+            for gt, ga in (("A", "203.0.113.9"), ("AAAA", "2001:db8:c::9")):
+                codes, out = self._codes(self._resp(
+                    authority=[self._rs("victim.example.", "NS",
+                                        "ns.attacker.example.")],
+                    additional=[self._rs("ns.attacker.example.", gt, ga)]), fam)
+                self.assertIn("DNSD-006", codes, f"{fam}/{gt}")
+                self.assertNotIn("DNSD-170", codes, f"{fam}/{gt}")
+                six = [f for f in out if f["code"] == "DNSD-006"][0]
+                self.assertEqual(six["evidence"]["count"], 2, f"{fam}/{gt}")
+
+    # -- T3 near-miss: one stray among good glue ---------------------
+    def test_T3_stray_record_is_isolated(self):
+        for fam in ("v4", "v6"):
+            codes, out = self._codes(self._resp(
+                authority=[self._rs(self.REV, "NS", self.NS1)],
+                additional=[self._rs(self.NS1, "A", "203.0.113.7"),
+                            self._rs("www.victim.example.", "A", "203.0.113.7")]),
+                fam)
+            self.assertIn("DNSD-006", codes, fam)
+            self.assertIn("DNSD-170", codes, fam)
+            six = [f for f in out if f["code"] == "DNSD-006"][0]
+            self.assertEqual(six["evidence"]["count"], 1, fam)
+            self.assertEqual(six["evidence"]["names"], ["www.victim.example."], fam)
+
+    # -- T6: canonicalisation ----------------------------------------
+    def test_T6_case_insensitive_match(self):
+        for fam in ("v4", "v6"):
+            codes, _ = self._codes(self._resp(
+                authority=[self._rs(self.REV, "NS", "NS1.Customer.Example.")],
+                additional=[self._rs(self.NS1, "A", "203.0.113.10")]), fam)
+            self.assertNotIn("DNSD-006", codes, fam)
+            self.assertIn("DNSD-170", codes, fam)
+
+    # -- T7: bounded -------------------------------------------------
+    def test_T7_chain_is_bounded_and_grants_nothing_past_the_cap(self):
+        import detect as _d
+        self.assertEqual(_d.CHAIN_MAX_HOPS, 16)
+        answer = [self._rs(self.REV, "CNAME", "h0.chain.example.")]
+        for i in range(25):
+            answer.append(self._rs(f"h{i}.chain.example.", "CNAME",
+                                   f"h{i+1}.chain.example."))
+        for fam in ("v4", "v6"):
+            codes, out = self._codes(self._resp(
+                answer=answer,
+                additional=[self._rs("h24.chain.example.", "A", "203.0.113.24")]),
+                fam)
+            self.assertIn("DNSD-006", codes, fam)
+            self.assertNotIn("DNSD-170", codes, fam)
+            self.assertTrue([f for f in out if f["code"] == "DNSD-006"
+                             ][0]["evidence"]["chain_truncated"], fam)
+
+    def test_T7_loop_terminates(self):
+        for fam in ("v4", "v6"):
+            self._codes(self._resp(answer=[
+                self._rs(self.REV, "CNAME", "a.loop.example."),
+                self._rs("a.loop.example.", "CNAME", "b.loop.example."),
+                self._rs("b.loop.example.", "CNAME", "a.loop.example.")]), fam)
+
+    # -- the shared utility is untouched -----------------------------
+    def test_shared_bailiwick_untouched(self):
+        import bailiwick as _bw
+        import detect as _d
+        self.assertIs(_d.in_bailiwick, _bw.in_bailiwick)
+        self.assertFalse(hasattr(_bw, "_chain_targets"))
+        self.assertFalse(hasattr(_bw, "_anchored_ns_targets"))
+
+    def test_dedupe_once_per_responder_zone_owner(self):
+        from scapy.all import Ether, UDP, raw
+        eng = Engine(Config())
+        wire = self._resp(authority=[self._rs(self.REV, "NS", self.NS1)],
+                          additional=[self._rs(self.NS1, "A", "203.0.113.5")])
+        fr = raw(Ether() / self._l3("v4") / UDP(sport=53, dport=50000) / wire)
+        n = [len([f for f in eng.handle_frame(fr, now=1.0 + i)
+                  if f["code"] == "DNSD-170"]) for i in range(3)]
+        self.assertEqual(n, [1, 0, 0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

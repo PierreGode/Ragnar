@@ -413,7 +413,8 @@ class Engine:
             # ---- response path ----
             out += detect.detect_keytrap(msg, cfg, zone)
             out += detect.detect_nxnsattack(msg, cfg, zone, zstate, now)
-            out += detect.detect_maginotdns(msg, cfg, zone)
+            out += detect.detect_maginotdns(msg, cfg, zone,
+                                            self.posture, src, now)
             out += detect.detect_nsec3_iterations(msg, cfg, zone)
             out += detect.detect_algo_downgrade(msg, cfg, zone)
             out += detect.detect_dnskey_malformed(msg, cfg, zone)
