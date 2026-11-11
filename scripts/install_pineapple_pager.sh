@@ -650,9 +650,17 @@ host_fetch() {  # host_fetch <url> <outfile>  -> 0 on success
     fi
 }
 
+# python3 from `opkg -d mmc` lands under /mmc, which is NOT on the Pager's default
+# PATH or ld search path. payload.sh exports exactly these at launch, so every
+# on-device python3 call here must use them too - otherwise an installed python3
+# wrongly looks "missing" (which is what made this installer bail out).
+PY_ENV='export PATH=/mmc/usr/bin:$PATH; export LD_LIBRARY_PATH=/mmc/usr/lib:$LD_LIBRARY_PATH;'
+# Same, plus the payload's bundled pure-python libs (nmap, paramiko, ...).
+PY_ENV_LIB="${PY_ENV} export PYTHONPATH='${PAGER_PAYLOAD_DIR}/lib:${PAGER_PAYLOAD_DIR}';"
+
 log "INFO" "Checking Python3 on Pager..."
 
-PYTHON3_INSTALLED=$(pager_ssh "python3 --version 2>/dev/null && echo FOUND || echo MISSING")
+PYTHON3_INSTALLED=$(pager_ssh "${PY_ENV} python3 --version 2>/dev/null && echo FOUND || echo MISSING")
 
 # Package list Ragnar needs (OpenWrt names, no versions)
 PY_PKGS="python3-base python3-light python3-logging python3-asyncio python3-codecs \
@@ -672,7 +680,7 @@ install_via_device_opkg() {
             opkg install python3 ${PY_PKGS} 2>&1 | tail -20
         fi
     "
-    pager_ssh "python3 -c 'import ctypes,sqlite3,ssl; print(42)'" 2>/dev/null | grep -q 42
+    pager_ssh "${PY_ENV} python3 -c 'import ctypes,sqlite3,ssl; print(42)'" 2>/dev/null | grep -q 42
 }
 
 # --- Strategy B: download .ipk set on the host, discover version, stream over
@@ -726,7 +734,7 @@ install_via_host_download() {
         rm -f /tmp/python3-*.ipk /tmp/libpython3-*.ipk 2>/dev/null
     "
     rm -rf "${IPK_DIR}"; IPK_DIR=""
-    pager_ssh "python3 -c 'import ctypes,sqlite3,ssl; print(42)'" 2>/dev/null | grep -q 42
+    pager_ssh "${PY_ENV} python3 -c 'import ctypes,sqlite3,ssl; print(42)'" 2>/dev/null | grep -q 42
 }
 
 needs_python_install=false
@@ -735,7 +743,7 @@ if echo "$PYTHON3_INSTALLED" | grep -q "MISSING"; then
 else
     log "SUCCESS" "Python3 already present on Pager"
     # Confirm the stdlib modules Ragnar imports are actually there
-    MISSING_MODS=$(pager_ssh "python3 -c '
+    MISSING_MODS=$(pager_ssh "${PY_ENV} python3 -c '
 import importlib
 need=[\"logging\",\"asyncio\",\"ctypes\",\"sqlite3\",\"xml.etree.ElementTree\",\"email\",\"urllib\",\"multiprocessing\",\"ssl\",\"uuid\",\"decimal\",\"codecs\"]
 miss=[]
@@ -774,7 +782,7 @@ fi
 
 log "INFO" "Checking python-nmap on Pager..."
 
-NMAP_PY_OK=$(pager_ssh "python3 -c 'import nmap; print(\"OK\")' 2>/dev/null || echo 'MISSING'")
+NMAP_PY_OK=$(pager_ssh "${PY_ENV_LIB} python3 -c 'import nmap; print(\"OK\")' 2>/dev/null || echo 'MISSING'")
 
 if [ "$NMAP_PY_OK" != "OK" ]; then
     # Prefer the copy bundled in the repo (works fully offline); fall back to PyPI.
@@ -794,8 +802,8 @@ if [ "$NMAP_PY_OK" != "OK" ]; then
 
     if [ -n "$NMAP_SRC" ] && [ -d "$NMAP_SRC" ]; then
         # Determine the Pager's python3.x site dir instead of assuming 3.11
-        PY_LIBDIR=$(pager_ssh "python3 -c 'import sys;print(\"/usr/lib/python%d.%d\"%sys.version_info[:2])' 2>/dev/null")
-        [ -z "$PY_LIBDIR" ] && PY_LIBDIR="/usr/lib/python3.11"
+        PY_LIBDIR=$(pager_ssh "${PY_ENV} python3 -c 'import sys,os;print(os.path.join(sys.prefix,\"lib\",\"python%d.%d\"%sys.version_info[:2]))' 2>/dev/null")
+        [ -z "$PY_LIBDIR" ] && PY_LIBDIR="/mmc/usr/lib/python3.11"
         if push_dir "$NMAP_SRC" "${PY_LIBDIR}/nmap"; then
             log "SUCCESS" "python-nmap installed to ${PY_LIBDIR}/nmap"
         else
@@ -854,8 +862,9 @@ VERIFY_RESULT=$(pager_ssh "
     
     # Test Python import
     cd ${PAGER_PAYLOAD_DIR}
+    export PATH=\"/mmc/usr/bin:\$PATH\"
     export PYTHONPATH=\"${PAGER_PAYLOAD_DIR}/lib:${PAGER_PAYLOAD_DIR}:\$PYTHONPATH\"
-    export LD_LIBRARY_PATH=\"/root/lib:${PAGER_PAYLOAD_DIR}/lib:${PAGER_PAYLOAD_DIR}:\$LD_LIBRARY_PATH\"
+    export LD_LIBRARY_PATH=\"/mmc/usr/lib:/root/lib:${PAGER_PAYLOAD_DIR}/lib:${PAGER_PAYLOAD_DIR}:\$LD_LIBRARY_PATH\"
     
     python3 -c 'from pagerctl import Pager; print(\"PAGERCTL_OK\")' 2>/dev/null || echo 'PAGERCTL_IMPORT_FAILED'
     python3 -c 'import nmap; nmap.PortScanner(); print(\"NMAP_PY_OK\")' 2>/dev/null || echo 'NMAP_PY_FAILED'
@@ -903,8 +912,9 @@ log "INFO" "Ensuring actions.json is up to date..."
 
 pager_ssh "
     cd ${PAGER_PAYLOAD_DIR}
+    export PATH=\"/mmc/usr/bin:\$PATH\"
     export PYTHONPATH=\"${PAGER_PAYLOAD_DIR}/lib:${PAGER_PAYLOAD_DIR}:\$PYTHONPATH\"
-    export LD_LIBRARY_PATH=\"/root/lib:${PAGER_PAYLOAD_DIR}/lib:${PAGER_PAYLOAD_DIR}:\$LD_LIBRARY_PATH\"
+    export LD_LIBRARY_PATH=\"/mmc/usr/lib:/root/lib:${PAGER_PAYLOAD_DIR}/lib:${PAGER_PAYLOAD_DIR}:\$LD_LIBRARY_PATH\"
 
     python3 -c '
 import sys, os, json, importlib
