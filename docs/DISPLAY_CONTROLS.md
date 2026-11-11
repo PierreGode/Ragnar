@@ -120,9 +120,11 @@ The LCD HAT is a colour panel, and two kinds of screen use it:
   [mesh.md](mesh.md#the-shieldmaiden-shows-on-the-panel-not-just-the-web)).
 - **Wardriving screens** — the same dark theme; the VIKING screen shows the
   full-colour character too.
-
-The other pages (network, vulnerabilities, discovered hosts, traffic, Network
-Diagnostic mode) are still black on white.
+- **Info pages** — Network, Vulnerabilities, Discovered hosts, Advanced and
+  Traffic all use the dark theme with a gold title.
+- **Network Diagnostic mode** — the cards, the card-selection menu and the
+  per-network signal bars use the dark theme too; the Wi-Fi signal bars are
+  **green**, matching the web GUI's signal meters.
 
 Two config keys in `config/shared_config.json` switch it off, each defaulting
 to on; restart the service after changing one:
