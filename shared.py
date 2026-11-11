@@ -650,6 +650,8 @@ class SharedData:
             "debug_mode": False,
             "scan_vuln_running": True,
             "scan_vuln_no_ports": False,
+            "distro_cve_enrichment": False,  # opt-in: check Debian/Ubuntu security trackers before surfacing a CVE (issue #1051)
+            "distro_cve_cache_hours": 24,
             "enable_attacks": False,
             "release_gate_enabled": False,
             "release_gate_message": "",

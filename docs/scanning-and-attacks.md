@@ -120,6 +120,81 @@ to known weaknesses. Findings are correlated against live threat intelligence
 For the deeper web-application scanners (Nuclei, Nikto, SQLMap, WhatWeb, OWASP
 ZAP) see [Advanced Vulnerability Scanning](adv-scan.md).
 
+### Distro-aware CVE check (Debian / Ubuntu)
+
+The Nmap `vulners` script matches a service against its **upstream** version
+(`cpe:/a:openbsd:openssh:9.2p1`) and returns every CVE ever filed against it.
+Debian and Ubuntu backport security fixes without changing that upstream
+version, so a fully patched host still shows CVEs that were fixed years ago, and
+the one finding that is really open is buried under them.
+
+The distro patch level is usually in the service banner
+(`OpenSSH 9.2p1 Debian 2+deb12u10`). With **Distro-aware CVE Check** on, Ragnar
+reads it and asks the distro's own security tracker about each CVE before
+showing it.
+
+**Turn it on:** Config → General → **Distro-aware CVE Check**
+(`distro_cve_enrichment`, off by default). It applies to scans that run after
+you enable it; a host scanned in the last hour is re-checked on its next scan.
+
+Every finding is **tagged, never deleted**:
+
+| Tag | Meaning | Default view |
+|-----|---------|--------------|
+| `distro-fixed` | The host's package revision already contains the fix | Hidden |
+| `distro-not-affected` | The distro marks its package as not affected (or "unimportant") | Hidden |
+| `exploit-ref` | An exploit reference (githubexploit, PacketStorm, EDB…) that names no CVE, on a service whose CVEs were checked | Hidden |
+| `distro-deferred` | Vulnerable; the distro postponed or will not ship a fix | Shown |
+| `distro-open` | Vulnerable: no fix yet, or a fix exists and the host is behind (the fixed version is named) | Shown |
+| `unverified` | No revision in the banner, unknown product, or no tracker data. Same as before | Shown |
+
+In **Threat Intel**, hidden findings do not count towards a host's totals or its
+risk level. Each host shows how many are suppressed, and **Show N suppressed**
+in the host's details lists them with their tag and the tracker's reason. The
+dashboard and on-device vulnerability count use the same rule. Within a host,
+**CISA KEV** entries come first, then tracker-confirmed open findings, then the
+rest by severity. A CVE in the CISA KEV catalogue is never hidden, even when the
+distro says it is fixed.
+
+What it can check:
+
+- **Debian** — releases the security tracker still carries (currently bookworm,
+  trixie and forky). Older releases stay `unverified`.
+- **Ubuntu** — the release is worked out from the tracker's fixed versions,
+  because an Ubuntu revision such as `3ubuntu0.10` does not name it. When that
+  is ambiguous the findings stay `unverified` rather than guessed.
+- **RHEL (`elN`) and Amazon Linux (`amznN`)** markers are recognised but there is
+  no tracker lookup for them yet, so they stay `unverified`.
+- The banner must carry the revision. OpenSSH, MariaDB/MySQL and BIND usually
+  do; Apache and nginx normally only say `(Debian)`, which is not enough.
+
+Data and privacy:
+
+- Debian: one snapshot of the tracker (about 15 MB to download), trimmed on disk
+  to the ~30 service packages Ragnar can fingerprint (under 1 MB) and refreshed
+  every 24 hours (`distro_cve_cache_hours`). After the first sync the check works
+  offline from that cache.
+- Ubuntu: one request per CVE, cached for the same period.
+- Only CVE ids are sent. Nothing about the scanned host leaves the box.
+- Cache: `data/distro_cve/`. If a tracker cannot be reached and there is no
+  cache, findings stay `unverified` and the scan carries on.
+
+Limits worth knowing: the verdict trusts the banner, so a host that hides or
+fakes its version string is not covered; and exploit references are hidden only
+because they cannot be tied to a CVE, not because each was proven harmless.
+Expand them when in doubt.
+
+Try one service by hand:
+
+```bash
+python3 distro_cve.py "OpenSSH 9.2p1 Debian 2+deb12u10" CVE-2024-6387 CVE-2026-60002
+```
+
+API: `/api/vulnerabilities/grouped` and `/api/vulnerabilities` add
+`distro_status`, `distro` (release, package, host and fixed version, note,
+tracker link), `kev` and `suppressed` to each finding, plus `suppressed_count`
+per host and `total_suppressed`.
+
 ## Multi-source threat intelligence
 
 Real-time fusion from **CISA KEV**, **NVD CVE**, **AlienVault OTX**, and **MITRE

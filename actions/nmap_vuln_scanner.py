@@ -49,6 +49,7 @@ from shared import SharedData
 from logger import Logger
 from nmap_logger import nmap_logger
 from db_manager import get_db
+import distro_cve
 
 logger = Logger(name="nmap_vuln_scanner.py", level=logging.INFO)
 
@@ -342,6 +343,12 @@ class NmapVulnScanner:
             else:
                 logger.warning(f"⚠️ No valid MAC for {ip} - cannot use incremental scanning")
             
+            # Distro revision-aware CVE enrichment (opt-in, issue #1051). The
+            # banner script is a fallback source for the distro patch level
+            # when the VERSION column does not carry it.
+            distro_enrichment = distro_cve.enrichment_enabled(self.shared_data)
+            vuln_scripts = "vulners.nse,banner" if distro_enrichment else "vulners.nse"
+
             # Determine scan strategy based on detected ports
             if not ports_to_scan:
                 # Check if scanning hosts without ports is enabled
@@ -359,7 +366,7 @@ class NmapVulnScanner:
                     "-sT",  # TCP connect scan (works on Wi-Fi)
                     "-sV",  # Service version detection
                     "--script",
-                    "vulners.nse",
+                    vuln_scripts,
                     "--top-ports",
                     "50",
                     ip,
@@ -375,7 +382,7 @@ class NmapVulnScanner:
                     "-sT",  # TCP connect scan (works on Wi-Fi)
                     "-sV",  # Service version detection
                     "--script",
-                    "vulners.nse",
+                    vuln_scripts,
                     "-p",
                     ",".join(ports_to_scan),
                     ip,
@@ -409,7 +416,10 @@ class NmapVulnScanner:
             # Network Intelligence is the authoritative source - no CSV files needed
             # If vulnerabilities are deleted via web UI and scan finds them again,
             # they will be automatically re-added here
-            self.feed_to_network_intelligence(ip, port_vulnerabilities, port_services)
+            distro_tags = {}
+            if distro_enrichment:
+                distro_tags = self.enrich_with_distro_tracker(ip, result.stdout, port_vulnerabilities)
+            self.feed_to_network_intelligence(ip, port_vulnerabilities, port_services, distro_tags)
             
             # CRITICAL: Update scanned ports history for incremental scanning
             # This ensures we don't re-scan the same ports on subsequent runs
@@ -590,6 +600,62 @@ class NmapVulnScanner:
         summary = "; ".join(sorted(summary_entries))
         return summary, port_vulnerabilities, port_services
 
+    def parse_service_banners(self, scan_result: str) -> Dict[str, Dict[str, str]]:
+        """Per port: the nmap VERSION column and the raw banner (banner NSE script).
+
+        "22/tcp open ssh OpenSSH 9.2p1 Debian 2+deb12u10 (protocol 2.0)" ->
+        {"22": {"version": "OpenSSH 9.2p1 Debian 2+deb12u10 (protocol 2.0)", "banner": "..."}}
+        """
+        banners: Dict[str, Dict[str, str]] = {}
+        current_port: Optional[str] = None
+        for raw_line in (scan_result or "").splitlines():
+            line = raw_line.strip()
+            if "/tcp" in line and any(state in line for state in ["open", "closed", "filtered"]):
+                parts = line.split(None, 3)
+                port = parts[0].split('/')[0] if parts else ''
+                current_port = port or None
+                if current_port:
+                    banners[current_port] = {
+                        "version": parts[3].strip() if len(parts) > 3 else "",
+                        "banner": "",
+                    }
+                continue
+            if current_port and line.startswith('|'):
+                match = re.match(r'\|[_ ]?\s*banner:\s*(.+)$', line)
+                if match:
+                    banners[current_port]["banner"] = match.group(1).strip()
+        return banners
+
+    def enrich_with_distro_tracker(self, ip, scan_result, port_vulnerabilities) -> Dict[str, Dict[str, Dict]]:
+        """Tag each vulners line with its Debian/Ubuntu tracker status.
+
+        Returns {port: {vulners line: tag}}. Never raises - on any problem the
+        findings simply stay untagged (the pre-enrichment behaviour).
+        """
+        tags: Dict[str, Dict[str, Dict]] = {}
+        try:
+            enricher = distro_cve.get_enricher(self.shared_data)
+            banners = self.parse_service_banners(scan_result)
+            for port_str, vulnerabilities in port_vulnerabilities.items():
+                # the "cpe:/a:vendor:product:version:" header line is not a finding
+                findings = [v for v in vulnerabilities
+                            if not ("cpe:/" in v and not distro_cve.extract_cve(v))]
+                if not findings:
+                    continue
+                info = banners.get(port_str, {})
+                tags[port_str] = enricher.enrich_service(
+                    info.get("version", ""), info.get("banner", ""), findings)
+            counts: Dict[str, int] = {}
+            for port_tags in tags.values():
+                for tag in port_tags.values():
+                    counts[tag.get("status", "unverified")] = counts.get(tag.get("status", "unverified"), 0) + 1
+            if counts:
+                logger.info(f"Distro CVE enrichment for {ip}: "
+                            + ", ".join(f"{n} {status}" for status, n in sorted(counts.items())))
+        except Exception as e:
+            logger.warning(f"Distro CVE enrichment failed for {ip}: {e}")
+        return tags
+
     def determine_severity(self, vulnerability_text: str) -> Tuple[str, str]:
         """Determine severity and normalized description from vulnerability text"""
         normalized_text = vulnerability_text
@@ -634,10 +700,15 @@ class NmapVulnScanner:
 
         return severity, normalized_text
 
-    def feed_to_network_intelligence(self, ip, port_vulnerabilities, port_services):
+    def feed_to_network_intelligence(self, ip, port_vulnerabilities, port_services, distro_tags=None):
         """
-        Feed vulnerability scan results to the network intelligence system
+        Feed vulnerability scan results to the network intelligence system.
+
+        distro_tags ({port: {vulners line: tag}}) comes from the opt-in distro
+        tracker enrichment; a tag is stored under details['distro'] so the web
+        UI can badge/suppress the finding. Findings are never dropped here.
         """
+        distro_tags = distro_tags or {}
         try:
             # Check if network intelligence is available
             if not hasattr(self.shared_data, 'network_intelligence') or not self.shared_data.network_intelligence:
@@ -667,17 +738,21 @@ class NmapVulnScanner:
                         continue
 
                     try:
+                        details = {
+                            'raw_output': vulnerability,
+                            'service': service or "unknown",
+                            'port': int(port_str),
+                        }
+                        distro_tag = distro_tags.get(port_str, {}).get(vulnerability)
+                        if distro_tag:
+                            details['distro'] = distro_tag
                         self.shared_data.network_intelligence.add_vulnerability(
                             host=ip,
                             port=int(port_str),
                             service=service or "unknown",
                             vulnerability=normalized_text,
                             severity=severity,
-                            details={
-                                'raw_output': vulnerability,
-                                'service': service or "unknown",
-                                'port': int(port_str),
-                            }
+                            details=details
                         )
                         logger.info(f"Added VERIFIED vulnerability: {ip}:{port_str} - {normalized_text}")
                     except Exception as e:

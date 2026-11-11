@@ -459,12 +459,18 @@ class NetworkIntelligence:
                     vulnerabilities.update(default_vulns)
                     credentials.update(default_creds)
             
+            # Distro tracker enrichment (opt-in): findings the distro already
+            # fixed stay in 'vulnerabilities' (tagged, expandable in the UI) but
+            # do not count as open findings on the dashboard / display.
+            suppressed = self.count_suppressed(vulnerabilities)
+
             result = {
                 'network_id': network_id,
                 'vulnerabilities': vulnerabilities,
                 'credentials': credentials,
                 'counts': {
-                    'vulnerabilities': len(vulnerabilities),
+                    'vulnerabilities': len(vulnerabilities) - suppressed,
+                    'suppressed_vulnerabilities': suppressed,
                     'credentials': len(credentials)
                 }
             }
@@ -474,6 +480,24 @@ class NetworkIntelligence:
         except Exception as e:
             self.logger.error(f"Error getting active findings: {e}")
             return {'network_id': 'unknown', 'vulnerabilities': {}, 'credentials': {}, 'counts': {'vulnerabilities': 0, 'credentials': 0}}
+
+    def distro_suppression_enabled(self) -> bool:
+        """True when the opt-in distro CVE enrichment is on (see distro_cve.py)."""
+        try:
+            return bool(self.shared_data.config.get('distro_cve_enrichment', False))
+        except Exception:
+            return False
+
+    def count_suppressed(self, vulnerabilities: Dict) -> int:
+        """How many findings the distro tracker marks fixed / not affected."""
+        if not self.distro_suppression_enabled():
+            return 0
+        try:
+            from distro_cve import is_suppressed
+            return sum(1 for v in vulnerabilities.values() if isinstance(v, dict) and is_suppressed(v))
+        except Exception as e:
+            self.logger.debug(f"Could not evaluate distro suppression: {e}")
+            return 0
 
     def get_vulnerabilities_for_network(self, status_filter: str = "open") -> Dict:
         """Return vulnerabilities for current network filtered by status.
