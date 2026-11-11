@@ -4,6 +4,19 @@
 
 ### 2026-11-11
 
+#### feat(vuln): Debian/Ubuntu revision-aware CVE check to cut banner-scan false positives
+*branch `feat/debian-revision-aware-cve`* · closes [#1051](https://github.com/PierreGode/Ragnar/issues/1051)
+
+- **The problem.** The Nmap `vulners` scan matches the upstream version (`openssh 9.2p1`) and lists every CVE ever filed against it. Debian and Ubuntu backport fixes without changing that version, so a fully patched Debian 12 host on `OpenSSH 9.2p1-2+deb12u10` showed about 120 findings, nearly all fixed long ago, with the one open CVE ranked below them.
+- **The fix (opt-in).** Config → General → **Distro-aware CVE Check** (`distro_cve_enrichment`, off by default). Ragnar reads the distro patch level from the service banner and checks each CVE against the Debian security tracker or the Ubuntu CVE tracker before showing it.
+- **Tagged, never dropped.** `distro-fixed`, `distro-not-affected` and `exploit-ref` (exploit references that name no CVE) are hidden from the default view; `distro-deferred`, `distro-open` and `unverified` stay visible. A host that is behind on updates gets `distro-open` with the fixed version named. Hidden findings are still stored and expand under **Show N suppressed** in Threat Intel, each with the tracker's reason and a link.
+- **Re-ranked.** Hidden findings no longer count towards a host's totals, risk level, the dashboard/on-device vulnerability count or mesh fleet findings. Within a host, CISA KEV entries come first, then tracker-confirmed open findings, then severity. A CISA KEV CVE is never hidden.
+- **Small footprint.** The 85 MB Debian snapshot (15 MB on the wire) is scanned through `mmap` and trimmed to the ~30 service packages Ragnar can fingerprint: a 0.3 MB cache and about 3 MB of heap, where a plain JSON load of the snapshot peaks near 360 MB (measured), too much for a Pi Zero 2 W. Refreshed every 24 h with `If-Modified-Since`; scans work offline from the cache, and an unreachable tracker backs off for 30 minutes instead of stalling every host. Ubuntu is one cached request per CVE. Only CVE ids are sent.
+- **Details that mattered on real hosts.** The package version is rebuilt from the tracker, not the banner: trixie's `sshd` announces `10.0p2` while the package is `1:10.0p1-7+deb13u4`, and banners never carry the epoch. Ubuntu revisions (`3ubuntu0.10`) do not name their release, so it is inferred from the tracker's fixed versions and left `unverified` when ambiguous. Exploit ids that embed a CVE (`..._CVE_2026_123158_...`) are checked as that CVE. The `banner` NSE script is added to the scan as a second source for the patch level.
+- **Not covered:** RHEL / Amazon Linux markers are recognised but have no tracker lookup yet; Debian releases the tracker has dropped stay `unverified`; services whose banner only says `(Debian)` (Apache, nginx) cannot be checked.
+- **Docs:** [scanning-and-attacks.md](scanning-and-attacks.md#distro-aware-cve-check-debian--ubuntu), [knowledgebase.md](knowledgebase.md) (+1 entry), README
+- **Validation:** new `tests/test_distro_cve.py` (49 tests, offline: banner parsing, dpkg version ordering, snapshot extraction, the issue's deb12u10 scenario, outdated host, Ubuntu release inference, offline/stale-cache/backoff, suppression and ranking, scanner wiring, and the grouped API through the Flask test client with the feature on and off). Checked live against both trackers: the issue's six CVEs classify as reported (4 fixed, 1 not affected, 1 deferred), and a real scan of a Debian 13 host went from 53 findings to 23 visible. Threat Intel rendered in headless Chromium at desktop and 390 px phone width: no script errors, no horizontal overflow, tracker text HTML-escaped.
+
 #### feat(display): colour the Network Diagnostic screens on the 1.44" LCD HAT
 *branch `feat/netdiag-lcd-colour`*
 

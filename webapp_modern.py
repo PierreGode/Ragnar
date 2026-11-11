@@ -58,6 +58,7 @@ except ImportError:
 from init_shared import shared_data
 import git_updater
 import os_updates
+import distro_cve
 import cyd_node
 import cyd_serial_bridge
 import cyd_sensor
@@ -4646,9 +4647,12 @@ def _mesh_local_findings(limit=40):
         ni = getattr(shared_data, 'network_intelligence', None)
         if ni:
             data = ni.get_active_findings_for_dashboard() or {}
+            _distro_on = ni.distro_suppression_enabled()
             for v in (data.get('vulnerabilities') or {}).values():
                 if not isinstance(v, dict):
                     continue
+                if _distro_on and distro_cve.is_suppressed(v):
+                    continue  # distro already fixed it - not a fleet finding
                 port = v.get('port')
                 where = str(v.get('host', '?')) + (f":{port}" if port else '')
                 findings.append({
@@ -22855,6 +22859,24 @@ def get_actions():
         return jsonify({'error': str(e)}), 500
 
 
+def _distro_fields(vuln_info, enabled):
+    """Distro tracker tag of a finding, flattened for the API (issue #1051).
+
+    distro_status: distro-fixed | distro-not-affected | distro-deferred |
+    distro-open | exploit-ref | unverified. 'suppressed' findings are hidden
+    from the default view (but always returned, so the UI can expand them).
+    """
+    tag = distro_cve.distro_info(vuln_info) if enabled else {}
+    return {
+        'distro_status': tag.get('status', distro_cve.STATUS_UNVERIFIED),
+        'distro': {k: tag[k] for k in ('distro', 'release', 'package', 'host_version',
+                                       'fixed_version', 'note', 'tracker_url', 'checked')
+                   if tag.get(k)} if tag else None,
+        'kev': bool(tag.get('kev')),
+        'suppressed': distro_cve.is_suppressed(vuln_info, enabled),
+    }
+
+
 @app.route('/api/vulnerabilities')
 def get_vulnerabilities():
     """Get vulnerability scan results"""
@@ -22879,14 +22901,16 @@ def get_vulnerabilities():
                     'severity': vuln_info['severity'],
                     'discovered': vuln_info['discovered'],
                     'network_id': vuln_info['network_id'],
-                    'status': vuln_info['status']
+                    'status': vuln_info['status'],
+                    **_distro_fields(vuln_info, shared_data.network_intelligence.distro_suppression_enabled())
                 })
             
             return jsonify({
                 'vulnerabilities': vuln_data,
                 'network_context': {
                     'current_network': dashboard_findings['network_id'],
-                    'count': dashboard_findings['counts']['vulnerabilities']
+                    'count': dashboard_findings['counts']['vulnerabilities'],
+                    'suppressed': dashboard_findings['counts'].get('suppressed_vulnerabilities', 0)
                 }
             })
         else:
@@ -22955,6 +22979,7 @@ def get_vulnerabilities_grouped():
             # Get filtered vulnerabilities for dashboard
             vulnerabilities = shared_data.network_intelligence.get_vulnerabilities_for_network(status_filter)
             network_id = shared_data.network_intelligence.get_current_network_id()
+            distro_on = shared_data.network_intelligence.distro_suppression_enabled()
             
             # Group vulnerabilities by host IP
             grouped = {}
@@ -22965,6 +22990,7 @@ def get_vulnerabilities_grouped():
                     grouped[host] = {
                         'ip': host,
                         'total_vulnerabilities': 0,
+                        'suppressed_count': 0,
                         'severity_counts': {
                             'critical': 0,
                             'high': 0,
@@ -22976,11 +23002,17 @@ def get_vulnerabilities_grouped():
                         'vulnerabilities': []
                     }
                 
-                # Increment counts
-                grouped[host]['total_vulnerabilities'] += 1
                 severity = vuln_info.get('severity', 'medium')
-                if severity in grouped[host]['severity_counts']:
-                    grouped[host]['severity_counts'][severity] += 1
+                distro_fields = _distro_fields(vuln_info, distro_on)
+
+                # Findings the distro already fixed are returned (tagged, so the
+                # UI can expand them) but do not count towards the host's risk.
+                if distro_fields['suppressed']:
+                    grouped[host]['suppressed_count'] += 1
+                else:
+                    grouped[host]['total_vulnerabilities'] += 1
+                    if severity in grouped[host]['severity_counts']:
+                        grouped[host]['severity_counts'][severity] += 1
                 
                 # Track ports and services
                 grouped[host]['affected_ports'].add(vuln_info['port'])
@@ -22995,7 +23027,9 @@ def get_vulnerabilities_grouped():
                     'severity': severity,
                     'discovered': vuln_info['discovered'],
                     'status': vuln_info.get('status', 'active'),
-                    'resolved': vuln_info.get('resolved')
+                    'resolved': vuln_info.get('resolved'),
+                    **distro_fields,
+                    '_rank': distro_cve.rank_key(vuln_info, distro_on),
                 })
             
             # Inject rogue/threat device detections from main scanner hosts
@@ -23019,6 +23053,7 @@ def get_vulnerabilities_grouped():
                             grouped[host_ip] = {
                                 'ip': host_ip,
                                 'total_vulnerabilities': 0,
+                                'suppressed_count': 0,
                                 'severity_counts': {'critical': 0, 'high': 0, 'medium': 0, 'low': 0},
                                 'affected_ports': set(),
                                 'affected_services': set(),
@@ -23050,23 +23085,30 @@ def get_vulnerabilities_grouped():
             for host_data in grouped.values():
                 host_data['affected_ports'] = sorted(list(host_data['affected_ports']))
                 host_data['affected_services'] = sorted(list(host_data['affected_services']))
-                # Sort vulnerabilities by severity
+                # Rank: visible before distro-suppressed, CISA KEV first, tracker-
+                # confirmed open next, then severity (rogue-device rows have no
+                # _rank and sort by severity among the visible ones).
                 severity_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
                 host_data['vulnerabilities'].sort(
-                    key=lambda v: severity_order.get(v['severity'], 4)
+                    key=lambda v: v.get('_rank') or (0, 1, severity_order.get(v['severity'], 4) * 10 + 2)
                 )
+                for v in host_data['vulnerabilities']:
+                    v.pop('_rank', None)
             
-            # Convert to list and sort by total vulnerability count
+            # Hosts with open findings first (most first); hosts whose findings
+            # are all distro-suppressed sink to the bottom.
             grouped_list = sorted(
                 grouped.values(),
-                key=lambda x: x['total_vulnerabilities'],
+                key=lambda x: (x['total_vulnerabilities'] > 0, x['total_vulnerabilities'], x['suppressed_count']),
                 reverse=True
             )
             
             return jsonify({
                 'grouped_vulnerabilities': grouped_list,
-                'total_hosts': len(grouped_list),
-                'total_vulnerabilities': sum(len(h['vulnerabilities']) for h in grouped_list),
+                'total_hosts': sum(1 for h in grouped_list if h['total_vulnerabilities'] > 0),
+                'total_vulnerabilities': sum(h['total_vulnerabilities'] for h in grouped_list),
+                'total_suppressed': sum(h['suppressed_count'] for h in grouped_list),
+                'distro_enrichment': distro_on,
                 'network_context': {
                     'current_network': network_id,
                     'network_name': 'Unknown',

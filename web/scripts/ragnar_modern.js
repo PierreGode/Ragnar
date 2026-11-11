@@ -277,6 +277,10 @@ const configMetadata = {
         label: "Scan Hosts Without Ports",
         description: "When enabled, vulnerability scans will scan the top 50 common ports on hosts where no ports were discovered. When disabled, only hosts with discovered ports will be scanned."
     },
+    distro_cve_enrichment: {
+        label: "Distro-aware CVE Check",
+        description: "Check the Debian / Ubuntu security trackers before surfacing a CVE. When a service banner shows the distro patch level (e.g. OpenSSH 9.2p1 Debian 2+deb12u10), CVEs the distro already fixed are tagged and hidden from the default view instead of shown as open. Downloads tracker data (about 15 MB for Debian, cached); only CVE ids are sent."
+    },
     enable_attacks: {
         label: "Enable Automatic Attacks",
         description: "Allow Ragnar to perform automated attacks (SSH, FTP, SMB, SQL, etc.) on discovered targets. Disable to only scan without attacking."
@@ -26055,13 +26059,13 @@ function displayConfigForm(config) {
     
     // Group config by sections
     const sections = {
-        'General': ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck'],
+        'General': ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'distro_cve_enrichment', 'enable_attacks', 'blacklistcheck'],
         'Network': ['network_max_failed_pings'],
         'Timing': ['startup_delay', 'web_delay', 'screen_delay', 'scan_interval'],
         'Display': ['epd_type', 'screen_reversed', 'spi_clock_mhz', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness']
     };
     
-    const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck', 'wardriving_enabled', 'wardriving_display', 'wardriving_auto_export', 'wardriving_wigle_include_zigbee'];
+    const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'distro_cve_enrichment', 'enable_attacks', 'blacklistcheck', 'wardriving_enabled', 'wardriving_display', 'wardriving_auto_export', 'wardriving_wigle_include_zigbee'];
     const alwaysShowKeys = new Set(['network_max_failed_pings', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'spi_clock_mhz', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness', 'wardriving_scan_interval', 'wardriving_gps_port', 'wardriving_gps_baudrate']);
     const fallbackValues = {
         network_max_failed_pings: 15,
@@ -31478,6 +31482,79 @@ async function loadThreatIntelData() {
     }
 }
 
+// --- Distro revision-aware CVE enrichment (issue #1051) ----------------------
+// Each finding may carry a distro tracker tag. Colours are inline on purpose:
+// the Tailwind build is pruned and most "/20" tints are not in it.
+const DISTRO_BADGES = {
+    'distro-fixed':        { label: 'Distro fixed',  bg: 'rgba(34,197,94,0.18)',  fg: '#86efac' },
+    'distro-not-affected': { label: 'Not affected',  bg: 'rgba(34,197,94,0.18)',  fg: '#86efac' },
+    'distro-deferred':     { label: 'Fix deferred',  bg: 'rgba(245,158,11,0.18)', fg: '#fcd34d' },
+    'distro-open':         { label: 'Distro: open',  bg: 'rgba(239,68,68,0.20)',  fg: '#fca5a5' },
+    'exploit-ref':         { label: 'Exploit ref',   bg: 'rgba(148,163,184,0.18)', fg: '#cbd5e1' }
+};
+const vulnDetailRegistry = {};
+
+function distroEsc(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function distroBadgesHtml(vuln) {
+    let html = '';
+    if (vuln.kev) {
+        html += '<span class="px-2 py-0.5 rounded text-xs font-semibold" style="background:#b91c1c;color:#fff" title="In the CISA Known Exploited Vulnerabilities catalogue">CISA KEV</span>';
+    }
+    const badge = DISTRO_BADGES[vuln.distro_status];
+    if (badge) {
+        const note = vuln.distro && vuln.distro.note ? distroEsc(vuln.distro.note) : '';
+        html += `<span class="px-2 py-0.5 rounded text-xs font-semibold" style="background:${badge.bg};color:${badge.fg}" title="${note}">${badge.label}</span>`;
+    }
+    return html;
+}
+
+function renderGroupedVulnRow(vuln) {
+    const severityColors = { 'critical': 'red', 'high': 'orange', 'medium': 'yellow', 'low': 'blue' };
+    const color = severityColors[vuln.severity] || 'gray';
+    const vulnText = vuln.vulnerability.length > 100 ?
+        vuln.vulnerability.substring(0, 100) + '...' :
+        vuln.vulnerability;
+    vulnDetailRegistry[vuln.id] = vuln;
+    const note = vuln.distro && vuln.distro.note && DISTRO_BADGES[vuln.distro_status]
+        ? `<div class="text-xs text-slate-400 mt-1 break-words">${distroEsc(vuln.distro.note)}</div>` : '';
+    return `
+        <div class="bg-slate-800/30 rounded p-3 hover:bg-slate-800/50 transition-colors">
+            <div class="flex items-start justify-between">
+                <div class="flex-1 min-w-0">
+                    <div class="flex flex-wrap items-center gap-2 mb-1">
+                        <span class="bg-${color}-500/20 text-${color}-300 px-2 py-0.5 rounded text-xs font-semibold uppercase">${vuln.severity}</span>
+                        ${distroBadgesHtml(vuln)}
+                        <span class="text-slate-400 text-xs">${vuln.service}:${vuln.port}</span>
+                    </div>
+                    <div class="text-sm text-white font-mono break-all">${vulnText}</div>
+                    ${note}
+                </div>
+                <button onclick="showVulnerabilityDetailsById('${distroEsc(vuln.id)}')"
+                        class="ml-2 text-Ragnar-400 hover:text-Ragnar-300 text-xs">
+                    Details
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+function showVulnerabilityDetailsById(id) {
+    const vuln = vulnDetailRegistry[id];
+    if (vuln) showVulnerabilityDetails(vuln);
+}
+
+function toggleSuppressedVulns(hostId) {
+    const list = document.getElementById(`${hostId}-suppressed`);
+    const btn = document.getElementById(`${hostId}-suppressed-toggle`);
+    if (!list || !btn) return;
+    const hidden = list.classList.toggle('hidden');
+    btn.textContent = (hidden ? 'Show ' : 'Hide ') + btn.getAttribute('data-label');
+}
+
 // Display grouped vulnerabilities by host
 function displayGroupedVulnerabilities(data) {
     const container = document.getElementById('grouped-vulnerabilities-container');
@@ -31521,14 +31598,29 @@ function displayGroupedVulnerabilities(data) {
     
     // Build HTML for each host group
     let html = '';
+    const totalSuppressed = data.total_suppressed || 0;
+    if (totalSuppressed > 0) {
+        html += `
+            <div class="glass rounded-lg p-4 text-sm text-slate-300" style="border-left:3px solid #22c55e">
+                <span class="font-semibold" style="color:#86efac">${totalSuppressed} finding${totalSuppressed === 1 ? '' : 's'} hidden</span>
+                — already fixed by the distro, not affecting its package, or exploit references that name no CVE.
+                They are tagged, not deleted: open a host's details to review them.
+            </div>
+        `;
+    }
     data.grouped_vulnerabilities.forEach((hostData, index) => {
         const severityCounts = hostData.severity_counts;
         const vulnCount = hostData.total_vulnerabilities;
+        const suppressedCount = hostData.suppressed_count || 0;
+        const visibleVulns = hostData.vulnerabilities.filter(v => !v.suppressed);
+        const suppressedVulns = hostData.vulnerabilities.filter(v => v.suppressed);
         
         // Determine risk level color
         let riskColor = 'blue';
         let riskLabel = 'Low Risk';
-        if (severityCounts.critical > 0) {
+        if (vulnCount === 0 && suppressedCount > 0) {
+            riskLabel = 'No Open Findings';
+        } else if (severityCounts.critical > 0) {
             riskColor = 'red';
             riskLabel = 'Critical Risk';
         } else if (severityCounts.high > 5) {
@@ -31553,7 +31645,7 @@ function displayGroupedVulnerabilities(data) {
                             <h3 class="text-2xl font-bold text-white">${hostData.ip}</h3>
                             <p class="text-sm text-slate-400">
                                 <span class="bg-${riskColor}-500/20 text-${riskColor}-300 px-2 py-1 rounded text-xs font-semibold">${riskLabel}</span>
-                                <span class="ml-2">${vulnCount} Vulnerabilities Found</span>
+                                <span class="ml-2">${vulnCount} Vulnerabilities Found${suppressedCount > 0 ? ` · ${suppressedCount} suppressed` : ''}</span>
                             </p>
                         </div>
                     </div>
@@ -31598,39 +31690,20 @@ function displayGroupedVulnerabilities(data) {
                 <!-- Detailed Vulnerabilities (Initially Hidden) -->
                 <div id="host-${index}-details" class="hidden mt-4">
                     <div class="border-t border-slate-700 pt-4">
-                        <h4 class="text-lg font-semibold mb-3 text-white">All Vulnerabilities (${vulnCount})</h4>
+                        <h4 class="text-lg font-semibold mb-3 text-white">${suppressedCount > 0 ? 'Open Findings' : 'All Vulnerabilities'} (${vulnCount})</h4>
                         <div class="space-y-2 max-h-96 overflow-y-auto scrollbar-thin">
-                            ${hostData.vulnerabilities.map(vuln => {
-                                const severityColors = {
-                                    'critical': 'red',
-                                    'high': 'orange',
-                                    'medium': 'yellow',
-                                    'low': 'blue'
-                                };
-                                const color = severityColors[vuln.severity] || 'gray';
-                                const vulnText = vuln.vulnerability.length > 100 ? 
-                                    vuln.vulnerability.substring(0, 100) + '...' : 
-                                    vuln.vulnerability;
-                                
-                                return `
-                                    <div class="bg-slate-800/30 rounded p-3 hover:bg-slate-800/50 transition-colors">
-                                        <div class="flex items-start justify-between">
-                                            <div class="flex-1">
-                                                <div class="flex items-center space-x-2 mb-1">
-                                                    <span class="bg-${color}-500/20 text-${color}-300 px-2 py-0.5 rounded text-xs font-semibold uppercase">${vuln.severity}</span>
-                                                    <span class="text-slate-400 text-xs">${vuln.service}:${vuln.port}</span>
-                                                </div>
-                                                <div class="text-sm text-white font-mono">${vulnText}</div>
-                                            </div>
-                                            <button onclick='showVulnerabilityDetails(${JSON.stringify(vuln).replace(/'/g, "\\'")})' 
-                                                    class="ml-2 text-Ragnar-400 hover:text-Ragnar-300 text-xs">
-                                                Details
-                                            </button>
-                                        </div>
-                                    </div>
-                                `;
-                            }).join('')}
+                            ${visibleVulns.length ? visibleVulns.map(renderGroupedVulnRow).join('')
+                                : '<div class="text-sm text-slate-400">No open findings on this host.</div>'}
                         </div>
+                        ${suppressedCount > 0 ? `
+                        <div class="mt-4">
+                            <button id="host-${index}-suppressed-toggle" data-label="${suppressedCount} suppressed (distro-fixed / not affected / exploit refs)"
+                                    onclick="toggleSuppressedVulns('host-${index}')"
+                                    class="text-sm text-Ragnar-400 hover:text-Ragnar-300 text-left">Show ${suppressedCount} suppressed (distro-fixed / not affected / exploit refs)</button>
+                            <div id="host-${index}-suppressed" class="hidden space-y-2 max-h-96 overflow-y-auto scrollbar-thin mt-2 opacity-60">
+                                ${suppressedVulns.map(renderGroupedVulnRow).join('')}
+                            </div>
+                        </div>` : ''}
                     </div>
                 </div>
             </div>
@@ -31746,6 +31819,23 @@ function showVulnerabilityDetails(vuln) {
                 <div class="text-sm text-slate-400 mb-1">Status</div>
                 <div class="text-white capitalize">${vuln.status}</div>
             </div>
+
+            ${vuln.distro ? `
+            <div class="bg-slate-800/50 rounded-lg p-4">
+                <div class="text-sm text-slate-400 mb-2">Distro Security Tracker</div>
+                <div class="flex flex-wrap items-center gap-2 mb-2">${distroBadgesHtml(vuln) || '<span class="text-slate-300 text-sm">Unverified</span>'}</div>
+                ${vuln.distro.note ? `<div class="text-white text-sm break-words mb-2">${distroEsc(vuln.distro.note)}</div>` : ''}
+                <div class="text-xs text-slate-400 break-all">
+                    ${[['Distro', [vuln.distro.distro, vuln.distro.release].filter(Boolean).join(' / ')],
+                       ['Package', vuln.distro.package],
+                       ['Host version', vuln.distro.host_version],
+                       ['Fixed in', vuln.distro.fixed_version],
+                       ['Checked', vuln.distro.checked]]
+                        .filter(row => row[1])
+                        .map(row => `<div>${row[0]}: <span class="text-slate-300 font-mono">${distroEsc(row[1])}</span></div>`).join('')}
+                </div>
+                ${vuln.distro.tracker_url && /^https:\/\//.test(vuln.distro.tracker_url) ? `<a href="${distroEsc(vuln.distro.tracker_url)}" target="_blank" rel="noopener noreferrer" class="text-blue-400 hover:text-blue-300 text-sm underline">View on the distro tracker</a>` : ''}
+            </div>` : ''}
         </div>
     `;
     

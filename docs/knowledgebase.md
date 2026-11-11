@@ -223,6 +223,11 @@ It extracts data from services that authentication attacks open up, and stores i
 Source: scanning-and-attacks.md
 <!-- proof: docs/scanning-and-attacks.md | Extracts data from services that authentication attacks open up -->
 
+### Why does a patched Debian or Ubuntu host show old CVEs?
+The scan matches the upstream version, and distros backport fixes without changing it. Turn on **Distro-aware CVE Check** in **Config → General**: Ragnar then checks the Debian or Ubuntu security tracker and hides CVEs the distro already fixed. They stay tagged and can be expanded in **Threat Intel**.
+Source: docs/scanning-and-attacks.md
+<!-- proof: docs/scanning-and-attacks.md | Distro-aware CVE check (Debian / Ubuntu) -->
+
 ## Advanced scanning
 
 ### What is the Adv Scan tab for?
