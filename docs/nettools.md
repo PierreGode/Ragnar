@@ -457,8 +457,28 @@ its no-transmit invariant is AST-enforced in its own conformance. Findings (code
   `DNSD-021` the closest-encloser CPU-exhaustion pattern (baseline-gated).
 - **NXNSAttack** (`CVE-2020-8616`) — `DNSD-004` a glueless out-of-bailiwick NS overflow,
   `DNSD-005` a correlated burst — referral amplification.
-- **MaginotDNS** (`CVE-2021-25220`) — `DNSD-006` an authority/additional record outside the
-  queried zone's bailiwick: cache-poisoning record injection.
+- **MaginotDNS** (attack class `CVE-2021-25220`) — `DNSD-006` an authority/additional record
+  outside the queried zone's bailiwick that the response itself does not account for:
+  cache-poisoning record injection. **v12** fixes a false positive on reverse zones. Reverse
+  DNS at an ISP produces out-of-bailiwick data all day (referral glue for a customer's name
+  server, RFC 2317 / CNAME chains into customer domains), and it was reported as a critical
+  finding. Each such record is now classified from the single packet:
+  - **glue**: an A/AAAA in the additional section whose owner is the target of an *anchored*
+    NS record → `DNSD-170`, notice;
+  - **chain**: a record owned by a CNAME/DNAME chain target reachable from the query name, or
+    an NS/SOA for an ancestor of one → `DNSD-170`, notice;
+  - **everything else** → `DNSD-006`, critical, as before.
+
+  An NS record is *anchored* only if its owner is inside the queried zone or at/above a chain
+  target, so a forged `victim.example NS ns.attacker.example` cannot excuse its own glue: both
+  records stay `DNSD-006`. The chain walk stops at 16 hops or on a loop, and nothing past the
+  stop is excused (`chain_truncated` in the evidence). `DNSD-170` (`OUT_OF_BAILIWICK_ACCOUNTED`,
+  no CVE) keeps the record visible, once per responder + zone + owner, and seeing it constantly
+  on an ISP resolver tap is correct. The CVE field of `DNSD-006` now reads
+  `attack class: CVE-2021-25220, CVE-2025-40778`: the detector is structural and has no version
+  awareness, so the CVEs name the shape being matched, not a vulnerable build. Still critical:
+  an out-of-bailiwick NS/SOA with no chain tie, a record nothing in the response references,
+  and glue whose NS is itself out of bailiwick.
 - **DNSBomb** (`CVE-2024-33655`) — `DNSD-020` a short-TTL burst far above a zone's learned
   rate: the pulsing-amplification accumulation phase (baseline-gated).
 - **SAD DNS** (`CVE-2020-25705`) — `DNSD-030` two conflicting responses to one outstanding

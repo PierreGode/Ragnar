@@ -124,7 +124,11 @@ behind them is Solarflere's work.
   Matter/Thread census) — informational, carries no CVE. **DNS Watch v11** enriches that census
   with the fingerprint the Z/IP gateway publishes — device type, home ID, endpoint, product ID and
   raw security-class hex — while deliberately reading **no on-wire device name** (Z-Wave node names
-  stay inside the encrypted Z/IP tunnel); still informational, still no CVE.
+  stay inside the encrypted Z/IP tunnel); still informational, still no CVE. **DNS Watch v12** fixes the
+  **MaginotDNS** detector (`DNSD-006`) false positive on ISP reverse zones: out-of-bailiwick records
+  that the response's own anchored delegation glue or CNAME/DNAME chain accounts for become the
+  notice-level `DNSD-170` (no CVE), real injection stays critical, and the CVE field is relabelled
+  as an attack class. No new CVE.
 - **SSDP / UPnP** — a passive SSDP/UPnP protocol detector for **CallStranger** (**CVE-2020-12695**),
   the lone spec-level GENA flaw: a `SUBSCRIBE` whose `CALLBACK` points off-link turns the device
   into a reflector / data-exfiltration relay, independent of device age. 25 codes across discovery

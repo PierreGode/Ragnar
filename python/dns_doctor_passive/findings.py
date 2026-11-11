@@ -82,8 +82,8 @@ FINDINGS = {
     },
     "DNSD-006": {
         "name": "MAGINOTDNS_OUT_OF_BAILIWICK", "severity": "critical", "confidence": "high",
-        "cve": "CVE-2021-25220, CVE-2025-40778", "klass": "structural", "stateful": False,
-        "desc": "Response carries an authority or additional record outside the queried zone's bailiwick, or an unsolicited RR the query never asked for -- cache-poisoning record injection",
+        "cve": "attack class: CVE-2021-25220, CVE-2025-40778", "klass": "structural", "stateful": False,
+        "desc": "Response carries an authority or additional record outside the queried zone's bailiwick that is NOT accounted for by this response's own delegation glue or CNAME/DNAME chain -- cache-poisoning record injection. Records that ARE so accounted are reported as DNSD-170 instead. The cve field names the ATTACK CLASS this shape belongs to, not a claim that the responder is running a vulnerable build: this detector is purely structural and has no version awareness",
     },
     "DNSD-007": {
         "name": "TUDOOR_MALFORMED_PACKET", "severity": "notice", "confidence": "low",
@@ -460,6 +460,16 @@ FINDINGS = {
         "name": "SPF_MACRO_BUDGET_UNDERFLOW", "severity": "critical", "confidence": "high",
         "cve": "CVE-2023-42118", "klass": "spf-parser", "stateful": True,
         "desc": "An SPF term carries enough macro variables to leave libspf2's compile budget between 0 and 3 bytes when the next string literal is initialised. The 2021 fix subtracted sizeof(SPF_data_t) from an unsigned count with no floor, so that subtraction UNDERFLOWS to roughly SIZE_MAX and every later bounds check passes. A regression of the CVE-2021-20314 fix, in the same macro in the same function",
+    },
+
+    # ---------------- 170-179: structural, continued ----------------
+    # The 001-009 structural block is full. This is structural work
+    # that arrived later, not a new class.
+    "DNSD-170": {
+        "name": "OUT_OF_BAILIWICK_ACCOUNTED", "severity": "notice",
+        "confidence": "high", "cve": None, "klass": "structural",
+        "stateful": False,
+        "desc": "A record outside the queried zone's bailiwick that THIS response's own structure explains: either A/AAAA glue in the additional section whose owner is the target of an anchored NS record, or a record owned by a CNAME/DNAME chain target (or an NS/SOA for an ancestor of one). Reverse DNS at an ISP produces these constantly -- referral glue for out-of-zone NS targets, and RFC 2317 / CNAME chains into customer domains -- and they are normal operation rather than injection. Reported rather than silently dropped so the record stays visible and the count stays auditable; the classification decision is made from the single packet, with no cross-packet state",
     },
 
     # ---------------- 160-169: TCP stream reassembly ----------------

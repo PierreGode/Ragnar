@@ -17,7 +17,8 @@ from collections import Counter, defaultdict
 
 import parse
 import netscope
-from bailiwick import in_bailiwick, normalize, out_of_bailiwick_rrs
+from bailiwick import (in_bailiwick, is_subdomain_of, normalize,
+                       out_of_bailiwick_rrs)
 from findings import finding, BASELINE_DEPENDENT
 
 
@@ -191,51 +192,215 @@ def detect_nxnsattack(msg, cfg, zone, zstate=None, now=None):
     return out
 
 
-def detect_maginotdns(msg, cfg, zone):
-    """
-    CVE-2021-25220 family. Cache-poisoning by smuggling records for a
-    zone the responder has no authority over.
+# The chain walk is bounded. A response can carry a CNAME loop or an
+# arbitrarily long chain, and an unbounded follow would either spin or
+# let an attacker extend the exemption set as far as they liked by
+# stacking hops.
+CHAIN_MAX_HOPS = 16
 
-    THE FALSE-POSITIVE CONTROL: an out-of-bailiwick record in the
-    ADDITIONAL section is usually legitimate glue for a third-party
-    nameserver, which is everywhere. So additional-section records are
-    only reported when they are NOT plausible glue -- i.e. their owner
-    is not the target of any NS record in the authority section.
-    Authority-section records outside the zone have no such excuse and
-    are reported directly.
+
+def _chain_targets(msg, qname):
+    """
+    The QNAME plus every CNAME/DNAME target reachable from it through
+    the ANSWER section.
+
+    Returns (ordered list of normalized names, stopped_early).
+
+    `stopped_early` is True on a loop or on hitting the hop cap, and
+    when it is set the caller must NOT treat anything past the stop
+    point as accounted -- the whole purpose of the cap is that an
+    attacker cannot buy exemptions by stacking hops, so a truncated
+    walk has to exempt less, never more.
+
+    DNAME is followed owner -> target as though it were a CNAME. That
+    is an approximation: a DNAME rewrites a subtree rather than one
+    name, and a real resolver synthesises the CNAME. It is the
+    conservative direction HERE only because every exemption in this
+    classifier downgrades critical to notice and never suppresses the
+    record, so a slightly wide chain set costs alert severity, not
+    visibility.
+    """
+    by_owner = {}
+    for r in msg.answers:
+        if r.rtype in (parse.T_CNAME, parse.T_DNAME):
+            t = r.parsed.get("target")
+            if t is not None:
+                by_owner.setdefault(tuple(normalize(r.name)), []).append(
+                    tuple(normalize(t)))
+
+    start = tuple(normalize(qname))
+    chain = [start]
+    seen = {start}
+    cur = start
+    stopped_early = False
+    for _ in range(CHAIN_MAX_HOPS):
+        nxt = by_owner.get(cur)
+        if not nxt:
+            break
+        cur = nxt[0]
+        if cur in seen:
+            stopped_early = True       # loop
+            break
+        seen.add(cur)
+        chain.append(cur)
+    else:
+        # The loop ran the full cap without breaking: there may be more
+        # chain we refused to follow.
+        stopped_early = cur in by_owner
+
+    return chain, stopped_early
+
+
+def _anchored_ns_targets(msg, zone_name, chain):
+    """
+    RDATA targets of the NS records we are willing to treat as a real
+    delegation in this response.
+
+    An NS record anchors glue only if its OWNER is something this
+    response has standing to delegate from: either inside the queried
+    zone's bailiwick, or at (or above) a name the CNAME/DNAME chain
+    actually reached.
+
+    THIS IS THE WHOLE FIX FOR T5. The previous implementation accepted
+    the target of ANY NS record in the authority section, so an
+    attacker could inject `victim.example NS ns.attacker.example`
+    plus matching A glue and have the glue silently exempted by the NS
+    record that came in the same forged packet. Anchoring means a
+    foreign NS cannot authorise its own glue.
+    """
+    targets = set()
+    for r in msg.all_rrs():
+        if r.rtype != parse.T_NS or r.section not in ("authority", "answer"):
+            continue
+        owner = r.name
+        anchored = in_bailiwick(owner, zone_name)
+        if not anchored:
+            for ct in chain:
+                # owner is the chain target itself, or an ancestor of it
+                if is_subdomain_of(ct, owner):
+                    anchored = True
+                    break
+        if not anchored:
+            continue
+        t = r.parsed.get("target")
+        if t is not None:
+            targets.add(tuple(normalize(t)))
+    return targets
+
+
+def detect_maginotdns(msg, cfg, zone, table=None, src_raw=None, now=0.0):
+    """
+    CVE-2021-25220 / CVE-2025-40778 attack class. Cache-poisoning by
+    smuggling records for a zone the responder has no authority over.
+
+    THIS DETECTOR CLASSIFIES, IT NO LONGER JUST MATCHES. Every record
+    outside the queried zone's bailiwick is sorted into one of three
+    buckets, and all three are reported -- the split changes the
+    SEVERITY an operator sees, never whether the record is visible.
+
+      glue   -- A/AAAA in ADDITIONAL whose owner is the target of an
+                ANCHORED NS record            -> DNSD-170, notice
+      chain  -- owner is a CNAME/DNAME chain target, or NS/SOA for an
+                ancestor of one               -> DNSD-170, notice
+      none   -- everything else               -> DNSD-006, critical
+
+    WHY THE SPLIT EXISTS. DNSD-006 was purely structural with no
+    version awareness, and reverse DNS at an ISP legitimately produces
+    out-of-bailiwick data all day: referral glue for out-of-zone NS
+    targets (`2.0.192.in-addr.arpa NS ns1.customer.example`) and RFC
+    2317 / CNAME chains into customer domains. Those are normal
+    operation, and reporting them as a critical cache-poisoning finding
+    against a patched BIND is a false positive that costs an operator
+    real time.
+
+    WHAT IT DELIBERATELY DOES NOT DO. It does not become
+    version-aware, consult a declared patch level, or take an operator
+    allowlist of expected NS targets -- all three were ruled out of
+    scope. It is still one packet in, a verdict out, with no probing
+    and nothing sent.
+
+    The shared bailiwick utility is NOT touched: NXNSAttack
+    (DNSD-004/005) asks it the same question and must keep getting the
+    same answer. The split lives here.
     """
     q = _question(msg)
     if q is None:
         return []
     zone_name = q["name"]
 
-    ns_targets = set()
-    for r in msg.authority:
-        if r.rtype == parse.T_NS:
-            t = r.parsed.get("target")
-            if t is not None:
-                ns_targets.add(tuple(normalize(t)))
-
-    suspicious = []
-    for rr in out_of_bailiwick_rrs(msg, zone_name):
-        if rr.section == "additional":
-            if tuple(normalize(rr.name)) in ns_targets:
-                continue  # plausible glue for a delegation in this response
-            if rr.rtype not in (parse.T_A, parse.T_AAAA, parse.T_CNAME,
-                                parse.T_NS, parse.T_DNSKEY, parse.T_RRSIG):
-                continue  # only report record types that can poison a cache
-        suspicious.append(rr)
-
-    if not suspicious:
+    oob = out_of_bailiwick_rrs(msg, zone_name)
+    if not oob:
         return []
-    names = sorted({r.name.text() for r in suspicious})[:5]
-    return [finding(
-        "DNSD-006", zone,
-        f"{len(suspicious)} record(s) outside the queried zone's bailiwick and not "
-        f"explainable as delegation glue: {', '.join(names)}",
-        {"count": len(suspicious), "names": names, "qzone": zone_name.text(),
-         "sections": sorted({r.section for r in suspicious})},
-    )]
+
+    chain, chain_truncated = _chain_targets(msg, zone_name)
+    chain_set = set(chain)
+    ns_targets = _anchored_ns_targets(msg, zone_name, chain)
+
+    def _classify(rr):
+        """-> ('glue', detail) | ('chain', detail) | (None, None)"""
+        owner = tuple(normalize(rr.name))
+        if (rr.section == "additional" and rr.rtype in (parse.T_A, parse.T_AAAA)
+                and owner in ns_targets):
+            return "glue", {"anchored_ns_target": rr.name.text()}
+        if owner in chain_set:
+            return "chain", {"chain_hop": chain.index(owner)}
+        if rr.rtype in (parse.T_NS, parse.T_SOA):
+            for i, ct in enumerate(chain):
+                if is_subdomain_of(ct, rr.name):
+                    return "chain", {"ancestor_of_chain_hop": i}
+        return None, None
+
+    accounted, suspicious = [], []
+    for rr in oob:
+        reason, detail = _classify(rr)
+        if reason is None:
+            if rr.section == "additional" and rr.rtype not in (
+                    parse.T_A, parse.T_AAAA, parse.T_CNAME, parse.T_NS,
+                    parse.T_DNSKEY, parse.T_RRSIG):
+                # Pseudo-records and record types that cannot poison a
+                # cache keep their pre-split handling: not reported.
+                continue
+            suspicious.append(rr)
+        else:
+            accounted.append((rr, reason, detail))
+
+    out = []
+
+    # ---- the accounted records: notice, deduped -------------------
+    for rr, reason, detail in accounted:
+        key = ("DNSD-170", bytes(src_raw or b""), zone_name.text().lower(),
+               rr.name.text().lower())
+        if table is not None and not table.first_sighting(key, now):
+            continue
+        ev = {"qname": _qname_text(msg), "qzone": zone_name.text(),
+              "rr_owner": rr.name.text(), "rr_type": rr.rtype,
+              "section": rr.section, "reason": reason,
+              "responder": _fmt_addr(src_raw) if src_raw else None,
+              "family": ("v6" if src_raw and len(src_raw) == 16 else
+                         "v4" if src_raw else None),
+              "chain_len": len(chain), "chain_truncated": chain_truncated}
+        ev.update(detail)
+        out.append(finding(
+            "DNSD-170", zone,
+            f"out-of-bailiwick {rr.name.text()} in {rr.section} is accounted for by "
+            f"this response's own {reason} structure, not injection",
+            ev,
+        ))
+
+    # ---- the rest: unchanged DNSD-006 -----------------------------
+    if suspicious:
+        names = sorted({r.name.text() for r in suspicious})[:5]
+        out.append(finding(
+            "DNSD-006", zone,
+            f"{len(suspicious)} record(s) outside the queried zone's bailiwick and "
+            f"not accounted for by delegation glue or a CNAME/DNAME chain: "
+            f"{', '.join(names)}",
+            {"count": len(suspicious), "names": names, "qzone": zone_name.text(),
+             "sections": sorted({r.section for r in suspicious}),
+             "accounted_count": len(accounted),
+             "chain_len": len(chain), "chain_truncated": chain_truncated},
+        ))
+    return out
 
 
 def detect_tudoor(msg, cfg, zone):

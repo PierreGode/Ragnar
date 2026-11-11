@@ -27160,7 +27160,13 @@ def _ipsec_selftest():
 # is radio-free evidence of a Z-Wave mesh on the IP side, informational like the Matter/Thread
 # census; v11 enriches it with the Z/IP announcement fingerprint (device type, home ID, endpoint,
 # product ID and security-class hex) but reads NO user-set device name — Z-Wave node names live
-# inside the encrypted Z/IP tunnel (DTLS 41230), off the wire. Dual-stack; the engine never
+# inside the encrypted Z/IP tunnel (DTLS 41230), off the wire. v12 fixes the MaginotDNS
+# detector (DNSD-006) false positive on reverse zones: each out-of-bailiwick record is now
+# classified from the single packet — A/AAAA glue for an ANCHORED NS target, or a record on the
+# response's own CNAME/DNAME chain (bounded at 16 hops), is reported as the new notice-level
+# DNSD-170 (no CVE) instead of a critical DNSD-006; a foreign NS cannot anchor its own glue, so
+# real injection stays critical. DNSD-006's cve field is relabelled "attack class: ..." because
+# the detector is structural and has no version awareness. Dual-stack; the engine never
 # transmits (AST-enforced in its conformance). Complements the ACTIVE do_dns_doctor.
 _DNS_PASSIVE_PKG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     'python', 'dns_doctor_passive')
@@ -27244,7 +27250,9 @@ def _dns_passive_normalize(f):
     return {'code': f.get('code'), 'name': f.get('name') or f.get('code'),
             'severity': _DNS_PASSIVE_SEV.get(str(sev).lower(), 'MEDIUM'),
             'klass': _dns_passive_klass(sev), 'src': f.get('src') or None,
-            'cves': [c.strip() for c in str(f.get('cve') or '').split(',') if c.strip()],
+            # v12: DNSD-006's cve field is prefixed "attack class: ..." (a label, not a claim
+            # about the responder's build), so pull the CVE ids out instead of comma-splitting.
+            'cves': re.findall(r'CVE-\d{4}-\d{4,}', str(f.get('cve') or '')),
             'detail': {'zone': f.get('zone'), 'confidence': f.get('confidence'),
                        'evidence': f.get('evidence'), 'text': f.get('detail')}}
 
@@ -27272,6 +27280,9 @@ def do_dns_watch(interface=None, seconds=20, learn=True, quick=False):
     tier (CVE-2021-33912/33913/20314, CVE-2023-42118) and TCP stream reassembly (segment-overlap
     evasion), plus the v10 Z-Wave Z/IP Gateway mDNS census (DNSD-079, no CVE; v11 enriches it with
     a device-type / home-ID / product-ID / security-class fingerprint, but no on-wire device name).
+    v12 splits the MaginotDNS detector: out-of-bailiwick records that the response's own anchored
+    delegation glue or CNAME/DNAME chain accounts for (normal on ISP reverse zones) are a
+    notice-level DNSD-170, everything else stays a critical DNSD-006.
     Dual-stack; adapts the vendored dns_doctor_passive engine over a bounded capture."""
     iface = interface if _valid_iface(interface or '') else _capture_iface()
     if not iface:
