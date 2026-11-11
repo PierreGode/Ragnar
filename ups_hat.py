@@ -61,9 +61,10 @@ CELL_FULL_V = 4.2
 CELL_MIN_PLAUSIBLE_V = 2.4
 CELL_MAX_PLAUSIBLE_V = 4.5
 
-# The shunt sits in the battery line: negative = the battery is feeding the
-# Pi, positive = it is charging. Waveshare's demo calibrates for 0.01 ohm,
-# which is what the current figure below assumes.
+# UPS HAT (C) schematic: R9 (0.01 ohm, 1 %) sits between the charger's BATT
+# pin (INA219 IN+) and the cell (IN-). So the bus voltage is the battery
+# voltage, and the shunt reads positive while charging and negative while the
+# battery feeds the Pi. A0=SDA, A1=GND strap the chip to 0x43.
 SHUNT_OHMS = 0.01
 # A running Pi Zero pulls well over 100 mA from the cell (>= 1 mV across the
 # shunt). Anything less negative than this means external power is present,

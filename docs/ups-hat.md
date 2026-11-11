@@ -71,6 +71,8 @@ it off.
 
 - No automatic shutdown at low battery; the HAT's protection circuit cuts power
   when the cell is empty.
-- The current figure printed by `ups_hat.py` assumes the 0.01 Ω shunt from
-  Waveshare's demo calibration. Percentage and charge state do not depend on it.
+- The current figure printed by `ups_hat.py` uses the 0.01 Ω shunt shown on
+  Waveshare's UPS HAT (C) schematic (R9) and used by their demo calibration.
+  Their wiki FAQ says 0.1 Ω, which does not match either. Percentage and charge
+  state do not depend on the shunt value.
 - For UPS Lite v1.2 boards (MAX17040 / CW2015) see [UPS_INTEGRATION.md](UPS_INTEGRATION.md).
