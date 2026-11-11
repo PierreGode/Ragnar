@@ -20066,7 +20066,25 @@ async function updateVulnerabilityCount() {
 // WI-FI MANAGEMENT FUNCTIONS
 // ============================================================================
 
+// Set from /api/wifi/status when the driver says the adapter cannot do AP mode.
+let wifiApBlocker = null;
+
+// Inline notice under the Start AP Mode button. An empty message hides it.
+function setApModeNotice(message) {
+    const el = document.getElementById('ap-mode-notice');
+    if (!el) return;
+    el.textContent = message || '';
+    el.classList.toggle('hidden', !message);
+}
+
 async function startAPMode() {
+    // Known up front that this adapter cannot be an access point: say so
+    // instead of asking to disconnect Wi-Fi for a hotspot that cannot start.
+    if (wifiApBlocker) {
+        setApModeNotice(wifiApBlocker);
+        addConsoleMessage(`AP Mode not available: ${wifiApBlocker}`, 'error');
+        return;
+    }
     if (!confirm('Start AP Mode?\n\nThis will:\n• Disconnect from current Wi-Fi\n• Start "Ragnar" access point\n• Enable 3-minute smart cycling\n• Allow Wi-Fi configuration via AP\n\nContinue?')) {
         return;
     }
@@ -20078,6 +20096,7 @@ async function startAPMode() {
         const data = await postAPI('/api/wifi/ap/enable', {});
         
         if (data.success) {
+            setApModeNotice('');
             addConsoleMessage(`AP Mode started: ${data.ap_config.ssid}`, 'success');
             updateWifiStatus(
                 `AP Mode Active: "${data.ap_config.ssid}" | ${data.ap_config.timeout}s timeout | Smart cycling enabled`,
@@ -20087,8 +20106,11 @@ async function startAPMode() {
             // Auto-refresh Wi-Fi status
             setTimeout(refreshWifiStatus, 2000);
         } else {
-            addConsoleMessage(`Failed to start AP Mode: ${data.message}`, 'error');
-            updateWifiStatus(`Failed to start AP Mode: ${data.message}`, 'error');
+            const reason = data.error || data.message || 'unknown error';
+            addConsoleMessage(`Failed to start AP Mode: ${reason}`, 'error');
+            updateWifiStatus(`Failed to start AP Mode: ${reason}`, 'error');
+            setApModeNotice(reason === data.error ? reason : `AP Mode was not started: ${reason}`);
+            setTimeout(refreshWifiStatus, 2000);
         }
         
     } catch (error) {
@@ -20134,6 +20156,17 @@ async function refreshWifiStatus() {
         }
         const interfaceLabel = data.interface ? data.interface : activeInterface;
         const ipBadge = data.ip_address ? ` (${data.ip_address})` : '';
+
+        // Say up front when this adapter cannot be an access point, instead of
+        // letting the user find out by losing Wi-Fi.
+        wifiApBlocker = (!data.ap_mode_active && data.ap_supported === false)
+            ? (data.ap_error || `The Wi-Fi adapter on ${data.ap_interface || 'this device'} does not support Access Point mode. AP Mode cannot be started with it.`)
+            : null;
+        if (data.ap_mode_active) {
+            setApModeNotice('');
+        } else {
+            setApModeNotice(wifiApBlocker || data.ap_error || '');
+        }
         
         if (data.ap_mode_active) {
             const apMessage = `AP Mode Active: "${data.ap_ssid || 'Ragnar'}" | Connect to configure Wi-Fi`;

@@ -4176,6 +4176,9 @@
                                 </svg>
                                 Start AP Mode
                             </button>
+                            <!-- Shown when the adapter cannot be an access point, or the last start failed -->
+                            <div id="ap-mode-notice" class="hidden" role="alert"
+                                 style="margin-top:10px;padding:8px 10px;border-radius:6px;border:1px solid #b45309;background:rgba(180,83,9,0.15);color:#fcd34d;font-size:13px;line-height:1.4;overflow-wrap:anywhere"></div>
                         </div>
 
                         <!-- Multi-Interface Scanner Card -->
@@ -10151,7 +10154,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261111-upshat"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261111-apcheck"></script>
 
 
 

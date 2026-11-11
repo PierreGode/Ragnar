@@ -137,6 +137,10 @@ class WiFiManager:
         self.ap_ssid = shared_data.config.get('wifi_ap_ssid', 'Ragnar')
         self.ap_password = shared_data.config.get('wifi_ap_password', 'ragnarconnect')
         self.ap_interface = self.default_wifi_interface
+        # Why the last AP start did not happen, in words a user can act on
+        # (None when it worked). Surfaced by the web UI and /api/wifi/status.
+        self.ap_last_error = None
+        self._ap_support_cache = {}
         # Resolved lazily by _client_wifi_interface(); the built-in hosts the
         # AP and a dongle, when present, carries the client connection.
         self._client_iface_cache = None
@@ -214,6 +218,108 @@ class WiFiManager:
         self._client_iface_cache = iface
         self._client_iface_cache_ts = now
         return iface
+
+    # ── AP-mode capability ─────────────────────────────────────────────
+    #
+    # Not every Wi-Fi adapter can be an access point: plenty of USB dongle
+    # drivers are station/monitor only. hostapd then fails, but only after
+    # the interface has been taken away from NetworkManager, so the box loses
+    # its Wi-Fi and gains nothing. Asking the driver first avoids that.
+
+    @staticmethod
+    def _parse_iw_interface_modes(phy_info):
+        """The 'Supported interface modes' of an `iw phy <phy> info` dump, as a
+        set of mode names, or None when the section is missing."""
+        modes, in_section = set(), False
+        for line in (phy_info or '').splitlines():
+            stripped = line.strip()
+            if stripped.lower().startswith('supported interface modes'):
+                in_section = True
+                continue
+            if in_section:
+                if stripped.startswith('*'):
+                    modes.add(stripped.lstrip('*').strip())
+                elif stripped:
+                    break
+        return modes if in_section else None
+
+    def _iw_interface_modes(self, iface):
+        """Interface modes the driver behind `iface` supports (set of names),
+        or None when that cannot be determined (no iw, no such interface)."""
+        try:
+            dev = subprocess.run(['iw', 'dev', iface, 'info'],
+                                 capture_output=True, text=True, timeout=5)
+            if dev.returncode != 0:
+                return None
+            match = re.search(r'^\s*wiphy\s+(\d+)', dev.stdout, re.MULTILINE)
+            if not match:
+                return None
+            phy = subprocess.run(['iw', 'phy', f'phy{match.group(1)}', 'info'],
+                                 capture_output=True, text=True, timeout=5)
+            if phy.returncode != 0:
+                return None
+            return self._parse_iw_interface_modes(phy.stdout)
+        except Exception as exc:
+            self.logger.debug(f"AP capability check failed on {iface}: {exc}")
+            return None
+
+    def interface_supports_ap(self, iface=None):
+        """True / False when the driver says so, None when it cannot be told
+        (callers must then behave as before and simply try)."""
+        iface = iface or self.ap_interface
+        if not iface:
+            return None
+        cached = self._ap_support_cache.get(iface)
+        now = time.time()
+        if cached and (now - cached[1]) < 60.0:
+            return cached[0]
+        modes = self._iw_interface_modes(iface)
+        supported = None if modes is None else ('AP' in modes)
+        self._ap_support_cache[iface] = (supported, now)
+        return supported
+
+    @staticmethod
+    def _interface_driver(iface):
+        try:
+            return os.path.basename(os.readlink(f'/sys/class/net/{iface}/device/driver'))
+        except OSError:
+            return None
+
+    def ap_mode_blocker(self, iface=None):
+        """A user-facing reason AP mode cannot run on `iface`, or None."""
+        iface = iface or self.ap_interface
+        if self.interface_supports_ap(iface) is not False:
+            return None
+        driver = self._interface_driver(iface)
+        message = (f"The Wi-Fi adapter on {iface}"
+                   + (f" (driver {driver})" if driver else "")
+                   + " does not support Access Point mode, so the hotspot was not started"
+                     " and the current Wi-Fi connection was left untouched.")
+        try:
+            others = [i.get('name') for i in gather_wifi_interfaces(self.default_wifi_interface)]
+        except Exception:
+            others = []
+        capable = [n for n in others if n and n != iface and self.interface_supports_ap(n)]
+        if capable:
+            message += (f" {capable[0]} does support it: set Wi-Fi default interface"
+                        f" (wifi_default_interface) to {capable[0]} and restart Ragnar.")
+        else:
+            message += (" Use the Raspberry Pi's built-in Wi-Fi or an adapter whose driver"
+                        " lists AP under 'Supported interface modes' in `iw list`.")
+        return message
+
+    def _refuse_ap_if_unsupported(self, iface=None):
+        """Record and log the blocker, if any. True when AP must not be tried."""
+        blocker = self.ap_mode_blocker(iface)
+        if not blocker:
+            return False
+        self.ap_last_error = blocker
+        self.logger.warning(f"AP mode not started: {blocker}")
+        try:
+            self.ap_logger.warning(f"AP mode not started: {blocker}")
+        except Exception:
+            pass
+        return True
 
     def _has_dedicated_client_radio(self):
         """True when the client connection has a radio of its own, so bringing
@@ -920,7 +1026,9 @@ class WiFiManager:
             self.force_exit_ap_mode = False
             self.logger.info("Endless Loop: AP mode started, waiting for connections or timeout")
         else:
-            self.logger.error("Endless Loop: Failed to start AP mode, retrying WiFi search")
+            self.logger.error("Endless Loop: Failed to start AP mode"
+                              + (f" ({self.ap_last_error})" if self.ap_last_error else "")
+                              + ", retrying WiFi search")
             # If AP fails, try WiFi search again after short delay
             time.sleep(30)
             self._endless_loop_wifi_search()
@@ -2714,6 +2822,11 @@ class WiFiManager:
     def enable_ap_mode_from_web(self):
         """Enable AP mode from web interface - uses endless loop behavior"""
         self.logger.info("AP mode requested from web interface")
+        # Check BEFORE dropping Wi-Fi: on an adapter that cannot be an access
+        # point the hotspot never comes up, and the box would just go offline.
+        self.ap_last_error = None
+        if not self.ap_mode_active and self._refuse_ap_if_unsupported():
+            return False
         if self.wifi_connected:
             # If connected, disconnect first
             self.disconnect_wifi()
@@ -2726,7 +2839,12 @@ class WiFiManager:
         if self.endless_loop_active:
             # Use endless loop AP mode
             self._endless_loop_start_ap_mode()
-            return True
+            # Report what actually happened: the loop used to answer True even
+            # when hostapd never came up.
+            if self.ap_mode_active or self.shared_data.config.get('wardriving_enabled', False) \
+                    or self.shared_data.config.get('network_diagnostic_mode', False):
+                return True
+            return False
         else:
             # Fallback to regular AP mode if endless loop not active
             return self.start_ap_mode()
@@ -2742,7 +2860,11 @@ class WiFiManager:
             self.logger.info("AP mode already active")
             self.ap_logger.info("AP mode start requested but already active")
             return True
-        
+
+        self.ap_last_error = None
+        if self._refuse_ap_if_unsupported():
+            return False
+
         try:
             self.logger.info(f"Starting AP mode: {self.ap_ssid}")
             self.ap_logger.info(f"Starting AP mode: SSID={self.ap_ssid}, Interface={self.ap_interface}")
@@ -2794,6 +2916,9 @@ class WiFiManager:
                 return True
             else:
                 self.ap_logger.error("Failed to start AP services")
+                if not self.ap_last_error:
+                    self.ap_last_error = (f"The access point could not be started on {self.ap_interface}"
+                                          " (hostapd or dnsmasq failed). See the AP log for details.")
                 self._cleanup_ap_mode()
                 return False
                 
@@ -2916,6 +3041,14 @@ class WiFiManager:
         # 3) Last resort.
         if iface is None:
             iface = self.default_wifi_interface
+
+        # An adapter that cannot be an access point: say so and hand the radio
+        # back, before the WiFi uplink is dropped for nothing.
+        if self._refuse_ap_if_unsupported(iface):
+            if self._wardrive_ap_lent_iface and engine is not None:
+                engine.reclaim_interface_from_ap(self._wardrive_ap_lent_iface)
+            self._wardrive_ap_lent_iface = None
+            return False
 
         # If we're taking the live WiFi uplink, drop it cleanly first — a single
         # chip can't be both a station and an AP.
@@ -3217,6 +3350,9 @@ port=0
                 stdout, stderr = self.hostapd_process.communicate()
                 self.logger.error("hostapd failed to start")
                 self.ap_logger.error("hostapd failed to start")
+                _tail = [l.strip() for l in (stdout.decode(errors='replace') + stderr.decode(errors='replace')).splitlines() if l.strip()]
+                self.ap_last_error = (f"hostapd could not start an access point on {self.ap_interface}"
+                                      + (f": {_tail[-1][:160]}" if _tail else "."))
                 self.ap_logger.error(f"Hostapd stdout: {stdout.decode()}")
                 self.ap_logger.error(f"Hostapd stderr: {stderr.decode()}")
                 return False
@@ -3385,7 +3521,11 @@ port=0
             'known_networks_count': len(self.known_networks),
             'connection_attempts': self.connection_attempts,
             'startup_complete': self.startup_complete,
-            'available_networks': len(self.available_networks)
+            'available_networks': len(self.available_networks),
+            'ap_interface': self.ap_interface,
+            # True / False from the driver, None when it could not be asked.
+            'ap_supported': self.interface_supports_ap(),
+            'ap_error': self.ap_last_error,
         }
         
         # Add AP mode timing information

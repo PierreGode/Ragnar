@@ -4,6 +4,19 @@
 
 ### 2026-11-11
 
+#### fix(wifi): clear error instead of losing Wi-Fi when the adapter cannot do AP mode
+*branch `fix/ap-mode-unsupported-adapter`* · closes [#1048](https://github.com/PierreGode/Ragnar/issues/1048)
+
+- **The problem.** With a Wi-Fi adapter whose driver has no Access Point mode (many USB dongles), pressing **Start AP Mode** disconnected Wi-Fi first and then failed to start the hotspot, with nothing on screen saying why. The unit just dropped off the network.
+- **Checked before anything is touched.** Ragnar now asks the driver (`iw`) whether the AP interface supports AP mode. If it does not, the hotspot is not attempted and the Wi-Fi connection stays up.
+- **An error message that says what is wrong.** Connect → Access Point Mode shows it under the button: *The Wi-Fi adapter on wlan0 (driver …) does not support Access Point mode…*, with what to use instead. If another adapter on the box can do it, the message names it. The notice is shown as soon as the Connect tab loads, and the "this will disconnect Wi-Fi" prompt is skipped. The older `wifi_config.html` page shows the same text.
+- **API.** `/api/wifi/ap/enable`, `/api/wifi/ap/start` and `/api/wifi/disconnect` return the reason as `error`; `/api/wifi/status` gains `ap_supported`, `ap_interface` and `ap_error`.
+- **Honest result from the button.** `/api/wifi/ap/enable` used to answer success whenever the connection loop was running, even if `hostapd` never came up. It now reports failure, with `hostapd`'s last line of output when that is the cause.
+- **Same guard elsewhere.** The automatic AP fallback and the wardriving AP (KEY1) use the same check; the wardriving AP hands the radio back to scanning instead of dropping the uplink.
+- **Unchanged** for adapters that support AP mode, and when the driver cannot be asked (no `iw`): Ragnar tries as before.
+- **Docs:** [RagnarAP.md](RagnarAP.md#wi-fi-adapters-that-cannot-be-an-access-point), [knowledgebase.md](knowledgebase.md) (+1 entry)
+- **Validation:** new `tests/test_ap_mode_capability.py` (19 tests: `iw` parsing incl. near-misses like `AP/VLAN` and `start_ap`, refusal without any radio/NetworkManager command, the web button no longer disconnecting, the alternative-adapter hint, the wardriving AP, unchanged behaviour for capable/unknown adapters, and the three endpoints through the Flask test client); 8 of them fail with the check removed. The real `iw` path was run on the dev box's built-in radio (reports AP-capable). The notice was rendered in headless Chromium at desktop and 390 px phone width: no script errors, no overflow. **No AP-incapable adapter was available, so the refusal was exercised with a simulated driver dump, not real hardware.**
+
 #### feat(display): battery percentage from a Waveshare UPS HAT (C)
 *branch `feat/waveshare-ups-hat-c`* · closes [#1049](https://github.com/PierreGode/Ragnar/issues/1049)
 

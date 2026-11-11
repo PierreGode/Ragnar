@@ -72,6 +72,40 @@ suppressed, so the box will still rejoin a network on its own if one appears.
 | Wardriving | `wardriving_enabled` | Needs the radio for scanning. `hostapd` would take the interface over. Wardriving has its own AP, started deliberately — see [below](#the-wardriving-ap-is-a-different-thing). |
 | On-Screen Network Diagnostic Mode | `network_diagnostic_mode` | It is a field test *of the network the box is on*. Converting the radio into an access point mid-test invalidates every reading on the screen. |
 
+### Wi-Fi adapters that cannot be an access point
+
+Not every Wi-Fi adapter can run an access point: many USB dongle drivers only do
+client (and sometimes monitor) mode. Before starting the AP, Ragnar asks the
+driver (`iw`), and if the adapter cannot do it:
+
+- the AP is **not** attempted and the current Wi-Fi connection is left untouched
+  (it used to be dropped first, and then the AP failed to start);
+- **Connect → Access Point Mode** shows the reason under the **Start AP Mode**
+  button, for example: *The Wi-Fi adapter on wlan0 (driver r8188eu) does not
+  support Access Point mode*. The same text is returned as `error` by
+  `/api/wifi/ap/enable` and `/api/wifi/ap/start`, and as `ap_error` in
+  `/api/wifi/status` (with `ap_supported` and `ap_interface`);
+- the notice is already there when you open the Connect tab, so you know before
+  pressing the button;
+- the wardriving AP (KEY1) is refused the same way and the radio goes straight
+  back to scanning.
+
+If another adapter on the box can do it, the message names it. To fix it, use
+the Raspberry Pi's built-in Wi-Fi for the AP, or an adapter that lists `AP`
+under *Supported interface modes*:
+
+```bash
+iw list | sed -n '/Supported interface modes/,/Band 1/p'
+```
+
+When Ragnar cannot ask the driver (no `iw`, interface missing) it behaves as
+before and simply tries. If `hostapd` then fails for another reason, its last
+line of output is shown in the same place.
+
+A unit whose only adapter cannot be an access point has **no AP fallback**: if
+it loses its network it keeps searching for a known one, but you cannot reach
+it over a `Ragnar` hotspot.
+
 ---
 
 ## Getting back onto a known network
