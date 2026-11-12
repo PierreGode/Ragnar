@@ -35,6 +35,7 @@ if os.path.exists(_lib_path) and _lib_path not in sys.path:
 
 from pagerctl import Pager  # noqa: E402
 
+DATA_DIR = os.path.join(PAYLOAD_DIR, 'data')
 FONTS_DIR = os.path.join(PAYLOAD_DIR, 'resources', 'fonts')
 _FONT_MONO = os.path.join(FONTS_DIR, 'DejaVuSansMono.ttf')
 if not os.path.exists(_FONT_MONO):
@@ -378,6 +379,50 @@ class Sweeper(threading.Thread):
     def ap_count(self):
         return len(self.aps)
 
+    def ap_channels(self, band):
+        """Light (band, channel) list for spectrum markers - no copy/sort."""
+        with self.lock:
+            if band and band != 'ALL':
+                return [(v[2], v[1]) for v in self.aps.values()
+                        if v[2] == band and v[1]]
+            return [(v[2], v[1]) for v in self.aps.values() if v[1]]
+
+    def export_csv(self, path):
+        """Write the discovered networks to a CSV so a sweep leaves real recon
+        output behind. Returns the row count, or -1 on failure."""
+        try:
+            with self.lock:
+                items = list(self.aps.items())
+            if not items:
+                return 0
+            import csv
+            with open(path, 'w', newline='') as f:
+                w = csv.writer(f)
+                w.writerow(['bssid', 'ssid', 'band_ghz', 'channel', 'rssi_dbm', 'encryption'])
+                for bssid, (ssid, ch, band, rssi, enc, seen) in items:
+                    w.writerow([bssid, ssid, band, ch if ch else '',
+                                rssi, 'WPA/WPA2' if enc else 'open'])
+            return len(items)
+        except Exception:
+            return -1
+
+    def best_24_channel(self):
+        """Least-congested 2.4 GHz channel among 1/6/11 (overlap-weighted)."""
+        with self.lock:
+            vals = [v for v in self.aps.values() if v[2] == '2.4' and v[1]]
+        load = {1: 0.0, 6: 0.0, 11: 0.0}
+        for ssid, ch, band, rssi, enc, seen in vals:
+            w = _rssi_t(rssi) + 0.2
+            for c in (1, 6, 11):
+                if ch is None:
+                    continue
+                d = abs(ch - c)
+                if d == 0:
+                    load[c] += w
+                elif d <= 4:
+                    load[c] += w * (1.0 - d / 5.0)   # adjacent-channel overlap
+        return min(load, key=load.get)
+
     def stats(self):
         """Counts for the summary view: (total, open, enc, per-band dict)."""
         with self.lock:
@@ -413,8 +458,8 @@ SX = 2
 SPAN = W - 4
 SPEC_Y0, SPEC_H = 20, 108       # spectrum region
 WF_Y0 = SPEC_Y0 + SPEC_H + 2    # waterfall top
-WF_ROWS = 9
-WF_RH = 5
+WF_ROWS = 7
+WF_RH = 6
 FOOT_Y = WF_Y0 + WF_ROWS * WF_RH + 1
 
 # Display columns: the radio delivers N channel samples; we interpolate them to
@@ -427,7 +472,7 @@ COLW = SPAN / float(COLS)
 # function, not interpolation) and heavy quantisation, so flat noise-floor
 # regions collapse to long run-length spans and the per-frame cost stays low and
 # roughly band-independent. (Interpolating sparse channels defeats RLE.)
-WF_COLS = 36
+WF_COLS = 24
 WF_CW = SPAN / float(WF_COLS)
 WF_LEVELS = 6
 PEAK_STEP = 5                   # draw the peak-hold as an envelope every N cols
@@ -517,7 +562,7 @@ class RenderState:
         for j, (_f, ch, b) in enumerate(chans):
             idx[(b, ch)] = j
         out = []
-        for ssid, ch, b, rssi, enc, seen in swp.networks(band):
+        for b, ch in swp.ap_channels(band):
             j = idx.get((b, ch))
             if j is None:
                 continue
@@ -748,6 +793,12 @@ def _draw_stats(gfx, swp, band, font):
                       COL_TEXT, 1)
         y += 14
 
+    # channel recommendation (classic analyser feature)
+    if per['2.4'] > 0:
+        rec = swp.best_24_channel()
+        msg = "clearest 2.4: ch %d" % rec
+        gfx.draw_text(W - gfx.text_width(msg, 1) - 6, y, msg, Pager.rgb(90, 230, 140), 1)
+
     gfx.hline(0, FOOT_Y, W, COL_GRID)
     gfx.draw_text(4, FOOT_Y + 3, "passive survey - no packets sent", COL_DIM, 1)
     gfx.flip()
@@ -877,6 +928,19 @@ def run_spectrum(gfx, font_mono=None):
     swp.stop()
     try:
         gfx.led_all_off()
+    except Exception:
+        pass
+    # leave recon output behind
+    try:
+        out = os.path.join(DATA_DIR, 'spectrum_networks.csv')
+        os.makedirs(DATA_DIR, exist_ok=True)
+        nrows = swp.export_csv(out)
+        if nrows and nrows > 0:
+            gfx.clear(COL_BG)
+            gfx.draw_text_centered(90, "saved %d networks" % nrows, Pager.rgb(90, 230, 140), 2)
+            gfx.draw_text_centered(120, "data/spectrum_networks.csv", COL_DIM, 1)
+            gfx.flip()
+            time.sleep(1.1)
     except Exception:
         pass
     time.sleep(0.05)

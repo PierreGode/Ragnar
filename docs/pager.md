@@ -30,6 +30,32 @@ full-color LCD display, button controls, and LED status indicators.
 - Graphical startup menu with interface selection and Web UI toggle
 - Auto-dim for battery saving and payload handoff support
 
+## RF Observatory (native spectrum app)
+
+From the Pager menu, select **RF Observatory** for a real-time, tri-band WiFi
+RF analyser rendered natively on the LCD. It uses the Pager's **own** radio —
+no external SDR, no HackRF, no extra binaries. It retunes the monitor interface
+(`wlan1mon`) across every 2.4 / 5 / **6 GHz** channel the radio supports,
+captures 802.11 frames through a raw packet socket, reads the per-frame
+radiotap RSSI, and passively parses beacons/probe-responses for SSID, BSSID,
+channel and encryption. Nothing is transmitted.
+
+Three views, cycled with **GREEN**:
+
+- **Spectrum** — filled gradient columns (interpolated and temporally eased for
+  smooth motion), a peak-hold envelope, scope grid, a live sweep cursor, per-band
+  colouring (2.4 = green, 5 = cyan, 6 = magenta), AP channel markers, and an
+  inferno waterfall of recent sweeps.
+- **Networks** — a scrollable list of every discovered access point (SSID, band,
+  channel, signal bar, open/locked), strongest first.
+- **Survey** — counts (total / open / secured), per-band bars, the strongest
+  networks, and the clearest 2.4 GHz channel recommendation.
+
+Controls: **GREEN** cycle view · **UP/DOWN** change band (or scroll the list) ·
+**LEFT/RIGHT** brightness · **RED** exit. The 4 d-pad RGB LEDs run a physical
+radar sweep tinted by the strongest band. On exit the discovered networks are
+written to `data/spectrum_networks.csv`.
+
 ---
 
 ## Installation
