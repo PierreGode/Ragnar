@@ -11,7 +11,7 @@
 - **New-find alerts.** When the host, credential or vulnerability counter goes up, a banner shows on whatever screen is open and the Pager buzzes (vibration for a new host; chime plus vibration for credentials or a vulnerable host). **Buzz On New Finds** on the System settings screen turns the buzz off.
 - **Rank title.** The dashboard shows a Norse rank next to the level (Thrall, Karl, Hersir, Jarl, Konungr, Berserkr, Einherjar, Jotunn, Ragnar).
 - **WiFi tab.** A new screen that opens WiFi Spectrum with GREEN while Ragnar keeps running; RED returns to it.
-- Layouts were checked by rendering them with the display mock. The buzzer, and opening WiFi Spectrum from inside a running Ragnar, have not been tried on the device.
+- Checked on a Pager with Ragnar running: all tabs display correctly. The new-find buzzer has not been observed firing.
 
 #### feat(pager): Radar, Activity and Device screens, Viking art on the dashboard, pause menu fits the screen
 *branch `fix/pineapple-pager-install`*
@@ -21,7 +21,7 @@
 - **Activity screen.** A scrollable feed of the latest orchestrator and scanner log lines, colour-coded by level.
 - **Device screen.** Battery, CPU load, memory, uptime, free storage, scan interface and level progress.
 - **Dashboard.** Shows the animated Viking status art for the action currently running.
-- Layouts were checked by rendering them with the display mock; they have not yet been looked at on the device itself.
+- Checked on a Pager with Ragnar running.
 
 #### feat(pager): WiFi Spectrum — native tri-band WiFi spectrum, waterfall & passive network discovery
 *branch `fix/pineapple-pager-install`*
