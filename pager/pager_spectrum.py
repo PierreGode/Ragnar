@@ -723,13 +723,21 @@ def _draw_networks(gfx, swp, band, scroll, font):
 
     y = top
     bar_x = W - 92
+    now = time.time()
     for ssid, ch, b, rssi, enc, seen in shown:
+        fresh = (now - seen) < 3.0          # just heard -> highlight
+        stale = (now - seen) > 45.0         # gone quiet -> dim
         bcol = BAND_RGB_565.get(b, COL_TEXT)
         gfx.fill_rect(2, y + 1, 4, row_h - 3, bcol)           # band chip
         name = ssid if ssid else "<hidden>"
-        if len(name) > 20:
-            name = name[:19] + "…"
-        gfx.draw_text(10, y + 1, name, COL_TEXT if ssid else COL_DIM, 1)
+        if len(name) > 18:
+            name = name[:17] + "…"
+        name_col = (Pager.rgb(150, 255, 180) if fresh else
+                    (COL_DIM if (stale or not ssid) else COL_TEXT))
+        gfx.draw_text(10, y + 1, name, name_col, 1)
+        if fresh:
+            gfx.draw_text(10 + gfx.text_width(name, 1) + 4, y + 1, "NEW",
+                          Pager.rgb(120, 230, 140), 1)
         lock = "#" if enc else "o"                              # locked / open
         gfx.draw_text(10, y + 9, "%s ch%s %sG" % (lock, ch if ch else "?", b),
                       COL_DIM, 1)
@@ -914,15 +922,19 @@ def run_spectrum(gfx, font_mono=None):
             break
 
         tick += 1
-        if tick % 3 == 0:
-            _update_leds(gfx, swp, tick // 3)
-        if view == VIEW_SPECTRUM:
-            _draw_spectrum(gfx, swp, st, font, (tick // 4) % 2 == 0)
-        elif view == VIEW_NETWORKS:
-            scroll = _draw_networks(gfx, swp, BANDS[band_idx], scroll, font)
-            time.sleep(0.03)        # list is static-ish; no need to spin hot
-        else:
-            _draw_stats(gfx, swp, BANDS[band_idx], font)
+        try:
+            if tick % 3 == 0:
+                _update_leds(gfx, swp, tick // 3)
+            if view == VIEW_SPECTRUM:
+                _draw_spectrum(gfx, swp, st, font, (tick // 4) % 2 == 0)
+            elif view == VIEW_NETWORKS:
+                scroll = _draw_networks(gfx, swp, BANDS[band_idx], scroll, font)
+                time.sleep(0.03)    # list is static-ish; no need to spin hot
+            else:
+                _draw_stats(gfx, swp, BANDS[band_idx], font)
+                time.sleep(0.05)
+        except Exception:
+            # a transient draw error must never kill the app mid-run
             time.sleep(0.05)
 
     swp.stop()
