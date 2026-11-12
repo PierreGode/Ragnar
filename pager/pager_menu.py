@@ -195,7 +195,10 @@ class RagnarMenu:
         when the user presses RED. Any failure is shown briefly rather than
         crashing the menu."""
         try:
+            import importlib
             import pager_spectrum
+            # pick up an updated app file without restarting the whole payload
+            importlib.reload(pager_spectrum)
             pager_spectrum.run_spectrum(self.gfx, FONT_DEJAVU)
         except Exception as e:
             try:
@@ -246,7 +249,7 @@ class RagnarMenu:
         self.gfx.flip()
 
     def _get_menu_items(self, iface_idx, web_ui):
-        items = [{'label': 'Start Ragnar'}]
+        items = [{'label': 'Start Ragnar'}, {'label': 'WiFi Spectrum'}]
 
         if self.interfaces:
             iface = self.interfaces[iface_idx]
@@ -273,7 +276,6 @@ class RagnarMenu:
             'max_value': 'ON :8000',
         })
 
-        items.append({'label': 'WiFi Spectrum'})
         items.append({'label': 'Clear Data'})
         items.append({'label': 'Exit'})
         return items
@@ -309,14 +311,14 @@ class RagnarMenu:
                         'ip': iface['ip'],
                         'web_ui': web_ui,
                     }
-                elif selected == 1 and self.interfaces:
+                elif selected == 1:
+                    self._run_spectrum()
+                    self._draw_main_menu(selected, iface_idx, web_ui)
+                elif selected == 2 and self.interfaces:
                     iface_idx = (iface_idx + 1) % len(self.interfaces)
                     self._draw_main_menu(selected, iface_idx, web_ui)
-                elif selected == 2:
-                    web_ui = not web_ui
-                    self._draw_main_menu(selected, iface_idx, web_ui)
                 elif selected == 3:
-                    self._run_spectrum()
+                    web_ui = not web_ui
                     self._draw_main_menu(selected, iface_idx, web_ui)
                 elif selected == 4:
                     self._show_clear_data_menu()

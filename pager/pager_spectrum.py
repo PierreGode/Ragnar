@@ -9,10 +9,10 @@ per-frame radiotap RSSI. No external SDR, no HackRF, no extra binaries - just
 the radio that is already in the device.
 
 Controls on the Pager:
-    UP / DOWN   cycle band   (ALL -> 2.4 -> 5 -> 6 GHz)
-    GREEN (A)   pause / resume the sweep
-    RED   (B)   exit back to the menu
+    GREEN (A)   cycle view   (Waterfall -> Networks -> Survey)
+    UP / DOWN   cycle band   (ALL -> 2.4 -> 5 -> 6 GHz), or scroll the list
     LEFT/RIGHT  screen brightness
+    RED   (B)   exit back to the menu
 
 Entry points:
     run_spectrum(gfx, font_small, font_mono)   reuse an existing Pager context
@@ -26,7 +26,6 @@ import socket
 import struct
 import threading
 import subprocess
-from collections import deque
 
 PAYLOAD_DIR = os.path.dirname(os.path.abspath(__file__))
 _lib_path = os.path.join(PAYLOAD_DIR, 'lib')
@@ -452,41 +451,63 @@ COL_TEXT = Pager.rgb(190, 200, 215)
 COL_DIM = Pager.rgb(110, 120, 140)
 COL_PEAK = Pager.rgb(255, 255, 255)
 
-# Layout (480x222 landscape)
+# Layout (480x222 landscape): header, a full-width per-pixel waterfall, footer.
+#
+# PERFORMANCE MODEL (measured on the Pager, Nov 2026): every libpagerctl draw
+# primitive costs ~1.2 ms of call overhead REGARDLESS of area (a 6x4 and a
+# 2x100 fill both ~1.2 ms); flip() is ~8 ms; draw_text ~1.3 ms; draw_ttf ~10 ms.
+# So anything built from many rectangles is slow (a screen-filling waterfall of
+# cells took 320-630 ms per repaint). Drawing one whole image is cheap by
+# comparison: draw_image_file() of a 480x190 BMP is ~90 ms. Hence the waterfall
+# is an in-memory image, see RenderState.
 W, H = 480, 222
 SX = 2
 SPAN = W - 4
-SPEC_Y0, SPEC_H = 20, 108       # spectrum region
-WF_Y0 = SPEC_Y0 + SPEC_H + 2    # waterfall top
-WF_ROWS = 7
-WF_RH = 6
-FOOT_Y = WF_Y0 + WF_ROWS * WF_RH + 1
+HEAD_H = 14
+WF_Y0 = HEAD_H + 4              # 18  - top of the waterfall
+FOOT_H = 13
+WF_W = W                        # waterfall is full width, one value per PIXEL
+WF_H = 190                      # pixel rows of history
+WF_STEP = 2                     # pixel rows added per update
+WF_PERIOD = 0.30                # seconds between waterfall lines
+FOOT_Y = WF_Y0 + WF_H + 1
 
-# Display columns: the radio delivers N channel samples; we interpolate them to
-# COLS smooth columns so the trace is a flowing curve, not a few fat bars. COLS
-# also bounds the per-frame draw cost (each column is ~1 vline ~= 0.32 ms on
-# this MIPS LCD; clear+flip is only ~4 ms), so ~96 cols -> ~20 fps.
-COLS = 64
-COLW = SPAN / float(COLS)
-# Waterfall is rendered at a coarse fixed resolution with MAX-POOLing (a step
-# function, not interpolation) and heavy quantisation, so flat noise-floor
-# regions collapse to long run-length spans and the per-frame cost stays low and
-# roughly band-independent. (Interpolating sparse channels defeats RLE.)
-WF_COLS = 24
-WF_CW = SPAN / float(WF_COLS)
-WF_LEVELS = 6
-PEAK_STEP = 5                   # draw the peak-hold as an envelope every N cols
+# The waterfall image lives in RAM as BMP pixel data and is written to tmpfs for
+# libpagerctl's (stb_image) loader - it has no draw-from-memory entry point.
+_WF_FILE = '/tmp/ragnar_wf.bmp'
+_WF_ROWB = WF_W * 3             # 480*3 is already 4-byte aligned (BMP row rule)
+_WF_HDR = (b'BM' + struct.pack('<IHHI', 54 + _WF_ROWB * WF_H, 0, 0, 54) +
+           struct.pack('<IiiHHIIiiII', 40, WF_W, WF_H, 1, 24, 0,
+                       _WF_ROWB * WF_H, 2835, 2835, 0, 0))
 
-# Vertical spectrum gradient (cool -> warm by height), precomputed RGB565.
-def _build_spec_grad():
-    stops = [(0.0, (20, 60, 120)), (0.35, (30, 190, 180)),
-             (0.6, (120, 230, 90)), (0.8, (250, 210, 60)), (1.0, (255, 90, 70))]
+def _build_wf_lut():
+    """256 BGR byte-triples: inferno with a slight gamma lift so weak signals
+    are visible above the floor."""
     out = []
-    for i in range(SPEC_H + 1):
-        t = i / float(SPEC_H)
+    for i in range(256):
+        c = INFERNO[int(255 * ((i / 255.0) ** 0.8))]
+        r, g, b = (c >> 11) << 3, ((c >> 5) & 0x3F) << 2, (c & 0x1F) << 3
+        out.append(bytes((b, g, r)))
+    return out
+
+_WF_LUT = _build_wf_lut()
+_WF_SEP = bytes((104, 84, 70))                  # band-boundary pixel (BGR)
+_WF_BLACK = _WF_LUT[0] * (WF_W * WF_H)
+
+TITLE_BG = Pager.rgb(14, 18, 30)
+BAND_LBL = Pager.rgb(255, 210, 90)
+
+# Live-strip palette: a signal-meter gradient (blue -> cyan -> green -> amber ->
+# red) so the "now" bar reads like a power meter, distinct from the inferno
+# waterfall below it.
+def _build_meter():
+    stops = [(0.00, (18, 42, 96)), (0.30, (24, 170, 190)), (0.55, (70, 215, 110)),
+             (0.78, (240, 205, 60)), (1.00, (255, 80, 70))]
+    out = []
+    for i in range(256):
+        t = i / 255.0
         for k in range(len(stops) - 1):
-            t0, c0 = stops[k]
-            t1, c1 = stops[k + 1]
+            t0, c0 = stops[k]; t1, c1 = stops[k + 1]
             if t0 <= t <= t1:
                 f = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
                 out.append(Pager.rgb(int(c0[0] + (c1[0] - c0[0]) * f),
@@ -497,206 +518,114 @@ def _build_spec_grad():
             out.append(Pager.rgb(*stops[-1][1]))
     return out
 
-SPEC_GRAD = _build_spec_grad()
-
-def _downsample(vec, d):
-    """Collapse vec to d values by max-pooling each group (step, RLE-friendly)."""
-    n = len(vec)
-    if n <= d:
-        return list(vec) + [0.0] * (d - n)
-    out = []
-    for i in range(d):
-        a = i * n // d
-        b = (i + 1) * n // d
-        if b <= a:
-            b = a + 1
-        seg = vec[a:b]
-        out.append(max(seg) if seg else 0.0)
-    return out
-
-def _interp(vec, d):
-    """Resample vec to d points with linear interpolation (smooth curve)."""
-    n = len(vec)
-    if n == 0:
-        return [0.0] * d
-    if n == 1:
-        return [vec[0]] * d
-    out = []
-    for i in range(d):
-        p = i * (n - 1) / float(d - 1) if d > 1 else 0.0
-        a = int(p)
-        b = min(a + 1, n - 1)
-        f = p - a
-        out.append(vec[a] * (1.0 - f) + vec[b] * f)
-    return out
-
-BASE_Y = SPEC_Y0 + SPEC_H
-TITLE_BG = Pager.rgb(14, 18, 30)
-BAND_LBL = Pager.rgb(255, 210, 90)
-# Precompute column x positions (avoids float math in the hot loop).
-_SPEC_X = [int(SX + j * COLW) for j in range(COLS)]
-_WF_X = [int(SX + j * WF_CW) for j in range(WF_COLS + 1)]
-_PEAK_X = [int(SX + j * COLW) for j in range(0, COLS, PEAK_STEP)]
+METER = _build_meter()
 
 class RenderState:
-    """Holds the smoothed display vectors so motion eases between radio sweeps."""
+    """State for the waterfall view.
+
+    The waterfall is a real per-pixel image, not rectangles: every primitive
+    through libpagerctl costs ~1.2 ms regardless of size, so a field made of
+    cells is either blocky or slow. Instead we keep the waterfall as the pixel
+    data of a 24-bit BMP in memory, scroll it with one slice move, stamp the
+    newest line at the top, and hand the whole thing to the library in ONE
+    draw_image_file() call (~90 ms for 480x190 on the Pager)."""
     def __init__(self):
-        self.disp = [0.0] * COLS     # eased spectrum heights
-        self.peak = [0.0] * COLS     # peak-hold
-        self.wf = deque(maxlen=WF_ROWS)   # quantised waterfall rows
-        self.last_hist = -1
-        self.imap = None             # cached interp map for the current n
-        self.map_n = -1
-        self._marks = []             # cached AP marker (x,color) list
-        self._mark_tick = 0
+        self.pix = bytearray(_WF_BLACK)   # BMP pixel data (bottom-up, BGR)
+        self.full = True                  # clear + static chrome on next paint
+        self.next_t = 0.0                 # next scheduled waterfall line
+        self._maps = {}                   # n -> per-pixel interpolation map
+        self._seps = {}                   # (band, n) -> band-boundary pixels
 
-    def markers(self, swp, band, chans, n):
-        """AP channel markers for the spectrum baseline, refreshed occasionally
-        (cheap: recomputed ~3x/sec, not every frame)."""
-        self._mark_tick -= 1
-        if self._mark_tick > 0:
-            return self._marks
-        self._mark_tick = 8
-        # map (band, channel) -> column index
-        idx = {}
-        for j, (_f, ch, b) in enumerate(chans):
-            idx[(b, ch)] = j
-        out = []
-        for b, ch in swp.ap_channels(band):
-            j = idx.get((b, ch))
-            if j is None:
-                continue
-            x = int(SX + (j / float(max(1, n - 1))) * SPAN) if n > 1 else SX
-            out.append((min(W - 2, max(SX, x)), BAND_RGB_565.get(b, COL_TEXT)))
-        self._marks = out
-        return out
-
-    def interp_map(self, n):
-        """(a, b, f) per output column for resampling n -> COLS; cached."""
-        if n == self.map_n:
-            return self.imap
-        m = []
-        if n <= 1:
-            m = [(0, 0, 0.0)] * COLS
-        else:
-            for i in range(COLS):
-                p = i * (n - 1) / float(COLS - 1)
-                a = int(p)
-                b = a + 1 if a + 1 < n else a
-                m.append((a, b, p - a))
-        self.imap = m
-        self.map_n = n
+    def colmap(self, n):
+        """(a, b, wb) per screen pixel for resampling n channels -> WF_W px
+        (linear interpolation in 8-bit fixed point); cached per n."""
+        m = self._maps.get(n)
+        if m is None:
+            if n <= 1:
+                m = [(0, 0, 0)] * WF_W
+            else:
+                m = []
+                for x in range(WF_W):
+                    p = x * (n - 1) / float(WF_W - 1)
+                    a = int(p)
+                    b = a + 1 if a + 1 < n else a
+                    m.append((a, b, int((p - a) * 256)))
+            self._maps[n] = m
         return m
 
+    def seps(self, band, chans, n):
+        """Pixel x of each band boundary (ALL mode), cached."""
+        key = (band, n)
+        s = self._seps.get(key)
+        if s is None:
+            s = []
+            if band == 'ALL' and n > 1:
+                prev = chans[0][2]
+                for j in range(1, n):
+                    if chans[j][2] != prev:
+                        prev = chans[j][2]
+                        s.append(int((j - 0.5) * (WF_W - 1) / float(n - 1)))
+            self._seps[key] = s
+        return s
+
+def _wf_line(st, inten, n, band, chans):
+    """One waterfall line (WF_W pixels) as BMP bytes from the live intensities."""
+    q = [int(v * 255) if v < 1.0 else 255 for v in inten]
+    px = [_WF_LUT[(q[a] * (256 - wb) + q[b] * wb) >> 8] for a, b, wb in st.colmap(n)]
+    for x in st.seps(band, chans, n):
+        px[x] = _WF_SEP
+    return b''.join(px)
+
 def _draw_spectrum(gfx, swp, st, font, blink):
+    """WiFi Waterfall view: a per-pixel scrolling inferno waterfall, newest line
+    on top, advancing at a steady WF_PERIOD from the live sweep data.
+    (Function name kept for the run-loop dispatch.)"""
+    now = time.time()
+    if not st.full and now < st.next_t:
+        return
+    st.next_t = now + WF_PERIOD
     inten, n, cur, band, best, hist_count, newest, chans = swp.snapshot()
 
-    # NOTE: all per-frame text uses the built-in BITMAP font (draw_text), not
-    # draw_ttf - TrueType rasterisation costs ~10 ms each and tanked the frame
-    # rate when called several times per frame.
-    gfx.clear(COL_BG)
-    gfx.fill_rect(0, 0, W, 14, TITLE_BG)
-    gfx.draw_text(4, 3, "RAGNAR SPECTRUM", COL_TITLE, 1)
-    blabel = "ALL" if band == 'ALL' else band + "G"
-    gfx.draw_text(W - gfx.text_width(blabel, 1) - 4, 3, blabel, BAND_LBL, 1)
+    if st.full:
+        st.full = False
+        gfx.clear(COL_BG)
+        gfx.fill_rect(0, 0, W, HEAD_H, TITLE_BG)
+        gfx.draw_text(4, 3, "WIFI WATERFALL", COL_TITLE, 1)
+        blabel = "ALL" if band == 'ALL' else band + "G"
+        gfx.draw_text(W - gfx.text_width(blabel, 1) - 4, 3, blabel, BAND_LBL, 1)
+        gfx.hline(0, FOOT_Y, W, COL_GRID)
+        hint = "A=view RED=exit"
+        gfx.draw_text(W - gfx.text_width(hint, 1) - 4, FOOT_Y + 3, hint, COL_DIM, 1)
 
-    if n == 0:
-        gfx.draw_text_centered(100, "scanning...", COL_DIM, 2)
-        gfx.flip()
-        return
+    if n > 0:
+        # scroll down WF_STEP pixel rows and stamp the new line on top. BMP rows
+        # are stored bottom-up, so "top of the image" is the END of the data.
+        line = _wf_line(st, inten, n, band, chans)
+        k = WF_STEP * _WF_ROWB
+        pix = st.pix
+        pix[:-k] = pix[k:]
+        pix[-k:] = line * WF_STEP
+        try:
+            with open(_WF_FILE, 'wb') as f:
+                f.write(_WF_HDR)
+                f.write(pix)
+            gfx.draw_image_file(0, WF_Y0, _WF_FILE)
+        except Exception:
+            pass
 
-    # resample channel intensities -> COLS (cached map), then ease toward it
-    imap = st.interp_map(n)
-    disp, peak = st.disp, st.peak
-    for j in range(COLS):
-        a, b, f = imap[j]
-        tgt = inten[a] * (1.0 - f) + inten[b] * f
-        d0 = disp[j]
-        d0 = d0 + (tgt - d0) * 0.35
-        disp[j] = d0
-        pk = peak[j]
-        if d0 > pk:
-            peak[j] = d0
-        elif pk > d0:
-            pk -= 0.012
-            peak[j] = d0 if pk < d0 else pk
-
-    # faint scope grid
-    gfx.hline(SX, SPEC_Y0 + SPEC_H // 3, SPAN, Pager.rgb(20, 26, 40))
-    gfx.hline(SX, SPEC_Y0 + 2 * SPEC_H // 3, SPAN, Pager.rgb(20, 26, 40))
-    gfx.hline(SX, BASE_Y, SPAN, COL_GRID)
-
-    # --- live sweep cursor at the channel currently being measured
-    if 0 <= cur < n:
-        cxx = int(SX + (cur / float(max(1, n - 1))) * SPAN) if n > 1 else SX
-        gfx.vline(cxx, SPEC_Y0, SPEC_H, Pager.rgb(60, 72, 96))
-
-    # --- spectrum: a filled column per bin, coloured by height (solid curve)
-    cwpx = int(COLW) + 1
-    for j in range(COLS):
-        h = int(disp[j] * SPEC_H)
-        if h > 0:
-            gfx.fill_rect(_SPEC_X[j], BASE_Y - h, cwpx, h, SPEC_GRAD[h])
-
-    # --- band separators + labels (ALL mode) show where 2.4/5/6 begin
-    if band == 'ALL' and n > 1:
-        prev = None
-        for j in range(n):
-            b = chans[j][2]
-            if b != prev:
-                xx = int(SX + (j / float(n - 1)) * SPAN)
-                gfx.vline(xx, SPEC_Y0, SPEC_H, Pager.rgb(40, 48, 66))
-                gfx.draw_text(xx + 2, SPEC_Y0 + 1, b + "G", BAND_RGB_565.get(b, COL_DIM), 1)
-                prev = b
-
-    # --- peak-hold as a light envelope polyline (cheap)
-    px = py = None
-    pi = 0
-    for j in range(0, COLS, PEAK_STEP):
-        x = _PEAK_X[pi]; pi += 1
-        y = BASE_Y - int(peak[j] * SPEC_H)
-        if px is not None:
-            gfx.line(px, py, x, y, COL_PEAK)
-        px, py = x, y
-
-    # --- append a waterfall row once per completed radio sweep (max-pool -> RLE)
-    if newest is not None and hist_count != st.last_hist:
-        st.last_hist = hist_count
-        row = _downsample(newest, WF_COLS)
-        st.wf.appendleft([min(WF_LEVELS - 1, int(v * WF_LEVELS)) for v in row])
-
-    # --- waterfall: coarse grid, run-length encoded per row
-    yoff = WF_Y0
-    for qrow in st.wf:
-        j = 0
-        while j < WF_COLS:
-            q = qrow[j]
-            k = j + 1
-            while k < WF_COLS and qrow[k] == q:
-                k += 1
-            gfx.fill_rect(_WF_X[j], yoff, max(1, _WF_X[k] - _WF_X[j]), WF_RH,
-                          INFERNO[(q * 255) // (WF_LEVELS - 1)])
-            j = k
-        yoff += WF_RH
-
-    # --- AP markers: a tick at the baseline for each discovered AP's channel
-    marks = st.markers(swp, band, chans, n)
-    for mx, mcol in marks:
-        gfx.vline(mx, BASE_Y - 4, 4, mcol)
-        gfx.fill_rect(mx - 1, BASE_Y - 7, 3, 3, mcol)
-
-    # --- footer
-    gfx.hline(0, FOOT_Y, W, COL_GRID)
+    # sweep progress (thin line under the header) + footer stats
+    gfx.fill_rect(0, HEAD_H + 1, W, 2, COL_BG)
+    if n > 0 and cur >= 0:
+        gfx.fill_rect(0, HEAD_H + 1, int(W * (cur + 1) / float(n)), 2,
+                      Pager.rgb(0, 190, 235))
     naps = swp.ap_count()
-    if best[1] >= 0 and best[1] < n:
-        _f, ch, b = chans[best[1]]
+    if 0 <= best[1] < n:
+        _f, ch, bb = chans[best[1]]
         info = "%d APs  peak ch%d %ddBm" % (naps, ch, best[0])
     else:
-        info = "%d APs  scanning..." % naps
+        info = "%d APs  listening..." % naps
+    gfx.fill_rect(0, FOOT_Y + 1, W - 100, H - FOOT_Y - 1, COL_BG)
     gfx.draw_text(4, FOOT_Y + 3, info, COL_TEXT, 1)
-    hint = "A=view RED=exit"
-    gfx.draw_text(W - gfx.text_width(hint, 1) - 4, FOOT_Y + 3, hint, COL_DIM, 1)
-
     gfx.flip()
 
 # ------------------------------------------------------------------ networks view
@@ -744,8 +673,7 @@ def _draw_networks(gfx, swp, band, scroll, font):
         # RSSI bar
         t = _rssi_t(rssi)
         gfx.fill_rect(bar_x, y + 3, 60, 8, Pager.rgb(24, 30, 44))
-        gfx.fill_rect(bar_x, y + 3, int(60 * t), 8,
-                      SPEC_GRAD[int(t * SPEC_H)])
+        gfx.fill_rect(bar_x, y + 3, int(60 * t), 8, METER[int(t * 255)])
         gfx.draw_text(bar_x + 64, y + 3, "%d" % rssi, COL_TEXT, 1)
         y += row_h
 
@@ -839,7 +767,7 @@ def _splash(gfx, font):
             gfx.fill_circle(int(cx + bx * R), int(cy + by * R), 2, Pager.rgb(90, 230, 140))
         gfx.draw_text_centered(14, "R A G N A R", COL_TITLE, 3)
         gfx.draw_text_centered(40, "WIFI SPECTRUM", Pager.rgb(120, 170, 210), 1)
-        gfx.draw_text_centered(210, "tri-band passive spectrum", COL_DIM, 1)
+        gfx.draw_text_centered(210, "tri-band passive waterfall", COL_DIM, 1)
         gfx.flip()
         ev = gfx.get_input_event()
         if ev and ev[1] == Pager.EVENT_PRESS:
@@ -894,6 +822,8 @@ def run_spectrum(gfx, font_mono=None):
             elif button == Pager.BTN_A:                 # cycle view
                 view = (view + 1) % 3
                 scroll = 0
+                if view == VIEW_SPECTRUM:
+                    st.full = True       # other views cleared the screen; redraw chrome
             elif button == Pager.BTN_UP:
                 if view == VIEW_NETWORKS:
                     scroll = max(0, scroll - 1)
@@ -927,6 +857,7 @@ def run_spectrum(gfx, font_mono=None):
                 _update_leds(gfx, swp, tick // 3)
             if view == VIEW_SPECTRUM:
                 _draw_spectrum(gfx, swp, st, font, (tick // 4) % 2 == 0)
+                time.sleep(0.03)    # the waterfall advances slowly; no need to spin
             elif view == VIEW_NETWORKS:
                 scroll = _draw_networks(gfx, swp, BANDS[band_idx], scroll, font)
                 time.sleep(0.03)    # list is static-ish; no need to spin hot
@@ -940,6 +871,10 @@ def run_spectrum(gfx, font_mono=None):
     swp.stop()
     try:
         gfx.led_all_off()
+    except Exception:
+        pass
+    try:
+        os.remove(_WF_FILE)
     except Exception:
         pass
     # leave recon output behind

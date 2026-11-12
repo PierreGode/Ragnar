@@ -32,7 +32,8 @@ full-color LCD display, button controls, and LED status indicators.
 
 ## WiFi Spectrum (native spectrum app)
 
-From the Pager menu, select **WiFi Spectrum** for a real-time, tri-band WiFi
+From the PagerRagnar menu, select **WiFi Spectrum** (directly under **Start
+Ragnar**) for a real-time, tri-band WiFi
 spectrum analyser rendered natively on the LCD. It uses the Pager's **own** radio —
 no external SDR, no HackRF, no extra binaries. It retunes the monitor interface
 (`wlan1mon`) across every 2.4 / 5 / **6 GHz** channel the radio supports,
@@ -42,10 +43,10 @@ channel and encryption. Nothing is transmitted.
 
 Three views, cycled with **GREEN**:
 
-- **Spectrum** — filled gradient columns (interpolated and temporally eased for
-  smooth motion), a peak-hold envelope, scope grid, a live sweep cursor, per-band
-  colouring (2.4 = green, 5 = cyan, 6 = magenta), AP channel markers, and an
-  inferno waterfall of recent sweeps.
+- **Waterfall** — a per-pixel scrolling inferno waterfall across the full
+  480 px width, interpolated between channels, newest line on top (about three
+  new lines a second). A thin line under the header shows sweep progress; in
+  ALL mode thin vertical lines mark the 2.4 / 5 / 6 GHz boundaries.
 - **Networks** — a scrollable list of every discovered access point (SSID, band,
   channel, signal bar, open/locked), strongest first.
 - **Survey** — counts (total / open / secured), per-band bars, the strongest
