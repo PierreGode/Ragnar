@@ -2,7 +2,45 @@
 
 ## Releases
 
+### 2026-11-12
+
+#### feat(pager): host detail page, new-find alerts, rank title, WiFi tab in the running view
+*branch `fix/pineapple-pager-install`*
+
+- **Host detail.** The Hosts screen now has a selection bar; **GREEN** opens a page for that host with MAC, vendor, every open port, its vulnerabilities and any credentials found on it. UP/DOWN steps to the next host, GREEN or RED closes.
+- **New-find alerts.** When the host, credential or vulnerability counter goes up, a banner shows on whatever screen is open and the Pager buzzes (vibration for a new host; chime plus vibration for credentials or a vulnerable host). **Buzz On New Finds** on the System settings screen turns the buzz off.
+- **Rank title.** The dashboard shows a Norse rank next to the level (Thrall, Karl, Hersir, Jarl, Konungr, Berserkr, Einherjar, Jotunn, Ragnar).
+- **WiFi tab.** A new screen that opens WiFi Spectrum with GREEN while Ragnar keeps running; RED returns to it.
+- Checked on a Pager with Ragnar running: all tabs display correctly. The new-find buzzer has not been observed firing.
+
+#### feat(pager): Radar, Activity and Device screens, Viking art on the dashboard, pause menu fits the screen
+*branch `fix/pineapple-pager-install`*
+
+- **Pause menu fix.** The RED-button menu was laid out for a portrait screen, so on the 480x222 landscape LCD the option buttons stacked down past the bottom edge (the second was cut in half, the third was off-screen). It is now a landscape layout: brightness bar on top, the options as a row of buttons underneath, wrapping to a second row when launchers are installed.
+- **Radar screen.** Hosts drawn as blips around Ragnar (bearing = last IP octet, closer to the centre = more open ports; red = vulnerable, cyan = open ports, green = alive, grey = down) with a sweep line and a "most exposed" list.
+- **Activity screen.** A scrollable feed of the latest orchestrator and scanner log lines, colour-coded by level.
+- **Device screen.** Battery, CPU load, memory, uptime, free storage, scan interface and level progress.
+- **Dashboard.** Shows the animated Viking status art for the action currently running.
+- Checked on a Pager with Ragnar running.
+
+#### feat(pager): WiFi Spectrum — native tri-band WiFi spectrum, waterfall & passive network discovery
+*branch `fix/pineapple-pager-install`*
+
+- **What it is.** A new native Pineapple Pager app (menu: **WiFi Spectrum**) that turns the Pager's own tri-band WiFi radio into a spectrum/recon instrument — no external SDR. It retunes `wlan1mon` across every 2.4 / 5 / **6 GHz** channel, captures 802.11 frames via a raw `AF_PACKET` socket, reads radiotap RSSI, and passively parses beacons/probe-responses for SSID, BSSID, channel and encryption. Nothing is transmitted.
+- **Three views** (cycle with GREEN): a per-pixel scrolling inferno **Waterfall** (full 480 px width, interpolated between channels, newest line on top, about three new lines a second, band boundaries marked in ALL mode); a scrollable **Networks** list (SSID / band / channel / signal / open-locked, strongest first); and a **Survey** dashboard (total / open / secured counts, per-band bars, strongest networks, clearest-2.4-GHz-channel recommendation).
+- **Pager flourishes.** A radar-sweep splash, and the 4 d-pad RGB LEDs run a physical radar sweep tinted by the strongest band and pulsing with signal strength. On exit the inventory is written to `data/spectrum_networks.csv`. The menu entry sits directly under **Start Ragnar** and reloads the app each time it is opened.
+- **Tuned for the hardware.** Measured on the Pager, every libpagerctl draw call costs ~1.2 ms regardless of area and TrueType text ~10 ms, so a display built from many rectangles is slow (a screen-filling waterfall of cells took 320-630 ms per repaint and looked blocky). The waterfall is therefore kept as an in-memory BMP image, scrolled with one slice move and drawn with a single `draw_image_file()` call: ~150 ms per update at full pixel resolution. Per-frame text uses the bitmap font.
+
 ### 2026-11-11
+
+#### fix(pager): Pineapple Pager installer deployed an empty payload and 404'd on Python
+*branch `fix/pineapple-pager-install`*
+
+- **The core bug.** The maintained installer lives at `scripts/install_pineapple_pager.sh`, and that is how `install_ragnar.sh` (option 3) and the docs invoke it. But it set `RAGNAR_DIR="$(dirname "$0")"` — i.e. the `scripts/` directory — so every source path (`$RAGNAR_DIR/pager/...`, `$RAGNAR_DIR/shared.py`, `$RAGNAR_DIR/actions`, `$RAGNAR_DIR/web`) resolved under `scripts/`, where none of them exist. Every file was silently skipped, an almost-empty payload was copied to the Pager, and the script still printed **"successfully deployed."** Ragnar then would not start on the device. Now the repo root is found by walking up from the script (works whether it is run from `scripts/` or the repo root), and a completeness guard **aborts** instead of deploying a payload that is missing `payload.sh`, `pager_menu.py`, `shared.py`, `actions/`, `web/`, etc.
+- **Python install 404'd.** The Python3 `.ipk` set was pinned to `3.11.14-r1`, a version the OpenWrt `mipsel_24kc` feed has since dropped (now `3.11.18-r1`) — every download returned 404, so the Pager was left without Python. The installer no longer pins a version: it first lets the Pager's own `opkg` resolve the current packages online, and if the Pager has no internet it reads the current `Filename:` for each package from the feed's `Packages.gz` index on the host and streams the `.ipk` set over. `python-nmap` now prefers the copy bundled in `pager_lib/` and installs into the Pager's actual `python3.x` site dir. All of the installer's own on-device `python3` checks now use the same `/mmc/usr/bin` + `/mmc/usr/lib` paths that `payload.sh` exports — `opkg -d mmc` installs Python under `/mmc`, which is not on the default `PATH`, so the old bare `python3` checks reported a freshly-installed interpreter as "missing" and the installer bailed out just before its final steps. Verified end-to-end on a real Pager (firmware OpenWrt, MIPS).
+- **Transfer no longer relies on `scp`.** Modern OpenSSH `scp` speaks SFTP, which the Pager's dropbear-style SSH server may not provide; payload, packages and the nmap module now go over a single `tar | ssh 'tar -x'` stream (faster for thousands of small files, and it needs no SFTP subsystem).
+- **Connection UX.** A pre-flight TCP check on port 22 separates "Pager not plugged in / wrong IP" from "auth failed" and suggests the detected `172.16.<N>.1` when the pinned default is wrong; SSH connection multiplexing means a password user is prompted **once** instead of ~20 times.
+- **One source of truth.** The stale, identical copy at the repo root is now a thin forwarder that execs `scripts/install_pineapple_pager.sh`, so the two copies can no longer drift (this drift is why the fixes had to land in the `scripts/` copy).
 
 #### fix(net): DNS Watch v12, MaginotDNS detector no longer alarms on normal reverse-DNS referrals
 *branch `feature/dns-poison-v12`*
