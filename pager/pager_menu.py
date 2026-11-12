@@ -273,7 +273,7 @@ class RagnarMenu:
             'max_value': 'ON :8000',
         })
 
-        items.append({'label': 'RF Observatory'})
+        items.append({'label': 'WiFi Spectrum'})
         items.append({'label': 'Clear Data'})
         items.append({'label': 'Exit'})
         return items

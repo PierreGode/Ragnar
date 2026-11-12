@@ -4,10 +4,10 @@
 
 ### 2026-11-12
 
-#### feat(pager): RF Observatory — native tri-band WiFi spectrum, waterfall & passive network discovery
+#### feat(pager): WiFi Spectrum — native tri-band WiFi spectrum, waterfall & passive network discovery
 *branch `fix/pineapple-pager-install`*
 
-- **What it is.** A new native Pineapple Pager app (menu: **RF Observatory**) that turns the Pager's own tri-band radio into an RF recon instrument — no external SDR. It retunes `wlan1mon` across every 2.4 / 5 / **6 GHz** channel, captures 802.11 frames via a raw `AF_PACKET` socket, reads radiotap RSSI, and passively parses beacons/probe-responses for SSID, BSSID, channel and encryption. Nothing is transmitted.
+- **What it is.** A new native Pineapple Pager app (menu: **WiFi Spectrum**) that turns the Pager's own tri-band WiFi radio into a spectrum/recon instrument — no external SDR. It retunes `wlan1mon` across every 2.4 / 5 / **6 GHz** channel, captures 802.11 frames via a raw `AF_PACKET` socket, reads radiotap RSSI, and passively parses beacons/probe-responses for SSID, BSSID, channel and encryption. Nothing is transmitted.
 - **Three views** (cycle with GREEN): a smooth **Spectrum** (filled gradient columns, interpolated and temporally eased, peak-hold envelope, scope grid, live sweep cursor, per-band colour, AP channel markers, inferno waterfall); a scrollable **Networks** list (SSID / band / channel / signal / open-locked, strongest first); and a **Survey** dashboard (total / open / secured counts, per-band bars, strongest networks, clearest-2.4-GHz-channel recommendation).
 - **Pager flourishes.** A radar-sweep splash, and the 4 d-pad RGB LEDs run a physical radar sweep tinted by the strongest band and pulsing with signal strength. On exit the inventory is written to `data/spectrum_networks.csv`.
 - **Tuned for the hardware.** The MIPS LCD does ~3k draw calls/sec and clear+flip is only ~4 ms, so the frame cost is all per-call. The big win was replacing per-frame TrueType text (~60 ms/frame) with the bitmap font; plus cached interpolation, no per-frame history copy, a run-length waterfall and a bounded column count. Result: ~15 fps on the busy 2.4 GHz view and ~18–30 fps on the others, verified on real hardware.

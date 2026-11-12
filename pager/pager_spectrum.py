@@ -1,7 +1,7 @@
 """
 Ragnar WiFi Spectrum Waterfall - native Pineapple Pager app.
 
-A passive tri-band (2.4 / 5 / 6 GHz) RF spectrum analyser and scrolling
+A passive tri-band (2.4 / 5 / 6 GHz) WiFi spectrum analyser and scrolling
 waterfall rendered directly on the Pager's 480x222 LCD. It uses the Pager's
 OWN monitor radio (wlan1mon): it retunes across every channel the radio
 supports, captures 802.11 frames through a raw AF_PACKET socket, and reads the
@@ -766,7 +766,7 @@ def _draw_stats(gfx, swp, band, font):
     rows = swp.networks('ALL')
     gfx.clear(COL_BG)
     gfx.fill_rect(0, 0, W, 14, TITLE_BG)
-    gfx.draw_text(4, 3, "RF SURVEY", COL_TITLE, 1)
+    gfx.draw_text(4, 3, "WIFI SURVEY", COL_TITLE, 1)
     hint = "A=view RED=exit"
     gfx.draw_text(W - gfx.text_width(hint, 1) - 4, 3, hint, COL_DIM, 1)
 
@@ -838,7 +838,7 @@ def _splash(gfx, font):
         for bx, by in ((0.4, -0.3), (-0.6, 0.2), (0.1, 0.7), (-0.2, -0.6)):
             gfx.fill_circle(int(cx + bx * R), int(cy + by * R), 2, Pager.rgb(90, 230, 140))
         gfx.draw_text_centered(14, "R A G N A R", COL_TITLE, 3)
-        gfx.draw_text_centered(40, "RF OBSERVATORY", Pager.rgb(120, 170, 210), 1)
+        gfx.draw_text_centered(40, "WIFI SPECTRUM", Pager.rgb(120, 170, 210), 1)
         gfx.draw_text_centered(210, "tri-band passive spectrum", COL_DIM, 1)
         gfx.flip()
         ev = gfx.get_input_event()
@@ -848,7 +848,7 @@ def _splash(gfx, font):
     _ = t0
 
 def run_spectrum(gfx, font_mono=None):
-    """Run the RF observatory UI on an existing Pager context until the user
+    """Run the WiFi Spectrum UI on an existing Pager context until the user
     presses RED. Returns None."""
     font = font_mono or _FONT_MONO
     dev = find_monitor_iface()

@@ -30,10 +30,10 @@ full-color LCD display, button controls, and LED status indicators.
 - Graphical startup menu with interface selection and Web UI toggle
 - Auto-dim for battery saving and payload handoff support
 
-## RF Observatory (native spectrum app)
+## WiFi Spectrum (native spectrum app)
 
-From the Pager menu, select **RF Observatory** for a real-time, tri-band WiFi
-RF analyser rendered natively on the LCD. It uses the Pager's **own** radio —
+From the Pager menu, select **WiFi Spectrum** for a real-time, tri-band WiFi
+spectrum analyser rendered natively on the LCD. It uses the Pager's **own** radio —
 no external SDR, no HackRF, no extra binaries. It retunes the monitor interface
 (`wlan1mon`) across every 2.4 / 5 / **6 GHz** channel the radio supports,
 captures 802.11 frames through a raw packet socket, reads the per-frame
