@@ -18,6 +18,7 @@ import threading
 import time
 import os
 import sys
+import math
 import signal
 import logging
 import random
@@ -37,16 +38,20 @@ logger = Logger(name="pager_display.py", level=logging.INFO)
 PAYLOAD_DIR = os.path.dirname(os.path.abspath(__file__))
 
 SCREEN_DASHBOARD = 0
-SCREEN_HOSTS = 1
-SCREEN_CREDS = 2
-SCREEN_VULNS = 3
-SCREEN_SCAN_SETTINGS = 4
-SCREEN_ATTACK_SETTINGS = 5
-SCREEN_NETWORK_SETTINGS = 6
-SCREEN_SYSTEM_SETTINGS = 7
-SCREEN_COUNT = 8
+SCREEN_RADAR = 1
+SCREEN_HOSTS = 2
+SCREEN_CREDS = 3
+SCREEN_VULNS = 4
+SCREEN_ACTIVITY = 5
+SCREEN_DEVICE = 6
+SCREEN_SCAN_SETTINGS = 7
+SCREEN_ATTACK_SETTINGS = 8
+SCREEN_NETWORK_SETTINGS = 9
+SCREEN_SYSTEM_SETTINGS = 10
+SCREEN_COUNT = 11
 
-SCREEN_NAMES = ["Dashboard", "Hosts", "Creds", "Vulns", "Scan Cfg", "Atk Cfg", "Net Cfg", "System"]
+SCREEN_NAMES = ["Dashboard", "Radar", "Hosts", "Creds", "Vulns", "Activity", "Device",
+                "Scan Cfg", "Atk Cfg", "Net Cfg", "System"]
 
 # Screens that use interactive settings (UP/DOWN=select, A=edit)
 SETTINGS_SCREENS = {SCREEN_SCAN_SETTINGS, SCREEN_ATTACK_SETTINGS, SCREEN_NETWORK_SETTINGS, SCREEN_SYSTEM_SETTINGS}
@@ -209,6 +214,12 @@ class PagerDisplay:
         self._creds_data = []
         self._vulns_data = []
         self._last_data_refresh = 0
+        self._activity = []
+        self._activity_refresh = 0
+        self._device = {}
+        self._device_refresh = 0
+        self._sprite = None
+        self._sprite_key = None
 
         # Animation
         self.main_image_path = None
@@ -357,6 +368,7 @@ class PagerDisplay:
                         'alive': h.get('status') == 'alive',
                         'ports': h.get('ports', ''),
                         'mac': h.get('mac', ''),
+                        'vulns': bool(h.get('vulnerabilities')),
                     })
             elif os.path.exists(self.shared_data.netkbfile):
                 with open(self.shared_data.netkbfile, 'r') as f:
@@ -458,7 +470,7 @@ class PagerDisplay:
         self.pager.fill_rect(0, 0, self.width, h, self.HEADER_BG)
         self.pager.draw_ttf(8, 2, title, self.WHITE, self.font_viking, 18)
 
-        # Compact screen indicator dots (6px spacing, fits 8 screens in 56px)
+        # Compact screen indicator dots (6px spacing)
         DOT_SIZE = 4
         DOT_SPACING = 6
         total_dots_w = SCREEN_COUNT * DOT_SPACING
@@ -576,6 +588,34 @@ class PagerDisplay:
         self.pager.draw_ttf(right_x + 8, info_y + 38, f"Atk: {self.shared_data.attacksnbr}", self.GRAY, self.font_arial, 12)
         wifi = "WiFi: ON" if self.shared_data.wifi_connected else "WiFi: --"
         self.pager.draw_ttf(right_x + 8, info_y + 54, wifi, self.CYAN if self.shared_data.wifi_connected else self.DARK_GRAY, self.font_arial, 12)
+
+        # The Viking: the animated status art for whatever Ragnar is doing now
+        sprite = self._status_sprite(status)
+        if sprite:
+            size = 92
+            sx = right_x + right_w - size - 8
+            sy = self.height - size - 10
+            try:
+                self.pager.draw_image_file_scaled(sx, sy, size, size, sprite)
+                self.pager.rect(sx - 1, sy - 1, size + 2, size + 2, self.DARK_GRAY)
+            except Exception:
+                pass
+
+    def _status_sprite(self, status):
+        """Path of the current animation frame for this status (new frame ~1/s)."""
+        key = (status, int(time.time()))
+        if key == self._sprite_key:
+            return self._sprite
+        self._sprite_key = key
+        base = os.path.join(PAYLOAD_DIR, 'resources', 'images', 'status')
+        for name in (status, 'IDLE'):
+            frames = [f for f in glob.glob(os.path.join(base, name, '*.bmp'))
+                      if os.path.basename(f)[:-4] != name]      # skip the 28px icon
+            if frames:
+                self._sprite = random.choice(frames)
+                return self._sprite
+        self._sprite = None
+        return None
 
     # ------------------------------------------------------------------
     # Screen 1: Hosts
@@ -731,7 +771,252 @@ class PagerDisplay:
                 self.pager.fill_rect(self.width - 3, sb_y, 2, sb_h, self.GRAY)
 
     # ------------------------------------------------------------------
-    # Settings screens (4-7) - interactive configuration
+    # Screen: Radar - hosts as blips around Ragnar
+    # ------------------------------------------------------------------
+
+    def draw_radar(self):
+        """Hosts plotted on a radar: bearing = last IP octet, distance = how
+        exposed the host is (more open ports -> closer to the centre)."""
+        self.pager.clear(self.DARK_BG)
+        self.refresh_list_data()
+        hosts = self._hosts_data
+        alive = [h for h in hosts if h['alive']]
+        self._draw_screen_header(f"RADAR ({len(alive)} alive)")
+
+        cx, cy, R = 104, 124, 92
+        ring = self.pager.rgb(30, 70, 60)
+        for r in (R // 3, 2 * R // 3, R):
+            self.pager.circle(cx, cy, r, ring)
+        self.pager.line(cx - R, cy, cx + R, cy, ring)
+        self.pager.line(cx, cy - R, cx, cy + R, ring)
+
+        # rotating sweep (one revolution every ~6 s)
+        ang = (time.time() % 6.0) / 6.0 * 2 * math.pi
+        for k, shade in ((0.0, 200), (0.12, 110), (0.24, 60)):
+            a = ang - k
+            self.pager.line(cx, cy, int(cx + R * math.cos(a)), int(cy + R * math.sin(a)),
+                            self.pager.rgb(0, shade, shade // 2))
+
+        ranked = []
+        for h in hosts[:80]:
+            try:
+                octet = int(h['ip'].split('.')[-1])
+            except (ValueError, IndexError, AttributeError):
+                octet = 0
+            nports = len([p for p in str(h['ports'] or '').replace(';', ',').split(',') if p.strip()])
+            a = octet / 256.0 * 2 * math.pi - math.pi / 2
+            dist = R * (0.95 - min(nports, 8) * 0.09) if h['alive'] else R * 0.97
+            x, y = int(cx + dist * math.cos(a)), int(cy + dist * math.sin(a))
+            if not h['alive']:
+                self.pager.fill_rect(x - 1, y - 1, 2, 2, self.DARK_GRAY)
+                continue
+            color = self.RED if h.get('vulns') else (self.CYAN if nports else self.GREEN)
+            self.pager.fill_circle(x, y, 3 if nports else 2, color)
+            ranked.append((1 if h.get('vulns') else 0, nports, h, color))
+        self.pager.fill_circle(cx, cy, 3, self.WHITE)
+
+        # right side: legend + most exposed hosts
+        x0 = 212
+        self.pager.draw_ttf(x0, 28, "MOST EXPOSED", self.GRAY, self.font_arial, 11)
+        ranked.sort(key=lambda t: (t[0], t[1]), reverse=True)
+        y = 44
+        for vul, nports, h, color in ranked[:7]:
+            self.pager.fill_rect(x0, y + 5, 6, 6, color)
+            self.pager.draw_ttf(x0 + 12, y, str(h['ip'])[:15], self.WHITE, self.font_arial, 13)
+            name = (h['hostname'] or '')[:12]
+            tail = f"{nports}p {name}" if name else (f"{nports} port" + ("" if nports == 1 else "s"))
+            self.pager.draw_ttf(x0 + 128, y + 1, tail, self.GRAY, self.font_arial, 11)
+            y += 20
+        if not ranked:
+            self.pager.draw_ttf(x0, 60, "No live hosts yet", self.GRAY, self.font_arial, 14)
+
+        ly = self.height - 16
+        for label, color, lx in (("vuln", self.RED, x0), ("open ports", self.CYAN, x0 + 56),
+                                 ("alive", self.GREEN, x0 + 146), ("down", self.DARK_GRAY, x0 + 204)):
+            self.pager.fill_rect(lx, ly + 4, 6, 6, color)
+            self.pager.draw_ttf(lx + 10, ly, label, self.GRAY, self.font_arial, 10)
+
+    # ------------------------------------------------------------------
+    # Screen: Activity - what Ragnar has been doing
+    # ------------------------------------------------------------------
+
+    _ACTIVITY_LOGS = ('orchestrator.py.log', 'scanning.py.log')
+
+    def _refresh_activity(self):
+        now = time.time()
+        if now - self._activity_refresh < 3:
+            return
+        self._activity_refresh = now
+        rows = []
+        for name in self._ACTIVITY_LOGS:
+            path = os.path.join(self.shared_data.logsdir, name)
+            try:
+                with open(path, 'rb') as f:
+                    f.seek(0, os.SEEK_END)
+                    size = f.tell()
+                    f.seek(max(0, size - 6000))
+                    chunk = f.read().decode('utf-8', 'replace')
+            except Exception:
+                continue
+            for line in chunk.splitlines()[1:]:
+                parts = line.split(' - ', 3)
+                if len(parts) < 4 or parts[2] == 'DEBUG':
+                    continue
+                msg = self.sanitize_text(parts[3]).strip()
+                if not msg or set(msg) <= set('=-* '):
+                    continue
+                msg = ''.join(c if 32 <= ord(c) < 127 else ' ' for c in msg).strip()
+                rows.append((parts[0], parts[2], msg))
+        rows.sort(key=lambda r: r[0])
+        self._activity = rows[-60:]
+
+    def draw_activity(self):
+        self.pager.clear(self.DARK_BG)
+        self._refresh_activity()
+        self._draw_screen_header("ACTIVITY")
+        rows = self._activity
+        y0, row_h = 28, 16
+        visible = (self.height - y0 - 2) // row_h
+        total = len(rows)
+        self.scroll_offset = min(self.scroll_offset, max(0, total - visible))
+        if not rows:
+            self.pager.draw_ttf_centered(100, "Nothing logged yet", self.GRAY, self.font_arial, 16)
+            return
+        # scroll_offset 0 = newest lines; UP/DOWN walks back through history
+        end = total - self.scroll_offset
+        colors = {'WARNING': self.YELLOW, 'ERROR': self.RED, 'CRITICAL': self.RED}
+        for i, (ts, level, msg) in enumerate(rows[max(0, end - visible):end]):
+            y = y0 + i * row_h
+            self.pager.draw_ttf(4, y, ts[11:19], self.DARK_GRAY, self.font_arial, 11)
+            self.pager.draw_ttf(62, y, msg[:62], colors.get(level, self.LIGHT_GRAY), self.font_arial, 12)
+        if total > visible:
+            sb_h = max(8, int((self.height - y0) * visible / total))
+            sb_y = y0 + int((self.height - y0 - sb_h) * (end - visible) / max(1, total - visible))
+            self.pager.fill_rect(self.width - 3, sb_y, 2, sb_h, self.GRAY)
+
+    # ------------------------------------------------------------------
+    # Screen: Device - battery, load, memory, uptime
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _read_first(pattern):
+        for path in sorted(glob.glob(pattern)):
+            try:
+                with open(path) as f:
+                    return f.read().strip()
+            except Exception:
+                continue
+        return None
+
+    def _refresh_device(self):
+        now = time.time()
+        if now - self._device_refresh < 5:
+            return
+        self._device_refresh = now
+        d = {}
+        cap = self._read_first('/sys/class/power_supply/*/capacity')
+        d['batt'] = int(cap) if cap and cap.isdigit() else None
+        d['batt_status'] = self._read_first('/sys/class/power_supply/*/status') or ''
+        volt = self._read_first('/sys/class/power_supply/*/voltage_now')
+        d['volt'] = int(volt) / 1e6 if volt and volt.isdigit() else None
+        try:
+            with open('/proc/loadavg') as f:
+                d['load'] = float(f.read().split()[0])
+        except Exception:
+            d['load'] = None
+        try:
+            mem = {}
+            with open('/proc/meminfo') as f:
+                for line in f:
+                    k, v = line.split(':', 1)
+                    mem[k] = int(v.split()[0])
+            total = mem.get('MemTotal', 0)
+            avail = mem.get('MemAvailable', mem.get('MemFree', 0))
+            d['mem'] = (total - avail) / float(total) if total else None
+            d['mem_mb'] = (total - avail) // 1024
+        except Exception:
+            d['mem'] = None
+        try:
+            with open('/proc/uptime') as f:
+                d['uptime'] = int(float(f.read().split()[0]))
+        except Exception:
+            d['uptime'] = None
+        try:
+            st = os.statvfs(PAYLOAD_DIR)
+            d['disk_free_mb'] = st.f_bavail * st.f_frsize // (1024 * 1024)
+        except Exception:
+            d['disk_free_mb'] = None
+        self._device = d
+
+    def _draw_meter(self, x, y, w, label, frac, text, color):
+        self.pager.draw_ttf(x, y, label, self.GRAY, self.font_arial, 11)
+        self.pager.draw_ttf(x + w - self.pager.ttf_width(text, self.font_arial, 13), y - 2,
+                            text, self.WHITE, self.font_arial, 13)
+        self.pager.fill_rect(x, y + 16, w, 8, self.DARK_GRAY)
+        if frac is not None:
+            self.pager.fill_rect(x, y + 16, max(1, int(w * max(0.0, min(1.0, frac)))), 8, color)
+
+    def draw_device(self):
+        self.pager.clear(self.DARK_BG)
+        self._refresh_device()
+        self._draw_screen_header("DEVICE")
+        d = self._device
+
+        # battery (left card)
+        self.pager.fill_rect(4, 28, 150, self.height - 32, self.CARD_BG)
+        self.pager.rect(4, 28, 150, self.height - 32, self.DARK_GRAY)
+        batt = d.get('batt')
+        bx, by, bw, bh = 34, 44, 84, 40
+        self.pager.rect(bx, by, bw, bh, self.WHITE)
+        self.pager.fill_rect(bx + bw, by + 12, 5, 16, self.WHITE)
+        if batt is not None:
+            bcol = self.GREEN if batt > 40 else (self.YELLOW if batt > 15 else self.RED)
+            self.pager.fill_rect(bx + 3, by + 3, max(1, (bw - 6) * batt // 100), bh - 6, bcol)
+            txt = f"{batt}%"
+        else:
+            txt = "n/a"
+        tw = self.pager.ttf_width(txt, self.font_arial, 26)
+        self.pager.draw_ttf(4 + (150 - tw) // 2, 92, txt, self.WHITE, self.font_arial, 26)
+        status = d.get('batt_status', '')
+        if d.get('volt'):
+            status = f"{status} {d['volt']:.2f}V".strip()
+        sw = self.pager.ttf_width(status, self.font_arial, 12)
+        self.pager.draw_ttf(4 + (150 - sw) // 2, 126, status, self.GRAY, self.font_arial, 12)
+        up = d.get('uptime')
+        if up is not None:
+            ut = f"up {up // 3600}h {(up % 3600) // 60:02d}m"
+            uw = self.pager.ttf_width(ut, self.font_arial, 12)
+            self.pager.draw_ttf(4 + (150 - uw) // 2, 150, ut, self.CYAN, self.font_arial, 12)
+
+        # meters (right)
+        x, w = 168, self.width - 168 - 10
+        load = d.get('load')
+        self._draw_meter(x, 34, w, "CPU LOAD", None if load is None else load / 4.0,
+                         "n/a" if load is None else f"{load:.2f}",
+                         self.GREEN if (load or 0) < 2 else self.ORANGE)
+        mem = d.get('mem')
+        self._draw_meter(x, 70, w, "MEMORY", mem,
+                         "n/a" if mem is None else f"{d.get('mem_mb', 0)} MB  {int(mem * 100)}%",
+                         self.CYAN if (mem or 0) < 0.8 else self.RED)
+        ppl = getattr(self.shared_data, 'points_per_level', 200) or 200
+        coins = self.shared_data.coinnbr
+        self._draw_meter(x, 106, w, f"LEVEL {self.shared_data.levelnbr}", (coins % ppl) / float(ppl),
+                         f"{coins} pts", self.PURPLE)
+
+        y = 146
+        iface = os.environ.get('RAGNAR_INTERFACE', '?')
+        ip = os.environ.get('RAGNAR_IP', '?')
+        self.pager.draw_ttf(x, y, f"Scan iface  {iface}  {ip}", self.LIGHT_GRAY, self.font_arial, 12)
+        free = d.get('disk_free_mb')
+        if free is not None:
+            self.pager.draw_ttf(x, y + 18, f"Storage free  {free} MB", self.LIGHT_GRAY, self.font_arial, 12)
+        wifi = "connected" if self.shared_data.wifi_connected else "not connected"
+        self.pager.draw_ttf(x, y + 36, f"WiFi  {wifi}", self.LIGHT_GRAY, self.font_arial, 12)
+        mode = "manual" if self.shared_data.manual_mode else "auto"
+        self.pager.draw_ttf(x, y + 54, f"Mode  {mode}", self.LIGHT_GRAY, self.font_arial, 12)
+
+    # ------------------------------------------------------------------
+    # Settings screens - interactive configuration
     # ------------------------------------------------------------------
 
     def _get_settings_for_screen(self, screen):
@@ -1028,11 +1313,14 @@ class PagerDisplay:
                                      self.GRAY, self.font_arial, 13)
 
     # ------------------------------------------------------------------
-    # Pause menu (kept from original)
+    # Pause menu
     # ------------------------------------------------------------------
 
     def show_exit_confirmation(self):
-        """Show pause menu. Returns: None=back, 99=main menu, 42=handoff, 0=exit."""
+        """Show pause menu. Returns: None=back, 99=main menu, 42=handoff, 0=exit.
+
+        Laid out for the 480x222 landscape screen: brightness on top, the
+        options as a row of buttons underneath (LEFT/RIGHT walks the row)."""
         self.dialog_showing = True
         time.sleep(0.2)
 
@@ -1059,48 +1347,54 @@ class PagerDisplay:
         num_options = len(options)
         selected = 0
 
+        # Button grid: up to 4 per row, rows stacked upward from the bottom edge
+        per_row = min(num_options, 4)
+        rows = (num_options + per_row - 1) // per_row
+        gap = 8
+        btn_h = 34 if rows == 1 else (28 if rows == 2 else 22)
+        btn_w = (self.width - 40 - (per_row - 1) * gap) // per_row
+        grid_y = self.height - 18 - rows * btn_h - (rows - 1) * gap
+        font_size = 15 if rows < 3 else 12
+
+        def fit(label):
+            while len(label) > 3 and self.pager.ttf_width(label, self.font_arial, font_size) > btn_w - 8:
+                label = label[:-2]
+            return label
+
         def draw_menu():
-            self.pager.fill_rect(0, 0, self.width, self.height, self.WHITE)
-            box_y = int(self.height * 0.10)
-            box_h = int(self.height * 0.80)
-            self.pager.fill_rect(10, box_y, self.width - 20, box_h, self.WHITE)
-            self.pager.rect(10, box_y, self.width - 20, box_h, self.BLACK)
-            self.pager.rect(12, box_y + 2, self.width - 24, box_h - 4, self.BLACK)
+            self.pager.clear(self.DARK_BG)
+            self.pager.rect(6, 6, self.width - 12, self.height - 12, self.DARK_GRAY)
+            self.pager.draw_ttf_centered(10, "PAUSED", self.WHITE, self.font_viking, 22)
 
-            title_y = box_y + 15
-            self.pager.draw_ttf_centered(title_y, "MENU", self.BLACK, self.font_viking, 24)
-
-            bright_y = box_y + 60
-            self.pager.draw_ttf_centered(bright_y, "BRIGHTNESS", self.BLACK, self.font_arial, 16)
-
-            bar_y = bright_y + 30
-            bar_x = 30
-            bar_w = self.width - 60
-            bar_h = 20
-            self.pager.fill_rect(bar_x, bar_y, bar_w, bar_h, self.GRAY)
-            fill_w = int(bar_w * current_brightness / 100)
-            self.pager.fill_rect(bar_x, bar_y, fill_w, bar_h, self.BLACK)
-            self.pager.rect(bar_x, bar_y, bar_w, bar_h, self.BLACK)
-
-            pct_y = bar_y + bar_h + 5
-            self.pager.draw_ttf_centered(pct_y, f"{current_brightness}%", self.BLACK, self.font_arial, 16)
-
-            btn_w = 140
-            btn_h = 32
-            btn_x = (self.width - btn_w) // 2
-            btn_gap = 10
-            font_size = 16
-            first_btn_y = pct_y + 30
+            compact = rows > 1
+            bar_y = 44 if compact else 58
+            if not compact:
+                self.pager.draw_ttf(30, 40, "BRIGHTNESS", self.GRAY, self.font_arial, 12)
+            pct = f"{current_brightness}%"
+            self.pager.draw_ttf(self.width - 30 - self.pager.ttf_width(pct, self.font_arial, 14),
+                                bar_y - 19, pct, self.WHITE, self.font_arial, 14)
+            bar_x, bar_w, bar_h = 30, self.width - 60, 16
+            self.pager.fill_rect(bar_x, bar_y, bar_w, bar_h, self.DARK_GRAY)
+            self.pager.fill_rect(bar_x, bar_y, int(bar_w * current_brightness / 100), bar_h, self.CYAN)
+            self.pager.rect(bar_x, bar_y, bar_w, bar_h, self.GRAY)
+            if grid_y - (bar_y + bar_h) >= 30:
+                self.pager.draw_ttf_centered(bar_y + bar_h + 6,
+                                             "UP/DOWN brightness    LEFT/RIGHT select    GREEN ok",
+                                             self.GRAY, self.font_arial, 11)
 
             for i, (label, color, _action) in enumerate(options):
-                btn_y = first_btn_y + i * (btn_h + btn_gap)
+                r, c = divmod(i, per_row)
+                in_row = min(per_row, num_options - r * per_row)
+                row_w = in_row * btn_w + (in_row - 1) * gap
+                btn_x = (self.width - row_w) // 2 + c * (btn_w + gap)
+                btn_y = grid_y + r * (btn_h + gap)
                 if i == selected:
-                    self.pager.fill_rect(btn_x - 4, btn_y - 4, btn_w + 8, btn_h + 8, self.BLACK)
+                    self.pager.fill_rect(btn_x - 3, btn_y - 3, btn_w + 6, btn_h + 6, self.WHITE)
                 self.pager.fill_rect(btn_x, btn_y, btn_w, btn_h, color)
-                text_w = self.pager.ttf_width(label, self.font_arial, font_size)
-                text_x = btn_x + (btn_w - text_w) // 2
-                text_y = btn_y + (btn_h - font_size) // 2
-                self.pager.draw_ttf(text_x, text_y, label, self.WHITE, self.font_arial, font_size)
+                text = fit(label)
+                text_w = self.pager.ttf_width(text, self.font_arial, font_size)
+                self.pager.draw_ttf(btn_x + (btn_w - text_w) // 2, btn_y + (btn_h - font_size) // 2 - 1,
+                                    text, self.WHITE, self.font_arial, font_size)
 
             self.pager.flip()
 
@@ -1280,6 +1574,12 @@ class PagerDisplay:
             return
         if self.current_screen == SCREEN_DASHBOARD:
             self.draw_dashboard()
+        elif self.current_screen == SCREEN_RADAR:
+            self.draw_radar()
+        elif self.current_screen == SCREEN_ACTIVITY:
+            self.draw_activity()
+        elif self.current_screen == SCREEN_DEVICE:
+            self.draw_device()
         elif self.current_screen == SCREEN_HOSTS:
             self.draw_hosts()
         elif self.current_screen == SCREEN_CREDS:

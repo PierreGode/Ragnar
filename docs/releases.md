@@ -4,6 +4,16 @@
 
 ### 2026-11-12
 
+#### feat(pager): Radar, Activity and Device screens, Viking art on the dashboard, pause menu fits the screen
+*branch `fix/pineapple-pager-install`*
+
+- **Pause menu fix.** The RED-button menu was laid out for a portrait screen, so on the 480x222 landscape LCD the option buttons stacked down past the bottom edge (the second was cut in half, the third was off-screen). It is now a landscape layout: brightness bar on top, the options as a row of buttons underneath, wrapping to a second row when launchers are installed.
+- **Radar screen.** Hosts drawn as blips around Ragnar (bearing = last IP octet, closer to the centre = more open ports; red = vulnerable, cyan = open ports, green = alive, grey = down) with a sweep line and a "most exposed" list.
+- **Activity screen.** A scrollable feed of the latest orchestrator and scanner log lines, colour-coded by level.
+- **Device screen.** Battery, CPU load, memory, uptime, free storage, scan interface and level progress.
+- **Dashboard.** Shows the animated Viking status art for the action currently running.
+- Layouts were checked by rendering them with the display mock; they have not yet been looked at on the device itself.
+
 #### feat(pager): WiFi Spectrum — native tri-band WiFi spectrum, waterfall & passive network discovery
 *branch `fix/pineapple-pager-install`*
 

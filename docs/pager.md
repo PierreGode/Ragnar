@@ -97,6 +97,26 @@ address on — `N` differs between units, e.g. `42` or `52`).
   forward. If both fail, it prints the one-line `opkg` command to run on the
   Pager yourself, then re-run the installer.
 
+## Screens while Ragnar is running
+
+**LEFT/RIGHT** move between screens; **UP/DOWN** scroll lists.
+
+- **Dashboard** — status, the six counters, level bar, Ragnar's comment, and the
+  animated Viking art for whatever action is running.
+- **Radar** — every known host as a blip: bearing is the last IP octet, and the
+  more open ports a host has the closer it sits to the centre. Red = has
+  vulnerabilities, cyan = open ports, green = alive, grey = down. The side list
+  shows the most exposed hosts.
+- **Hosts / Creds / Vulns** — scrollable lists.
+- **Activity** — the latest orchestrator and scanner log lines (warnings in
+  yellow, errors in red); UP/DOWN scrolls back.
+- **Device** — battery, CPU load, memory, uptime, storage, scan interface and
+  level progress.
+- **Scan / Attack / Network / System settings** — edit with GREEN.
+
+**RED** opens the pause menu: UP/DOWN sets brightness, LEFT/RIGHT picks
+Back / Main Menu / Exit Ragnar (plus any installed launchers).
+
 ## Usage
 
 1. Launch from the Pager menu: **Reconnaissance > PagerRagnar**
