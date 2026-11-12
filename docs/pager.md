@@ -101,18 +101,30 @@ address on — `N` differs between units, e.g. `42` or `52`).
 
 **LEFT/RIGHT** move between screens; **UP/DOWN** scroll lists.
 
-- **Dashboard** — status, the six counters, level bar, Ragnar's comment, and the
-  animated Viking art for whatever action is running.
+- **Dashboard** — status, the six counters, level and Norse rank title (Thrall,
+  Karl, Hersir, Jarl ...), Ragnar's comment, and the animated Viking art for
+  whatever action is running.
 - **Radar** — every known host as a blip: bearing is the last IP octet, and the
   more open ports a host has the closer it sits to the centre. Red = has
   vulnerabilities, cyan = open ports, green = alive, grey = down. The side list
   shows the most exposed hosts.
-- **Hosts / Creds / Vulns** — scrollable lists.
+- **Hosts** — scrollable list; UP/DOWN moves the selection and **GREEN** opens
+  a detail page for that host (MAC, vendor, every open port, vulnerabilities,
+  credentials found on it). GREEN or RED closes it.
+- **Creds / Vulns** — scrollable lists.
 - **Activity** — the latest orchestrator and scanner log lines (warnings in
   yellow, errors in red); UP/DOWN scrolls back.
 - **Device** — battery, CPU load, memory, uptime, storage, scan interface and
   level progress.
+- **WiFi** — press **GREEN** to open WiFi Spectrum without stopping Ragnar;
+  RED inside it returns to this screen.
 - **Scan / Attack / Network / System settings** — edit with GREEN.
+
+When the host, credential or vulnerability counter goes up, a banner appears at
+the bottom of whatever screen is showing and the Pager buzzes (a short vibration
+for a new host, a three-note chime with vibration for credentials or a
+vulnerable host). Turn the buzz off with **Buzz On New Finds** on the System
+settings screen; the banner still shows.
 
 **RED** opens the pause menu: UP/DOWN sets brightness, LEFT/RIGHT picks
 Back / Main Menu / Exit Ragnar (plus any installed launchers).

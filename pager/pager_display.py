@@ -44,13 +44,18 @@ SCREEN_CREDS = 3
 SCREEN_VULNS = 4
 SCREEN_ACTIVITY = 5
 SCREEN_DEVICE = 6
-SCREEN_SCAN_SETTINGS = 7
-SCREEN_ATTACK_SETTINGS = 8
-SCREEN_NETWORK_SETTINGS = 9
-SCREEN_SYSTEM_SETTINGS = 10
-SCREEN_COUNT = 11
+SCREEN_WIFI = 7
+SCREEN_SCAN_SETTINGS = 8
+SCREEN_ATTACK_SETTINGS = 9
+SCREEN_NETWORK_SETTINGS = 10
+SCREEN_SYSTEM_SETTINGS = 11
+SCREEN_COUNT = 12
 
-SCREEN_NAMES = ["Dashboard", "Radar", "Hosts", "Creds", "Vulns", "Activity", "Device",
+# Rank title shown next to the level (lowest level that earns it, title).
+RANK_LADDER = [(1, "Thrall"), (5, "Karl"), (15, "Hersir"), (30, "Jarl"), (60, "Konungr"),
+               (100, "Berserkr"), (200, "Einherjar"), (500, "Jotunn"), (1000, "Ragnar")]
+
+SCREEN_NAMES = ["Dashboard", "Radar", "Hosts", "Creds", "Vulns", "Activity", "Device", "WiFi",
                 "Scan Cfg", "Atk Cfg", "Net Cfg", "System"]
 
 # Screens that use interactive settings (UP/DOWN=select, A=edit)
@@ -105,6 +110,7 @@ SYSTEM_SETTINGS = [
     # Web server is controlled by the startup menu (RAGNAR_WEB_UI env var), not this config.
     {'key': 'ai_enabled',      'label': 'AI Features',        'type': 'bool'},
     {'key': 'pushover_enabled','label': 'Push Notifications', 'type': 'bool'},
+    {'key': 'pager_alerts',    'label': 'Buzz On New Finds',  'type': 'bool'},
     {'key': 'debug_mode',      'label': 'Debug Mode',         'type': 'bool'},
     {'key': 'startup_delay',   'label': 'Startup Delay (s)',  'type': 'int',  'min': 0, 'max': 60,  'step': 1},
     {'key': 'comment_delaymin','label': 'Comment Freq Min',   'type': 'int',  'min': 5, 'max': 120, 'step': 5},
@@ -220,6 +226,13 @@ class PagerDisplay:
         self._device_refresh = 0
         self._sprite = None
         self._sprite_key = None
+        self._host_top = 0            # first visible row of the hosts list
+        self._host_detail = False     # host detail page open (Hosts screen)
+        self._toast = None            # (text, colour, until) banner for new finds
+        self._seen = None             # last (hosts, creds, vulns) counters
+        self._data_ready = False      # first counter refresh finished
+        if self.shared_data.config.get('pager_alerts') is None:
+            self.shared_data.config['pager_alerts'] = True
 
         # Animation
         self.main_image_path = None
@@ -298,7 +311,10 @@ class PagerDisplay:
 
                 self.wake_screen()
 
-                if button == Pager.BTN_B:
+                if button == Pager.BTN_B and self._host_detail:
+                    self._host_detail = False
+
+                elif button == Pager.BTN_B:
                     logger.info("Red button pressed - showing pause menu")
                     action = self.show_exit_confirmation()
                     if action is None:
@@ -319,10 +335,12 @@ class PagerDisplay:
                 elif button == Pager.BTN_LEFT:
                     self.current_screen = (self.current_screen - 1) % SCREEN_COUNT
                     self.scroll_offset = 0
+                    self._host_detail = False
 
                 elif button == Pager.BTN_RIGHT:
                     self.current_screen = (self.current_screen + 1) % SCREEN_COUNT
                     self.scroll_offset = 0
+                    self._host_detail = False
 
                 elif button == Pager.BTN_UP:
                     if self.current_screen in SETTINGS_SCREENS:
@@ -339,6 +357,10 @@ class PagerDisplay:
                 elif button == Pager.BTN_A:
                     if self.current_screen in SETTINGS_SCREENS:
                         self._settings_activate()
+                    elif self.current_screen == SCREEN_HOSTS:
+                        self._host_detail = not self._host_detail and bool(self._hosts_data)
+                    elif self.current_screen == SCREEN_WIFI:
+                        self._open_wifi()
 
             except Exception as e:
                 logger.error(f"Error in input handler: {e}")
@@ -369,6 +391,8 @@ class PagerDisplay:
                         'ports': h.get('ports', ''),
                         'mac': h.get('mac', ''),
                         'vulns': bool(h.get('vulnerabilities')),
+                        'vendor': h.get('vendor') or '',
+                        'vuln_text': h.get('vulnerabilities') or '',
                     })
             elif os.path.exists(self.shared_data.netkbfile):
                 with open(self.shared_data.netkbfile, 'r') as f:
@@ -558,9 +582,12 @@ class PagerDisplay:
         ppl = self.shared_data.points_per_level if hasattr(self.shared_data, 'points_per_level') else 200
         progress = (coins % ppl) / ppl if ppl > 0 else 0
 
-        self.pager.draw_ttf(6, stats_bottom, f"Lvl {level}", self.PURPLE, self.font_arial, 12)
-        self.pager.draw_ttf(60, stats_bottom, f"{coins}pts", self.GRAY, self.font_arial, 11)
-        bar_x = 120
+        lvl_txt = f"Lvl {level} {self._rank(level)}"
+        self.pager.draw_ttf(6, stats_bottom, lvl_txt, self.PURPLE, self.font_arial, 12)
+        px = 6 + self.pager.ttf_width(lvl_txt, self.font_arial, 12) + 8
+        pts_txt = f"{coins}pts"
+        self.pager.draw_ttf(px, stats_bottom, pts_txt, self.GRAY, self.font_arial, 11)
+        bar_x = px + self.pager.ttf_width(pts_txt, self.font_arial, 11) + 8
         bar_y = stats_bottom + 4
         bar_w = left_w - bar_x - 6
         bar_h = 5
@@ -601,6 +628,24 @@ class PagerDisplay:
             except Exception:
                 pass
 
+    def _rank(self, level):
+        """Norse rank title for a level."""
+        try:
+            getter = getattr(self.shared_data, 'get_rank', None)
+            if getter:
+                r = getter(level)
+                return r if isinstance(r, str) else str(r.get('name', ''))
+        except Exception:
+            pass
+        title = RANK_LADDER[0][1]
+        try:
+            for need, name in RANK_LADDER:
+                if int(level) >= need:
+                    title = name
+        except (TypeError, ValueError):
+            pass
+        return title
+
     def _status_sprite(self, status):
         """Path of the current animation frame for this status (new frame ~1/s)."""
         key = (status, int(time.time()))
@@ -622,57 +667,226 @@ class PagerDisplay:
     # ------------------------------------------------------------------
 
     def draw_hosts(self):
-        """Hosts list for 480x222 landscape."""
-        self.pager.clear(self.DARK_BG)
+        """Hosts list for 480x222 landscape. UP/DOWN moves the selection,
+        GREEN opens the selected host's detail page."""
         self.refresh_list_data()
+        hosts = self._hosts_data
+        total = len(hosts)
+        if self._host_detail and total:
+            self.scroll_offset = min(self.scroll_offset, total - 1)
+            self._draw_host_detail(hosts[self.scroll_offset], self.scroll_offset, total)
+            return
+        self._host_detail = False
+        self.pager.clear(self.DARK_BG)
 
-        alive = sum(1 for h in self._hosts_data if h['alive'])
+        alive = sum(1 for h in hosts if h['alive'])
         self._draw_screen_header(f"HOSTS ({alive} alive)")
 
         y = 26
         max_y = self.height - 2
         row_h = 24
-        visible = (max_y - y) // row_h
-
-        hosts = self._hosts_data
-        total = len(hosts)
-        self.scroll_offset = min(self.scroll_offset, max(0, total - visible))
+        rows = (max_y - y - 16) // row_h
 
         if not hosts:
             self.pager.draw_ttf_centered(100, "No hosts found yet", self.GRAY, self.font_arial, 16)
+            return
+
+        sel = self.scroll_offset = min(self.scroll_offset, total - 1)
+        top = min(self._host_top, sel)
+        if sel >= top + rows:
+            top = sel - rows + 1
+        self._host_top = top = max(0, min(top, max(0, total - rows)))
+
+        # Column headers
+        self.pager.draw_ttf(8, y, "IP", self.GRAY, self.font_arial, 10)
+        self.pager.draw_ttf(150, y, "HOSTNAME", self.GRAY, self.font_arial, 10)
+        self.pager.draw_ttf(310, y, "PORTS", self.GRAY, self.font_arial, 10)
+        self.pager.draw_ttf(388, y, "GREEN = details", self.DARK_GRAY, self.font_arial, 10)
+        y += 16
+
+        for i in range(top, min(top + rows, total)):
+            h = hosts[i]
+            cy = y + (i - top) * row_h
+
+            if i == sel:
+                self.pager.fill_rect(2, cy, self.width - 6, row_h - 2, self.pager.rgb(30, 70, 95))
+                self.pager.rect(2, cy, self.width - 6, row_h - 2, self.CYAN)
+            elif (i - top) % 2 == 0:
+                self.pager.fill_rect(2, cy, self.width - 6, row_h - 2, self.CARD_BG)
+
+            # Status dot
+            dot_color = self.GREEN if h['alive'] else self.RED
+            self.pager.fill_rect(5, cy + 8, 5, 5, dot_color)
+
+            self.pager.draw_ttf(14, cy + 3, h['ip'][:18], self.WHITE, self.font_arial, 13)
+            hn = h['hostname'][:18] if h['hostname'] else ""
+            self.pager.draw_ttf(150, cy + 3, hn, self.GRAY, self.font_arial, 12)
+            ports = h['ports'][:22] if h['ports'] else "-"
+            self.pager.draw_ttf(310, cy + 3, ports, self.CYAN, self.font_arial, 11)
+
+        # Scroll indicator
+        if total > rows:
+            sb_h = max(8, int((max_y - 42) * rows / total))
+            sb_y = 42 + int((max_y - 42 - sb_h) * top / max(1, total - rows))
+            self.pager.fill_rect(self.width - 3, sb_y, 2, sb_h, self.GRAY)
+
+    def _draw_host_detail(self, h, idx, total):
+        """Everything Ragnar knows about one host."""
+        self.pager.clear(self.DARK_BG)
+        self._draw_screen_header(f"HOST {idx + 1}/{total}")
+        W = self.width
+
+        self.pager.draw_ttf(8, 28, str(h['ip'])[:22], self.WHITE, self.font_arial, 20)
+        state, scol = ("ALIVE", self.GREEN) if h['alive'] else ("DOWN", self.RED)
+        tw = self.pager.ttf_width(state, self.font_arial, 13)
+        self.pager.fill_rect(W - tw - 22, 34, 8, 8, scol)
+        self.pager.draw_ttf(W - tw - 8, 30, state, scol, self.font_arial, 13)
+
+        name = self.sanitize_text(h['hostname'] or '') or "(no hostname)"
+        self.pager.draw_ttf(8, 54, name[:44], self.CYAN, self.font_arial, 13)
+        mac = (h.get('mac') or '').upper()
+        vendor = self.sanitize_text(h.get('vendor') or '')
+        self.pager.draw_ttf(8, 72, (mac + ("   " + vendor if vendor else ""))[:58],
+                            self.GRAY, self.font_arial, 11)
+
+        # open ports as chips, wrapped over at most two rows
+        ports = [p.strip() for p in str(h['ports'] or '').replace(';', ',').split(',') if p.strip()]
+        y = 90
+        self.pager.draw_ttf(8, y, f"OPEN PORTS ({len(ports)})", self.GRAY, self.font_arial, 10)
+        y += 14
+        x, row, shown = 8, 0, 0
+        for p in ports:
+            label = p[:12]
+            cw = self.pager.ttf_width(label, self.font_arial, 12) + 10
+            if x + cw > W - 44:
+                row += 1
+                if row > 1:
+                    break
+                x = 8
+            cy = y + row * 20
+            self.pager.fill_rect(x, cy, cw, 17, self.CARD_BG)
+            self.pager.rect(x, cy, cw, 17, self.CYAN)
+            self.pager.draw_ttf(x + 5, cy + 1, label, self.WHITE, self.font_arial, 12)
+            x += cw + 4
+            shown += 1
+        if not ports:
+            self.pager.draw_ttf(8, y + 1, "none seen", self.DARK_GRAY, self.font_arial, 12)
+        elif shown < len(ports):
+            self.pager.draw_ttf(x + 2, y + 21, f"+{len(ports) - shown}", self.GRAY, self.font_arial, 12)
+        y += 20 * (min(row, 1) + 1) + 4
+
+        # findings: vulnerabilities, then credentials found on this host
+        vuln = self.sanitize_text(str(h.get('vuln_text') or ''))
+        creds = [c for c in self._creds_data if c.get('host') == h['ip']]
+        foot = self.height - 16
+        if vuln:
+            self.pager.draw_ttf(8, y, "VULNERABILITIES", self.RED, self.font_arial, 10)
+            y += 13
+            for line in self.shared_data.wrap_text(vuln, max_chars=66)[:2]:
+                if y + 13 > foot:
+                    break
+                self.pager.draw_ttf(8, y, line, self.LIGHT_GRAY, self.font_arial, 11)
+                y += 13
+        if creds and y + 14 <= foot:
+            txt = "  ".join(f"{c['service']}:{c['user']}" for c in creds[:4])
+            self.pager.draw_ttf(8, y, f"CREDS ({len(creds)})  " + self.sanitize_text(txt)[:52],
+                                self.YELLOW, self.font_arial, 11)
+            y += 14
+        if not vuln and not creds and y + 14 <= foot:
+            self.pager.draw_ttf(8, y, "No vulnerabilities or credentials found on this host yet",
+                                self.DARK_GRAY, self.font_arial, 11)
+
+        self.pager.draw_ttf(8, foot, "UP/DOWN other host    GREEN or RED back",
+                            self.DARK_GRAY, self.font_arial, 10)
+
+    # ------------------------------------------------------------------
+    # Screen: WiFi - doorway to the live waterfall
+    # ------------------------------------------------------------------
+
+    def draw_wifi(self):
+        self.pager.clear(self.DARK_BG)
+        self._draw_screen_header("WIFI")
+        self.pager.draw_ttf_centered(52, "WiFi Spectrum", self.CYAN, self.font_arial, 24)
+        self.pager.draw_ttf_centered(92, "Live waterfall, network list and survey",
+                                     self.LIGHT_GRAY, self.font_arial, 13)
+        bw, bh = 220, 34
+        bx, by = (self.width - bw) // 2, 124
+        self.pager.fill_rect(bx, by, bw, bh, self.pager.rgb(0, 150, 0))
+        tw = self.pager.ttf_width("GREEN to open", self.font_arial, 16)
+        self.pager.draw_ttf(bx + (bw - tw) // 2, by + 7, "GREEN to open", self.WHITE, self.font_arial, 16)
+        self.pager.draw_ttf_centered(174, "Ragnar keeps working in the background.",
+                                     self.GRAY, self.font_arial, 11)
+        self.pager.draw_ttf_centered(190, "RED inside the waterfall brings you back here.",
+                                     self.GRAY, self.font_arial, 11)
+
+    def _open_wifi(self):
+        """Run the WiFi Spectrum app on this display, then come back."""
+        self.dialog_showing = True
+        time.sleep(0.25)              # let the render loop finish its frame
+        try:
+            import pager_spectrum
+            pager_spectrum.run_spectrum(self.pager)
+        except Exception as e:
+            logger.error(f"WiFi Spectrum failed: {e}")
+            self._toast = ("WiFi Spectrum could not start", self.ORANGE, time.time() + 5)
+        finally:
+            try:
+                self.pager.clear_input_events()
+                self.pager.set_brightness(self.screen_brightness)
+            except Exception:
+                pass
+            self.last_led_status = None       # the app used the d-pad LEDs
+            self.wake_screen()
+            self.dialog_showing = False
+
+    # ------------------------------------------------------------------
+    # New-find alerts
+    # ------------------------------------------------------------------
+
+    def _check_finds(self):
+        """Buzz and show a banner when a counter goes up."""
+        if not self._data_ready:
+            return
+        cur = (self.shared_data.targetnbr, self.shared_data.crednbr, self.shared_data.vulnnbr)
+        prev, self._seen = self._seen, cur
+        if prev is None or cur == prev:
+            return
+        try:
+            d_host, d_cred, d_vuln = (int(c) - int(p) for c, p in zip(cur, prev))
+        except (TypeError, ValueError):
+            return
+        if d_vuln > 0:
+            text, color, loud = f"NEW VULNERABLE HOST  (+{d_vuln}, {cur[2]} total)", self.RED, True
+        elif d_cred > 0:
+            text, color, loud = f"CREDENTIALS FOUND  (+{d_cred}, {cur[1]} total)", self.YELLOW, True
+        elif d_host > 0:
+            text, color, loud = f"NEW HOST  (+{d_host}, {cur[0]} alive)", self.GREEN, False
         else:
-            # Column headers
-            self.pager.draw_ttf(8, y, "IP", self.GRAY, self.font_arial, 10)
-            self.pager.draw_ttf(150, y, "HOSTNAME", self.GRAY, self.font_arial, 10)
-            self.pager.draw_ttf(310, y, "PORTS", self.GRAY, self.font_arial, 10)
-            y += 16
+            return
+        self._toast = (text, color, time.time() + 6)
+        if not self.shared_data.config.get('pager_alerts', True):
+            return
+        self.wake_screen()
+        try:
+            if loud:
+                self.pager.play_rtttl("find:d=16,o=6,b=180:c,e,g", 1)   # sound + vibrate
+            else:
+                self.pager.vibrate(120)
+        except Exception as e:
+            logger.debug(f"Alert failed: {e}")
 
-            for i in range(self.scroll_offset, min(self.scroll_offset + visible - 1, total)):
-                h = hosts[i]
-                cy = y + (i - self.scroll_offset) * row_h
-
-                # Alternating row bg
-                if (i - self.scroll_offset) % 2 == 0:
-                    self.pager.fill_rect(2, cy, self.width - 4, row_h - 2, self.CARD_BG)
-
-                # Status dot
-                dot_color = self.GREEN if h['alive'] else self.RED
-                self.pager.fill_rect(4, cy + 7, 5, 5, dot_color)
-
-                # IP
-                self.pager.draw_ttf(12, cy + 3, h['ip'][:18], self.WHITE, self.font_arial, 13)
-                # Hostname
-                hn = h['hostname'][:18] if h['hostname'] else ""
-                self.pager.draw_ttf(150, cy + 3, hn, self.GRAY, self.font_arial, 12)
-                # Ports
-                ports = h['ports'][:22] if h['ports'] else "-"
-                self.pager.draw_ttf(310, cy + 3, ports, self.CYAN, self.font_arial, 11)
-
-            # Scroll indicator
-            if total > visible:
-                sb_h = max(8, int((max_y - 42) * visible / total))
-                sb_y = 42 + int((max_y - 42 - sb_h) * self.scroll_offset / max(1, total - visible))
-                self.pager.fill_rect(self.width - 3, sb_y, 2, sb_h, self.GRAY)
+    def _draw_toast(self):
+        if not self._toast:
+            return
+        text, color, until = self._toast
+        if time.time() > until:
+            self._toast = None
+            return
+        h = 22
+        y = self.height - h
+        self.pager.fill_rect(0, y, self.width, h, color)
+        tw = self.pager.ttf_width(text, self.font_arial, 14)
+        self.pager.draw_ttf(max(4, (self.width - tw) // 2), y + 3, text, self.BLACK, self.font_arial, 14)
 
     # ------------------------------------------------------------------
     # Screen 2: Credentials
@@ -1513,6 +1727,7 @@ class PagerDisplay:
 
                 self.shared_data.update_stats()
                 self.shared_data.wifi_connected = self.is_wifi_connected()
+                self._data_ready = True
 
             except FileNotFoundError as e:
                 logger.debug(f"Data file not ready: {e}")
@@ -1580,6 +1795,8 @@ class PagerDisplay:
             self.draw_activity()
         elif self.current_screen == SCREEN_DEVICE:
             self.draw_device()
+        elif self.current_screen == SCREEN_WIFI:
+            self.draw_wifi()
         elif self.current_screen == SCREEN_HOSTS:
             self.draw_hosts()
         elif self.current_screen == SCREEN_CREDS:
@@ -1595,6 +1812,7 @@ class PagerDisplay:
         elif self.current_screen == SCREEN_SYSTEM_SETTINGS:
             self._draw_settings_screen(SCREEN_SYSTEM_SETTINGS, "SYSTEM CONFIG")
         if not self.dialog_showing:
+            self._draw_toast()
             self.pager.flip()
 
     def run(self):
@@ -1608,6 +1826,7 @@ class PagerDisplay:
                 self.display_comment(self.shared_data.ragnarorch_status)
                 self.shared_data.update_ragnarstatus()
                 self.update_leds(self.shared_data.ragnarorch_status)
+                self._check_finds()
                 self.render_frame()
                 time.sleep(0.1)
             except Exception as e:

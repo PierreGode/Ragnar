@@ -4,6 +4,15 @@
 
 ### 2026-11-12
 
+#### feat(pager): host detail page, new-find alerts, rank title, WiFi tab in the running view
+*branch `fix/pineapple-pager-install`*
+
+- **Host detail.** The Hosts screen now has a selection bar; **GREEN** opens a page for that host with MAC, vendor, every open port, its vulnerabilities and any credentials found on it. UP/DOWN steps to the next host, GREEN or RED closes.
+- **New-find alerts.** When the host, credential or vulnerability counter goes up, a banner shows on whatever screen is open and the Pager buzzes (vibration for a new host; chime plus vibration for credentials or a vulnerable host). **Buzz On New Finds** on the System settings screen turns the buzz off.
+- **Rank title.** The dashboard shows a Norse rank next to the level (Thrall, Karl, Hersir, Jarl, Konungr, Berserkr, Einherjar, Jotunn, Ragnar).
+- **WiFi tab.** A new screen that opens WiFi Spectrum with GREEN while Ragnar keeps running; RED returns to it.
+- Layouts were checked by rendering them with the display mock. The buzzer, and opening WiFi Spectrum from inside a running Ragnar, have not been tried on the device.
+
 #### feat(pager): Radar, Activity and Device screens, Viking art on the dashboard, pause menu fits the screen
 *branch `fix/pineapple-pager-install`*
 
