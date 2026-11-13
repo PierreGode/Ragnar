@@ -164,3 +164,42 @@ def test_a_host_below_the_threshold_stays_alive():
     _account(entries, alive_macs={'11:22:33:44:55:66'}, max_failed_pings=15)
 
     assert entries['aa:bb:cc:dd:ee:ff']['Alive'] == '1'
+
+
+# ---------------------------------------------------------------------------
+# arp-scan missing (e.g. WiFi Pineapple Pager): skip quietly, don't error
+# ---------------------------------------------------------------------------
+
+def test_missing_arp_scan_is_reported_once_and_never_run(scanner, monkeypatch):
+    import actions.scanning as scanning
+    monkeypatch.setattr(scanning.shutil, 'which', lambda name: None)
+    monkeypatch.setattr(NetworkScanner, '_arp_scan_missing_logged', False)
+    scanner._arp_scan_prefix = lambda: NetworkScanner._arp_scan_prefix(scanner)
+    scanner._read_neighbour_table = lambda: {
+        '192.168.1.1': {'mac': 'b0:6e:bf:28:00:a0', 'vendor': ''}}
+    scanner.blacklistcheck = False
+    calls = []
+    monkeypatch.setattr(scanning.subprocess, 'run',
+                        lambda *a, **k: calls.append(a) or pytest.fail('arp-scan was run'))
+
+    for _ in range(3):
+        hosts = NetworkScanner.run_arp_scan(scanner, network='192.168.1.0/24')
+
+    assert calls == []
+    assert hosts == {'192.168.1.1': {'mac': 'b0:6e:bf:28:00:a0', 'vendor': ''}}
+    scanner.logger.error.assert_not_called()
+    assert scanner.logger.warning.call_count == 1          # once, not every cycle
+
+
+def test_arp_scan_prefix_uses_sudo_only_when_needed(scanner, monkeypatch):
+    import actions.scanning as scanning
+    monkeypatch.setattr(scanning.shutil, 'which', lambda name: '/usr/bin/' + name)
+    monkeypatch.setattr(scanning.os, 'geteuid', lambda: 1000)
+    assert NetworkScanner._arp_scan_prefix(scanner) == ['sudo', 'arp-scan']
+    monkeypatch.setattr(scanning.os, 'geteuid', lambda: 0)
+    assert NetworkScanner._arp_scan_prefix(scanner) == ['arp-scan']
+    # root-only boxes without sudo (OpenWrt)
+    monkeypatch.setattr(scanning.os, 'geteuid', lambda: 1000)
+    monkeypatch.setattr(scanning.shutil, 'which',
+                        lambda name: None if name == 'sudo' else '/usr/bin/' + name)
+    assert NetworkScanner._arp_scan_prefix(scanner) == ['arp-scan']

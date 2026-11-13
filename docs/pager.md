@@ -97,6 +97,10 @@ address on — `N` differs between units, e.g. `42` or `52`).
   forward. If both fail, it prints the one-line `opkg` command to run on the
   Pager yourself, then re-run the installer.
 
+- **arp-scan.** Optional. The installer tries to add it with `opkg` (needs
+  internet on the Pager); with it, hosts get vendor names. Without it Ragnar
+  logs one warning and reads MAC addresses from the neighbour table.
+
 ## Screens while Ragnar is running
 
 **LEFT/RIGHT** move between screens; **UP/DOWN** scroll lists.

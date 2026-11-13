@@ -778,6 +778,32 @@ if [ "$needs_python_install" = true ]; then
 fi
 
 # ============================================================
+# Step 8a: arp-scan (optional - adds vendor names to discovered hosts)
+# ============================================================
+# Ragnar works without it (MACs come from the neighbour table), so this is
+# best-effort: it needs internet on the Pager and never fails the install.
+
+if pager_ssh "PATH=/mmc/usr/bin:/mmc/usr/sbin:\$PATH command -v arp-scan >/dev/null 2>&1"; then
+    log "SUCCESS" "arp-scan already installed on Pager"
+else
+    log "INFO" "Trying to install arp-scan on the Pager (optional)..."
+    pager_ssh "
+        rm -f /var/lock/opkg.lock 2>/dev/null
+        opkg update >/dev/null 2>&1 || true
+        if grep -q 'dest mmc' /etc/opkg.conf 2>/dev/null; then
+            opkg -d mmc install arp-scan >/dev/null 2>&1
+        else
+            opkg install arp-scan >/dev/null 2>&1
+        fi
+    " || true
+    if pager_ssh "PATH=/mmc/usr/bin:/mmc/usr/sbin:\$PATH command -v arp-scan >/dev/null 2>&1"; then
+        log "SUCCESS" "arp-scan installed"
+    else
+        log "INFO" "arp-scan not available (no internet on the Pager, or not in its feed) - Ragnar will use the neighbour table instead"
+    fi
+fi
+
+# ============================================================
 # Step 8b: Install python-nmap (pure Python wrapper for nmap)
 # ============================================================
 

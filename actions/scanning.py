@@ -294,6 +294,28 @@ class NetworkScanner:
 
         return hosts
 
+    _arp_scan_missing_logged = False
+
+    def _arp_scan_prefix(self):
+        """Command prefix for arp-scan, or None when the tool is not installed.
+
+        Boxes without arp-scan (e.g. the WiFi Pineapple Pager) still get MACs
+        from the kernel neighbour table, so a missing binary is reported once
+        and then skipped instead of raising an error on every scan cycle.
+        ``sudo`` is used only where it exists and we are not already root.
+        """
+        if shutil.which('arp-scan') is None:
+            if not NetworkScanner._arp_scan_missing_logged:
+                NetworkScanner._arp_scan_missing_logged = True
+                self.logger.warning(
+                    "arp-scan is not installed; using the neighbour table for "
+                    "MAC discovery (no vendor names). Install arp-scan for a "
+                    "full ARP sweep.")
+            return None
+        if os.geteuid() != 0 and shutil.which('sudo'):
+            return ['sudo', 'arp-scan']
+        return ['arp-scan']
+
     def run_arp_scan(self, network=None):
         """Execute arp-scan to get MAC addresses and vendor information for local network hosts."""
         if network is None:
@@ -303,14 +325,17 @@ class NetworkScanner:
         # sweep is charged a failed ping. --ignoredups keeps duplicate replies
         # from being parsed twice.
         reliability_flags = ['--retry=3', '--timeout=500', '--ignoredups']
-        commands = [
-            ['sudo', 'arp-scan', f'--interface={self.arp_scan_interface}',
-             '--localnet'] + reliability_flags,
-        ]
-        if network is not None:
+        prefix = self._arp_scan_prefix()
+        commands = []
+        if prefix is not None:
             commands.append(
-                ['sudo', 'arp-scan',
-                 f'--interface={self.arp_scan_interface}', str(network)]
+                prefix + [f'--interface={self.arp_scan_interface}', '--localnet']
+                + reliability_flags)
+        if prefix is None:
+            pass        # no arp-scan on this box: the neighbour table below covers it
+        elif network is not None:
+            commands.append(
+                prefix + [f'--interface={self.arp_scan_interface}', str(network)]
                 + reliability_flags)
         else:
             self.logger.warning(
@@ -359,7 +384,8 @@ class NetworkScanner:
         except Exception as e:                                  # noqa: BLE001
             self.logger.debug(f"Could not merge neighbour table: {e}")
 
-        self.logger.info(f"📋 arp-scan complete: {len(all_hosts)} hosts with MAC addresses discovered")
+        source = "arp-scan" if commands else "neighbour table"
+        self.logger.info(f"📋 {source} complete: {len(all_hosts)} hosts with MAC addresses discovered")
         
         # Write ARP scan results to SQLite database
         try:
