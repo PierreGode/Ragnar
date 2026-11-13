@@ -2,6 +2,16 @@
 
 ## Releases
 
+### 2026-11-13
+
+#### fix(scan): no more `arp-scan command not found` errors every scan cycle on boxes without arp-scan
+*branch `fix/pager-arp-scan-missing`*
+
+- **The problem.** On the WiFi Pineapple Pager (and any box without `arp-scan`) the scanner tried to run it twice per cycle and logged an ERROR each time, filling the log and the Pager's Activity screen with red lines. Scanning itself still worked, because MAC addresses also come from the kernel neighbour table.
+- **The fix.** The scanner now checks for `arp-scan` first. If it is missing it says so once, as a warning, and goes straight to the neighbour table. It also only prefixes `sudo` when not already root and `sudo` exists (OpenWrt has none).
+- **Installer.** `scripts/install_pineapple_pager.sh` now tries `opkg install arp-scan` on the Pager as an optional step (adds vendor names to hosts); it never fails the install if the package or internet is unavailable.
+- Covered by two new tests in `tests/test_host_liveness.py`. Not run on a Pager: the device was offline when this was written, so the optional `opkg` step is untested on hardware.
+
 ### 2026-11-12
 
 #### feat(pager): host detail page, new-find alerts, rank title, WiFi tab in the running view
