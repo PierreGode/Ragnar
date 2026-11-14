@@ -1019,7 +1019,7 @@ class Display:
     # drive the LCD HAT's input layers (cardputer_input.py): F/X/Z/C are the
     # joystick directions, OK (Enter) its centre press, Esc goes back.
     _KEYBOARD_HINTS = {
-        "K1:Home K2:Flip K3:Next K4:Rst": "F/X/Z/C:Page  OK:Diag  Esc:Home  A:Auto  Bksp:Flip",
+        "K1:Home K2:Flip K3:Next K4:Rst": "F/X/Z/C:Page OK:Diag Esc:Home A:Auto P:Cam Bksp:Flip",
         "K2 back · press=open":           "F/X:Move  OK:Open  Esc:Back",
         "K1 back to pages":               "OK:Close  Esc:Back",
         "K1Exit K2WiFi K3AP":             "Z/C:Page Esc:Exit Bksp:WiFi Tab:AP",
@@ -1907,6 +1907,131 @@ class Display:
                 os.fsync(img_file.fileno())
         except Exception:
             pass
+
+    # ── Camera screen (CardputerZero: P key) ─────────────────────────────
+    CAMERA_WEB_MIRROR_SECONDS = 1.0
+
+    def _push_frame_quiet(self, image):
+        """One frame to the panel without the per-update log line, for the
+        camera view's several frames a second."""
+        epd_img = _apply_epd_rotation(image, self.shared_data.screen_reversed)
+        try:
+            epd = self.epd_helper.epd
+            epd.displayPartial(epd.getbuffer(epd_img))
+        except Exception:
+            self.epd_helper.display_partial(epd_img)
+
+    def _camera_layout(self, W, H):
+        """(view box, text box) on a W x H canvas: the largest 4:3 picture,
+        and what is left beside it (wide screen) or under it (tall)."""
+        if W * 3 >= H * 4:
+            vw = int(H * 4 / 3)
+            return (0, 0, vw, H), (vw, 0, W, H)
+        vh = int(W * 3 / 4)
+        return (0, 0, W, vh), (0, vh, W, H)
+
+    def _render_camera_frame(self, image, draw, picture, bl, cam, problem=None):
+        W, H = image.size
+        view, side = self._camera_layout(W, H)
+        if picture is not None:
+            image.paste(picture, (view[0], view[1]))
+        font = self.shared_data.font_arial9
+        title_font = self._font_at('Viking.TTF', 13) or font
+        C = _WD_COLORS
+        x, y = side[0] + 5, side[1] + 16
+        width = side[2] - side[0] - 8
+        try:
+            rec = cam.recording() if cam is not None else None
+        except Exception:
+            rec = None
+        video = bool(getattr(bl, 'camera_video', False)) or bool(rec)
+        draw.text((x, y), "VIDEO" if video else "PHOTO", font=title_font, fill=C['title'])
+        y += 20
+        if rec:
+            secs = int(rec.get('seconds', 0))
+            draw.ellipse((x, y + 2, x + 7, y + 9), fill=C['bad'])
+            draw.text((x + 11, y), "REC %d:%02d" % (secs // 60, secs % 60), font=font, fill=C['bad'])
+            y += 14
+            # A red frame around the picture too: recording must be obvious.
+            draw.rectangle((view[0], view[1], view[2] - 1, view[3] - 1), outline=C['bad'])
+        note = getattr(bl, 'camera_note', None)
+        text = problem or (note[0] if note and time.monotonic() < note[1] else None)
+        if text:
+            line = ""
+            for word in str(text).split():
+                trial = (line + " " + word).strip()
+                if line and font.getlength(trial) > width:
+                    draw.text((x, y), line, font=font, fill=C['warn'] if problem else C['good'])
+                    y += 11
+                    line = word
+                else:
+                    line = trial
+            if line:
+                draw.text((x, y), line, font=font, fill=C['warn'] if problem else C['good'])
+        hints = ["OK: stop" if rec else ("OK: record" if video else "OK: photo")]
+        if not rec:
+            hints.append("Z/C: mode")
+        hints.append("Esc: exit")
+        hy = side[3] - 4 - 11 * len(hints)
+        for hint in hints:
+            draw.text((x, hy), hint, font=font, fill=C['dim'])
+            hy += 11
+
+    def _camera_screen(self, bl, W, H):
+        """The camera's live view on the device's own screen, with OK to take
+        a photo or start / stop a video (cardputer_input.py handles the keys).
+        Returns when the camera screen is left."""
+        import io
+        import pi_camera
+        cam = pi_camera.get_camera(self.config)
+        view, _ = self._camera_layout(W, H)
+        size = (view[2] - view[0], view[3] - view[1])
+        holding = False
+        picture = None
+        last = 0
+        next_try = 0.0
+        next_web = 0.0
+        try:
+            while getattr(bl, 'camera_mode', False) and not self.shared_data.display_should_exit:
+                now = time.monotonic()
+                problem = None
+                if not holding and now >= next_try:
+                    holding = cam.acquire()
+                    next_try = now + 3.0
+                if not holding:
+                    problem = cam.last_error or "No camera"
+                    time.sleep(0.2)
+                else:
+                    last, frame = cam.wait_frame(last, 0.5)
+                    if frame is not None:
+                        try:
+                            shot = Image.open(io.BytesIO(frame))
+                            shot.draft('RGB', size)
+                            picture = shot.convert('RGB').resize(size)
+                        except Exception as e:
+                            logger.debug(f"camera frame decode error: {e}")
+                    elif not cam.streaming and not getattr(bl, 'camera_busy', False):
+                        # The live view ended by itself: say why and retry.
+                        problem = cam.last_error or "Camera stopped"
+                        if now >= next_try:
+                            cam.ensure_stream()
+                            next_try = now + 3.0
+                image = Image.new('RGB', (W, H), _WD_COLORS['bg'])
+                draw = ImageDraw.Draw(image)
+                self._render_camera_frame(image, draw, picture, bl, cam, problem)
+                self._cardputer_overlays(image)
+                self._push_frame_quiet(image)
+                if now >= next_web:
+                    next_web = now + self.CAMERA_WEB_MIRROR_SECONDS
+                    try:
+                        web_img = _apply_web_rotation(image, self.shared_data.web_screen_reversed)
+                        with open(os.path.join(self.shared_data.webdir, "screen.png"), 'wb') as f:
+                            web_img.save(f)
+                    except Exception:
+                        pass
+        finally:
+            if holding:
+                cam.release()
 
     def _cardputer_landscape(self, render_w=None, render_h=None):
         """True on the M5Stack CardputerZero's built-in 320x170 LCD held the
@@ -4991,6 +5116,17 @@ class Display:
                 current_page = PAGE_MAIN
                 if self.button_listener and self.button_listener.available:
                     current_page = self.button_listener.current_page
+
+                # Camera screen (CardputerZero, P key): the live view owns the
+                # panel until it is left.
+                if (self.button_listener is not None
+                        and getattr(self.button_listener, 'camera_mode', False)):
+                    try:
+                        self._camera_screen(self.button_listener, render_w, render_h)
+                    except Exception as e:
+                        logger.warning(f"camera screen error: {e}")
+                        self.button_listener.camera_mode = False
+                    continue
 
                 # Network Diagnostic display mode: an Ethernet-focused,
                 # internet-independent field screen (link / addressing / switch

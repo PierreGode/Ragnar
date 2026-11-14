@@ -15246,7 +15246,7 @@ def _cz_detect_now(reidentify=False):
         info['header'] = cardputer_caps.header_state()
         try:
             import pi_camera
-            info['camera'] = pi_camera.get_camera().info()
+            info['camera'] = pi_camera.get_camera(shared_data.config).info()
         except Exception as e:
             info['camera'] = {'present': False, 'reason': str(e)}
     return info
@@ -15359,32 +15359,33 @@ def _camera_dir():
 
 
 _CAMERA_NAME_RE = re.compile(r'^ragnar_\d{8}_\d{6}(_\d+)?\.jpg$')
+_CAMERA_VIDEO_RE = re.compile(r'^ragnar_\d{8}_\d{6}(_\d+)?\.(mp4|avi)$')
+
+
+def _camera():
+    """The camera, turned the way the config asks (camera_rotation)."""
+    import pi_camera
+    return pi_camera.get_camera(shared_data.config)
 
 
 def _camera_photos(limit=24):
-    try:
-        names = sorted((n for n in os.listdir(_camera_dir()) if _CAMERA_NAME_RE.match(n)),
-                       reverse=True)
-    except OSError:
-        names = []
-    out = []
-    for name in names[:limit]:
-        try:
-            st = os.stat(os.path.join(_camera_dir(), name))
-            out.append({'name': name, 'size': st.st_size, 'time': int(st.st_mtime)})
-        except OSError:
-            continue
-    return out
+    import pi_camera
+    return pi_camera.list_media(_camera_dir(), _CAMERA_NAME_RE, limit)
+
+
+def _camera_videos(limit=24):
+    import pi_camera
+    return pi_camera.list_media(_camera_dir(), _CAMERA_VIDEO_RE, limit)
 
 
 @app.route('/api/camera/status')
 def api_camera_status():
-    """Camera presence and live-view state (see pi_camera.py)."""
+    """Camera presence, live-view and recording state (see pi_camera.py)."""
     try:
-        import pi_camera
-        data = pi_camera.get_camera().status()
+        data = _camera().status()
         data['supported'] = bool(data.get('present'))
         data['photos'] = _camera_photos() if data['supported'] else []
+        data['videos'] = _camera_videos() if data['supported'] else []
         return jsonify(data)
     except Exception as e:
         logger.error(f"Camera status error: {e}")
@@ -15394,8 +15395,7 @@ def api_camera_status():
 @app.route('/api/camera/stream')
 def api_camera_stream():
     """Live view as MJPEG (multipart/x-mixed-replace), for an <img> element."""
-    import pi_camera
-    resp = Response(pi_camera.get_camera().mjpeg(),
+    resp = Response(_camera().mjpeg(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
     resp.headers['Cache-Control'] = 'no-store'
     return resp
@@ -15406,20 +15406,77 @@ def api_camera_photo():
     """Take a photo and keep it in data/camera/. Returns its name."""
     try:
         import pi_camera
-        data = pi_camera.get_camera().photo()
+        data = _camera().photo()
+        name = pi_camera.save_photo(_camera_dir(), data)
     except RuntimeError as e:
         return jsonify({'success': False, 'error': str(e)}), 503
     except Exception as e:
         logger.error(f"Camera photo error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
-    base = time.strftime('ragnar_%Y%m%d_%H%M%S')
-    name, n = base + '.jpg', 1
-    while os.path.exists(os.path.join(_camera_dir(), name)):
-        n += 1
-        name = f'{base}_{n}.jpg'
-    with open(os.path.join(_camera_dir(), name), 'wb') as f:
-        f.write(data)
     return jsonify({'success': True, 'name': name, 'size': len(data), 'photos': _camera_photos()})
+
+
+@app.route('/api/camera/record', methods=['POST'])
+def api_camera_record():
+    """Start or stop a video: {"action": "start" | "stop"}. Videos are kept
+    in data/camera/ beside the photos."""
+    action = (request.get_json(silent=True) or {}).get('action')
+    if action not in ('start', 'stop'):
+        return jsonify({'success': False, 'error': 'action must be start or stop'}), 400
+    try:
+        cam = _camera()
+        if action == 'start':
+            return jsonify({'success': True, 'recording': cam.start_recording(_camera_dir())})
+        done = cam.stop_recording()
+        return jsonify({'success': True, 'recording': None, 'video': done,
+                        'converting': cam.status().get('converting', []),
+                        'videos': _camera_videos()})
+    except RuntimeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 503
+    except Exception as e:
+        logger.error(f"Camera record error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/camera/settings', methods=['POST'])
+def api_camera_settings():
+    """Turn the picture: {"rotation": 0 | 180}. Saved in the config."""
+    try:
+        rotation = int((request.get_json(silent=True) or {}).get('rotation'))
+    except (TypeError, ValueError):
+        rotation = None
+    if rotation not in (0, 180):
+        return jsonify({'success': False, 'error': 'rotation must be 0 or 180'}), 400
+    try:
+        shared_data.config['camera_rotation'] = rotation
+        shared_data.save_config()
+        return jsonify({'success': True, 'rotation': _camera().set_rotation(rotation)})
+    except Exception as e:
+        logger.error(f"Camera settings error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/camera/video/<name>', methods=['GET', 'DELETE'])
+def api_camera_video_file(name):
+    """Serve or delete one saved video. The name must be one Ragnar wrote."""
+    if not _CAMERA_VIDEO_RE.match(name or ''):
+        return jsonify({'error': 'bad video name'}), 400
+    path = os.path.join(_camera_dir(), name)
+    if not os.path.isfile(path):
+        return jsonify({'error': 'not found'}), 404
+    if request.method == 'DELETE':
+        rec = _camera().recording()
+        if rec and rec.get('name') == name:
+            return jsonify({'success': False, 'error': 'still recording'}), 409
+        try:
+            os.remove(path)
+        except OSError as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': True, 'videos': _camera_videos()})
+    mp4 = name.endswith('.mp4')
+    return send_from_directory(_camera_dir(), name, conditional=True,
+                               mimetype='video/mp4' if mp4 else 'video/x-msvideo',
+                               as_attachment=bool(request.args.get('download')) or not mp4)
 
 
 @app.route('/api/camera/photo/<name>', methods=['GET', 'DELETE'])

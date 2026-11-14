@@ -29926,8 +29926,109 @@ function updateCameraView(d) {
     panel.classList.remove('hidden');
     const model = document.getElementById('camera-model');
     if (model) model.textContent = [d.model, d.modes].filter(Boolean).join(' · ');
-    if (d.error && !_cam.busy) _cameraNote(d.error, true);
+    if (d.error && !_cam.busy && !d.recording) _cameraNote(d.error, true);
+    _cam.rotation = d.rotation || 0;
     _renderCameraPhotos(d.photos);
+    _renderCameraVideos(d.videos, d.converting);
+    _setCameraRecording(d.recording);
+}
+
+function _camSize(bytes) {
+    return bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(bytes / 1024)) + ' kB';
+}
+
+function _renderCameraVideos(videos, converting) {
+    const section = document.getElementById('camera-videos-section');
+    const list = document.getElementById('camera-videos');
+    if (!section || !list) return;
+    videos = videos || [];
+    converting = converting || [];
+    section.classList.toggle('hidden', videos.length === 0);
+    // Rebuilding the list would stop a video that is playing.
+    const key = JSON.stringify([videos, converting]);
+    if (key === _cam.videoKey) return;
+    _cam.videoKey = key;
+    list.innerHTML = videos.map(v => {
+        const url = '/api/camera/video/' + encodeURIComponent(v.name);
+        const name = _czEsc(v.name);
+        const busy = converting.indexOf(v.name) >= 0;
+        const mp4 = v.name.endsWith('.mp4');
+        const state = busy ? ' · converting to MP4…' : (mp4 ? '' : ' · AVI (download to play)');
+        return `<div class="cam-video">` +
+            (mp4 ? `<video controls playsinline preload="none" src="${url}"></video>` : '') +
+            `<span class="cam-video-name">${name} · ${_camSize(v.size)}${state}</span>` +
+            `<a class="pw-btn" href="${url}?download=1">Download</a>` +
+            `<button class="pw-btn" aria-label="Delete video" onclick="deleteCameraVideo('${name}')">Delete</button></div>`;
+    }).join('');
+}
+
+function _setCameraRecording(rec) {
+    const btn = document.getElementById('camera-record-btn');
+    _cam.recording = rec ? { since: Date.now() - (rec.seconds || 0) * 1000 } : null;
+    if (btn) {
+        btn.textContent = rec ? 'Stop recording' : 'Record video';
+        btn.classList.toggle('cam-rec', !!rec);
+    }
+    if (rec && !_cam.recTimer) {
+        _cam.recTimer = setInterval(_cameraRecTick, 1000);
+        _cameraRecTick();
+    } else if (!rec && _cam.recTimer) {
+        clearInterval(_cam.recTimer);
+        _cam.recTimer = null;
+    }
+}
+
+function _cameraRecTick() {
+    if (!_cam.recording) return;
+    const s = Math.max(0, Math.round((Date.now() - _cam.recording.since) / 1000));
+    _cameraNote('● Recording ' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'), true);
+}
+
+function toggleCameraRecording() {
+    const btn = document.getElementById('camera-record-btn');
+    if (_cam.busy) return;
+    const stopping = !!_cam.recording;
+    _cam.busy = true;
+    if (btn) btn.disabled = true;
+    networkAwareFetch('/api/camera/record', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: stopping ? 'stop' : 'start' })
+    })
+        .then(r => r.json())
+        .then(d => {
+            if (!d || !d.success) { _cameraNote((d && d.error) || 'Recording failed', true); return; }
+            _setCameraRecording(d.recording);
+            if (stopping) {
+                const v = d.video || {};
+                _cameraNote(v.name ? 'Saved ' + v.name + (v.note ? ' (' + v.note + ')' : '') : (v.note || 'Nothing was recorded'), !v.name);
+                _renderCameraVideos(d.videos, d.converting);
+            }
+        })
+        .catch(e => _cameraNote(String(e), true))
+        .finally(() => { _cam.busy = false; if (btn) btn.disabled = false; });
+}
+
+function deleteCameraVideo(name) {
+    networkAwareFetch('/api/camera/video/' + encodeURIComponent(name), { method: 'DELETE' })
+        .then(r => r.json())
+        .then(d => {
+            if (d && d.success) fetchCameraStatus();
+            else _cameraNote((d && d.error) || 'Could not delete the video', true);
+        })
+        .catch(e => console.error('Error deleting video:', e));
+}
+
+function flipCamera() {
+    networkAwareFetch('/api/camera/settings', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rotation: _cam.rotation === 180 ? 0 : 180 })
+    })
+        .then(r => r.json())
+        .then(d => {
+            if (d && d.success) { _cam.rotation = d.rotation; _cameraNote('Picture turned. New photos and videos use it.'); }
+            else _cameraNote((d && d.error) || 'Could not turn the picture', true);
+        })
+        .catch(e => _cameraNote(String(e), true));
 }
 
 function toggleCameraLive() {

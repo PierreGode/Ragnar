@@ -116,9 +116,11 @@ EVDEV_KEY_NAMES = {
 #                  the main screen
 #   Space          KEY1 (diagnostic mode on / off)
 #   Backspace      KEY2      Tab  KEY3      A  page autoscroll on / off
+#   P              the camera screen on / off. On it: OK takes a photo or
+#                  starts / stops a video, Z / C switch between photo and video
 KEY_ACTIONS = {"F": "up", "X": "down", "Z": "left", "C": "right", "OK": "press",
                "Esc": "back", "Space": "key1", "Bksp": "key2", "Tab": "key3",
-               "A": "auto"}
+               "A": "auto", "P": "camera"}
 
 # Raw TCA8418 key code -> logical action, used only on the direct I2C path.
 DEFAULT_KEYMAP = {str(matrix_code(*KEY_MATRIX[name])): action
@@ -160,13 +162,15 @@ DEFAULT_EVDEV_KEYMAP = {
     "14": "key2",    # Backspace → flip screen / reconnect WiFi
     "15": "key3",    # Tab       → next page (long: restart) / toggle AP
     "30": "auto",    # A         → page autoscroll on / off
+    "25": "camera",  # P         → camera screen on / off
 }
 
 # The board's fn and sym keys report as KEY_DVD (0x185) and KEY_CD (0x17f).
 _MODIFIER_CODES = {0x185, 0x17f, 464, 42, 54, 29, 97, 56, 100, 125, 126, 127}
 
 _VALID_ACTIONS = {"up", "down", "left", "right", "press", "key1", "key2", "key3",
-                  "back", "auto"}
+                  "back", "auto", "camera"}
+CAMERA_NOTE_SECONDS = 2.5
 _KEYMAP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "config", "cardputer_keymap.json")
 
@@ -267,6 +271,11 @@ class CardputerInputListener(LCDHATInputListener):
         self._press_times = {}     # logical name -> monotonic time of press
         self._fired_hold = set()   # names whose long-press already fired
         self._stop = False
+        # Camera screen (display.py draws it while camera_mode is set).
+        self.camera_mode = False
+        self.camera_video = False  # OK records a video instead of taking a photo
+        self.camera_busy = False   # a photo is being taken
+        self.camera_note = None    # (text, show until) for the camera screen
 
     # --- Lifecycle --------------------------------------------------------
 
@@ -541,7 +550,11 @@ class CardputerInputListener(LCDHATInputListener):
     # --- Keyboard-specific keys -------------------------------------------
 
     def _on_input_press(self, name):
-        if name == "back":
+        if name == "camera":
+            self._set_camera(not self.camera_mode)
+        elif self.camera_mode:
+            self._camera_input(name)
+        elif name == "back":
             self._go_back()
         elif name == "auto":
             # Autoscroll belongs to the Ragnar pages; the other layers have
@@ -550,6 +563,87 @@ class CardputerInputListener(LCDHATInputListener):
                 self._toggle_autoscroll()
         else:
             super()._on_input_press(name)
+
+    # --- Camera screen ------------------------------------------------------
+
+    def _defers(self, name):
+        # On the camera screen every key acts on press (or not at all).
+        return False if self.camera_mode else super()._defers(name)
+
+    def _camera(self):
+        import pi_camera
+        return pi_camera.get_camera(self.shared_data.config)
+
+    def _camera_folder(self):
+        return os.path.join(self.shared_data.datadir, "camera")
+
+    def _camera_say(self, text):
+        self.camera_note = (text, time.monotonic() + CAMERA_NOTE_SECONDS)
+
+    def _set_camera(self, on):
+        if not on and self.camera_mode:
+            # Leaving the screen ends a video: nothing records out of sight.
+            threading.Thread(target=self._camera_stop_video, name="cardputer-cam",
+                             daemon=True).start()
+        self.camera_mode = bool(on)
+        self.camera_note = None
+        self.netdiag_seq = getattr(self, 'netdiag_seq', 0) + 1   # wake the diagnostic screens' sleep
+        logger.info("CardputerZero camera screen %s", "on" if on else "off")
+
+    def _camera_input(self, name):
+        """Keys on the camera screen. Backspace still flips the screen."""
+        if name == "back":
+            self._set_camera(False)
+        elif name in ("left", "right", "up", "down"):
+            try:
+                recording = self._camera().recording()
+            except Exception:
+                recording = None
+            if not recording:
+                self.camera_video = not self.camera_video
+        elif name == "press":
+            if self.camera_busy:
+                return
+            work = self._camera_toggle_video if self.camera_video else self._camera_take_photo
+            self.camera_busy = True
+            threading.Thread(target=self._camera_run, args=(work,), name="cardputer-cam",
+                             daemon=True).start()
+        elif name == "key2":
+            self._on_key2()
+
+    def _camera_run(self, work):
+        try:
+            work()
+        except Exception as e:
+            logger.warning("CardputerZero camera: %s", e)
+            self._camera_say(str(e)[:40])
+        finally:
+            self.camera_busy = False
+
+    def _camera_take_photo(self):
+        import pi_camera
+        self.camera_note = ("Taking photo...", time.monotonic() + 60)
+        data = self._camera().photo()
+        name = pi_camera.save_photo(self._camera_folder(), data)
+        logger.info("CardputerZero camera: saved %s", name)
+        self._camera_say("Photo saved")
+
+    def _camera_toggle_video(self):
+        cam = self._camera()
+        if cam.recording():
+            self._camera_stop_video()
+        else:
+            cam.start_recording(self._camera_folder())
+            self.camera_note = None
+
+    def _camera_stop_video(self):
+        try:
+            done = self._camera().stop_recording()
+        except Exception as e:
+            logger.warning("CardputerZero camera: %s", e)
+            return
+        if done:
+            self._camera_say("Video saved" if done.get("name") else "No video")
 
     def _go_back(self):
         """Esc: one step out. Diagnostic screens: close a result, else leave
