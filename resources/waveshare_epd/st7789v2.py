@@ -117,6 +117,9 @@ class EPD:
         self._gpio = {}
         self._ioe  = None   # M5IOE1 expander (LCD reset + backlight), lazy
         self._initialized = False
+        # Paint the "Starting Ragnar" picture as soon as the panel is up, so
+        # the reset does not leave it blank until Ragnar's first frame.
+        self.boot_screen = os.environ.get("RAGNAR_NO_SPLASH") != "1"
 
     # ------------------------------------------------------------------
     # Public EPD-compatible interface
@@ -139,6 +142,15 @@ class EPD:
             raise RuntimeError(
                 "CardputerZero display: no LCD framebuffer and SPI init failed")
         self._initialized = True
+        if self.boot_screen:
+            self.boot_screen = False
+            try:
+                import ragnar_splash
+                message, detail = ragnar_splash.MESSAGES["start"]
+                self._blit(self.getbuffer(ragnar_splash.render(
+                    message, detail, config=ragnar_splash.saved_config())))
+            except Exception as e:
+                logger.debug("CardputerZero: boot screen not drawn: %s", e)
 
     def Clear(self, color=0xFFFF):
         """Fill the whole display with a solid RGB565 colour (default white)."""

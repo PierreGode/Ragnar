@@ -12,6 +12,8 @@
 #   sudo scripts/cardputer_hardware.sh gnss-undo  put the serial console back
 #   sudo scripts/cardputer_hardware.sh nfc        also enable the NFC reader's
 #                                                 SPI chip-select (needs a reboot)
+#   sudo scripts/cardputer_hardware.sh boot-screen      picture on the LCD early in boot
+#   sudo scripts/cardputer_hardware.sh boot-screen-off  remove it (stays off across updates)
 #   scripts/cardputer_hardware.sh status          what is set up
 #
 # Plain setup never edits cmdline.txt: it only says when the serial console is
@@ -24,7 +26,58 @@ ROOT="${RAGNAR_CARDPUTER_ROOT:-}"        # alternate root, for testing
 EXT5V="$ROOT/sys/class/leds/ext_5v_out/brightness"
 NFC_OVERLAY="spi0-spidev2-gpio22-overlay"
 
-SELF_# With the LoRa + GNSS Cap fitted, set the Cap up as a Meshtastic node: install
+SELF_# A picture on the LCD early in boot, long before the Ragnar service starts
+# (ragnar_splash.py). The unit is not ordered before anything and cannot hold
+# the boot up: it draws once and exits, and gives up quietly without a panel.
+boot_screen_unit() {
+    cat <<UNIT
+# Written by Ragnar (scripts/cardputer_hardware.sh). Remove with:
+#   sudo scripts/cardputer_hardware.sh boot-screen-off
+[Unit]
+Description=Ragnar boot screen (CardputerZero LCD)
+DefaultDependencies=no
+After=systemd-modules-load.service systemd-udev-trigger.service local-fs.target
+ConditionPathExists=$REPO/ragnar_splash.py
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 $REPO/ragnar_splash.py --boot --wait 20
+TimeoutStartSec=40
+Nice=5
+
+[Install]
+WantedBy=basic.target
+UNIT
+}
+
+install_boot_screen() {
+    local unit="$ROOT/etc/systemd/system/ragnar-splash.service"
+    local wants="$ROOT/etc/systemd/system/basic.target.wants"
+    [ -f "$REPO/ragnar_splash.py" ] || return 0
+    [ -f "$ROOT/etc/ragnar-splash-optout" ] && return 0
+    mkdir -p "$(dirname "$unit")"
+    if [ "$(boot_screen_unit)" != "$(cat "$unit" 2>/dev/null)" ]; then
+        boot_screen_unit > "$unit"
+        log "boot screen installed (ragnar-splash.service)"
+    fi
+    if [ -z "$ROOT" ]; then
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl enable ragnar-splash.service >/dev/null 2>&1 || true
+    else
+        mkdir -p "$wants" && ln -sf ../ragnar-splash.service "$wants/ragnar-splash.service"
+    fi
+}
+
+remove_boot_screen() {
+    [ -n "$ROOT" ] || systemctl disable ragnar-splash.service >/dev/null 2>&1 || true
+    rm -f "$ROOT/etc/systemd/system/ragnar-splash.service" \
+          "$ROOT/etc/systemd/system/basic.target.wants/ragnar-splash.service"
+    mkdir -p "$ROOT/etc" && : > "$ROOT/etc/ragnar-splash-optout"
+    [ -n "$ROOT" ] || systemctl daemon-reload 2>/dev/null || true
+    log "boot screen removed (updates will not put it back; 'boot-screen' does)"
+}
+
+# With the LoRa + GNSS Cap fitted, set the Cap up as a Meshtastic node: install
 # meshtasticd (from Meshtastic's package repository) and write its settings.
 # Skipped when it is already set up, when another Cap or none is fitted, and
 # when the owner removed it (cardputer_lora_meshtastic.sh remove).
@@ -191,6 +244,7 @@ case "${1:-setup}" in
         camera_tools
         camera_overlay || true
         serial_console_check || true
+        install_boot_screen || true
         install_lora_daemon || true
         refresh_lora_config
         ;;
@@ -203,6 +257,14 @@ case "${1:-setup}" in
         is_cardputer || { log "not a CardputerZero — nothing to do"; exit 0; }
         python3 "$REPO/cardputer_caps.py" --free-gnss-uart
         ;;
+    boot-screen)
+        is_cardputer || { log "not a CardputerZero — nothing to do"; exit 0; }
+        rm -f "$ROOT/etc/ragnar-splash-optout"
+        install_boot_screen
+        ;;
+    boot-screen-off)
+        remove_boot_screen
+        ;;
     gnss-undo)
         python3 "$REPO/cardputer_caps.py" --restore-serial-console
         ;;
@@ -212,5 +274,5 @@ case "${1:-setup}" in
         enable_nfc
         ;;
     status) status ;;
-    *) echo "usage: $0 [setup|camera|gnss|gnss-undo|nfc|status]"; exit 2 ;;
+    *) echo "usage: $0 [setup|camera|gnss|gnss-undo|nfc|boot-screen|boot-screen-off|status]"; exit 2 ;;
 esac

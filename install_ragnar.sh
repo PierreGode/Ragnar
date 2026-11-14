@@ -108,7 +108,90 @@ fi
 # Function to display progress
 show_progress() {
     echo -e "${BLUE}Step $CURRENT_STEP of $TOTAL_STEPS: $1${NC}"
+    install_splash "$1" $(( CURRENT_STEP * 100 / TOTAL_STEPS ))
 }
+
+# ── "Installing Ragnar" on the CardputerZero's LCD ──────────────────────────
+# A first install takes a long time, and until Ragnar itself runs nothing
+# draws on the built-in screen: it stays blank and looks dead. ragnar_splash.py
+# draws straight to the panel and needs nothing from Ragnar but a few files, so
+# it can run from the first minute. Every step here is best effort: a failure
+# only means the screen stays blank, as it did before.
+SPLASH_STATE=""          # "" = not tried yet, "yes" = usable, "no" = give up
+SPLASH_DIR=""
+SPLASH_RAW="https://raw.githubusercontent.com/PierreGode/Ragnar/main"
+SPLASH_FILES="ragnar_splash.py m5ioe1.py resources/waveshare_epd/st7789v2.py resources/fonts/Viking.TTF resources/fonts/Arial.ttf resources/fonts/ArialB.TTF resources/images/status/IDLE/IDLE1.bmp"
+
+# The built-in screen exists on this board only: the menu choice says so, or
+# (before the menu) the board's own model string does.
+splash_board() {
+    [ "$CARDPUTER_MODE" = true ] && return 0
+    grep -aq "Compute Module 0" "${SPLASH_MODEL_FILE:-/proc/device-tree/model}" 2>/dev/null
+}
+
+splash_prepare() {
+    [ -n "$SPLASH_STATE" ] && return 0
+    splash_board || return 0                  # asked again once the menu is answered
+    SPLASH_STATE="no"
+    command -v python3 >/dev/null 2>&1 || return 0
+    # The files: this checkout, an existing install, or a small download.
+    local here
+    here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    if [ -f "$here/ragnar_splash.py" ] && [ -f "$here/resources/waveshare_epd/st7789v2.py" ]; then
+        SPLASH_DIR="$here"
+    elif [ -f "$ragnar_PATH/ragnar_splash.py" ]; then
+        SPLASH_DIR="$ragnar_PATH"
+    else
+        SPLASH_DIR="$(mktemp -d /tmp/ragnar-splash.XXXXXX)" || return 0
+        local f
+        for f in $SPLASH_FILES; do
+            mkdir -p "$SPLASH_DIR/$(dirname "$f")"
+            if command -v curl >/dev/null 2>&1; then
+                curl -fsSL --max-time 20 -o "$SPLASH_DIR/$f" "$SPLASH_RAW/$f" 2>/dev/null
+            else
+                wget -q -T 20 -O "$SPLASH_DIR/$f" "$SPLASH_RAW/$f" 2>/dev/null
+            fi
+        done
+        [ -s "$SPLASH_DIR/ragnar_splash.py" ] && [ -s "$SPLASH_DIR/resources/waveshare_epd/st7789v2.py" ] || return 0
+    fi
+    # The panel is on SPI and its reset and backlight on I2C: switch both on
+    # now, without a reboot (the interfaces step makes it permanent later).
+    if [ -z "$SPLASH_DRY_RUN" ]; then
+        if command -v dtparam >/dev/null 2>&1; then
+            dtparam spi=on >/dev/null 2>&1 || true
+            dtparam i2c_arm=on >/dev/null 2>&1 || true
+        fi
+        modprobe i2c-dev >/dev/null 2>&1 || true
+        modprobe spidev >/dev/null 2>&1 || true
+        if ! python3 -c "import PIL, spidev, gpiozero, smbus2" >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                python3-pil python3-spidev python3-gpiozero python3-lgpio python3-smbus2 >/dev/null 2>&1 || true
+        fi
+    fi
+    SPLASH_STATE="yes"
+}
+
+# install_splash "what is happening" [percent]
+install_splash() {
+    splash_prepare
+    [ "$SPLASH_STATE" = "yes" ] || return 0
+    local args=(--install "$1")
+    [ -n "${2:-}" ] && args+=(--progress "$2")
+    if [ -n "$SPLASH_DRY_RUN" ]; then
+        echo "splash: $SPLASH_DIR ${args[*]}" >> "$SPLASH_DRY_RUN"
+        return 0
+    fi
+    splash_run "${args[@]}"
+}
+
+# The menu choice settles which board this is; before it, the script checks
+# the hardware itself.
+splash_run() {
+    local known=""
+    [ "$CARDPUTER_MODE" = true ] && known=1
+    RAGNAR_SPLASH_BOARD="$known" timeout 30 python3 "$SPLASH_DIR/ragnar_splash.py" "$@" >/dev/null 2>&1 || true
+}
+# ── end of the install splash ──
 
 # Logging function
 log() {
@@ -2534,6 +2617,9 @@ main() {
         exit 1
     fi
 
+    # CardputerZero: something on the built-in screen from the first minute.
+    install_splash "Answer the questions in your terminal"
+
     # IS_PI is set by detect_platform (called above); reuse it for the menu.
     local is_pi=$IS_PI
 
@@ -3098,6 +3184,9 @@ except:
 
     log "SUCCESS" "ragnar installation completed!"
     log "INFO" "Please reboot your system to apply all changes."
+    if [ "$SPLASH_STATE" = "yes" ] && [ -z "$SPLASH_DRY_RUN" ]; then
+        splash_run --message "Ragnar is installed" --detail "Restart the CardputerZero to start it." --progress 100
+    fi
     echo -e "\n${GREEN}Installation completed successfully!${NC}"
     echo -e "${YELLOW}Important notes:${NC}"
     echo "1. If configuring Windows PC for USB gadget connection:"

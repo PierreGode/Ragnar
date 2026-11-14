@@ -80,6 +80,21 @@ It renders all three on-device modes (see [Display Controls](DISPLAY_CONTROLS.md
   map, GPS, sky view, session and the character.
 - **Network Diagnostic** — the on-screen field-tester cards.
 
+#### Boot and install screens
+
+The LCD is not left blank while nothing of Ragnar is running yet:
+
+- **Boot:** a few seconds after power-on it shows the Ragnar name, the character
+  and *Starting up* (`ragnar-splash.service`), then *Starting Ragnar* while the
+  service loads, until the first real screen (about a minute in total).
+- **First install:** `install_ragnar.sh` shows *Installing Ragnar* with the
+  current step and a progress bar from its first minute, and *Ragnar is
+  installed* when it is done.
+
+Both come from `ragnar_splash.py`, which draws straight to the panel.
+`sudo scripts/cardputer_hardware.sh boot-screen-off` removes the boot screen
+(`boot-screen` puts it back).
+
 #### The main screen
 
 The character fills the right-hand side at twice its usual size, in full colour.
@@ -486,6 +501,7 @@ no direction remap is applied.
 | `cardputer_input.py` | Keyboard listener — kernel input device first, TCA8418 I²C fallback (reuses the LCD-HAT input layer) |
 | `sysfs_battery.py` | Battery percentage — kernel power-supply class first, BQ27220 over I²C as fallback |
 | `cardputer_caps.py` | Expansion header: Cap power, which Cap is fitted, GNSS and camera detection, LoRa preparation |
+| `ragnar_splash.py` | Boot, start-up and install picture on the LCD, drawn before Ragnar runs |
 | `pi_camera.py` | Camera: photos, video recording and the shared live view, through `rpicam-still` / `rpicam-vid` |
 | `cc1101_scan.py` | Receive-only sub-GHz sweep on the Cap CC1101, as an RF Waterfall source |
 | `scripts/cardputer_hardware.sh` | Camera tools, serial-console check, NFC overlay |
