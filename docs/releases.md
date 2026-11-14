@@ -13,7 +13,8 @@ Diagnosed on a CardputerZero with the LoRa + GNSS Cap, running plain Raspberry P
 - **Mesh Nodes names the real problem.** With the LoRa Cap fitted and no daemon running, the page now says the Cap is not set up or its service is not running, instead of "plug a node in via USB".
 - **Camera setup did nothing on plain Raspberry Pi OS.** The setup script recognised a CardputerZero only by things M5Stack's image provides, so it exited with "not a CardputerZero" and never enabled the camera. It now also goes by Ragnar's display setting. It also runs after an update from the web UI, not only from `update_ragnar.sh`. The camera needs one reboot after the overlay is added.
 - **Grove port 5 V on by default.** The Grove connector's 5 V pin is switched and off at power-on; Ragnar now turns it on at start (setting `cardputer_grove_power`), and the hardware panel shows its state.
-- GNSS was confirmed working on the unit: NMEA arrives on `/dev/ttyS0` at 115200 after the serial login prompt was removed.
+- **Checked on the unit with this branch's code** (run from a temporary folder, nothing installed): the setup script now recognises the unit; the Grove 5 V switch turns on and reads back on while Cap power stays on; `meshtasticd` with Ragnar's settings initialises the SX1262 and Ragnar's Meshtastic client connects to it over TCP (region unset, so nothing was transmitted); GPS is connected on `/dev/serial0` (no fix indoors); the fuel gauge reads over I2C; the screen renders with the battery indicator.
+- **Not checked on the unit:** the camera (needs the overlay added as root and a reboot), key presses (nobody at the keyboard), and the CC1101 Cap (the LoRa Cap was fitted).
 
 #### fix(cardputer): Cap field report — CC1101 waterfall, GPS port, Meshtastic on the LoRa Cap, camera
 *branch `fix/cardputer-caps-field-report`*

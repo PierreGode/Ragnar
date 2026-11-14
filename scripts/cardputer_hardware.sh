@@ -147,7 +147,13 @@ status() {
         echo "not a CardputerZero"
         return 0
     fi
-    echo "cap power rail: $([ -e "$EXT5V" ] && cat "$EXT5V" || echo missing)"
+    if [ -e "$EXT5V" ]; then
+        echo "cap power rail: $(cat "$EXT5V")"
+    else
+        # Plain Raspberry Pi OS has no control file; Ragnar switches the rail
+        # through the board's I/O expander instead.
+        echo "cap power rail: switched by Ragnar (sudo python3 cardputer_caps.py shows it)"
+    fi
     local config
     echo "camera tools: $(command -v rpicam-still libcamera-still 2>/dev/null | head -1 || true)"
     if config="$(config_file)" && grep -qE '^[[:space:]]*dtoverlay=imx219\b' "$config"; then
