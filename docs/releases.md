@@ -4,6 +4,14 @@
 
 ### 2026-11-14
 
+#### feat(files): a Camera folder in the Files tab for photos and videos
+*branch `feat/camera-files-folder`*
+
+- **Where they go.** Photos and videos are saved on the unit in `data/camera/`. That folder is now **Files → Camera**, next to Uploads and Backups: preview, play, download, rename, move, delete, send over the mesh, or put in the Vault like any other file.
+- **Link from the Camera panel.** Under the buttons, *Files → Camera* opens the folder directly.
+- A video that is still recording cannot be deleted from the Files tab.
+- Good to know: the **Photos** and **Videos** lists in the Camera panel show files with Ragnar's own names (`ragnar_YYYYMMDD_HHMMSS`). A file renamed or moved to a subfolder stays in **Files → Camera** but leaves those lists.
+
 #### feat(camera): flip, video recording, and a camera screen on the CardputerZero
 *branch `feat/cardputer-camera-screen`*
 

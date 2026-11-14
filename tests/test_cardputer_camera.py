@@ -475,3 +475,44 @@ def test_camera_screen_says_when_there_is_no_camera(monkeypatch, tmp_path):
     bl.camera_mode = False
     thread.join(3)
     assert not thread.is_alive()
+
+
+# ── the Camera folder in the Files tab ───────────────────────────────────────
+
+def test_files_tab_has_a_camera_folder_with_the_photos_and_videos(web, tmp_path):
+    client = web.app.test_client()
+    roots = client.get("/api/files/list?path=/").get_json()
+    assert {"name": "camera", "is_directory": True, "path": "/camera"} in roots
+    assert client.post("/api/camera/photo").get_json()["success"]
+    photo = os.listdir(tmp_path / "camera")[0]
+    (tmp_path / "camera" / "ragnar_20261114_101500.mp4").write_bytes(b"mp4")
+    listed = {f["name"]: f for f in client.get("/api/files/list?path=/camera").get_json()}
+    assert set(listed) == {photo, "ragnar_20261114_101500.mp4"}
+    assert listed[photo]["path"] == "/camera/" + photo and listed[photo]["size"] > 0
+    got = client.get(f"/api/files/download?path=/camera/{photo}")
+    assert got.status_code == 200 and got.data == (tmp_path / "camera" / photo).read_bytes()
+    # Managed like any other folder: rename, then delete.
+    moved = client.post("/api/files/rename", json={"path": "/camera/" + photo, "name": "desk.jpg"})
+    assert moved.status_code == 200 and (tmp_path / "camera" / "desk.jpg").exists()
+    assert client.post("/api/files/delete", json={"path": "/camera/desk.jpg"}).status_code == 200
+    assert not (tmp_path / "camera" / "desk.jpg").exists()
+
+
+def test_files_tab_cannot_leave_the_camera_folder(web, tmp_path):
+    (tmp_path / "secret.txt").write_text("x")
+    client = web.app.test_client()
+    for path in ("/camera/../secret.txt", "/camera/%2e%2e/secret.txt", "/camerax"):
+        assert client.get(f"/api/files/download?path={path}").status_code in (400, 404)
+        assert client.get(f"/api/files/list?path={path}").status_code in (400, 404)
+    assert (tmp_path / "secret.txt").exists()
+
+
+def test_files_tab_will_not_delete_a_video_that_is_recording(web, tmp_path):
+    client = web.app.test_client()
+    name = client.post("/api/camera/record", json={"action": "start"}).get_json()["recording"]["name"]
+    FakeVid.started[0].feed(jpeg())
+    assert wait_for(lambda: web.camera.recording()["frames"] == 1)
+    for path in ("/camera/" + name, "/camera"):
+        assert client.post("/api/files/delete", json={"path": path}).status_code == 409
+    client.post("/api/camera/record", json={"action": "stop"})
+    assert client.post("/api/files/delete", json={"path": "/camera/" + name}).status_code == 200

@@ -15,6 +15,7 @@ The top-level **Directories** are:
 | **Backups** | Backup archives |
 | **Data Stolen / Cracked Passwords / Vulnerabilities / Scan Results** | Captured loot and scan output, grouped per network |
 | **Logs** | Ragnar's log files |
+| **Camera** | Photos and videos taken with the camera, from the browser or the device's own screen ([camera](CardputerZero-Caps.md#camera)) |
 | **Console Scripts / Rubber Ducky** | The script libraries ([console](ragnarscripts.md), [ducky](rubber-ducky.md)) |
 
 The loot categories (Data Stolen, Scan Results, …) first list the **networks**

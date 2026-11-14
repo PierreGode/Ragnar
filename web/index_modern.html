@@ -421,6 +421,7 @@
         .cz-fix { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0 10px; }
         .cz-fix .pw-muted { flex: 1 1 220px; font-size: 12px; }
         .cz-log { margin-top: 4px; padding: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-word; background: rgba(0,0,0,.3); border-radius: 6px; max-height: 160px; overflow: auto; }
+        .cam-link { background: none; border: 0; padding: 0; color: #38bdf8; text-decoration: underline; cursor: pointer; font: inherit; }
         .pw-btn.cam-rec { color: #f87171; border-color: #f87171; font-weight: 600; }
         .cam-videos { display: flex; flex-direction: column; gap: 8px; }
         .cam-video { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; }
@@ -6783,6 +6784,7 @@
                         <button class="pw-btn" id="camera-flip-btn" onclick="flipCamera()" title="Turn the picture upside down">Flip</button>
                     </div>
                     <div id="camera-note" class="pw-muted" style="margin-top:6px"></div>
+                    <div class="pw-muted" style="margin-top:6px;font-size:12px">Photos and videos are saved on this unit in <button type="button" class="cam-link" onclick="openCameraFolder()">Files → Camera</button>.</div>
                     <img id="camera-live" class="cam-view hidden" alt="Camera live view">
                     <div class="pw-section hidden" id="camera-photos-section">
                         <div class="pw-section-title">Photos</div>
@@ -10215,7 +10217,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261114-camvideo"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261114-camfiles"></script>
 
 
 

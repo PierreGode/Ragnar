@@ -259,6 +259,15 @@ ships that overlay.
 
 Photos are kept on the unit in `data/camera/` as `ragnar_YYYYMMDD_HHMMSS.jpg`.
 
+### Where photos and videos are saved
+
+Everything the camera takes, from the browser or from the device's own screen,
+is saved on the unit in `data/camera/`. Open it under **Files** → **Camera**
+(or press *Files → Camera* in the Camera panel): preview a photo, play a video,
+download, rename, move or delete, like any other folder there. The **Photos**
+and **Videos** lists in the Camera panel show the files that still carry
+Ragnar's own names; a renamed or moved file stays in **Files** only.
+
 ### Example: record a video from the browser
 
 1. Press **Record video**. The button turns into **Stop recording** and a timer
