@@ -758,6 +758,26 @@ Press a key and watch the bottom-left corner of the screen: it names the key and
 Source: M5StackCardputerZero.md
 <!-- proof: docs/M5StackCardputerZero.md | the bottom-left corner names the -->
 
+### Does Ragnar support the CardputerZero's Cap modules?
+Yes for the LoRa + GNSS Cap and the CC1101 radio of the Sub-GHz Cap. The GNSS feeds Ragnar's GPS, the LoRa radio runs as a Meshtastic node, and the CC1101 sweeps sub-GHz bands on the RF Waterfall page. NFC is not supported yet.
+Source: M5StackCardputerZero.md
+<!-- proof: docs/M5StackCardputerZero.md | **NFC (ST25R3916).** Not supported yet. -->
+
+### How do I use the CardputerZero LoRa Cap with Meshtastic?
+Run `sudo scripts/cardputer_lora_meshtastic.sh install`, then set your region once with `meshtastic --host 127.0.0.1 --set lora.region EU_868`. It needs `meshtasticd` installed.
+Source: M5StackCardputerZero.md
+<!-- proof: docs/M5StackCardputerZero.md | sudo scripts/cardputer_lora_meshtastic.sh install -->
+
+### Does the CardputerZero camera work in Ragnar?
+Yes. **System → Camera** has a live view and a **Take photo** button; photos are saved to `data/camera/`.
+Source: M5StackCardputerZero.md
+<!-- proof: docs/M5StackCardputerZero.md | **Take photo** saves a JPEG -->
+
+### Does the GPS in the CardputerZero LoRa Cap need setting up?
+No. Ragnar powers the Cap at start and its GPS auto-detection finds the receiver on `/dev/ttyS0` at 115200 baud.
+Source: M5StackCardputerZero.md
+<!-- proof: docs/M5StackCardputerZero.md | Ragnar's GPS auto-detection finds it -->
+
 ### Does the installer ask about PiSugar on a CardputerZero?
 No. The board has its own battery, so option 7 skips the PiSugar question.
 Source: M5StackCardputerZero.md

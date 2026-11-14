@@ -91,7 +91,7 @@ Every feature below has a full guide in [`docs/`](docs). Short version here, det
 - **WiFi Pineapple Pager** — deploy Ragnar to the Pager as a native payload with a full-color LCD, buttons and LED status. Based on **brAinphreAk**'s [PagerBjorn / Loki](https://github.com/pineapple-pager-projects/pineapple_pager_loki). See [Pager Guide](docs/pager.md).
 - **PiSugar 3 button** — physical button to swap between Ragnar and Pwnagotchi modes (see below).
 - **Battery percentage on screen** — PiSugar, or a Waveshare UPS HAT (C) on a Pi Zero (auto-detected over I2C, nothing to install). See [UPS HAT](docs/ups-hat.md).
-- **M5Stack CardputerZero** — colour 320×170 screen with the Viking or shieldmaiden, built-in battery percentage, and `F` `X` `Z` `C` arrow-key paging. See [M5Stack CardputerZero](docs/M5StackCardputerZero.md).
+- **M5Stack CardputerZero** — colour 320×170 screen with the Viking or shieldmaiden, built-in battery percentage, `F` `X` `Z` `C` arrow-key paging, the camera, and Cap modules (GNSS, LoRa as a Meshtastic node, CC1101 sub-GHz sweep). See [M5Stack CardputerZero](docs/M5StackCardputerZero.md).
 
 ### Platform, safety & storage
 - **LAN-first connectivity & smart WiFi** — prefers Ethernet when present, manages WiFi as fallback, auto-connects to known networks and falls back to AP mode with a captive portal.

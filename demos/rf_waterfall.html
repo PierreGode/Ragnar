@@ -305,6 +305,7 @@
       <div class="rig"><b>RTL-SDR</b> · 24&nbsp;MHz–1.7&nbsp;GHz <span class="tag idle" id="rig-rtl">detecting…</span></div>
       <div class="rig"><b>HackRF&nbsp;One</b> · 1&nbsp;MHz–6&nbsp;GHz <span class="tag idle" id="rig-hackrf">detecting…</span></div>
       <div class="rig"><b>ESP-SDR</b> · 2.2–2.7&nbsp;GHz <span class="tag idle" id="rig-esp">detecting…</span></div>
+      <div class="rig"><b>CC1101</b> · 300–928&nbsp;MHz <span class="tag idle" id="rig-cc1101">detecting…</span></div>
     </div>
   </header>
 
@@ -3582,6 +3583,16 @@
     hwLo:2200, hwHi:2700, tuneSpan:16,   // ESP32-S3: ~2.2-2.7 GHz usable; 16 MHz min capture window
     liveBands:ESP_BANDS, defaultBand:'2.4' });
   scopes.push(esp); stack.appendChild(esp.el);
+  // CC1101 (CardputerZero Cap CC1101): a narrow-band transceiver stepped across
+  // the band reading RSSI at each step. Coarse, receive-only, sub-GHz ISM only.
+  var CC_BANDS=[{id:'315',label:'315'},{id:'433',label:'433'},{id:'868',label:'868'},{id:'915',label:'915'}];
+  var cc1101=new Scope({ name:"Sub-GHz (CC1101)", short:"CC1101", dev:"CC1101 · RSSI sweep", rig:"rig-cc1101",
+    api:{status:'/api/net/cc1101/status',start:'/api/net/cc1101/start',stop:'/api/net/cc1101/stop',frames:'/api/net/cc1101/frames'},
+    synth:function(b,lo,hi){ if(lo!=null&&hi!=null) return subGhzModel(lo,hi); var r=BAND_MHZ[b]; return r?subGhzModel(r[0],r[1]):subGhzModel(); },
+    synthDefault:'433', synthBands:true, decode:false, zwave:false, minSpan:0.5,
+    hwLo:300, hwHi:928, tuneSpan:2,   // CC1101: 300-348, 387-464, 779-928 MHz
+    liveBands:CC_BANDS, defaultBand:'433' });
+  scopes.push(cc1101); stack.appendChild(cc1101.el);
   window.RFWF={scopes:scopes};   // console/debug handle on the panels
   // ---- keyboard shortcuts (act on the panel last pointed at) ---------------
   var activeScope=scopes[0];

@@ -656,6 +656,7 @@ class SharedData:
             "distro_cve_cache_hours": 24,
             "ups_hat_monitor": True,  # auto-detect a Waveshare INA219 UPS HAT (C at 0x43, B at 0x42) and show its battery % (issue #1049)
             "builtin_battery_monitor": True,  # show a built-in fuel gauge (kernel power-supply battery; the CardputerZero's BQ27220)
+            "cardputer_cap_power": True,  # CardputerZero: switch the expansion header's 5 V rail on at start so a Cap works
             "enable_attacks": False,
             "release_gate_enabled": False,
             "release_gate_message": "",

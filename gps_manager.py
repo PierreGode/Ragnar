@@ -155,7 +155,14 @@ def _port_is_espressif(port):
         return False
 
 
-def _probe_nmea(dev, timeout_per_baud=1.5):
+NMEA_BAUDS = (9600, 4800, 38400, 115200)
+# Baud each port was last heard talking NMEA at, keyed by real path. The reader
+# opens the port at this rate, so a receiver found at 115200 (the CardputerZero
+# Cap's GNSS, a reconfigured u-blox) is not then opened at the 9600 default.
+_PROBED_BAUD = {}
+
+
+def probe_nmea_baud(dev, timeout_per_baud=1.5):
     """Try common GPS baud rates and look for NMEA sentences.
 
     Many modules ship at 9600 but Garmin and some older receivers default
@@ -163,21 +170,40 @@ def _probe_nmea(dev, timeout_per_baud=1.5):
     115200. We try each in order until we see a recognizable NMEA prefix
     or run out of options.
 
-    Returns True if NMEA was seen at any baud, False otherwise.
+    Returns the baud rate NMEA was seen at, or None. The result is remembered
+    (see probed_baud) so the reader can open the port at the same rate.
     """
     try:
         import serial as pyserial
     except ImportError:
-        return False
-    for baud in (9600, 4800, 38400, 115200):
+        return None
+    for baud in NMEA_BAUDS:
         try:
             with pyserial.Serial(dev, baud, timeout=timeout_per_baud) as ser:
                 data = ser.read(512).decode('ascii', errors='ignore')
-                if '$GP' in data or '$GN' in data or '$GL' in data:
-                    return True
+                if '$GP' in data or '$GN' in data or '$GL' in data or '$BD' in data or '$GB' in data:
+                    _PROBED_BAUD[os.path.realpath(dev)] = baud
+                    return baud
         except Exception:
             continue
-    return False
+    return None
+
+
+def probed_baud(dev):
+    """The baud a port was last found talking NMEA at, or None if never probed."""
+    return _PROBED_BAUD.get(os.path.realpath(dev))
+
+
+def is_native_uart(dev):
+    """True for a board UART (Pi /dev/ttyS0, /dev/ttyAMA0, /dev/serial0), as
+    opposed to a USB serial adapter."""
+    name = os.path.basename(os.path.realpath(dev))
+    return name.startswith(('ttyS', 'ttyAMA'))
+
+
+def _probe_nmea(dev, timeout_per_baud=1.5):
+    """True if NMEA was seen on the port at any common baud rate."""
+    return probe_nmea_baud(dev, timeout_per_baud) is not None
 
 
 def _try_gpsd(host='127.0.0.1', port=2947, timeout=2):
@@ -416,10 +442,23 @@ class GPSManager:
         logger.info("GPS started via gpsd")
         return True
 
+    def _baud_for(self, port):
+        """The baud to open `port` at: the rate auto-detection heard NMEA at,
+        else (for a board UART given by name, which has no USB default to
+        rely on) one probe, else the configured rate."""
+        baud = probed_baud(port)
+        if baud is None and is_native_uart(port):
+            baud = probe_nmea_baud(port, timeout_per_baud=1.2)
+        if baud and baud != self.baudrate:
+            logger.info(f"GPS on {port} talks NMEA at {baud} baud "
+                        f"(configured {self.baudrate}); using {baud}")
+            self.baudrate = baud
+        return self.baudrate
+
     def _start_serial(self):
         try:
             import serial as pyserial
-            self._serial = pyserial.Serial(self.port, self.baudrate, timeout=1)
+            self._serial = pyserial.Serial(self.port, self._baud_for(self.port), timeout=1)
             self._running = True
             self.connected = True
             self.error = None
@@ -1130,7 +1169,7 @@ class GPSManager:
                 self._detect_cache_port = port
                 self._detect_cache_time = now
             if port:
-                self._serial = pyserial.Serial(port, self.baudrate, timeout=1)
+                self._serial = pyserial.Serial(port, self._baud_for(port), timeout=1)
                 self.port = port
                 # Fresh device state: the u-blox 7 pucks have no battery/flash,
                 # so a replugged receiver comes back in whatever mode it ships

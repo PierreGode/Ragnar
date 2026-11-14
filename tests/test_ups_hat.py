@@ -293,3 +293,17 @@ def test_system_status_reports_the_hat_battery(monkeypatch):
 
 def test_system_status_has_no_battery_without_a_hat(monkeypatch):
     assert _status(monkeypatch, monitor({}))['battery'] is None
+
+
+def test_no_probe_on_a_cardputer_zero():
+    """Its LoRa Cap has an I/O expander on 0x43; that must never read as a HAT."""
+    opened = []
+
+    def opener(bus, address):
+        opened.append(address)
+        raise OSError("should not be reached")
+
+    shared = types.SimpleNamespace(config={"epd_type": "st7789v2"})
+    m = ups_hat.UpsHatMonitor(shared, opener=opener)
+    m.start()
+    assert m._thread is None and opened == [] and not m.available

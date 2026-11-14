@@ -10947,6 +10947,12 @@ def _any_sdr_present():
             return True
     except Exception:
         pass
+    try:
+        import cc1101_scan
+        if bool((cc1101_scan.status().get('detect') or {}).get('available')):
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -15185,6 +15191,189 @@ def api_fan():
     except Exception as e:
         logger.error(f"Fan status error: {e}")
         return jsonify({'supported': False, 'error': str(e)}), 500
+
+
+# ---- CardputerZero expansion header, Caps and camera ------------------------
+# Detection listens on the UART and queries the camera, which takes seconds, so
+# it runs on a background thread and the route answers from the last result.
+_cz_hw = {'data': None, 'at': 0.0, 'busy': False, 'lock': threading.Lock()}
+_CZ_HW_TTL = 60
+
+
+def _cz_gnss_port_in_use():
+    """True when a GPS reader already has the Cap's UART (directly, or through
+    gpsd). Probing it then would steal bytes from that reader."""
+    try:
+        import cardputer_caps
+        import serial_claims
+        if os.path.realpath(cardputer_caps.GNSS_PORT) in serial_claims.claimed():
+            return True
+    except Exception:
+        pass
+    try:
+        from gps_manager import _try_gpsd
+        sock = _try_gpsd(timeout=0.5)
+        if sock:
+            sock.close()
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _cz_gps_live():
+    """Live GPS state from the wardriving engine, if it has a GPS open."""
+    try:
+        gps = getattr(_wardriving_engine, '_gps', None)
+        if gps is None:
+            return None
+        return {'port': getattr(gps, 'port', None), 'connected': bool(getattr(gps, 'connected', False)),
+                'has_fix': bool(gps.has_fix()), 'baud': getattr(gps, 'baudrate', None),
+                'satellites': getattr(gps, 'satellites', None)}
+    except Exception:
+        return None
+
+
+def _cz_detect_now():
+    import cardputer_caps
+    in_use = _cz_gnss_port_in_use()
+    info = cardputer_caps.detect(shared_data.config, probe_serial=not in_use, camera=False)
+    if info.get('gnss') is not None:
+        info['gnss']['in_use'] = in_use
+    if info.get('board'):
+        info['header'] = cardputer_caps.header_state()
+        try:
+            import pi_camera
+            info['camera'] = pi_camera.get_camera().info()
+        except Exception as e:
+            info['camera'] = {'present': False, 'reason': str(e)}
+    return info
+
+
+def _cz_refresh_async():
+    with _cz_hw['lock']:
+        if _cz_hw['busy']:
+            return
+        _cz_hw['busy'] = True
+
+    def work():
+        try:
+            _cz_hw['data'] = _cz_detect_now()
+            _cz_hw['at'] = time.time()
+        except Exception as e:
+            logger.error(f"CardputerZero hardware detection failed: {e}")
+        finally:
+            _cz_hw['busy'] = False
+
+    threading.Thread(target=work, name='cz-hardware', daemon=True).start()
+
+
+@app.route('/api/cardputer/hardware')
+def api_cardputer_hardware():
+    """Expansion header, attached Cap, GNSS and camera on a CardputerZero.
+    {supported: false} on every other board. ?refresh=1 forces a new scan."""
+    try:
+        import cardputer_caps
+        if not cardputer_caps.is_cardputer_zero(shared_data.config):
+            return jsonify({'supported': False})
+        stale = time.time() - _cz_hw['at'] > _CZ_HW_TTL
+        if request.args.get('refresh') or stale or _cz_hw['data'] is None:
+            _cz_refresh_async()
+        data = dict(_cz_hw['data'] or {})
+        data.update({'supported': True, 'scanning': _cz_hw['busy'],
+                     'pending': _cz_hw['data'] is None, 'gps': _cz_gps_live()})
+        return jsonify(data)
+    except Exception as e:
+        logger.error(f"CardputerZero hardware error: {e}")
+        return jsonify({'supported': False, 'error': str(e)}), 500
+
+
+def _camera_dir():
+    path = os.path.join(shared_data.datadir, 'camera')
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+_CAMERA_NAME_RE = re.compile(r'^ragnar_\d{8}_\d{6}(_\d+)?\.jpg$')
+
+
+def _camera_photos(limit=24):
+    try:
+        names = sorted((n for n in os.listdir(_camera_dir()) if _CAMERA_NAME_RE.match(n)),
+                       reverse=True)
+    except OSError:
+        names = []
+    out = []
+    for name in names[:limit]:
+        try:
+            st = os.stat(os.path.join(_camera_dir(), name))
+            out.append({'name': name, 'size': st.st_size, 'time': int(st.st_mtime)})
+        except OSError:
+            continue
+    return out
+
+
+@app.route('/api/camera/status')
+def api_camera_status():
+    """Camera presence and live-view state (see pi_camera.py)."""
+    try:
+        import pi_camera
+        data = pi_camera.get_camera().status()
+        data['supported'] = bool(data.get('present'))
+        data['photos'] = _camera_photos() if data['supported'] else []
+        return jsonify(data)
+    except Exception as e:
+        logger.error(f"Camera status error: {e}")
+        return jsonify({'supported': False, 'present': False, 'error': str(e)}), 500
+
+
+@app.route('/api/camera/stream')
+def api_camera_stream():
+    """Live view as MJPEG (multipart/x-mixed-replace), for an <img> element."""
+    import pi_camera
+    resp = Response(pi_camera.get_camera().mjpeg(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@app.route('/api/camera/photo', methods=['POST'])
+def api_camera_photo():
+    """Take a photo and keep it in data/camera/. Returns its name."""
+    try:
+        import pi_camera
+        data = pi_camera.get_camera().photo()
+    except RuntimeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 503
+    except Exception as e:
+        logger.error(f"Camera photo error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+    base = time.strftime('ragnar_%Y%m%d_%H%M%S')
+    name, n = base + '.jpg', 1
+    while os.path.exists(os.path.join(_camera_dir(), name)):
+        n += 1
+        name = f'{base}_{n}.jpg'
+    with open(os.path.join(_camera_dir(), name), 'wb') as f:
+        f.write(data)
+    return jsonify({'success': True, 'name': name, 'size': len(data), 'photos': _camera_photos()})
+
+
+@app.route('/api/camera/photo/<name>', methods=['GET', 'DELETE'])
+def api_camera_photo_file(name):
+    """Serve or delete one saved photo. The name must be one Ragnar wrote."""
+    if not _CAMERA_NAME_RE.match(name or ''):
+        return jsonify({'error': 'bad photo name'}), 400
+    path = os.path.join(_camera_dir(), name)
+    if not os.path.isfile(path):
+        return jsonify({'error': 'not found'}), 404
+    if request.method == 'DELETE':
+        try:
+            os.remove(path)
+        except OSError as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': True, 'photos': _camera_photos()})
+    return send_from_directory(_camera_dir(), name, mimetype='image/jpeg',
+                               as_attachment=bool(request.args.get('download')))
 
 
 @app.route('/api/fan/mode', methods=['POST'])

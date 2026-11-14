@@ -2999,6 +2999,8 @@ except:
     # A stock CardputerZero keeps the LCD and keyboard with its own launcher.
     if [ "$CARDPUTER_MODE" = true ]; then
         bash "$ragnar_PATH/scripts/cardputer_takeover.sh" apply
+        # Camera tools + expansion-header checks
+        bash "$ragnar_PATH/scripts/cardputer_hardware.sh" setup
     fi
 
     CURRENT_STEP=9; show_progress "Verifying installation"

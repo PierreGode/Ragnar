@@ -58,6 +58,7 @@ import bt_scanner
 import sdr_spectrum
 import rtl_sdr
 import esp_sdr
+import cc1101_scan
 import sigmf_analyzer
 import adsb
 import meshtastic_node
@@ -33393,6 +33394,44 @@ def register_network_diagnostics(app, logger=None):
             return _bad('Invalid since')
         return jsonify(esp_sdr.get_frames(since=since))
 
+    # CC1101 sub-GHz sweep (CardputerZero Cap CC1101): same shape as the
+    # other waterfall sources. Receive only.
+    @app.route('/api/net/cc1101/status', methods=['GET'])
+    def net_cc1101_status():
+        return jsonify(cc1101_scan.status())
+
+    @app.route('/api/net/cc1101/start', methods=['POST'])
+    def net_cc1101_start():
+        data = request.get_json(silent=True) or {}
+        band = str(data.get('band') or '433').strip()
+        lo_mhz = hi_mhz = None
+        try:
+            if data.get('lo_hz') is not None and data.get('hi_hz') is not None:
+                lo_mhz = float(data['lo_hz']) / 1e6
+                hi_mhz = float(data['hi_hz']) / 1e6
+        except (TypeError, ValueError):
+            return _bad('Invalid zoom span')
+        if lo_mhz is None and band not in cc1101_scan.BANDS:
+            return _bad('Invalid band')
+        _log(f"net/cc1101/start band={band} zoom={lo_mhz}:{hi_mhz}")
+        result = cc1101_scan.start(band=band, lo_mhz=lo_mhz, hi_mhz=hi_mhz)
+        if not result.get('ok') and 'error' not in result:
+            result['error'] = 'could not start the sweep'
+        return jsonify(result)
+
+    @app.route('/api/net/cc1101/stop', methods=['POST'])
+    def net_cc1101_stop():
+        _log("net/cc1101/stop")
+        return jsonify(cc1101_scan.stop())
+
+    @app.route('/api/net/cc1101/frames', methods=['GET'])
+    def net_cc1101_frames():
+        try:
+            since = int(request.args.get('since', 0))
+        except (TypeError, ValueError):
+            return _bad('Invalid since')
+        return jsonify(cc1101_scan.get_frames(since=since))
+
     @app.route('/api/net/esp/selftest', methods=['GET'])
     def net_esp_selftest():
         _log("net/esp/selftest")
@@ -34146,7 +34185,7 @@ def register_network_diagnostics(app, logger=None):
     def net_mesh_start():
         data = request.get_json(silent=True) or {}
         _log("net/mesh/start")
-        return jsonify(meshtastic_node.start(port=data.get('port')))
+        return jsonify(meshtastic_node.start(port=data.get('port'), host=data.get('host')))
 
     @app.route('/api/net/mesh/stop', methods=['POST'])
     def net_mesh_stop():

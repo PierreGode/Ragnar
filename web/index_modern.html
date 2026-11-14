@@ -409,6 +409,19 @@
         .pw-row > :last-child { white-space: nowrap; font-family: ui-monospace, monospace; }
         .pw-fix { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; background: rgba(15, 23, 42, .6); border: 1px solid #1e293b; border-radius: 8px; padding: 10px 12px; margin-top: 6px; }
         .pw-fix-text { font-size: 13px; min-width: 0; flex: 1 1 220px; }
+        .cz-header { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+        .cz-pin { border: 1px solid #334155; border-radius: 6px; padding: 4px 2px; text-align: center; font-size: 11px; min-width: 0; }
+        .cz-pin b { display: block; font-size: 12px; }
+        .cz-pin span { display: block; color: #94a3b8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .cz-pin.hi { border-color: #22c55e; }
+        .cz-pin.pwr { border-color: #b45309; }
+        .cam-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+        .cam-view { display: block; width: 100%; max-width: 640px; height: auto; margin-top: 10px; border-radius: 8px; background: #000; }
+        .cam-view.hidden { display: none; }
+        .cam-photos { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+        .cam-photo { position: relative; }
+        .cam-photo img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 6px; display: block; }
+        .cam-photo button { position: absolute; top: 2px; right: 2px; min-height: 28px; min-width: 28px; padding: 0 6px; border-radius: 6px; border: 0; background: rgba(15,23,42,.8); color: #e2e8f0; cursor: pointer; }
         .pw-btn { font-size: 13px; font-weight: 600; padding: 7px 14px; border-radius: 8px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; cursor: pointer; white-space: nowrap; min-height: 36px; }
         .pw-btn:hover { background: #334155; }
         .pw-btn:disabled { opacity: .5; cursor: default; }
@@ -6733,6 +6746,38 @@
                     <div id="power-test-body" class="mt-3"></div>
                 </div>
 
+                <!-- CardputerZero: expansion header, Cap, GNSS (only on that board) -->
+                <div id="cz-panel" class="glass-card sys-panel mb-4 sm:mb-6 hidden">
+                    <div class="flex items-center justify-between gap-3 mb-3">
+                        <h3 class="font-semibold">CardputerZero hardware</h3>
+                        <button class="pw-btn" id="cz-rescan" onclick="rescanCardputerHardware()">Rescan</button>
+                    </div>
+                    <div id="cz-summary"></div>
+                    <div class="pw-section">
+                        <div class="pw-section-title">Expansion header</div>
+                        <div id="cz-header" class="cz-header"></div>
+                        <div class="pw-muted" style="margin-top:6px">Top row and bottom row as printed on the case. SPI is shared with the screen.</div>
+                    </div>
+                </div>
+
+                <!-- Camera (only when one is detected) -->
+                <div id="camera-panel" class="glass-card sys-panel mb-4 sm:mb-6 hidden">
+                    <div class="flex items-center justify-between gap-3 mb-3">
+                        <h3 class="font-semibold">Camera</h3>
+                        <span class="pw-muted" id="camera-model"></span>
+                    </div>
+                    <div class="cam-actions">
+                        <button class="pw-btn" id="camera-live-btn" onclick="toggleCameraLive()">Live view</button>
+                        <button class="pw-btn pw-btn-primary" id="camera-photo-btn" onclick="takeCameraPhoto()">Take photo</button>
+                    </div>
+                    <div id="camera-note" class="pw-muted" style="margin-top:6px"></div>
+                    <img id="camera-live" class="cam-view hidden" alt="Camera live view">
+                    <div class="pw-section hidden" id="camera-photos-section">
+                        <div class="pw-section-title">Photos</div>
+                        <div id="camera-photos" class="cam-photos"></div>
+                    </div>
+                </div>
+
                 <!-- Cooling fan -->
                 <div id="fan-panel" class="glass-card sys-panel mb-4 sm:mb-6 hidden">
                     <div class="flex items-center justify-between gap-3 mb-3">
@@ -10154,7 +10199,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261111-apcheck"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261114-czcaps"></script>
 
 
 

@@ -588,6 +588,8 @@ if grep -q '"epd_type"[[:space:]]*:[[:space:]]*"st7789v2"' "$_disp_cfg" 2>/dev/n
         echo -e "  ${YELLOW}⚠${NC} spidev + smbus2 failed to install — needed only on a plain kernel without the LCD/keyboard drivers"
     fi
     bash "$(dirname "$0")/scripts/cardputer_takeover.sh" apply
+    # Camera tools + expansion-header checks (see docs/M5StackCardputerZero.md)
+    bash "$(dirname "$0")/scripts/cardputer_hardware.sh" setup
 else
     echo -e "  ${GREEN}✓${NC} Not a CardputerZero display profile — nothing to do"
 fi
