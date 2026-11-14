@@ -4,13 +4,16 @@
 
 ### 2026-11-14
 
-#### feat(files): a Camera folder in the Files tab for photos and videos
+#### feat(files): a Camera folder in the Files tab; fix: GPS for the Meshtastic node, steady camera detection
 *branch `feat/camera-files-folder`*
 
 - **Where they go.** Photos and videos are saved on the unit in `data/camera/`. That folder is now **Files → Camera**, next to Uploads and Backups: preview, play, download, rename, move, delete, send over the mesh, or put in the Vault like any other file.
 - **Link from the Camera panel.** Under the buttons, *Files → Camera* opens the folder directly.
 - A video that is still recording cannot be deleted from the Files tab.
 - Good to know: the **Photos** and **Videos** lists in the Camera panel show files with Ragnar's own names (`ragnar_YYYYMMDD_HHMMSS`). A file renamed or moved to a subfolder stays in **Files → Camera** but leaves those lists.
+- **Meshtastic node had no GPS (LoRa + GNSS Cap).** The GNSS and Ragnar share one serial port, and two readers on one port corrupt both, so the Meshtastic daemon cannot read it itself. Ragnar now hands its GPS fix to the node on the unit, the way the Meshtastic phone apps do: while the **Node** link is on in Mesh Nodes, the node gets the position every two minutes (sooner when moving) and uses it as its own. Between wardriving sessions Ragnar keeps a standby GPS reader open for this; a session takes the port back before it opens the GPS. The page shows *GPS from Ragnar* or *waiting for GPS fix*. Setting: `meshtastic_share_gps` (on by default). Note that a Meshtastic node with a position broadcasts it to the mesh.
+- **Camera panel came and went.** Ragnar asked the system for its camera list again every minute. On this board that takes seconds, and when the unit was busy (a recording, an update) it timed out, so the camera counted as "not detected" until the next try. A camera that was found now stays found; a list that times out goes by the sensor the kernel has; and the check no longer waits behind a photo being taken.
+- **Not checked on a unit:** the GPS hand-over and the detection change were tested with simulated hardware only. The unit was in use (recording) while this was written, so nothing was run on it. That the node adopts a position sent this way was confirmed in the Meshtastic firmware source.
 
 #### feat(camera): flip, video recording, and a camera screen on the CardputerZero
 *branch `feat/cardputer-camera-screen`*

@@ -2095,6 +2095,7 @@ class WardrivingEngine:
         self._bt_thread = None
         self._cell_thread = None
         self._gps = None
+        self._standby_gps = None   # GPS reader for when no session runs (see standby_gps)
         self.session = None
         self.scan_interval = 2  # seconds between scans (fast!)
         self.interfaces = []     # WiFi interfaces to use
@@ -2224,6 +2225,9 @@ class WardrivingEngine:
         port = getattr(gps, 'port', None) if gps is not None else None
         if port and port != 'gpsd':
             ports.append(port)
+        standby = getattr(getattr(self, '_standby_gps', None), 'port', None)
+        if standby and standby != 'gpsd':
+            ports.append(standby)
         pinned = self._gpsd_configured_realpath()
         if pinned and os.path.exists(pinned):
             ports.append(pinned)
@@ -2312,10 +2316,55 @@ class WardrivingEngine:
         except Exception as e:
             logger.debug(f"_ensure_gpsd best-effort failed: {e}")
 
+    # ── Standby GPS ────────────────────────────────────────────────────
+    # The GPS is otherwise only read during a session. Something that wants a
+    # position between sessions (the Meshtastic node on a CardputerZero LoRa +
+    # GNSS Cap, which cannot read the shared UART itself) asks for this reader.
+    # It belongs to the engine so there is never a second reader on the port:
+    # a session closes it before opening the GPS, and the status reports it.
+    STANDBY_GPS_RETRY_SECONDS = 30
+
+    def standby_gps(self, port=None, baudrate=9600, make=None):
+        """The GPS reader to use right now: the session's while one runs,
+        otherwise a standby reader on `port` (opened on first use). None when
+        there is none."""
+        if self._gps is not None or self._running or self._starting:
+            return self._gps
+        if self._standby_gps is not None:
+            return self._standby_gps
+        now = time.time()
+        if not port or now < getattr(self, '_standby_gps_retry', 0):
+            return None
+        try:
+            if make is None:
+                from gps_manager import GPSManager
+                make = GPSManager
+            mgr = make(port=port, baudrate=baudrate, assist=False, set_clock=False)
+            if mgr.start():
+                self._standby_gps = mgr
+                logger.info(f"Standby GPS reader on {port}")
+                return mgr
+            mgr.stop()
+        except Exception as e:
+            logger.debug(f"standby GPS not opened: {e}")
+        self._standby_gps_retry = now + self.STANDBY_GPS_RETRY_SECONDS
+        return None
+
+    def stop_standby_gps(self):
+        mgr, self._standby_gps = self._standby_gps, None
+        if mgr is not None:
+            try:
+                mgr.stop()
+            except Exception:
+                pass
+            logger.info("Standby GPS reader closed")
+
     def start(self, interfaces=None, gps_port=None, device_name=None):
         """Start a wardriving session."""
         if self._running:
             return {'error': 'Already running'}
+        # The session opens the GPS itself: one reader per port.
+        self.stop_standby_gps()
 
         # Flag the bring-up window so the display flips to wardriving mode right
         # away (see __init__). Cleared once _running goes True, on early error
@@ -3212,6 +3261,8 @@ class WardrivingEngine:
         # the !running case ensures the status reflects current hardware.
         if self._gps and self._running:
             gps_status = self._gps.get_status()
+        elif self._standby_gps is not None:
+            gps_status = self._standby_gps.get_status()
         else:
             now = time.time()
             # detect_gps_device opens/reads serial ports (up to ~1.5s x 4 bauds

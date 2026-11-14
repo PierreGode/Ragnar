@@ -15038,6 +15038,44 @@ def reset_vulnerability_scan_history():
 
 _wardriving_engine = None
 
+
+def _mesh_standby_port():
+    """Where a standby GPS reader may open between wardriving sessions: the
+    GNSS of a CardputerZero LoRa + GNSS Cap, once the hardware scan has seen
+    that Cap. (port, baud) or (None, None)."""
+    try:
+        import cardputer_caps
+        data = _cz_hw.get('data')
+        if data is None:
+            # Nobody has opened the hardware panel yet: find out which Cap is on.
+            if cardputer_caps.is_cardputer_zero(shared_data.config):
+                _cz_refresh_async()
+            return None, None
+        if data.get('cap') == cardputer_caps.CAP_LORA_GNSS:
+            return cardputer_caps.GNSS_PORT, cardputer_caps.GNSS_BAUD
+    except Exception:
+        pass
+    return None, None
+
+
+def _mesh_gps_fix():
+    """Ragnar's current GPS fix for the Meshtastic node on this unit: from the
+    wardriving session's GPS, or from the standby reader between sessions."""
+    engine = _get_wardriving_engine()
+    port, baud = _mesh_standby_port()
+    gps = engine.standby_gps(port, baud)
+    return gps.get_position() if gps is not None else None
+
+
+def _mesh_gps_release():
+    if _wardriving_engine is not None:
+        _wardriving_engine.stop_standby_gps()
+
+
+meshtastic_node.set_position_source(
+    _mesh_gps_fix, lambda: bool(shared_data.config.get('meshtastic_share_gps', True)),
+    release=_mesh_gps_release)
+
 def _get_wardriving_engine():
     global _wardriving_engine
     if _wardriving_engine is None:

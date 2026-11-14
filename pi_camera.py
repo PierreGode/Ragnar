@@ -207,6 +207,7 @@ class PiCamera:
         self._run = run or subprocess.run
         self._detector = detector
         self._lock = threading.RLock()          # serialises camera ownership
+        self._detect_lock = threading.Lock()    # one detection at a time, never behind a photo
         self._frame_cond = threading.Condition()
         self._frame = None
         self._frame_id = 0
@@ -226,13 +227,19 @@ class PiCamera:
     # ── detection ──────────────────────────────────────────────────────
 
     def info(self, refresh=False):
-        """{'present': bool, 'model': ..., 'modes': ...}, cached for a minute.
-        Not refreshed while the live view owns the camera."""
+        """{'present': bool, 'model': ..., 'modes': ...}.
+
+        A camera that was found stays found: it is soldered to the board, and
+        asking libcamera again every minute costs seconds on a small board and
+        can time out while the unit is busy, which made the Camera panel come
+        and go. Only "no camera" is asked again, once a minute, and Refresh
+        (refresh=True) always asks."""
         now = time.monotonic()
-        with self._lock:
-            fresh = self._detected is not None and now - self._detected_at < DETECT_TTL
-            if (fresh and not refresh) or (self._proc is not None and self._detected):
-                return dict(self._detected)
+        with self._detect_lock:
+            known = self._detected
+            if known is not None and not refresh:
+                if known.get("present") or now - self._detected_at < DETECT_TTL:
+                    return dict(known)
             try:
                 if self._detector:
                     found = self._detector()
@@ -241,6 +248,11 @@ class PiCamera:
                     found = cardputer_caps.detect_camera()
             except Exception as e:
                 found = {"present": False, "reason": str(e)}
+            if not found.get("present") and self._proc is not None and self._frame is not None:
+                # Frames are arriving right now: whatever the listing said,
+                # there is a camera.
+                found = dict(known) if known and known.get("present") else {
+                    "present": True, "model": "camera", "modes": ""}
             self._detected, self._detected_at = found, now
             return dict(found)
 
