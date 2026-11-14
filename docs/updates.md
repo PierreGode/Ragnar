@@ -319,8 +319,10 @@ every fetch fail, and with it every update and every branch switch. The usual
 symptom was an orange **Needs attention** with a message about a corrupt tag and
 an Update button that could not be clicked.
 
-Ragnar repairs this itself, in four steps of increasing cost:
+Ragnar repairs this itself, in steps of increasing cost:
 
+0. **Ownership.** Files in `.git` that belong to the wrong user are given back
+   to the checkout's owner, so the steps below (and git itself) can write there.
 1. **Plain-file fixes.** An unreadable `HEAD`, `config` or `packed-refs`, empty
    ref files and zero-length object files are fixed or removed.
 2. **Broken references.** Every tag, branch, remote branch or stash that points
@@ -330,7 +332,7 @@ Ragnar repairs this itself, in four steps of increasing cost:
 4. **Rebuild.** If git still cannot work, `.git` is replaced with a fresh one
    built around the files already on disk.
 
-The background update check runs steps 1 to 3, so most damage is gone before
+The background update check runs steps 0 to 3, so most damage is gone before
 you see it. Step 4 runs only when you click **Repair and Update** (or run
 `update_ragnar.sh`), because it resets Ragnar's own program files to the upstream
 version; with the old history unreadable, a local edit cannot be told apart from
@@ -338,6 +340,18 @@ an old version. It also only runs when git itself reports damaged data, never fo
 an error Ragnar does not recognise. Your settings, databases and collected data
 are gitignored and are not touched by any step. If the rebuild cannot reach
 github.com, the old `.git` is put back exactly as it was.
+
+**Where root-owned files came from.** The Ragnar service runs as root while the
+checkout belongs to `ragnar`. Each background update check fetched as root and
+left root-owned files in `.git`, and git's automatic clean-up, started in the
+background by that fetch, went on writing more after it returned. A `git`
+command run by hand as `ragnar` then failed with "permission denied". Ragnar now
+hands the files back after every fetch and runs that clean-up in the foreground,
+so nothing is written afterwards. Running `update_ragnar.sh` with `sudo` remains
+the supported way to update from a shell; it fixes ownership itself.
+
+Two habits still help: shut the board down instead of cutting power, and keep
+some free space on the card (`df -h`); an update refuses to start below 60 MB.
 
 The button now stays usable in every state except "git does not run on this
 board" and "the disk is full".

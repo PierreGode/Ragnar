@@ -84,6 +84,12 @@ GIT_IDENTITY = [
 GIT_TRANSFER_GUARDS = [
     '-c', 'http.lowSpeedLimit=1000',
     '-c', 'http.lowSpeedTime=30',
+    # A fetch may start "git gc --auto" in the background. Detached, it keeps
+    # rewriting packs and refs after the fetch has returned - as root, when the
+    # service is root - and leaves files the checkout's owner cannot write.
+    # Run it in the foreground so the ownership hand-back that follows a fetch
+    # covers what it wrote.
+    '-c', 'gc.autoDetach=false',
 ]
 
 # One update at a time per process. Held non-blocking: a second click gets an
@@ -467,6 +473,41 @@ def restore_ownership(repo_path, warnings=None):
     return changed
 
 
+def restore_git_ownership(repo_path, warnings=None):
+    """Give .git back to the checkout's owner. Returns the number of paths fixed.
+
+    An earlier git run under sudo leaves root-owned files in .git. Whoever
+    owns the checkout then cannot write new objects there, and a fetch fails
+    with "permission denied" or "unable to create". Only possible when running
+    as root (the service does); otherwise it changes nothing and says so.
+    """
+    owner = repo_owner(repo_path)
+    if not owner:
+        return 0
+    uid, gid, name = owner
+    git_dir = os.path.join(repo_path, '.git')
+    changed = denied = 0
+    for root, dirs, files in os.walk(git_dir):
+        for entry in [''] + dirs + files:
+            path = os.path.join(root, entry) if entry else root
+            try:
+                st = os.lstat(path)
+                if st.st_uid != uid or st.st_gid != gid:
+                    os.lchown(path, uid, gid)
+                    changed += 1
+            except PermissionError:
+                denied += 1
+            except OSError:
+                continue
+    if changed:
+        _note(warnings, f"Gave {changed} file(s) in the git data back to user {name} "
+                        "(they belonged to another user, usually from a run with sudo)")
+    if denied:
+        logger.warning(f"{denied} path(s) in .git belong to another user and could not be "
+                       f"changed; run: sudo chown -R {name}:{name} {git_dir}")
+    return changed
+
+
 def refresh_exec_bits(repo_path, warnings=None):
     """Re-assert +x on the scripts the service and the installer invoke.
 
@@ -550,8 +591,7 @@ _PACKED_LINE_RE = re.compile(r'^([0-9a-f]{40}(?:[0-9a-f]{24})?) (refs/[^\s\x00]+
 _PEELED_LINE_RE = re.compile(r'^\^[0-9a-f]{40}(?:[0-9a-f]{24})?$')
 
 # Fetch failures a repair cannot help with.
-_NOT_DAMAGE_CODES = ('offline', 'timeout', 'auth', 'disk_full', 'git_missing', 'locked',
-                     'ownership', 'permission')
+_NOT_DAMAGE_CODES = ('offline', 'timeout', 'auth', 'disk_full', 'git_missing')
 
 BROKEN_GIT_BACKUP = '.git.ragnar-broken'
 # When .git was last rebuilt in this process. An update compares it with its
@@ -845,6 +885,20 @@ def _branch_only_fetch(repo_path, timeout, refetch=False):
     return run_git(args, repo_path, timeout=timeout, network=True)
 
 
+def _hand_back_git_files(repo_path):
+    """After a fetch run as root, give what it wrote back to the checkout's
+    owner. The service runs as root over a checkout owned by 'ragnar', so every
+    background fetch used to leave root-owned objects behind; the next git
+    command run as 'ragnar' (by hand, or by another tool) then failed with
+    "permission denied". Quiet: this is housekeeping, not a repair."""
+    try:
+        if os.geteuid() != 0:
+            return 0
+    except AttributeError:      # pragma: no cover - non-POSIX
+        return 0
+    return restore_git_ownership(repo_path, None)
+
+
 def _is_damage(result):
     """A failure the harmless repairs are worth trying on."""
     code, _hint = classify(result.message, result.timed_out)
@@ -900,7 +954,17 @@ def rebuild_repository(repo_path, warnings=None):
 
 def resilient_fetch(repo_path, warnings, timeout=GIT_NETWORK_TIMEOUT, allow_rebuild=False,
                     state=None):
-    """A fetch that repairs a damaged repository instead of failing on it.
+    """A fetch that repairs a damaged repository instead of failing on it, and
+    leaves the files it wrote owned by the checkout's owner (see
+    _repairing_fetch for the repair ladder)."""
+    try:
+        return _repairing_fetch(repo_path, warnings, timeout, allow_rebuild, state)
+    finally:
+        _hand_back_git_files(repo_path)
+
+
+def _repairing_fetch(repo_path, warnings, timeout, allow_rebuild, state):
+    """The fetch and its repair ladder.
 
     Tries a normal tag-syncing fetch first, which keeps tags current on a
     healthy box. A failure that is not a network problem walks the repair
@@ -915,6 +979,10 @@ def resilient_fetch(repo_path, warnings, timeout=GIT_NETWORK_TIMEOUT, allow_rebu
     confirmed = _is_confirmed_damage(res)
     logger.warning(f"Fetch failed on what looks like repository damage; repairing ({first_error})")
 
+    # Wrong owners first: nothing below can delete or rewrite a file it is not
+    # allowed to touch, and a fetch cannot save what it downloads.
+    restore_git_ownership(repo_path, warnings)
+    clear_stale_locks(repo_path, warnings, min_age_seconds=LOCK_STALE_SECONDS)
     tidy_git_files(repo_path, warnings)
     prune_broken_refs(repo_path, warnings)
     reset_corrupt_index(repo_path, warnings)
@@ -1586,5 +1654,6 @@ __all__ = [
     'resolve_target_branch', 'remote_default_branch', 'current_branch',
     'restore_ownership', 'refresh_exec_bits', 'classify', 'run_git', 'git_usable',
     'resilient_fetch', 'tidy_git_files', 'prune_broken_refs', 'rebuild_repository',
+    'restore_git_ownership',
     'GIT_NETWORK_TIMEOUT', 'GIT_LOCAL_TIMEOUT', 'LOCK_STALE_SECONDS',
 ]

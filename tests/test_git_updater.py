@@ -811,3 +811,126 @@ def test_an_error_ragnar_does_not_recognise_never_triggers_a_rebuild(box, upstre
                                   'fatal: unable to connect to github.com'])
 def test_server_trouble_is_offline_not_damage(text):
     assert gu.classify(text)[0] == 'offline'
+
+
+# --- a real report, step for step ---------------------------------------------
+# "One git object file was empty. The branch pointer origin/fix/cardputer-
+#  keymap-i2c still pointed to the broken object, which blocked the fetch.
+#  git update-ref -d couldn't [delete it] because the object was missing.
+#  Some files in .git belonged to root."
+
+def _reported_damage(box, upstream):
+    """An empty object that only a remote-tracking branch still points at."""
+    _git(upstream, 'checkout', '-q', '-b', 'fix/cardputer-keymap-i2c')
+    sha = _publish(upstream, filename='keys.py', content='KEYS = 1\n', message='keymap')
+    _git(upstream, 'checkout', '-q', 'main')
+    _git(box, 'fetch', '-q', 'origin')
+    _unpack_all(box)
+    obj = box / '.git' / 'objects' / sha[:2] / sha[2:]
+    assert obj.exists()
+    os.chmod(obj, 0o644)
+    obj.write_bytes(b'')
+    return sha, obj
+
+
+def test_the_reported_damage_really_blocks_a_plain_fetch(box, upstream):
+    _reported_damage(box, upstream)
+    _publish(upstream)
+    raw = gu.run_git(['fetch', '--prune', 'origin'], str(box))
+    assert not raw.ok                                       # the premise of the report
+    assert gu.classify(raw.message)[0] in ('repo_damaged', 'broken_tag')
+    # And the tool the user reached for first cannot remove the pointer.
+    ref = 'refs/remotes/origin/fix/cardputer-keymap-i2c'
+    assert (box / '.git' / ref).exists()
+
+
+def test_the_reported_damage_clears_itself_on_the_next_check(box, upstream, monkeypatch):
+    monkeypatch.setattr(gu, 'DEFAULT_REMOTE_URL', str(upstream))
+    sha, obj = _reported_damage(box, upstream)
+    _publish(upstream)
+    report = gu.check(str(box))
+    assert report['ok'] and report['code'] == '' and report['updates_available'], report
+    # Steps 2-4 of the user's manual fix happened by themselves.
+    assert obj.exists() and obj.stat().st_size > 0          # a good copy was downloaded
+    assert _git(box, 'rev-parse', 'origin/fix/cardputer-keymap-i2c') == sha
+    assert _git(box, 'cat-file', '-t', sha) == 'commit'
+    assert (box / 'app.py').read_text() == 'VERSION = 1\n'  # the check did not update
+    assert _private_data_intact(box)
+    assert gu.update(str(box))['ok']
+
+
+def test_wrong_owner_is_fixed_before_anything_else_is_tried(box, upstream, monkeypatch):
+    """Step 1 of the user's fix. Not root here, so ownership is simulated: the
+    first fetch fails the way it does on root-owned files, and the repair must
+    call the ownership fix before its retry."""
+    _publish(upstream)
+    order = []
+    real_run = gu.run_git
+    state = {'failed': False}
+
+    def run(args, cwd, **kw):
+        if args and args[0] == 'fetch' and not state['failed']:
+            state['failed'] = True
+            order.append('fetch-denied')
+            return gu.GitResult(args, 128, '', "error: cannot open .git/FETCH_HEAD: Permission denied")
+        if args and args[0] == 'fetch':
+            order.append('fetch')
+        return real_run(args, cwd, **kw)
+
+    monkeypatch.setattr(gu, 'run_git', run)
+    monkeypatch.setattr(gu, 'restore_git_ownership',
+                        lambda repo, warnings=None: order.append('chown') or 3)
+    monkeypatch.setattr(gu, 'rebuild_repository', lambda *a, **k: pytest.fail('no rebuild for this'))
+    res = gu.resilient_fetch(str(box), [], allow_rebuild=True)
+    assert res.ok
+    assert order[:3] == ['fetch-denied', 'chown', 'fetch']
+
+
+def test_git_ownership_fix_changes_only_what_is_wrong(box, monkeypatch):
+    calls = []
+    me = os.getuid()
+    monkeypatch.setattr(gu, 'repo_owner', lambda repo: (me, os.getgid(), 'box'))
+    monkeypatch.setattr(gu.os, 'lchown', lambda path, uid, gid: calls.append(path))
+    assert gu.restore_git_ownership(str(box)) == 0 and calls == []   # all correct already
+    foreign = str(box / '.git' / 'HEAD')
+    real_lstat = os.lstat
+
+    class Stat:
+        def __init__(self, st):
+            self.st_uid, self.st_gid = 0, 0
+
+    monkeypatch.setattr(gu.os, 'lstat', lambda p: Stat(real_lstat(p)) if p == foreign else real_lstat(p))
+    warnings = []
+    assert gu.restore_git_ownership(str(box), warnings) == 1
+    assert calls == [foreign] and 'back to user box' in warnings[0]
+
+
+def test_ownership_fix_without_root_does_not_fail(box, monkeypatch):
+    monkeypatch.setattr(gu, 'repo_owner', lambda repo: (12345, 12345, 'someone'))
+
+    def denied(path, uid, gid):
+        raise PermissionError(1, 'Operation not permitted')
+
+    monkeypatch.setattr(gu.os, 'lchown', denied)
+    assert gu.restore_git_ownership(str(box)) == 0
+
+
+def test_a_fetch_run_as_root_hands_its_files_back(box, upstream, monkeypatch):
+    """The service is root, the checkout is not: without this every background
+    check leaves root-owned objects that block git for the owner."""
+    _publish(upstream)
+    handed = []
+    monkeypatch.setattr(gu.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(gu, 'restore_git_ownership', lambda repo, warnings=None: handed.append(warnings) or 0)
+    assert gu.resilient_fetch(str(box), []).ok
+    assert handed == [None]                       # ran once, quietly
+    handed.clear()
+    monkeypatch.setattr(gu.os, 'geteuid', lambda: 1000)
+    assert gu.resilient_fetch(str(box), []).ok
+    assert handed == []                           # nothing to do when not root
+
+
+def test_network_git_never_leaves_a_background_gc_running():
+    """A detached gc outlives the fetch and writes files as root after the
+    ownership hand-back has already run."""
+    assert 'gc.autoDetach=false' in gu.GIT_TRANSFER_GUARDS
