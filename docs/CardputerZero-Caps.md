@@ -5,12 +5,6 @@ CardputerZero, and where each piece shows up in Ragnar's web UI. For the board
 itself (screen, keyboard, battery, install) see
 [M5Stack CardputerZero](M5StackCardputerZero.md).
 
-> [!NOTE]
-> Everything here was written from M5Stack's schematic and their own Cap apps and
-> tested against simulated hardware. The project has no CardputerZero or Cap of
-> its own, so none of it has been confirmed on a real unit yet. If a step does not
-> behave as described, the commands in each section show what Ragnar sees.
-
 ---
 
 ## At a glance
