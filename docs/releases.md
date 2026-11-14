@@ -4,6 +4,19 @@
 
 ### 2026-11-14
 
+#### fix(cardputer): findings from a real unit — Meshtastic start, camera setup on plain Raspberry Pi OS, Grove power
+*branch `fix/cardputer-unit-findings`*
+
+Diagnosed on a CardputerZero with the LoRa + GNSS Cap, running plain Raspberry Pi OS (not M5Stack's image).
+
+- **Meshtastic never started.** The step that powers the Cap before the daemon starts ran as the service's own user, which cannot read Ragnar's folder (`Permission denied`), so `meshtasticd` failed on every start and the Mesh Nodes page fell back to asking for a USB node. That step now runs as root. Existing installs are repaired at the next update. On the unit, the daemon with Ragnar's radio settings reported `sx1262 init success`.
+- **Mesh Nodes names the real problem.** With the LoRa Cap fitted and no daemon running, the page now says the Cap is not set up or its service is not running, instead of "plug a node in via USB".
+- **Camera setup did nothing on plain Raspberry Pi OS.** The setup script recognised a CardputerZero only by things M5Stack's image provides, so it exited with "not a CardputerZero" and never enabled the camera. It now also goes by Ragnar's display setting. It also runs after an update from the web UI, not only from `update_ragnar.sh`. The camera needs one reboot after the overlay is added.
+- **Grove port 5 V on by default.** The Grove connector's 5 V pin is switched and off at power-on; Ragnar now turns it on at start (setting `cardputer_grove_power`), and the hardware panel shows its state.
+- **Checked on the unit with this branch's code** (run from a temporary folder, nothing installed): the setup script now recognises the unit; the Grove 5 V switch turns on and reads back on while Cap power stays on; `meshtasticd` with Ragnar's settings initialises the SX1262 and Ragnar's Meshtastic client connects to it over TCP (region unset, so nothing was transmitted); GPS is connected on `/dev/serial0` (no fix indoors); the fuel gauge reads over I2C; the screen renders with the battery indicator.
+- **Camera hardware confirmed, driver not yet.** With the camera's power line (GPIO40, which the kernel only drives once the `imx219` overlay is loaded) switched on by hand, the sensor answered on the camera I2C bus (GPIO44/45) with model ID `0x0219`, an IMX219, exactly where the stock `dtoverlay=imx219` looks for it. Loading the overlay itself needs root and a reboot, so a picture has not been taken yet.
+- **Not checked on the unit:** key presses (nobody at the keyboard), and the CC1101 Cap (the LoRa Cap was fitted).
+
 #### fix(cardputer): Cap field report — CC1101 waterfall, GPS port, Meshtastic on the LoRa Cap, camera
 *branch `fix/cardputer-caps-field-report`*
 

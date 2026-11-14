@@ -149,6 +149,10 @@ def is_cardputer_zero(config=None):
 # rail is then switched directly: it is pin IO13 (HAT_EN) of the board's
 # M5IOE1 I/O expander, the chip m5ioe1.py already drives for the screen.
 EXT5V_EXPANDER_IO = 13
+# The Grove (HY2.0-4P) port's 5 V pin has its own switch, off at power-on:
+# `grove_5v_out` in M5Stack's device tree, expander line 3 (IO4).
+GROVE5V_PATH = os.environ.get("RAGNAR_GROVE_5V", "/sys/class/leds/grove_5v_out/brightness")
+GROVE5V_EXPANDER_IO = 4
 _use_expander = False        # set by detect()/power_on_cap() on a known CardputerZero
 
 
@@ -166,24 +170,23 @@ def _expander():
         return None
 
 
-def _expander_rail_state(exp):
-    direction_reg, out_reg, _, bit = exp._gpio_regs(EXT5V_EXPANDER_IO)
+def _expander_rail_state(exp, io=EXT5V_EXPANDER_IO):
+    direction_reg, out_reg, _, bit = exp._gpio_regs(io)
     is_output = exp._bus.read_byte_data(exp.addr, direction_reg) >> bit & 1
     level = exp._bus.read_byte_data(exp.addr, out_reg) >> bit & 1
     return bool(is_output and level)
 
 
-def ext5v_state(path=None):
-    """True/False for the Cap 5 V rail, None when the board has no such rail."""
-    value = _read_text(path or EXT5V_PATH)
+def _rail_state(path, io):
+    value = _read_text(path)
     if value is None:
         exp = _expander()
         if exp is None:
             return None
         try:
-            return _expander_rail_state(exp)
+            return _expander_rail_state(exp, io)
         except Exception as e:
-            logger.debug(f"Cap power: expander read failed: {e}")
+            logger.debug(f"5 V switch: expander read failed: {e}")
             return None
         finally:
             exp.close()
@@ -193,18 +196,16 @@ def ext5v_state(path=None):
         return None
 
 
-def set_ext5v(on, path=None):
-    """Switch the Cap 5 V rail. Returns True when the rail reports the state."""
-    path = path or EXT5V_PATH
+def _set_rail(on, path, io):
     if not os.path.exists(path):
         exp = _expander()
         if exp is None:
             return False
         try:
-            exp._set_gpio(EXT5V_EXPANDER_IO, bool(on))
-            return _expander_rail_state(exp) is bool(on)
+            exp._set_gpio(io, bool(on))
+            return _expander_rail_state(exp, io) is bool(on)
         except Exception as e:
-            logger.warning(f"Cap power: expander write failed: {e}")
+            logger.warning(f"5 V switch: expander write failed: {e}")
             return False
         finally:
             exp.close()
@@ -212,9 +213,40 @@ def set_ext5v(on, path=None):
         with open(path, "w") as f:
             f.write("1\n" if on else "0\n")
     except OSError as e:
-        logger.warning(f"Cap power: cannot write {path}: {e}")
+        logger.warning(f"5 V switch: cannot write {path}: {e}")
         return False
-    return ext5v_state(path) is bool(on)
+    return _rail_state(path, io) is bool(on)
+
+
+def ext5v_state(path=None):
+    """True/False for the Cap 5 V rail, None when the board has no such rail."""
+    return _rail_state(path or EXT5V_PATH, EXT5V_EXPANDER_IO)
+
+
+def set_ext5v(on, path=None):
+    """Switch the Cap 5 V rail. Returns True when the rail reports the state."""
+    return _set_rail(on, path or EXT5V_PATH, EXT5V_EXPANDER_IO)
+
+
+def grove5v_state(path=None):
+    """True/False for the Grove port's 5 V pin, None when there is no switch."""
+    return _rail_state(path or GROVE5V_PATH, GROVE5V_EXPANDER_IO)
+
+
+def set_grove5v(on, path=None):
+    """Switch the Grove port's 5 V pin. Returns True when it reports the state."""
+    return _set_rail(on, path or GROVE5V_PATH, GROVE5V_EXPANDER_IO)
+
+
+def power_on_grove():
+    """Grove 5 V on, so a Grove unit works when plugged in. Returns the state
+    afterwards (None = no switch on this board)."""
+    state = grove5v_state()
+    if state is None:
+        return None
+    if not state:
+        set_grove5v(True)
+    return grove5v_state()
 
 
 def saved_config():
@@ -722,12 +754,13 @@ def detect(config=None, power=True, probe_serial=True, camera=True, reidentify=F
     free_uart=True takes the serial login prompt off the UART when the
     LoRa + GNSS Cap is fitted (see free_gnss_uart); needs root."""
     allow_expander(config)
-    result = {"board": is_cardputer_zero(config), "ext5v": None, "cap": CAP_NONE,
+    result = {"board": is_cardputer_zero(config), "ext5v": None, "grove5v": None, "cap": CAP_NONE,
               "cap_name": None, "radios": [], "pins": {}, "gnss": None,
               "nfc_spi": None, "camera": None, "checked": time.time()}
     if not result["board"]:
         return result
     result["ext5v"] = power_on_cap() if power else ext5v_state()
+    result["grove5v"] = grove5v_state()
     result["cap"], version = identify_cap(force=reidentify)
     if version is not None:
         result["cc1101_version"] = version
@@ -792,6 +825,8 @@ def main():
         return 1
     rail = {True: "on", False: "off", None: "not present"}[info["ext5v"]]
     print(f"Cap 5 V rail: {rail}")
+    grove = {True: "on", False: "off", None: "not present"}[info["grove5v"]]
+    print(f"Grove 5 V: {grove}")
     print(f"Cap: {info['cap_name'] or 'none detected'}")
     for radio in info["radios"]:
         print(f"  - {radio}")

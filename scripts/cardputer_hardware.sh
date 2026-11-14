@@ -24,6 +24,8 @@ ROOT="${RAGNAR_CARDPUTER_ROOT:-}"        # alternate root, for testing
 EXT5V="$ROOT/sys/class/leds/ext_5v_out/brightness"
 NFC_OVERLAY="spi0-spidev2-gpio22-overlay"
 
+SELF_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 log() { echo "[cardputer-hw] $*"; }
 
 config_file() {
@@ -42,9 +44,17 @@ cmdline_file() {
     return 1
 }
 
+# M5Stack's image shows itself through its device tree (the Cap rail, the LCD
+# framebuffer). On plain Raspberry Pi OS none of that exists, and the only sign
+# is Ragnar's own display setting, so ask Ragnar as well.
 is_cardputer() {
     [ -e "$EXT5V" ] || grep -qsi cardputer "$ROOT/proc/device-tree/model" \
-        || grep -qsE 'st7789v_m5st' "$ROOT/sys/class/graphics"/fb*/name
+        || grep -qsE 'st7789v_m5st' "$ROOT/sys/class/graphics"/fb*/name \
+        || { [ -z "$ROOT" ] && python3 -c "
+import sys
+sys.path.insert(0, '$SELF_REPO')
+import cardputer_caps as c
+sys.exit(0 if c.is_cardputer_zero(c.saved_config()) else 1)" >/dev/null 2>&1; }
 }
 
 camera_tools() {
@@ -73,10 +83,25 @@ serial_console_check() {
 # (an older version named a chip-select pin the daemon could not claim).
 refresh_lora_config() {
     local conf="$ROOT/etc/meshtasticd/config.d/ragnar-cardputerzero-cap-lora.yaml"
+    local dropin="$ROOT/etc/systemd/system/meshtasticd.service.d/ragnar-cap.conf"
+    local changed=0
     [ -f "$conf" ] || return 0
     if ! python3 "$REPO/cardputer_caps.py" --meshtasticd-config | cmp -s - "$conf"; then
         python3 "$REPO/cardputer_caps.py" --meshtasticd-config > "$conf"
-        [ -n "$ROOT" ] || systemctl restart meshtasticd.service 2>/dev/null || true
+        changed=1
+    fi
+    # The power step must run as root ("+"): as the service's own user it
+    # cannot read Ragnar's folder, and the daemon then never starts.
+    if [ -f "$dropin" ] && grep -q '^ExecStartPre=/' "$dropin"; then
+        sed -i 's|^ExecStartPre=/|ExecStartPre=+/|' "$dropin"
+        changed=1
+    fi
+    if [ "$changed" = 1 ]; then
+        if [ -z "$ROOT" ]; then
+            systemctl daemon-reload 2>/dev/null || true
+            systemctl reset-failed meshtasticd.service 2>/dev/null || true
+            systemctl restart meshtasticd.service 2>/dev/null || true
+        fi
         log "updated the LoRa Cap's meshtasticd settings"
     fi
 }
@@ -122,7 +147,13 @@ status() {
         echo "not a CardputerZero"
         return 0
     fi
-    echo "cap power rail: $([ -e "$EXT5V" ] && cat "$EXT5V" || echo missing)"
+    if [ -e "$EXT5V" ]; then
+        echo "cap power rail: $(cat "$EXT5V")"
+    else
+        # Plain Raspberry Pi OS has no control file; Ragnar switches the rail
+        # through the board's I/O expander instead.
+        echo "cap power rail: switched by Ragnar (sudo python3 cardputer_caps.py shows it)"
+    fi
     local config
     echo "camera tools: $(command -v rpicam-still libcamera-still 2>/dev/null | head -1 || true)"
     if config="$(config_file)" && grep -qE '^[[:space:]]*dtoverlay=imx219\b' "$config"; then
