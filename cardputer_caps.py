@@ -562,6 +562,9 @@ def camera_overlay_enabled(root=""):
     return None
 
 
+CAMERA_LIST_TIMEOUT = 40    # rpicam-hello --list-cameras, generous for a loaded 512 MB board
+
+
 def camera_sensor_bound(root=""):
     """True when the kernel's imx219 driver has a sensor attached."""
     try:
@@ -602,17 +605,23 @@ def detect_camera(runner=None, root=""):
 
         def runner():
             done = subprocess.run([tool, "--list-cameras"], capture_output=True,
-                                  text=True, timeout=20)
+                                  text=True, timeout=CAMERA_LIST_TIMEOUT)
             # The list is on stdout in current rpicam-apps and was on stderr
             # in older libcamera-apps: read both.
             return (done.stdout or "") + "\n" + (done.stderr or "")
+    failed = False
     try:
         out = runner() or ""
     except Exception as e:
-        out, errors = "", str(e)
+        out, errors, failed = "", str(e), True
     found = parse_camera_list(out)
     if found["present"]:
         return found
+    if failed and camera_sensor_bound(root):
+        # The listing did not finish (a busy unit: it can take longer than the
+        # timeout), but the kernel has the sensor. That is a camera.
+        return {"present": True, "model": CAMERA_SENSOR, "modes": "",
+                "note": "the camera list did not finish; going by the kernel's sensor"}
     return dict(camera_diagnosis(root, tool=True, tool_error=errors or out), present=False)
 
 

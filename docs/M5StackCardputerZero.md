@@ -292,6 +292,8 @@ down (`camera_rotation`). The live view stops a few seconds after the last
 viewer closes it, so it costs nothing when unused. It needs the `rpicam-apps`
 tools, which the installer and updater put in place.
 
+Everything is saved in `data/camera/`, which is **Files → Camera** in the web UI.
+
 **On the device:** press **P** for the camera screen. It shows the live picture;
 **OK** takes a photo, **Z** / **C** switch between photo and video, **OK** then
 starts and stops a recording, **Esc** or **P** leaves. Backspace still flips the

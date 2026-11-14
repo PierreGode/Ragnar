@@ -327,8 +327,45 @@ def normalize_nodes(nodes, my_num=None):
 # Live connector (lazy-imports the meshtastic package)
 # --------------------------------------------------------------------------
 
+# ── Ragnar's GPS for a node that has none ───────────────────────────────────
+# The Meshtastic daemon on this machine (a CardputerZero LoRa Cap, a Pi LoRa
+# HAT) has no GPS of its own: on the Cap the GNSS shares one UART that Ragnar
+# already reads, and two readers on one serial port corrupt both. So Ragnar
+# hands its fix to the node the way the Meshtastic phone apps do: a position
+# sent through the client link, which the node adopts as its own and includes
+# in its normal position broadcasts.
+SHARE_EVERY_SECONDS = 120      # while standing still
+SHARE_MIN_GAP_SECONDS = 30     # never more often than this
+SHARE_MOVED_METRES = 50        # ... but this much movement sends sooner
+
+_position_source = None        # callable -> {'lat', 'lon', 'alt'} or None
+_share_enabled = lambda: True  # noqa: E731
+
+
+_position_release = None       # called when the link stops needing the GPS
+
+
+def set_position_source(source, enabled=None, release=None):
+    """Tell the link where Ragnar's GPS fix comes from. `source()` returns
+    {'lat', 'lon', 'alt'} or None without a fix; `enabled()` is the user's
+    setting (meshtastic_share_gps)."""
+    global _position_source, _share_enabled, _position_release
+    _position_source = source
+    _position_release = release
+    if enabled is not None:
+        _share_enabled = enabled
+
+
+def _metres(lat1, lon1, lat2, lon2):
+    import math
+    k = 111320.0
+    dx = (lon2 - lon1) * k * math.cos(math.radians((lat1 + lat2) / 2))
+    return math.hypot(dx, (lat2 - lat1) * k)
+
+
 class MeshLink:
     def __init__(self):
+        self._shared = None      # last position handed to the node: {lat, lon, alt, ts}
         self._lock = threading.Lock()
         self._iface = None
         self._thread = None
@@ -355,7 +392,44 @@ class MeshLink:
                     "my_num": self._my_num,
                     "info": self._info,
                     "port": self._port, "host": self._host, "owner": self._owner,
+                    "gps_shared": dict(self._shared) if self._shared else None,
                     "error": self._error}
+
+    def _on_this_machine(self):
+        host = (self._host or "").rsplit(":", 1)[0]
+        return host in ("127.0.0.1", "localhost", "::1")
+
+    def share_position(self, now=None):
+        """Hand Ragnar's GPS fix to the node on this machine when one is due.
+        True when a position was sent."""
+        now = time.time() if now is None else now
+        if not (self._connected and self._iface is not None and self._on_this_machine()):
+            return False
+        try:
+            if _position_source is None or not _share_enabled():
+                return False
+            pos = _position_source()
+        except Exception:
+            return False
+        if not pos or pos.get("lat") is None or pos.get("lon") is None:
+            return False
+        lat, lon = float(pos["lat"]), float(pos["lon"])
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+            return False
+        last = self._shared
+        if last:
+            age = now - last["ts"]
+            moved = _metres(last["lat"], last["lon"], lat, lon)
+            if age < SHARE_MIN_GAP_SECONDS or (age < SHARE_EVERY_SECONDS and moved < SHARE_MOVED_METRES):
+                return False
+        alt = int(round(float(pos.get("alt") or 0)))
+        try:
+            self._iface.sendPosition(latitude=lat, longitude=lon, altitude=alt)
+        except Exception as exc:
+            self._error_gps = str(exc)
+            return False
+        self._shared = {"lat": lat, "lon": lon, "alt": alt, "ts": now}
+        return True
 
     def claimed_port(self):
         """Serial port this link holds or has reserved (for serial_claims)."""
@@ -593,6 +667,7 @@ class MeshLink:
             if self._stop.is_set():
                 break
             self._refresh_nodes()
+            self.share_position()
 
     def _store_outbound(self, text, dest, channel, via):
         """Log a message we sent into the feed (tagged outbound)."""
@@ -742,6 +817,12 @@ class MeshLink:
             self._iface = None
             self._connected = False
             self._port = self._host = self._reserved = self._owner = None
+            self._shared = None
+        try:
+            if _position_release is not None:
+                _position_release()
+        except Exception:
+            pass
         return {"ok": True}
 
 

@@ -182,6 +182,14 @@ journalctl -u meshtasticd -n 40          # the daemon's own log
 
 **Good to know**
 
+- **GPS for the node.** The Meshtastic daemon cannot read the Cap's GNSS itself:
+  Ragnar reads that serial port, and two readers on one port corrupt both. So
+  Ragnar hands its GPS fix to the node while the **Node** link is on (every two
+  minutes, sooner when moving), and the node uses it as its own position. The
+  device tag on the Mesh Nodes page says *GPS from Ragnar* once a fix has been
+  handed over, or *waiting for GPS fix* (indoors, or just started). A node with
+  a position broadcasts it to the mesh; switch the hand-over off with
+  `meshtastic_share_gps: false` in the config if you do not want that.
 - The **Mesh Nodes** button only appears once a Meshtastic source is available
   (the daemon running, or a USB node plugged in).
 - The script only writes two files: the radio's wiring for meshtasticd, and a
@@ -258,6 +266,15 @@ ships that overlay.
    full size, or ✕ to delete it.
 
 Photos are kept on the unit in `data/camera/` as `ragnar_YYYYMMDD_HHMMSS.jpg`.
+
+### Where photos and videos are saved
+
+Everything the camera takes, from the browser or from the device's own screen,
+is saved on the unit in `data/camera/`. Open it under **Files** → **Camera**
+(or press *Files → Camera* in the Camera panel): preview a photo, play a video,
+download, rename, move or delete, like any other folder there. The **Photos**
+and **Videos** lists in the Camera panel show the files that still carry
+Ragnar's own names; a renamed or moved file stays in **Files** only.
 
 ### Example: record a video from the browser
 
@@ -430,6 +447,8 @@ All in `config/shared_config.json`; none of them is needed for normal use.
 | Meshtastic finds no LoRa | meshtasticd is not set up yet: press **Set up Meshtastic** in the hardware panel. If you set it up before this fix, press **Set up again** (the earlier radio settings named a chip-select pin the daemon could not use). |
 | Mesh Nodes asks for a USB node although the LoRa Cap is fitted | The Cap's service is not running. Update Ragnar (older installs could not start it), or press **Set up again** in the hardware panel. Check: `sudo systemctl status meshtasticd`. |
 | No **Mesh Nodes** button | The daemon is not running: `sudo scripts/cardputer_lora_meshtastic.sh status`. |
+| Meshtastic node has no position | Press **▶ Node** in Mesh Nodes and wait for a GPS fix (outdoors, a few minutes after power-on). The tag shows *waiting for GPS fix* until then. The node gets the position from Ragnar, not from the GNSS directly. |
+| **Camera** panel disappears now and then | Fixed: update Ragnar. A camera that was found now stays found. |
 | Mesh Nodes connects but hears nothing | Region not set (step 3 above), or no Meshtastic traffic in range. |
 | CC1101 tag says not detected | The LoRa Cap is fitted instead, or the CC1101 Cap was fitted with the power on. |
 | CC1101 sweep stops with "never entered receive" | The radio did not lock; power-cycle the unit with the Cap fitted. |

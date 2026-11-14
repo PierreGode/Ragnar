@@ -576,7 +576,7 @@
       else { mt.className='tag idle'; mt.textContent=det.mqtt_available===false?'MQTT n/a':'MQTT off'; }
       if(st&&st.running){ running=true; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;Node'; ensurePoll(); }
       updateSend();
-      if(det.available){ dt.className='tag live'; dt.textContent=(det.usb_desc||'Meshtastic')+' ready'; if(running||mqttOn)hideVeil(); }
+      if(det.available){ dt.className='tag live'; dt.textContent=(det.usb_desc||'Meshtastic')+' ready'+(st.running&&det.local_daemon?(st.gps_shared?' · GPS from Ragnar':' · waiting for GPS fix'):''); if(running||mqttOn)hideVeil(); }
       else { dt.className='tag idle'; dt.textContent=det.error?'no node':'detecting…';
         if(DEMO_ON){ if(!running&&!mqttOn) synthMode(); }
         else if(!running&&!mqttOn){ setMode('idle'); showVeil('No Meshtastic node', (det.error||'Plug a Meshtastic device in via USB')+' — or connect ☁ MQTT to watch the mesh over the Internet with no node.', det.tools_installed===false); } }

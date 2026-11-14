@@ -27598,7 +27598,8 @@ function displayDirectoryTree() {
         { name: 'Vulnerabilities', path: '/vulnerabilities', icon: '⚠️' },
         { name: 'Logs', path: '/logs', icon: '📋' },
         { name: 'Backups', path: '/backups', icon: '💾' },
-        { name: 'Uploads', path: '/uploads', icon: '📤' }
+        { name: 'Uploads', path: '/uploads', icon: '📤' },
+        { name: 'Camera', path: '/camera', icon: '📷' }
     ];
     
     let html = '<div class="space-y-1">';
@@ -30017,6 +30018,12 @@ function deleteCameraVideo(name) {
             else _cameraNote((d && d.error) || 'Could not delete the video', true);
         })
         .catch(e => console.error('Error deleting video:', e));
+}
+
+function openCameraFolder() {
+    showTab('files');
+    // After the tab's own first listing of '/', so that one cannot land on top.
+    setTimeout(() => loadFiles('/camera'), 400);
 }
 
 function flipCamera() {

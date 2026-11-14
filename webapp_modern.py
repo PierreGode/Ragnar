@@ -15038,6 +15038,44 @@ def reset_vulnerability_scan_history():
 
 _wardriving_engine = None
 
+
+def _mesh_standby_port():
+    """Where a standby GPS reader may open between wardriving sessions: the
+    GNSS of a CardputerZero LoRa + GNSS Cap, once the hardware scan has seen
+    that Cap. (port, baud) or (None, None)."""
+    try:
+        import cardputer_caps
+        data = _cz_hw.get('data')
+        if data is None:
+            # Nobody has opened the hardware panel yet: find out which Cap is on.
+            if cardputer_caps.is_cardputer_zero(shared_data.config):
+                _cz_refresh_async()
+            return None, None
+        if data.get('cap') == cardputer_caps.CAP_LORA_GNSS:
+            return cardputer_caps.GNSS_PORT, cardputer_caps.GNSS_BAUD
+    except Exception:
+        pass
+    return None, None
+
+
+def _mesh_gps_fix():
+    """Ragnar's current GPS fix for the Meshtastic node on this unit: from the
+    wardriving session's GPS, or from the standby reader between sessions."""
+    engine = _get_wardriving_engine()
+    port, baud = _mesh_standby_port()
+    gps = engine.standby_gps(port, baud)
+    return gps.get_position() if gps is not None else None
+
+
+def _mesh_gps_release():
+    if _wardriving_engine is not None:
+        _wardriving_engine.stop_standby_gps()
+
+
+meshtastic_node.set_position_source(
+    _mesh_gps_fix, lambda: bool(shared_data.config.get('meshtastic_share_gps', True)),
+    release=_mesh_gps_release)
+
 def _get_wardriving_engine():
     global _wardriving_engine
     if _wardriving_engine is None:
@@ -26431,6 +26469,7 @@ def list_files_api():
                 {'name': 'logs', 'is_directory': True, 'path': '/logs'},
                 {'name': 'backups', 'is_directory': True, 'path': '/backups'},
                 {'name': 'uploads', 'is_directory': True, 'path': '/uploads'},
+                {'name': 'camera', 'is_directory': True, 'path': '/camera'},
                 {'name': 'console_scripts', 'is_directory': True, 'path': '/console_scripts'},
                 {'name': 'engagement_playbooks', 'is_directory': True, 'path': '/engagement_playbooks'},
                 {'name': 'rubber-ducky', 'is_directory': True, 'path': '/rubber-ducky'}
@@ -26457,6 +26496,11 @@ def list_files_api():
         elif path == '/logs' or path.startswith('/logs/'):
             try:
                 actual_path = _resolve_legacy_path('/logs', os.path.join(shared_data.datadir, 'logs'), path)
+            except ValueError:
+                return jsonify({'error': 'Invalid path'}), 400
+        elif path == '/camera' or path.startswith('/camera/'):
+            try:
+                actual_path = _resolve_legacy_path('/camera', _camera_dir(), path)
             except ValueError:
                 return jsonify({'error': 'Invalid path'}), 400
         elif path == '/backups' or path.startswith('/backups/'):
@@ -26573,6 +26617,11 @@ def preview_file_api():
         elif file_path == '/logs' or file_path.startswith('/logs/'):
             try:
                 actual_path = _resolve_legacy_path('/logs', os.path.join(shared_data.datadir, 'logs'), file_path)
+            except ValueError:
+                return jsonify({'error': 'Invalid path'}), 400
+        elif file_path == '/camera' or file_path.startswith('/camera/'):
+            try:
+                actual_path = _resolve_legacy_path('/camera', _camera_dir(), file_path)
             except ValueError:
                 return jsonify({'error': 'Invalid path'}), 400
         elif file_path == '/backups' or file_path.startswith('/backups/'):
@@ -26738,6 +26787,11 @@ def download_file_api():
                 actual_path = _resolve_legacy_path('/logs', os.path.join(shared_data.datadir, 'logs'), file_path)
             except ValueError:
                 return jsonify({'error': 'Invalid file path'}), 400
+        elif file_path == '/camera' or file_path.startswith('/camera/'):
+            try:
+                actual_path = _resolve_legacy_path('/camera', _camera_dir(), file_path)
+            except ValueError:
+                return jsonify({'error': 'Invalid file path'}), 400
         elif file_path == '/backups' or file_path.startswith('/backups/'):
             try:
                 actual_path = _resolve_legacy_path('/backups', shared_data.backupdir, file_path)
@@ -26831,6 +26885,11 @@ def delete_file_api():
                 actual_path = _resolve_legacy_path('/logs', os.path.join(shared_data.datadir, 'logs'), file_path)
             except ValueError:
                 return jsonify({'error': 'Invalid file path'}), 400
+        elif file_path == '/camera' or file_path.startswith('/camera/'):
+            try:
+                actual_path = _resolve_legacy_path('/camera', _camera_dir(), file_path)
+            except ValueError:
+                return jsonify({'error': 'Invalid file path'}), 400
         elif file_path == '/backups' or file_path.startswith('/backups/'):
             try:
                 actual_path = _resolve_legacy_path('/backups', shared_data.backupdir, file_path)
@@ -26864,6 +26923,18 @@ def delete_file_api():
 
         if not os.path.exists(actual_path):
             return jsonify({'error': 'File not found'}), 404
+
+        # A video still being recorded cannot be removed from under the camera.
+        if file_path == '/camera' or file_path.startswith('/camera/'):
+            try:
+                rec = _camera().recording()
+            except Exception:
+                rec = None
+            if rec:
+                busy = os.path.realpath(os.path.join(_camera_dir(), rec['name']))
+                target = os.path.realpath(actual_path)
+                if busy == target or busy.startswith(target + os.sep):
+                    return jsonify({'error': 'A video is still recording there'}), 409
 
         # Delete file or directory
         if os.path.isdir(actual_path):
@@ -26926,6 +26997,8 @@ def _resolve_readable_path(file_path):
             return resolved
     if file_path == '/logs' or file_path.startswith('/logs/'):
         return _resolve_legacy_path('/logs', os.path.join(shared_data.datadir, 'logs'), file_path)
+    if file_path == '/camera' or file_path.startswith('/camera/'):
+        return _resolve_legacy_path('/camera', _camera_dir(), file_path)
     if file_path == '/backups' or file_path.startswith('/backups/'):
         return _resolve_legacy_path('/backups', shared_data.backupdir, file_path)
     if file_path == '/uploads' or file_path.startswith('/uploads/'):
