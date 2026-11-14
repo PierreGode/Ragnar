@@ -355,10 +355,105 @@ def probe_cc1101(transfer=spi_transfer):
 
 
 def serial_console_on(port=None, cmdline_path="/proc/cmdline"):
-    """True when the kernel console owns the UART the GNSS receiver uses."""
+    """True when the kernel console is on the UART the GNSS receiver uses.
+    That alone does not stop the port being read: the kernel only writes
+    boot messages to it. The login prompt is what takes the receiver's bytes
+    (see serial_getty_active)."""
     cmdline = _read_text(cmdline_path) or ""
     name = os.path.basename(port or GNSS_PORT)
     return f"console={name}" in cmdline or "console=serial0" in cmdline
+
+
+def _getty_unit(port=None):
+    return f"serial-getty@{os.path.basename(port or GNSS_PORT)}.service"
+
+
+def _systemctl(*args, runner=None):
+    """Run systemctl, returning (exit code, stdout). (127, '') without it."""
+    if runner is not None:
+        return runner(list(args))
+    tool = shutil.which("systemctl")
+    if not tool:
+        return 127, ""
+    try:
+        done = subprocess.run([tool] + list(args), capture_output=True, text=True, timeout=20)
+        return done.returncode, done.stdout.strip()
+    except Exception as e:
+        logger.debug(f"systemctl {' '.join(args)} failed: {e}")
+        return 1, ""
+
+
+def serial_getty_active(port=None, runner=None):
+    """True while a login prompt holds the GNSS UART. It reads the port, so
+    the receiver's sentences never reach the GPS reader in one piece."""
+    code, out = _systemctl("is-active", _getty_unit(port), runner=runner)
+    return code == 0 and out == "active"
+
+
+def _cmdline_files(root=""):
+    return [root + "/boot/firmware/cmdline.txt", root + "/boot/cmdline.txt"]
+
+
+def strip_serial_console(cmdline, port=None):
+    """A kernel command line without its console on the GNSS UART. Other
+    consoles (tty1) and every other argument are kept, in order."""
+    name = os.path.basename(port or GNSS_PORT)
+    drop = ("console=serial0", f"console={name}")
+    kept = [word for word in cmdline.split()
+            if not any(word == d or word.startswith(d + ",") for d in drop)]
+    return " ".join(kept)
+
+
+def free_gnss_uart(port=None, root="", runner=None):
+    """Hand the UART to the GNSS receiver: stop the login prompt now (so GPS
+    works without a reboot), keep it from coming back, and take the serial
+    console off the kernel command line for the next boot. cmdline.txt is
+    copied to cmdline.txt.ragnar-bak first. Returns (ok, message)."""
+    unit = _getty_unit(port)
+    done = []
+    if serial_getty_active(port, runner=runner):
+        _systemctl("stop", unit, runner=runner)
+        if serial_getty_active(port, runner=runner):
+            return False, f"could not stop {unit} (run as root)"
+        done.append("stopped the serial login prompt")
+    # The prompt is generated from the kernel command line, so mask it too:
+    # it then stays away even if console= is put back.
+    _systemctl("mask", unit, runner=runner)
+    for path in _cmdline_files(root):
+        text = _read_text(path)
+        if text is None:
+            continue
+        stripped = strip_serial_console(text, port)
+        if stripped.split() == text.split():
+            break
+        try:
+            if not os.path.exists(path + ".ragnar-bak"):
+                shutil.copyfile(path, path + ".ragnar-bak")
+            tmp = path + ".ragnar-tmp"
+            with open(tmp, "w") as f:
+                f.write(stripped + "\n")
+            os.replace(tmp, path)
+            done.append(f"removed the serial console from {path}")
+        except OSError as e:
+            return False, f"could not edit {path}: {e}"
+        break
+    return True, "; ".join(done) if done else "the port was already free"
+
+
+def restore_serial_console(port=None, root="", runner=None):
+    """Undo free_gnss_uart: put cmdline.txt back and allow the login prompt
+    again (it returns at the next boot). Returns (ok, message)."""
+    _systemctl("unmask", _getty_unit(port), runner=runner)
+    for path in _cmdline_files(root):
+        backup = path + ".ragnar-bak"
+        if os.path.exists(backup):
+            try:
+                shutil.copyfile(backup, path)
+                os.remove(backup)
+            except OSError as e:
+                return False, f"could not restore {path}: {e}"
+            return True, f"restored {path}; reboot to get the serial console back"
+    return True, "no saved cmdline.txt to restore; the login prompt is allowed again"
 
 
 def probe_gnss(port=None, baud=GNSS_BAUD, seconds=2.0, opener=None):
@@ -419,22 +514,74 @@ def nmea_valid(line):
         return False
 
 
-def detect_camera(runner=None):
+CAMERA_SENSOR = "imx219"
+CAMERA_SETUP_HINT = "sudo scripts/cardputer_hardware.sh camera"
+
+
+def camera_overlay_enabled(root=""):
+    """True / False for `dtoverlay=imx219` in config.txt, None without one.
+    The CardputerZero's camera is not auto-detected: M5Stack's image sets
+    camera_auto_detect=0 and loads the overlay by name."""
+    import re
+    for path in (root + "/boot/firmware/config.txt", root + "/boot/config.txt"):
+        text = _read_text(path)
+        if text is not None:
+            return bool(re.search(rf"^\s*dtoverlay={CAMERA_SENSOR}\b", text, re.M))
+    return None
+
+
+def camera_sensor_bound(root=""):
+    """True when the kernel's imx219 driver has a sensor attached."""
+    try:
+        entries = os.listdir(root + f"/sys/bus/i2c/drivers/{CAMERA_SENSOR}")
+    except OSError:
+        return False
+    return any("-" in name for name in entries)       # e.g. "10-0010"
+
+
+def camera_diagnosis(root="", tool=True, tool_error=""):
+    """Why no camera was listed, as {'reason', 'fix'}; most likely first."""
+    overlay = camera_overlay_enabled(root)
+    if overlay is False:
+        return {"reason": "the camera overlay is not enabled (dtoverlay=imx219 in config.txt)",
+                "fix": CAMERA_SETUP_HINT, "code": "overlay"}
+    if not camera_sensor_bound(root):
+        return {"reason": "the camera sensor did not answer at boot (the kernel has no imx219 attached)",
+                "fix": "check the overlay in config.txt, then reboot: " + CAMERA_SETUP_HINT,
+                "code": "sensor"}
+    if not tool:
+        return {"reason": "the sensor is there, but the camera tools (rpicam-apps) are not installed",
+                "fix": CAMERA_SETUP_HINT, "code": "tools"}
+    detail = (tool_error or "").strip().splitlines()
+    return {"reason": "the sensor is there, but libcamera lists no camera"
+                      + (f" ({detail[-1][:160]})" if detail else ""),
+            "fix": "sudo apt install --reinstall rpicam-apps libcamera0.*", "code": "libcamera"}
+
+
+def detect_camera(runner=None, root=""):
     """The camera libcamera sees, e.g. {'present': True, 'model': 'imx219',
-    'modes': '3280x2464'}; present False when there is none or no tool."""
+    'modes': '3280x2464'}. When there is none: present False plus `reason`
+    and `fix`, worked out from config.txt and the kernel (camera_diagnosis)."""
     tool = shutil.which("rpicam-hello") or shutil.which("libcamera-hello")
+    errors = ""
     if runner is None:
         if not tool:
-            return {"present": False, "reason": "rpicam-apps not installed"}
+            return dict(camera_diagnosis(root, tool=False), present=False)
 
         def runner():
-            return subprocess.run([tool, "--list-cameras"], capture_output=True,
-                                  text=True, timeout=20).stdout
+            done = subprocess.run([tool, "--list-cameras"], capture_output=True,
+                                  text=True, timeout=20)
+            # The list is on stdout in current rpicam-apps and was on stderr
+            # in older libcamera-apps: read both.
+            return (done.stdout or "") + "\n" + (done.stderr or "")
     try:
         out = runner() or ""
     except Exception as e:
-        return {"present": False, "reason": str(e)}
-    return parse_camera_list(out)
+        out, errors = "", str(e)
+    found = parse_camera_list(out)
+    if found["present"]:
+        return found
+    return dict(camera_diagnosis(root, tool=True, tool_error=errors or out), present=False)
 
 
 def parse_camera_list(out):
@@ -494,15 +641,19 @@ MESHTASTICD_CONFIG_NAME = "ragnar-cardputerzero-cap-lora.yaml"
 MESHTASTICD_CONFIG = """\
 # Written by Ragnar (scripts/cardputer_lora_meshtastic.sh).
 # M5Stack CardputerZero + Cap LoRa-1262: SX1262 on SPI0 CS1.
+# Same pins as Meshtastic's own preset (bin/config.d/lora-cardputer-zero.yaml).
+# No CS line: the kernel drives chip-select 1 (GPIO7) through spidev0.1, and
+# naming it here makes the daemon try to claim a pin it cannot have.
 Lora:
   Module: sx1262
-  CS: 7
+  spidev: spidev0.1
+  spiSpeed: 1000000
+  gpiochip: 0
   IRQ: 23
-  Busy: 22
   Reset: 26
+  Busy: 22
   DIO2_AS_RF_SWITCH: true
   DIO3_TCXO_VOLTAGE: 3.0
-  spidev: spidev0.1
 """
 
 
@@ -520,6 +671,19 @@ def prepare_lora():
     if not enable_lora_rf_switch():
         return False, "could not set the Cap's RF switch (I2C 0x43)"
     return True, "LoRa Cap powered, RF switch on"
+
+
+def lora_daemon_state(root="", runner=None):
+    """How far the LoRa Cap is set up as a Meshtastic node:
+    {'installed', 'configured', 'active'}. meshtasticd is Meshtastic's own
+    firmware built for Linux: it drives the bare SX1262 over SPI, so the Pi
+    itself is the node and Ragnar talks to it on 127.0.0.1:4403."""
+    installed = bool(shutil.which("meshtasticd")) or os.path.exists(root + "/usr/sbin/meshtasticd") \
+        or os.path.exists(root + "/usr/bin/meshtasticd")
+    configured = os.path.exists(root + "/etc/meshtasticd/config.d/" + MESHTASTICD_CONFIG_NAME)
+    code, out = _systemctl("is-active", "meshtasticd.service", runner=runner)
+    return {"installed": installed, "configured": configured,
+            "active": code == 0 and out == "active"}
 
 
 # The Cap found at start: (cap id, CC1101 version or None). None = not looked yet.
@@ -543,7 +707,8 @@ def identify_cap(force=False):
     return _identity
 
 
-def detect(config=None, power=True, probe_serial=True, camera=True, reidentify=False):
+def detect(config=None, power=True, probe_serial=True, camera=True, reidentify=False,
+           free_uart=False):
     """What is on the header and whether the camera answers.
 
     Returns a dict: board, ext5v, cap ('none' / 'lora_gnss' / 'subghz_nfc'),
@@ -553,7 +718,9 @@ def detect(config=None, power=True, probe_serial=True, camera=True, reidentify=F
     UART (pass it when the GPS reader already has the port open: two readers
     would each get half the bytes); camera=False skips the camera query.
     The Cap itself is identified once per start (see identify_cap);
-    reidentify=True looks again, but only if none was found before."""
+    reidentify=True looks again, but only if none was found before.
+    free_uart=True takes the serial login prompt off the UART when the
+    LoRa + GNSS Cap is fitted (see free_gnss_uart); needs root."""
     allow_expander(config)
     result = {"board": is_cardputer_zero(config), "ext5v": None, "cap": CAP_NONE,
               "cap_name": None, "radios": [], "pins": {}, "gnss": None,
@@ -570,10 +737,17 @@ def detect(config=None, power=True, probe_serial=True, camera=True, reidentify=F
         result["radios"] = list(info["radios"])
         result["pins"] = dict(info["pins"])
     if result["cap"] == CAP_LORA_GNSS:
-        console = serial_console_on()
-        heard = 0 if (console or not probe_serial) else probe_gnss()
-        result["gnss"] = {"port": GNSS_PORT, "baud": GNSS_BAUD,
-                          "sentences": heard, "console_conflict": console}
+        getty = serial_getty_active()
+        freed = None
+        if getty and free_uart:
+            ok, freed = free_gnss_uart()
+            logger.info(f"GNSS UART: {freed}")
+            getty = serial_getty_active()
+        heard = 0 if (getty or not probe_serial) else probe_gnss()
+        result["gnss"] = {"port": GNSS_PORT, "baud": GNSS_BAUD, "sentences": heard,
+                          "console_conflict": getty, "kernel_console": serial_console_on(),
+                          "freed": freed}
+        result["lora"] = lora_daemon_state()
     if result["cap"] == CAP_SUBGHZ_NFC:
         result["nfc_spi"] = os.path.exists(NFC_SPI_DEV)
     result["camera"] = detect_camera() if camera else None
@@ -597,6 +771,14 @@ def main():
         ok, message = prepare_lora()
         print(message)
         return 0 if ok else 1
+    if "--free-gnss-uart" in sys.argv:
+        ok, message = free_gnss_uart()
+        print(message)
+        return 0 if ok else 1
+    if "--restore-serial-console" in sys.argv:
+        ok, message = restore_serial_console()
+        print(message)
+        return 0 if ok else 1
     if "--meshtasticd-config" in sys.argv:
         sys.stdout.write(MESHTASTICD_CONFIG)
         return 0
@@ -616,15 +798,21 @@ def main():
     if info["gnss"]:
         g = info["gnss"]
         if g["console_conflict"]:
-            print(f"  GNSS: {g['port']} is the serial console; remove console=serial0 "
-                  "from cmdline.txt and reboot")
+            print(f"  GNSS: a serial login prompt holds {g['port']}; free it with: "
+                  "sudo python3 cardputer_caps.py --free-gnss-uart")
         else:
             print(f"  GNSS: {g['sentences']} NMEA sentence(s) heard on {g['port']}")
+        lora = info.get("lora") or {}
+        print("  Meshtastic: " + ("running" if lora.get("active") else
+              "set up, not running" if lora.get("configured") else
+              "not set up (sudo scripts/cardputer_lora_meshtastic.sh install)"))
     if info["cap"] == CAP_SUBGHZ_NFC and not info["nfc_spi"]:
         print(f"  NFC: {NFC_SPI_DEV} missing; add dtoverlay={NFC_OVERLAY} to config.txt and reboot")
     cam = info["camera"] or {}
     print("Camera: " + (f"{cam.get('model')} ({cam.get('modes')})" if cam.get("present")
                         else f"not found ({cam.get('reason', 'unknown')})"))
+    if not cam.get("present") and cam.get("fix"):
+        print(f"  fix: {cam['fix']}")
     return 0
 
 

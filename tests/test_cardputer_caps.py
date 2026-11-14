@@ -95,7 +95,7 @@ def test_cc1101_probe_survives_a_missing_spi_node():
     assert cc.probe_cc1101(lambda device, data: None) is None
 
 
-def fake_board(monkeypatch, tmp_path, lora=False, cc1101=None, console=False,
+def fake_board(monkeypatch, tmp_path, lora=False, cc1101=None, console=False, getty=None,
                nmea=0, camera="0 : imx219 [3280x2464 10-bit RGGB] (/base/soc/i2c0mux/i2c@1/imx219@10)"):
     rail = tmp_path / "brightness"
     rail.write_text("0\n")
@@ -105,6 +105,12 @@ def fake_board(monkeypatch, tmp_path, lora=False, cc1101=None, console=False,
     monkeypatch.setattr(cc, "probe_lora_cap", lambda: lora)
     monkeypatch.setattr(cc, "probe_cc1101", lambda: cc1101)
     monkeypatch.setattr(cc, "serial_console_on", lambda: console)
+    held = [console if getty is None else getty]
+    monkeypatch.setattr(cc, "serial_getty_active", lambda *a, **k: held[0])
+    monkeypatch.setattr(cc, "free_gnss_uart",
+                        lambda *a, **k: (held.__setitem__(0, False), (True, "freed"))[1])
+    monkeypatch.setattr(cc, "lora_daemon_state",
+                        lambda *a, **k: {"installed": False, "configured": False, "active": False})
     monkeypatch.setattr(cc, "probe_gnss", lambda: nmea)
     monkeypatch.setattr(cc, "detect_camera", lambda: cc.parse_camera_list(camera))
     return rail
@@ -117,7 +123,8 @@ def test_lora_gnss_cap_is_detected(monkeypatch, tmp_path):
     assert info["cap"] == "lora_gnss"
     assert info["pins"]["irq"] == 23 and info["pins"]["reset"] == 26 and info["pins"]["busy"] == 22
     assert info["gnss"] == {"port": "/dev/ttyS0", "baud": 115200, "sentences": 3,
-                            "console_conflict": False}
+                            "console_conflict": False, "kernel_console": False, "freed": None}
+    assert info["lora"] == {"installed": False, "configured": False, "active": False}
     assert info["camera"] == {"present": True, "model": "imx219", "modes": "3280x2464"}
 
 
@@ -125,6 +132,121 @@ def test_gnss_is_not_opened_while_the_console_owns_the_uart(monkeypatch, tmp_pat
     fake_board(monkeypatch, tmp_path, lora=True, console=True, nmea=99)
     info = cc.detect()
     assert info["gnss"]["console_conflict"] is True and info["gnss"]["sentences"] == 0
+
+
+def test_kernel_console_alone_does_not_block_the_gnss(monkeypatch, tmp_path):
+    # Only the login prompt reads the port. console= without it is harmless.
+    fake_board(monkeypatch, tmp_path, lora=True, console=True, getty=False, nmea=3)
+    info = cc.detect()
+    assert info["gnss"]["console_conflict"] is False and info["gnss"]["sentences"] == 3
+    assert info["gnss"]["kernel_console"] is True
+
+
+def test_detect_frees_the_uart_when_asked(monkeypatch, tmp_path):
+    fake_board(monkeypatch, tmp_path, lora=True, console=True, nmea=3)
+    info = cc.detect(free_uart=True)
+    assert info["gnss"]["console_conflict"] is False and info["gnss"]["sentences"] == 3
+    assert info["gnss"]["freed"] == "freed"
+
+
+def test_detect_leaves_the_uart_alone_without_the_gnss_cap(monkeypatch, tmp_path):
+    fake_board(monkeypatch, tmp_path, cc1101=0x14, console=True)
+    monkeypatch.setattr(cc, "free_gnss_uart", lambda *a, **k: pytest.fail("no GNSS Cap fitted"))
+    assert cc.detect(free_uart=True)["gnss"] is None
+
+
+# ── freeing the UART ─────────────────────────────────────────────────────────
+
+class FakeSystemd:
+    def __init__(self, active=True, stoppable=True):
+        self.active, self.stoppable, self.calls = active, stoppable, []
+
+    def __call__(self, args):
+        self.calls.append(args)
+        if args[0] == "is-active":
+            return (0, "active") if self.active else (3, "inactive")
+        if args[0] == "stop" and self.stoppable:
+            self.active = False
+        return 0, ""
+
+
+@pytest.mark.parametrize("before,after", [
+    ("console=serial0,115200 console=tty1 root=PARTUUID=1-02 rootwait",
+     "console=tty1 root=PARTUUID=1-02 rootwait"),
+    ("console=tty1 console=ttyS0,115200 quiet", "console=tty1 quiet"),
+    ("console=tty1 root=/dev/mmcblk0p2", "console=tty1 root=/dev/mmcblk0p2"),
+    ("console=ttyS01,9600 console=serial0", "console=ttyS01,9600"),
+])
+def test_strip_serial_console(before, after):
+    assert cc.strip_serial_console(before, "/dev/ttyS0") == after
+
+
+def test_free_gnss_uart_stops_the_prompt_and_edits_cmdline(tmp_path):
+    boot = tmp_path / "boot" / "firmware"
+    boot.mkdir(parents=True)
+    cmdline = boot / "cmdline.txt"
+    cmdline.write_text("console=serial0,115200 console=tty1 root=PARTUUID=1-02 rootwait\n")
+    systemd = FakeSystemd()
+    ok, message = cc.free_gnss_uart("/dev/ttyS0", root=str(tmp_path), runner=systemd)
+    assert ok and "stopped" in message and "cmdline.txt" in message
+    assert cmdline.read_text() == "console=tty1 root=PARTUUID=1-02 rootwait\n"
+    assert (boot / "cmdline.txt.ragnar-bak").read_text().startswith("console=serial0,115200")
+    assert ["stop", "serial-getty@ttyS0.service"] in systemd.calls
+    assert ["mask", "serial-getty@ttyS0.service"] in systemd.calls
+    # Again: nothing left to do, and the first backup is not overwritten.
+    ok, message = cc.free_gnss_uart("/dev/ttyS0", root=str(tmp_path), runner=systemd)
+    assert ok and message == "the port was already free"
+    assert (boot / "cmdline.txt.ragnar-bak").read_text().startswith("console=serial0,115200")
+
+
+def test_free_gnss_uart_reports_a_prompt_it_cannot_stop(tmp_path):
+    ok, message = cc.free_gnss_uart("/dev/ttyS0", root=str(tmp_path),
+                                    runner=FakeSystemd(stoppable=False))
+    assert not ok and "serial-getty@ttyS0.service" in message
+
+
+def test_restore_serial_console_puts_cmdline_back(tmp_path):
+    boot = tmp_path / "boot" / "firmware"
+    boot.mkdir(parents=True)
+    original = "console=serial0,115200 console=tty1 root=x\n"
+    (boot / "cmdline.txt").write_text(original)
+    systemd = FakeSystemd()
+    cc.free_gnss_uart("/dev/ttyS0", root=str(tmp_path), runner=systemd)
+    ok, _ = cc.restore_serial_console("/dev/ttyS0", root=str(tmp_path), runner=systemd)
+    assert ok and (boot / "cmdline.txt").read_text() == original
+    assert ["unmask", "serial-getty@ttyS0.service"] in systemd.calls
+
+
+# ── camera diagnosis ─────────────────────────────────────────────────────────
+
+def camera_root(tmp_path, overlay=True, sensor=True):
+    boot = tmp_path / "boot" / "firmware"
+    boot.mkdir(parents=True)
+    (boot / "config.txt").write_text("camera_auto_detect=0\n" + ("dtoverlay=imx219\n" if overlay else
+                                                                 "#dtoverlay=imx219\n"))
+    driver = tmp_path / "sys" / "bus" / "i2c" / "drivers" / "imx219"
+    driver.mkdir(parents=True)
+    (driver / "bind").write_text("")
+    if sensor:
+        (driver / "10-0010").mkdir()
+    return str(tmp_path)
+
+
+@pytest.mark.parametrize("overlay,sensor,tool,code", [
+    (False, False, True, "overlay"), (True, False, True, "sensor"),
+    (True, True, False, "tools"), (True, True, True, "libcamera"),
+])
+def test_camera_diagnosis_names_the_first_thing_missing(tmp_path, overlay, sensor, tool, code):
+    found = cc.camera_diagnosis(camera_root(tmp_path, overlay, sensor), tool=tool)
+    assert found["code"] == code and found["reason"] and found["fix"]
+
+
+def test_detect_camera_explains_an_empty_list(tmp_path):
+    found = cc.detect_camera(lambda: "No cameras available!\n", root=camera_root(tmp_path, overlay=False))
+    assert found["present"] is False and found["code"] == "overlay"
+    listed = "Available cameras\n0 : imx219 [3280x2464 10-bit RGGB] (/base/soc/i2c0mux/i2c@1/imx219@10)\n"
+    assert cc.detect_camera(lambda: listed, root=str(tmp_path)) == {
+        "present": True, "model": "imx219", "modes": "3280x2464"}
 
 
 def test_subghz_nfc_cap_is_detected(monkeypatch, tmp_path):
@@ -239,11 +361,26 @@ def test_camera_list_parsing():
 
 def test_meshtasticd_config_uses_the_caps_wiring():
     cfg = cc.MESHTASTICD_CONFIG
-    for line in ("Module: sx1262", "CS: 7", "IRQ: 23", "Busy: 22", "Reset: 26",
+    for line in ("Module: sx1262", "IRQ: 23", "Busy: 22", "Reset: 26", "gpiochip: 0",
                  "DIO2_AS_RF_SWITCH: true", "DIO3_TCXO_VOLTAGE: 3.0", "spidev: spidev0.1"):
         assert f"  {line}\n" in cfg, line
     yaml = pytest.importorskip("yaml")
-    assert yaml.safe_load(cfg)["Lora"]["Reset"] == 26
+    lora = yaml.safe_load(cfg)["Lora"]
+    assert lora["Reset"] == 26
+    # The kernel owns chip-select 1 through spidev0.1; naming it as a GPIO
+    # makes meshtasticd fail to claim the pin and never find the radio.
+    assert "CS" not in lora
+
+
+def test_lora_daemon_state(tmp_path):
+    systemd = lambda args: (0, "active")   # noqa: E731
+    conf = tmp_path / "etc" / "meshtasticd" / "config.d"
+    conf.mkdir(parents=True)
+    state = cc.lora_daemon_state(root=str(tmp_path), runner=systemd)
+    assert state["configured"] is False and state["active"] is True
+    (conf / cc.MESHTASTICD_CONFIG_NAME).write_text(cc.MESHTASTICD_CONFIG)
+    assert cc.lora_daemon_state(root=str(tmp_path), runner=lambda a: (3, "inactive")) == {
+        "installed": state["installed"], "configured": True, "active": False}
 
 
 @pytest.mark.parametrize("rail,cap,switch,ok,word", [

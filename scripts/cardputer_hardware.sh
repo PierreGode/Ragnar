@@ -3,13 +3,20 @@
 # camera and expansion header ("Cap" modules). Called by install_ragnar.sh and
 # update_ragnar.sh on a CardputerZero; safe to run again, and a no-op elsewhere.
 #
-#   sudo scripts/cardputer_hardware.sh            camera tools + checks
+#   sudo scripts/cardputer_hardware.sh            camera tools + overlay, checks
+#   sudo scripts/cardputer_hardware.sh camera     the camera part only
+#   sudo scripts/cardputer_hardware.sh gnss       give the UART to the Cap's GNSS
+#                                                 receiver (stops the serial login
+#                                                 prompt now; console= leaves
+#                                                 cmdline.txt, backup kept)
+#   sudo scripts/cardputer_hardware.sh gnss-undo  put the serial console back
 #   sudo scripts/cardputer_hardware.sh nfc        also enable the NFC reader's
 #                                                 SPI chip-select (needs a reboot)
 #   scripts/cardputer_hardware.sh status          what is set up
 #
-# What it does NOT do: it never edits cmdline.txt. If the serial console is on
-# the UART the GNSS receiver uses, it says so and prints the fix.
+# Plain setup never edits cmdline.txt: it only says when the serial console is
+# on the GNSS UART. Ragnar frees the port by itself when it finds the LoRa +
+# GNSS Cap fitted (setting cardputer_free_gnss_uart), or run `gnss` here.
 
 set -u
 
@@ -56,10 +63,41 @@ serial_console_check() {
     cmdline="$(cmdline_file)" || return 0
     if grep -qE 'console=(serial0|ttyS0)' "$cmdline"; then
         log "the serial console is on the UART the Cap's GNSS receiver uses."
-        log "to free it: sudo sed -i 's/ console=serial0,[0-9]*//; s/ console=ttyS0,[0-9]*//' $cmdline && sudo reboot"
+        log "Ragnar frees it when the LoRa + GNSS Cap is fitted; to do it now: sudo $0 gnss"
         return 1
     fi
     return 0
+}
+
+# Radio settings Ragnar wrote for meshtasticd earlier are brought up to date
+# (an older version named a chip-select pin the daemon could not claim).
+refresh_lora_config() {
+    local conf="$ROOT/etc/meshtasticd/config.d/ragnar-cardputerzero-cap-lora.yaml"
+    [ -f "$conf" ] || return 0
+    if ! python3 "$REPO/cardputer_caps.py" --meshtasticd-config | cmp -s - "$conf"; then
+        python3 "$REPO/cardputer_caps.py" --meshtasticd-config > "$conf"
+        [ -n "$ROOT" ] || systemctl restart meshtasticd.service 2>/dev/null || true
+        log "updated the LoRa Cap's meshtasticd settings"
+    fi
+}
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# The camera is not auto-detected on this board: M5Stack's image turns
+# camera_auto_detect off and loads the imx219 overlay by name.
+camera_overlay() {
+    local config
+    config="$(config_file)" || { log "config.txt not found"; return 1; }
+    if grep -qE '^[[:space:]]*dtoverlay=imx219\b' "$config"; then
+        log "camera overlay already enabled"
+        return 0
+    fi
+    [ -f "$config.ragnar-bak" ] || cp "$config" "$config.ragnar-bak"
+    sed -i 's/^[[:space:]]*camera_auto_detect=1/camera_auto_detect=0/' "$config"
+    grep -qE '^[[:space:]]*camera_auto_detect=' "$config" \
+        || printf '\n# Ragnar: the CardputerZero camera is loaded by name\ncamera_auto_detect=0\n' >> "$config"
+    printf '\n# Ragnar: CardputerZero built-in camera (IMX219)\n[all]\ndtoverlay=imx219\n' >> "$config"
+    log "camera overlay enabled (dtoverlay=imx219) — reboot to apply"
 }
 
 enable_nfc() {
@@ -85,7 +123,13 @@ status() {
         return 0
     fi
     echo "cap power rail: $([ -e "$EXT5V" ] && cat "$EXT5V" || echo missing)"
+    local config
     echo "camera tools: $(command -v rpicam-still libcamera-still 2>/dev/null | head -1 || true)"
+    if config="$(config_file)" && grep -qE '^[[:space:]]*dtoverlay=imx219\b' "$config"; then
+        echo "camera overlay: enabled"
+    else
+        echo "camera overlay: not enabled"
+    fi
     local config
     if config="$(config_file)" && grep -qE "^dtoverlay=${NFC_OVERLAY}\b" "$config"; then
         echo "nfc overlay: enabled"
@@ -100,7 +144,21 @@ case "${1:-setup}" in
     setup)
         is_cardputer || { log "not a CardputerZero — nothing to do"; exit 0; }
         camera_tools
+        camera_overlay || true
         serial_console_check || true
+        refresh_lora_config
+        ;;
+    camera)
+        is_cardputer || { log "not a CardputerZero — nothing to do"; exit 0; }
+        camera_tools
+        camera_overlay
+        ;;
+    gnss)
+        is_cardputer || { log "not a CardputerZero — nothing to do"; exit 0; }
+        python3 "$REPO/cardputer_caps.py" --free-gnss-uart
+        ;;
+    gnss-undo)
+        python3 "$REPO/cardputer_caps.py" --restore-serial-console
         ;;
     nfc)
         is_cardputer || { log "not a CardputerZero — nothing to do"; exit 0; }
@@ -108,5 +166,5 @@ case "${1:-setup}" in
         enable_nfc
         ;;
     status) status ;;
-    *) echo "usage: $0 [setup|nfc|status]"; exit 2 ;;
+    *) echo "usage: $0 [setup|camera|gnss|gnss-undo|nfc|status]"; exit 2 ;;
 esac

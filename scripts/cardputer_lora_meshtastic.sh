@@ -11,8 +11,10 @@
 #   /etc/meshtasticd/config.d/ragnar-cardputerzero-cap-lora.yaml   radio pins
 #   /etc/systemd/system/meshtasticd.service.d/ragnar-cap.conf      powers the Cap
 #                                                                  before start
-# meshtasticd itself comes from Meshtastic's package repository. If it is not
-# installed this script tries apt once and otherwise points at their guide:
+# meshtasticd is Meshtastic's firmware built for Linux: it drives the bare
+# SX1262 itself, so the CardputerZero IS the node (no separate Meshtastic board
+# needed). It comes from Meshtastic's package repository, which this script
+# adds when the package is not installed:
 #   https://meshtastic.org/docs/hardware/devices/linux-native-hardware/
 # Set your region in the Meshtastic app or `meshtastic --set lora.region EU_868`
 # before transmitting: the daemon stays silent until a region is chosen.
@@ -31,13 +33,53 @@ log() { echo "[cap-lora] $*"; }
 have_daemon() { command -v meshtasticd >/dev/null 2>&1 || [ -n "${RAGNAR_FAKE_MESHTASTICD:-}" ]; }
 sysctl_() { [ -n "$ROOT" ] || systemctl "$@" 2>/dev/null || true; }
 
+OBS="https://download.opensuse.org/repositories/network:/Meshtastic:/beta"
+KEYRING="$ROOT/etc/apt/keyrings/meshtastic.gpg"
+SOURCES="$ROOT/etc/apt/sources.list.d/meshtastic.list"
+
+# Meshtastic's repository directory for this system, e.g. Debian_12.
+obs_target() {
+    local id="" version="" codename="" arch
+    [ -r "$ROOT/etc/os-release" ] && . "$ROOT/etc/os-release" \
+        && id="${ID:-}" version="${VERSION_ID:-}" codename="${VERSION_CODENAME:-}"
+    arch="$(dpkg --print-architecture 2>/dev/null || echo arm64)"
+    case "$codename" in bookworm) version=12 ;; trixie) version=13 ;; esac
+    case "$version" in 12|13) ;; *) version=13 ;; esac      # rolling releases track the newest
+    if [ "$id" = "raspbian" ] && [ "$arch" = "armhf" ]; then
+        echo "Raspbian_$version"
+    else
+        echo "Debian_$version"
+    fi
+}
+
+add_repository() {
+    local target url
+    target="$(obs_target)"
+    url="$OBS/$target"
+    log "adding Meshtastic's package repository ($target)"
+    mkdir -p "$(dirname "$KEYRING")" "$(dirname "$SOURCES")"
+    if ! curl -fsSL "$url/Release.key" | gpg --dearmor > "$KEYRING.tmp" 2>/dev/null \
+        || [ ! -s "$KEYRING.tmp" ]; then
+        rm -f "$KEYRING.tmp"
+        log "could not download the repository key (no internet?)"
+        return 1
+    fi
+    mv "$KEYRING.tmp" "$KEYRING"
+    chmod 644 "$KEYRING"
+    echo "deb [signed-by=/etc/apt/keyrings/meshtastic.gpg] $url/ /" > "$SOURCES"
+    apt-get update -o Dir::Etc::sourcelist="$SOURCES" -o Dir::Etc::sourceparts="-" \
+        -o APT::Get::List-Cleanup="0" >/dev/null 2>&1 || apt-get update >/dev/null 2>&1 || true
+}
+
 install() {
-    if ! have_daemon; then
-        log "meshtasticd is not installed; trying apt"
-        apt-get install -y meshtasticd >/dev/null 2>&1 || true
+    if ! have_daemon && [ -z "$ROOT" ]; then
+        log "meshtasticd is not installed; installing it"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y meshtasticd >/dev/null 2>&1 || {
+            add_repository && DEBIAN_FRONTEND=noninteractive apt-get install -y meshtasticd 2>&1 | tail -3
+        }
     fi
     if ! have_daemon; then
-        log "meshtasticd is not available from this system's package sources."
+        log "meshtasticd could not be installed."
         log "install it from Meshtastic's repository, then run this again:"
         log "  $GUIDE"
         return 1

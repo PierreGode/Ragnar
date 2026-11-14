@@ -241,10 +241,12 @@ off by default. Ragnar does not switch that one on.
 
 **GNSS (ATGM336H).** Nothing to set up. The receiver talks NMEA on
 `/dev/ttyS0` at 115200 baud and Ragnar's GPS auto-detection finds it, so
-wardriving and the GPS pages work as they do with a USB puck. The serial console
-must not be on that UART; M5Stack's image already keeps it off. If the hardware
-panel says "Serial console is using the port", run
-`sudo scripts/cardputer_hardware.sh status` for the command that frees it.
+wardriving and the GPS pages work as they do with a USB puck. A serial login
+prompt on that UART takes the receiver's data, so Ragnar removes it when it finds
+this Cap fitted (stops `serial-getty`, takes `console=serial0` out of
+`cmdline.txt`, keeps `cmdline.txt.ragnar-bak`). By hand:
+`sudo scripts/cardputer_hardware.sh gnss`, undone with `gnss-undo`; turn the
+automatic step off with `cardputer_free_gnss_uart: false`.
 
 **LoRa (SX1262) as a Meshtastic node.** Ragnar uses
 [meshtasticd](https://meshtastic.org/docs/hardware/devices/linux-native-hardware/),
@@ -450,7 +452,7 @@ no direction remap is applied.
 | **Cap fitted while running is not seen** | Expected: Caps are not hot-swappable. Power off, fit the Cap, power on. |
 | **Cap not detected** | `sudo python3 cardputer_caps.py`. "Cap 5 V rail: not present" means the kernel has no `ext_5v_out` control (not M5Stack's image). |
 | **No GPS from the LoRa Cap** | The antenna is inside the Cap and needs sky view. Check **System → CardputerZero hardware**: "Silent" means no data on `/dev/ttyS0`. |
-| **Camera panel missing** | `rpicam-hello --list-cameras` must list the camera; if the command is missing run `sudo scripts/cardputer_hardware.sh`. |
+| **Camera panel missing** | The hardware panel's Camera row gives the reason. The camera needs `dtoverlay=imx219` in `config.txt` (not auto-detected on this board) and `rpicam-apps`: `sudo scripts/cardputer_hardware.sh camera`, then reboot. |
 | **No battery percentage** | Run `python3 sysfs_battery.py`. If it finds nothing, check `ls /sys/class/power_supply/`; an empty list means the kernel has no gauge driver, so try `python3 sysfs_battery.py --i2c`. |
 | **Arrow keys do nothing** | Press a key and watch the bottom-left corner. `F: up` means the key works. Nothing at all means the press is not reaching Ragnar: run `sudo python3 cardputer_input.py`. |
 | **Screen stays black** | Check `cat /sys/class/graphics/fb*/name` and `cat /sys/class/backlight/*/brightness`. On the SPI path, confirm the expander answers at `0x4F` (`i2cdetect -y 1`). |
