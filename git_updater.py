@@ -34,6 +34,7 @@ cannot remove an ignored file.
 
 import logging
 import os
+import re
 import pwd
 import shutil
 import subprocess
@@ -203,13 +204,24 @@ _ERROR_SIGNATURES = (
      'The origin repository asked for credentials. Point it at the public URL: '
      f'git remote set-url origin {DEFAULT_REMOTE_URL}'),
     ('offline', ('could not resolve host', 'unable to access', 'connection timed out',
+                 'the requested url returned error', 'remote end hung up', 'unable to connect',
+                 'gnutls', 'http/2 stream', 'bad gateway', 'service unavailable',
                  'could not read from remote repository', 'connection reset', 'early eof',
                  'network is unreachable', 'operation timed out', 'ssl connect error',
                  'failed to connect', 'temporary failure in name resolution', 'rpc failed'),
      'The box could not reach github.com. Check its internet connection and try again.'),
     ('broken_tag', ('did not send all necessary objects', 'bad object refs/tags'),
-     'A tag in this clone or on the remote is corrupt and was blocking the fetch. Ragnar drops the '
-     'broken tag and fetches branches only (it never needs a tag to update), so no action is needed.'),
+     'Part of the git data on this box is damaged (this happens when power is lost during a '
+     'write). Click Repair and Update: Ragnar rebuilds the damaged data and updates. Your '
+     'settings and collected data are not affected.'),
+    ('repo_damaged', ('bad object', 'is empty', 'is corrupt', 'index file smaller than expected',
+                      'bad signature', 'unterminated line in', 'bad config line',
+                      'does not match index', 'unable to read', 'missing blob', 'missing tree',
+                      'missing commit', 'invalid sha1 pointer', 'broken link', 'bad index file',
+                      'index file corrupt', 'loose object', 'packfile'),
+     'Part of the git data on this box is damaged (this happens when power is lost during a '
+     'write). Click Repair and Update: Ragnar rebuilds the damaged data and updates. Your '
+     'settings and collected data are not affected.'),
     ('branch_missing', ("couldn't find remote ref", 'unknown revision', 'not a valid object name',
                         'does not appear to be a git repository'),
      'This checkout tracks a branch that no longer exists upstream. Ragnar will fall back to the '
@@ -226,6 +238,9 @@ _ERROR_SIGNATURES = (
 )
 
 _HINTS = {
+    'repo_damaged': 'Part of the git data on this box is damaged (this happens when power is lost '
+                    'during a write). Click Repair and Update: Ragnar rebuilds the damaged data '
+                    'and updates. Your settings and collected data are not affected.',
     'timeout': 'The git command stopped responding and was cancelled. This is almost always a slow '
                'or dropped internet connection - try again once the box is back online.',
     'busy': 'An update is already running. Give it a minute to finish.',
@@ -506,70 +521,430 @@ def ensure_remote(repo_path, warnings=None):
     return True, ''
 
 
-def prune_broken_tags(repo_path, warnings=None):
-    """Delete local tag refs whose object is missing or corrupt.
+# --- self-repair --------------------------------------------------------------
+#
+# Git's own files get damaged on these boxes: an SD card that loses power in the
+# middle of a write leaves empty or half-written files under .git. One bad file
+# is enough to make every fetch fail, and "cannot fetch" means no update and no
+# branch switch, from the web UI or the shell, until someone repairs it by hand.
+#
+# So a failed fetch that is not a network problem is treated as damage and
+# repaired, in order of how much it costs:
+#
+#   1. tidy_git_files     plain-file fixes that need no git: unreadable HEAD,
+#                         config, packed-refs, empty refs and empty objects
+#   2. prune_broken_refs  drop every ref (tag, branch, remote, stash) that does
+#                         not point at a readable object, and a corrupt index
+#   3. refetch            ask the remote for everything again, ignoring what the
+#                         damaged object store claims to have
+#   4. rebuild_repository throw .git away and build a fresh one around the
+#                         files on disk
+#
+# Steps 1-3 never touch the working tree, so the background update check may run
+# them. Step 4 resets tracked files to upstream and only runs inside an update
+# the user started. The box's own data is gitignored and is never touched.
 
-    One bad tag ref - a release tag like ``os-v1.8.0`` that was force-pushed,
-    partially deleted or had its objects GC'd on the remote - makes a plain
-    ``git fetch`` abort with ``bad object refs/tags/...`` / ``did not send all
-    necessary objects``, which blocks every update and branch switch. The
-    updater only ever syncs to a *branch head*, never a tag, so dropping the
-    broken tag ref is always safe. Returns the number of refs removed.
-    """
-    listed = run_git(['for-each-ref', '--format=%(refname)', 'refs/tags'], repo_path,
-                     timeout=GIT_QUICK_TIMEOUT)
-    if not listed.ok:
+_HEX_RE = re.compile(r'^[0-9a-f]{40}(?:[0-9a-f]{24})?$')
+_SYMREF_RE = re.compile(r'^ref: (refs/[^\s\x00]+)$')
+_PACKED_LINE_RE = re.compile(r'^([0-9a-f]{40}(?:[0-9a-f]{24})?) (refs/[^\s\x00]+)$')
+_PEELED_LINE_RE = re.compile(r'^\^[0-9a-f]{40}(?:[0-9a-f]{24})?$')
+
+# Fetch failures a repair cannot help with.
+_NOT_DAMAGE_CODES = ('offline', 'timeout', 'auth', 'disk_full', 'git_missing', 'locked',
+                     'ownership', 'permission')
+
+BROKEN_GIT_BACKUP = '.git.ragnar-broken'
+# When .git was last rebuilt in this process. An update compares it with its
+# own start time to know the old history is gone (see update()).
+_LAST_REBUILD = [0.0]
+
+
+def _git_dir(repo_path):
+    return os.path.join(repo_path, '.git')
+
+
+def _read_small(path, limit=4096):
+    try:
+        with open(path, 'rb') as fh:
+            return fh.read(limit)
+    except OSError:
+        return None
+
+
+def _note(warnings, message):
+    logger.warning(message)
+    if warnings is not None:
+        warnings.append(message)
+
+
+def repo_readable(repo_path):
+    """True when git can open the repository at all."""
+    return run_git(['rev-parse', '--git-dir'], repo_path, timeout=GIT_QUICK_TIMEOUT).ok
+
+
+def _loose_refs(git_dir):
+    """(refname, path) for every loose ref file."""
+    base = os.path.join(git_dir, 'refs')
+    out = []
+    for root, _dirs, files in os.walk(base):
+        for name in files:
+            if name.endswith('.lock'):
+                continue
+            path = os.path.join(root, name)
+            out.append((os.path.relpath(path, git_dir).replace(os.sep, '/'), path))
+    return out
+
+
+def _ref_text_valid(raw):
+    if raw is None:
+        return False
+    try:
+        text = raw.decode('ascii').strip()
+    except UnicodeDecodeError:
+        return False
+    return bool(_HEX_RE.match(text) or _SYMREF_RE.match(text))
+
+
+def _write_atomic(path, text):
+    tmp = path + '.ragnar-tmp'
+    with open(tmp, 'w') as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def _sanitize_packed_refs(git_dir):
+    """Drop unreadable lines from packed-refs. Returns the number dropped."""
+    path = os.path.join(git_dir, 'packed-refs')
+    try:
+        with open(path, 'rb') as fh:
+            raw = fh.read()
+    except OSError:
         return 0
-    removed = 0
-    for ref in listed.out.splitlines():
-        ref = ref.strip()
-        if not ref:
+    kept, dropped, last_kept = [], 0, False
+    for line in raw.split(b'\n'):
+        try:
+            text = line.decode('ascii')
+        except UnicodeDecodeError:
+            text = None
+        if text == '':
             continue
-        # A ref whose peeled object is unreadable is the one that aborts fetch.
+        if text is not None and text.startswith('#'):
+            kept.append(text)
+            last_kept = False
+        elif text is not None and _PACKED_LINE_RE.match(text):
+            kept.append(text)
+            last_kept = True
+        elif text is not None and _PEELED_LINE_RE.match(text) and last_kept:
+            kept.append(text)
+        else:
+            dropped += 1
+            last_kept = False
+    if dropped:
+        _write_atomic(path, '\n'.join(kept) + ('\n' if kept else ''))
+    return dropped
+
+
+def _drop_packed_ref(git_dir, refname):
+    path = os.path.join(git_dir, 'packed-refs')
+    try:
+        with open(path) as fh:
+            lines = fh.read().split('\n')
+    except (OSError, UnicodeDecodeError):
+        return False
+    out, skip_peeled, found = [], False, False
+    for line in lines:
+        if skip_peeled and line.startswith('^'):
+            skip_peeled = False
+            continue
+        skip_peeled = False
+        match = _PACKED_LINE_RE.match(line)
+        if match and match.group(2) == refname:
+            found, skip_peeled = True, True
+            continue
+        out.append(line)
+    if found:
+        _write_atomic(path, '\n'.join(out))
+    return found
+
+
+def _packed_ref_names(git_dir):
+    try:
+        with open(os.path.join(git_dir, 'packed-refs')) as fh:
+            return [m.group(2) for m in map(_PACKED_LINE_RE.match, fh.read().split('\n')) if m]
+    except (OSError, UnicodeDecodeError):
+        return []
+
+
+def _minimal_config():
+    return ('[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n'
+            '\tlogallrefupdates = true\n'
+            f'[remote "origin"]\n\turl = {DEFAULT_REMOTE_URL}\n'
+            '\tfetch = +refs/heads/*:refs/remotes/origin/*\n')
+
+
+def tidy_git_files(repo_path, warnings=None):
+    """Fix damage that makes git refuse to open the repository, using plain
+    file operations only. Returns the number of things fixed."""
+    git_dir = _git_dir(repo_path)
+    if not os.path.isdir(git_dir):
+        return 0
+    fixed = 0
+
+    # HEAD must name a branch or a commit. An empty one reads as "not a git
+    # repository", which used to dead-end the whole updater.
+    head = os.path.join(git_dir, 'HEAD')
+    if not _ref_text_valid(_read_small(head)):
+        branch = FALLBACK_BRANCHES[0]
+        for candidate in FALLBACK_BRANCHES:
+            if os.path.exists(os.path.join(git_dir, 'refs', 'heads', candidate)):
+                branch = candidate
+                break
+        _write_atomic(head, f'ref: refs/heads/{branch}\n')
+        _note(warnings, f'Repaired an unreadable .git/HEAD (now on {branch})')
+        fixed += 1
+
+    # Refs: a ref file is one line, a hash or "ref: <name>". Anything else is
+    # a casualty of an interrupted write.
+    for refname, path in _loose_refs(git_dir):
+        if not _ref_text_valid(_read_small(path)):
+            try:
+                os.remove(path)
+                fixed += 1
+                logger.warning(f"Removed unreadable ref file: {refname}")
+            except OSError:
+                pass
+    dropped = _sanitize_packed_refs(git_dir)
+    fixed += dropped
+
+    # Zero-length object files: git reports them as corrupt forever. Removed,
+    # they are merely missing, and a refetch brings them back.
+    objects = os.path.join(git_dir, 'objects')
+    try:
+        fanout = [d for d in os.listdir(objects) if len(d) == 2]
+    except OSError:
+        fanout = []
+    for sub in fanout:
+        folder = os.path.join(objects, sub)
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(folder, name)
+            try:
+                if os.path.isfile(path) and os.path.getsize(path) == 0:
+                    os.remove(path)
+                    fixed += 1
+            except OSError:
+                pass
+
+    # A config git cannot parse stops every command. Keep the damaged one for
+    # inspection and write the few lines an update needs.
+    config = os.path.join(git_dir, 'config')
+    if not run_git(['config', '--local', '--list'], repo_path, timeout=GIT_QUICK_TIMEOUT).ok \
+            and os.path.isfile(head):
+        probe = run_git(['config', '--file', config, '--list'], repo_path, timeout=GIT_QUICK_TIMEOUT)
+        if not probe.ok:
+            try:
+                if os.path.exists(config):
+                    os.replace(config, config + '.ragnar-broken')
+                _write_atomic(config, _minimal_config())
+                _note(warnings, 'Repaired an unreadable .git/config')
+                fixed += 1
+            except OSError:
+                pass
+
+    if fixed and warnings is not None:
+        warnings.append(f"Repaired {fixed} damaged file(s) in the git data")
+    return fixed
+
+
+def prune_broken_refs(repo_path, warnings=None, namespace='refs'):
+    """Delete every ref under `namespace` whose object is missing or corrupt.
+
+    Not only tags: a broken branch, remote-tracking ref or stash aborts a fetch
+    in exactly the same way ("bad object refs/..."). The names come from the
+    files themselves, because git's own listing leaves broken refs out. The
+    updater always ends on origin/<branch>, which the fetch that follows
+    recreates, so dropping a ref that points at nothing loses nothing.
+    Returns the number of refs removed.
+    """
+    git_dir = _git_dir(repo_path)
+    if not repo_readable(repo_path):
+        return 0            # cannot tell good from bad; leave it to the rebuild
+    prefix = namespace.rstrip('/') + '/'
+    loose = {name: path for name, path in _loose_refs(git_dir) if name.startswith(prefix)}
+    names = sorted(set(loose) | {n for n in _packed_ref_names(git_dir) if n.startswith(prefix)})
+    removed = 0
+    for ref in names:
         check_ref = run_git(['rev-parse', '--verify', '--quiet', f'{ref}^{{object}}'],
                             repo_path, timeout=GIT_QUICK_TIMEOUT)
-        if not (check_ref.ok and check_ref.out.strip()):
-            drop = run_git(['update-ref', '-d', ref], repo_path, timeout=GIT_QUICK_TIMEOUT)
-            if drop.ok:
-                removed += 1
-                logger.warning(f"Removed broken tag ref blocking fetch: {ref}")
+        if check_ref.ok and check_ref.out.strip():
+            # The name resolves; make sure the object is really readable.
+            if run_git(['cat-file', '-e', check_ref.out.strip()], repo_path,
+                       timeout=GIT_QUICK_TIMEOUT).ok:
+                continue
+        gone = False
+        if ref in loose:
+            try:
+                os.remove(loose[ref])
+                gone = True
+            except OSError:
+                pass
+        if _drop_packed_ref(git_dir, ref):
+            gone = True
+        if not gone:
+            gone = run_git(['update-ref', '-d', ref], repo_path, timeout=GIT_QUICK_TIMEOUT).ok
+        if gone:
+            removed += 1
+            logger.warning(f"Removed broken ref blocking fetch: {ref}")
     if removed and warnings is not None:
-        warnings.append(f"Removed {removed} broken tag ref(s) that were blocking the fetch")
+        warnings.append(f"Removed {removed} broken ref(s) that were blocking the fetch")
     return removed
 
 
-def _branch_only_fetch(repo_path, timeout):
+def prune_broken_tags(repo_path, warnings=None):
+    """Delete local tag refs whose object is missing or corrupt (see
+    prune_broken_refs). Returns the number of refs removed."""
+    return prune_broken_refs(repo_path, warnings, namespace='refs/tags')
+
+
+def reset_corrupt_index(repo_path, warnings=None):
+    """Rebuild the index when git cannot read it. The working tree is not
+    touched. Returns True if it was rebuilt."""
+    probe = run_git(['ls-files', '--stage'], repo_path, timeout=GIT_LOCAL_TIMEOUT)
+    if probe.ok:
+        return False
+    low = probe.message.lower()
+    if 'index' not in low and 'bad signature' not in low:
+        return False
+    try:
+        os.remove(os.path.join(_git_dir(repo_path), 'index'))
+    except OSError:
+        return False
+    run_git(['reset', '-q'], repo_path, timeout=GIT_LOCAL_TIMEOUT, identity=True)
+    _note(warnings, 'Rebuilt a corrupt git index')
+    return True
+
+
+def _branch_only_fetch(repo_path, timeout, refetch=False):
     """Fetch branch heads only, skipping tags entirely.
 
     Sidesteps a tag that is corrupt *on the remote* (which per-clone pruning
     cannot reach). ``--force`` keeps a rewound remote branch from failing the
-    refspec; the updater resets onto the fetched head anyway.
+    refspec; the updater resets onto the fetched head anyway. ``refetch`` asks
+    for every object again instead of trusting the local object store, which
+    is what brings back objects that have gone missing or corrupt.
     """
-    return run_git(
-        ['fetch', '--no-tags', '--prune', '--force', 'origin',
-         '+refs/heads/*:refs/remotes/origin/*'],
-        repo_path, timeout=timeout, network=True)
+    args = ['fetch', '--no-tags', '--prune', '--force']
+    if refetch:
+        args.append('--refetch')
+    args += ['origin', '+refs/heads/*:refs/remotes/origin/*']
+    return run_git(args, repo_path, timeout=timeout, network=True)
 
 
-def resilient_fetch(repo_path, warnings, timeout=GIT_NETWORK_TIMEOUT):
-    """A single fetch that survives a corrupt tag ref (local or remote).
+def _is_damage(result):
+    """A failure the harmless repairs are worth trying on."""
+    code, _hint = classify(result.message, result.timed_out)
+    return code not in _NOT_DAMAGE_CODES
 
-    Tries a normal tag-syncing fetch first - keeps tags current when the remote
-    is healthy. On the broken-tag signature it drops broken local tag refs and
-    retries branches-only, which is all the updater needs. Returns a GitResult.
+
+def _is_confirmed_damage(result):
+    """A failure git itself attributes to its own data. Only this justifies a
+    rebuild, which resets tracked files: an error Ragnar does not recognise
+    (a server hiccup, a new git message) must never cost a user their edits."""
+    code, _hint = classify(result.message, result.timed_out)
+    return code in ('repo_damaged', 'broken_tag', 'not_a_repo')
+
+
+def rebuild_repository(repo_path, warnings=None):
+    """Last resort: replace a damaged .git with a fresh one.
+
+    The damaged directory is moved aside first and put back if the rebuild
+    cannot finish (no network), so a failure never leaves the box worse off.
+    Tracked files are then reset to upstream: with the old history unreadable
+    there is no telling a local edit from an old version, and replaying "old
+    version" on top of the update would undo it. Gitignored data - the box's
+    databases, config and loot - is not touched. Returns (ok, error).
+    """
+    git_dir = _git_dir(repo_path)
+    backup = os.path.join(repo_path, BROKEN_GIT_BACKUP)
+    logger.warning("Git data is damaged beyond repair - rebuilding .git from upstream")
+    try:
+        shutil.rmtree(backup, ignore_errors=True)
+        if os.path.isdir(git_dir):
+            os.rename(git_dir, backup)
+    except OSError as exc:
+        return False, f"could not move the damaged .git aside: {exc}"
+    ok, err = reattach_repository(repo_path, None)
+    if not ok:
+        shutil.rmtree(git_dir, ignore_errors=True)
+        try:
+            if os.path.isdir(backup):
+                os.rename(backup, git_dir)
+        except OSError:
+            pass
+        return False, err
+    reset = run_git(['reset', '--hard', 'HEAD'], repo_path, timeout=GIT_LOCAL_TIMEOUT,
+                    identity=True)
+    shutil.rmtree(backup, ignore_errors=True)
+    if not reset.ok:
+        return False, reset.message
+    _LAST_REBUILD[0] = time.time()
+    _note(warnings, 'The git data on this box was damaged and has been rebuilt from upstream; '
+                    'tracked files were reset to the upstream version')
+    return True, ''
+
+
+def resilient_fetch(repo_path, warnings, timeout=GIT_NETWORK_TIMEOUT, allow_rebuild=False,
+                    state=None):
+    """A fetch that repairs a damaged repository instead of failing on it.
+
+    Tries a normal tag-syncing fetch first, which keeps tags current on a
+    healthy box. A failure that is not a network problem walks the repair
+    ladder described above. ``allow_rebuild`` permits the last step, which
+    resets tracked files; ``state['rebuilt']`` is set when it ran. Returns the
+    GitResult of the last fetch.
     """
     res = run_git(['fetch', '--prune', 'origin'], repo_path, timeout=timeout, network=True)
+    if res.ok or not _is_damage(res):
+        return res
+    first_error = res.message
+    confirmed = _is_confirmed_damage(res)
+    logger.warning(f"Fetch failed on what looks like repository damage; repairing ({first_error})")
+
+    tidy_git_files(repo_path, warnings)
+    prune_broken_refs(repo_path, warnings)
+    reset_corrupt_index(repo_path, warnings)
+    ensure_remote(repo_path, warnings)
+    res = _branch_only_fetch(repo_path, timeout)
     if res.ok:
+        _note(warnings, 'Damaged git data was repaired; branch updates were fetched without tags')
         return res
-    code, _hint = classify(res.message, res.timed_out)
-    if code != 'broken_tag':
+    if not _is_damage(res):
         return res
-    logger.warning("Fetch hit a corrupt tag; pruning broken tags and retrying without tags")
-    prune_broken_tags(repo_path, warnings)
-    recovered = _branch_only_fetch(repo_path, timeout)
-    if recovered.ok and warnings is not None:
-        warnings.append('A corrupt tag was skipped; branch updates were fetched without tags')
-    return recovered
+    confirmed = confirmed or _is_confirmed_damage(res)
+    after_repair = res
+
+    res = _branch_only_fetch(repo_path, timeout, refetch=True)
+    if res.ok:
+        _note(warnings, 'Missing git objects were downloaded again from upstream')
+        return res
+    if not _is_damage(res):
+        return res
+    if not (allow_rebuild and confirmed):
+        # Report the damage, not the refetch's own complaint (an old git does
+        # not know --refetch at all).
+        return after_repair
+
+    ok, err = rebuild_repository(repo_path, warnings)
+    if not ok:
+        return GitResult(['rebuild'], 1, '', f"{first_error}; rebuilding the git data also failed: {err}")
+    if state is not None:
+        state['rebuilt'] = True
+    return _branch_only_fetch(repo_path, timeout)
 
 
 def _reattach_branch_candidates(repo_path):
@@ -740,6 +1115,16 @@ def preflight(repo_path=None, warnings=None):
 
     ensure_safe_directory(repo_path)
     clear_stale_locks(repo_path, warnings)
+    # A .git that git cannot even open (unreadable HEAD, config or packed-refs)
+    # is repaired in place where possible, rebuilt where not.
+    if not repo_readable(repo_path):
+        tidy_git_files(repo_path, warnings)
+        if not repo_readable(repo_path):
+            ok, err = rebuild_repository(repo_path, warnings)
+            if not ok:
+                code, _hint = classify(err)
+                return False, ('repo_damaged' if code == 'git_error' else code), (
+                    f"The git data on this box is damaged and could not be rebuilt: {err}")
     abort_in_progress_operation(repo_path, warnings)
     ok, err = ensure_remote(repo_path, warnings)
     if not ok:
@@ -869,11 +1254,21 @@ def check(repo_path=None, allow_fetch=True):
     if allow_fetch and _UPDATE_LOCK.acquire(blocking=False):
         try:
             clear_stale_locks(repo_path)
+            if not repo_readable(repo_path):
+                tidy_git_files(repo_path, warnings)
+                if not repo_readable(repo_path):
+                    result.update({'ok': False, 'code': 'repo_damaged',
+                                   'error': 'git cannot open the repository on this box',
+                                   'hint': _HINTS['repo_damaged']})
+                    return result
             ensure_remote(repo_path, warnings)
             fetch = resilient_fetch(repo_path, warnings, timeout=GIT_CHECK_TIMEOUT)
             result['fetched'] = fetch.ok
             if not fetch.ok:
                 code, hint = classify(fetch.message, fetch.timed_out)
+                if code in ('git_error', 'broken_tag'):
+                    # The repairs a background check may do were not enough.
+                    code, hint = 'repo_damaged', _HINTS['repo_damaged']
                 result.update({'ok': False, 'code': code, 'error': fetch.message, 'hint': hint})
                 # Keep going: the counts below are still worth showing, they are
                 # just computed against the refs we already had.
@@ -914,6 +1309,15 @@ def check(repo_path=None, allow_fetch=True):
             except ValueError:
                 pass
     result['updates_available'] = result['commits_behind'] > 0
+    # A box whose own branch or history is unreadable cannot be compared with
+    # upstream. That is not "up to date": say an update is waiting, so the
+    # button that repairs it is live.
+    head_ok = run_git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], repo_path,
+                      timeout=GIT_QUICK_TIMEOUT).ok
+    if result['ok'] and (not head_ok or not counts.ok):
+        result['updates_available'] = True
+        result['commits_behind'] = max(1, result['commits_behind'])
+        warnings.append('The local git history on this box is damaged; Update restores it')
     result['git_status'] = _working_tree_status(repo_path)
     return result
 
@@ -974,6 +1378,7 @@ def update(repo_path=None, on_step=None):
         return _fail(result, 'busy', 'An update is already running on this box.')
     _UPDATE_STATE.update({'running': True, 'started': time.time(), 'step': 'starting'})
     try:
+        started = time.time()
         step('preflight')
         ok, code, err = preflight(repo_path, warnings)
         if not ok:
@@ -983,7 +1388,12 @@ def update(repo_path=None, on_step=None):
                                         timeout=GIT_QUICK_TIMEOUT).out
 
         step('fetch')
-        fetch = _fetch_with_retry(repo_path, warnings)
+        fetch_state = {}
+        fetch = _fetch_with_retry(repo_path, warnings, state=fetch_state)
+        if fetch_state.get('rebuilt') or _LAST_REBUILD[0] >= started or not result['from_commit']:
+            # The old history is gone, so there is nothing to diff against.
+            result['rebuilt'] = True
+            result['from_commit'] = ''
         if not fetch.ok:
             code, hint = classify(fetch.message, fetch.timed_out)
             return _fail(result, code, f"Could not fetch from origin: {fetch.message}", hint)
@@ -1061,13 +1471,14 @@ def update(repo_path=None, on_step=None):
         _UPDATE_LOCK.release()
 
 
-def _fetch_with_retry(repo_path, warnings, attempts=3):
+def _fetch_with_retry(repo_path, warnings, attempts=3, state=None):
     """Fetch, retrying transient network trouble with a short backoff."""
     last = None
     for attempt in range(1, attempts + 1):
         # resilient_fetch already recovers a corrupt tag (local or remote) by
         # pruning broken tag refs and refetching branches only.
-        res = resilient_fetch(repo_path, warnings, timeout=GIT_NETWORK_TIMEOUT)
+        res = resilient_fetch(repo_path, warnings, timeout=GIT_NETWORK_TIMEOUT,
+                              allow_rebuild=True, state=state)
         if res.ok:
             return res
         last = res
@@ -1152,6 +1563,10 @@ def _finish(result, repo_path, warnings):
             warnings.append('Could not list changed files; installing dependencies to be safe')
     else:
         result['files_changed'] = 0
+    if result.get('rebuilt'):
+        # No old commit to compare with: install dependencies rather than guess.
+        result['requirements_changed'] = True
+        result['already_current'] = False
 
     restore_ownership(repo_path, warnings)
     refresh_exec_bits(repo_path, warnings)
@@ -1170,5 +1585,6 @@ __all__ = [
     'clear_stale_locks', 'ensure_safe_directory', 'reattach_repository',
     'resolve_target_branch', 'remote_default_branch', 'current_branch',
     'restore_ownership', 'refresh_exec_bits', 'classify', 'run_git', 'git_usable',
+    'resilient_fetch', 'tidy_git_files', 'prune_broken_refs', 'rebuild_repository',
     'GIT_NETWORK_TIMEOUT', 'GIT_LOCAL_TIMEOUT', 'LOCK_STALE_SECONDS',
 ]

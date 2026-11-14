@@ -517,3 +517,297 @@ def test_update_lands_even_with_a_broken_tag_present(box, upstream):
     assert result['ok'], result
     assert _head(box) == target
     assert _private_data_intact(box)
+
+
+# --- damaged git data ---------------------------------------------------------
+# What a power cut during a write leaves behind: empty or half-written files
+# under .git. Each of these used to leave a box unable to update, several of
+# them behind the "a tag ... is corrupt" message with a dead Update button.
+
+import glob as _glob
+import shutil as _shutil
+
+
+def _tags_dir(box):
+    d = box / '.git' / 'refs' / 'tags'
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _unpack_all(box):
+    """Turn packs into loose objects so one of them can be damaged."""
+    for pack in _glob.glob(str(box / '.git' / 'objects' / 'pack' / '*.pack')):
+        tmp = str(box / 'tmp.pack')
+        _shutil.move(pack, tmp)
+        for leftover in _glob.glob(str(box / '.git' / 'objects' / 'pack' / '*')):
+            os.remove(leftover)
+        with open(tmp, 'rb') as fh:
+            subprocess.run(['git', 'unpack-objects', '-q'], cwd=box, stdin=fh, check=True)
+        os.remove(tmp)
+
+
+def _head_object_file(box):
+    sha = (box / '.git' / 'refs' / 'heads' / 'main').read_text().strip()
+    path = box / '.git' / 'objects' / sha[:2] / sha[2:]
+    os.chmod(path, 0o644)
+    return path
+
+
+def _d_tag_bogus(box):
+    (_tags_dir(box) / 'os-v1').write_text('deadbeef' * 5 + '\n')
+
+
+def _d_tag_empty(box):
+    (_tags_dir(box) / 'os-v1').write_text('')
+
+
+def _d_tag_zero_bytes(box):
+    (_tags_dir(box) / 'os-v1').write_bytes(b'\x00' * 41)
+
+
+def _d_tag_packed(box):
+    path = box / '.git' / 'packed-refs'
+    old = path.read_text() if path.exists() else '# pack-refs with: peeled fully-peeled sorted \n'
+    path.write_text(old + 'deadbeef' * 5 + ' refs/tags/os-v1\n')
+
+
+def _d_remote_ref_bogus(box):
+    (box / '.git' / 'refs' / 'remotes' / 'origin' / 'main').write_text('deadbeef' * 5 + '\n')
+
+
+def _d_remote_ref_empty(box):
+    (box / '.git' / 'refs' / 'remotes' / 'origin' / 'main').write_text('')
+
+
+def _d_branch_empty(box):
+    (box / '.git' / 'refs' / 'heads' / 'main').write_text('')
+
+
+def _d_branch_bogus(box):
+    (box / '.git' / 'refs' / 'heads' / 'main').write_text('deadbeef' * 5 + '\n')
+
+
+def _d_stash_bogus(box):
+    (box / '.git' / 'refs' / 'stash').write_text('deadbeef' * 5 + '\n')
+
+
+def _d_object_empty(box):
+    _unpack_all(box)
+    _head_object_file(box).write_bytes(b'')
+
+
+def _d_object_missing(box):
+    _unpack_all(box)
+    os.remove(_head_object_file(box))
+
+
+def _d_head_empty(box):
+    (box / '.git' / 'HEAD').write_text('')
+
+
+def _d_index_empty(box):
+    (box / '.git' / 'index').write_bytes(b'')
+
+
+def _d_index_zero_bytes(box):
+    (box / '.git' / 'index').write_bytes(b'\x00' * 200)
+
+
+def _d_config_empty(box):
+    (box / '.git' / 'config').write_text('')
+
+
+def _d_config_half_written(box):
+    (box / '.git' / 'config').write_bytes(b'[core\x00\x00\n\trepositoryformatversion = \n[remote "ori')
+
+
+def _d_fetch_head_zero_bytes(box):
+    (box / '.git' / 'FETCH_HEAD').write_bytes(b'\x00' * 64)
+
+
+def _d_packed_refs_zero_bytes(box):
+    (box / '.git' / 'packed-refs').write_bytes(b'\x00' * 120)
+
+
+def _d_pack_truncated(box):
+    _git(box, 'gc', '-q', check=False)
+    for pack in _glob.glob(str(box / '.git' / 'objects' / 'pack' / '*.pack')):
+        os.chmod(pack, 0o644)
+        data = open(pack, 'rb').read()
+        open(pack, 'wb').write(data[:len(data) // 2])
+
+
+_DAMAGE = [_d_tag_bogus, _d_tag_empty, _d_tag_zero_bytes, _d_tag_packed, _d_remote_ref_bogus,
+           _d_remote_ref_empty, _d_branch_empty, _d_branch_bogus, _d_stash_bogus, _d_object_empty,
+           _d_object_missing, _d_head_empty, _d_index_empty, _d_index_zero_bytes, _d_config_empty,
+           _d_config_half_written, _d_fetch_head_zero_bytes, _d_packed_refs_zero_bytes,
+           _d_pack_truncated]
+_damage_ids = [f.__name__[3:] for f in _DAMAGE]
+
+
+@pytest.mark.parametrize('damage', _DAMAGE, ids=_damage_ids)
+def test_update_lands_whatever_is_damaged(damage, box, upstream, monkeypatch):
+    monkeypatch.setattr(gu, 'DEFAULT_REMOTE_URL', str(upstream))
+    target = _publish(upstream)
+    damage(box)
+    result = gu.update(str(box))
+    assert result['ok'], result
+    assert _head(box) == target
+    assert (box / 'app.py').read_text() == 'VERSION = 2\n'
+    assert _private_data_intact(box)
+    after = gu.check(str(box))
+    assert after['ok'] and not after['updates_available'], after
+    assert not (box / gu.BROKEN_GIT_BACKUP).exists()
+
+
+@pytest.mark.parametrize('damage', _DAMAGE, ids=_damage_ids)
+def test_background_check_never_changes_the_files_on_disk(damage, box, upstream, monkeypatch):
+    """The check may repair git's own files. It must not move the code: that
+    would be an update without the dependency install and restart."""
+    monkeypatch.setattr(gu, 'DEFAULT_REMOTE_URL', str(upstream))
+    _publish(upstream)
+    damage(box)
+    report = gu.check(str(box))
+    assert (box / 'app.py').read_text() == 'VERSION = 1\n'
+    assert _private_data_intact(box)
+    assert (box / '.git').is_dir()
+    # Either it healed (and sees the update) or it says the box needs the
+    # repair that Update performs. Never the old dead-end codes.
+    assert report['code'] in ('', 'repo_damaged'), report
+    if report['ok']:
+        assert report['updates_available']
+    else:
+        assert 'Repair and Update' in report['hint']
+
+
+def test_rebuild_that_cannot_reach_upstream_puts_the_old_git_data_back(box, upstream, monkeypatch, tmp_path):
+    marker = box / '.git' / 'ragnar-test-marker'
+    marker.write_text('original')
+    monkeypatch.setattr(gu, 'DEFAULT_REMOTE_URL', str(tmp_path / 'no-such-remote'))
+    monkeypatch.setattr(gu, 'FALLBACK_BRANCHES', ('main',))
+    ok, err = gu.rebuild_repository(str(box))
+    assert not ok and err
+    assert marker.read_text() == 'original'                 # the same .git is back
+    assert not (box / gu.BROKEN_GIT_BACKUP).exists()
+    assert (box / 'app.py').read_text() == 'VERSION = 1\n'
+    assert _private_data_intact(box)
+
+
+def test_rebuild_installs_dependencies_because_it_cannot_compare(box, upstream, monkeypatch):
+    monkeypatch.setattr(gu, 'DEFAULT_REMOTE_URL', str(upstream))
+    target = _publish(upstream)
+    # Damage no in-place repair can fix: the object store is gone.
+    _shutil.rmtree(box / '.git' / 'objects')
+    result = gu.update(str(box))
+    assert _head(box) == target and (box / 'app.py').read_text() == 'VERSION = 2\n'
+    assert _private_data_intact(box)
+    assert result['ok'] and result.get('rebuilt') is True
+    assert result['requirements_changed'] is True and result['already_current'] is False
+    assert any('rebuilt from upstream' in w for w in result['warnings'])
+
+
+def test_an_offline_box_is_not_treated_as_damaged(box, upstream):
+    """No network must never trigger repairs, least of all a rebuild."""
+    marker = box / '.git' / 'ragnar-test-marker'
+    marker.write_text('original')
+    _git(box, 'remote', 'set-url', 'origin', 'https://ragnar-no-such-host.invalid/x.git')
+    result = gu.update(str(box))
+    assert not result['ok'] and result['code'] in ('offline', 'timeout')
+    assert marker.read_text() == 'original' and not result.get('rebuilt')
+    assert (box / 'app.py').read_text() == 'VERSION = 1\n'
+
+
+def test_healthy_refs_survive_the_pruning(box):
+    _git(box, 'tag', 'v-good')
+    _git(box, 'branch', 'feature')
+    _git(box, 'pack-refs', '--all')
+    _git(box, 'tag', 'v-loose')
+    _d_tag_empty(box)
+    _d_stash_bogus(box)
+    gu.tidy_git_files(str(box))
+    removed = gu.prune_broken_refs(str(box))
+    assert removed == 1                                     # the stash; the empty tag was tidied
+    refs = _git(box, 'for-each-ref', '--format=%(refname)').split()
+    for ref in ('refs/tags/v-good', 'refs/tags/v-loose', 'refs/heads/feature', 'refs/heads/main',
+                'refs/remotes/origin/main'):
+        assert ref in refs
+    assert 'refs/stash' not in refs and 'refs/tags/os-v1' not in refs
+
+
+def test_packed_refs_keeps_its_good_lines(box):
+    _git(box, 'tag', 'v-good')
+    _git(box, 'pack-refs', '--all')
+    path = box / '.git' / 'packed-refs'
+    good = path.read_bytes()
+    path.write_bytes(good + b'\x00' * 40 + b'\nnot a ref line\n')
+    assert gu.tidy_git_files(str(box)) == 2
+    assert path.read_bytes() == good
+    assert 'v-good' in _git(box, 'tag', '-l').split()
+
+
+@pytest.mark.parametrize('text', [
+    'fatal: bad object refs/heads/main',
+    'error: object file .git/objects/3d/d4cd is empty',
+    'fatal: .git/index: index file smaller than expected',
+    'fatal: unterminated line in .git/packed-refs: ',
+    'fatal: bad config line 1 in file .git/config',
+    'error: packfile .git/objects/pack/pack-1.pack does not match index'])
+def test_damage_is_named_as_damage_with_a_way_out(text):
+    code, hint = gu.classify(text)
+    assert code in ('repo_damaged', 'broken_tag')
+    assert 'Repair and Update' in hint and 'no action is needed' not in hint
+
+
+def _shell_helpers(script):
+    """The fetch-recovery functions from a shell updater, ready to source."""
+    text = open(os.path.join(os.path.dirname(gu.__file__), script)).read()
+    start = text.index('resilient_fetch() {')
+    end = text.index('\necho -e "${BLUE}Step 2:', start)
+    return 'YELLOW=""; GREEN=""; NC=""; BLUE=""; RED=""\n' + text[start:end]
+
+
+@pytest.mark.parametrize('script', ['update_ragnar.sh', 'scripts/update_ragnar.sh'])
+@pytest.mark.parametrize('damage', [_d_tag_empty, _d_branch_bogus, _d_remote_ref_empty,
+                                    _d_stash_bogus, _d_index_zero_bytes],
+                         ids=lambda f: f.__name__[3:])
+def test_shell_updater_repairs_the_same_damage(script, damage, box, upstream, tmp_path):
+    target = _publish(upstream)
+    _shutil.copy(gu.__file__, box / 'git_updater.py')
+    for name in ('logger.py',):
+        src = os.path.join(os.path.dirname(gu.__file__), name)
+        if os.path.exists(src):
+            _shutil.copy(src, box / name)
+    damage(box)
+    runner = tmp_path / 'run.sh'
+    runner.write_text(_shell_helpers(script) + '\nresilient_fetch\n')
+    proc = subprocess.run(['bash', str(runner)], cwd=box, capture_output=True, text=True,
+                          env=dict(os.environ, GIT_CONFIG_COUNT='1',
+                                   GIT_CONFIG_KEY_0='protocol.file.allow',
+                                   GIT_CONFIG_VALUE_0='always'))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _git(box, 'rev-parse', 'origin/main') == target
+
+
+def test_an_error_ragnar_does_not_recognise_never_triggers_a_rebuild(box, upstream, monkeypatch):
+    """A rebuild resets tracked files. Only damage git names itself earns one."""
+    (box / 'app.py').write_text('VERSION = 1  # my local edit\n')
+    calls = []
+    monkeypatch.setattr(gu, 'rebuild_repository', lambda *a, **k: calls.append(1) or (True, ''))
+    real = gu.run_git
+
+    def flaky(args, cwd, **kw):
+        if args and args[0] == 'fetch':
+            return gu.GitResult(args, 128, '', 'fatal: remote error: something new and strange')
+        return real(args, cwd, **kw)
+
+    monkeypatch.setattr(gu, 'run_git', flaky)
+    result = gu.update(str(box))
+    assert not result['ok'] and calls == []
+    assert (box / 'app.py').read_text() == 'VERSION = 1  # my local edit\n'
+
+
+@pytest.mark.parametrize('text', ['error: The requested URL returned error: 503',
+                                  'fatal: the remote end hung up unexpectedly',
+                                  'fatal: unable to connect to github.com'])
+def test_server_trouble_is_offline_not_damage(text):
+    assert gu.classify(text)[0] == 'offline'

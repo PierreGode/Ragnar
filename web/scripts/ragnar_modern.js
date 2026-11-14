@@ -19038,8 +19038,11 @@ async function checkForUpdates() {
         // repository metadata). Say which, and keep the button usable when the
         // updater can repair the problem itself.
         if (data.code) {
-            const repairable = data.code === 'not_a_repo' || data.code === 'ownership' ||
-                               data.code === 'locked' || data.code === 'no_remote';
+            // The update itself carries every repair the updater knows, up
+            // to rebuilding the git data, so the button stays usable for
+            // anything short of "git does not run" or "the disk is full". A
+            // dead button here is what left boxes unable to update at all.
+            const repairable = data.code !== 'git_missing' && data.code !== 'disk_full';
             reportUpdateProblem('Update check', data);
             updateElement('update-status', data.code === 'offline' ? 'Offline' : 'Needs attention');
             if (updateStatusEl) {
@@ -19050,7 +19053,8 @@ async function checkForUpdates() {
                 updateBtn.disabled = false;
                 updateBtn.onclick = performUpdate;
                 updateBtn.className = 'w-full bg-yellow-600 hover:bg-yellow-700 text-white py-2 px-4 rounded transition-colors';
-                updateElement('update-btn-text', 'Repair and Update');
+                updateElement('update-btn-text', data.code === 'offline' || data.code === 'timeout'
+                    ? 'Retry Update' : 'Repair and Update');
             }
             return;
         }

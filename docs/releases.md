@@ -4,6 +4,18 @@
 
 ### 2026-11-14
 
+#### fix(update): damaged git data can no longer leave a box unable to update
+*branch `fix/update-self-repair`*
+
+- **The report.** Boxes showed **Needs attention**: "A tag in this clone or on the remote is corrupt…", with an Update button that could not be clicked. The remote's tags are fine. The damage is local: a power cut during a write leaves empty or half-written files under `.git`, and the earlier fix only handled one shape of it (a tag pointing at a missing object). An empty tag file, a bad branch or remote-branch file, a bad stash ref, a corrupt index, an empty object or a truncated pack all hit the same dead end.
+- **Reproduced.** 19 kinds of damage were planted in a test checkout: 15 left the box unable to update.
+- **The fix: a repair ladder** in `git_updater.py`. (1) plain-file fixes for an unreadable `HEAD`, `config`, `packed-refs`, empty refs and empty objects; (2) every broken ref is dropped, not only tags, and a corrupt index is rebuilt; (3) missing objects are refetched; (4) as a last resort `.git` is rebuilt around the files on disk. The background check runs 1 to 3. Step 4 runs only inside an update the user started, only when git itself reports damaged data, and puts the old `.git` back if it cannot reach github.com.
+- **The button.** **Repair and Update** is now offered for every failure except "git does not run" and "disk full". A dead button is what turned a repairable box into a stuck one.
+- **No false "Up to date".** A box whose own branch or history is unreadable used to compare as 0 commits behind. It now reports an update waiting.
+- **Shell updater.** `update_ragnar.sh` and `scripts/update_ragnar.sh` run the same ladder, before their first git command and when a fetch fails.
+- **Data safety.** Settings, databases and collected data are gitignored and untouched by every step; the tests check that for each kind of damage. A rebuild resets Ragnar's own tracked program files to upstream, so a local edit to those is lost in that one case.
+- **Verified for real, not only in unit tests:** two actual clones of this repository were damaged (empty tag file + bad remote ref + zeroed index; and the whole object store deleted) and updated against github.com. Both landed on `main` with private data intact. 63 new tests cover the same on small repositories, for the web and the shell updater.
+
 #### fix(cardputer): Caps are not hot-swappable, so identify the Cap once per start
 *branch `fix/cardputer-cap-no-hotplug`*
 

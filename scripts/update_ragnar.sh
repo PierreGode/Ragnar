@@ -49,6 +49,26 @@ git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$ragnar_PA
     || git config --global --add safe.directory "$ragnar_PATH"
 rm -f "$ragnar_PATH/.git/index.lock" "$ragnar_PATH/.git/HEAD.lock" "$ragnar_PATH/.git/shallow.lock" 2>/dev/null
 chown -R ragnar:ragnar "$ragnar_PATH" 2>/dev/null || true
+# Git data damaged by a power cut (an empty HEAD, a half-written config or
+# packed-refs) makes every git command below fail before any repair can run.
+# Fix what plain file operations can fix, and rebuild .git if git still cannot
+# open the repository. Gitignored data is never touched.
+if [ -d "$ragnar_PATH/.git" ] && [ -f "$ragnar_PATH/git_updater.py" ]; then
+    python3 - "$ragnar_PATH" <<'PYEOF' || true
+import sys
+root = sys.argv[1]
+sys.path.insert(0, root)
+import git_updater as g
+warnings = []
+g.tidy_git_files(root, warnings)
+if not g.repo_readable(root):
+    ok, err = g.rebuild_repository(root, warnings)
+    if not ok:
+        print("  could not rebuild the git data: " + str(err))
+for line in warnings:
+    print("  " + line)
+PYEOF
+fi
 # Stash and merge commits need an author identity; root rarely has one.
 GIT_ID=(-c user.name="Ragnar Updater" -c user.email="ragnar-updater@localhost" -c pull.rebase=false)
 
@@ -66,8 +86,12 @@ resilient_fetch() {
         rm -f "$errf"; return 0
     fi
     cat "$errf" >&2 || true
+    if grep -qiE 'could not resolve host|unable to access|timed out|network is unreachable|failed to connect' "$errf"; then
+        rm -f "$errf"; return 1   # offline - nothing to repair
+    fi
     if ! grep -qiE 'did not send all necessary objects|bad object refs/tags' "$errf"; then
-        rm -f "$errf"; return 1   # not a tag problem - let the caller fall back
+        rm -f "$errf"
+        repair_git_data; return $?   # other damage: straight to the repair ladder
     fi
     rm -f "$errf"
     echo -e "${YELLOW}Fetch hit a corrupt tag - clearing broken tag refs and retrying without tags...${NC}"
@@ -87,7 +111,30 @@ resilient_fetch() {
     # A corrupt tag inside packed-refs can survive the per-ref cleanup above.
     echo -e "${YELLOW}Retrying after dropping all local tags...${NC}"
     git tag -l | xargs -r git tag -d >/dev/null 2>&1 || true
-    git fetch --no-tags --prune --force origin '+refs/heads/*:refs/remotes/origin/*'
+    if git fetch --no-tags --prune --force origin '+refs/heads/*:refs/remotes/origin/*'; then
+        return 0
+    fi
+    repair_git_data
+}
+
+# Last resort for git data damaged by a power cut (empty or half-written files
+# under .git): the same repair ladder the web updater uses, ending in a rebuild
+# of .git around the files on disk. Gitignored data is never touched.
+repair_git_data() {
+    local root; root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    [ -f "$root/git_updater.py" ] || return 1
+    echo -e "${YELLOW}Fetch still failing - repairing the git data...${NC}"
+    python3 - "$root" <<'PYEOF'
+import sys
+root = sys.argv[1]
+sys.path.insert(0, root)
+import git_updater as g
+warnings = []
+result = g.resilient_fetch(root, warnings, allow_rebuild=True)
+for line in warnings:
+    print("  " + line)
+sys.exit(0 if result.ok else 1)
+PYEOF
 }
 
 echo -e "${BLUE}Step 2: Backing up local changes...${NC}"
