@@ -763,6 +763,11 @@ Yes for the LoRa + GNSS Cap and the CC1101 radio of the Sub-GHz Cap. The GNSS fe
 Source: M5StackCardputerZero.md
 <!-- proof: docs/M5StackCardputerZero.md | **NFC (ST25R3916).** Not supported yet. -->
 
+### Where are the CardputerZero Cap modules in the web UI?
+The fitted Cap and all header pins are under **System** → CardputerZero hardware. GNSS feeds the **Wardriving** tab, LoRa is **Network** → Signal Intelligence → Mesh Nodes, the CC1101 is a panel on the RF Waterfall page, and the camera is **System** → Camera.
+Source: CardputerZero-Caps.md
+<!-- proof: docs/CardputerZero-Caps.md | **Network** → **Signal Intelligence** → **Mesh Nodes** -->
+
 ### Can I swap CardputerZero Caps while it is running?
 No. Caps are not hot-swappable. Power the CardputerZero off before fitting or removing one; Ragnar identifies the Cap once at start.
 Source: M5StackCardputerZero.md

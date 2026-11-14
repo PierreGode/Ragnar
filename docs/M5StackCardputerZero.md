@@ -184,6 +184,9 @@ These are the 1.44" LCD HAT's controls on a keyboard; see
 
 ## Expansion header, Caps and camera
 
+> Step-by-step examples, and where each module is in the web UI:
+> [CardputerZero Caps, GPIO & Camera](CardputerZero-Caps.md).
+
 The 14-pin socket on the top edge takes M5Stack's "Cap" modules. Ragnar powers
 the header at start, works out which Cap is fitted, and shows it under
 **System → CardputerZero hardware** together with the live state of every pin.

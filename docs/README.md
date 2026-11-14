@@ -55,6 +55,7 @@ browse than search.
 ## Hardware & displays
 - [Display Buttons & Joystick Reference](DISPLAY_CONTROLS.md) — every HAT's key/joystick map
 - [M5Stack CardputerZero](M5StackCardputerZero.md) — built-in LCD + keyboard setup
+- [CardputerZero Caps, GPIO & Camera](CardputerZero-Caps.md) — how-to with examples: where each module is in the UI and how to use it
 - [Kiosk Mode](kiosk.md) — fullscreen Chromium dashboard on an attached screen
 - [Pager Guide](pager.md) — WiFi Pineapple Pager payload
 - [Gen 2 Hardware](hardware-gen2.md) — reference-build BOM & assembly
