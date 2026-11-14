@@ -99,15 +99,22 @@ auto-detection finds the receiver on `/dev/ttyS0` at 115200 baud.
 | In use by GPS | Ragnar's GPS reader has the port open |
 | Receiving on /dev/ttyS0 | Data seen; GPS not started yet |
 | Silent | Nothing on the serial port (Cap not powered or not seated) |
-| Serial console is using the port | The Linux serial console owns the UART; see below |
+| A serial login prompt is using the port | Linux has a login prompt on the UART and it is taking the receiver's data; see below |
 
-**If the serial console owns the port** (not the case on M5Stack's own image):
+**If a serial login prompt has the port.** Many images put a login prompt on this
+UART. Ragnar takes it off by itself when it finds the LoRa + GNSS Cap fitted, so
+this row normally clears on its own a few seconds after start. If it stays, press
+**Free the port for GPS** under the row, or from a shell:
 
 ```bash
-sudo /home/ragnar/Ragnar/scripts/cardputer_hardware.sh status
+sudo /home/ragnar/Ragnar/scripts/cardputer_hardware.sh gnss
 ```
 
-prints the exact command that frees it, followed by a reboot.
+Either way the prompt is stopped at once (no reboot needed, GPS can be started
+right away) and `console=serial0` is removed from `cmdline.txt` so it stays away
+after a reboot. The original file is kept as `cmdline.txt.ragnar-bak`;
+`sudo scripts/cardputer_hardware.sh gnss-undo` puts it back. To stop Ragnar doing
+this on its own, set `cardputer_free_gnss_uart` to `false`.
 
 **Check from a shell**
 
@@ -126,21 +133,31 @@ You should see lines starting with `$GN` or `$GP`.
 **Where:** **Network** → **Signal Intelligence** → **Mesh Nodes** (opens the Mesh
 Nodes page, which links to the Mesh Map).
 
-**Setup:** one script, once. Ragnar drives the radio through
-[meshtasticd](https://meshtastic.org/docs/hardware/devices/linux-native-hardware/),
-Meshtastic's Linux daemon.
+**How this works without a Meshtastic board.** A normal Meshtastic node is a
+small board running the Meshtastic firmware. The Cap is only the radio chip, so
+the firmware runs on the CardputerZero instead:
+[meshtasticd](https://meshtastic.org/docs/hardware/devices/linux-native-hardware/)
+is the same Meshtastic firmware built for Linux, and it drives the SX1262
+directly. The CardputerZero then *is* the node, and Ragnar connects to it at
+`127.0.0.1` like it would to a node on USB. Until meshtasticd is set up, the
+Mesh Nodes page has nothing to find.
+
+**Setup:** once. In **System** → **CardputerZero hardware**, the **Meshtastic**
+row says *Not set up*; press **Set up Meshtastic** under it. It needs internet
+and takes a few minutes. The row then reads *Running on this device*.
 
 ### Example: join the local Meshtastic mesh
 
-1. Install `meshtasticd` if it is not there yet. The script in the next step tries
-   `apt` once; if that fails, follow Meshtastic's guide linked above and come
-   back.
-2. Configure it for the Cap and start it:
+1. Press **Set up Meshtastic** in the hardware panel, or run the same thing from
+   a shell:
 
    ```bash
    sudo /home/ragnar/Ragnar/scripts/cardputer_lora_meshtastic.sh install
    ```
 
+   It adds Meshtastic's package repository, installs `meshtasticd`, writes the
+   radio settings for the Cap and starts the service.
+2. Wait for the **Meshtastic** row to say *Running on this device*.
 3. Set your region **once**. The radio stays silent until you do:
 
    ```bash
@@ -254,8 +271,14 @@ rpicam-hello --list-cameras          # what the system sees
 - Taking a photo while the live view runs pauses the view for the shot.
 - Live view is 640×480 at 10 frames a second, to stay light on a 512 MB board.
   Photos are 1640×1232.
-- The panel needs the `rpicam-apps` tools. The installer and updater add them; by
-  hand: `sudo /home/ragnar/Ragnar/scripts/cardputer_hardware.sh`.
+- The camera is part of the CardputerZero itself, not of a Cap. It needs two
+  things: the `rpicam-apps` tools, and `dtoverlay=imx219` in `config.txt` (this
+  board's camera is not auto-detected). The installer and updater set up both;
+  the overlay needs one reboot.
+- When the camera is missing, the **Camera** row in the hardware panel says why
+  (overlay not enabled, sensor did not answer, tools missing) and offers
+  **Set up the camera** when that fixes it. By hand:
+  `sudo /home/ragnar/Ragnar/scripts/cardputer_hardware.sh camera`, then reboot.
 
 ---
 
@@ -348,6 +371,7 @@ All in `config/shared_config.json`; none of them is needed for normal use.
 | Setting | Default | Effect |
 |---|---|---|
 | `cardputer_cap_power` | `true` | Switch the header's 5 V on at start. `false`: Ragnar leaves it alone, and a Cap stays unpowered |
+| `cardputer_free_gnss_uart` | `true` | With the LoRa + GNSS Cap fitted, take the serial login prompt off the UART so GPS can read it. `false`: Ragnar only reports it |
 | `wardriving_gps_port` | `auto` | Which serial port the GPS reads. `auto` finds the Cap's GNSS |
 | `wardriving_gps_baudrate` | `9600` | Fallback only; the detected rate wins |
 
@@ -362,11 +386,14 @@ All in `config/shared_config.json`; none of them is needed for normal use.
 | Cap fitted while running is not seen | Expected. Power off, fit it, power on. |
 | GNSS says "Silent" | Cap not powered or not seated. Check *Cap power (5 V)* says On. |
 | GNSS never gets a fix | Needs a view of the sky; wait several minutes outdoors the first time. |
+| Meshtastic finds no LoRa | meshtasticd is not set up yet: press **Set up Meshtastic** in the hardware panel. If you set it up before this fix, press **Set up again** (the earlier radio settings named a chip-select pin the daemon could not use). |
 | No **Mesh Nodes** button | The daemon is not running: `sudo scripts/cardputer_lora_meshtastic.sh status`. |
 | Mesh Nodes connects but hears nothing | Region not set (step 3 above), or no Meshtastic traffic in range. |
 | CC1101 tag says not detected | The LoRa Cap is fitted instead, or the CC1101 Cap was fitted with the power on. |
 | CC1101 sweep stops with "never entered receive" | The radio did not lock; power-cycle the unit with the Cap fitted. |
-| No **Camera** panel | `rpicam-hello --list-cameras` must list a camera. If the command is missing: `sudo scripts/cardputer_hardware.sh`. |
+| No **Camera** panel | Read the reason on the **Camera** row of the hardware panel. Usually: press **Set up the camera**, then reboot. |
+| CC1101 waterfall is black but the readouts move | Fixed: the colour scale started at the wrong level for this radio. Reload the page; if you changed the scale yourself, open **Settings** on the panel and set Ref to -40, Range to 70. |
+| GNSS says a login prompt is using the port | Press **Free the port for GPS** (see the GNSS section). |
 | Live view stays black | Another program has the camera. Stop it, then press **Live view** again. |
 | Screen freezes after pulling a Cap | That is the hot-plug problem. Power-cycle the unit. |
 

@@ -15238,7 +15238,8 @@ def _cz_detect_now(reidentify=False):
     import cardputer_caps
     in_use = _cz_gnss_port_in_use()
     info = cardputer_caps.detect(shared_data.config, probe_serial=not in_use, camera=False,
-                                 reidentify=reidentify)
+                                 reidentify=reidentify,
+                                 free_uart=bool(shared_data.config.get('cardputer_free_gnss_uart', True)))
     if info.get('gnss') is not None:
         info['gnss']['in_use'] = in_use
     if info.get('board'):
@@ -15284,11 +15285,71 @@ def api_cardputer_hardware():
             _cz_refresh_async(reidentify=bool(request.args.get('refresh')))
         data = dict(_cz_hw['data'] or {})
         data.update({'supported': True, 'scanning': _cz_hw['busy'],
-                     'pending': _cz_hw['data'] is None, 'gps': _cz_gps_live()})
+                     'pending': _cz_hw['data'] is None, 'gps': _cz_gps_live(),
+                     'task': _cz_task_state()})
         return jsonify(data)
     except Exception as e:
         logger.error(f"CardputerZero hardware error: {e}")
         return jsonify({'supported': False, 'error': str(e)}), 500
+
+
+# One-tap fixes from the hardware panel. Each runs the same script a user
+# would run by hand; only one at a time, and the last lines of its output are
+# kept for the panel.
+_CZ_ACTIONS = {
+    'gnss': (['scripts/cardputer_hardware.sh', 'gnss'], 'Freeing the serial port for GPS'),
+    'camera': (['scripts/cardputer_hardware.sh', 'camera'], 'Setting up the camera'),
+    'lora': (['scripts/cardputer_lora_meshtastic.sh', 'install'], 'Setting up Meshtastic on the LoRa Cap'),
+}
+_cz_task = {'lock': threading.Lock(), 'name': None, 'label': None, 'running': False,
+            'ok': None, 'log': '', 'at': 0}
+
+
+def _cz_task_state():
+    return {k: _cz_task[k] for k in ('name', 'label', 'running', 'ok', 'log', 'at')}
+
+
+def _cz_run_action(name):
+    script, label = _CZ_ACTIONS[name]
+    with _cz_task['lock']:
+        if _cz_task['running']:
+            return False
+        _cz_task.update(name=name, label=label, running=True, ok=None, log='', at=time.time())
+
+    def work():
+        ok, out = False, ''
+        try:
+            cmd = ['bash', os.path.join(shared_data.currentdir, script[0])] + script[1:]
+            done = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+            ok = done.returncode == 0
+            out = ((done.stdout or '') + (done.stderr or '')).strip()
+        except Exception as e:
+            out = str(e)
+        _cz_task.update(running=False, ok=ok, log='\n'.join(out.splitlines()[-8:]), at=time.time())
+        logger.info(f"CardputerZero action {name}: {'ok' if ok else 'failed'}")
+        _cz_refresh_async()
+
+    threading.Thread(target=work, name='cz-action', daemon=True).start()
+    return True
+
+
+@app.route('/api/cardputer/action', methods=['POST'])
+def api_cardputer_action():
+    """Run one of the hardware panel's fixes: gnss, camera or lora."""
+    try:
+        import cardputer_caps
+        if not cardputer_caps.is_cardputer_zero(shared_data.config):
+            return jsonify({'ok': False, 'error': 'not a CardputerZero'}), 400
+        name = str((request.get_json(silent=True) or {}).get('action') or '')
+        if name not in _CZ_ACTIONS:
+            return jsonify({'ok': False, 'error': 'unknown action'}), 400
+        if not _cz_run_action(name):
+            return jsonify({'ok': False, 'error': 'another setup step is still running',
+                            'task': _cz_task_state()}), 409
+        return jsonify({'ok': True, 'task': _cz_task_state()})
+    except Exception as e:
+        logger.error(f"CardputerZero action error: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 
 def _camera_dir():

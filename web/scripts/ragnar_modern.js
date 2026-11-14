@@ -29761,7 +29761,7 @@ function fetchPowerDetail() {
 // Both panels stay hidden unless the backend reports the hardware, so other
 // boards never see them. The hardware scan runs server-side in the background;
 // the 5 s system loop just reads its last result.
-const _cz = { supported: null };
+const _cz = { supported: null, taskRunning: false };
 const _cam = { live: false, busy: false };
 
 function _czEsc(v) {
@@ -29786,6 +29786,21 @@ function _czRow(label, value, cls) {
     return `<div class="pw-row"><span>${_czEsc(label)}</span><span class="${cls || ''}">${_czEsc(value)}</span></div>`;
 }
 
+function _czFix(action, label, hint) {
+    const off = _cz.taskRunning ? ' disabled' : '';
+    return `<div class="cz-fix"><button class="pw-btn pw-btn-primary" onclick="runCardputerAction('${action}')"${off}>${_czEsc(label)}</button>`
+        + `<span class="pw-muted">${_czEsc(hint)}</span></div>`;
+}
+
+function runCardputerAction(action) {
+    _cz.taskRunning = true;
+    networkAwareFetch('/api/cardputer/action', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }) })
+        .then(r => r.json())
+        .then(() => fetchCardputerHardware(false))
+        .catch(e => { _cz.taskRunning = false; console.error('CardputerZero action failed:', e); });
+}
+
 function updateCardputerHardwareView(d) {
     const panel = document.getElementById('cz-panel');
     _cz.supported = !!(d && d.supported);
@@ -29807,7 +29822,7 @@ function updateCardputerHardwareView(d) {
             let text, cls = 'pw-ok';
             const g = d.gps;
             if (d.gnss.console_conflict) {
-                text = 'Serial console is using the port'; cls = 'pw-bad';
+                text = 'A serial login prompt is using the port'; cls = 'pw-bad';
             } else if (g && g.connected) {
                 text = g.has_fix ? `Fix, ${g.satellites || 0} satellites` : 'Connected, waiting for a fix';
             } else if (d.gnss.in_use) {
@@ -29819,7 +29834,19 @@ function updateCardputerHardwareView(d) {
             }
             rows.push(_czRow('GNSS', text, cls));
             if (d.gnss.console_conflict) {
-                rows.push('<div class="pw-muted">Remove <code>console=serial0,115200</code> from /boot/firmware/cmdline.txt and reboot.</div>');
+                rows.push(_czFix('gnss', 'Free the port for GPS',
+                    'Stops the serial login prompt now and removes the serial console from cmdline.txt (a backup is kept). GPS then works for wardriving.'));
+            }
+        }
+        if (d.lora) {
+            const l = d.lora;
+            rows.push(_czRow('Meshtastic', l.active ? 'Running on this device' : l.configured ? 'Set up, not running' : 'Not set up',
+                l.active ? 'pw-ok' : 'pw-muted'));
+            if (l.active) {
+                rows.push('<div class="pw-muted">The LoRa Cap is a Meshtastic node of its own. Open Mesh Nodes and connect: it is found at 127.0.0.1.</div>');
+            } else {
+                rows.push(_czFix('lora', l.configured ? 'Set up again' : 'Set up Meshtastic',
+                    'Installs meshtasticd, the Meshtastic firmware for Linux. It drives the LoRa radio directly, so no separate Meshtastic board is needed. Needs internet; takes a few minutes.'));
             }
         }
         if (d.cap === 'subghz_nfc' && d.nfc_spi === false) {
@@ -29828,8 +29855,24 @@ function updateCardputerHardwareView(d) {
         }
         const cam = d.camera || {};
         rows.push(_czRow('Camera', cam.present ? `${cam.model || 'Detected'} ${cam.modes || ''}`.trim() : 'Not detected',
-            cam.present ? 'pw-ok' : 'pw-muted'));
+            cam.present ? 'pw-ok' : 'pw-bad'));
+        if (!cam.present && cam.reason) {
+            rows.push(`<div class="pw-muted">${_czEsc(cam.reason.charAt(0).toUpperCase() + cam.reason.slice(1))}.</div>`);
+            if (cam.code === 'overlay' || cam.code === 'tools') {
+                rows.push(_czFix('camera', 'Set up the camera',
+                    'Installs the camera tools and enables the camera in config.txt (a backup is kept). Restart the CardputerZero afterwards.'));
+            } else if (cam.fix) {
+                rows.push(`<div class="pw-muted"><code>${_czEsc(cam.fix)}</code></div>`);
+            }
+        }
+        const t = d.task;
+        if (t && t.name) {
+            const state = t.running ? `${t.label}…` : (t.ok ? `${t.label}: done` : `${t.label}: failed`);
+            rows.push(`<div class="${t.running ? 'pw-muted' : t.ok ? 'pw-ok' : 'pw-bad'}" style="margin-top:8px">${_czEsc(state)}</div>`);
+            if (!t.running && t.log) rows.push(`<pre class="cz-log">${_czEsc(t.log)}</pre>`);
+        }
     }
+    _cz.taskRunning = !!(d.task && d.task.running);
     const summary = document.getElementById('cz-summary');
     if (summary) summary.innerHTML = rows.join('');
 

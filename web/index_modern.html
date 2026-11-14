@@ -418,6 +418,9 @@
         .cam-actions { display: flex; flex-wrap: wrap; gap: 8px; }
         .cam-view { display: block; width: 100%; max-width: 640px; height: auto; margin-top: 10px; border-radius: 8px; background: #000; }
         .cam-view.hidden { display: none; }
+        .cz-fix { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0 10px; }
+        .cz-fix .pw-muted { flex: 1 1 220px; font-size: 12px; }
+        .cz-log { margin-top: 4px; padding: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-word; background: rgba(0,0,0,.3); border-radius: 6px; max-height: 160px; overflow: auto; }
         .cam-photos { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
         .cam-photo { position: relative; }
         .cam-photo img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 6px; display: block; }
@@ -10200,7 +10203,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261114-updrepair"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261114-capsfix"></script>
 
 
 

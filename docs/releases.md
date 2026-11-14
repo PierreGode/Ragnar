@@ -4,6 +4,15 @@
 
 ### 2026-11-14
 
+#### fix(cardputer): Cap field report — CC1101 waterfall, GPS port, Meshtastic on the LoRa Cap, camera
+*branch `fix/cardputer-caps-field-report`*
+
+- **CC1101 waterfall was black.** The sweep ran and the readouts were right, but the colour scale started at the level used for the SDR sources, far above anything this radio reports, so every row drew black. The CC1101 panel now starts with a scale that fits it (-40 to -110 dBm).
+- **GPS port taken by the serial console.** With the LoRa + GNSS Cap fitted, Ragnar now stops the serial login prompt on the UART (GPS works straight away, no reboot) and removes `console=serial0` from `cmdline.txt` for the next boot, keeping `cmdline.txt.ragnar-bak`. Also a **Free the port for GPS** button in the hardware panel, `scripts/cardputer_hardware.sh gnss` / `gnss-undo`, and the setting `cardputer_free_gnss_uart`. Only the login prompt counts as a conflict now: a kernel console alone does not stop the port being read.
+- **Meshtastic did not find the LoRa radio.** Two causes. The radio settings Ragnar wrote named chip-select as a GPIO, which the daemon cannot claim because the kernel owns it; they now match Meshtastic's own CardputerZero preset. And `meshtasticd` was never installed, because it is not in the system's package sources: the setup script now adds Meshtastic's repository. New **Set up Meshtastic** button and a Meshtastic status row in the hardware panel. The guide explains how this works without a Meshtastic board (the firmware runs on the CardputerZero itself).
+- **Camera not detected.** The built-in camera is not auto-detected on this board; it needs `dtoverlay=imx219` in `config.txt`, as on M5Stack's image. Install and update now add it (backup kept, one reboot). The hardware panel's Camera row says why a camera is missing and offers **Set up the camera**.
+- Not confirmed on a unit: these follow the user's report, M5Stack's published configuration and Meshtastic's preset, and were checked against simulated hardware.
+
 #### docs(cardputer): how-to guide for Caps, the GPIO header and the camera
 *branch `docs/cardputer-caps-guide`*
 
