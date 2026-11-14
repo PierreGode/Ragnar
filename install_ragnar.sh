@@ -1146,6 +1146,14 @@ install_pisugar_server() {
         return 0
     fi
 
+    # The CardputerZero has its own battery and fuel gauge (read by
+    # sysfs_battery.py), so there is nothing to ask.
+    if [ "$CARDPUTER_MODE" = true ]; then
+        log "INFO" "Skipping PiSugar server install (CardputerZero has a built-in battery)"
+        echo -e "${GREEN}✓ CardputerZero: built-in battery, PiSugar not needed${NC}"
+        return 0
+    fi
+
     # Check if pisugar-server is already installed
     if command -v pisugar-server >/dev/null 2>&1 || systemctl list-unit-files pisugar-server.service >/dev/null 2>&1; then
         log "INFO" "PiSugar server is already installed"

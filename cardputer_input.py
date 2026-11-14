@@ -12,6 +12,12 @@
 #   2. _visual_dir is made an identity map — the LCD HAT remaps directions
 #      because its joystick is mounted 90° off, but keyboard arrows already point
 #      the way the user reads them.
+# Backspace also only flips the screen between its two landscape ways up.
+#
+# Arrows: the F / X / Z / C keys carry the up / down / left / right legends.
+# M5Stack's key guide asks apps to treat the plain letters as arrows when no
+# text is being typed, so both the plain keys and their Fn-layer arrow codes
+# are mapped. They page through the screens in every layer.
 #
 # Logical inputs handed to the base class (same names as the LCD HAT):
 #   up / down / left / right / press / key1 / key2 / key3
@@ -75,6 +81,9 @@ DEFAULT_KEYMAP = {
 
 # --- Kernel input device -------------------------------------------------------
 EVDEV_BY_PATH = "/dev/input/by-path/platform-3f804000.i2c-event"
+EVDEV_BY_PATH_GLOB = "/dev/input/by-path/platform-*.i2c-event*"
+# Substrings of the input device name the keypad driver registers under.
+_KEYBOARD_NAME_TAGS = ("tca8418", "cardputer", "m5stack")
 _SYS_INPUT = "/sys/class/input"
 _EVENT_FORMAT = "llHHi"       # struct input_event: sec, usec, type, code, value
 _EVENT_SIZE = struct.calcsize(_EVENT_FORMAT)
@@ -122,9 +131,12 @@ def find_keyboard_device():
                 name = f.read()
         except OSError:
             continue
-        if "tca8418" in name.lower():
+        if any(tag in name.lower() for tag in _KEYBOARD_NAME_TAGS):
             event = os.path.basename(os.path.dirname(os.path.dirname(name_path)))
             return f"/dev/input/{event}"
+    # A kernel that names the node differently still hangs it off the I2C bus.
+    for path in sorted(glob.glob(EVDEV_BY_PATH_GLOB)):
+        return path
     return None
 
 
@@ -362,6 +374,25 @@ class CardputerInputListener(LCDHATInputListener):
                 self._on_input_held(name)
 
     # --- Orientation ------------------------------------------------------
+
+    def _on_key2(self):
+        """Backspace (KEY2): turn the screen upside down and back. The LCD
+        HAT steps through all four rotations, but this board is a keyboard
+        with a wide screen above it, so only the two landscape ways up make
+        sense. The choice is saved, so it survives a restart."""
+        try:
+            current = int(getattr(self.shared_data, 'screen_reversed', 0) or 0) % 360
+        except (TypeError, ValueError):
+            current = 0
+        new_rotation = 0 if current == 180 else 180
+        self.shared_data.screen_reversed = new_rotation
+        try:
+            self.shared_data.config['screen_reversed'] = new_rotation
+            self.shared_data.save_config()
+        except Exception as e:
+            logger.warning("CardputerZero: could not save the rotation (%s)", e)
+        logger.info("CardputerZero Backspace: display rotation set to %d°", new_rotation)
+
 
     def _visual_dir(self, name):
         """Keyboard arrows already point the way the user reads them — no 90°

@@ -15,6 +15,10 @@ The UPS HAT (C) is the board this was built for. The two-cell boards use the
 same chip and the same formula scaled to two cells, but have not been tested on
 hardware.
 
+A board with its own fuel gauge, such as the M5Stack CardputerZero, is read by
+`sysfs_battery.py` instead and fills the same battery slots; see
+[M5Stack CardputerZero](M5StackCardputerZero.md).
+
 A PiSugar keeps working as before. If both a PiSugar and a UPS HAT answer, the
 PiSugar reading is shown.
 

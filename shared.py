@@ -200,7 +200,9 @@ DISPLAY_PROFILES = {
     # M5Stack CardputerZero built-in 1.9" ST7789V2, used landscape as 320x170.
     # Landscape reference so the layout reflows to the wide panel (same "ref =
     # panel size" approach as st7735s) instead of being stretched from portrait.
-    "st7789v2":    {"ref_width": 320, "ref_height": 170, "default_flip": False},
+    # mounted_flipped: the panel sits upside down relative to the image its
+    # driver shows, so the first start on it turns the screen 180 degrees.
+    "st7789v2":    {"ref_width": 320, "ref_height": 170, "default_flip": True, "mounted_flipped": True},
     # Whisplay HAT 1.69" ST7789 240x280 colour TFT LCD (ref height keeps the
     # 240:280 aspect so the layout isn't stretched: 122 * 280/240 = 142)
     "whisplay":    {"ref_width": DESIGN_REF_WIDTH, "ref_height": 142, "default_flip": False},
@@ -653,6 +655,7 @@ class SharedData:
             "distro_cve_enrichment": False,  # opt-in: check Debian/Ubuntu security trackers before surfacing a CVE (issue #1051)
             "distro_cve_cache_hours": 24,
             "ups_hat_monitor": True,  # auto-detect a Waveshare INA219 UPS HAT (C at 0x43, B at 0x42) and show its battery % (issue #1049)
+            "builtin_battery_monitor": True,  # show a built-in fuel gauge (kernel power-supply battery; the CardputerZero's BQ27220)
             "enable_attacks": False,
             "release_gate_enabled": False,
             "release_gate_message": "",
@@ -1066,6 +1069,17 @@ class SharedData:
             if self.config.get('screen_reversed') != desired_orientation:
                 self.config['screen_reversed'] = desired_orientation
                 changed = True
+
+        # A panel mounted upside down gets its 180 degree turn once, the first
+        # time it is selected. The marker makes it a default, not a rule: an
+        # orientation chosen afterwards (web UI, Backspace on the keyboard) is
+        # kept, and one already set by hand is not turned back.
+        if profile.get('mounted_flipped') and self.config.get('orientation_default_applied') != epd_key:
+            if normalize_rotation(self.config.get('screen_reversed', 0)) == 0:
+                self.config['screen_reversed'] = 180
+                self.screen_reversed = 180
+            self.config['orientation_default_applied'] = epd_key
+            changed = True
 
         if persist and changed:
             self.save_config()

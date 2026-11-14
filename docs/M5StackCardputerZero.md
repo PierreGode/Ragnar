@@ -4,9 +4,11 @@ Ragnar runs on the [M5Stack CardputerZero](https://docs.m5stack.com/en/Cardputer
 — a pocket-sized Linux computer with a built-in 1.9" LCD and a 46-key keyboard.
 
 > [!IMPORTANT]
-> CardputerZero support follows M5Stack's published pin map and developer docs and
-> is tested against simulated hardware, but it has **not been run on a physical
-> unit yet**. Report anything that differs; the display, keyboard and backlight
+> The first units are in users' hands, and their reports shaped this page: the
+> screen orientation, the battery reading, the colour screens and the key hints
+> below all come from that feedback. The project itself still has no unit to test
+> on, so each change is checked against M5Stack's published docs and simulated
+> hardware. Report anything that differs; the display, keyboard and backlight
 > settings can all be changed without editing code (see below).
 
 ---
@@ -19,6 +21,9 @@ Ragnar runs on the [M5Stack CardputerZero](https://docs.m5stack.com/en/Cardputer
 - The only board-specific parts are its two built-in peripherals: the **1.9" LCD**
   and the **46-key keyboard**. Ragnar drives both.
 - Install it by choosing **option 7 — "M5Stack CardputerZero"** in `install_ragnar.sh`.
+- The screen is in **colour** with the full-colour Viking or shieldmaiden, the
+  header shows the **battery percentage**, and **`F` `X` `Z` `C`** page through
+  the screens.
 - On M5Stack's stock image this **replaces the APPLaunch launcher** on the LCD and
   keyboard. It is reversible; see [Taking over from APPLaunch](#taking-over-from-applaunch).
 
@@ -69,28 +74,86 @@ reserved for the tiny ST7735S HAT.
 
 It renders all three on-device modes (see [Display Controls](DISPLAY_CONTROLS.md)):
 
-- **Default** — the Ragnar character/status frame and a carousel of stat pages
-  (host/target counts, vulnerability count, Wi-Fi/BT/PAN/USB connectivity, service
-  status, …).
-- **Wardriving** (engine running) — live **2.4 / 5 / 6 GHz** network counts as large
-  numbers, **GPS fix**, **speed**, companion status, and a live GPS/network map,
-  across a 5-screen carousel.
+- **Default** — the main screen, then five stat pages (Network, Vuln, Discovered,
+  Adv Scanner, Traffic).
+- **Wardriving** (engine running) — six screens: band counts (2.4 / 5 / 6 GHz),
+  map, GPS, sky view, session and the character.
 - **Network Diagnostic** — the on-screen field-tester cards.
+
+#### The main screen
+
+The character fills the right-hand side at twice its usual size, in full colour.
+The left column has the header (Wi-Fi strength, last IP octet, unit name, battery),
+eight stat counters, the current status and what Ragnar is saying. Counts above 999
+are shortened (`1.9k`, `19k`).
+
+Every screen uses a dark colour theme. `lcd_color: false` in
+`config/shared_config.json` switches the main screen, stat pages and net-diag cards
+back to black-on-white; `wardriving_lcd_color: false` does the same for the
+wardriving screens. Colour applies while the screen is in landscape, which is the
+only orientation the keyboard offers.
+
+#### Viking or shieldmaiden
+
+The character follows the unit's gender, the same setting the web dashboard uses.
+Set `mesh_viking_gender` to `female` for the shieldmaiden or `male` for the Viking
+(**Mesh** tab, or `config/shared_config.json`). On a mesh, a unit that carries a
+woman's Viking name gets the shieldmaiden without being told.
+
+#### Orientation
+
+The panel is mounted upside down relative to the picture its driver shows, so the
+first start on a CardputerZero turns the screen 180°. This is a one-time default:
+a unit already turned by hand is left as it is, and a later choice is kept.
+**Backspace** flips the screen between its two landscape positions and saves the
+choice. **Config → Display** can set any rotation.
+
+### The battery
+
+The CardputerZero has a 1750 mAh cell and a **BQ27220** fuel gauge. Ragnar reads it
+and shows the percentage in the header of the main screen (with a `+` while
+charging) and in the **System** tab's Battery card. Nothing needs installing or
+configuring, and the installer does not ask about a PiSugar on this board.
+
+| Source | When |
+|---|---|
+| `/sys/class/power_supply/*` (type `Battery`) | M5Stack's image, whose kernel loads the gauge driver. Preferred. |
+| The gauge itself, I²C `0x55` on bus 1 | A kernel without that driver. Read-only. |
+
+Check it from a shell:
+
+```bash
+python3 sysfs_battery.py          # BQ27220 fuel gauge: 76% (3.91 V, on battery)
+python3 sysfs_battery.py --i2c    # also try the gauge directly over I2C
+cat /sys/class/power_supply/*/capacity
+```
+
+`builtin_battery_monitor: false` turns the reading off. A PiSugar or Waveshare UPS
+HAT, if one is ever attached and answering, takes precedence. The I²C path is
+written from the gauge's datasheet and has not been confirmed on a unit.
 
 ### The 46-key keyboard — replaces the HAT buttons/joystick
 The keyboard is mapped onto the **same logical controls** the LCD-HAT joystick and
 keys use (`cardputer_input.py` subclasses the LCD-HAT input layer), so every on-device
 control Ragnar already has works from the keys:
 
-| Key(s) | Logical action |
-|---|---|
-| `F` `X` `Z` `C`, or the Fn arrows | up / down / left / right — cycle pages, steer the wardriving carousel |
-| Enter | press / select |
-| Space | **KEY1** — mode toggle (net-diag on/off, leave the wardriving screens) |
-| Backspace | **KEY2** — rotate screen / reconnect Wi-Fi |
-| Tab or Esc | **KEY3** — next page (hold: restart Ragnar) / toggle phone AP |
+`F` `X` `Z` `C` are the keys with the arrow legends. They work as arrows on their
+own, as M5Stack's key guide recommends, and with **fn** held.
 
-See [Display Controls](DISPLAY_CONTROLS.md) for the exact per-mode key actions.
+| Key(s) | Ragnar screens | Wardriving screens | Network Diagnostic |
+|---|---|---|---|
+| `F` / `Z` (up / left) | previous page | previous screen | `Z` previous card, `F` previous function |
+| `X` / `C` (down / right) | next page | next screen | `C` next card, `X` next function |
+| Enter (OK) | start / stop page autoscroll | back to the first screen | run the highlighted function |
+| Space | Network Diagnostic on | back to the Ragnar screens | Network Diagnostic off |
+| Backspace | flip the screen 180° | reconnect to a known Wi-Fi | card list |
+| Tab or Esc | next page (hold: restart Ragnar) | phone-access AP on / off | auto-switch cards on / off |
+
+The footer of each screen names the keys that apply there, for example
+`F/X/Z/C:Page  OK:Auto  Space:NetDiag  Bksp:Flip`.
+
+These are the 1.44" LCD HAT's controls on a keyboard; see
+[Display Controls](DISPLAY_CONTROLS.md) for what each mode does.
 
 ---
 
@@ -218,6 +281,10 @@ a device. On a plain kernel without that driver, Ragnar talks to the TCA8418 ove
 
 Either map can be changed **without editing code**:
 
+Ragnar finds the keyboard by its fixed path, then by an input device whose name
+contains `tca8418`, `cardputer` or `m5stack`, then by any `platform-*.i2c-event`
+node.
+
 1. Watch the log. Every **unmapped** key press logs its code:
    ```
    CardputerZero keyboard: unmapped key code 30 (add to config/cardputer_keymap.json to use it)
@@ -240,6 +307,9 @@ no direction remap is applied.
 |---|---|
 | **Stock launcher still on screen / LCD frozen** | Run `sudo scripts/cardputer_takeover.sh status`, then `apply` if needed. |
 | **Text console draws over Ragnar** | Reboot after the takeover; the `cmdline.txt` change only applies at boot. |
+| **Screen is upside down** | Press **Backspace** on a Ragnar screen, or set the rotation under **Config → Display**. |
+| **No battery percentage** | Run `python3 sysfs_battery.py`. If it finds nothing, check `ls /sys/class/power_supply/`; an empty list means the kernel has no gauge driver, so try `python3 sysfs_battery.py --i2c`. |
+| **Arrow keys do nothing** | Look for `CardputerZero keyboard: reading /dev/input/...` in the log. If it is missing, see "Keys do nothing" below. |
 | **Screen stays black** | Check `cat /sys/class/graphics/fb*/name` and `cat /sys/class/backlight/*/brightness`. On the SPI path, confirm the expander answers at `0x4F` (`i2cdetect -y 1`). |
 | **Ragnar painted over the HDMI console** | Shouldn't happen, but if forced, unset `RAGNAR_CARDPUTER_FB` or point it at the correct LCD `/dev/fbN`. |
 | **Image mirrored / rotated wrong (SPI path only)** | Try the alternate MADCTL values noted in `st7789v2.py`. |
@@ -256,6 +326,7 @@ no direction remap is applied.
 | `m5ioe1.py` | M5IOE1 expander driver — LCD reset + backlight (SPI path) |
 | `scripts/cardputer_takeover.sh` | Hands the LCD and keyboard from APPLaunch to Ragnar, and back |
 | `cardputer_input.py` | Keyboard listener — kernel input device first, TCA8418 I²C fallback (reuses the LCD-HAT input layer) |
+| `sysfs_battery.py` | Battery percentage — kernel power-supply class first, BQ27220 over I²C as fallback |
 | `config/cardputer_keymap.json` | Optional per-board keymap override |
 | `install_ragnar.sh` / `update_ragnar.sh` | Install option 7 + dependency parity |
 | `shared.py`, `epd_helper.py`, `display.py`, `web/scripts/ragnar_modern.js` | Display profile + selector wiring |
@@ -264,7 +335,9 @@ no direction remap is applied.
 
 ## Status
 
-Follows M5Stack's published pin map and developer docs, and is covered by
-`tests/test_cardputer_zero.py` against simulated hardware. **Not yet run on a physical
-unit.** The likeliest things to need attention are the launcher takeover, which depends
-on how a given M5Stack image is built, and the SPI fallback's rotation and offsets.
+Running on users' units: install, display and web UI are confirmed by their reports.
+The project has no unit of its own, so changes are covered by
+`tests/test_cardputer_zero.py` and `tests/test_sysfs_battery.py` against simulated
+hardware and by rendering the real screens at 320×170. Not yet confirmed on a unit:
+the battery reading, the colour screens, the SPI fallback's rotation and offsets, and
+the direct-I²C paths for the keyboard and the fuel gauge.

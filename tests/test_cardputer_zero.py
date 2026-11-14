@@ -694,3 +694,249 @@ def test_display_profile_resolves_from_the_web_size_key():
     assert shared.resolve_epd_type("1in9_cardputer") == "st7789v2"
     assert shared.DISPLAY_PROFILES["st7789v2"]["ref_width"] == 320
     assert shared.DISPLAY_PROFILES["st7789v2"]["ref_height"] == 170
+
+
+# ── First units in the field: orientation, battery prompt, colour, key hints ─
+
+def orientation_data(**config):
+    import shared
+    data = shared.SharedData.__new__(shared.SharedData)
+    data.config = dict({"epd_type": "st7789v2"}, **config)
+    data.screen_reversed = shared.normalize_rotation(data.config.get("screen_reversed", 0))
+    data.saved = []
+    data.save_config = lambda: data.saved.append(dict(data.config))
+    return data
+
+
+def test_first_start_turns_the_upside_down_panel_round():
+    data = orientation_data(screen_reversed=0)
+    assert data.apply_display_profile("st7789v2", persist=True)
+    assert data.config["screen_reversed"] == 180 and data.screen_reversed == 180
+    assert data.saved[-1]["screen_reversed"] == 180
+
+
+def test_orientation_default_is_applied_only_once():
+    data = orientation_data(screen_reversed=0)
+    data.apply_display_profile("st7789v2")
+    data.config["screen_reversed"] = 0          # the owner turns it back
+    data.apply_display_profile("st7789v2")
+    assert data.config["screen_reversed"] == 0
+
+
+def test_a_unit_already_turned_by_hand_is_left_alone():
+    data = orientation_data(screen_reversed=180)
+    data.apply_display_profile("st7789v2")
+    assert data.config["screen_reversed"] == 180
+
+
+def test_other_panels_get_no_orientation_default():
+    data = orientation_data(epd_type="st7735s", screen_reversed=0)
+    data.apply_display_profile("st7735s")
+    assert data.config["screen_reversed"] == 0
+    assert "orientation_default_applied" not in data.config
+
+
+def test_backspace_flips_between_the_two_landscape_ways_up(monkeypatch):
+    monkeypatch.setattr(ci, "_KEYMAP_FILE", "/nonexistent/cardputer_keymap.json")
+    saved = []
+    shared = types.SimpleNamespace(screen_reversed=180, config={"screen_reversed": 180},
+                                   save_config=lambda: saved.append(True))
+    lst = ci.CardputerInputListener(shared)
+    monkeypatch.setattr(lst, "_netdiag_active", lambda: False)
+    monkeypatch.setattr(lst, "_is_wardriving_active", lambda: False)
+    lst._keymap = dict(ci.DEFAULT_EVDEV_KEYMAP)
+    seen = []
+    for _ in range(4):
+        lst._handle_event(14, True)
+        lst._handle_event(14, False)
+        seen.append(shared.screen_reversed)
+    assert seen == [0, 180, 0, 180]              # never 90 or 270
+    assert shared.config["screen_reversed"] == 180 and len(saved) == 4
+
+
+@pytest.mark.parametrize("code,step", [(33, -1), (44, -1), (45, +1), (46, +1),
+                                       (103, -1), (105, -1), (108, +1), (106, +1)])
+def test_arrow_keys_page_through_the_screens(monkeypatch, code, step):
+    """F/X/Z/C and their Fn-layer arrow codes, through the real state machine."""
+    from epd_button import PAGE_COUNT
+    monkeypatch.setattr(ci, "_KEYMAP_FILE", "/nonexistent/cardputer_keymap.json")
+    lst = ci.CardputerInputListener(types.SimpleNamespace(screen_reversed=180, config={}))
+    monkeypatch.setattr(lst, "_netdiag_active", lambda: False)
+    monkeypatch.setattr(lst, "_is_wardriving_active", lambda: False)
+    lst._keymap = dict(ci.DEFAULT_EVDEV_KEYMAP)
+    lst._handle_event(code, True)
+    lst._handle_event(code, False)
+    assert lst.current_page == step % PAGE_COUNT
+
+
+def test_keyboard_found_under_another_driver_name(tmp_path, monkeypatch):
+    node = tmp_path / "event2" / "device"
+    node.mkdir(parents=True)
+    (node / "name").write_text("M5Stack CardputerZero Keyboard\n")
+    monkeypatch.setattr(ci, "_SYS_INPUT", str(tmp_path))
+    monkeypatch.setattr(ci, "EVDEV_BY_PATH", str(tmp_path / "absent"))
+    monkeypatch.setattr(ci, "EVDEV_BY_PATH_GLOB", str(tmp_path / "absent*"))
+    monkeypatch.delenv("RAGNAR_CARDPUTER_KBD", raising=False)
+    assert ci.find_keyboard_device() == "/dev/input/event2"
+
+
+def test_keyboard_found_on_another_i2c_controller_path(tmp_path, monkeypatch):
+    (tmp_path / "platform-fe804000.i2c-event").write_text("")
+    monkeypatch.setattr(ci, "_SYS_INPUT", str(tmp_path / "nosys"))
+    monkeypatch.setattr(ci, "EVDEV_BY_PATH", str(tmp_path / "absent"))
+    monkeypatch.setattr(ci, "EVDEV_BY_PATH_GLOB", str(tmp_path / "platform-*.i2c-event*"))
+    monkeypatch.delenv("RAGNAR_CARDPUTER_KBD", raising=False)
+    assert ci.find_keyboard_device() == str(tmp_path / "platform-fe804000.i2c-event")
+
+
+def test_installer_does_not_ask_about_pisugar_on_a_cardputer(tmp_path):
+    text = (ROOT / "install_ragnar.sh").read_text()
+    body = text[text.index("install_pisugar_server() {"):]
+    body = body[:body.index("\n}\n") + 3]
+    script = tmp_path / "pisugar.sh"
+    script.write_text(
+        'log() { :; }\nGREEN=""; NC=""; CYAN=""; BLUE=""; YELLOW=""\n'
+        'command() { return 1; }\nsystemctl() { return 1; }\n'
+        'read() { echo ASKED; return 1; }\ncurl() { echo DOWNLOADED; }\n'
+        'IS_ARM=true; UNATTENDED=false\n' + body +
+        '\nCARDPUTER_MODE="$1"\ninstall_pisugar_server\n')
+    on = subprocess.run(["bash", str(script), "true"], capture_output=True, text=True)
+    assert on.returncode == 0
+    assert "ASKED" not in on.stdout and "DOWNLOADED" not in on.stdout
+    assert "built-in battery" in on.stdout
+    # Every other board is still asked.
+    off = subprocess.run(["bash", str(script), "false"], capture_output=True, text=True)
+    assert "ASKED" in off.stdout
+
+
+# The screens themselves, rendered by the real Display code at 320x170.
+
+sys.path.insert(0, str(ROOT / "tests"))
+
+
+def cz_display(gender="male", **cfg):
+    lc = pytest.importorskip("test_lcd_color")
+    sd = lc._sd(gender)
+    sd.width, sd.height = 320, 170
+    sd.fontdir = lc.FONTS
+    sd.ragnarstatusimage = None
+    sd.ragnar_instance = None
+    sd.coinnbr = 1984
+    d = lc._display(sd, epd_type="st7789v2", **cfg)
+    d.render_w, d.render_h = 320, 170
+    d._dbm_to_quality = lambda dbm: 70
+    return lc, sd, d
+
+
+def cz_main(d, lc):
+    from PIL import ImageDraw
+    if d._lcd_color_panel(320, 170):
+        img = Image.new("RGB", (320, 170), lc.display._WD_COLORS["bg"])
+    else:
+        img = Image.new("1", (320, 170), 255)
+    d._render_main_cardputer(img, ImageDraw.Draw(img), 320, 170)
+    return img
+
+
+@pytest.mark.parametrize("gender", ["male", "female"])
+def test_main_screen_is_colour_with_the_full_colour_character(gender):
+    lc, sd, d = cz_display(gender)
+    assert d._cardputer_landscape(320, 170) and d._lcd_color_panel(320, 170)
+    img = cz_main(d, lc)
+    assert img.mode == "RGB"
+    assert img.getpixel((80, 160)) == lc.display._WD_COLORS["bg"]
+    figure = img.crop((170, 20, 318, 168))
+    assert len(figure.getcolors(maxcolors=100000)) > 300
+    white = sum(1 for p in lc._px(figure) if min(p) > 240)
+    assert white < 0.2 * figure.width * figure.height        # no white backdrop
+    icons = img.crop((2, 24, 160, 66))
+    assert len({p for p in lc._px(icons) if max(p) - min(p) > 80}) > 6
+
+
+def test_the_shieldmaiden_and_the_viking_are_different_art():
+    lc, _, d_m = cz_display("male")
+    _, _, d_f = cz_display("female")
+    assert cz_main(d_m, lc).crop((170, 20, 318, 168)).tobytes() != \
+        cz_main(d_f, lc).crop((170, 20, 318, 168)).tobytes()
+
+
+def test_nothing_is_drawn_over_the_character():
+    """The left column (header, stats, speech) must stop short of the figure."""
+    lc, sd, d = cz_display("female")
+    sd.ragnarsays = "word " * 60
+    full = cz_main(d, lc)
+    sd.ragnarsays = ""
+    sd.targetnbr = sd.portnbr = sd.vulnnbr = sd.crednbr = 0
+    bare = cz_main(d, lc)
+    assert full.crop((166, 0, 320, 170)).tobytes() == bare.crop((166, 0, 320, 170)).tobytes()
+
+
+def test_colour_can_be_switched_off():
+    lc, sd, d = cz_display(lcd_color=False)
+    img = cz_main(d, lc)
+    assert img.mode == "1" and img.histogram()[0] > 800
+
+
+def test_battery_percentage_is_in_the_header():
+    lc, sd, d = cz_display()
+    without = cz_main(d, lc).crop((100, 0, 166, 20))
+
+    class Gauge:
+        available = True
+        def get_battery_level(self): return 76.4
+        def is_charging(self): return True
+
+    sd.ragnar_instance = types.SimpleNamespace(builtin_battery=Gauge())
+    with_battery = cz_main(d, lc).crop((100, 0, 166, 20))
+    assert without.tobytes() != with_battery.tobytes()
+    good = lc.display._WD_COLORS["good"]
+    assert good in {p for p in lc._px(with_battery)}
+
+
+def test_turned_on_its_side_it_keeps_the_generic_layouts():
+    lc, sd, d = cz_display()
+    assert not d._cardputer_landscape(170, 320)
+    assert not d._lcd_color_panel(170, 320)
+
+
+def test_footer_hints_name_keyboard_keys_not_hat_buttons():
+    lc, sd, d = cz_display()
+    for hat_hint in ("K1:Home K2:Flip K3:Next K4:Rst", "K2 back · press=open",
+                     "K1 back to pages", "K1Exit K2WiFi K3AP", "K1Exit K2WiFi K3APoff"):
+        hint = d._key_hint(hat_hint)
+        assert not re.search(r"\bK[1-4]", hint), hint
+        assert lc.display.ImageFont  # hint must fit the 320 px footer
+        assert sd.font_arial9.getlength(hint) <= 320 - 8, hint
+    assert "F/X/Z/C" in d._key_hint("K1:Home K2:Flip K3:Next K4:Rst")
+    # Other panels keep their own wording.
+    d.config["epd_type"] = "epd2in7_V2"
+    assert d._key_hint("K1:Home K2:Flip K3:Next K4:Rst") == "K1:Home K2:Flip K3:Next K4:Rst"
+
+
+def test_wardriving_uses_the_paged_screens_the_arrows_drive():
+    from PIL import ImageDraw
+    lc, sd, d = cz_display()
+    called = []
+    d._get_wardriving_data = lambda: {"running": True}
+    d._render_wardriving_page_compact = lambda image, draw, wd: called.append(wd)
+    img = Image.new("RGB", (320, 170))
+    d._render_wardriving_page(img, ImageDraw.Draw(img))
+    assert called == [{"running": True}]
+    assert d._wd_color_panel(320, 170)
+
+
+@pytest.mark.parametrize("rows", [3, 40])
+def test_scrolling_rows_with_a_divider_render_on_a_colour_canvas(rows):
+    """Measuring on a 1-bit scratch canvas with RGB inks used to raise, which
+    blanked the Discovered page on every colour panel."""
+    from PIL import ImageDraw
+    lc, sd, d = cz_display()
+    d.render_sx = d.render_sy = 1.0
+    img = Image.new("RGB", (320, 170), lc.display._WD_COLORS["bg"])
+    groups = [("rows", [(f"row {i}", i) for i in range(rows)]), ("divider", None),
+              ("rows", [("last", 1)])]
+    d._draw_scrollable_rows(img, ImageDraw.Draw(img), 26, 150, groups)
+    assert len(img.getcolors(maxcolors=100000)) > 2
+    one = Image.new("1", (320, 170), 255)
+    d._draw_scrollable_rows(one, ImageDraw.Draw(one), 26, 150, groups)
+    assert one.histogram()[0] > 50
