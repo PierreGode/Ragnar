@@ -28,6 +28,13 @@ non-zero (the kernel exposes the rail switch as an LED). Ragnar turns the
 rail on and LEAVES it on: a Cap shares SPI with the LCD, and cutting its
 supply while it is plugged in can freeze the panel.
 
+Not hot-swappable. M5Stack's guide: "Hot-plugging Cap expansion modules is
+not supported and may cause abnormal operation. Power off before installing
+or removing a Cap." So the Cap is identified ONCE per start and that answer is
+kept: the buses are not re-probed while Ragnar runs, and a Cap that was found
+is never "re-detected" as something else. Later refreshes only update live
+state (GNSS traffic, pin levels, camera).
+
 Detection is read-only apart from that rail and G26 (driven high: it is the
 CC1101 Cap's power enable and the SX1262's reset, and high is the working
 state for both). Nothing is transmitted.
@@ -515,7 +522,28 @@ def prepare_lora():
     return True, "LoRa Cap powered, RF switch on"
 
 
-def detect(config=None, power=True, probe_serial=True, camera=True):
+# The Cap found at start: (cap id, CC1101 version or None). None = not looked yet.
+_identity = None
+
+
+def identify_cap(force=False):
+    """Which Cap is fitted -> (cap id, CC1101 version or None).
+
+    Probed once and remembered, because Caps must not be swapped with the
+    power on. `force` looks again, and is honoured only while no Cap has been
+    found: an identified Cap stays identified until Ragnar restarts."""
+    global _identity
+    if _identity is not None and not (force and _identity[0] == CAP_NONE):
+        return _identity
+    if probe_lora_cap():
+        _identity = (CAP_LORA_GNSS, None)
+    else:
+        version = probe_cc1101()
+        _identity = (CAP_SUBGHZ_NFC, version) if version is not None else (CAP_NONE, None)
+    return _identity
+
+
+def detect(config=None, power=True, probe_serial=True, camera=True, reidentify=False):
     """What is on the header and whether the camera answers.
 
     Returns a dict: board, ext5v, cap ('none' / 'lora_gnss' / 'subghz_nfc'),
@@ -523,7 +551,9 @@ def detect(config=None, power=True, probe_serial=True, camera=True):
     camera. With power=True the Cap rail is switched on first, because an
     unpowered Cap cannot answer. probe_serial=False skips listening on the
     UART (pass it when the GPS reader already has the port open: two readers
-    would each get half the bytes); camera=False skips the camera query."""
+    would each get half the bytes); camera=False skips the camera query.
+    The Cap itself is identified once per start (see identify_cap);
+    reidentify=True looks again, but only if none was found before."""
     allow_expander(config)
     result = {"board": is_cardputer_zero(config), "ext5v": None, "cap": CAP_NONE,
               "cap_name": None, "radios": [], "pins": {}, "gnss": None,
@@ -531,13 +561,9 @@ def detect(config=None, power=True, probe_serial=True, camera=True):
     if not result["board"]:
         return result
     result["ext5v"] = power_on_cap() if power else ext5v_state()
-    if probe_lora_cap():
-        result["cap"] = CAP_LORA_GNSS
-    else:
-        version = probe_cc1101()
-        if version is not None:
-            result["cap"] = CAP_SUBGHZ_NFC
-            result["cc1101_version"] = version
+    result["cap"], version = identify_cap(force=reidentify)
+    if version is not None:
+        result["cc1101_version"] = version
     info = CAP_INFO.get(result["cap"])
     if info:
         result["cap_name"] = info["name"]

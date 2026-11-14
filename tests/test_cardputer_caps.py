@@ -100,6 +100,7 @@ def fake_board(monkeypatch, tmp_path, lora=False, cc1101=None, console=False,
     rail = tmp_path / "brightness"
     rail.write_text("0\n")
     monkeypatch.setattr(cc, "EXT5V_PATH", str(rail))
+    monkeypatch.setattr(cc, "_identity", None)
     monkeypatch.setattr(cc, "set_gpio", lambda gpio, high: True)
     monkeypatch.setattr(cc, "probe_lora_cap", lambda: lora)
     monkeypatch.setattr(cc, "probe_cc1101", lambda: cc1101)
@@ -374,3 +375,57 @@ def test_kernel_rail_control_wins_over_the_expander(monkeypatch, tmp_path, plain
     before = dict(FakeExpander.regs)
     assert cc.power_on_cap() is True and rail.read_text().strip() == "1"
     assert FakeExpander.regs == before
+
+
+# ── Caps are not hot-swappable: identify once per start ──────────────────────
+
+def counting_probes(monkeypatch, lora=False, cc1101=None):
+    calls = {"lora": 0, "cc1101": 0}
+    state = {"lora": lora, "cc1101": cc1101}
+
+    def probe_lora():
+        calls["lora"] += 1
+        return state["lora"]
+
+    def probe_cc():
+        calls["cc1101"] += 1
+        return state["cc1101"]
+
+    monkeypatch.setattr(cc, "_identity", None)
+    monkeypatch.setattr(cc, "probe_lora_cap", probe_lora)
+    monkeypatch.setattr(cc, "probe_cc1101", probe_cc)
+    return calls, state
+
+
+def test_a_found_cap_is_never_probed_again(monkeypatch):
+    calls, state = counting_probes(monkeypatch, lora=True)
+    assert cc.identify_cap() == ("lora_gnss", None)
+    state["lora"] = False                      # even if the bus stops answering
+    for force in (False, True, True):
+        assert cc.identify_cap(force=force) == ("lora_gnss", None)
+    assert calls == {"lora": 1, "cc1101": 0}
+
+
+def test_cc1101_cap_identity_is_kept_too(monkeypatch):
+    calls, state = counting_probes(monkeypatch, cc1101=0x14)
+    assert cc.identify_cap() == ("subghz_nfc", 0x14)
+    state["cc1101"] = None
+    assert cc.identify_cap(force=True) == ("subghz_nfc", 0x14)
+    assert calls == {"lora": 1, "cc1101": 1}
+
+
+def test_an_empty_header_is_only_looked_at_again_when_asked(monkeypatch):
+    calls, state = counting_probes(monkeypatch)
+    assert cc.identify_cap() == ("none", None)
+    assert cc.identify_cap() == ("none", None)
+    assert calls == {"lora": 1, "cc1101": 1}           # no background re-probing
+    state["lora"] = True
+    assert cc.identify_cap(force=True) == ("lora_gnss", None)
+
+
+def test_detect_reuses_the_identity(monkeypatch, tmp_path):
+    fake_board(monkeypatch, tmp_path, lora=True, nmea=1)
+    calls, _ = counting_probes(monkeypatch, lora=True)
+    for _ in range(3):
+        assert cc.detect()["cap"] == "lora_gnss"
+    assert calls["lora"] == 1

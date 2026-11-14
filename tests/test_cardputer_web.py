@@ -47,8 +47,8 @@ def test_hardware_scan_runs_in_the_background_and_is_served(web, monkeypatch):
     import pi_camera
     calls = []
 
-    def detect(config=None, power=True, probe_serial=True, camera=True):
-        calls.append({"probe_serial": probe_serial, "camera": camera})
+    def detect(config=None, power=True, probe_serial=True, camera=True, reidentify=False):
+        calls.append({"probe_serial": probe_serial, "camera": camera, "reidentify": reidentify})
         return {"board": True, "ext5v": True, "cap": "lora_gnss",
                 "cap_name": "Cap LoRa-1262 + GNSS", "radios": ["SX1262"], "pins": {},
                 "gnss": {"port": "/dev/ttyS0", "baud": 115200, "sentences": 3,
@@ -69,14 +69,18 @@ def test_hardware_scan_runs_in_the_background_and_is_served(web, monkeypatch):
     assert data["pending"] is False and data["cap"] == "lora_gnss"
     assert data["gnss"]["sentences"] == 3 and data["gnss"]["in_use"] is False
     assert data["camera"]["model"] == "imx219" and data["header"][0]["label"] == "G26"
-    assert calls == [{"probe_serial": True, "camera": False}]      # cached: one scan
+    # Cached: one scan, and a timed scan never re-identifies the Cap.
+    assert calls == [{"probe_serial": True, "camera": False, "reidentify": False}]
+    client.get("/api/cardputer/hardware?refresh=1")
+    assert wait_for(lambda: len(calls) == 2 and not web._cz_hw["busy"])
+    assert calls[1]["reidentify"] is True                         # the Refresh button may
 
 
 def test_gnss_port_is_not_probed_while_gps_has_it(web, monkeypatch):
     import cardputer_caps
     seen = []
     monkeypatch.setattr(cardputer_caps, "is_cardputer_zero", lambda cfg=None: True)
-    monkeypatch.setattr(cardputer_caps, "detect", lambda config=None, power=True, probe_serial=True, camera=True:
+    monkeypatch.setattr(cardputer_caps, "detect", lambda config=None, power=True, probe_serial=True, camera=True, reidentify=False:
                         seen.append(probe_serial) or {"board": False, "gnss": {"sentences": 0}})
     monkeypatch.setattr(web, "_cz_gnss_port_in_use", lambda: True)
     info = web._cz_detect_now()

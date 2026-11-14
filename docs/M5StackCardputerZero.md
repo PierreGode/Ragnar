@@ -188,6 +188,13 @@ The 14-pin socket on the top edge takes M5Stack's "Cap" modules. Ragnar powers
 the header at start, works out which Cap is fitted, and shows it under
 **System → CardputerZero hardware** together with the live state of every pin.
 
+> [!WARNING]
+> **Caps are not hot-swappable.** M5Stack's guide: "Hot-plugging Cap expansion
+> modules is not supported and may cause abnormal operation. Power off before
+> installing or removing a Cap." Ragnar follows that: it identifies the Cap once
+> when it starts and does not probe the header again while running. To change
+> Caps, power the CardputerZero off, swap, and power on.
+
 ```
 G26   G23   G22   G11   G10   G9    G7
 5VIN  GND   5VOUT G2    G3    G14   G15
@@ -220,7 +227,12 @@ sudo python3 cardputer_caps.py          # Cap, GNSS, camera
 sudo python3 cardputer_caps.py --json   # the same plus every pin's state
 ```
 
-Only one Cap fits at a time: both use SPI chip-select 1.
+Only one Cap fits at a time: both use SPI chip-select 1. The panel's **Refresh**
+button updates GNSS, camera and pin state; it only looks for a Cap again when
+none was found at start.
+
+The Grove port on the right side has its own switched 5 V output, which is also
+off by default. Ragnar does not switch that one on.
 
 ### Cap LoRa-1262 + GNSS
 
@@ -432,11 +444,12 @@ no direction remap is applied.
 | **Stock launcher still on screen / LCD frozen** | Run `sudo scripts/cardputer_takeover.sh status`, then `apply` if needed. |
 | **Text console draws over Ragnar** | Reboot after the takeover; the `cmdline.txt` change only applies at boot. |
 | **Screen is upside down** | Press **Backspace** on a Ragnar screen, or set the rotation under **Config → Display**. |
+| **Cap fitted while running is not seen** | Expected: Caps are not hot-swappable. Power off, fit the Cap, power on. |
 | **Cap not detected** | `sudo python3 cardputer_caps.py`. "Cap 5 V rail: not present" means the kernel has no `ext_5v_out` control (not M5Stack's image). |
 | **No GPS from the LoRa Cap** | The antenna is inside the Cap and needs sky view. Check **System → CardputerZero hardware**: "Silent" means no data on `/dev/ttyS0`. |
 | **Camera panel missing** | `rpicam-hello --list-cameras` must list the camera; if the command is missing run `sudo scripts/cardputer_hardware.sh`. |
 | **No battery percentage** | Run `python3 sysfs_battery.py`. If it finds nothing, check `ls /sys/class/power_supply/`; an empty list means the kernel has no gauge driver, so try `python3 sysfs_battery.py --i2c`. |
-| **Arrow keys do nothing** | Press a key and watch the bottom-left corner. `F: up` means the key works. Nothing at all means the press is not reaching Ragnar: try the **LOCK** slider (above the keyboard, on the right), then run `sudo python3 cardputer_input.py`. |
+| **Arrow keys do nothing** | Press a key and watch the bottom-left corner. `F: up` means the key works. Nothing at all means the press is not reaching Ragnar: run `sudo python3 cardputer_input.py`. |
 | **Screen stays black** | Check `cat /sys/class/graphics/fb*/name` and `cat /sys/class/backlight/*/brightness`. On the SPI path, confirm the expander answers at `0x4F` (`i2cdetect -y 1`). |
 | **Ragnar painted over the HDMI console** | Shouldn't happen, but if forced, unset `RAGNAR_CARDPUTER_FB` or point it at the correct LCD `/dev/fbN`. |
 | **Image mirrored / rotated wrong (SPI path only)** | Try the alternate MADCTL values noted in `st7789v2.py`. |

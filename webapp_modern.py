@@ -15234,10 +15234,11 @@ def _cz_gps_live():
         return None
 
 
-def _cz_detect_now():
+def _cz_detect_now(reidentify=False):
     import cardputer_caps
     in_use = _cz_gnss_port_in_use()
-    info = cardputer_caps.detect(shared_data.config, probe_serial=not in_use, camera=False)
+    info = cardputer_caps.detect(shared_data.config, probe_serial=not in_use, camera=False,
+                                 reidentify=reidentify)
     if info.get('gnss') is not None:
         info['gnss']['in_use'] = in_use
     if info.get('board'):
@@ -15250,7 +15251,7 @@ def _cz_detect_now():
     return info
 
 
-def _cz_refresh_async():
+def _cz_refresh_async(reidentify=False):
     with _cz_hw['lock']:
         if _cz_hw['busy']:
             return
@@ -15258,7 +15259,7 @@ def _cz_refresh_async():
 
     def work():
         try:
-            _cz_hw['data'] = _cz_detect_now()
+            _cz_hw['data'] = _cz_detect_now(reidentify=reidentify)
             _cz_hw['at'] = time.time()
         except Exception as e:
             logger.error(f"CardputerZero hardware detection failed: {e}")
@@ -15278,7 +15279,9 @@ def api_cardputer_hardware():
             return jsonify({'supported': False})
         stale = time.time() - _cz_hw['at'] > _CZ_HW_TTL
         if request.args.get('refresh') or stale or _cz_hw['data'] is None:
-            _cz_refresh_async()
+            # Caps are not hot-swappable, so a timed refresh only updates
+            # live state. The button may look again while no Cap is known.
+            _cz_refresh_async(reidentify=bool(request.args.get('refresh')))
         data = dict(_cz_hw['data'] or {})
         data.update({'supported': True, 'scanning': _cz_hw['busy'],
                      'pending': _cz_hw['data'] is None, 'gps': _cz_gps_live()})

@@ -342,13 +342,16 @@ def detect():
         caps.allow_expander(config)
         if not caps.is_cardputer_zero(config):
             value = {"available": False, "error": "needs a CardputerZero with the Cap CC1101"}
-        elif caps.probe_lora_cap():
-            value = {"available": False, "error": "the LoRa Cap is fitted, not the CC1101 Cap"}
         else:
+            # Caps are not hot-swappable: use the Cap identified at start
+            # instead of probing the buses again.
             caps.power_on_cap()
-            version = caps.probe_cc1101()
-            if version is None:
-                value = {"available": False, "error": "no CC1101 answers on SPI (is the Cap fitted?)"}
+            cap, version = caps.identify_cap()
+            if cap == caps.CAP_LORA_GNSS:
+                value = {"available": False, "error": "the LoRa Cap is fitted, not the CC1101 Cap"}
+            elif cap != caps.CAP_SUBGHZ_NFC:
+                value = {"available": False,
+                         "error": "no CC1101 Cap was found at start (power off to fit one)"}
             else:
                 value = {"available": True, "model_name": "CC1101", "board": "Cap CC1101",
                          "version": version, "bands": sorted(BANDS),
