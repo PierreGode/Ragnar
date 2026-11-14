@@ -28,8 +28,10 @@
 #      DEFAULT_EVDEV_KEYMAP uses Linux KEY_* codes and matches a layout already
 #      in use on this board. Events are read as raw input_event structs, so no
 #      python-evdev dependency is needed.
-#   2. Direct I2C. For a plain kernel with no keypad driver. Matrix positions are
-#      unpublished, so DEFAULT_KEYMAP there is a best guess.
+#   2. Direct I2C. For a plain kernel with no keypad driver (a stock Raspberry
+#      Pi OS or Kali image). The chip reports each key as row * 10 + column + 1.
+#      DEFAULT_KEYMAP uses the board's own matrix: the schematic's 5 x 10 grid
+#      and the row / column of every key in M5Stack's device tree.
 #
 # Either map can be replaced without code changes: every unmapped key press is
 # logged at INFO with its code, and config/cardputer_keymap.json holds
@@ -46,6 +48,7 @@ import threading
 import time
 
 from lcdhat_input import LCDHATInputListener
+from epd_button import PAGE_MAIN
 from epd_button import NETDIAG_HOLD_TIME
 
 logger = logging.getLogger(__name__)
@@ -64,20 +67,64 @@ REG_KP_GPIO3       = 0x1F     # cols C8-C9 into the keypad matrix
 
 POLL_INTERVAL = 0.02          # 50 Hz — also the resolution of long-press timing
 
-# Raw TCA8418 key code → logical action, used only on the direct I2C path.
-# Best-effort default; override per board via config/cardputer_keymap.json.
-DEFAULT_KEYMAP = {
-    # arrow cluster (guess: bottom-right of the CardputerZero keyboard)
-    "31": "up",
-    "41": "down",
-    "40": "left",
-    "42": "right",
-    "43": "press",   # Enter / OK
-    # edge keys standing in for the HAT's three buttons
-    "1":  "key1",    # ` / Esc  → mode toggle (net-diag / exit wardriving)
-    "11": "key2",    # Tab      → rotate screen / reconnect WiFi
-    "30": "key3",    # Fn/Shift → next page (long: restart) / toggle AP
+# --- The key matrix -------------------------------------------------------------
+# (row, column) of every key, from the linux,keymap table in M5Stack's device
+# tree for this board (m5stack-linux-dtoverlays, cardputerzero-v5-overlay.dts).
+# Rows 0-3 are the four main rows, columns 0-9 left to right; row 4 holds the
+# keys at the left edge of each row plus Esc and Tab.
+#   Esc                                       Tab
+#   1    2 3 4 5 6 7 8 9 0   Backspace
+#   sym  Q W E R T Y U I O P
+#   shift A S D F G H J K L  Enter
+#   fn   ctrl alt Z X C V B N M  Space
+KEY_MATRIX = {
+    "Esc": (4, 0), "Tab": (4, 9),
+    "1": (4, 4), "2": (0, 0), "3": (0, 1), "4": (0, 2), "5": (0, 3), "6": (0, 4),
+    "7": (0, 5), "8": (0, 6), "9": (0, 7), "0": (0, 8), "Bksp": (0, 9),
+    "sym": (4, 3), "Q": (1, 0), "W": (1, 1), "E": (1, 2), "R": (1, 3), "T": (1, 4),
+    "Y": (1, 5), "U": (1, 6), "I": (1, 7), "O": (1, 8), "P": (1, 9),
+    "shift": (4, 1), "A": (2, 0), "S": (2, 1), "D": (2, 2), "F": (2, 3), "G": (2, 4),
+    "H": (2, 5), "J": (2, 6), "K": (2, 7), "L": (2, 8), "OK": (2, 9),
+    "fn": (4, 2), "ctrl": (3, 0), "alt": (3, 1), "Z": (3, 2), "X": (3, 3), "C": (3, 4),
+    "V": (3, 5), "B": (3, 6), "N": (3, 7), "M": (3, 8), "Space": (3, 9),
 }
+
+
+def matrix_code(row, col):
+    """The key code the TCA8418 reports for a matrix position."""
+    return row * 10 + col + 1
+
+
+# TCA8418 code -> name printed on the key, for the direct I2C path.
+I2C_KEY_NAMES = {matrix_code(r, c): name for name, (r, c) in KEY_MATRIX.items()}
+# Linux KEY_* code -> name, for the kernel input device.
+EVDEV_KEY_NAMES = {
+    1: "Esc", 15: "Tab", 14: "Bksp", 28: "OK", 57: "Space", 42: "shift", 29: "ctrl",
+    56: "alt", 0x185: "fn", 0x17f: "sym",
+    2: "1", 3: "2", 4: "3", 5: "4", 6: "5", 7: "6", 8: "7", 9: "8", 10: "9", 11: "0",
+    16: "Q", 17: "W", 18: "E", 19: "R", 20: "T", 21: "Y", 22: "U", 23: "I", 24: "O", 25: "P",
+    30: "A", 31: "S", 32: "D", 33: "F", 34: "G", 35: "H", 36: "J", 37: "K", 38: "L",
+    44: "Z", 45: "X", 46: "C", 47: "V", 48: "B", 49: "N", 50: "M",
+    103: "fn+F", 108: "fn+X", 105: "fn+Z", 106: "fn+C",
+}
+
+# What each key does, by the name printed on it. Both sources use this.
+#   F / X / Z / C  the arrow keys: the joystick's up / down / left / right
+#   OK (Enter)     the joystick's centre press. On the Ragnar screens it opens
+#                  the diagnostic screens; inside them it runs / selects.
+#   Esc            back: out of the diagnostic or wardriving screens, else to
+#                  the main screen
+#   Space          KEY1 (diagnostic mode on / off)
+#   Backspace      KEY2      Tab  KEY3      A  page autoscroll on / off
+KEY_ACTIONS = {"F": "up", "X": "down", "Z": "left", "C": "right", "OK": "press",
+               "Esc": "back", "Space": "key1", "Bksp": "key2", "Tab": "key3",
+               "A": "auto"}
+
+# Raw TCA8418 key code -> logical action, used only on the direct I2C path.
+DEFAULT_KEYMAP = {str(matrix_code(*KEY_MATRIX[name])): action
+                  for name, action in KEY_ACTIONS.items()}
+# fn and sym report as ordinary keys on this path: held, never an action.
+I2C_MODIFIER_CODES = {matrix_code(*KEY_MATRIX[n]) for n in ("fn", "sym", "shift", "ctrl", "alt")}
 
 # --- Kernel input device -------------------------------------------------------
 EVDEV_BY_PATH = "/dev/input/by-path/platform-3f804000.i2c-event"
@@ -107,18 +154,19 @@ DEFAULT_EVDEV_KEYMAP = {
     "45": "down",    # X
     "44": "left",    # Z
     "46": "right",   # C
-    "28": "press",   # Enter
-    "57": "key1",    # Space     → mode toggle (net-diag / exit wardriving)
-    "14": "key2",    # Backspace → rotate screen / reconnect WiFi
+    "28": "press",   # Enter / OK
+    "1":  "back",    # Esc
+    "57": "key1",    # Space     → diagnostic mode on / off
+    "14": "key2",    # Backspace → flip screen / reconnect WiFi
     "15": "key3",    # Tab       → next page (long: restart) / toggle AP
-    "1":  "key3",    # Esc       → same as Tab
+    "30": "auto",    # A         → page autoscroll on / off
 }
 
-# fn / sym / shift / ctrl / alt: held with other keys, never an action alone.
 # The board's fn and sym keys report as KEY_DVD (0x185) and KEY_CD (0x17f).
 _MODIFIER_CODES = {0x185, 0x17f, 464, 42, 54, 29, 97, 56, 100, 125, 126, 127}
 
-_VALID_ACTIONS = {"up", "down", "left", "right", "press", "key1", "key2", "key3"}
+_VALID_ACTIONS = {"up", "down", "left", "right", "press", "key1", "key2", "key3",
+                  "back", "auto"}
 _KEYMAP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "config", "cardputer_keymap.json")
 
@@ -447,21 +495,30 @@ class CardputerInputListener(LCDHATInputListener):
 
     # --- Shared event handling --------------------------------------------
 
+    def key_label(self, code):
+        """The name printed on the key a code belongs to, for the echo."""
+        names = I2C_KEY_NAMES if self._source == "i2c" else EVDEV_KEY_NAMES
+        return names.get(code, f"key {code}")
+
+    def _is_modifier(self, code):
+        return code in (I2C_MODIFIER_CODES if self._source == "i2c" else _MODIFIER_CODES)
+
     def _handle_event(self, code, pressed):
         name = self._keymap.get(str(code))
-        if pressed and code not in _MODIFIER_CODES:
+        if pressed and not self._is_modifier(code):
             # For the on-screen echo (display.py) and for diagnosis: every
             # press is recorded and logged, mapped or not.
             self.last_key = (code, name, time.monotonic())
             self.key_seq += 1
         if name is None:
-            if pressed and code not in _MODIFIER_CODES:
+            if pressed and not self._is_modifier(code):
                 logger.info("CardputerZero keyboard: unmapped key code %d "
                             "(add to config/cardputer_keymap.json to use it)",
                             code)
             return
         if pressed:
-            logger.info("CardputerZero keyboard: key %d -> %s", code, name)
+            logger.info("CardputerZero keyboard: key %d (%s) -> %s", code,
+                        self.key_label(code), name)
             self._press_times[name] = time.monotonic()
             self._fired_hold.discard(name)
             self._on_input_press(name)
@@ -480,6 +537,46 @@ class CardputerInputListener(LCDHATInputListener):
             if now - t0 >= NETDIAG_HOLD_TIME:
                 self._fired_hold.add(name)
                 self._on_input_held(name)
+
+    # --- Keyboard-specific keys -------------------------------------------
+
+    def _on_input_press(self, name):
+        if name == "back":
+            self._go_back()
+        elif name == "auto":
+            # Autoscroll belongs to the Ragnar pages; the other layers have
+            # their own cycling.
+            if not self._netdiag_active() and not self._wardrive_view():
+                self._toggle_autoscroll()
+        else:
+            super()._on_input_press(name)
+
+    def _go_back(self):
+        """Esc: one step out. Diagnostic screens: close a result, else leave
+        them. Wardriving screens: back to the Ragnar pages. Otherwise home."""
+        if self._netdiag_active():
+            self.netdiag_seq += 1
+            if self.netdiag_result is not None:
+                self.netdiag_result = None
+            elif self.netdiag_view == "menu":
+                self.netdiag_view = "card"
+            else:
+                self._set_netdiag(False)
+        elif self._wardrive_view():
+            self._wardrive_exit_to_ragnar()
+        else:
+            self.autoscroll = False
+            self.current_page = PAGE_MAIN
+            logger.info("CardputerZero Esc: main screen")
+
+    def _default_input(self, name, gesture="short"):
+        """On the Ragnar pages OK opens the diagnostic screens (the LCD HAT
+        starts page autoscroll with its centre press; that is the A key
+        here). Everything else is the LCD HAT's default layer."""
+        if name == "press":
+            self._set_netdiag(True)
+            return
+        super()._default_input(name, gesture)
 
     # --- Orientation ------------------------------------------------------
 
@@ -548,7 +645,8 @@ def _key_test():
                         _EVENT_FORMAT, data[:usable]):
                     if ev_type == EV_KEY and value == EV_PRESS:
                         action = DEFAULT_EVDEV_KEYMAP.get(str(code), "not mapped")
-                        print(f"  key code {code:<4} -> {action:<10} ({fds[fd]})")
+                        label = EVDEV_KEY_NAMES.get(code, "?")
+                        print(f"  key code {code:<4} {label:<6} -> {action:<10} ({fds[fd]})")
     except KeyboardInterrupt:
         return 0
 

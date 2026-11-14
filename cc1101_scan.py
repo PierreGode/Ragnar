@@ -338,7 +338,9 @@ def detect():
         return dict(_detect_cache["value"])
     try:
         import cardputer_caps as caps
-        if not caps.is_cardputer_zero():
+        config = caps.saved_config()
+        caps.allow_expander(config)
+        if not caps.is_cardputer_zero(config):
             value = {"available": False, "error": "needs a CardputerZero with the Cap CC1101"}
         elif caps.probe_lora_cap():
             value = {"available": False, "error": "the LoRa Cap is fitted, not the CC1101 Cap"}

@@ -139,25 +139,33 @@ The keyboard is mapped onto the **same logical controls** the LCD-HAT joystick a
 keys use (`cardputer_input.py` subclasses the LCD-HAT input layer), so every on-device
 control Ragnar already has works from the keys:
 
-`F` `X` `Z` `C` are the keys with the arrow legends. They work as arrows on their
-own, as M5Stack's key guide recommends, and with **fn** held.
+`F` `X` `Z` `C` are the keys with the arrow legends. They are the joystick: up,
+down, left, right, with or without **fn**. **OK** (Enter) is the joystick's centre
+press, and **Esc** goes back.
 
-| Key(s) | Ragnar screens | Wardriving screens | Network Diagnostic |
+| Key | Ragnar screens | Diagnostic screens | Wardriving screens |
 |---|---|---|---|
-| `F` / `Z` (up / left) | previous page | previous screen | `Z` previous card, `F` previous function |
-| `X` / `C` (down / right) | next page | next screen | `C` next card, `X` next function |
-| Enter (OK) | start / stop page autoscroll | back to the first screen | run the highlighted function |
-| Space | Network Diagnostic on | back to the Ragnar screens | Network Diagnostic off |
-| Backspace | flip the screen 180° | reconnect to a known Wi-Fi | card list |
-| Tab or Esc | next page (hold: restart Ragnar) | phone-access AP on / off | auto-switch cards on / off |
+| `F` / `Z` (up / left) | previous page | `Z` previous card, `F` previous function | previous screen |
+| `X` / `C` (down / right) | next page | `C` next card, `X` next function | next screen |
+| **OK** (Enter) | open the diagnostic screens | run the highlighted function, close a result | back to the first screen |
+| **Esc** | back to the main screen | close a result, then leave diagnostics | back to the Ragnar screens |
+| `A` | page autoscroll on / off | | |
+| Space | diagnostics on | diagnostics off | back to the Ragnar screens |
+| Backspace | flip the screen 180° | card list | reconnect to a known Wi-Fi |
+| Tab | next page (hold: restart Ragnar) | auto-switch cards on / off | phone-access AP on / off |
 
 The footer of each screen names the keys that apply there, for example
-`F/X/Z/C:Page  OK:Auto  Space:NetDiag  Bksp:Flip`. The main screen has no footer;
+`F/X/Z/C:Page  OK:Diag  Esc:Home  A:Auto  Bksp:Flip`. The main screen has no footer;
 the keys work there all the same.
 
+These are the 1.44" LCD HAT's controls on a keyboard; see
+[Display Controls](DISPLAY_CONTROLS.md) for what each mode does.
+
 **Key echo.** For two seconds after a key press, the bottom-left corner names the
-key and what it did (`F: up`, `Tab: key3`, `key 16: not mapped`). If a key shows
-nothing there, the press is not reaching Ragnar. `cardputer_key_echo: false` turns
+key and what it did (`F: up`, `OK: OK`, `Q (code 11): no action`). Most keys have
+no action, which is normal: only the keys in the table do something. If a key shows
+nothing there at all, the press is not reaching Ragnar. If a key shows the wrong
+name, note the code and remap it (below). `cardputer_key_echo: false` turns
 the echo off.
 
 **Key test.** From a shell (Ragnar can keep running):
@@ -195,6 +203,9 @@ G26   G23   G22   G11   G10   G9    G7
 | G2 / G3 | I²C bus 1, shared with the board's own chips |
 | G14 / G15 | UART TX / RX (`/dev/ttyS0`) |
 | 5V OUT | Switched 5 V, `/sys/class/leds/ext_5v_out/brightness` |
+
+On a plain kernel without M5Stack's drivers there is no `ext_5v_out` file; Ragnar
+then switches the rail through the board's I/O expander (pin IO13) instead.
 
 **Power.** A Cap is dead until the 5 V rail is switched on, and so are the
 header's SPI, I²C and UART lines (their level shifters run from that rail).
@@ -383,8 +394,11 @@ If a board revision moves a pin, correct it without touching code:
 On the stock image the kernel owns the keyboard, which appears as
 `/dev/input/by-path/platform-3f804000.i2c-event`, and Ragnar reads standard Linux key
 codes from it with no extra dependency. `RAGNAR_CARDPUTER_KBD=/dev/input/eventN` forces
-a device. On a plain kernel without that driver, Ragnar talks to the TCA8418 over I²C
-(`0x34`) instead; matrix positions are unpublished, so that default map is a best guess.
+a device. On a plain kernel without that driver (a stock Raspberry Pi OS or Kali image),
+Ragnar talks to the TCA8418 over I²C (`0x34`) instead. The chip then reports each key as
+`row × 10 + column + 1`, and Ragnar uses the board's real matrix (the schematic's
+5 × 10 grid with M5Stack's key positions): `F` 24, `X` 34, `Z` 33, `C` 35, OK 30,
+Esc 41, Space 40, Backspace 10, Tab 50, `A` 21.
 
 Either map can be changed **without editing code**:
 
@@ -402,7 +416,8 @@ later. The default key codes are the ones in M5Stack's device tree for this boar
    ```json
    { "30": "press", "31": "key2" }
    ```
-   Valid actions: `up`, `down`, `left`, `right`, `press`, `key1`, `key2`, `key3`.
+   Valid actions: `up`, `down`, `left`, `right`, `press` (OK), `back` (Esc),
+   `auto` (autoscroll), `key1`, `key2`, `key3`.
 
 The file is read at startup and **overrides** individual defaults. Unlike the LCD-HAT
 joystick (mounted 90° off), the keyboard arrows already point the way you read them, so

@@ -4,6 +4,16 @@
 
 ### 2026-11-14
 
+#### fix(cardputer): arrow keys, OK and Esc on units without M5Stack's keyboard driver
+*branch `fix/cardputer-keymap-i2c`*
+
+- **The cause.** On a kernel without M5Stack's keypad driver, Ragnar reads the keyboard chip directly, and that path still used guessed key positions from before the hardware was documented. So ctrl, Esc, Space, shift and fn acted as the arrows and OK, Enter was "next page", and the real arrow keys showed "not mapped". The earlier fixes only touched the kernel-driver path, which is why nothing changed.
+- **The fix.** The direct path now uses the board's real key matrix (schematic sheet 07 with the key positions from M5Stack's device tree). Both paths give every key the same job.
+- **Key roles, as requested.** `F` `X` `Z` `C` are the joystick (up, down, left, right). **OK** (Enter) is the joystick press: on the Ragnar screens it opens the diagnostic screens, inside them it runs the highlighted function. **Esc** goes back one step: closes a result, leaves diagnostics, leaves the wardriving screens, or returns to the main screen. Page autoscroll moved from Enter to `A`.
+- **Key echo** now shows the name printed on the key (`Z: left`, `Q (code 11): no action`). "No action" on most keys is normal.
+- **Cap power on the same units.** Without M5Stack's drivers there is no `ext_5v_out` control, so the expansion header stayed unpowered. Ragnar now switches the rail through the board's I/O expander there. Only on a unit configured as a CardputerZero: the expander's I²C address is also used by common sensors on other boards.
+- Not run on a CardputerZero. The matrix comes from M5Stack's own keymap; if a key shows the wrong name in the echo, the code beside it can be remapped in `config/cardputer_keymap.json`.
+
 #### feat(cardputer): expansion header, Cap modules (GNSS, LoRa/Meshtastic, CC1101 sweep) and camera
 *branch `feat/cardputer-caps-camera`*
 

@@ -367,7 +367,7 @@ def test_evdev_wins_when_both_sources_answer(listener, monkeypatch):
 @pytest.mark.parametrize("code,action", [
     (103, "up"), (108, "down"), (105, "left"), (106, "right"),
     (33, "up"), (45, "down"), (44, "left"), (46, "right"),
-    (28, "press"), (57, "key1"), (14, "key2"), (15, "key3"), (1, "key3"),
+    (28, "press"), (57, "key1"), (14, "key2"), (15, "key3"), (1, "back"),
 ])
 def test_evdev_keymap_matches_the_field_tested_layout(listener, monkeypatch, code, action):
     w = attach_pipe(listener, monkeypatch)
@@ -396,8 +396,8 @@ def test_holding_a_key_fires_a_long_press(listener, monkeypatch):
 def test_unmapped_key_logs_its_code(listener, caplog):
     listener._source = "evdev"
     with caplog.at_level("INFO", logger="cardputer_input"):
-        listener._handle_event(30, True)
-    assert "unmapped key code 30" in caplog.text
+        listener._handle_event(16, True)
+    assert "unmapped key code 16" in caplog.text
     assert listener.actions == []
 
 
@@ -1054,7 +1054,7 @@ def test_every_key_press_is_recorded_for_the_echo(listener, caplog):
     with caplog.at_level(logging.INFO):
         listener._handle_event(33, True)
     assert listener.last_key[:2] == (33, "up") and listener.key_seq == 1
-    assert "key 33 -> up" in caplog.text
+    assert "key 33 (F) -> up" in caplog.text
     listener._handle_event(33, False)                 # a release is not a press
     assert listener.key_seq == 1
     listener._handle_event(16, True)                  # Q: not mapped
@@ -1067,7 +1067,8 @@ def test_every_key_press_is_recorded_for_the_echo(listener, caplog):
 @pytest.mark.parametrize("code,action", [
     (0x21, "up"), (0x2d, "down"), (0x2c, "left"), (0x2e, "right"),      # F X Z C
     (0x67, "up"), (0x6c, "down"), (0x69, "left"), (0x6a, "right"),      # with fn
-    (0x1c, "press"), (0x39, "key1"), (0x0e, "key2"), (0x0f, "key3"), (0x01, "key3")])
+    (0x1c, "press"), (0x39, "key1"), (0x0e, "key2"), (0x0f, "key3"), (0x01, "back"),
+    (0x1e, "auto")])
 def test_keymap_matches_the_boards_device_tree(code, action):
     """Key codes from the linux,keymap tables in M5Stack's CardputerZero
     overlay (m5stack-linux-dtoverlays, cardputerzero-v5-overlay.dts)."""
@@ -1121,3 +1122,169 @@ def test_scrolling_rows_with_a_divider_render_on_a_colour_canvas(rows):
     one = Image.new("1", (320, 170), 255)
     d._draw_scrollable_rows(one, ImageDraw.Draw(one), 26, 150, groups)
     assert one.histogram()[0] > 50
+
+
+# ── Direct-I2C keymap (no kernel keypad driver) and the key roles ────────────
+# Matrix positions: schematic sheet "07 Keyboard" (5 rows x 10 columns on the
+# TCA8418) and the row/column of each key in M5Stack's device tree.
+
+def test_matrix_has_every_key_once_and_fits_the_chip():
+    assert len(ci.KEY_MATRIX) == 46                      # "46-key keyboard"
+    positions = list(ci.KEY_MATRIX.values())
+    assert len(set(positions)) == 46
+    assert all(0 <= r <= 4 and 0 <= c <= 9 for r, c in positions)
+    # Row 4 only has the edge keys the schematic shows: columns 0-4 and 9.
+    assert sorted(c for r, c in positions if r == 4) == [0, 1, 2, 3, 4, 9]
+    assert len(ci.I2C_KEY_NAMES) == 46
+
+
+@pytest.mark.parametrize("key,row,col,code", [
+    ("2", 0, 0, 1), ("Bksp", 0, 9, 10), ("Q", 1, 0, 11), ("A", 2, 0, 21),
+    ("F", 2, 3, 24), ("OK", 2, 9, 30), ("alt", 3, 1, 32), ("Z", 3, 2, 33),
+    ("X", 3, 3, 34), ("C", 3, 4, 35), ("Space", 3, 9, 40), ("Esc", 4, 0, 41),
+    ("fn", 4, 2, 43), ("1", 4, 4, 45), ("Tab", 4, 9, 50)])
+def test_chip_codes_follow_row_times_ten_plus_column(key, row, col, code):
+    assert ci.KEY_MATRIX[key] == (row, col)
+    assert ci.matrix_code(row, col) == code and ci.I2C_KEY_NAMES[code] == key
+
+
+def test_both_sources_give_each_key_the_same_job():
+    by_name_i2c = {ci.I2C_KEY_NAMES[int(c)]: a for c, a in ci.DEFAULT_KEYMAP.items()}
+    by_name_evdev = {ci.EVDEV_KEY_NAMES[int(c)]: a for c, a in ci.DEFAULT_EVDEV_KEYMAP.items()
+                     if not ci.EVDEV_KEY_NAMES[int(c)].startswith("fn+")}
+    assert by_name_i2c == by_name_evdev == ci.KEY_ACTIONS
+    assert by_name_i2c["F"] == "up" and by_name_i2c["X"] == "down"
+    assert by_name_i2c["Z"] == "left" and by_name_i2c["C"] == "right"
+    assert by_name_i2c["OK"] == "press"
+
+
+def i2c_listener(monkeypatch, netdiag=False, wardriving=False, **shared):
+    monkeypatch.setattr(ci, "_KEYMAP_FILE", "/nonexistent/cardputer_keymap.json")
+    config = {"network_diagnostic_mode": netdiag}
+    sd = types.SimpleNamespace(screen_reversed=0, config=config, save_config=lambda: None, **shared)
+    lst = ci.CardputerInputListener(sd)
+    lst._source = "i2c"
+    lst._keymap = dict(ci.DEFAULT_KEYMAP)
+    monkeypatch.setattr(lst, "_is_wardriving_active", lambda: wardriving)
+    return lst
+
+
+def tap(lst, name):
+    code = ci.matrix_code(*ci.KEY_MATRIX[name])
+    lst._handle_event(code, True)
+    lst._handle_event(code, False)
+
+
+def test_arrow_keys_work_without_the_kernel_driver(monkeypatch):
+    from epd_button import PAGE_COUNT
+    lst = i2c_listener(monkeypatch)
+    for name, expected in (("C", 1), ("X", 2), ("Z", 1), ("F", 0), ("F", PAGE_COUNT - 1)):
+        tap(lst, name)
+        assert lst.current_page == expected, name
+    assert lst.last_key[:2] == (24, "up") and lst.key_label(24) == "F"
+
+
+def test_ok_opens_the_diagnostic_screens_and_esc_returns(monkeypatch):
+    lst = i2c_listener(monkeypatch)
+    tap(lst, "OK")
+    assert lst.shared_data.config["network_diagnostic_mode"] is True
+    assert lst.netdiag_view == "card" and lst.netdiag_page == 0
+    tap(lst, "Esc")
+    assert lst.shared_data.config["network_diagnostic_mode"] is False
+
+
+def test_ok_inside_diagnostics_selects_instead_of_leaving(monkeypatch):
+    lst = i2c_listener(monkeypatch, netdiag=True)
+    ran = []
+    monkeypatch.setattr(lst, "_run_netdiag_test", ran.append)
+    lst.netdiag_page, lst.netdiag_func_idx = 0, 0
+    tap(lst, "OK")
+    assert len(ran) == 1                                   # ran the highlighted function
+    assert lst.shared_data.config["network_diagnostic_mode"] is True
+    # Arrows are the joystick: left/right change card, up/down change function.
+    tap(lst, "C")
+    assert lst.netdiag_page == 1
+    tap(lst, "Z")
+    assert lst.netdiag_page == 0
+    before = lst.netdiag_func_idx
+    tap(lst, "X")
+    assert lst.netdiag_func_idx != before
+
+
+def test_esc_steps_back_one_level_at_a_time(monkeypatch):
+    lst = i2c_listener(monkeypatch, netdiag=True)
+    lst.netdiag_result = {"title": "Ping"}
+    tap(lst, "Esc")
+    assert lst.netdiag_result is None and lst.shared_data.config["network_diagnostic_mode"]
+    lst.netdiag_view = "menu"
+    tap(lst, "Esc")
+    assert lst.netdiag_view == "card" and lst.shared_data.config["network_diagnostic_mode"]
+    tap(lst, "Esc")
+    assert lst.shared_data.config["network_diagnostic_mode"] is False
+    # On the Ragnar pages Esc goes home.
+    lst.current_page = 3
+    tap(lst, "Esc")
+    assert lst.current_page == 0
+
+
+def test_a_toggles_autoscroll_on_the_ragnar_pages_only(monkeypatch):
+    lst = i2c_listener(monkeypatch)
+    tap(lst, "A")
+    assert lst.autoscroll is True
+    tap(lst, "A")
+    assert lst.autoscroll is False
+    lst.shared_data.config["network_diagnostic_mode"] = True
+    tap(lst, "A")
+    assert lst.autoscroll is False
+
+
+def test_modifier_keys_are_silent_on_the_chip_path(monkeypatch):
+    lst = i2c_listener(monkeypatch)
+    for name in ("fn", "sym", "shift", "ctrl", "alt"):
+        tap(lst, name)
+    assert lst.key_seq == 0 and lst.current_page == 0
+    # fn held with an arrow: the chip still reports the plain key.
+    lst._handle_event(ci.matrix_code(*ci.KEY_MATRIX["fn"]), True)
+    tap(lst, "C")
+    assert lst.current_page == 1
+
+
+def test_echo_names_the_key_for_the_active_source(monkeypatch):
+    lst = i2c_listener(monkeypatch)
+    assert lst.key_label(33) == "Z" and lst.key_label(99) == "key 99"
+    lst._source = "evdev"
+    assert lst.key_label(33) == "F" and lst.key_label(44) == "Z"
+
+
+def test_echo_text_for_mapped_and_unmapped_keys():
+    lc, sd, d = cz_display()
+    sd.ragnar_instance = None
+    shown = []
+    real = lc.display.ImageDraw.ImageDraw.text
+
+    def spy(self, xy, text, **kw):
+        shown.append(text)
+        return real(self, xy, text, **kw)
+
+    lc.display.ImageDraw.ImageDraw.text = spy
+    try:
+        for last, expected in (((33, "left"), "Z: left"), ((30, "press"), "OK: OK"),
+                               ((11, None), "Q (code 11): no action"),
+                               ((77, None), "key 77: no action")):
+            d.button_listener = types.SimpleNamespace(
+                last_key=(last[0], last[1], time.monotonic()), key_seq=1,
+                key_label=lambda code: ci.I2C_KEY_NAMES.get(code, f"key {code}"))
+            img = Image.new("RGB", (320, 170), lc.display._WD_COLORS["bg"])
+            d._cardputer_overlays(img)
+            assert shown[-1] == expected
+    finally:
+        lc.display.ImageDraw.ImageDraw.text = real
+
+
+def test_hints_name_the_new_key_roles():
+    lc, sd, d = cz_display()
+    main = d._key_hint("K1:Home K2:Flip K3:Next K4:Rst")
+    assert "OK:Diag" in main and "Esc:Home" in main and "A:Auto" in main
+    assert "Esc" in d._key_hint("K1Exit K2WiFi K3AP")
+    for hint in (main, d._key_hint("K2 back · press=open"), d._key_hint("K1 back to pages")):
+        assert sd.font_arial9.getlength(hint) <= 320 - 8, hint

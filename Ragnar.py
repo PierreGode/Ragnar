@@ -79,6 +79,7 @@ class Ragnar:
             import cardputer_caps
             if (shared_data.config.get('cardputer_cap_power', True)
                     and cardputer_caps.is_cardputer_zero(shared_data.config)):
+                cardputer_caps.allow_expander(shared_data.config)
                 rail = cardputer_caps.power_on_cap()
                 logger.info(f"CardputerZero Cap power rail: "
                             f"{'on' if rail else 'not available' if rail is None else 'off'}")
