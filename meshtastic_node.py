@@ -192,6 +192,21 @@ def parse_host(host):
     return m.group(1).strip('[]'), port
 
 
+LOCAL_DAEMON_HOST = "127.0.0.1:4403"
+
+
+def local_daemon():
+    """True when a Meshtastic daemon (meshtasticd, e.g. on a CardputerZero
+    LoRa Cap or a Pi LoRa HAT) is listening on this machine."""
+    import socket
+    host, port = parse_host(LOCAL_DAEMON_HOST)
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
 def detect():
     """Report Meshtastic capability.
 
@@ -211,7 +226,9 @@ def detect():
     if rc == 0 and out:
         usb_id, usb_desc = parse_lsusb_for_mesh(out)
     ports = _serial_ports()
-    device_present = bool(usb_id) or bool(ports)
+    daemon = local_daemon()
+    mqtt_extra["local_daemon"] = daemon
+    device_present = bool(usb_id) or bool(ports) or daemon
     if not have_pkg:
         return {"available": False, "tools_installed": False,
                 "device_present": device_present, "usb_id": usb_id,
@@ -1116,6 +1133,9 @@ def start(port=None, host=None, owner="user"):
     d = detect()
     if not d.get("available"):
         return {"ok": False, "error": d.get("error", "meshtastic unavailable")}
+    # No port asked for and no USB node, but a daemon on this machine: use it.
+    if not port and d.get("local_daemon") and not d.get("usb_id") and not d.get("ports"):
+        return _link.start(host=LOCAL_DAEMON_HOST, owner=owner)
     return _link.start(port=port, owner=owner)
 
 

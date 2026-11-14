@@ -4,6 +4,19 @@
 
 ### 2026-11-14
 
+#### feat(cardputer): expansion header, Cap modules (GNSS, LoRa/Meshtastic, CC1101 sweep) and camera
+*branch `feat/cardputer-caps-camera`*
+
+- **Expansion header.** Ragnar switches the header's 5 V rail on at start (a Cap and the header's SPI/I²C/UART lines are dead without it) and leaves it on. New **System → CardputerZero hardware** panel: which Cap is fitted, its radios, GNSS state, camera, and the live function and level of all 14 pins. `sudo python3 cardputer_caps.py` prints the same.
+- **GNSS (LoRa Cap).** Works with no setup: GPS auto-detection finds the receiver on `/dev/ttyS0`.
+- **GPS baud fix, all boards.** Auto-detection probed ports at several baud rates but the reader then always opened the port at the configured rate (9600), so a receiver found at 115200 was read as noise. The reader now opens the port at the rate NMEA was heard at; a board UART given by name is probed once.
+- **LoRa as a Meshtastic node.** `sudo scripts/cardputer_lora_meshtastic.sh install` configures `meshtasticd` for the Cap's SX1262 and powers the Cap before the daemon starts. Ragnar's Meshtastic pages now use a daemon on this machine (127.0.0.1:4403) when no USB node is present.
+- **Sub-GHz sweep.** New **Sub-GHz (CC1101)** panel on the RF Waterfall page: a receive-only signal-strength sweep of 315 / 433 / 868 / 915 MHz on the Cap CC1101.
+- **Camera.** New **System → Camera** panel on any board with a camera: live view (one shared stream, stops when nobody watches) and photos saved to `data/camera/`.
+- **Not done: NFC.** The Cap's ST25R3916 reader has no driver yet. `sudo scripts/cardputer_hardware.sh nfc` enables its chip-select overlay.
+- The Waveshare UPS HAT probe is skipped on a CardputerZero: the LoRa Cap has a chip on the same I²C address (0x43).
+- Written from M5Stack's schematic and their own Cap apps; tested against simulated hardware (a register-level CC1101 model, fake camera tools, fake serial ports) and by loading the new panels in headless Chromium. Not run on a CardputerZero.
+
 #### feat(cardputer): phone-style battery icon, key echo, reads every keyboard
 *branch `fix/cardputer-keys-battery-icon`*
 

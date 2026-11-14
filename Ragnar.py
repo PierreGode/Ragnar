@@ -73,6 +73,18 @@ class Ragnar:
         except Exception as e:
             logger.debug(f"UPS HAT monitor unavailable: {e}")
 
+        # CardputerZero: power the expansion header so a plugged-in Cap (GNSS,
+        # LoRa, sub-GHz, NFC) is alive before GPS auto-detection looks for it.
+        try:
+            import cardputer_caps
+            if (shared_data.config.get('cardputer_cap_power', True)
+                    and cardputer_caps.is_cardputer_zero(shared_data.config)):
+                rail = cardputer_caps.power_on_cap()
+                logger.info(f"CardputerZero Cap power rail: "
+                            f"{'on' if rail else 'not available' if rail is None else 'off'}")
+        except Exception as e:
+            logger.debug(f"CardputerZero Cap power not set: {e}")
+
         # Built-in fuel gauge (kernel power-supply class; the CardputerZero's
         # BQ27220), auto-detected
         self.builtin_battery = None

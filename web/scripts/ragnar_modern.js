@@ -29724,6 +29724,8 @@ function loadSystemData() {
     fetchNetworkStats();
     fetchPowerDetail();
     fetchFanStatus();
+    fetchCardputerHardware();
+    fetchCameraStatus();
 
     // Auto-refresh every 5 seconds when on system tab
     if (systemMonitoringInterval) {
@@ -29736,6 +29738,7 @@ function loadSystemData() {
             fetchNetworkStats();
             fetchPowerDetail();
             if (!_fan.busy) fetchFanStatus();
+            if (_cz.supported !== false) fetchCardputerHardware();
         }
     }, 5000);
 }
@@ -29748,6 +29751,182 @@ function fetchPowerDetail() {
         .then(response => response.json())
         .then(data => { if (!data || !data.error) updatePowerSystemView(data); })
         .catch(error => console.error('Error fetching power detail:', error));
+}
+
+// ---- CardputerZero hardware + camera (System tab) --------------------------
+// Both panels stay hidden unless the backend reports the hardware, so other
+// boards never see them. The hardware scan runs server-side in the background;
+// the 5 s system loop just reads its last result.
+const _cz = { supported: null };
+const _cam = { live: false, busy: false };
+
+function _czEsc(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function fetchCardputerHardware(refresh) {
+    networkAwareFetch('/api/cardputer/hardware' + (refresh ? '?refresh=1' : ''))
+        .then(r => r.json())
+        .then(d => updateCardputerHardwareView(d))
+        .catch(e => console.error('Error fetching CardputerZero hardware:', e));
+}
+
+function rescanCardputerHardware() {
+    const btn = document.getElementById('cz-rescan');
+    if (btn) btn.disabled = true;
+    fetchCardputerHardware(true);
+}
+
+function _czRow(label, value, cls) {
+    return `<div class="pw-row"><span>${_czEsc(label)}</span><span class="${cls || ''}">${_czEsc(value)}</span></div>`;
+}
+
+function updateCardputerHardwareView(d) {
+    const panel = document.getElementById('cz-panel');
+    _cz.supported = !!(d && d.supported);
+    if (!panel) return;
+    if (!_cz.supported) { panel.classList.add('hidden'); return; }
+    panel.classList.remove('hidden');
+    const btn = document.getElementById('cz-rescan');
+    if (btn) btn.disabled = !!d.scanning;
+
+    const rows = [];
+    if (d.pending) {
+        rows.push(_czRow('Cap', 'Scanning…', 'pw-muted'));
+    } else {
+        rows.push(_czRow('Cap power (5 V)', d.ext5v === true ? 'On' : d.ext5v === false ? 'Off' : 'Not available',
+            d.ext5v === true ? 'pw-ok' : 'pw-muted'));
+        rows.push(_czRow('Cap', d.cap_name || 'None detected', d.cap_name ? 'pw-ok' : 'pw-muted'));
+        (d.radios || []).forEach(r => rows.push(_czRow('Radio', r)));
+        if (d.gnss) {
+            let text, cls = 'pw-ok';
+            const g = d.gps;
+            if (d.gnss.console_conflict) {
+                text = 'Serial console is using the port'; cls = 'pw-bad';
+            } else if (g && g.connected) {
+                text = g.has_fix ? `Fix, ${g.satellites || 0} satellites` : 'Connected, waiting for a fix';
+            } else if (d.gnss.in_use) {
+                text = 'In use by GPS';
+            } else if (d.gnss.sentences > 0) {
+                text = `Receiving on ${d.gnss.port}`;
+            } else {
+                text = 'Silent'; cls = 'pw-bad';
+            }
+            rows.push(_czRow('GNSS', text, cls));
+            if (d.gnss.console_conflict) {
+                rows.push('<div class="pw-muted">Remove <code>console=serial0,115200</code> from /boot/firmware/cmdline.txt and reboot.</div>');
+            }
+        }
+        if (d.cap === 'subghz_nfc' && d.nfc_spi === false) {
+            rows.push(_czRow('NFC', 'Needs an overlay', 'pw-muted'));
+            rows.push('<div class="pw-muted">Add <code>dtoverlay=spi0-spidev2-gpio22-overlay</code> to /boot/firmware/config.txt and reboot.</div>');
+        }
+        const cam = d.camera || {};
+        rows.push(_czRow('Camera', cam.present ? `${cam.model || 'Detected'} ${cam.modes || ''}`.trim() : 'Not detected',
+            cam.present ? 'pw-ok' : 'pw-muted'));
+    }
+    const summary = document.getElementById('cz-summary');
+    if (summary) summary.innerHTML = rows.join('');
+
+    const header = document.getElementById('cz-header');
+    if (header && Array.isArray(d.header)) {
+        header.innerHTML = d.header.map(p => {
+            const power = p.gpio == null;
+            const state = power ? '' : (p.function || '?') + (p.level == null ? '' : (p.level ? ' hi' : ' lo'));
+            const cls = power ? 'pwr' : (p.level ? 'hi' : '');
+            return `<div class="cz-pin ${cls}" title="${_czEsc(p.role)}"><b>${_czEsc(p.label)}</b><span>${_czEsc(state || p.role)}</span></div>`;
+        }).join('');
+    }
+}
+
+function fetchCameraStatus() {
+    networkAwareFetch('/api/camera/status')
+        .then(r => r.json())
+        .then(d => updateCameraView(d))
+        .catch(e => console.error('Error fetching camera status:', e));
+}
+
+function _cameraNote(text, bad) {
+    const note = document.getElementById('camera-note');
+    if (!note) return;
+    note.textContent = text || '';
+    note.className = bad ? 'pw-bad' : 'pw-muted';
+}
+
+function _renderCameraPhotos(photos) {
+    const section = document.getElementById('camera-photos-section');
+    const grid = document.getElementById('camera-photos');
+    if (!section || !grid) return;
+    photos = photos || [];
+    section.classList.toggle('hidden', photos.length === 0);
+    grid.innerHTML = photos.map(p => {
+        const url = '/api/camera/photo/' + encodeURIComponent(p.name);
+        return `<div class="cam-photo"><a href="${url}" target="_blank" rel="noopener"><img loading="lazy" src="${url}" alt="${_czEsc(p.name)}"></a>` +
+            `<button title="Delete" aria-label="Delete photo" onclick="deleteCameraPhoto('${_czEsc(p.name)}')">✕</button></div>`;
+    }).join('');
+}
+
+function updateCameraView(d) {
+    const panel = document.getElementById('camera-panel');
+    if (!panel) return;
+    if (!d || !d.supported) {
+        panel.classList.add('hidden');
+        if (_cam.live) toggleCameraLive();
+        return;
+    }
+    panel.classList.remove('hidden');
+    const model = document.getElementById('camera-model');
+    if (model) model.textContent = [d.model, d.modes].filter(Boolean).join(' · ');
+    if (d.error && !_cam.busy) _cameraNote(d.error, true);
+    _renderCameraPhotos(d.photos);
+}
+
+function toggleCameraLive() {
+    const img = document.getElementById('camera-live');
+    const btn = document.getElementById('camera-live-btn');
+    if (!img) return;
+    _cam.live = !_cam.live;
+    if (_cam.live) {
+        // A fresh query string each time, or the browser reuses a dead stream.
+        img.src = '/api/camera/stream?t=' + Date.now();
+        img.classList.remove('hidden');
+        img.onerror = () => { if (_cam.live) { _cameraNote('The live view stopped.', true); toggleCameraLive(); } };
+        _cameraNote('');
+    } else {
+        // Dropping the src closes the connection, which lets the camera stop.
+        img.onerror = null;
+        img.removeAttribute('src');
+        img.classList.add('hidden');
+    }
+    if (btn) btn.textContent = _cam.live ? 'Stop live view' : 'Live view';
+}
+
+function takeCameraPhoto() {
+    const btn = document.getElementById('camera-photo-btn');
+    if (_cam.busy) return;
+    _cam.busy = true;
+    if (btn) btn.disabled = true;
+    _cameraNote('Taking photo…');
+    networkAwareFetch('/api/camera/photo', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+            if (d && d.success) {
+                _cameraNote('Saved ' + d.name);
+                _renderCameraPhotos(d.photos);
+            } else {
+                _cameraNote((d && d.error) || 'Photo failed', true);
+            }
+        })
+        .catch(e => _cameraNote(String(e), true))
+        .finally(() => { _cam.busy = false; if (btn) btn.disabled = false; });
+}
+
+function deleteCameraPhoto(name) {
+    networkAwareFetch('/api/camera/photo/' + encodeURIComponent(name), { method: 'DELETE' })
+        .then(r => r.json())
+        .then(d => { if (d && d.success) _renderCameraPhotos(d.photos); })
+        .catch(e => console.error('Error deleting photo:', e));
 }
 
 // ---- Cooling fan (System tab) ---------------------------------------------

@@ -11,6 +11,10 @@ heatmap, with band-scope presets and a free-frequency manual tune.
   (RTL-SDR, real-time `rtl_sdr` IQ FFT with an `rtl_power` fallback) and
   `esp_sdr.py` (ESP-SDR, on-chip FFT spectra over native USB), exposed at
   `/api/net/sdr/*`, `/api/net/rtl/*` and `/api/net/esp/*`.
+- A fourth source, `cc1101_scan.py` (`/api/net/cc1101/*`), appears as the
+  **Sub-GHz (CC1101)** panel on an M5Stack CardputerZero with the Cap CC1101.
+  It is a stepped signal-strength sweep of 315 / 433 / 868 / 915 MHz, not an
+  FFT, and it is receive-only. See [M5Stack CardputerZero](M5StackCardputerZero.md).
 
 ### ESP-SDR panel (ESP32 on-chip FFT)
 

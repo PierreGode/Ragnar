@@ -337,6 +337,8 @@ Auto-detected at startup, in priority order:
 3. **NMEA probe** — other `by-id` entries that aren't already claimed by an ESP companion are probed at 9600/4800/38400/115200 baud for `$GP`/`$GN`/`$GL` sentences.
 4. **Raw device nodes** — `/dev/ttyACM*`, `/dev/ttyUSB*`, `/dev/ttyS*`, `/dev/ttyAMA*`, `/dev/serial0`, `/dev/serial1` — probed the same way.
 
+The port is then opened at the baud rate the probe heard NMEA at, so a receiver that talks at 115200 (the M5Stack CardputerZero Cap's GNSS on `/dev/ttyS0`, a reconfigured u-blox) works without setting `wardriving_gps_baudrate`. A board UART named explicitly in `wardriving_gps_port` is probed once for the same reason.
+
 ### gpsd setup
 
 `gpsd` + `gpsd-clients` are installed by the wardriving installer (`install_wifi_management.sh`), which then runs `scripts/setup_gpsd.sh`:

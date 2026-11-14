@@ -174,6 +174,96 @@ These are the 1.44" LCD HAT's controls on a keyboard; see
 
 ---
 
+## Expansion header, Caps and camera
+
+The 14-pin socket on the top edge takes M5Stack's "Cap" modules. Ragnar powers
+the header at start, works out which Cap is fitted, and shows it under
+**System → CardputerZero hardware** together with the live state of every pin.
+
+```
+G26   G23   G22   G11   G10   G9    G7
+5VIN  GND   5VOUT G2    G3    G14   G15
+                  SDA   SCL   TX    RX
+```
+
+| Pin | Use |
+|---|---|
+| G11 / G10 / G9 | SPI0 clock / MOSI / MISO, **shared with the screen** |
+| G7 | SPI0 chip-select 1 (`/dev/spidev0.1`) |
+| G22 | GPIO, or SPI0 chip-select 2 with an overlay (the NFC reader) |
+| G23, G26 | GPIO. A switch on the board can route USB D-/D+ here instead; Ragnar leaves it on GPIO |
+| G2 / G3 | I²C bus 1, shared with the board's own chips |
+| G14 / G15 | UART TX / RX (`/dev/ttyS0`) |
+| 5V OUT | Switched 5 V, `/sys/class/leds/ext_5v_out/brightness` |
+
+**Power.** A Cap is dead until the 5 V rail is switched on, and so are the
+header's SPI, I²C and UART lines (their level shifters run from that rail).
+Ragnar switches it on at start and leaves it on: M5Stack warns that cutting a
+fitted Cap's supply can freeze the screen it shares SPI with.
+`cardputer_cap_power: false` stops Ragnar touching the rail.
+
+Check what Ragnar sees from a shell:
+
+```bash
+sudo python3 cardputer_caps.py          # Cap, GNSS, camera
+sudo python3 cardputer_caps.py --json   # the same plus every pin's state
+```
+
+Only one Cap fits at a time: both use SPI chip-select 1.
+
+### Cap LoRa-1262 + GNSS
+
+**GNSS (ATGM336H).** Nothing to set up. The receiver talks NMEA on
+`/dev/ttyS0` at 115200 baud and Ragnar's GPS auto-detection finds it, so
+wardriving and the GPS pages work as they do with a USB puck. The serial console
+must not be on that UART; M5Stack's image already keeps it off. If the hardware
+panel says "Serial console is using the port", run
+`sudo scripts/cardputer_hardware.sh status` for the command that frees it.
+
+**LoRa (SX1262) as a Meshtastic node.** Ragnar uses
+[meshtasticd](https://meshtastic.org/docs/hardware/devices/linux-native-hardware/),
+Meshtastic's Linux daemon, to drive the radio, and then talks to it like any
+other node (the **Mesh nodes** and **Mesh map** pages, the Wardrift mesh
+reporter).
+
+```bash
+sudo scripts/cardputer_lora_meshtastic.sh install   # config + start
+meshtastic --host 127.0.0.1 --set lora.region EU_868 # pick your region once
+sudo scripts/cardputer_lora_meshtastic.sh status
+sudo scripts/cardputer_lora_meshtastic.sh remove    # undo
+```
+
+`install` needs `meshtasticd` to be installed; if apt cannot find it, the script
+points at Meshtastic's install guide. It writes the radio wiring to
+`/etc/meshtasticd/config.d/` and a systemd drop-in that powers the Cap before
+the daemon starts. The daemon does not transmit until a region is set.
+
+### Cap CC1101 (Sub-GHz + NFC)
+
+**Sub-GHz (CC1101).** Open the **RF Waterfall** page: the **Sub-GHz (CC1101)**
+panel sweeps 315, 433, 868 or 915 MHz. The CC1101 is a narrow-band radio, not
+an SDR, so this is a stepped signal-strength sweep: good for seeing who is
+transmitting and where, not for decoding. It is receive-only. The chip tunes
+300-348, 387-464 and 779-928 MHz. From a shell:
+`sudo python3 cc1101_scan.py 433`.
+
+**NFC (ST25R3916).** Not supported yet. `sudo scripts/cardputer_hardware.sh nfc`
+enables the reader's chip-select overlay (reboot afterwards) so it is ready
+when the driver arrives.
+
+### Camera
+
+The built-in 8 MP camera (IMX219) appears under **System → Camera** when it is
+detected: **Live view** streams it to the page and **Take photo** saves a JPEG
+to `data/camera/`, shown in the list underneath. The live view stops a few
+seconds after the last viewer closes it, so it costs nothing when unused. It
+needs the `rpicam-apps` tools, which the installer and updater put in place.
+`python3 pi_camera.py photo.jpg` takes one photo from a shell. The panel is
+not CardputerZero-specific: any camera `rpicam-hello --list-cameras` reports
+gets it.
+
+---
+
 ## Installing
 
 Run the installer and pick **option 7**:
@@ -327,6 +417,9 @@ no direction remap is applied.
 | **Stock launcher still on screen / LCD frozen** | Run `sudo scripts/cardputer_takeover.sh status`, then `apply` if needed. |
 | **Text console draws over Ragnar** | Reboot after the takeover; the `cmdline.txt` change only applies at boot. |
 | **Screen is upside down** | Press **Backspace** on a Ragnar screen, or set the rotation under **Config → Display**. |
+| **Cap not detected** | `sudo python3 cardputer_caps.py`. "Cap 5 V rail: not present" means the kernel has no `ext_5v_out` control (not M5Stack's image). |
+| **No GPS from the LoRa Cap** | The antenna is inside the Cap and needs sky view. Check **System → CardputerZero hardware**: "Silent" means no data on `/dev/ttyS0`. |
+| **Camera panel missing** | `rpicam-hello --list-cameras` must list the camera; if the command is missing run `sudo scripts/cardputer_hardware.sh`. |
 | **No battery percentage** | Run `python3 sysfs_battery.py`. If it finds nothing, check `ls /sys/class/power_supply/`; an empty list means the kernel has no gauge driver, so try `python3 sysfs_battery.py --i2c`. |
 | **Arrow keys do nothing** | Press a key and watch the bottom-left corner. `F: up` means the key works. Nothing at all means the press is not reaching Ragnar: try the **LOCK** slider (above the keyboard, on the right), then run `sudo python3 cardputer_input.py`. |
 | **Screen stays black** | Check `cat /sys/class/graphics/fb*/name` and `cat /sys/class/backlight/*/brightness`. On the SPI path, confirm the expander answers at `0x4F` (`i2cdetect -y 1`). |
@@ -346,6 +439,11 @@ no direction remap is applied.
 | `scripts/cardputer_takeover.sh` | Hands the LCD and keyboard from APPLaunch to Ragnar, and back |
 | `cardputer_input.py` | Keyboard listener — kernel input device first, TCA8418 I²C fallback (reuses the LCD-HAT input layer) |
 | `sysfs_battery.py` | Battery percentage — kernel power-supply class first, BQ27220 over I²C as fallback |
+| `cardputer_caps.py` | Expansion header: Cap power, which Cap is fitted, GNSS and camera detection, LoRa preparation |
+| `pi_camera.py` | Camera: photos and the shared live view, through `rpicam-still` / `rpicam-vid` |
+| `cc1101_scan.py` | Receive-only sub-GHz sweep on the Cap CC1101, as an RF Waterfall source |
+| `scripts/cardputer_hardware.sh` | Camera tools, serial-console check, NFC overlay |
+| `scripts/cardputer_lora_meshtastic.sh` | Runs the LoRa Cap as a Meshtastic node through meshtasticd |
 | `config/cardputer_keymap.json` | Optional per-board keymap override |
 | `install_ragnar.sh` / `update_ragnar.sh` | Install option 7 + dependency parity |
 | `shared.py`, `epd_helper.py`, `display.py`, `web/scripts/ragnar_modern.js` | Display profile + selector wiring |
@@ -358,5 +456,7 @@ Running on users' units: install, display and web UI are confirmed by their repo
 The project has no unit of its own, so changes are covered by
 `tests/test_cardputer_zero.py` and `tests/test_sysfs_battery.py` against simulated
 hardware and by rendering the real screens at 320×170. Not yet confirmed on a unit:
-the battery reading, why one user's arrow keys did not page, the SPI fallback's rotation and offsets, and
+the battery reading, why one user's arrow keys did not page, every part of the
+expansion header, Cap and camera support (written from M5Stack's schematic and
+their own Cap apps), the SPI fallback's rotation and offsets, and
 the direct-I²C paths for the keyboard and the fuel gauge.

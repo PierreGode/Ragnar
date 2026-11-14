@@ -156,6 +156,11 @@ class UpsHatMonitor:
 
     def enabled(self):
         cfg = getattr(self.shared_data, 'config', None) or {}
+        # The CardputerZero has its own fuel gauge (sysfs_battery.py), and its
+        # LoRa Cap puts an I/O expander on 0x43, the UPS HAT (C)'s address.
+        # Never probe there: a stray answer must not be read as a battery.
+        if cfg.get('epd_type') == 'st7789v2':
+            return False
         return bool(cfg.get('ups_hat_monitor', True))
 
     def start(self):
