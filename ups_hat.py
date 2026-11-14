@@ -302,13 +302,14 @@ class UpsHatMonitor:
 def battery_source(shared_data):
     """The battery telemetry source that is live right now, or None.
 
-    PiSugar wins when both answer (it also owns the hardware button); a
-    Waveshare UPS HAT is used otherwise. Both expose the same getters.
+    PiSugar wins when several answer (it also owns the hardware button), then
+    a Waveshare UPS HAT, then a built-in fuel gauge (sysfs_battery.py, e.g.
+    the CardputerZero's). All expose the same getters.
     """
     inst = getattr(shared_data, 'ragnar_instance', None)
     if inst is None:
         return None
-    for name in ('pisugar_listener', 'ups_hat_monitor'):
+    for name in ('pisugar_listener', 'ups_hat_monitor', 'builtin_battery'):
         src = getattr(inst, name, None)
         if src is not None and getattr(src, 'available', False):
             return src

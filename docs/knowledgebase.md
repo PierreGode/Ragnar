@@ -733,6 +733,31 @@ Yes. It is a real Raspberry Pi Compute Module Zero, so full Ragnar runs on it.
 Source: M5StackCardputerZero.md
 <!-- proof: docs/M5StackCardputerZero.md | **full Ragnar runs on it unchanged** -->
 
+### Does the CardputerZero show its battery percentage?
+Yes. Ragnar reads the built-in BQ27220 fuel gauge and shows the percentage in the screen header and the **System** tab Battery card. Check it with `python3 sysfs_battery.py`.
+Source: M5StackCardputerZero.md
+<!-- proof: docs/M5StackCardputerZero.md | shows the percentage in the header of the main screen -->
+
+### My CardputerZero screen is upside down. How do I turn it?
+Press **Backspace** on a Ragnar screen. It flips the screen 180° and saves the choice. New installs start turned the right way.
+Source: M5StackCardputerZero.md
+<!-- proof: docs/M5StackCardputerZero.md | flips the screen between its two landscape positions and saves the -->
+
+### Which keys change page on a CardputerZero?
+`F`, `X`, `Z` and `C`, the keys with the arrow legends. `F`/`Z` go back and `X`/`C` go forward, with or without **fn**.
+Source: M5StackCardputerZero.md
+<!-- proof: docs/M5StackCardputerZero.md | `F` `X` `Z` `C` are the keys with the arrow legends -->
+
+### How do I get the female avatar on a CardputerZero?
+Set `mesh_viking_gender` to `female` (Mesh tab or `config/shared_config.json`). The shieldmaiden then shows in full colour.
+Source: M5StackCardputerZero.md
+<!-- proof: docs/M5StackCardputerZero.md | Set `mesh_viking_gender` to `female` for the shieldmaiden -->
+
+### Does the installer ask about PiSugar on a CardputerZero?
+No. The board has its own battery, so option 7 skips the PiSugar question.
+Source: M5StackCardputerZero.md
+<!-- proof: docs/M5StackCardputerZero.md | the installer does not ask about a PiSugar on this board -->
+
 ### How do I get the stock launcher back on a CardputerZero?
 Run `sudo scripts/cardputer_takeover.sh revert`, then reboot.
 Source: M5StackCardputerZero.md

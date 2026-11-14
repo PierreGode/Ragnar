@@ -2,6 +2,21 @@
 
 ## Releases
 
+### 2026-11-14
+
+#### feat(cardputer): colour screen with the Viking and shieldmaiden, battery percentage, arrow-key hints, right way up
+*branch `feat/cardputer-zero-field-fixes`*
+
+Fixes from the first CardputerZero units in users' hands.
+
+- **Upside-down screen.** The panel is mounted upside down relative to the picture its driver shows. The first start on a CardputerZero now turns the screen 180° once. A unit already turned by hand is left alone, and a later choice is kept. **Backspace** now flips between the two landscape positions (it used to step through four rotations, two of them sideways) and saves the choice.
+- **PiSugar question.** Installer option 7 no longer asks about a PiSugar; the board has its own battery.
+- **Battery percentage.** New `sysfs_battery.py` reads the built-in BQ27220 fuel gauge from `/sys/class/power_supply`, or directly over I²C (`0x55`) on a kernel without the driver. It feeds the same battery slot as PiSugar and the UPS HAT: screen header and the System tab's Battery card. `python3 sysfs_battery.py` prints one reading. Any board whose kernel exposes a battery there is picked up too.
+- **Colour, with both avatars.** The main screen has a new 320×170 layout: the character at double size in full colour on the right (Viking, or the shieldmaiden with `mesh_viking_gender: female`), header, stats, status and speech on the left. The stat pages, net-diag cards and wardriving screens use the dark colour theme. `lcd_color: false` and `wardriving_lcd_color: false` switch back to black-on-white.
+- **Arrow keys.** `F` `X` `Z` `C` already paged through the screens, but every footer still showed the 2.7" HAT's `K1`-`K4` hints, so nothing said which keys to press. Footers now name the keyboard keys (`F/X/Z/C:Page  OK:Auto  Space:NetDiag  Bksp:Flip`). While wardriving, the arrows now page through the six wardriving screens; before, they changed a page counter that the full-width stats page ignored. The keyboard is also found under other driver names and I²C controller paths.
+- **Fix for every colour panel.** The Discovered page raised an error and stayed blank on a colour canvas (the 1.44" colour LCD HAT included): its rows were measured on a 1-bit scratch canvas using RGB inks.
+- Tested against simulated hardware (`tests/test_cardputer_zero.py`, new `tests/test_sysfs_battery.py`) and by rendering the real screens at 320×170. Not run on a CardputerZero: the project has none.
+
 ### 2026-11-13
 
 #### fix(scan): no more `arp-scan command not found` errors every scan cycle on boxes without arp-scan

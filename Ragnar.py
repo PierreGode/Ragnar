@@ -73,6 +73,15 @@ class Ragnar:
         except Exception as e:
             logger.debug(f"UPS HAT monitor unavailable: {e}")
 
+        # Built-in fuel gauge (kernel power-supply class; the CardputerZero's
+        # BQ27220), auto-detected
+        self.builtin_battery = None
+        try:
+            from sysfs_battery import SysfsBatteryMonitor
+            self.builtin_battery = SysfsBatteryMonitor(shared_data)
+        except Exception as e:
+            logger.debug(f"Built-in battery monitor unavailable: {e}")
+
     def run(self):
         """Main loop for Ragnar. Waits for Wi-Fi connection and starts Orchestrator."""
         logger.info("=" * 70)
@@ -86,6 +95,10 @@ class Ragnar:
         # Start the Waveshare UPS HAT battery monitor (idles if no HAT answers)
         if self.ups_hat_monitor:
             self.ups_hat_monitor.start()
+
+        # Start the built-in battery monitor (idles if the board has none)
+        if self.builtin_battery:
+            self.builtin_battery.start()
 
         # If wardriving-on-boot is enabled, kick wardriving off BEFORE the WiFi
         # manager starts. wifi_manager.start() blocks ~5s minimum (longer with
@@ -260,6 +273,8 @@ class Ragnar:
             self.pisugar_listener.stop()
         if getattr(self, 'ups_hat_monitor', None):
             self.ups_hat_monitor.stop()
+        if getattr(self, 'builtin_battery', None):
+            self.builtin_battery.stop()
 
         # Stop orchestrator
         self.stop_orchestrator()

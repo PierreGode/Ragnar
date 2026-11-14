@@ -202,13 +202,18 @@ Ragnar gets the LCD and keyboard, then asks for a reboot. Undo it with
 On a plain kernel without that driver it falls back to native SPI (CS on GPIO8, DC on
 GPIO25), with reset and backlight through the M5IOE1 expander at `0x4F`.
 
-**Keyboard.** `F` `X` `Z` `C` or the Fn arrows navigate, Enter selects, and Space,
-Backspace and Tab stand in for the HAT's KEY1, KEY2 and KEY3 — the same controls
-documented in [Display Controls](DISPLAY_CONTROLS.md). Any key can be remapped in
+**Keyboard.** `F` `X` `Z` `C` (the keys with the arrow legends) page through the
+screens, Enter selects, and Space, Backspace and Tab stand in for the HAT's KEY1, KEY2
+and KEY3 — the same controls documented in [Display Controls](DISPLAY_CONTROLS.md).
+The footer of each screen names the keys. Any key can be remapped in
 `config/cardputer_keymap.json`; unmapped keys log their code.
 
-> CardputerZero support follows M5Stack's published docs and is tested against simulated
-> hardware, but has not been run on a physical unit yet.
+**Screen and battery.** The screen is in colour and starts turned 180° to match how
+the panel is mounted (Backspace flips it). The built-in battery's percentage shows in
+the header and on the System tab; the installer does not ask about a PiSugar here.
+
+> The project has no CardputerZero of its own: changes follow users' reports and
+> M5Stack's published docs, and are tested against simulated hardware.
 
 ### 📶 Connecting Ragnar to a network
 

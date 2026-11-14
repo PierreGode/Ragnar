@@ -1012,8 +1012,27 @@ class Display:
         self._unit_title_cache = (key, title)
         return title
 
+    # Footer key hints as the CardputerZero's keyboard labels them. The keys
+    # drive the LCD HAT's input layers (cardputer_input.py): F/X/Z/C are the
+    # arrows, Enter (OK) the joystick press, Space/Backspace/Tab KEY1-3.
+    _KEYBOARD_HINTS = {
+        "K1:Home K2:Flip K3:Next K4:Rst": "F/X/Z/C:Page  OK:Auto  Space:NetDiag  Bksp:Flip",
+        "K2 back · press=open":           "F/X:Move  OK:Open  Bksp:Back",
+        "K1 back to pages":               "OK:Back  Space:Exit",
+        "K1Exit K2WiFi K3AP":             "Z/C:Page Space:Exit Bksp:WiFi Tab:AP",
+        "K1Exit K2WiFi K3APoff":          "Z/C:Page Space:Exit Bksp:WiFi Tab:AP-off",
+    }
+
+    def _key_hint(self, hint):
+        """The footer hint for this panel's controls: the keyboard wording on
+        the CardputerZero, the text as given everywhere else."""
+        if self.config.get("epd_type") == "st7789v2":
+            return self._KEYBOARD_HINTS.get(hint, hint)
+        return hint
+
     def _draw_page_frame(self, draw, title, hint="K1:Home K2:Flip K3:Next K4:Rst"):
         """Draw standard page frame: border, title, divider, footer."""
+        hint = self._key_hint(hint)
         w = getattr(self, 'render_w', self.shared_data.width)
         h = getattr(self, 'render_h', self.shared_data.height)
         sx = getattr(self, 'render_sx', self.scale_factor_x)
@@ -1110,19 +1129,23 @@ class Display:
             for kind, payload in row_groups:
                 if kind == 'divider':
                     y += int(2 * sy)
-                    d.line((int(4 * sx), y, w - int(4 * sx), y), fill=self._wd_c(draw, 'frame'))
+                    d.line((int(4 * sx), y, w - int(4 * sx), y), fill=self._wd_c(d, 'frame'))
                     y += int(4 * sy)
                 else:
                     y = self._draw_stat_rows(d, y, payload)
             return y
 
-        total_h = _emit(ImageDraw.Draw(Image.new('1', (w, 1), 255)), 0)
+        # Scratch canvases match the page's mode, so the colours _wd_c hands
+        # out are valid on them (an RGB ink on a 1-bit canvas raises).
+        mode = 'RGB' if getattr(image, 'mode', '1') == 'RGB' else '1'
+        blank = _WD_COLORS['bg'] if mode == 'RGB' else 255
+        total_h = _emit(ImageDraw.Draw(Image.new(mode, (w, 1), blank)), 0)
 
         if total_h <= available_h:
             _emit(draw, top_y)
             return
 
-        strip = Image.new('1', (w, total_h), 255)
+        strip = Image.new(mode, (w, total_h), blank)
         _emit(ImageDraw.Draw(strip), 0)
 
         overflow = total_h - available_h
@@ -1436,7 +1459,7 @@ class Display:
             draw.rectangle((1, 1, w - 1, h - 1), outline=self._wd_c(draw, 'frame'))
         foot_y = h - int(18 * sy)
         draw.line((1, foot_y, w - 1, foot_y), fill=self._wd_c(draw, 'frame'))
-        hint = "K2 back · press=open"
+        hint = self._key_hint("K2 back · press=open")
         avail_hint = w - int(8 * sx)
         while hint and font.getlength(hint) > avail_hint:
             hint = hint[:-1]
@@ -1483,7 +1506,15 @@ class Display:
         state = "auto" if not frozen else "manual"
         render_w = getattr(self, 'render_w', self.shared_data.width)
         funcs = netdiag_card_funcs(page)
-        if render_w < 150:
+        if self.config.get("epd_type") == "st7789v2":
+            # CardputerZero: the LCD HAT's card model on a keyboard, with room
+            # to name the keys beside the highlighted function.
+            if funcs and func_idx >= 0:
+                hint = (f"{page + 1}/{NETDIAG_PAGE_COUNT} >{funcs[func_idx % len(funcs)][0]}"
+                        "   Z/C:Card F/X:Func OK:Run")
+            else:
+                hint = f"{page + 1}/{NETDIAG_PAGE_COUNT} {state}   Z/C:Card Bksp:Menu Tab:Auto"
+        elif render_w < 150:
             # Narrow LCD HAT: show the page counter + the highlighted function
             # (the joystick's Up/Down selects it, press runs it). Cards with no
             # functions just show the auto/manual state.
@@ -1873,15 +1904,29 @@ class Display:
         except Exception:
             pass
 
+    def _cardputer_landscape(self, render_w=None, render_h=None):
+        """True on the M5Stack CardputerZero's built-in 320x170 LCD held the
+        way its keyboard dictates (landscape, either way up). It gets its own
+        wide main screen, the paged wardriving screens and keyboard key
+        hints. Turned on its side (90/270) it falls back to the generic
+        layouts."""
+        if self.config.get("epd_type") != "st7789v2":
+            return False
+        w = render_w if render_w is not None else getattr(self, 'render_w', self.shared_data.width)
+        h = render_h if render_h is not None else getattr(self, 'render_h', self.shared_data.height)
+        return w > h
+
     def _lcd_color_panel(self, render_w=None, render_h=None):
         """True when the main screen should render in colour: the 1.44"
-        ST7735S LCD HAT (a 128x128 RGB TFT). Every other panel that uses the
-        compact layout is 1-bit. `lcd_color: false` in the config keeps the
-        black-on-white look (the wardriving screens have their own switch,
-        `wardriving_lcd_color`)."""
-        if self.config.get("epd_type") != "st7735s":
-            return False
+        ST7735S LCD HAT (a 128x128 RGB TFT) and the CardputerZero's 320x170
+        LCD in landscape. Every other panel is 1-bit. `lcd_color: false` in
+        the config keeps the black-on-white look (the wardriving screens have
+        their own switch, `wardriving_lcd_color`)."""
         if not self.config.get("lcd_color", True):
+            return False
+        if self._cardputer_landscape(render_w, render_h):
+            return True
+        if self.config.get("epd_type") != "st7735s":
             return False
         w = render_w if render_w is not None else getattr(self, 'render_w', self.shared_data.width)
         h = render_h if render_h is not None else getattr(self, 'render_h', self.shared_data.height)
@@ -2076,6 +2121,182 @@ class Display:
                 draw.text((3, y), line, font=sd.font_arialbold, fill=c('ink'))
                 bb = sd.font_arialbold.getbbox(line)
                 y += (bb[3] - bb[1]) + 2
+
+    def _render_main_cardputer(self, image, draw, W, H):
+        """PAGE_MAIN for the CardputerZero's 320x170 landscape LCD.
+
+        The character gets the right-hand side at twice its native size (in
+        full colour on a colour canvas); the left column carries the header,
+        two rows of stat icons, the status lines and the speech text. Works on
+        a 1-bit canvas too (`lcd_color: false`): c() is then plain black ink."""
+        sd = self.shared_data
+        rgb = getattr(image, 'mode', '1') == 'RGB'
+        c = lambda key: self._wd_c(draw, key)
+        font = self._font_at('Arial.ttf', 11)
+        small = sd.font_arial9
+
+        # --- character: bottom-right, integer-scaled so the pixels stay even ---
+        vk = getattr(sd, 'imagegen', None)
+        box = H - 8                       # tallest the figure may be
+        art_w = 0
+        sprite = None
+        if rgb and vk is not None:
+            try:
+                sprite = sd.color_sprite(vk)
+            except Exception:
+                sprite = None
+        if sprite is None and vk is not None:
+            sprite = vk
+        if sprite is not None:
+            try:
+                if sprite.height > box:
+                    ratio = box / sprite.height
+                    sprite = sprite.resize((max(1, int(sprite.width * ratio)), box), Image.LANCZOS
+                                           if sprite.mode in ('RGB', 'RGBA') else Image.NEAREST)
+                else:
+                    n = max(1, box // sprite.height)
+                    if n > 1:
+                        sprite = sprite.resize((sprite.width * n, sprite.height * n), Image.NEAREST)
+                art_w = sprite.width
+                pos = (W - art_w - 2, H - sprite.height - 1)
+                if sprite.mode == 'RGBA':
+                    image.paste(sprite, pos, sprite)
+                else:
+                    image.paste(sprite, pos)
+            except Exception as e:
+                logger.debug(f"cardputer character render error: {e}")
+                art_w = 0
+        col_w = W - art_w - 6 if art_w else W - 2     # right edge of the left column
+
+        # --- header: connection glyph + IP, title, battery ---
+        left_used = 3
+        try:
+            if getattr(sd, 'ap_mode_active', False):
+                ap_text = "AP"
+                if getattr(sd, 'ap_client_count', 0) > 0:
+                    ap_text = f"AP:{sd.ap_client_count}"
+                draw.text((3, 4), ap_text, font=font, fill=c('warn'))
+                left_used = 3 + int(font.getlength(ap_text))
+            elif getattr(sd, 'wifi_connected', False):
+                try:
+                    q = getattr(sd, 'wifi_signal_quality', None)
+                    if q is None:
+                        q = self._dbm_to_quality(getattr(sd, 'wifi_signal_dbm', None))
+                    waves = max(1, min(3, self.get_wifi_wave_count(q)))
+                except Exception:
+                    waves = 3
+                cx, cy = 8, 15
+                for i in range(waves):
+                    r = 3 + i * 3
+                    draw.arc((cx - r, cy - r, cx + r, cy + r), start=225, end=315, fill=c('good'), width=1)
+                left_used = 18
+                try:
+                    ip_octet = self.get_wifi_ip_last_octet()
+                except Exception:
+                    ip_octet = None
+                if ip_octet:
+                    draw.text((19, 5), ip_octet, font=small, fill=c('dim'))
+                    left_used = 19 + int(small.getlength(ip_octet))
+        except Exception:
+            pass
+        bat_w = 0
+        try:
+            _ps = battery_source(sd)
+            if _ps:
+                bl = _ps.get_battery_level()
+                if bl is not None:
+                    bl = int(round(bl))
+                    bt = f"{bl}%{'+' if _ps.is_charging() else ''}"
+                    bat_w = int(font.getlength(bt)) + 3
+                    tint = 'good' if bl > 30 else ('warn' if bl > 15 else 'bad')
+                    draw.text((col_w - bat_w + 2, 4), bt, font=font, fill=c(tint))
+        except Exception:
+            pass
+        left_pad = left_used + 4
+        avail = col_w - left_pad - bat_w - 2
+        _title = self._unit_display_title()
+        title_font = self._fit_font('Viking.TTF', sd.font_viking, _title, avail)
+        tw = title_font.getlength(_title)
+        draw.text((left_pad + (avail - tw) / 2, 3), _title, font=title_font, fill=c('title'))
+        draw.line((1, 21, col_w, 21), fill=c('frame'))
+
+        # --- two rows of stat icons + counts ---
+        def _short(val):
+            """Counts past three digits as 1.9k / 12k so a slot never overflows."""
+            try:
+                n = int(val)
+            except (TypeError, ValueError):
+                return str(val)
+            if n < 1000:
+                return str(n)
+            if n < 10000:
+                return f"{n / 1000:.1f}".rstrip('0').rstrip('.') + "k"
+            if n < 1000000:
+                return f"{n // 1000}k"
+            return f"{n // 1000000}M"
+
+        def _row(y, items):
+            slot = col_w // len(items)
+            for i, (icon, val, tint) in enumerate(items):
+                x = i * slot + 2
+                tx = x
+                if icon is not None:
+                    try:
+                        self._paste_ink(image, icon, (x, y), c(tint))
+                        tx = x + icon.width + 2
+                    except Exception:
+                        pass
+                draw.text((tx, y + 3), _short(val), font=font, fill=c('ink'))
+
+        _row(25, [(getattr(sd, 'target', None), sd.targetnbr, 'good'),
+                  (getattr(sd, 'port', None),   sd.portnbr,   'b5'),
+                  (getattr(sd, 'vuln', None),   sd.vulnnbr,   'bad'),
+                  (getattr(sd, 'cred', None),   sd.crednbr,   'warn')])
+        _row(46, [(getattr(sd, 'zombie', None),  sd.zombiesnbr, 'b6'),
+                  (getattr(sd, 'data', None),    sd.datanbr,    'ble'),
+                  (getattr(sd, 'money', None),   sd.coinnbr,    'title'),
+                  (getattr(sd, 'attacks', None), sd.attacksnbr, 'b24')])
+        draw.line((1, 67, col_w, 67), fill=c('frame'))
+
+        # --- status icon + the two status lines ---
+        try:
+            sd.update_ragnarstatus()
+        except Exception:
+            pass
+        tx = 4
+        icon = getattr(sd, 'ragnarstatusimage', None)
+        if icon is not None:
+            try:
+                self._paste_ink(image, icon, (3, 70), c('title'))
+                tx = 3 + icon.width + 4
+            except Exception:
+                pass
+        line_w = col_w - tx
+
+        def _clip(text, f):
+            text = str(text or '')
+            while text and f.getlength(text) > line_w:
+                text = text[:-1]
+            return text
+
+        draw.text((tx, 71), _clip(getattr(sd, 'ragnarstatustext', ''), font), font=font, fill=c('title'))
+        draw.text((tx, 85), _clip(getattr(sd, 'ragnarstatustext2', ''), small), font=small, fill=c('dim'))
+        draw.line((1, 101, col_w, 101), fill=c('frame'))
+
+        # --- speech, wrapped into the left column ---
+        says = str(getattr(sd, 'ragnarsays', '') or '')
+        if says:
+            say_font = self._font_at('Arial.ttf', 12)
+            try:
+                lines = sd.wrap_text(says, say_font, col_w - 6)
+            except Exception:
+                lines = [says]
+            y = 105
+            for line in lines:
+                if y > H - 13:
+                    break
+                draw.text((4, y), line, font=say_font, fill=c('ink'))
+                y += 13
 
     def _render_main_horizontal(self, image, draw, W, H):
         """Landscape PAGE_MAIN layout for a small e-paper rotated 90°/270°
@@ -2672,13 +2893,16 @@ class Display:
             return None
 
     def _wd_color_panel(self, render_w=None, render_h=None):
-        """True when the compact wardriving screens should render in colour:
-        the 1.44" ST7735S LCD HAT (a 128x128 RGB TFT). Every other panel that
-        reaches these screens is 1-bit. `wardriving_lcd_color: false` in the
-        config keeps the old black-on-white look."""
-        if self.config.get("epd_type") != "st7735s":
-            return False
+        """True when the paged wardriving screens should render in colour:
+        the 1.44" ST7735S LCD HAT (a 128x128 RGB TFT) and the CardputerZero's
+        LCD in landscape. Every other panel that reaches these screens is
+        1-bit. `wardriving_lcd_color: false` in the config keeps the old
+        black-on-white look."""
         if not self.config.get("wardriving_lcd_color", True):
+            return False
+        if self._cardputer_landscape(render_w, render_h):
+            return True
+        if self.config.get("epd_type") != "st7735s":
             return False
         w = render_w if render_w is not None else getattr(self, 'render_w', self.shared_data.width)
         h = render_h if render_h is not None else getattr(self, 'render_h', self.shared_data.height)
@@ -2734,7 +2958,7 @@ class Display:
         # the per-page dividers are kept.
 
         ap_on = getattr(self.shared_data, 'wardrive_ap_active', False)
-        hint = "K1Exit K2WiFi K3APoff" if ap_on else "K1Exit K2WiFi K3AP"
+        hint = self._key_hint("K1Exit K2WiFi K3APoff" if ap_on else "K1Exit K2WiFi K3AP")
         page_str = f"{self._wd_compact_page() + 1}/{WARDRIVE_PAGE_COUNT}"
 
         footer_y = h - int(18 * sy)
@@ -3240,7 +3464,9 @@ class Display:
         # so render a header-less essentials-only layout instead.
         _w = getattr(self, 'render_w', self.shared_data.width)
         _h = getattr(self, 'render_h', self.shared_data.height)
-        if _w < 150 and _h < 150:
+        # The CardputerZero pages the same screens from its keyboard, so it
+        # gets them too (drawn across its 320x170).
+        if (_w < 150 and _h < 150) or self._cardputer_landscape(_w, _h):
             self._render_wardriving_page_compact(image, draw, self._get_wardriving_data())
             return
         ap_on = getattr(self.shared_data, 'wardrive_ap_active', False)
@@ -4830,6 +5056,26 @@ class Display:
                 # tall e-paper dashboard — its absolute coords fall off-screen and
                 # the speech text collides with the character sprite. Render a
                 # dedicated compact layout instead and commit it directly.
+                # CardputerZero (320x170 landscape): its own wide layout with
+                # the character at double size, in colour unless switched off.
+                if self._cardputer_landscape(render_w, render_h):
+                    try:
+                        if self._lcd_color_panel(render_w, render_h):
+                            image = Image.new('RGB', (render_w, render_h), _WD_COLORS['bg'])
+                            draw = ImageDraw.Draw(image)
+                        self._render_main_cardputer(image, draw, W, H)
+                    except Exception as e:
+                        logger.debug(f"cardputer main render error: {e}")
+                    epd_img = _apply_epd_rotation(image, self.screen_reversed)
+                    self.epd_helper.display_partial(epd_img)
+                    self.epd_helper.display_partial(epd_img)
+                    web_img = _apply_web_rotation(image, self.web_screen_reversed)
+                    with open(os.path.join(self.shared_data.webdir, "screen.png"), 'wb') as img_file:
+                        web_img.save(img_file)
+                        img_file.flush()
+                        os.fsync(img_file.fileno())
+                    self._sleep_interruptible(PAGE_MAIN)
+                    continue
                 if render_w < 150 and 100 <= render_h < 170:
                     try:
                         # Colour LCD HAT: swap the 1-bit canvas for an RGB one
