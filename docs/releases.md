@@ -4,6 +4,11 @@
 
 ### 2026-11-14
 
+#### docs(cardputer): how-to guide for Caps, the GPIO header and the camera
+*branch `docs/cardputer-caps-guide`*
+
+- New [docs/CardputerZero-Caps.md](CardputerZero-Caps.md): where each module is in the web UI, and worked examples for GNSS wardriving, LoRa as a Meshtastic node, the CC1101 sub-GHz sweep, the camera, and wiring your own hardware to the 14-pin header (LED, switch, I²C device, serial device). Includes what each status line means and a troubleshooting table. Linked from the docs index and the CardputerZero page.
+
 #### fix(update): damaged git data can no longer leave a box unable to update
 *branch `fix/update-self-repair`*
 
