@@ -16,7 +16,7 @@ itself (screen, keyboard, battery, install) see
 | LoRa SX1262 (LoRa Cap) | **Network** → **Signal Intelligence** → **Mesh Nodes** | Run it as a Meshtastic node: node list, messages, map |
 | Sub-GHz CC1101 (CC1101 Cap) | **Network** → **Signal Intelligence** → **RF Waterfall page** → *Sub-GHz (CC1101)* panel | Watch activity on 315 / 433 / 868 / 915 MHz |
 | NFC ST25R3916 (CC1101 Cap) | Not in the UI | Not supported yet |
-| Camera (built in) | **System** → *Camera* | Live view, take and keep photos |
+| Camera (built in) | **System** → *Camera*, and the **P** key on the CardputerZero itself | Live view, photos and videos, from the browser or on the device's own screen |
 
 The two **System** panels only appear on a CardputerZero (the Camera panel on any
 board with a camera). The *Sub-GHz (CC1101)* panel is always listed on the RF
@@ -259,6 +259,38 @@ ships that overlay.
 
 Photos are kept on the unit in `data/camera/` as `ragnar_YYYYMMDD_HHMMSS.jpg`.
 
+### Example: record a video from the browser
+
+1. Press **Record video**. The button turns into **Stop recording** and a timer
+   runs. You can open the live view to watch what is being recorded.
+2. Press **Stop recording**. The video appears under **Videos**.
+3. It is first saved as an AVI and then converted to an MP4 in the background
+   (the list says *converting to MP4…*). An MP4 plays right in the page, also on
+   a phone. **Download** saves it; **Delete** removes it.
+
+Videos are kept in `data/camera/` too, as `ragnar_YYYYMMDD_HHMMSS.mp4`.
+
+### Example: use the CardputerZero as a camera
+
+1. On the CardputerZero, press **P**. The screen shows what the camera sees, with
+   **PHOTO** beside it.
+2. Press **OK** to take a photo. *Taking photo...* shows while it is taken, then
+   *Photo saved*.
+3. Press **Z** or **C** to switch to **VIDEO**. **OK** starts recording (a red
+   frame and a **REC** timer show), **OK** again stops it.
+4. Press **Esc** or **P** to go back to Ragnar's screens. Leaving ends a video
+   that is still recording.
+
+Photos and videos taken on the device land in the same `data/camera/` folder and
+show up under **System** → **Camera** in the browser.
+
+### Picture upside down?
+
+Press **Flip** in the Camera panel. The choice is saved (`camera_rotation`: `0`,
+`180` or `auto`) and applies to the live view, photos, videos and the device
+screen. On a CardputerZero `auto` already means 180°, because the sensor is
+mounted upside down.
+
 **From a shell**
 
 ```bash
@@ -268,9 +300,17 @@ rpicam-hello --list-cameras          # what the system sees
 
 **Good to know**
 
-- Taking a photo while the live view runs pauses the view for the shot.
+- Taking a photo while the live view runs pauses the view for the shot. While a
+  video records, a photo is a frame of that video (640×480) so the recording is
+  not interrupted.
 - Live view is 640×480 at 10 frames a second, to stay light on a 512 MB board.
-  Photos are 1640×1232.
+  Photos are 1640×1232. Videos are the live view: 640×480, about 8 to 10 frames
+  a second, without sound.
+- A video stops by itself after 10 minutes, or when less than 200 MB of disk is
+  free. It takes roughly 25 MB a minute before conversion.
+- Converting to MP4 needs `ffmpeg` (the installer puts it in place) and takes
+  about twice the video's length on this board. Without `ffmpeg` the video
+  stays an AVI: download it and play it with VLC.
 - The camera is part of the CardputerZero itself, not of a Cap. It needs two
   things: the `rpicam-apps` tools, and `dtoverlay=imx219` in `config.txt` (this
   board's camera is not auto-detected). The installer and updater set up both;

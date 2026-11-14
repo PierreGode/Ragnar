@@ -46,7 +46,14 @@ import struct
 import sys
 import time
 
-from PIL import Image
+from PIL import Image, ImageChops
+
+# RGB565 lookup tables for getbuffer(): each channel's share of the high and
+# low byte. The shares never overlap, so adding them is the same as OR.
+_R_HIGH = [v & 0xF8 for v in range(256)]
+_G_HIGH = [v >> 5 for v in range(256)]
+_G_LOW = [(v & 0x1C) << 3 for v in range(256)]
+_B_LOW = [v >> 3 for v in range(256)]
 
 logger = logging.getLogger(__name__)
 
@@ -155,14 +162,13 @@ class EPD:
                          img.width, img.height, self.width, self.height)
             img = img.resize((self.width, self.height))
 
-        buf = bytearray(self.width * self.height * 2)
-        idx = 0
-        for r, g, b in img.getdata():
-            rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
-            buf[idx]     = (rgb565 >> 8) & 0xFF
-            buf[idx + 1] = rgb565 & 0xFF
-            idx += 2
-        return bytes(buf)
+        # RGB565, high byte first. Done per channel with lookup tables inside
+        # Pillow rather than a Python loop over 54,400 pixels: the loop costs
+        # a large part of a second on this board, too slow for the camera view.
+        r, g, b = img.split()
+        high = ImageChops.add(r.point(_R_HIGH), g.point(_G_HIGH))
+        low = ImageChops.add(g.point(_G_LOW), b.point(_B_LOW))
+        return Image.merge("LA", (high, low)).tobytes()
 
     def display(self, buf):
         """Write a full-screen RGB565 buffer to the display."""

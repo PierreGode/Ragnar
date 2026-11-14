@@ -60,7 +60,7 @@ def test_hardware_scan_runs_in_the_background_and_is_served(web, monkeypatch):
     monkeypatch.setattr(cardputer_caps, "header_state",
                         lambda: [{"label": "G26", "gpio": 26, "role": "x", "function": "op", "level": 1}])
     monkeypatch.setattr(web, "_cz_gnss_port_in_use", lambda: False)
-    monkeypatch.setattr(pi_camera, "get_camera", lambda: types.SimpleNamespace(
+    monkeypatch.setattr(pi_camera, "get_camera", lambda *a: types.SimpleNamespace(
         info=lambda: {"present": True, "model": "imx219", "modes": "3280x2464"}))
     client = web.app.test_client()
     first = client.get("/api/cardputer/hardware").get_json()
@@ -97,7 +97,7 @@ def camera(monkeypatch, **over):
         mjpeg=lambda: iter([b"--frame\r\n\r\n" + JPEG + b"\r\n"]))
     for k, v in over.items():
         setattr(cam, k, v)
-    monkeypatch.setattr(pi_camera, "get_camera", lambda: cam)
+    monkeypatch.setattr(pi_camera, "get_camera", lambda *a: cam)
     return cam
 
 

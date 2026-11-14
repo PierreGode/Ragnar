@@ -421,6 +421,12 @@
         .cz-fix { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0 10px; }
         .cz-fix .pw-muted { flex: 1 1 220px; font-size: 12px; }
         .cz-log { margin-top: 4px; padding: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-word; background: rgba(0,0,0,.3); border-radius: 6px; max-height: 160px; overflow: auto; }
+        .pw-btn.cam-rec { color: #f87171; border-color: #f87171; font-weight: 600; }
+        .cam-videos { display: flex; flex-direction: column; gap: 8px; }
+        .cam-video { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; }
+        .cam-video video { width: 100%; max-width: 640px; border-radius: 8px; background: #000; }
+        .cam-video .cam-video-name { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
+        .cam-video a.pw-btn { text-decoration: none; display: inline-flex; align-items: center; }
         .cam-photos { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
         .cam-photo { position: relative; }
         .cam-photo img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 6px; display: block; }
@@ -6773,12 +6779,18 @@
                     <div class="cam-actions">
                         <button class="pw-btn" id="camera-live-btn" onclick="toggleCameraLive()">Live view</button>
                         <button class="pw-btn pw-btn-primary" id="camera-photo-btn" onclick="takeCameraPhoto()">Take photo</button>
+                        <button class="pw-btn" id="camera-record-btn" onclick="toggleCameraRecording()">Record video</button>
+                        <button class="pw-btn" id="camera-flip-btn" onclick="flipCamera()" title="Turn the picture upside down">Flip</button>
                     </div>
                     <div id="camera-note" class="pw-muted" style="margin-top:6px"></div>
                     <img id="camera-live" class="cam-view hidden" alt="Camera live view">
                     <div class="pw-section hidden" id="camera-photos-section">
                         <div class="pw-section-title">Photos</div>
                         <div id="camera-photos" class="cam-photos"></div>
+                    </div>
+                    <div class="pw-section hidden" id="camera-videos-section">
+                        <div class="pw-section-title">Videos</div>
+                        <div id="camera-videos" class="cam-videos"></div>
                     </div>
                 </div>
 
@@ -10203,7 +10215,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261114-capsunit"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261114-camvideo"></script>
 
 
 
