@@ -4,6 +4,17 @@
 
 ### 2026-11-14
 
+#### feat(camera): flip, video recording, and a camera screen on the CardputerZero
+*branch `feat/cardputer-camera-screen`*
+
+- **Picture was upside down.** The CardputerZero's sensor is mounted upside down, so the picture is now turned 180° there by default. A **Flip** button in the Camera panel changes it on any board; the choice is saved (`camera_rotation`: `0`, `180`, `auto`) and applies to the live view, photos and videos.
+- **Video recording.** **Record video** in the Camera panel, with a timer, and a **Videos** list to play, download and delete. A video is the live view written to disk (640×480, about 8 to 10 frames a second, no sound), so the live view keeps running while it records. It is converted to an MP4 in the background when `ffmpeg` is installed, which plays in the page and on a phone; otherwise it stays an AVI to download. A recording stops by itself after 10 minutes or when the disk is nearly full.
+- **Camera on the device screen.** Press **P** on the CardputerZero: the screen shows the live picture. **OK** takes a photo; **Z** / **C** switch to video, where **OK** starts and stops a recording (red frame and timer while recording). **Esc** or **P** leaves, which also ends a recording.
+- **Smoother live view.** Frames were handed on in bursts of about three, so the web live view moved at 2 to 3 updates a second. They are now passed on as they arrive.
+- **Faster screen updates on the CardputerZero.** Converting a frame for the LCD took a Python loop over every pixel; it is now done inside the image library (about 12 ms a frame on the unit), which the camera view needs and every other screen benefits from.
+- **Checked on a real unit** (branch code run from a temporary folder): with the 180° turn the picture is the right way up; a recording captured every frame at about 8 frames a second while a viewer also received every frame; the MP4 conversion worked (7.5 s for a 4 s clip); a photo took 1.8 s.
+- **Not checked on the unit:** the camera screen on the LCD and its keys (nobody at the keyboard). They were tested with a simulated camera and keyboard, and the screen was rendered to an image.
+
 #### fix(cardputer): findings from a real unit — Meshtastic start, camera setup on plain Raspberry Pi OS, Grove power
 *branch `fix/cardputer-unit-findings`*
 

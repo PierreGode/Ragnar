@@ -150,12 +150,13 @@ press, and **Esc** goes back.
 | **OK** (Enter) | open the diagnostic screens | run the highlighted function, close a result | back to the first screen |
 | **Esc** | back to the main screen | close a result, then leave diagnostics | back to the Ragnar screens |
 | `A` | page autoscroll on / off | | |
+| `P` | camera screen on / off (works from any screen) | | |
 | Space | diagnostics on | diagnostics off | back to the Ragnar screens |
 | Backspace | flip the screen 180° | card list | reconnect to a known Wi-Fi |
 | Tab | next page (hold: restart Ragnar) | auto-switch cards on / off | phone-access AP on / off |
 
 The footer of each screen names the keys that apply there, for example
-`F/X/Z/C:Page  OK:Diag  Esc:Home  A:Auto  Bksp:Flip`. The main screen has no footer;
+`F/X/Z/C:Page OK:Diag Esc:Home A:Auto P:Cam Bksp:Flip`. The main screen has no footer;
 the keys work there all the same.
 
 These are the 1.44" LCD HAT's controls on a keyboard; see
@@ -282,10 +283,20 @@ when the driver arrives.
 ### Camera
 
 The built-in 8 MP camera (IMX219) appears under **System → Camera** when it is
-detected: **Live view** streams it to the page and **Take photo** saves a JPEG
-to `data/camera/`, shown in the list underneath. The live view stops a few
-seconds after the last viewer closes it, so it costs nothing when unused. It
-needs the `rpicam-apps` tools, which the installer and updater put in place.
+detected: **Live view** streams it to the page, **Take photo** saves a JPEG and
+**Record video** saves a video to `data/camera/`, both listed underneath. A
+video is the live view written to disk (640×480, no sound) and is converted to
+an MP4 afterwards when `ffmpeg` is installed. **Flip** turns the picture; on
+this board it is turned 180° by default because the sensor is mounted upside
+down (`camera_rotation`). The live view stops a few seconds after the last
+viewer closes it, so it costs nothing when unused. It needs the `rpicam-apps`
+tools, which the installer and updater put in place.
+
+**On the device:** press **P** for the camera screen. It shows the live picture;
+**OK** takes a photo, **Z** / **C** switch between photo and video, **OK** then
+starts and stops a recording, **Esc** or **P** leaves. Backspace still flips the
+screen.
+
 `python3 pi_camera.py photo.jpg` takes one photo from a shell. The panel is
 not CardputerZero-specific: any camera `rpicam-hello --list-cameras` reports
 gets it.
@@ -434,7 +445,7 @@ later. The default key codes are the ones in M5Stack's device tree for this boar
    { "30": "press", "31": "key2" }
    ```
    Valid actions: `up`, `down`, `left`, `right`, `press` (OK), `back` (Esc),
-   `auto` (autoscroll), `key1`, `key2`, `key3`.
+   `auto` (autoscroll), `camera` (camera screen), `key1`, `key2`, `key3`.
 
 The file is read at startup and **overrides** individual defaults. Unlike the LCD-HAT
 joystick (mounted 90° off), the keyboard arrows already point the way you read them, so
@@ -473,7 +484,7 @@ no direction remap is applied.
 | `cardputer_input.py` | Keyboard listener — kernel input device first, TCA8418 I²C fallback (reuses the LCD-HAT input layer) |
 | `sysfs_battery.py` | Battery percentage — kernel power-supply class first, BQ27220 over I²C as fallback |
 | `cardputer_caps.py` | Expansion header: Cap power, which Cap is fitted, GNSS and camera detection, LoRa preparation |
-| `pi_camera.py` | Camera: photos and the shared live view, through `rpicam-still` / `rpicam-vid` |
+| `pi_camera.py` | Camera: photos, video recording and the shared live view, through `rpicam-still` / `rpicam-vid` |
 | `cc1101_scan.py` | Receive-only sub-GHz sweep on the Cap CC1101, as an RF Waterfall source |
 | `scripts/cardputer_hardware.sh` | Camera tools, serial-console check, NFC overlay |
 | `scripts/cardputer_lora_meshtastic.sh` | Runs the LoRa Cap as a Meshtastic node through meshtasticd |

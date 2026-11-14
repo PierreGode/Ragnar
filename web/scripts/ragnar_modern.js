@@ -29929,7 +29929,7 @@ function updateCameraView(d) {
     if (d.error && !_cam.busy && !d.recording) _cameraNote(d.error, true);
     _cam.rotation = d.rotation || 0;
     _renderCameraPhotos(d.photos);
-    _renderCameraVideos(d.videos, d.converting);
+    _renderCameraVideos(d.videos, d.converting, d.recording && d.recording.name);
     _setCameraRecording(d.recording);
 }
 
@@ -29937,7 +29937,7 @@ function _camSize(bytes) {
     return bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(bytes / 1024)) + ' kB';
 }
 
-function _renderCameraVideos(videos, converting) {
+function _renderCameraVideos(videos, converting, recordingName) {
     const section = document.getElementById('camera-videos-section');
     const list = document.getElementById('camera-videos');
     if (!section || !list) return;
@@ -29945,7 +29945,7 @@ function _renderCameraVideos(videos, converting) {
     converting = converting || [];
     section.classList.toggle('hidden', videos.length === 0);
     // Rebuilding the list would stop a video that is playing.
-    const key = JSON.stringify([videos, converting]);
+    const key = JSON.stringify([videos.map(v => v.name), converting, recordingName || '']);
     if (key === _cam.videoKey) return;
     _cam.videoKey = key;
     list.innerHTML = videos.map(v => {
@@ -29953,10 +29953,11 @@ function _renderCameraVideos(videos, converting) {
         const name = _czEsc(v.name);
         const busy = converting.indexOf(v.name) >= 0;
         const mp4 = v.name.endsWith('.mp4');
-        const state = busy ? ' · converting to MP4…' : (mp4 ? '' : ' · AVI (download to play)');
+        const live = v.name === recordingName;
+        const state = live ? ' · recording…' : busy ? ' · converting to MP4…' : (mp4 ? '' : ' · AVI (download to play)');
         return `<div class="cam-video">` +
             (mp4 ? `<video controls playsinline preload="none" src="${url}"></video>` : '') +
-            `<span class="cam-video-name">${name} · ${_camSize(v.size)}${state}</span>` +
+            `<span class="cam-video-name">${name}${live ? '' : ' · ' + _camSize(v.size)}${state}</span>` +
             `<a class="pw-btn" href="${url}?download=1">Download</a>` +
             `<button class="pw-btn" aria-label="Delete video" onclick="deleteCameraVideo('${name}')">Delete</button></div>`;
     }).join('');
