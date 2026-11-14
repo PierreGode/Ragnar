@@ -71,7 +71,12 @@ add_repository() {
         -o APT::Get::List-Cleanup="0" >/dev/null 2>&1 || apt-get update >/dev/null 2>&1 || true
 }
 
+# Left by "remove": the owner took the Meshtastic setup off this unit, so the
+# installer and updater must not put it back by themselves.
+OPTOUT="$ROOT/etc/ragnar-meshtasticd-optout"
+
 install() {
+    rm -f "$OPTOUT"
     if ! have_daemon && [ -z "$ROOT" ]; then
         log "meshtasticd is not installed; installing it"
         DEBIAN_FRONTEND=noninteractive apt-get install -y meshtasticd >/dev/null 2>&1 || {
@@ -108,6 +113,7 @@ EOF
 
 remove() {
     rm -f "$CONF" "$DROPIN"
+    mkdir -p "$(dirname "$OPTOUT")" && : > "$OPTOUT"
     rmdir "$DROPIN_DIR" 2>/dev/null || true
     sysctl_ daemon-reload
     sysctl_ restart meshtasticd.service

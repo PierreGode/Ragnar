@@ -4,6 +4,16 @@
 
 ### 2026-11-14
 
+#### fix(cardputer): install and update set up Meshtastic on the LoRa Cap by themselves
+*branch `fix/cardputer-meshtasticd-autoinstall`*
+
+- **What was already installed:** the `meshtastic` Python client (Mesh Nodes) and `paho-mqtt` (the MQTT source, from `requirements.txt`) are installed by both `install_ragnar.sh` and the updater.
+- **What was missing:** the `meshtasticd` service that makes the LoRa Cap a node was only installed by pressing **Set up Meshtastic**. The installer and the updater (also from the web UI) now do it when the LoRa + GNSS Cap is fitted: add Meshtastic's package repository, install `meshtasticd`, write the Cap's radio settings and start it. Nothing is installed with another Cap or none.
+- It needs internet at that moment; if it fails, the **Set up Meshtastic** button still works.
+- `scripts/cardputer_lora_meshtastic.sh remove` is remembered: an update does not put it back until you set it up again yourself.
+- The region is still not set for you (it decides the legal frequencies): `meshtastic --host 127.0.0.1 --set lora.region EU_868`.
+- Not run on a unit; tested against a simulated system.
+
 #### feat(files): a Camera folder in the Files tab; fix: GPS for the Meshtastic node, steady camera detection
 *branch `feat/camera-files-folder`*
 
