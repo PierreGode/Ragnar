@@ -4,6 +4,15 @@
 
 ### 2026-11-14
 
+#### feat(cardputer): fn + Backspace (Del) switches the Grove port's 5 V on and off
+*branch `feat/cardputer-grove-key`*
+
+- **fn + Backspace**, the key's **del** legend, turns the Grove port's 5 V pin off and on again, from any screen (the camera screen too). The corner of the screen says *Del: Grove 5V off* / *on* for two seconds.
+- The choice is saved (`cardputer_grove_power`), so it is also the state after a restart. The default stays on.
+- Plain **Backspace** still flips the screen. Using it alone for Grove would have taken that away, and its other jobs on the wardriving and diagnostic screens.
+- Works with both keyboard paths: the kernel driver reports the key as Delete; without that driver Ragnar tracks fn itself.
+- Not tried on a unit (nobody at the keyboard); tested with a simulated keyboard and power switch.
+
 #### feat(cardputer): boot screen and an "Installing Ragnar" screen on the LCD
 *branch `feat/boot-install-splash`*
 

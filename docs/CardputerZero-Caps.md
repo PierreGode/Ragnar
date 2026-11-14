@@ -435,7 +435,7 @@ All in `config/shared_config.json`; none of them is needed for normal use.
 | Setting | Default | Effect |
 |---|---|---|
 | `cardputer_cap_power` | `true` | Switch the header's 5 V on at start. `false`: Ragnar leaves it alone, and a Cap stays unpowered |
-| `cardputer_grove_power` | `true` | Switch the Grove port's 5 V pin on at start, so a Grove unit works when plugged in. `false`: left off |
+| `cardputer_grove_power` | `true` | Switch the Grove port's 5 V pin on at start, so a Grove unit works when plugged in. `false`: left off. **fn** + **Backspace** (the **del** key) on the CardputerZero switches it off and on at any time and saves the choice here |
 | `cardputer_free_gnss_uart` | `true` | With the LoRa + GNSS Cap fitted, take the serial login prompt off the UART so GPS can read it. `false`: Ragnar only reports it |
 | `wardriving_gps_port` | `auto` | Which serial port the GPS reads. `auto` finds the Cap's GNSS |
 | `wardriving_gps_baudrate` | `9600` | Fallback only; the detected rate wins |
