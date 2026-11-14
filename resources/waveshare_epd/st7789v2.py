@@ -57,6 +57,8 @@ _B_LOW = [v >> 3 for v in range(256)]
 
 logger = logging.getLogger(__name__)
 
+_boot_screen_done = False   # the start-up picture has been painted in this process
+
 # Landscape geometry used by Ragnar. Native panel is 170(w) x 320(h) portrait;
 # we rotate 90° via MADCTL so the wide edge (over the keyboard) is horizontal.
 LCD_WIDTH  = 320
@@ -117,6 +119,9 @@ class EPD:
         self._gpio = {}
         self._ioe  = None   # M5IOE1 expander (LCD reset + backlight), lazy
         self._initialized = False
+        # Paint the "Starting Ragnar" picture as soon as the panel is up, so
+        # the reset does not leave it blank until Ragnar's first frame.
+        self.boot_screen = os.environ.get("RAGNAR_NO_SPLASH") != "1"
 
     # ------------------------------------------------------------------
     # Public EPD-compatible interface
@@ -139,6 +144,19 @@ class EPD:
             raise RuntimeError(
                 "CardputerZero display: no LCD framebuffer and SPI init failed")
         self._initialized = True
+        global _boot_screen_done
+        if self.boot_screen and not _boot_screen_done:
+            # Once per process: a display object made later (a settings change,
+            # a re-detect) must not flash this over Ragnar's live screen.
+            _boot_screen_done = True
+            self.boot_screen = False
+            try:
+                import ragnar_splash
+                message, detail = ragnar_splash.MESSAGES["start"]
+                self._blit(self.getbuffer(ragnar_splash.render(
+                    message, detail, config=ragnar_splash.saved_config())))
+            except Exception as e:
+                logger.debug("CardputerZero: boot screen not drawn: %s", e)
 
     def Clear(self, color=0xFFFF):
         """Fill the whole display with a solid RGB565 colour (default white)."""

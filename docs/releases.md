@@ -4,6 +4,16 @@
 
 ### 2026-11-14
 
+#### feat(cardputer): boot screen and an "Installing Ragnar" screen on the LCD
+*branch `feat/boot-install-splash`*
+
+- **Boot screen.** The CardputerZero's LCD used to stay blank during boot, then turn white for the minute Ragnar needs to start. It now shows the Ragnar name, the viking (or shieldmaiden) and *Starting up* a few seconds into boot (`ragnar-splash.service`), then *Starting Ragnar* while the service starts, until the first real screen. This also covers restarts after an update.
+- **Install screen.** `install_ragnar.sh` puts *Installing Ragnar* on the LCD from the first minute, with the current step and a progress bar, and *Ragnar is installed* at the end. It detects the board before the menu is answered, switches SPI and I2C on without a reboot, and fetches the few files it needs if the installer was downloaded on its own.
+- **How.** `ragnar_splash.py` draws straight to the panel through the display driver and needs nothing else from Ragnar. It only draws on a CardputerZero and never while Ragnar is running.
+- Switch the boot screen off with `sudo scripts/cardputer_hardware.sh boot-screen-off` (updates leave it off), back on with `boot-screen`. `RAGNAR_NO_SPLASH=1` stops the driver painting it at start.
+- M5Stack's own image gets its boot picture from a kernel screen driver; plain Raspberry Pi OS has none for this panel, so the picture appears once Python can run, a few seconds into boot, not from power-on.
+- **Not run on a unit.** Tested with a simulated panel, systemd tree and installer run; the pictures were rendered to image files. The field unit was running Ragnar, and drawing over it would have disturbed its screen.
+
 #### fix(cardputer): install and update set up Meshtastic on the LoRa Cap by themselves
 *branch `fix/cardputer-meshtasticd-autoinstall`*
 
