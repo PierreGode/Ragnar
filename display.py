@@ -2007,7 +2007,7 @@ class Display:
                         try:
                             shot = Image.open(io.BytesIO(frame))
                             shot.draft('RGB', size)
-                            picture = shot.convert('RGB').resize(size)
+                            picture = shot.convert('RGB').resize(size, Image.BILINEAR)
                         except Exception as e:
                             logger.debug(f"camera frame decode error: {e}")
                     elif not cam.streaming and not getattr(bl, 'camera_busy', False):

@@ -346,9 +346,12 @@ class PiCamera:
 
     def _read_frames(self, proc):
         buffer = b""
+        # read1 hands over what has arrived; a plain read on the buffered pipe
+        # would wait for a full 64 kB, delivering frames in bursts of three.
+        read = getattr(proc.stdout, "read1", proc.stdout.read)
         while True:
             try:
-                chunk = proc.stdout.read(65536)
+                chunk = read(65536)
             except Exception:
                 chunk = b""
             if not chunk:
