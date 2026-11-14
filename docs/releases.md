@@ -4,6 +4,14 @@
 
 ### 2026-11-14
 
+#### fix(cardputer): Caps are not hot-swappable, so identify the Cap once per start
+*branch `fix/cardputer-cap-no-hotplug`*
+
+- M5Stack's guide says hot-plugging a Cap "is not supported and may cause abnormal operation. Power off before installing or removing a Cap." Ragnar re-probed the header's I²C and SPI buses every minute while the System tab was open, as if a Cap could appear at any time.
+- The Cap is now identified once when Ragnar starts and that answer is kept. A Cap that was found is never probed again. The panel's button (now **Refresh**) updates GNSS, camera and pin state, and only looks for a Cap again when none was found at start.
+- The CC1101 sweep uses the same stored answer instead of probing SPI itself.
+- The panel and the docs now carry the warning. Removed a troubleshooting tip about the LOCK label, which is the stock launcher's screen lock and unrelated to Ragnar.
+
 #### fix(cardputer): arrow keys, OK and Esc on units without M5Stack's keyboard driver
 *branch `fix/cardputer-keymap-i2c`*
 

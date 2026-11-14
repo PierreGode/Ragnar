@@ -763,6 +763,11 @@ Yes for the LoRa + GNSS Cap and the CC1101 radio of the Sub-GHz Cap. The GNSS fe
 Source: M5StackCardputerZero.md
 <!-- proof: docs/M5StackCardputerZero.md | **NFC (ST25R3916).** Not supported yet. -->
 
+### Can I swap CardputerZero Caps while it is running?
+No. Caps are not hot-swappable. Power the CardputerZero off before fitting or removing one; Ragnar identifies the Cap once at start.
+Source: M5StackCardputerZero.md
+<!-- proof: docs/M5StackCardputerZero.md | **Caps are not hot-swappable.** -->
+
 ### How do I use the CardputerZero LoRa Cap with Meshtastic?
 Run `sudo scripts/cardputer_lora_meshtastic.sh install`, then set your region once with `meshtastic --host 127.0.0.1 --set lora.region EU_868`. It needs `meshtasticd` installed.
 Source: M5StackCardputerZero.md

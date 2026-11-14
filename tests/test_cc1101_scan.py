@@ -198,11 +198,27 @@ def test_detect_never_writes_cc1101_registers_to_a_lora_cap(monkeypatch):
     import cardputer_caps as caps
     monkeypatch.setattr(cs, "_detect_cache", {"at": 0.0, "value": None})
     monkeypatch.setattr(caps, "is_cardputer_zero", lambda cfg=None: True)
+    monkeypatch.setattr(caps, "_identity", None)
     monkeypatch.setattr(caps, "probe_lora_cap", lambda: True)
     monkeypatch.setattr(caps, "probe_cc1101", lambda: pytest.fail("SPI probe on a LoRa Cap"))
-    monkeypatch.setattr(caps, "power_on_cap", lambda: pytest.fail("not needed"))
+    monkeypatch.setattr(caps, "power_on_cap", lambda: True)
     info = cs.detect()
     assert info["available"] is False and "LoRa Cap" in info["error"]
+
+
+def test_detect_uses_the_cap_found_at_start(monkeypatch):
+    """Caps are not hot-swappable: no bus probing after the first look."""
+    import cardputer_caps as caps
+    monkeypatch.setattr(caps, "is_cardputer_zero", lambda cfg=None: True)
+    monkeypatch.setattr(caps, "power_on_cap", lambda: True)
+    monkeypatch.setattr(caps, "probe_lora_cap", lambda: pytest.fail("re-probed I2C"))
+    monkeypatch.setattr(caps, "probe_cc1101", lambda: pytest.fail("re-probed SPI"))
+    monkeypatch.setattr(caps, "_identity", ("subghz_nfc", 0x14))
+    monkeypatch.setattr(cs, "_detect_cache", {"at": 0.0, "value": None})
+    assert cs.detect()["available"] is True and cs.detect()["version"] == 0x14
+    monkeypatch.setattr(caps, "_identity", ("none", None))
+    monkeypatch.setattr(cs, "_detect_cache", {"at": 0.0, "value": None})
+    assert "power off to fit one" in cs.detect()["error"]
 
 
 def test_detect_on_another_board_is_quiet(monkeypatch):
