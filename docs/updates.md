@@ -81,7 +81,7 @@ in the card and in the console panel underneath it.
 | `disk_full` | Not enough space to pull | Free space — `data/logs` and old captures first |
 | `not_a_repo` | No `.git` (tarball install) **and** upstream unreachable | Check the box's internet connection; the check repairs this by itself once it can reach github.com |
 | `branch_missing` | The tracked branch is gone upstream | Nothing — the updater falls back to the default branch automatically |
-| `broken_tag` | A tag in this clone or on the remote is corrupt and was blocking the fetch | Nothing — the updater drops the broken tag and refetches branches only; see [A corrupt tag blocks every update](#a-corrupt-tag-blocks-every-update) |
+| `repo_damaged` (also shown for `broken_tag`) | Git's own files on the box are damaged, usually by a power cut during a write | Click **Repair and Update**. Most damage is repaired by the update check itself and never shown; see [Damaged git data](#damaged-git-data) |
 | `ownership` | Git refused the checkout's file ownership | Usually self-repairing; else `sudo chown -R ragnar:ragnar /home/ragnar/Ragnar` |
 | `locked` | Another git process holds the repository | Wait a moment and retry; stale locks are swept automatically |
 | `permission` | The service cannot write its own directory | `sudo chown -R ragnar:ragnar /home/ragnar/Ragnar` |
@@ -310,34 +310,57 @@ installed from — so once the metadata is back the card simply reads **Up to
 Date**. Only a box that cannot reach github.com at all reports `not_a_repo`, and
 the repair is retried at most every 10 minutes until it succeeds.
 
-### A corrupt tag blocks every update
+### Damaged git data
 
-A release tag that was force-pushed, partially deleted or had its objects
-garbage-collected (for example an `os-v*` OS-image tag) leaves a tag ref pointing
-at an object git can no longer read. From then on a plain `git fetch` aborts with:
+Git keeps its state in small files under `.git`. A box that loses power in the
+middle of a write (a pulled plug, a flat battery, a handheld switched off) can
+be left with empty or half-written ones. A single bad file is enough to make
+every fetch fail, and with it every update and every branch switch. The usual
+symptom was an orange **Needs attention** with a message about a corrupt tag and
+an Update button that could not be clicked.
 
-```
-fatal: bad object refs/tags/os-v1.8.0
-error: ... did not send all necessary objects
-```
+Ragnar repairs this itself, in steps of increasing cost:
 
-Because a pull and a branch checkout both fetch first, this blocks **every**
-update *and* every branch switch — not just the tag. **Ragnar now recovers from
-this automatically:** the web updater and `update_ragnar.sh` detect the signature,
-delete the broken tag ref (the updater only ever syncs to a branch head, never a
-tag) and refetch branches only. Note that `--no-tags` alone does **not** fix a
-broken *local* tag — git still uses it during negotiation — so the broken ref is
-deleted first.
+0. **Ownership.** Files in `.git` that belong to the wrong user are given back
+   to the checkout's owner, so the steps below (and git itself) can write there.
+1. **Plain-file fixes.** An unreadable `HEAD`, `config` or `packed-refs`, empty
+   ref files and zero-length object files are fixed or removed.
+2. **Broken references.** Every tag, branch, remote branch or stash that points
+   at an object git cannot read is dropped (the fetch recreates what matters),
+   and a corrupt index is rebuilt.
+3. **Refetch.** Missing objects are downloaded again from upstream.
+4. **Rebuild.** If git still cannot work, `.git` is replaced with a fresh one
+   built around the files already on disk.
 
-If you ever need to clear it by hand:
+The background update check runs steps 0 to 3, so most damage is gone before
+you see it. Step 4 runs only when you click **Repair and Update** (or run
+`update_ragnar.sh`), because it resets Ragnar's own program files to the upstream
+version; with the old history unreadable, a local edit cannot be told apart from
+an old version. It also only runs when git itself reports damaged data, never for
+an error Ragnar does not recognise. Your settings, databases and collected data
+are gitignored and are not touched by any step. If the rebuild cannot reach
+github.com, the old `.git` is put back exactly as it was.
+
+**Where root-owned files came from.** The Ragnar service runs as root while the
+checkout belongs to `ragnar`. Each background update check fetched as root and
+left root-owned files in `.git`, and git's automatic clean-up, started in the
+background by that fetch, went on writing more after it returned. A `git`
+command run by hand as `ragnar` then failed with "permission denied". Ragnar now
+hands the files back after every fetch and runs that clean-up in the foreground,
+so nothing is written afterwards. Running `update_ragnar.sh` with `sudo` remains
+the supported way to update from a shell; it fixes ownership itself.
+
+Two habits still help: shut the board down instead of cutting power, and keep
+some free space on the card (`df -h`); an update refuses to start below 60 MB.
+
+The button now stays usable in every state except "git does not run on this
+board" and "the disk is full".
+
+By hand, from a shell:
 
 ```bash
 cd /home/ragnar/Ragnar
-# drop any local tag ref whose object is missing, then refetch branches only
-for t in $(git for-each-ref --format='%(refname)' refs/tags); do
-  git rev-parse --verify --quiet "$t^{object}" >/dev/null || git update-ref -d "$t"
-done
-git fetch --no-tags --prune --force origin '+refs/heads/*:refs/remotes/origin/*'
+sudo ./update_ragnar.sh        # runs the same repair ladder, then updates
 ```
 
 ### The service did not come back after an update
