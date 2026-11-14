@@ -902,6 +902,7 @@ class Display:
                 time.sleep(0.1)
             return
         wd_page = getattr(self.button_listener, 'wardrive_page', 0)
+        key_seq = getattr(self.button_listener, 'key_seq', 0)
         # Check every 0.1s if page changed, otherwise do full sleep
         steps = max(1, int(self.shared_data.screen_delay / 0.1))
         for _ in range(steps):
@@ -909,6 +910,8 @@ class Display:
                 return  # Page changed, skip remaining sleep
             if getattr(self.button_listener, 'wardrive_page', 0) != wd_page:
                 return  # Wardriving sub-page changed (joystick)
+            if getattr(self.button_listener, 'key_seq', 0) != key_seq:
+                return  # A key was pressed (keyboard echo / any action)
             if self._wardriving_active_cheap() != wd_active0:
                 return  # Wardriving started/stopped — redraw now
             time.sleep(0.1)
@@ -1892,6 +1895,7 @@ class Display:
 
     def _commit_netdiag_frame(self, image):
         """Push a rendered netdiag frame to the panel and the web mirror."""
+        self._cardputer_overlays(image)
         epd_img = _apply_epd_rotation(image, self.screen_reversed)
         self.epd_helper.display_partial(epd_img)
         self.epd_helper.display_partial(epd_img)
@@ -2122,6 +2126,92 @@ class Display:
                 bb = sd.font_arialbold.getbbox(line)
                 y += (bb[3] - bb[1]) + 2
 
+    # Names for the key echo, by Linux key code (the CardputerZero's keys).
+    _KEY_LABELS = {1: "Esc", 14: "Bksp", 15: "Tab", 28: "OK", 57: "Space",
+                   33: "F", 45: "X", 44: "Z", 46: "C",
+                   103: "fn+F", 108: "fn+X", 105: "fn+Z", 106: "fn+C"}
+    KEY_ECHO_SECONDS = 2.0
+
+    def _draw_battery_icon(self, image, draw, right, top, with_text=True):
+        """Phone-style battery: percentage, then a battery outline filled to
+        the charge level, right-aligned at `right`. Green above 30 %, amber
+        above 15 %, red below; a bolt while charging. Returns the width used
+        (0 when no battery is reporting)."""
+        try:
+            src = battery_source(self.shared_data)
+            level = src.get_battery_level() if src else None
+            if level is None:
+                return 0
+            level = max(0, min(100, int(round(level))))
+            charging = bool(src.is_charging())
+        except Exception:
+            return 0
+        rgb = getattr(image, 'mode', '1') == 'RGB'
+        ink = self._wd_c(draw, 'ink')
+        tint = self._wd_c(draw, 'good' if level > 30 else ('warn' if level > 15 else 'bad'))
+        bg = _WD_COLORS['bg'] if rgb else 255
+        body_w, body_h, nub = 21, 11, 2
+        font = self.shared_data.font_arial9
+        text = f"{level}%" if with_text else ""
+        text_w = int(font.getlength(text)) + 3 if text else 0
+        width = text_w + body_w + nub
+        x0 = right - width
+        # Clear what is underneath so the icon stays readable over artwork.
+        draw.rectangle((x0 - 2, top - 1, right, top + body_h), fill=bg)
+        if text:
+            draw.text((x0, top + 1), text, font=font, fill=ink)
+        bx = x0 + text_w
+        draw.rectangle((bx, top, bx + body_w - 1, top + body_h - 1), outline=ink)
+        draw.rectangle((bx + body_w, top + 3, bx + body_w + nub - 1, top + body_h - 4), fill=ink)
+        inner = body_w - 4
+        fill_w = max(1, int(round(inner * level / 100.0))) if level > 0 else 0
+        if fill_w:
+            draw.rectangle((bx + 2, top + 2, bx + 1 + fill_w, top + body_h - 3), fill=tint)
+        if charging:
+            # Lightning bolt, centred in the body.
+            cx, cy = bx + body_w // 2, top + body_h // 2
+            bolt = [(cx + 1, top + 1), (cx - 3, cy), (cx, cy), (cx - 2, top + body_h - 2),
+                    (cx + 3, cy - 1), (cx, cy - 1)]
+            draw.polygon(bolt, fill=bg if fill_w > inner // 2 else ink)
+        return width + 2
+
+    def _draw_key_echo(self, image, draw):
+        """For a moment after a key press, name the key and what it did in
+        the bottom-left corner. It makes the keyboard self-explaining, and a
+        key that shows nothing here is not reaching Ragnar at all.
+        `cardputer_key_echo: false` turns it off."""
+        if not self.config.get("cardputer_key_echo", True):
+            return
+        last = getattr(self.button_listener, 'last_key', None)
+        if not last:
+            return
+        code, action, when = last
+        if time.monotonic() - when > self.KEY_ECHO_SECONDS:
+            return
+        label = self._KEY_LABELS.get(code, f"key {code}")
+        text = f"{label}: {action}" if action else f"{label}: not mapped"
+        rgb = getattr(image, 'mode', '1') == 'RGB'
+        font = self._font_at('Arial.ttf', 11)
+        w = int(font.getlength(text)) + 8
+        h = image.height
+        draw.rectangle((2, h - 17, 2 + w, h - 2),
+                       fill=(_WD_COLORS['title'] if rgb else 0))
+        draw.text((6, h - 16), text, font=font, fill=(_WD_COLORS['bg'] if rgb else 255))
+
+    def _cardputer_overlays(self, image, battery_text=True):
+        """Drawn last on every CardputerZero frame: the battery icon in the
+        top-right corner and the key echo. A no-op on every other panel.
+        `battery_text=False` leaves out the percentage where the corner is
+        tight (the wardriving band counts)."""
+        if self.config.get("epd_type") != "st7789v2":
+            return
+        try:
+            draw = ImageDraw.Draw(image)
+            self._draw_battery_icon(image, draw, image.width - 3, 3, with_text=battery_text)
+            self._draw_key_echo(image, draw)
+        except Exception as e:
+            logger.debug(f"cardputer overlay error: {e}")
+
     def _render_main_cardputer(self, image, draw, W, H):
         """PAGE_MAIN for the CardputerZero's 320x170 landscape LCD.
 
@@ -2199,19 +2289,9 @@ class Display:
                     left_used = 19 + int(small.getlength(ip_octet))
         except Exception:
             pass
+        # The battery is the icon in the screen's top-right corner
+        # (_cardputer_overlays), as on a phone.
         bat_w = 0
-        try:
-            _ps = battery_source(sd)
-            if _ps:
-                bl = _ps.get_battery_level()
-                if bl is not None:
-                    bl = int(round(bl))
-                    bt = f"{bl}%{'+' if _ps.is_charging() else ''}"
-                    bat_w = int(font.getlength(bt)) + 3
-                    tint = 'good' if bl > 30 else ('warn' if bl > 15 else 'bad')
-                    draw.text((col_w - bat_w + 2, 4), bt, font=font, fill=c(tint))
-        except Exception:
-            pass
         left_pad = left_used + 4
         avail = col_w - left_pad - bat_w - 2
         _title = self._unit_display_title()
@@ -5036,6 +5116,8 @@ class Display:
 
                 if current_page != PAGE_MAIN or _wd_override:
                     # Non-main pages are fully rendered above, skip to display
+                    self._cardputer_overlays(image, battery_text=not (
+                        _wd_override and self._wd_compact_page() == WD_PAGE_STATS))
                     epd_img = _apply_epd_rotation(image, self.screen_reversed)
                     self.epd_helper.display_partial(epd_img)
                     self.epd_helper.display_partial(epd_img)
@@ -5066,6 +5148,7 @@ class Display:
                         self._render_main_cardputer(image, draw, W, H)
                     except Exception as e:
                         logger.debug(f"cardputer main render error: {e}")
+                    self._cardputer_overlays(image)
                     epd_img = _apply_epd_rotation(image, self.screen_reversed)
                     self.epd_helper.display_partial(epd_img)
                     self.epd_helper.display_partial(epd_img)

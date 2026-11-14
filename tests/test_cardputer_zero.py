@@ -877,20 +877,201 @@ def test_colour_can_be_switched_off():
     assert img.mode == "1" and img.histogram()[0] > 800
 
 
-def test_battery_percentage_is_in_the_header():
+class Gauge:
+    available = True
+
+    def __init__(self, level=76.4, charging=False):
+        self.level, self.charging = level, charging
+
+    def get_battery_level(self):
+        return self.level
+
+    def is_charging(self):
+        return self.charging
+
+
+def corner(d, lc, sd, gauge, with_text=True):
+    """The top-right corner after the overlays, on a blank colour frame."""
+    sd.ragnar_instance = types.SimpleNamespace(builtin_battery=gauge) if gauge else None
+    img = Image.new("RGB", (320, 170), lc.display._WD_COLORS["bg"])
+    d._cardputer_overlays(img, battery_text=with_text)
+    return img.crop((250, 0, 320, 18))
+
+
+def test_battery_icon_sits_in_the_top_right_corner():
     lc, sd, d = cz_display()
-    without = cz_main(d, lc).crop((100, 0, 166, 20))
+    d.button_listener = None
+    colours = lc.display._WD_COLORS
+    blank = corner(d, lc, sd, None)
+    assert set(lc._px(blank)) == {colours["bg"]}             # no battery, no icon
+    shown = corner(d, lc, sd, Gauge(76.4))
+    assert colours["good"] in set(lc._px(shown))             # green fill
+    assert colours["ink"] in set(lc._px(shown))              # outline + percentage
+    # Nothing is drawn left of the corner: the rest of the frame is untouched.
+    img = Image.new("RGB", (320, 170), colours["bg"])
+    d._cardputer_overlays(img)
+    assert set(lc._px(img.crop((0, 0, 250, 170)))) == {colours["bg"]}
 
-    class Gauge:
-        available = True
-        def get_battery_level(self): return 76.4
-        def is_charging(self): return True
 
-    sd.ragnar_instance = types.SimpleNamespace(builtin_battery=Gauge())
-    with_battery = cz_main(d, lc).crop((100, 0, 166, 20))
-    assert without.tobytes() != with_battery.tobytes()
-    good = lc.display._WD_COLORS["good"]
-    assert good in {p for p in lc._px(with_battery)}
+def test_battery_fill_follows_the_charge_and_changes_colour():
+    lc, sd, d = cz_display()
+    d.button_listener = None
+    colours = lc.display._WD_COLORS
+
+    def fill(level, key):
+        px = lc._px(corner(d, lc, sd, Gauge(level)))
+        return sum(1 for p in px if p == colours[key])
+
+    assert fill(90, "good") > fill(50, "good") > 0
+    assert fill(25, "warn") > 0 and fill(25, "good") == 0
+    assert fill(8, "bad") > 0 and fill(8, "warn") == 0
+
+
+def test_charging_and_text_change_the_icon():
+    lc, sd, d = cz_display()
+    d.button_listener = None
+    plain = corner(d, lc, sd, Gauge(60, charging=False))
+    bolt = corner(d, lc, sd, Gauge(60, charging=True))
+    assert plain.tobytes() != bolt.tobytes()
+    icon_only = corner(d, lc, sd, Gauge(60), with_text=False)
+    assert icon_only.tobytes() != plain.tobytes()
+    # Without the percentage nothing reaches left of the icon itself.
+    assert set(lc._px(icon_only.crop((0, 0, 40, 18)))) == {lc.display._WD_COLORS["bg"]}
+
+
+def test_battery_icon_is_cardputer_only():
+    lc, sd, d = cz_display()
+    d.button_listener = None
+    d.config["epd_type"] = "st7735s"
+    assert set(lc._px(corner(d, lc, sd, Gauge(76)))) == {lc.display._WD_COLORS["bg"]}
+
+
+@pytest.mark.parametrize("last,expected", [((16, None, 0), True), ((33, "up", 0), True),
+                                           ((33, "up", -60), False), (None, False)])
+def test_key_echo_shows_the_last_key_for_a_moment(last, expected):
+    lc, sd, d = cz_display()
+    sd.ragnar_instance = None
+    if last:
+        last = (last[0], last[1], time.monotonic() + last[2])
+    d.button_listener = types.SimpleNamespace(last_key=last, key_seq=1)
+    img = Image.new("RGB", (320, 170), lc.display._WD_COLORS["bg"])
+    d._cardputer_overlays(img)
+    drawn = lc.display._WD_COLORS["title"] in set(lc._px(img.crop((0, 150, 160, 170))))
+    assert drawn is expected
+    d.config["cardputer_key_echo"] = False
+    img = Image.new("RGB", (320, 170), lc.display._WD_COLORS["bg"])
+    d._cardputer_overlays(img)
+    assert lc.display._WD_COLORS["title"] not in set(lc._px(img))
+
+
+def test_a_key_press_wakes_the_display_at_once():
+    lc, sd, d = cz_display()
+    sd.screen_delay = 5
+    d._wardriving_active_cheap = lambda: False
+    bl = types.SimpleNamespace(current_page=0, wardrive_page=0, key_seq=0)
+    d.button_listener = bl
+    import threading
+    threading.Timer(0.2, lambda: setattr(bl, "key_seq", 1)).start()
+    t0 = time.monotonic()
+    d._sleep_interruptible(0)
+    assert time.monotonic() - t0 < 2
+
+
+# The keyboard reader: every keyboard-like device, and a record of each key.
+
+def input_device(root, event, name, keys):
+    d = root / event / "device" / "capabilities"
+    d.mkdir(parents=True)
+    (root / event / "device" / "name").write_text(name + "\n")
+    bits = struct.calcsize("l") * 8
+    value = 0
+    for k in keys:
+        value |= 1 << k
+    words = []
+    while value:
+        words.append(f"{value & ((1 << bits) - 1):x}")
+        value >>= bits
+    (d / "key").write_text(" ".join(reversed(words or ["0"])) + "\n")
+
+
+def test_keyboards_are_told_apart_from_other_input_devices(tmp_path, monkeypatch):
+    letters = [1, 14, 15, 28, 33, 44, 45, 46, 57]
+    input_device(tmp_path, "event0", "vc4-hdmi", [103, 105, 106, 108, 28])      # CEC remote
+    input_device(tmp_path, "event1", "pwr_button", [116])
+    input_device(tmp_path, "event2", "Some USB Keyboard", letters + [464])
+    input_device(tmp_path, "event3", "tca8418c", letters)
+    monkeypatch.setattr(ci, "_SYS_INPUT", str(tmp_path))
+    monkeypatch.setattr(ci, "EVDEV_BY_PATH", str(tmp_path / "absent"))
+    monkeypatch.setattr(ci, "EVDEV_BY_PATH_GLOB", str(tmp_path / "absent*"))
+    monkeypatch.delenv("RAGNAR_CARDPUTER_KBD", raising=False)
+    real_exists = os.path.exists
+    monkeypatch.setattr(os.path, "exists",
+                        lambda p: str(p).startswith("/dev/input/event") or real_exists(p))
+    # Built-in keypad first, then the USB keyboard; never the remote or button.
+    assert ci.find_keyboard_devices() == ["/dev/input/event3", "/dev/input/event2"]
+    assert ci.find_keyboard_device() == "/dev/input/event3"
+
+
+def test_capability_bitmap_decoding():
+    bits = struct.calcsize("l") * 8
+    low = sum(1 << k for k in (28, 33, 44))
+    assert ci._reports_keys(f"{low:x}")
+    assert ci._reports_keys(f"1 {low:x}")                    # high word first
+    assert not ci._reports_keys(f"{1 << 28:x}")
+    assert not ci._reports_keys(f"{low:x} 0") or bits == 0   # shifted up a word
+    assert not ci._reports_keys("") and not ci._reports_keys("zz")
+
+
+def test_every_keyboard_is_read_and_one_going_away_is_harmless(listener, monkeypatch):
+    main_r, main_w = os.pipe()
+    usb_r, usb_w = os.pipe()
+    for fd in (main_r, usb_r):
+        os.set_blocking(fd, False)
+    listener.test_fds += [main_w]
+    opened = []
+
+    def fake_open():
+        if not opened:
+            listener._ev_fd = main_r
+            listener._extra_fds[usb_r] = "/dev/input/usb"
+            opened.append(True)
+        return True
+
+    monkeypatch.setattr(listener, "_open_evdev", fake_open)
+    listener.start()
+    os.write(usb_w, key(46, 1))
+    assert wait_for(lambda: ("press", "right") in listener.actions)
+    os.close(usb_w)                                   # USB keyboard unplugged
+    assert wait_for(lambda: usb_r not in listener._extra_fds)
+    os.write(main_w, key(44, 1))
+    assert wait_for(lambda: ("press", "left") in listener.actions)
+    assert listener._ev_fd == main_r
+
+
+def test_every_key_press_is_recorded_for_the_echo(listener, caplog):
+    import logging
+    listener._keymap = dict(ci.DEFAULT_EVDEV_KEYMAP)
+    with caplog.at_level(logging.INFO):
+        listener._handle_event(33, True)
+    assert listener.last_key[:2] == (33, "up") and listener.key_seq == 1
+    assert "key 33 -> up" in caplog.text
+    listener._handle_event(33, False)                 # a release is not a press
+    assert listener.key_seq == 1
+    listener._handle_event(16, True)                  # Q: not mapped
+    assert listener.last_key[:2] == (16, None) and listener.key_seq == 2
+    for modifier in (0x185, 0x17f, 42, 29, 56):       # fn, sym, shift, ctrl, alt
+        listener._handle_event(modifier, True)
+    assert listener.key_seq == 2
+
+
+@pytest.mark.parametrize("code,action", [
+    (0x21, "up"), (0x2d, "down"), (0x2c, "left"), (0x2e, "right"),      # F X Z C
+    (0x67, "up"), (0x6c, "down"), (0x69, "left"), (0x6a, "right"),      # with fn
+    (0x1c, "press"), (0x39, "key1"), (0x0e, "key2"), (0x0f, "key3"), (0x01, "key3")])
+def test_keymap_matches_the_boards_device_tree(code, action):
+    """Key codes from the linux,keymap tables in M5Stack's CardputerZero
+    overlay (m5stack-linux-dtoverlays, cardputerzero-v5-overlay.dts)."""
+    assert ci.DEFAULT_EVDEV_KEYMAP[str(code)] == action
 
 
 def test_turned_on_its_side_it_keeps_the_generic_layouts():

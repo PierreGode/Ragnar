@@ -111,8 +111,10 @@ choice. **Config → Display** can set any rotation.
 ### The battery
 
 The CardputerZero has a 1750 mAh cell and a **BQ27220** fuel gauge. Ragnar reads it
-and shows the percentage in the header of the main screen (with a `+` while
-charging) and in the **System** tab's Battery card. Nothing needs installing or
+and draws a battery icon with the percentage in the top-right corner of every
+screen, as a phone does: the icon fills with the charge, is green above 30 %, amber
+above 15 % and red below, and shows a bolt while charging. The **System** tab's
+Battery card shows the same reading. Nothing needs installing or
 configuring, and the installer does not ask about a PiSugar on this board.
 
 | Source | When |
@@ -150,7 +152,22 @@ own, as M5Stack's key guide recommends, and with **fn** held.
 | Tab or Esc | next page (hold: restart Ragnar) | phone-access AP on / off | auto-switch cards on / off |
 
 The footer of each screen names the keys that apply there, for example
-`F/X/Z/C:Page  OK:Auto  Space:NetDiag  Bksp:Flip`.
+`F/X/Z/C:Page  OK:Auto  Space:NetDiag  Bksp:Flip`. The main screen has no footer;
+the keys work there all the same.
+
+**Key echo.** For two seconds after a key press, the bottom-left corner names the
+key and what it did (`F: up`, `Tab: key3`, `key 16: not mapped`). If a key shows
+nothing there, the press is not reaching Ragnar. `cardputer_key_echo: false` turns
+the echo off.
+
+**Key test.** From a shell (Ragnar can keep running):
+
+```bash
+sudo python3 cardputer_input.py
+```
+
+It lists the input devices it reads and prints each key's code and action as you
+press it. Ragnar's log has the same information (`CardputerZero keyboard: key 33 -> up`).
 
 These are the 1.44" LCD HAT's controls on a keyboard; see
 [Display Controls](DISPLAY_CONTROLS.md) for what each mode does.
@@ -281,9 +298,11 @@ a device. On a plain kernel without that driver, Ragnar talks to the TCA8418 ove
 
 Either map can be changed **without editing code**:
 
-Ragnar finds the keyboard by its fixed path, then by an input device whose name
-contains `tca8418`, `cardputer` or `m5stack`, then by any `platform-*.i2c-event`
-node.
+Ragnar reads every keyboard it finds: the built-in keypad (by its fixed path, by a
+device name containing `tca8418`, `cardputer` or `m5stack`, or by any
+`platform-*.i2c-event` node) and any other input device that reports letter keys, so
+a USB keyboard works too. It looks again every few seconds for keyboards that appear
+later. The default key codes are the ones in M5Stack's device tree for this board.
 
 1. Watch the log. Every **unmapped** key press logs its code:
    ```
@@ -309,7 +328,7 @@ no direction remap is applied.
 | **Text console draws over Ragnar** | Reboot after the takeover; the `cmdline.txt` change only applies at boot. |
 | **Screen is upside down** | Press **Backspace** on a Ragnar screen, or set the rotation under **Config → Display**. |
 | **No battery percentage** | Run `python3 sysfs_battery.py`. If it finds nothing, check `ls /sys/class/power_supply/`; an empty list means the kernel has no gauge driver, so try `python3 sysfs_battery.py --i2c`. |
-| **Arrow keys do nothing** | Look for `CardputerZero keyboard: reading /dev/input/...` in the log. If it is missing, see "Keys do nothing" below. |
+| **Arrow keys do nothing** | Press a key and watch the bottom-left corner. `F: up` means the key works. Nothing at all means the press is not reaching Ragnar: try the **LOCK** slider (above the keyboard, on the right), then run `sudo python3 cardputer_input.py`. |
 | **Screen stays black** | Check `cat /sys/class/graphics/fb*/name` and `cat /sys/class/backlight/*/brightness`. On the SPI path, confirm the expander answers at `0x4F` (`i2cdetect -y 1`). |
 | **Ragnar painted over the HDMI console** | Shouldn't happen, but if forced, unset `RAGNAR_CARDPUTER_FB` or point it at the correct LCD `/dev/fbN`. |
 | **Image mirrored / rotated wrong (SPI path only)** | Try the alternate MADCTL values noted in `st7789v2.py`. |
@@ -339,5 +358,5 @@ Running on users' units: install, display and web UI are confirmed by their repo
 The project has no unit of its own, so changes are covered by
 `tests/test_cardputer_zero.py` and `tests/test_sysfs_battery.py` against simulated
 hardware and by rendering the real screens at 320×170. Not yet confirmed on a unit:
-the battery reading, the colour screens, the SPI fallback's rotation and offsets, and
+the battery reading, why one user's arrow keys did not page, the SPI fallback's rotation and offsets, and
 the direct-I²C paths for the keyboard and the fuel gauge.
