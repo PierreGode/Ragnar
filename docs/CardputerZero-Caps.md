@@ -142,7 +142,10 @@ directly. The CardputerZero then *is* the node, and Ragnar connects to it at
 `127.0.0.1` like it would to a node on USB. Until meshtasticd is set up, the
 Mesh Nodes page has nothing to find.
 
-**Setup:** once. In **System** → **CardputerZero hardware**, the **Meshtastic**
+**Setup:** the installer and the updater do it by themselves when the LoRa + GNSS
+Cap is fitted (they add Meshtastic's package repository and install
+`meshtasticd`; this needs internet). If the Cap was fitted later, or that step
+failed, do it by hand, once. In **System** → **CardputerZero hardware**, the **Meshtastic**
 row says *Not set up*; press **Set up Meshtastic** under it. It needs internet
 and takes a few minutes. The row then reads *Running on this device*.
 
@@ -192,6 +195,10 @@ journalctl -u meshtasticd -n 40          # the daemon's own log
   `meshtastic_share_gps: false` in the config if you do not want that.
 - The **Mesh Nodes** button only appears once a Meshtastic source is available
   (the daemon running, or a USB node plugged in).
+- `cardputer_lora_meshtastic.sh remove` is remembered: updates do not set it up
+  again until you run `install` or press the button yourself.
+- The Mesh Nodes page itself needs the `meshtastic` Python package, and its MQTT
+  source needs `paho-mqtt`. Both are installed with Ragnar on every board.
 - The script only writes two files: the radio's wiring for meshtasticd, and a
   start-up step that powers the Cap before the daemon opens the radio.
 - LoRa and GNSS are on the same Cap and work at the same time.

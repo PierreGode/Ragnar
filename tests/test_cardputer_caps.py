@@ -643,3 +643,53 @@ def test_mesh_page_names_the_lora_cap_instead_of_usb(monkeypatch):
     monkeypatch.setattr(cc, "is_cardputer_zero", lambda cfg=None: False)
     monkeypatch.setattr(cc, "identify_cap", lambda *a, **k: pytest.fail("must not probe other boards"))
     assert mn._lora_cap_hint() is None
+
+
+# ── setup installs the Meshtastic service when the LoRa Cap is fitted ────────
+
+def hardware_setup(tmp_path, cap):
+    import subprocess
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    (tmp_path / "sys/class/leds/ext_5v_out").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "sys/class/leds/ext_5v_out/brightness").write_text("1\n")
+    (tmp_path / "boot/firmware").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "boot/firmware/config.txt").write_text("dtoverlay=imx219\n")
+    env = dict(os.environ, RAGNAR_CARDPUTER_ROOT=str(tmp_path), RAGNAR_CARDPUTER_CAP=cap,
+               RAGNAR_FAKE_MESHTASTICD="1")
+    out = subprocess.run(["bash", os.path.join(root, "scripts", "cardputer_hardware.sh"), "setup"],
+                         capture_output=True, text=True, env=env)
+    assert out.returncode == 0, out.stdout + out.stderr
+    return out
+
+
+def test_setup_makes_the_lora_cap_a_meshtastic_node(tmp_path):
+    conf = tmp_path / "etc/meshtasticd/config.d" / cc.MESHTASTICD_CONFIG_NAME
+    out = hardware_setup(tmp_path, "lora_gnss")
+    assert conf.read_text() == cc.MESHTASTICD_CONFIG, out.stdout + out.stderr
+    assert "ExecStartPre=+" in (tmp_path / "etc/systemd/system/meshtasticd.service.d/ragnar-cap.conf").read_text()
+    assert "setting it up as a Meshtastic node" in out.stdout
+    # Already set up: the next update does not do it again.
+    assert "setting it up" not in hardware_setup(tmp_path, "lora_gnss").stdout
+
+
+@pytest.mark.parametrize("cap", ["", "subghz_nfc"])
+def test_setup_installs_nothing_without_the_lora_cap(tmp_path, cap):
+    hardware_setup(tmp_path, cap)
+    assert not (tmp_path / "etc/meshtasticd").exists()
+
+
+def test_setup_respects_a_removed_meshtastic_setup(tmp_path):
+    hardware_setup(tmp_path, "lora_gnss")
+    lora_script(tmp_path, "remove")
+    out = hardware_setup(tmp_path, "lora_gnss")
+    assert "setting it up" not in out.stdout
+    assert not (tmp_path / "etc/meshtasticd/config.d" / cc.MESHTASTICD_CONFIG_NAME).exists()
+    # Setting it up by hand again lifts that.
+    lora_script(tmp_path, "install")
+    assert not (tmp_path / "etc/ragnar-meshtasticd-optout").exists()
+
+
+def test_cap_option_prints_the_fitted_cap(monkeypatch, capsys):
+    monkeypatch.setattr(cc, "detect", lambda config=None, **kw: {"cap": cc.CAP_LORA_GNSS})
+    monkeypatch.setattr(sys, "argv", ["cardputer_caps.py", "--cap"])
+    assert cc.main() == 0 and capsys.readouterr().out.strip() == "lora_gnss"

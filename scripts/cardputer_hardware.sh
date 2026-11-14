@@ -24,7 +24,21 @@ ROOT="${RAGNAR_CARDPUTER_ROOT:-}"        # alternate root, for testing
 EXT5V="$ROOT/sys/class/leds/ext_5v_out/brightness"
 NFC_OVERLAY="spi0-spidev2-gpio22-overlay"
 
-SELF_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SELF_# With the LoRa + GNSS Cap fitted, set the Cap up as a Meshtastic node: install
+# meshtasticd (from Meshtastic's package repository) and write its settings.
+# Skipped when it is already set up, when another Cap or none is fitted, and
+# when the owner removed it (cardputer_lora_meshtastic.sh remove).
+install_lora_daemon() {
+    [ -f "$ROOT/etc/meshtasticd/config.d/ragnar-cardputerzero-cap-lora.yaml" ] && return 0
+    [ -f "$ROOT/etc/ragnar-meshtasticd-optout" ] && return 0
+    local cap="${RAGNAR_CARDPUTER_CAP-$(python3 "$REPO/cardputer_caps.py" --cap 2>/dev/null)}"
+    [ "$cap" = "lora_gnss" ] || return 0
+    log "LoRa Cap fitted: setting it up as a Meshtastic node (meshtasticd)"
+    bash "$REPO/scripts/cardputer_lora_meshtastic.sh" install \
+        || log "Meshtastic was not set up. Try again from System -> CardputerZero hardware -> Set up Meshtastic"
+}
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 log() { echo "[cardputer-hw] $*"; }
 
@@ -177,6 +191,7 @@ case "${1:-setup}" in
         camera_tools
         camera_overlay || true
         serial_console_check || true
+        install_lora_daemon || true
         refresh_lora_config
         ;;
     camera)

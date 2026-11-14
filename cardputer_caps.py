@@ -824,6 +824,10 @@ def main():
     if "--meshtasticd-config" in sys.argv:
         sys.stdout.write(MESHTASTICD_CONFIG)
         return 0
+    if "--cap" in sys.argv:
+        # Which Cap is fitted, for the setup script: "lora_gnss", "subghz_nfc" or nothing.
+        print(detect(config, probe_serial=False, camera=False).get("cap") or "")
+        return 0
     info = detect(config)
     if "--json" in sys.argv:
         info["header"] = header_state()
