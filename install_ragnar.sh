@@ -146,10 +146,12 @@ splash_prepare() {
         local f
         for f in $SPLASH_FILES; do
             mkdir -p "$SPLASH_DIR/$(dirname "$f")"
+            # Give up at the first file that does not arrive: with no network
+            # yet, seven timeouts in a row would hold the installer up.
             if command -v curl >/dev/null 2>&1; then
-                curl -fsSL --max-time 20 -o "$SPLASH_DIR/$f" "$SPLASH_RAW/$f" 2>/dev/null
+                curl -fsSL --connect-timeout 5 --max-time 20 -o "$SPLASH_DIR/$f" "$SPLASH_RAW/$f" 2>/dev/null || break
             else
-                wget -q -T 20 -O "$SPLASH_DIR/$f" "$SPLASH_RAW/$f" 2>/dev/null
+                wget -q -T 10 -t 1 -O "$SPLASH_DIR/$f" "$SPLASH_RAW/$f" 2>/dev/null || break
             fi
         done
         [ -s "$SPLASH_DIR/ragnar_splash.py" ] && [ -s "$SPLASH_DIR/resources/waveshare_epd/st7789v2.py" ] || return 0
@@ -163,9 +165,15 @@ splash_prepare() {
         fi
         modprobe i2c-dev >/dev/null 2>&1 || true
         modprobe spidev >/dev/null 2>&1 || true
+        # A fresh Raspberry Pi OS Lite has no Pillow, and no package lists to
+        # install it from yet: fetch the lists once if the first try fails.
         if ! python3 -c "import PIL, spidev, gpiozero, smbus2" >/dev/null 2>&1; then
-            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                python3-pil python3-spidev python3-gpiozero python3-lgpio python3-smbus2 >/dev/null 2>&1 || true
+            echo "Preparing the CardputerZero screen (one moment)..."
+            local splash_pkgs="python3-pil python3-spidev python3-gpiozero python3-lgpio python3-smbus2"
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $splash_pkgs >/dev/null 2>&1 || {
+                apt-get update >/dev/null 2>&1
+                DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $splash_pkgs >/dev/null 2>&1 || true
+            }
         fi
     fi
     SPLASH_STATE="yes"

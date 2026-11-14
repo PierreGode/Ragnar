@@ -84,7 +84,8 @@ def test_board_is_taken_from_the_saved_display_setting(tmp_path, monkeypatch):
 @pytest.fixture
 def shown(monkeypatch):
     calls = []
-    monkeypatch.setattr(rs, "show", lambda image, wait=0.0, driver=None: calls.append((image, wait)) or True)
+    monkeypatch.setattr(rs, "show", lambda image, wait=0.0, driver=None, still_wanted=None:
+                        calls.append((image, wait)) or True)
     monkeypatch.setattr(rs, "saved_config", lambda root="": {"epd_type": "st7789v2", "screen_reversed": 0})
     monkeypatch.setattr(rs, "ragnar_is_running", lambda runner=None: False)
     monkeypatch.delenv("RAGNAR_SPLASH_BOARD", raising=False)
@@ -119,7 +120,8 @@ def test_running_check_reads_systemd():
     def run(state):
         return lambda cmd, **kw: types.SimpleNamespace(stdout=state + "\n")
     assert rs.ragnar_is_running(run("active")) is True
-    assert rs.ragnar_is_running(run("activating")) is False
+    assert rs.ragnar_is_running(run("activating")) is True     # it is about to take the panel
+    assert rs.ragnar_is_running(run("inactive")) is False
     assert rs.ragnar_is_running(lambda *a, **k: 1 / 0) is False
 
 
@@ -155,6 +157,22 @@ def test_show_retries_while_the_devices_appear(monkeypatch):
     assert rs.show(img, wait=0, driver=types.SimpleNamespace(EPD=Dead)) is False
 
 
+def test_a_wait_for_the_panel_ends_when_ragnar_starts(monkeypatch):
+    tries = []
+
+    class Never:
+        def init(self):
+            tries.append(1)
+            raise RuntimeError("no LCD yet")
+
+    monkeypatch.setattr(rs.time, "sleep", lambda s: None)
+    img = rs.render("x", "y", config={})
+    # Ragnar starts after the second try: no third try, nothing drawn over it.
+    assert rs.show(img, wait=60, driver=types.SimpleNamespace(EPD=Never),
+                   still_wanted=lambda: len(tries) < 2) is False
+    assert len(tries) == 2
+
+
 # ── Ragnar's own start: no white screen, no blank after the panel reset ──────
 
 def driver():
@@ -165,6 +183,7 @@ def driver():
 
 def test_panel_init_paints_the_start_picture(monkeypatch):
     drv = driver()
+    monkeypatch.setattr(drv, "_boot_screen_done", False)
     epd = drv.EPD()
     frames = []
     monkeypatch.setattr(epd, "_init_framebuffer", lambda: False)
@@ -175,6 +194,15 @@ def test_panel_init_paints_the_start_picture(monkeypatch):
     assert frames[0] != bytes(len(frames[0]))             # not a black frame
     epd.init()
     assert len(frames) == 1                               # once, not on every loop
+    # A second display object in the same process (re-detect, settings
+    # change) must not flash the picture over the live screen.
+    again = drv.EPD()
+    monkeypatch.setattr(again, "_init_framebuffer", lambda: False)
+    monkeypatch.setattr(again, "_init_spi", lambda: True)
+    monkeypatch.setattr(again, "_blit", frames.append)
+    again.init()
+    assert len(frames) == 1
+    monkeypatch.setattr(drv, "_boot_screen_done", False)
     quiet = drv.EPD()
     quiet.boot_screen = False
     monkeypatch.setattr(quiet, "_init_framebuffer", lambda: False)

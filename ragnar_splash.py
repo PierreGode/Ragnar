@@ -95,12 +95,13 @@ def is_cardputer_zero(config=None, root=""):
 
 
 def ragnar_is_running(runner=None):
-    """True when the Ragnar service owns the display."""
+    """True when the Ragnar service owns the display, or is about to: while
+    it is starting it draws its own start-up picture and then takes the panel."""
     run = runner or subprocess.run
     try:
         done = run(["systemctl", "is-active", "ragnar.service"], capture_output=True,
                    text=True, timeout=5)
-        return (done.stdout or "").strip() == "active"
+        return (done.stdout or "").strip() in ("active", "activating")
     except Exception:
         return False
 
@@ -218,11 +219,15 @@ def _driver():
     return module
 
 
-def show(image, wait=0.0, driver=None):
+def show(image, wait=0.0, driver=None, still_wanted=None):
     """Put `image` on the LCD. `wait` is how long to keep trying while the
-    kernel is still creating the devices (early boot). True when shown."""
+    kernel is still creating the devices (early boot). `still_wanted()` is
+    asked before every try, so a wait never ends in drawing over a Ragnar
+    that started meanwhile. True when shown."""
     deadline = time.monotonic() + max(0.0, wait)
     while True:
+        if still_wanted is not None and not still_wanted():
+            return False
         try:
             epd = (driver or _driver()).EPD()
             epd.boot_screen = False       # we are the boot screen
@@ -262,9 +267,12 @@ def main(argv=None):
         return 0
     if not is_cardputer_zero(config):
         return 0
-    if not args.force and kind != "start" and ragnar_is_running():
+    # --start is Ragnar's own start-up step, so it draws regardless.
+    wanted = None if (args.force or kind == "start") else (lambda: not ragnar_is_running())
+    if wanted is not None and not wanted():
         return 0
-    return 0 if show(image, args.wait) else 1
+    shown = show(image, args.wait, still_wanted=wanted)
+    return 0 if shown or (wanted is not None and not wanted()) else 1
 
 
 if __name__ == "__main__":
