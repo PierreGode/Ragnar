@@ -202,9 +202,9 @@ Ragnar gets the LCD and keyboard, then asks for a reboot. Undo it with
 On a plain kernel without that driver it falls back to native SPI (CS on GPIO8, DC on
 GPIO25), with reset and backlight through the M5IOE1 expander at `0x4F`.
 
-**Keyboard.** `F` `X` `Z` `C` (the keys with the arrow legends) page through the
-screens, Enter selects, and Space, Backspace and Tab stand in for the HAT's KEY1, KEY2
-and KEY3 — the same controls documented in [Display Controls](DISPLAY_CONTROLS.md).
+**Keyboard.** `F` `X` `Z` `C` (the keys with the arrow legends) are the joystick,
+OK (Enter) is its press and opens the diagnostic screens, Esc goes back, and Space,
+Backspace and Tab stand in for the HAT's KEY1, KEY2 and KEY3 — the same controls documented in [Display Controls](DISPLAY_CONTROLS.md).
 The footer of each screen names the keys. Any key can be remapped in
 `config/cardputer_keymap.json`; unmapped keys log their code.
 

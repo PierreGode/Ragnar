@@ -273,12 +273,12 @@ link's own gateway. The choice resets to Auto when the mode is switched on.
 ## M5Stack CardputerZero (keyboard)
 
 The CardputerZero's keyboard drives the same three modes as the 1.44" LCD HAT above:
-`F` `X` `Z` `C` are the joystick directions (up, down, left, right), **Enter** the
-joystick press, **Space** KEY1, **Backspace** KEY2 and **Tab** or **Esc** KEY3. Two
-things differ: Backspace flips the screen 180° instead of stepping through four
-rotations, and the footer hints name keyboard keys instead of `K1`-`K4`. The screens
-are drawn in colour across its 320×170 LCD. Full table:
-[M5Stack CardputerZero](M5StackCardputerZero.md).
+`F` `X` `Z` `C` are the joystick directions (up, down, left, right) and **OK** (Enter)
+the joystick press. Differences: on the Ragnar screens **OK** opens the diagnostic
+screens (page autoscroll moved to the `A` key), **Esc** goes back one step, Backspace
+flips the screen 180° instead of stepping through four rotations, and the footer hints
+name keyboard keys instead of `K1`-`K4`. Space, Backspace and Tab are still KEY1, KEY2
+and KEY3. Full table: [M5Stack CardputerZero](M5StackCardputerZero.md).
 
 ## Notes
 

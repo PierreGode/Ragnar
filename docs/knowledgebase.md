@@ -744,7 +744,7 @@ Source: M5StackCardputerZero.md
 <!-- proof: docs/M5StackCardputerZero.md | flips the screen between its two landscape positions and saves the -->
 
 ### Which keys change page on a CardputerZero?
-`F`, `X`, `Z` and `C`, the keys with the arrow legends. `F`/`Z` go back and `X`/`C` go forward, with or without **fn**.
+`F`, `X`, `Z` and `C`, the keys with the arrow legends. `F`/`Z` go back and `X`/`C` go forward, with or without **fn**. OK (Enter) opens the diagnostic screens and Esc returns.
 Source: M5StackCardputerZero.md
 <!-- proof: docs/M5StackCardputerZero.md | `F` `X` `Z` `C` are the keys with the arrow legends -->
 

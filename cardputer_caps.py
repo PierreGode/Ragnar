@@ -138,11 +138,48 @@ def is_cardputer_zero(config=None):
     return "cardputer" in model
 
 
+# Without M5Stack's kernel drivers there is no ext_5v_out control file. The
+# rail is then switched directly: it is pin IO13 (HAT_EN) of the board's
+# M5IOE1 I/O expander, the chip m5ioe1.py already drives for the screen.
+EXT5V_EXPANDER_IO = 13
+_use_expander = False        # set by detect()/power_on_cap() on a known CardputerZero
+
+
+def _expander():
+    """The M5IOE1 expander, or None when it cannot be used (not allowed for
+    this board, not answering, or owned by the kernel driver)."""
+    if not _use_expander:
+        return None
+    try:
+        import m5ioe1
+        exp = m5ioe1.M5IOE1()
+        return exp if exp.available else None
+    except Exception as e:
+        logger.debug(f"M5IOE1 expander unavailable: {e}")
+        return None
+
+
+def _expander_rail_state(exp):
+    direction_reg, out_reg, _, bit = exp._gpio_regs(EXT5V_EXPANDER_IO)
+    is_output = exp._bus.read_byte_data(exp.addr, direction_reg) >> bit & 1
+    level = exp._bus.read_byte_data(exp.addr, out_reg) >> bit & 1
+    return bool(is_output and level)
+
+
 def ext5v_state(path=None):
     """True/False for the Cap 5 V rail, None when the board has no such rail."""
     value = _read_text(path or EXT5V_PATH)
     if value is None:
-        return None
+        exp = _expander()
+        if exp is None:
+            return None
+        try:
+            return _expander_rail_state(exp)
+        except Exception as e:
+            logger.debug(f"Cap power: expander read failed: {e}")
+            return None
+        finally:
+            exp.close()
     try:
         return int(value) > 0
     except ValueError:
@@ -152,6 +189,18 @@ def ext5v_state(path=None):
 def set_ext5v(on, path=None):
     """Switch the Cap 5 V rail. Returns True when the rail reports the state."""
     path = path or EXT5V_PATH
+    if not os.path.exists(path):
+        exp = _expander()
+        if exp is None:
+            return False
+        try:
+            exp._set_gpio(EXT5V_EXPANDER_IO, bool(on))
+            return _expander_rail_state(exp) is bool(on)
+        except Exception as e:
+            logger.warning(f"Cap power: expander write failed: {e}")
+            return False
+        finally:
+            exp.close()
     try:
         with open(path, "w") as f:
             f.write("1\n" if on else "0\n")
@@ -159,6 +208,16 @@ def set_ext5v(on, path=None):
         logger.warning(f"Cap power: cannot write {path}: {e}")
         return False
     return ext5v_state(path) is bool(on)
+
+
+def saved_config():
+    """Ragnar's saved settings (for the CLI, which has no SharedData)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "shared_config.json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
 
 
 def set_gpio(gpio, high):
@@ -380,6 +439,15 @@ def parse_camera_list(out):
     return {"present": True, "model": match.group(1), "modes": match.group(2)}
 
 
+def allow_expander(config=None):
+    """Let the Cap rail be switched through the M5IOE1 expander. Only for a
+    unit whose settings say it is a CardputerZero: the expander's address is
+    also used by common temperature sensors on other boards."""
+    global _use_expander
+    _use_expander = bool(config and config.get("epd_type") == "st7789v2")
+    return _use_expander
+
+
 def power_on_cap():
     """Bring a plugged-in Cap up: 5 V rail on, G26 high. Idempotent, and the
     rail is never switched back off (see the module docstring). Returns the
@@ -456,6 +524,7 @@ def detect(config=None, power=True, probe_serial=True, camera=True):
     unpowered Cap cannot answer. probe_serial=False skips listening on the
     UART (pass it when the GPS reader already has the port open: two readers
     would each get half the bytes); camera=False skips the camera query."""
+    allow_expander(config)
     result = {"board": is_cardputer_zero(config), "ext5v": None, "cap": CAP_NONE,
               "cap_name": None, "radios": [], "pins": {}, "gnss": None,
               "nfc_spi": None, "camera": None, "checked": time.time()}
@@ -496,6 +565,8 @@ def header_state():
 
 
 def main():
+    config = saved_config()
+    allow_expander(config)
     if "--prepare-lora" in sys.argv:
         ok, message = prepare_lora()
         print(message)
@@ -503,7 +574,7 @@ def main():
     if "--meshtasticd-config" in sys.argv:
         sys.stdout.write(MESHTASTICD_CONFIG)
         return 0
-    info = detect()
+    info = detect(config)
     if "--json" in sys.argv:
         info["header"] = header_state()
         print(json.dumps(info, indent=2))

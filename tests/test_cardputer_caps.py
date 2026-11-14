@@ -308,3 +308,69 @@ def test_local_meshtastic_daemon_counts_as_a_node(monkeypatch):
     # No daemon and no USB node: still "plug a node in".
     monkeypatch.setattr(mn, "local_daemon", lambda: False)
     assert mn.detect()["available"] is False
+
+
+# ── Cap rail without M5Stack's kernel drivers ────────────────────────────────
+
+class FakeExpander:
+    """m5ioe1.M5IOE1 stand-in holding the two register bytes the rail uses."""
+    available = True
+    addr = 0x4F
+    regs = {}
+
+    def __init__(self):
+        outer = self
+
+        class Bus:
+            def read_byte_data(self, addr, reg):
+                return FakeExpander.regs.get(reg, 0)
+        self._bus = Bus()
+
+    @staticmethod
+    def _gpio_regs(io):
+        assert io == 13
+        return 0x10, 0x11, 0x12, 4
+
+    def _set_gpio(self, io, level):
+        FakeExpander.regs[0x10] = FakeExpander.regs.get(0x10, 0) | 0x10
+        FakeExpander.regs[0x11] = (FakeExpander.regs.get(0x11, 0) & ~0x10) | (0x10 if level else 0)
+
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def plain_kernel(monkeypatch, tmp_path):
+    monkeypatch.setattr(cc, "EXT5V_PATH", str(tmp_path / "missing"))
+    FakeExpander.regs = {0x10: 0x03, 0x11: 0x01}          # other pins in use
+    monkeypatch.setitem(sys.modules, "m5ioe1", types.SimpleNamespace(M5IOE1=FakeExpander))
+    monkeypatch.setattr(cc, "set_gpio", lambda gpio, high: True)
+    yield
+    cc.allow_expander(None)
+
+
+def test_rail_is_switched_through_the_expander_on_a_plain_kernel(plain_kernel):
+    cc.allow_expander({"epd_type": "st7789v2"})
+    assert cc.ext5v_state() is False
+    assert cc.power_on_cap() is True
+    assert FakeExpander.regs == {0x10: 0x13, 0x11: 0x11}   # only IO13's bits changed
+
+
+def test_expander_is_never_touched_on_another_board(plain_kernel):
+    """0x4F is a common temperature-sensor address: writing there elsewhere
+    could reconfigure someone's sensor."""
+    cc.allow_expander({"epd_type": "epd2in13_V4"})
+    before = dict(FakeExpander.regs)
+    assert cc.ext5v_state() is None and cc.power_on_cap() is None
+    assert cc.set_ext5v(True) is False
+    assert FakeExpander.regs == before
+
+
+def test_kernel_rail_control_wins_over_the_expander(monkeypatch, tmp_path, plain_kernel):
+    rail = tmp_path / "brightness"
+    rail.write_text("0\n")
+    monkeypatch.setattr(cc, "EXT5V_PATH", str(rail))
+    cc.allow_expander({"epd_type": "st7789v2"})
+    before = dict(FakeExpander.regs)
+    assert cc.power_on_cap() is True and rail.read_text().strip() == "1"
+    assert FakeExpander.regs == before

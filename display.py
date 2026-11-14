@@ -1017,13 +1017,13 @@ class Display:
 
     # Footer key hints as the CardputerZero's keyboard labels them. The keys
     # drive the LCD HAT's input layers (cardputer_input.py): F/X/Z/C are the
-    # arrows, Enter (OK) the joystick press, Space/Backspace/Tab KEY1-3.
+    # joystick directions, OK (Enter) its centre press, Esc goes back.
     _KEYBOARD_HINTS = {
-        "K1:Home K2:Flip K3:Next K4:Rst": "F/X/Z/C:Page  OK:Auto  Space:NetDiag  Bksp:Flip",
-        "K2 back · press=open":           "F/X:Move  OK:Open  Bksp:Back",
-        "K1 back to pages":               "OK:Back  Space:Exit",
-        "K1Exit K2WiFi K3AP":             "Z/C:Page Space:Exit Bksp:WiFi Tab:AP",
-        "K1Exit K2WiFi K3APoff":          "Z/C:Page Space:Exit Bksp:WiFi Tab:AP-off",
+        "K1:Home K2:Flip K3:Next K4:Rst": "F/X/Z/C:Page  OK:Diag  Esc:Home  A:Auto  Bksp:Flip",
+        "K2 back · press=open":           "F/X:Move  OK:Open  Esc:Back",
+        "K1 back to pages":               "OK:Close  Esc:Back",
+        "K1Exit K2WiFi K3AP":             "Z/C:Page Esc:Exit Bksp:WiFi Tab:AP",
+        "K1Exit K2WiFi K3APoff":          "Z/C:Page Esc:Exit Bksp:WiFi Tab:AP-off",
     }
 
     def _key_hint(self, hint):
@@ -1514,9 +1514,9 @@ class Display:
             # to name the keys beside the highlighted function.
             if funcs and func_idx >= 0:
                 hint = (f"{page + 1}/{NETDIAG_PAGE_COUNT} >{funcs[func_idx % len(funcs)][0]}"
-                        "   Z/C:Card F/X:Func OK:Run")
+                        "  Z/C:Card F/X:Func OK:Run Esc:Exit")
             else:
-                hint = f"{page + 1}/{NETDIAG_PAGE_COUNT} {state}   Z/C:Card Bksp:Menu Tab:Auto"
+                hint = f"{page + 1}/{NETDIAG_PAGE_COUNT} {state}  Z/C:Card Bksp:Menu Esc:Exit"
         elif render_w < 150:
             # Narrow LCD HAT: show the page counter + the highlighted function
             # (the joystick's Up/Down selects it, press runs it). Cards with no
@@ -2126,10 +2126,9 @@ class Display:
                 bb = sd.font_arialbold.getbbox(line)
                 y += (bb[3] - bb[1]) + 2
 
-    # Names for the key echo, by Linux key code (the CardputerZero's keys).
-    _KEY_LABELS = {1: "Esc", 14: "Bksp", 15: "Tab", 28: "OK", 57: "Space",
-                   33: "F", 45: "X", 44: "Z", 46: "C",
-                   103: "fn+F", 108: "fn+X", 105: "fn+Z", 106: "fn+C"}
+    # What the key echo calls each action.
+    _ACTION_LABELS = {"press": "OK", "back": "back", "auto": "autoscroll",
+                      "key1": "diagnostics", "key2": "flip / WiFi", "key3": "next / AP"}
     KEY_ECHO_SECONDS = 2.0
 
     def _draw_battery_icon(self, image, draw, right, top, with_text=True):
@@ -2188,8 +2187,15 @@ class Display:
         code, action, when = last
         if time.monotonic() - when > self.KEY_ECHO_SECONDS:
             return
-        label = self._KEY_LABELS.get(code, f"key {code}")
-        text = f"{label}: {action}" if action else f"{label}: not mapped"
+        namer = getattr(self.button_listener, 'key_label', None)
+        label = namer(code) if namer else f"key {code}"
+        # A named key with no action shows its code too, so a wrong name
+        # (a board revision wired differently) can be reported and remapped.
+        if action:
+            text = f"{label}: {self._ACTION_LABELS.get(action, action)}"
+        else:
+            text = f"{label} (code {code}): no action" if not label.startswith("key ") \
+                else f"{label}: no action"
         rgb = getattr(image, 'mode', '1') == 'RGB'
         font = self._font_at('Arial.ttf', 11)
         w = int(font.getlength(text)) + 8
