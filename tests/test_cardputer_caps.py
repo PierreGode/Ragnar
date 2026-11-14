@@ -2,6 +2,7 @@
 hardware. Pin numbers, addresses and the power sequence come from M5Stack's
 own Cap apps (github.com/CardputerZero) and the board's device tree."""
 import os
+import subprocess
 import sys
 import types
 
@@ -417,7 +418,9 @@ def test_lora_setup_writes_config_and_power_dropin_then_removes_them(tmp_path):
     conf = tmp_path / "etc/meshtasticd/config.d/ragnar-cardputerzero-cap-lora.yaml"
     dropin = tmp_path / "etc/systemd/system/meshtasticd.service.d/ragnar-cap.conf"
     assert conf.read_text() == cc.MESHTASTICD_CONFIG, out.stdout + out.stderr
-    assert "ExecStartPre=/usr/bin/python3" in dropin.read_text()
+    # "+": as root. The service's own user cannot read Ragnar's folder, and
+    # this step failing kept the daemon from ever starting on a real unit.
+    assert "ExecStartPre=+/usr/bin/python3" in dropin.read_text()
     assert "cardputer_caps.py --prepare-lora" in dropin.read_text()
     assert "cap config: present" in lora_script(tmp_path, "status").stdout
     lora_script(tmp_path, "remove")
@@ -566,3 +569,77 @@ def test_detect_reuses_the_identity(monkeypatch, tmp_path):
     for _ in range(3):
         assert cc.detect()["cap"] == "lora_gnss"
     assert calls["lora"] == 1
+
+
+def test_update_repairs_an_older_meshtasticd_dropin(tmp_path):
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    (tmp_path / "sys/class/leds/ext_5v_out").mkdir(parents=True)
+    (tmp_path / "sys/class/leds/ext_5v_out/brightness").write_text("1\n")
+    (tmp_path / "boot/firmware").mkdir(parents=True)
+    (tmp_path / "boot/firmware/config.txt").write_text("dtoverlay=imx219\n")
+    conf = tmp_path / "etc/meshtasticd/config.d"
+    conf.mkdir(parents=True)
+    (conf / cc.MESHTASTICD_CONFIG_NAME).write_text("Lora:\n  CS: 7\n")
+    dropin = tmp_path / "etc/systemd/system/meshtasticd.service.d"
+    dropin.mkdir(parents=True)
+    (dropin / "ragnar-cap.conf").write_text(
+        "[Service]\nExecStartPre=/usr/bin/python3 /x/cardputer_caps.py --prepare-lora\n")
+    env = dict(os.environ, RAGNAR_CARDPUTER_ROOT=str(tmp_path))
+    for _ in range(2):      # the second run must leave it alone
+        out = subprocess.run(["bash", os.path.join(root, "scripts", "cardputer_hardware.sh"), "setup"],
+                             capture_output=True, text=True, env=env)
+        assert out.returncode == 0, out.stdout + out.stderr
+    assert (conf / cc.MESHTASTICD_CONFIG_NAME).read_text() == cc.MESHTASTICD_CONFIG
+    assert (dropin / "ragnar-cap.conf").read_text().count("ExecStartPre=+/usr/bin/python3") == 1
+
+
+# ── Grove port power ─────────────────────────────────────────────────────────
+
+def test_grove_power_through_the_kernel_switch(tmp_path, monkeypatch):
+    path = tmp_path / "brightness"
+    path.write_text("0\n")
+    monkeypatch.setattr(cc, "GROVE5V_PATH", str(path))
+    assert cc.grove5v_state() is False
+    assert cc.power_on_grove() is True and path.read_text().strip() == "1"
+
+
+def test_grove_power_through_the_expander(tmp_path, monkeypatch):
+    class Bus:
+        def __init__(self): self.regs = {}
+        def read_byte_data(self, addr, reg): return self.regs.get(reg, 0)
+        def write_byte_data(self, addr, reg, value): self.regs[reg] = value
+
+    import m5ioe1
+    exp = m5ioe1.M5IOE1.__new__(m5ioe1.M5IOE1)
+    exp._bus, exp.addr, exp.available, exp.close = Bus(), 0x4F, True, lambda: None
+    monkeypatch.setattr(cc, "GROVE5V_PATH", str(tmp_path / "missing"))
+    monkeypatch.setattr(cc, "_expander", lambda: exp)
+    assert cc.grove5v_state() is False
+    assert cc.power_on_grove() is True
+    # IO4 = bit 3 of the low registers; the Cap rail (IO13, high registers) is untouched.
+    assert exp._bus.regs[m5ioe1.REG_GPIO_O_L] == 0x08 and exp._bus.regs[m5ioe1.REG_GPIO_M_L] == 0x08
+    assert m5ioe1.REG_GPIO_O_H not in exp._bus.regs
+
+
+def test_no_grove_switch_on_other_boards(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "GROVE5V_PATH", str(tmp_path / "missing"))
+    monkeypatch.setattr(cc, "_expander", lambda: None)
+    assert cc.power_on_grove() is None
+
+
+def test_mesh_page_names_the_lora_cap_instead_of_usb(monkeypatch):
+    import meshtastic_node as mn
+    monkeypatch.setattr(cc, "saved_config", lambda: {"epd_type": "st7789v2"})
+    monkeypatch.setattr(cc, "identify_cap", lambda *a, **k: (cc.CAP_LORA_GNSS, None))
+    monkeypatch.setattr(cc, "lora_daemon_state",
+                        lambda *a, **k: {"installed": True, "configured": True, "active": False})
+    assert "meshtasticd" in mn._lora_cap_hint() and "USB" not in mn._lora_cap_hint()
+    monkeypatch.setattr(cc, "lora_daemon_state",
+                        lambda *a, **k: {"installed": False, "configured": False, "active": False})
+    assert "Set up Meshtastic" in mn._lora_cap_hint()
+    monkeypatch.setattr(cc, "identify_cap", lambda *a, **k: (cc.CAP_NONE, None))
+    assert mn._lora_cap_hint() is None
+    monkeypatch.setattr(cc, "saved_config", lambda: {})
+    monkeypatch.setattr(cc, "is_cardputer_zero", lambda cfg=None: False)
+    monkeypatch.setattr(cc, "identify_cap", lambda *a, **k: pytest.fail("must not probe other boards"))
+    assert mn._lora_cap_hint() is None

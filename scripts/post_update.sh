@@ -159,6 +159,12 @@ if [ -f "$REPO/init_data_files.sh" ]; then
 fi
 
 # --- system tools and radios ------------------------------------------------
+# CardputerZero: camera overlay/tools and the LoRa Cap's daemon settings.
+# A no-op on every other board.
+if [ -f "$REPO/scripts/cardputer_hardware.sh" ]; then
+    bash "$REPO/scripts/cardputer_hardware.sh" setup || true
+fi
+
 if [ -f "$REPO/scripts/provision_network_tools.sh" ]; then
     step "network tools"
     bash "$REPO/scripts/provision_network_tools.sh" || fail "network tool provisioning reported errors"

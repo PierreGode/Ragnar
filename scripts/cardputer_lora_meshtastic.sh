@@ -93,10 +93,13 @@ install() {
     cat > "$DROPIN" <<EOF
 # Written by Ragnar. The Cap has no power until its 5 V rail is switched on,
 # and its antenna path is behind an I2C switch: do both before the radio opens.
+# The "+" runs this step as root: the service's own user (meshtasticd) cannot
+# read Ragnar's folder, and the step failing keeps the daemon from starting.
 [Service]
-ExecStartPre=/usr/bin/python3 $REPO/cardputer_caps.py --prepare-lora
+ExecStartPre=+/usr/bin/python3 $REPO/cardputer_caps.py --prepare-lora
 EOF
     sysctl_ daemon-reload
+    sysctl_ reset-failed meshtasticd.service
     sysctl_ enable meshtasticd.service
     sysctl_ restart meshtasticd.service
     log "meshtasticd configured for the LoRa Cap ($CONF)"

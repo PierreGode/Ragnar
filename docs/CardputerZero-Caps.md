@@ -371,6 +371,7 @@ All in `config/shared_config.json`; none of them is needed for normal use.
 | Setting | Default | Effect |
 |---|---|---|
 | `cardputer_cap_power` | `true` | Switch the header's 5 V on at start. `false`: Ragnar leaves it alone, and a Cap stays unpowered |
+| `cardputer_grove_power` | `true` | Switch the Grove port's 5 V pin on at start, so a Grove unit works when plugged in. `false`: left off |
 | `cardputer_free_gnss_uart` | `true` | With the LoRa + GNSS Cap fitted, take the serial login prompt off the UART so GPS can read it. `false`: Ragnar only reports it |
 | `wardriving_gps_port` | `auto` | Which serial port the GPS reads. `auto` finds the Cap's GNSS |
 | `wardriving_gps_baudrate` | `9600` | Fallback only; the detected rate wins |
@@ -387,6 +388,7 @@ All in `config/shared_config.json`; none of them is needed for normal use.
 | GNSS says "Silent" | Cap not powered or not seated. Check *Cap power (5 V)* says On. |
 | GNSS never gets a fix | Needs a view of the sky; wait several minutes outdoors the first time. |
 | Meshtastic finds no LoRa | meshtasticd is not set up yet: press **Set up Meshtastic** in the hardware panel. If you set it up before this fix, press **Set up again** (the earlier radio settings named a chip-select pin the daemon could not use). |
+| Mesh Nodes asks for a USB node although the LoRa Cap is fitted | The Cap's service is not running. Update Ragnar (older installs could not start it), or press **Set up again** in the hardware panel. Check: `sudo systemctl status meshtasticd`. |
 | No **Mesh Nodes** button | The daemon is not running: `sudo scripts/cardputer_lora_meshtastic.sh status`. |
 | Mesh Nodes connects but hears nothing | Region not set (step 3 above), or no Meshtastic traffic in range. |
 | CC1101 tag says not detected | The LoRa Cap is fitted instead, or the CC1101 Cap was fitted with the power on. |

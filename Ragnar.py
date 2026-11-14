@@ -86,6 +86,19 @@ class Ragnar:
         except Exception as e:
             logger.debug(f"CardputerZero Cap power not set: {e}")
 
+        # CardputerZero: the Grove port's 5 V pin is switched too, and off at
+        # power-on. Turn it on so a Grove unit works when plugged in.
+        try:
+            import cardputer_caps
+            if (shared_data.config.get('cardputer_grove_power', True)
+                    and cardputer_caps.is_cardputer_zero(shared_data.config)):
+                cardputer_caps.allow_expander(shared_data.config)
+                grove = cardputer_caps.power_on_grove()
+                logger.info(f"CardputerZero Grove 5 V: "
+                            f"{'on' if grove else 'not available' if grove is None else 'off'}")
+        except Exception as e:
+            logger.debug(f"CardputerZero Grove power not set: {e}")
+
         # Built-in fuel gauge (kernel power-supply class; the CardputerZero's
         # BQ27220), auto-detected
         self.builtin_battery = None

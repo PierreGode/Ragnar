@@ -207,6 +207,28 @@ def local_daemon():
         return False
 
 
+def _lora_cap_hint():
+    """On a CardputerZero with the LoRa Cap fitted, what stops it being the
+    node (the Cap needs meshtasticd running here; it is not a USB device)."""
+    try:
+        import cardputer_caps as caps
+        config = caps.saved_config()
+        if not caps.is_cardputer_zero(config):
+            return None
+        caps.allow_expander(config)
+        if caps.identify_cap()[0] != caps.CAP_LORA_GNSS:
+            return None
+        state = caps.lora_daemon_state()
+    except Exception:
+        return None
+    if not state["configured"]:
+        return ("the LoRa Cap is fitted but not set up as a Meshtastic node yet — "
+                "System → CardputerZero hardware → Set up Meshtastic")
+    return ("the LoRa Cap's Meshtastic service (meshtasticd) is not running — "
+            "System → CardputerZero hardware → Set up again, or: "
+            "sudo systemctl status meshtasticd")
+
+
 def detect():
     """Report Meshtastic capability.
 
@@ -238,7 +260,7 @@ def detect():
     if not device_present:
         return {"available": False, "tools_installed": True,
                 "device_present": False, "usb_id": None, "ports": [],
-                "error": "no Meshtastic device on USB — plug a node in "
+                "error": _lora_cap_hint() or "no Meshtastic device on USB — plug a node in "
                          "(Heltec / RAK / T-Beam …) via USB", **mqtt_extra}
     return {"available": True, "tools_installed": True, "device_present": True,
             "usb_id": usb_id, "usb_desc": usb_desc, "ports": ports, **mqtt_extra}

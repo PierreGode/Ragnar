@@ -657,6 +657,7 @@ class SharedData:
             "ups_hat_monitor": True,  # auto-detect a Waveshare INA219 UPS HAT (C at 0x43, B at 0x42) and show its battery % (issue #1049)
             "builtin_battery_monitor": True,  # show a built-in fuel gauge (kernel power-supply battery; the CardputerZero's BQ27220)
             "cardputer_cap_power": True,  # CardputerZero: switch the expansion header's 5 V rail on at start so a Cap works
+            "cardputer_grove_power": True,  # CardputerZero: switch the Grove port's 5 V pin on at start
             "cardputer_free_gnss_uart": True,  # CardputerZero: with the LoRa + GNSS Cap fitted, take the serial login prompt off the UART so GPS can read it
             "enable_attacks": False,
             "release_gate_enabled": False,

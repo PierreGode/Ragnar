@@ -29816,6 +29816,7 @@ function updateCardputerHardwareView(d) {
     } else {
         rows.push(_czRow('Cap power (5 V)', d.ext5v === true ? 'On' : d.ext5v === false ? 'Off' : 'Not available',
             d.ext5v === true ? 'pw-ok' : 'pw-muted'));
+        if (d.grove5v != null) rows.push(_czRow('Grove port (5 V)', d.grove5v ? 'On' : 'Off', d.grove5v ? 'pw-ok' : 'pw-muted'));
         rows.push(_czRow('Cap', d.cap_name || 'None detected', d.cap_name ? 'pw-ok' : 'pw-muted'));
         (d.radios || []).forEach(r => rows.push(_czRow('Radio', r)));
         if (d.gnss) {
