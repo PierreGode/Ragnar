@@ -734,9 +734,9 @@ Source: M5StackCardputerZero.md
 <!-- proof: docs/M5StackCardputerZero.md | **full Ragnar runs on it unchanged** -->
 
 ### Does the CardputerZero show its battery percentage?
-Yes. Ragnar reads the built-in BQ27220 fuel gauge and shows the percentage in the screen header and the **System** tab Battery card. Check it with `python3 sysfs_battery.py`.
+Yes. Ragnar reads the built-in BQ27220 fuel gauge and draws a battery icon with the percentage in the top-right corner of every screen, plus the **System** tab Battery card. Check it with `python3 sysfs_battery.py`.
 Source: M5StackCardputerZero.md
-<!-- proof: docs/M5StackCardputerZero.md | shows the percentage in the header of the main screen -->
+<!-- proof: docs/M5StackCardputerZero.md | draws a battery icon with the percentage in the top-right corner of every -->
 
 ### My CardputerZero screen is upside down. How do I turn it?
 Press **Backspace** on a Ragnar screen. It flips the screen 180° and saves the choice. New installs start turned the right way.
@@ -752,6 +752,11 @@ Source: M5StackCardputerZero.md
 Set `mesh_viking_gender` to `female` (Mesh tab or `config/shared_config.json`). The shieldmaiden then shows in full colour.
 Source: M5StackCardputerZero.md
 <!-- proof: docs/M5StackCardputerZero.md | Set `mesh_viking_gender` to `female` for the shieldmaiden -->
+
+### The arrow keys do nothing on my CardputerZero. How do I check them?
+Press a key and watch the bottom-left corner of the screen: it names the key and its action for two seconds. If nothing shows, run `sudo python3 cardputer_input.py`, which prints every key it receives.
+Source: M5StackCardputerZero.md
+<!-- proof: docs/M5StackCardputerZero.md | the bottom-left corner names the -->
 
 ### Does the installer ask about PiSugar on a CardputerZero?
 No. The board has its own battery, so option 7 skips the PiSugar question.

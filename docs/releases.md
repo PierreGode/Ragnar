@@ -4,6 +4,16 @@
 
 ### 2026-11-14
 
+#### feat(cardputer): phone-style battery icon, key echo, reads every keyboard
+*branch `fix/cardputer-keys-battery-icon`*
+
+- **Battery icon.** A battery icon with the percentage now sits in the top-right corner of every CardputerZero screen: it fills with the charge, turns amber below 30 % and red below 15 %, and shows a bolt while charging. It replaces the plain `76%+` text in the main screen's header.
+- **Arrow keys still not paging for a user.** Ragnar's key codes were checked against M5Stack's device tree for the board and match (`F` 33, `X` 45, `Z` 44, `C` 46, and 103/108/105/106 with fn), so the cause is not the mapping and is not yet known. This release makes it visible and removes one possible cause:
+  - **Key echo.** For two seconds after a press, the bottom-left corner names the key and its action (`F: up`, `key 16: not mapped`). Nothing shown means the press never reached Ragnar. `cardputer_key_echo: false` turns it off.
+  - **Every keyboard is read.** The reader used to open one device node; it now reads the built-in keypad and any other device that reports letter keys (a USB keyboard works too), and looks for late arrivals every 5 s.
+  - **Key test.** `sudo python3 cardputer_input.py` prints each key's code and action. Every press is also logged, and errors in the key handler are logged as warnings instead of being hidden at debug level.
+- Not run on a CardputerZero; rendered at 320×170 and tested against simulated hardware.
+
 #### feat(cardputer): colour screen with the Viking and shieldmaiden, battery percentage, arrow-key hints, right way up
 *branch `feat/cardputer-zero-field-fixes`*
 
