@@ -105,7 +105,7 @@ EVDEV_KEY_NAMES = {
     16: "Q", 17: "W", 18: "E", 19: "R", 20: "T", 21: "Y", 22: "U", 23: "I", 24: "O", 25: "P",
     30: "A", 31: "S", 32: "D", 33: "F", 34: "G", 35: "H", 36: "J", 37: "K", 38: "L",
     44: "Z", 45: "X", 46: "C", 47: "V", 48: "B", 49: "N", 50: "M",
-    103: "fn+F", 108: "fn+X", 105: "fn+Z", 106: "fn+C",
+    103: "fn+F", 108: "fn+X", 105: "fn+Z", 106: "fn+C", 111: "Del",
 }
 
 # What each key does, by the name printed on it. Both sources use this.
@@ -118,6 +118,7 @@ EVDEV_KEY_NAMES = {
 #   Backspace      KEY2      Tab  KEY3      A  page autoscroll on / off
 #   P              the camera screen on / off. On it: OK takes a photo or
 #                  starts / stops a video, Z / C switch between photo and video
+#   fn + Backspace the key's "del" legend: Grove port 5 V on / off (saved)
 KEY_ACTIONS = {"F": "up", "X": "down", "Z": "left", "C": "right", "OK": "press",
                "Esc": "back", "Space": "key1", "Bksp": "key2", "Tab": "key3",
                "A": "auto", "P": "camera"}
@@ -127,6 +128,14 @@ DEFAULT_KEYMAP = {str(matrix_code(*KEY_MATRIX[name])): action
                   for name, action in KEY_ACTIONS.items()}
 # fn and sym report as ordinary keys on this path: held, never an action.
 I2C_MODIFIER_CODES = {matrix_code(*KEY_MATRIX[n]) for n in ("fn", "sym", "shift", "ctrl", "alt")}
+# The kernel driver applies the fn layer itself (fn + Backspace arrives as
+# KEY_DELETE). On this path Ragnar does: while fn is held a key is looked up
+# under FN_LAYER + its code first, and keeps its plain action when that has no
+# entry (so fn + F is still "up").
+FN_LAYER = 1000
+I2C_FN_CODE = matrix_code(*KEY_MATRIX["fn"])
+DEFAULT_KEYMAP[str(FN_LAYER + matrix_code(*KEY_MATRIX["Bksp"]))] = "grove"
+I2C_KEY_NAMES[FN_LAYER + matrix_code(*KEY_MATRIX["Bksp"])] = "Del"
 
 # --- Kernel input device -------------------------------------------------------
 EVDEV_BY_PATH = "/dev/input/by-path/platform-3f804000.i2c-event"
@@ -163,13 +172,14 @@ DEFAULT_EVDEV_KEYMAP = {
     "15": "key3",    # Tab       → next page (long: restart) / toggle AP
     "30": "auto",    # A         → page autoscroll on / off
     "25": "camera",  # P         → camera screen on / off
+    "111": "grove",  # fn + Backspace (Del) → Grove port 5 V on / off
 }
 
 # The board's fn and sym keys report as KEY_DVD (0x185) and KEY_CD (0x17f).
 _MODIFIER_CODES = {0x185, 0x17f, 464, 42, 54, 29, 97, 56, 100, 125, 126, 127}
 
 _VALID_ACTIONS = {"up", "down", "left", "right", "press", "key1", "key2", "key3",
-                  "back", "auto", "camera"}
+                  "back", "auto", "camera", "grove"}
 CAMERA_NOTE_SECONDS = 2.5
 _KEYMAP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "config", "cardputer_keymap.json")
@@ -271,6 +281,8 @@ class CardputerInputListener(LCDHATInputListener):
         self._press_times = {}     # logical name -> monotonic time of press
         self._fired_hold = set()   # names whose long-press already fired
         self._stop = False
+        self._fn_held = False      # direct I2C path: the fn key is down
+        self._down = {}            # key code as pressed -> (code looked up, action)
         # Camera screen (display.py draws it while camera_mode is set).
         self.camera_mode = False
         self.camera_video = False  # OK records a video instead of taking a photo
@@ -513,7 +525,21 @@ class CardputerInputListener(LCDHATInputListener):
         return code in (I2C_MODIFIER_CODES if self._source == "i2c" else _MODIFIER_CODES)
 
     def _handle_event(self, code, pressed):
-        name = self._keymap.get(str(code))
+        if self._source == "i2c" and code == I2C_FN_CODE:
+            self._fn_held = pressed
+        if pressed:
+            name = None
+            if self._source == "i2c" and self._fn_held and not self._is_modifier(code):
+                name = self._keymap.get(str(FN_LAYER + code))
+                if name is not None:
+                    code = FN_LAYER + code
+            if name is None:
+                name = self._keymap.get(str(code))
+            self._down[code % FN_LAYER if code >= FN_LAYER else code] = (code, name)
+        else:
+            # A release belongs to whatever the press was, even if fn was let
+            # go in between.
+            code, name = self._down.pop(code, (code, self._keymap.get(str(code))))
         if pressed and not self._is_modifier(code):
             # For the on-screen echo (display.py) and for diagnosis: every
             # press is recorded and logged, mapped or not.
@@ -550,7 +576,9 @@ class CardputerInputListener(LCDHATInputListener):
     # --- Keyboard-specific keys -------------------------------------------
 
     def _on_input_press(self, name):
-        if name == "camera":
+        if name == "grove":
+            self._toggle_grove()
+        elif name == "camera":
             self._set_camera(not self.camera_mode)
         elif self.camera_mode:
             self._camera_input(name)
@@ -563,6 +591,42 @@ class CardputerInputListener(LCDHATInputListener):
                 self._toggle_autoscroll()
         else:
             super()._on_input_press(name)
+
+    # --- Grove port power ---------------------------------------------------
+
+    def _on_input_release(self, name):
+        if name != "grove":
+            super()._on_input_release(name)
+
+    def _on_input_held(self, name):
+        if name != "grove":
+            super()._on_input_held(name)
+
+    def _toggle_grove(self):
+        """fn + Backspace (Del): switch the Grove port's 5 V pin, on any
+        screen. The choice is saved, so it is the state after a restart too.
+        The key echo says what happened."""
+        result = "Grove: no switch"
+        try:
+            import cardputer_caps
+            cardputer_caps.allow_expander(self.shared_data.config)
+            state = cardputer_caps.grove5v_state()
+            if state is not None:
+                cardputer_caps.set_grove5v(not state)
+                now = cardputer_caps.grove5v_state()
+                if now is None or now == state:
+                    result = "Grove 5V: no change"
+                else:
+                    result = "Grove 5V on" if now else "Grove 5V off"
+                    self.shared_data.config["cardputer_grove_power"] = bool(now)
+                    self.shared_data.save_config()
+        except Exception as e:
+            logger.warning("CardputerZero: Grove power not switched (%s)", e)
+            result = "Grove 5V: failed"
+        logger.info("CardputerZero fn+Backspace: %s", result)
+        if self.last_key:
+            self.last_key = (self.last_key[0], result, time.monotonic())
+            self.key_seq += 1
 
     # --- Camera screen ------------------------------------------------------
 

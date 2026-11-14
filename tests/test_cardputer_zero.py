@@ -1135,7 +1135,8 @@ def test_matrix_has_every_key_once_and_fits_the_chip():
     assert all(0 <= r <= 4 and 0 <= c <= 9 for r, c in positions)
     # Row 4 only has the edge keys the schematic shows: columns 0-4 and 9.
     assert sorted(c for r, c in positions if r == 4) == [0, 1, 2, 3, 4, 9]
-    assert len(ci.I2C_KEY_NAMES) == 46
+    # 46 keys, plus Del: Backspace on the fn layer.
+    assert len(ci.I2C_KEY_NAMES) == 47 and ci.I2C_KEY_NAMES[ci.FN_LAYER + 10] == "Del"
 
 
 @pytest.mark.parametrize("key,row,col,code", [
@@ -1152,7 +1153,9 @@ def test_both_sources_give_each_key_the_same_job():
     by_name_i2c = {ci.I2C_KEY_NAMES[int(c)]: a for c, a in ci.DEFAULT_KEYMAP.items()}
     by_name_evdev = {ci.EVDEV_KEY_NAMES[int(c)]: a for c, a in ci.DEFAULT_EVDEV_KEYMAP.items()
                      if not ci.EVDEV_KEY_NAMES[int(c)].startswith("fn+")}
-    assert by_name_i2c == by_name_evdev == ci.KEY_ACTIONS
+    # Del is fn + Backspace: its own key code from the kernel driver, the fn
+    # layer on the direct path.
+    assert by_name_i2c == by_name_evdev == dict(ci.KEY_ACTIONS, Del="grove")
     assert by_name_i2c["F"] == "up" and by_name_i2c["X"] == "down"
     assert by_name_i2c["Z"] == "left" and by_name_i2c["C"] == "right"
     assert by_name_i2c["OK"] == "press"

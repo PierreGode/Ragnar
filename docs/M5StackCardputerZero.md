@@ -166,6 +166,7 @@ press, and **Esc** goes back.
 | **Esc** | back to the main screen | close a result, then leave diagnostics | back to the Ragnar screens |
 | `A` | page autoscroll on / off | | |
 | `P` | camera screen on / off (works from any screen) | | |
+| **fn** + Backspace (**del**) | Grove port 5 V on / off (works from any screen, saved) | | |
 | Space | diagnostics on | diagnostics off | back to the Ragnar screens |
 | Backspace | flip the screen 180° | card list | reconnect to a known Wi-Fi |
 | Tab | next page (hold: restart Ragnar) | auto-switch cards on / off | phone-access AP on / off |
