@@ -323,7 +323,16 @@ gets it.
 
 ## Installing
 
-Run the installer and pick **option 7**:
+**The quick way: flash the image.** Download
+`RagnarOS-CardputerZero-arm64.img.xz` from [ragnar.life](https://ragnar.life/),
+write it to the card with Raspberry Pi Imager (**Use custom**; set a username,
+password and Wi-Fi in its settings) and power on. The screen, keyboard, camera
+and boot screen work from the first start, and a fitted LoRa Cap becomes a
+Meshtastic node on first boot. See
+[Ragnar OS → The CardputerZero image](ragnar-os.md#the-cardputerzero-image).
+
+**Or install it yourself** on Raspberry Pi OS Lite (64-bit) or M5Stack's own
+image. Run the installer and pick **option 7**:
 
 ```
    * 1) Raspberry Pi with e-Paper display

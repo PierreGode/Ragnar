@@ -2,18 +2,20 @@ name: Release OS images
 
 # Manually-triggered release pipeline for the Ragnar OS images. You — and any
 # collaborator with write access to this repo (e.g. solarflere) — can start a
-# fresh release of BOTH images straight from the Actions tab ("Run workflow").
+# fresh release of the images straight from the Actions tab ("Run workflow"):
+# "both" is the standard + Ulfberht pair, "all" adds the CardputerZero image,
+# or pick one edition.
 #
 # What it does, end to end:
 #   1. Works out the next version for each edition — bumps the highest existing
-#      os-v* / os-ulfberht-v* release (minor by default, matching the history),
+#      os-v* / os-ulfberht-v* / os-cardputer-v* release (minor by default, matching the history),
 #      or uses an explicit version you type in.
 #   2. Creates the matching git tag in the PRIVATE build repo PierreGode/RagnarOS.
 #      That tag push is exactly what the RagnarOS build workflows listen for: they
 #      build the image on the self-hosted Pi runner, upload it to ragnar.life, and
 #      publish the GitHub Release back here on this public repo.
 #   3. Follows each build run to completion, then checks the Release exists here
-#      and the ragnar.life manifest (std.json / ulf.json) shows the new version.
+#      and the ragnar.life manifest (std.json / ulf.json / cpz.json) shows the new version.
 #   4. Marks the STANDARD release as "Latest" (Ulfberht publishes last, so without
 #      this step it would steal the Latest badge).
 #
@@ -39,7 +41,7 @@ on:
       which:
         description: 'Which image(s) to release'
         type: choice
-        options: [both, standard, ulfberht]
+        options: [both, all, standard, ulfberht, cardputer]
         default: both
       bump:
         description: 'Version bump (ignored for an edition given an explicit version below)'
@@ -52,6 +54,10 @@ on:
         default: ''
       ulf_version:
         description: 'Explicit ULFBERHT version, e.g. 1.5.0 (blank = auto-bump)'
+        type: string
+        default: ''
+      cpz_version:
+        description: 'Explicit CARDPUTERZERO version, e.g. 1.1.0 (blank = auto-bump, 1.0.0 the first time)'
         type: string
         default: ''
       dry_run:
@@ -71,12 +77,14 @@ env:
   PRIV: PierreGode/RagnarOS
   STD_WF: build-os-image.yml
   ULF_WF: build-ulfberht-image.yml
+  CPZ_WF: build-cardputer-image.yml
 
 jobs:
   release:
     runs-on: ubuntu-latest
-    # Two ~75–90 min builds run back-to-back on the single Pi runner, plus queue.
-    timeout-minutes: 350
+    # Up to three ~75–90 min builds run back-to-back on the single Pi runner,
+    # plus queue. (GitHub's own ceiling for a hosted job is 360.)
+    timeout-minutes: 355
     steps:
       - name: Compute versions
         id: ver
@@ -90,9 +98,10 @@ jobs:
           latest() { # $1 = prefix, e.g. 'os-v' or 'os-ulfberht-v'
             gh api "repos/$REPO/releases" --paginate --jq '.[].tag_name' 2>/dev/null \
               | grep -E "^$1[0-9]+\.[0-9]+\.[0-9]+$" \
-              | sed "s/^$1//" | sort -V | tail -1
+              | sed "s/^$1//" | sort -V | tail -1 || true   # none yet is not an error
           }
-          bump() { # $1 = X.Y.Z  $2 = level
+          bump() { # $1 = X.Y.Z  $2 = level   (no release yet -> 1.0.0)
+            [ -n "$1" ] || { echo "1.0.0"; return 0; }
             local X Y Z; IFS=. read -r X Y Z <<<"$1"
             case "$2" in
               major) X=$((X+1)); Y=0; Z=0;;
@@ -101,26 +110,33 @@ jobs:
             esac
             echo "$X.$Y.$Z"
           }
-          norm() { echo "$1" | sed -E 's/^os-ulfberht-v//; s/^os-v//; s/^v//'; }
+          norm() { echo "$1" | sed -E 's/^os-ulfberht-v//; s/^os-cardputer-v//; s/^os-v//; s/^v//'; }
 
           WHICH='${{ inputs.which }}'; LEVEL='${{ inputs.bump }}'
-          STD_TAG=''; ULF_TAG=''
+          STD_TAG=''; ULF_TAG=''; CPZ_TAG=''
 
-          if [ "$WHICH" = both ] || [ "$WHICH" = standard ]; then
+          if [ "$WHICH" = both ] || [ "$WHICH" = all ] || [ "$WHICH" = standard ]; then
             IN='${{ inputs.std_version }}'
             if [ -n "$IN" ]; then V="$(norm "$IN")"; else V="$(bump "$(latest 'os-v')" "$LEVEL")"; fi
             echo "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::computed standard version '$V' is not X.Y.Z"; exit 1; }
             STD_TAG="os-v$V"
           fi
-          if [ "$WHICH" = both ] || [ "$WHICH" = ulfberht ]; then
+          if [ "$WHICH" = both ] || [ "$WHICH" = all ] || [ "$WHICH" = ulfberht ]; then
             IN='${{ inputs.ulf_version }}'
             if [ -n "$IN" ]; then V="$(norm "$IN")"; else V="$(bump "$(latest 'os-ulfberht-v')" "$LEVEL")"; fi
             echo "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::computed ulfberht version '$V' is not X.Y.Z"; exit 1; }
             ULF_TAG="os-ulfberht-v$V"
           fi
+          if [ "$WHICH" = all ] || [ "$WHICH" = cardputer ]; then
+            IN='${{ inputs.cpz_version }}'
+            if [ -n "$IN" ]; then V="$(norm "$IN")"; else V="$(bump "$(latest 'os-cardputer-v')" "$LEVEL")"; fi
+            echo "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::computed cardputerzero version '$V' is not X.Y.Z"; exit 1; }
+            CPZ_TAG="os-cardputer-v$V"
+          fi
 
           echo "std_tag=$STD_TAG" >> "$GITHUB_OUTPUT"
           echo "ulf_tag=$ULF_TAG" >> "$GITHUB_OUTPUT"
+          echo "cpz_tag=$CPZ_TAG" >> "$GITHUB_OUTPUT"
           {
             echo "### Release plan"
             echo ""
@@ -128,10 +144,11 @@ jobs:
             echo "|---|---|"
             [ -n "$STD_TAG" ] && echo "| Standard | \`$STD_TAG\` |"
             [ -n "$ULF_TAG" ] && echo "| Ulfberht | \`$ULF_TAG\` |"
+            [ -n "$CPZ_TAG" ] && echo "| CardputerZero | \`$CPZ_TAG\` |"
             echo ""
             [ "${{ inputs.dry_run }}" = "true" ] && echo "_Dry run — no tags created._"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "Planned: STANDARD='$STD_TAG'  ULFBERHT='$ULF_TAG'"
+          echo "Planned: STANDARD='$STD_TAG'  ULFBERHT='$ULF_TAG'  CARDPUTERZERO='$CPZ_TAG'"
 
       - name: Validate cross-repo token (RAGNAROS_DISPATCH_TOKEN)
         # Runs on every run, dry_run included, so a dry run is a real health check
@@ -256,6 +273,7 @@ jobs:
           GH_TOKEN: ${{ secrets.RAGNAROS_DISPATCH_TOKEN }}
           STD_TAG: ${{ steps.ver.outputs.std_tag }}
           ULF_TAG: ${{ steps.ver.outputs.ulf_tag }}
+          CPZ_TAG: ${{ steps.ver.outputs.cpz_tag }}
         run: |
           set -euo pipefail
           SHA="$(gh api "repos/$PRIV/commits/main" --jq .sha)"
@@ -280,6 +298,7 @@ jobs:
           }
           mktag "$STD_TAG"
           mktag "$ULF_TAG"
+          mktag "$CPZ_TAG"
 
       - name: Follow builds and verify
         if: ${{ inputs.dry_run == false }}
@@ -289,6 +308,7 @@ jobs:
           REPO: ${{ github.repository }}
           STD_TAG: ${{ steps.ver.outputs.std_tag }}
           ULF_TAG: ${{ steps.ver.outputs.ulf_tag }}
+          CPZ_TAG: ${{ steps.ver.outputs.cpz_tag }}
         run: |
           # Errexit OFF on purpose (the runner adds -e): this step treats a lagging
           # manifest / a missing release as a collected problem (FAIL) or a warning,
@@ -321,7 +341,7 @@ jobs:
             done
           }
 
-          FAIL=0; SID=''; UID_=''; SCC='n/a'; UCC='n/a'
+          FAIL=0; SID=''; UID_=''; CID=''; SCC='n/a'; UCC='n/a'; CCC='n/a'
 
           if [ -n "$STD_TAG" ]; then
             echo "Locating standard build for $STD_TAG ..."
@@ -331,14 +351,20 @@ jobs:
             echo "Locating ulfberht build for $ULF_TAG ..."
             UID_="$(find_run "$ULF_TAG" "$ULF_WF")" || { echo "::error::No build run appeared for $ULF_TAG — is the runner online?"; FAIL=1; }
           fi
+          if [ -n "$CPZ_TAG" ]; then
+            echo "Locating cardputerzero build for $CPZ_TAG ..."
+            CID="$(find_run "$CPZ_TAG" "$CPZ_WF")" || { echo "::error::No build run appeared for $CPZ_TAG — is the runner online?"; FAIL=1; }
+          fi
           [ "$FAIL" = 1 ] && exit 1
 
           [ -n "$SID" ] && echo "Standard build: https://github.com/$PRIV/actions/runs/$SID"
           [ -n "$UID_" ] && echo "Ulfberht build: https://github.com/$PRIV/actions/runs/$UID_"
+          [ -n "$CID" ] && echo "CardputerZero build: https://github.com/$PRIV/actions/runs/$CID"
 
           # Builds share one runner, so they run back-to-back; waiting in order is fine.
           if [ -n "$SID" ]; then echo "Waiting on standard build ..."; SCC="$(wait_run "$SID")"; echo "standard -> $SCC"; fi
           if [ -n "$UID_" ]; then echo "Waiting on ulfberht build ..."; UCC="$(wait_run "$UID_")"; echo "ulfberht -> $UCC"; fi
+          if [ -n "$CID" ]; then echo "Waiting on cardputerzero build ..."; CCC="$(wait_run "$CID")"; echo "cardputerzero -> $CCC"; fi
 
           # Verify the release + the ragnar.life manifest for a successful build.
           verify() { # $1 tag  $2 conclusion  $3 manifest-url  $4 label
@@ -359,8 +385,9 @@ jobs:
           }
           verify "$STD_TAG" "$SCC" "https://ragnar.life/images/std.json" "standard"
           verify "$ULF_TAG" "$UCC" "https://ragnar.life/images/ulf.json" "ulfberht"
+          verify "$CPZ_TAG" "$CCC" "https://ragnar.life/images/cpz.json" "cardputerzero"
 
-          # Keep the STANDARD edition as "Latest" (Ulfberht publishes last).
+          # Keep the STANDARD edition as "Latest" (the other editions publish later).
           if [ -n "$STD_TAG" ] && [ "$SCC" = success ]; then
             RID="$(gh api "repos/$REPO/releases/tags/$STD_TAG" --jq .id 2>/dev/null)"
             if [ -n "$RID" ]; then
@@ -376,6 +403,7 @@ jobs:
             echo "|---|---|---|---|"
             [ -n "$STD_TAG" ] && echo "| Standard | \`$STD_TAG\` | $SCC | https://github.com/$REPO/releases/tag/$STD_TAG |"
             [ -n "$ULF_TAG" ] && echo "| Ulfberht | \`$ULF_TAG\` | $UCC | https://github.com/$REPO/releases/tag/$ULF_TAG |"
+            [ -n "$CPZ_TAG" ] && echo "| CardputerZero | \`$CPZ_TAG\` | $CCC | https://github.com/$REPO/releases/tag/$CPZ_TAG |"
             echo ""
             echo "Download page: https://ragnar.life/"
           } >> "$GITHUB_STEP_SUMMARY"

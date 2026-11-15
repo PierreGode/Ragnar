@@ -12,6 +12,7 @@ running `install_ragnar.sh` by hand.
 - [Where the image comes from](#where-the-image-comes-from)
 - [How it is put together](#how-it-is-put-together)
 - [Differences from a script install](#differences-from-a-script-install)
+- [The CardputerZero image](#the-cardputerzero-image)
 
 > For authorized penetration testing only. Unauthorized access to networks is
 > illegal.
@@ -138,3 +139,41 @@ before `ragnar.service`, regenerates anything that must be unique, applies
 - Everything else — the service, AP onboarding, the updater, sudoers, udev
   rules, system limits — is identical, because the image runs the very same
   installer.
+
+## The CardputerZero image
+
+The M5Stack CardputerZero has its own image, `RagnarOS-CardputerZero-arm64.img.xz`,
+on the same [download page](https://ragnar.life/). Use it instead of the
+standard image on that board: the standard image is headless and knows nothing
+about the built-in screen and keyboard.
+
+What is different from the standard image:
+
+- **The screen works from the first power-on.** Ragnar is installed with the
+  CardputerZero profile (LCD, keyboard, battery gauge, camera), and the
+  [boot screen](M5StackCardputerZero.md) shows while the board starts.
+- **The board's buses are switched on** in `config.txt`: SPI (LCD), I2C
+  (keyboard, battery, Cap detection), the camera overlay (`dtoverlay=imx219`)
+  and the UART for the LoRa Cap's GNSS receiver. The serial login console is
+  off, because it shares that UART.
+- **Meshtastic is on the image.** `meshtasticd` is installed but switched off.
+  If the LoRa + GNSS Cap is fitted, the first boot sets it up as a Meshtastic
+  node, with no internet needed. Fit the Cap later and
+  **System → CardputerZero hardware → Set up Meshtastic** does the same.
+- **Lean.** The board has 512 MB of RAM, so the heavy scanners (Nuclei, Nikto,
+  SQLMap, ZAP) and AirSnitch are left out. Ragnar can
+  [hand those scans to a bigger unit](mesh.md) on the mesh instead.
+
+Flashing and first boot are the same as above: set a username, password and
+Wi-Fi in Raspberry Pi Imager, or join the **`Ragnar`** access point afterwards.
+The image is the same Raspberry Pi OS Lite underneath, so it can also be made
+by hand: flash Raspberry Pi OS Lite (64-bit) and run `install_ragnar.sh`,
+choosing the CardputerZero option.
+
+How it is built: the same pipeline, with
+`RAGNAR_PROFILE=cardputer RAGNAR_INSTALL_ADVANCED=no`. In an image build the
+installer calls `scripts/cardputer_hardware.sh image`, which writes everything
+above without a board to look at, and leaves the marker
+`/etc/ragnar-cardputer-image`. On seeing the marker, `ragnar-firstboot.sh` runs
+`cardputer_hardware.sh setup` on the real board to finish what depends on the
+fitted Cap.

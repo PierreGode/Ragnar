@@ -2,6 +2,19 @@
 
 ## Releases
 
+### 2026-11-15
+
+#### feat(os): a Ragnar OS image for the M5Stack CardputerZero
+*branch `feat/cardputer-os-image`*
+
+- **A third image**, `RagnarOS-CardputerZero-arm64.img.xz`, next to the standard and Ulfberht ones: flash it and the CardputerZero's screen, keyboard, battery gauge, camera and boot screen work from the first power-on, with no installer to run. Docs: [ragnar-os.md](ragnar-os.md#the-cardputerzero-image).
+- **What the image has that a plain install decides on the device:** SPI, I2C, the camera overlay and the UART are switched on in `config.txt`; the serial login console is off (it shares the UART with the LoRa Cap's GNSS receiver); `meshtasticd` is installed but off. On first boot, a fitted LoRa + GNSS Cap is set up as a Meshtastic node without internet.
+- **Lean:** no Nuclei / Nikto / SQLMap / ZAP / AirSnitch on a 512 MB board.
+- **In this repo:** `scripts/cardputer_hardware.sh image` (the image-build mode, used by `install_ragnar.sh --image-build` with `RAGNAR_PROFILE=cardputer`), `cardputer_lora_meshtastic.sh package` (daemon only, not configured), a first-boot step, and the **Release OS images** workflow gains `cardputer` and `all` (tags `os-cardputer-v*`, first version 1.0.0). The build recipe and the download page are in the build repository.
+- An image build no longer tries to draw the install screen on the build machine's own display.
+- **Fix: CardputerZero setup did nothing on plain Raspberry Pi OS.** Since the Meshtastic auto-install change, `scripts/cardputer_hardware.sh` stopped with `SELF_REPO: unbound variable` on a unit running plain Raspberry Pi OS (not M5Stack's image). Install and update therefore skipped the camera overlay check, the boot screen and the Meshtastic set-up on those units. Fixed; the next update runs them.
+- The image has not been booted on a CardputerZero yet.
+
 ### 2026-11-14
 
 #### feat(cardputer): fn + Backspace (Del) switches the Grove port's 5 V on and off

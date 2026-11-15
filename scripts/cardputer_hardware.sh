@@ -15,6 +15,9 @@
 #   sudo scripts/cardputer_hardware.sh boot-screen      picture on the LCD early in boot
 #   sudo scripts/cardputer_hardware.sh boot-screen-off  remove it (stays off across updates)
 #   scripts/cardputer_hardware.sh status          what is set up
+#   sudo scripts/cardputer_hardware.sh image      for building the CardputerZero OS
+#                                                 image: no board to ask, so write
+#                                                 everything the board needs
 #
 # Plain setup never edits cmdline.txt: it only says when the serial console is
 # on the GNSS UART. Ragnar frees the port by itself when it finds the LoRa +
@@ -26,7 +29,9 @@ ROOT="${RAGNAR_CARDPUTER_ROOT:-}"        # alternate root, for testing
 EXT5V="$ROOT/sys/class/leds/ext_5v_out/brightness"
 NFC_OVERLAY="spi0-spidev2-gpio22-overlay"
 
-SELF_# A picture on the LCD early in boot, long before the Ragnar service starts
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# A picture on the LCD early in boot, long before the Ragnar service starts
 # (ragnar_splash.py). The unit is not ordered before anything and cannot hold
 # the boot up: it draws once and exits, and gives up quietly without a panel.
 boot_screen_unit() {
@@ -63,7 +68,9 @@ install_boot_screen() {
     if [ -z "$ROOT" ]; then
         systemctl daemon-reload 2>/dev/null || true
         systemctl enable ragnar-splash.service >/dev/null 2>&1 || true
-    else
+    fi
+    # systemd may not answer (an alternate root, or an image-build chroot).
+    if [ ! -e "$wants/ragnar-splash.service" ]; then
         mkdir -p "$wants" && ln -sf ../ragnar-splash.service "$wants/ragnar-splash.service"
     fi
 }
@@ -91,8 +98,6 @@ install_lora_daemon() {
         || log "Meshtastic was not set up. Try again from System -> CardputerZero hardware -> Set up Meshtastic"
 }
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
 log() { echo "[cardputer-hw] $*"; }
 
 config_file() {
@@ -119,7 +124,7 @@ is_cardputer() {
         || grep -qsE 'st7789v_m5st' "$ROOT/sys/class/graphics"/fb*/name \
         || { [ -z "$ROOT" ] && python3 -c "
 import sys
-sys.path.insert(0, '$SELF_REPO')
+sys.path.insert(0, '$REPO')
 import cardputer_caps as c
 sys.exit(0 if c.is_cardputer_zero(c.saved_config()) else 1)" >/dev/null 2>&1; }
 }
@@ -173,8 +178,6 @@ refresh_lora_config() {
     fi
 }
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
 # The camera is not auto-detected on this board: M5Stack's image turns
 # camera_auto_detect off and loads the imx219 overlay by name.
 camera_overlay() {
@@ -207,6 +210,55 @@ enable_nfc() {
     [ -f "$config.ragnar-bak" ] || cp "$config" "$config.ragnar-bak"
     printf '\n# Ragnar: SPI0 CS2 on GPIO22 for the Cap NFC reader\ndtoverlay=%s\n' "$NFC_OVERLAY" >> "$config"
     log "NFC chip-select overlay enabled — reboot to apply"
+}
+
+# ── Building the CardputerZero OS image ─────────────────────────────────────
+# There is no board in an image build, so nothing can be detected: everything
+# the board needs is written out. The parts that depend on what is plugged in
+# (the LoRa Cap) are finished on the device's first boot, which runs `setup`
+# (scripts/ragnar-firstboot.sh, on seeing IMAGE_MARK).
+IMAGE_MARK="$ROOT/etc/ragnar-cardputer-image"
+
+# The LCD is on SPI, its reset and backlight (and the keyboard, battery gauge
+# and Cap detection) on I2C, and the Cap's GNSS receiver on the UART.
+bus_params() {
+    local config line
+    config="$(config_file)" || { log "config.txt not found"; return 1; }
+    for line in dtparam=spi=on dtparam=i2c_arm=on enable_uart=1; do
+        grep -qE "^[[:space:]]*${line}\b" "$config" && continue
+        grep -q '^# Ragnar: CardputerZero buses' "$config" \
+            || printf '\n# Ragnar: CardputerZero buses (LCD, keyboard, battery, Cap GNSS)\n[all]\n' >> "$config"
+        echo "$line" >> "$config"
+    done
+    mkdir -p "$ROOT/etc/modules-load.d"
+    echo i2c-dev > "$ROOT/etc/modules-load.d/ragnar-cardputer.conf"
+    log "SPI, I2C and the UART switched on in config.txt"
+}
+
+# The same result as `gnss`, without a running system to talk to.
+free_uart_offline() {
+    local cmdline
+    if cmdline="$(cmdline_file)" && grep -qE 'console=(serial0|ttyS0)' "$cmdline"; then
+        sed -i -E 's/[[:space:]]*console=(serial0|ttyS0)(,[^[:space:]]*)?//g; s/^[[:space:]]+//' "$cmdline"
+        log "serial console taken off the GNSS UART"
+    fi
+    mkdir -p "$ROOT/etc/systemd/system"
+    ln -sf /dev/null "$ROOT/etc/systemd/system/serial-getty@ttyS0.service"
+}
+
+build_image() {
+    [ -n "$ROOT" ] || camera_tools
+    bus_params || true
+    camera_overlay || true
+    free_uart_offline
+    rm -f "$ROOT/etc/ragnar-splash-optout"
+    install_boot_screen || true
+    # meshtasticd is put on the image so that a LoRa Cap works without
+    # internet; it stays off until first boot finds the Cap.
+    [ -n "$ROOT" ] || bash "$REPO/scripts/cardputer_lora_meshtastic.sh" package \
+        || log "meshtasticd is not on the image; it is downloaded when a LoRa Cap is fitted"
+    mkdir -p "$ROOT/etc" && : > "$IMAGE_MARK"
+    log "CardputerZero image prepared"
 }
 
 status() {
@@ -253,6 +305,9 @@ case "${1:-setup}" in
         camera_tools
         camera_overlay
         ;;
+    image)
+        build_image
+        ;;
     gnss)
         is_cardputer || { log "not a CardputerZero — nothing to do"; exit 0; }
         python3 "$REPO/cardputer_caps.py" --free-gnss-uart
@@ -274,5 +329,5 @@ case "${1:-setup}" in
         enable_nfc
         ;;
     status) status ;;
-    *) echo "usage: $0 [setup|camera|gnss|gnss-undo|nfc|boot-screen|boot-screen-off|status]"; exit 2 ;;
+    *) echo "usage: $0 [setup|camera|gnss|gnss-undo|nfc|boot-screen|boot-screen-off|image|status]"; exit 2 ;;
 esac
