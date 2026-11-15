@@ -426,7 +426,7 @@ class BleProvisioningServer:
 
             # Attach D-Bus to our GLib loop via a PRIVATE connection. The shared
             # dbus.SystemBus() is cached per-process, and inside the webapp other
-            # code (bt_pan and friends) already created it WITHOUT a main loop —
+            # code (the Bluetooth scanners) already created it WITHOUT a main loop —
             # then exporting our GATT objects on that cached connection fails with
             # "connections must be attached to a main loop by passing mainloop=…".
             # A private bus with an explicit mainloop is independent of that shared

@@ -16726,9 +16726,6 @@ async function loadConfigData() {
         // Load Bluetooth provisioning toggle + adapter picker state
         loadBleProvisioning();
 
-        // Load Bluetooth access-point (PAN) toggle state
-        loadBtPan();
-
         // Load GPS-backfill opt-in state (gates the map Backfill GPS button)
         loadWardrivingBackfillState();
 
@@ -35953,15 +35950,15 @@ async function loadWardrivingOnBootState() {
     } catch (e) { /* silent */ }
 }
 
-// ---- Bluetooth provisioning (mobile-app discovery) ----
+// ---- Bluetooth handover (mobile-app discovery) ----
 // Advertises a BLE GATT service so the Ragnar mobile app can find this box and
 // read its IP. Off by default (shares the adapter with the BLE overlay
 // scanner). See ble_provisioning.py + docs/ble_provisioning.md.
 function _bleProvStatusText(d) {
-    if (!d.enabled) return 'Disabled.';
-    if (d.autostopped) return 'Provisioned — advertising stopped to free the radio. Tap Re-advertise for another device.';
-    if (d.running) return 'Advertising as ' + (d.name || 'Ragnar') + (d.active_adapter ? ' on ' + d.active_adapter : '') + '.';
-    if (d.error) return 'Enabled, but not advertising: ' + d.error + (d.hint ? ' — ' + d.hint : '');
+    if (!d.enabled) return 'Off.';
+    if (d.autostopped) return 'A phone has connected — advertising stopped to free the radio.';
+    if (d.running) return '● Findable as ' + (d.name || 'Ragnar') + (d.active_adapter && (d.adapters || []).length > 1 ? ' on ' + d.active_adapter : '') + '.';
+    if (d.error) return 'On, but not advertising: ' + d.error + (d.hint ? ' — ' + d.hint : '');
     // Still registering with BlueZ — slow boards can take a while. Anything
     // else with no error is a state we have not heard back about yet.
     if (d.starting) return 'Starting — registering with BlueZ…';
@@ -35988,178 +35985,6 @@ function _bleProvPollUntilSettled(tries) {
     }, 1500);
 }
 
-let _btPanInstalling = false;
-
-function _btPanStatusText(d) {
-    if (!d) return '—';
-    if (d.error) return '⚠ ' + d.error;
-    if (!d.available) {
-        const pkgs = (d.missing_packages && d.missing_packages.length)
-            ? d.missing_packages.join(', ') : 'bluez-tools, dnsmasq';
-        return 'Dependencies not installed (' + pkgs + '). Tap “Install dependencies”, or just turn it on and it installs them for you.';
-    }
-    if (!d.enabled) return 'Off. Turn on, then pair the box in your phone’s Bluetooth settings.';
-    if (d.running) {
-        const n = d.connected_devices || 0;
-        return 'On — discoverable at ' + (d.address || '192.168.44.1') + ':8000 · '
-            + (n ? (n + ' phone' + (n === 1 ? '' : 's') + ' connected') : 'no phone connected yet');
-    }
-    return 'Starting…';
-}
-
-async function loadBtPan() {
-    try {
-        const res = await fetch('/api/bt/pan/status');
-        const d = await res.json();
-        const cb = document.getElementById('bt-pan-enabled');
-        if (cb) cb.checked = !!d.enabled;
-        const btn = document.getElementById('bt-pan-install');
-        // Offer the install button whenever the tools are missing (and we're not
-        // already mid-install).
-        if (btn) btn.classList.toggle('hidden', !!d.available || _btPanInstalling);
-        const st = document.getElementById('bt-pan-status');
-        if (st && !_btPanInstalling) st.textContent = _btPanStatusText(d);
-        // Only worth listing devices once the NAP is usable.
-        if (d.available) loadBtPanDevices();
-        else { const w = document.getElementById('bt-pan-devices-wrap'); if (w) w.classList.add('hidden'); }
-        // "Clear all pairings" is available whenever the stack is (even with no
-        // device currently listed — a phone's failed bond may not show here).
-        const clr = document.getElementById('bt-pan-clear');
-        const clrHint = document.getElementById('bt-pan-clear-hint');
-        if (clr) clr.classList.toggle('hidden', !d.available);
-        if (clrHint) clrHint.classList.toggle('hidden', !d.available);
-    } catch (e) { /* silent */ }
-}
-
-async function loadBtPanDevices() {
-    const wrap = document.getElementById('bt-pan-devices-wrap');
-    const list = document.getElementById('bt-pan-devices');
-    if (!wrap || !list) return;
-    try {
-        const res = await fetch('/api/bt/pan/devices');
-        const d = await res.json();
-        const devs = (d && d.devices) || [];
-        if (!devs.length) { wrap.classList.add('hidden'); return; }
-        wrap.classList.remove('hidden');
-        list.innerHTML = '';
-        devs.forEach(dev => {
-            const row = document.createElement('div');
-            row.className = 'flex items-center justify-between gap-3 bg-slate-800/60 border border-slate-700 rounded-lg px-3 py-2';
-            const dot = dev.connected ? '<span class="inline-block w-2 h-2 rounded-full bg-green-400 mr-2 align-middle"></span>'
-                                      : '<span class="inline-block w-2 h-2 rounded-full bg-slate-500 mr-2 align-middle"></span>';
-            const meta = document.createElement('div');
-            meta.className = 'min-w-0';
-            meta.innerHTML = '<div class="text-sm truncate">' + dot + escapeHtml(dev.name || dev.address) + '</div>'
-                + '<div class="text-[11px] text-gray-500">' + escapeHtml(dev.address)
-                + (dev.connected ? ' · connected' : (dev.paired ? ' · paired' : '')) + '</div>';
-            const btn = document.createElement('button');
-            btn.className = 'flex-none px-2.5 py-1 rounded-lg border border-red-700 text-red-300 hover:bg-red-900/40 text-xs';
-            btn.textContent = 'Forget';
-            btn.onclick = () => forgetBtPanDevice(dev.address, dev.name);
-            row.appendChild(meta);
-            row.appendChild(btn);
-            list.appendChild(row);
-        });
-    } catch (e) { /* silent */ }
-}
-
-async function forgetBtPanDevice(address, name) {
-    if (!confirm('Forget "' + (name || address) + '"? You will need to pair it again.')) return;
-    try {
-        const res = await postAPI('/api/bt/pan/forget', { address });
-        if (res && res.success) addConsoleMessage('Forgot ' + (name || address), 'success');
-        else addConsoleMessage('Could not forget: ' + ((res && res.error) || 'unknown'), 'error');
-    } catch (e) {
-        addConsoleMessage('Failed to forget device', 'error');
-    }
-    setTimeout(loadBtPanDevices, 500);
-}
-
-async function clearBtPanKeys() {
-    if (!confirm('Clear ALL Bluetooth pairings on the box?\n\nEvery paired phone will need to pair again (and forget "Ragnar" on its side first). This fixes the "incorrect PIN or passkey" error.')) return;
-    try {
-        const res = await postAPI('/api/bt/pan/clear-keys', {});
-        if (res && res.success) {
-            const n = res.removed || 0;
-            addConsoleMessage('Cleared ' + n + ' Bluetooth pairing' + (n === 1 ? '' : 's') + ' — pair fresh from the phone now', 'success');
-        } else {
-            addConsoleMessage('Could not clear pairings: ' + ((res && res.error) || 'unknown'), 'error');
-        }
-    } catch (e) {
-        addConsoleMessage('Failed to clear pairings', 'error');
-    }
-    setTimeout(loadBtPanDevices, 500);
-}
-
-// Poll the install log until it finishes; optionally enable the NAP after.
-function _btPanPollInstall(thenEnable) {
-    _btPanInstalling = true;
-    const st = document.getElementById('bt-pan-status');
-    const log = document.getElementById('bt-pan-log');
-    const btn = document.getElementById('bt-pan-install');
-    if (btn) btn.classList.add('hidden');
-    if (log) log.classList.remove('hidden');
-    const timer = setInterval(async () => {
-        try {
-            const res = await fetch('/api/bt/pan/install-log');
-            const d = await res.json();
-            if (log && d.log) { log.textContent = d.log; log.scrollTop = log.scrollHeight; }
-            if (st) st.textContent = d.running ? 'Installing dependencies…' : (st.textContent || '');
-            if (!d.running && d.done) {
-                clearInterval(timer);
-                _btPanInstalling = false;
-                if (d.ok) {
-                    addConsoleMessage('Bluetooth access-point dependencies installed', 'success');
-                    if (thenEnable) {
-                        try { await postAPI('/api/bt/pan/toggle', { enabled: true }); } catch (e) { /* handled by reload */ }
-                    }
-                } else {
-                    addConsoleMessage('Dependency install failed — see the log', 'error');
-                    if (st) st.textContent = '⚠ ' + (d.error || 'install failed');
-                    const cb = document.getElementById('bt-pan-enabled');
-                    if (cb) cb.checked = false;
-                }
-                loadBtPan();
-            }
-        } catch (e) { /* keep polling */ }
-    }, 1500);
-}
-
-async function installBtPanDeps(thenEnable) {
-    try {
-        await postAPI('/api/bt/pan/install', {});
-        addConsoleMessage('Installing Bluetooth access-point dependencies…', 'info');
-        _btPanPollInstall(!!thenEnable);
-    } catch (e) {
-        console.error('[BTPAN] install error:', e);
-        addConsoleMessage('Failed to start dependency install', 'error');
-    }
-}
-
-async function toggleBtPan(checkbox) {
-    const enabled = !!checkbox.checked;
-    const st = document.getElementById('bt-pan-status');
-    if (st) st.textContent = enabled ? 'Enabling…' : 'Disabling…';
-    try {
-        const res = await postAPI('/api/bt/pan/toggle', { enabled });
-        // Turning it on with missing deps: the server started the install; drive
-        // the progress UI and enable once it lands.
-        if (enabled && res && res.installing) {
-            _btPanPollInstall(true);
-            return;
-        }
-        addConsoleMessage('Bluetooth access point ' + (enabled ? 'enabled' : 'disabled'),
-            (res && res.error) ? 'error' : 'success');
-        if (st) st.textContent = _btPanStatusText(Object.assign({ enabled: enabled }, res || {}));
-        setTimeout(loadBtPan, 800);
-    } catch (e) {
-        console.error('[BTPAN] toggle error:', e);
-        addConsoleMessage('Failed to toggle Bluetooth access point', 'error');
-        checkbox.checked = !enabled;
-        if (st) st.textContent = '⚠ toggle failed';
-    }
-}
-
 async function loadBleProvisioning() {
     try {
         const res = await fetch('/api/ble/provisioning');
@@ -36181,7 +36006,20 @@ async function loadBleProvisioning() {
             });
             sel.value = current;
         }
-        // Show the Re-advertise button only once it has auto-stopped.
+        // One radio = nothing to choose; keep the card to a single switch.
+        const selWrap = document.getElementById('ble-provisioning-adapter-wrap');
+        if (selWrap) selWrap.classList.toggle('hidden', (d.adapters || []).length < 2);
+        // The address the app will be handed, so "same network" is checkable.
+        const addr = document.getElementById('ble-provisioning-address');
+        if (addr) {
+            const list = (d.addresses || []).join(', ');
+            addr.textContent = list
+                ? 'Hands the app: ' + list
+                : 'This box has no network address yet — connect it to Wi-Fi or Ethernet first.';
+            addr.classList.toggle('text-amber-300', !list);
+            addr.classList.toggle('hidden', !d.enabled);
+        }
+        // Show the Advertise-again button only once it has auto-stopped.
         const rebtn = document.getElementById('ble-provisioning-readvertise');
         if (rebtn) rebtn.classList.toggle('hidden', !(d.enabled && d.autostopped));
         // Under-voltage warning: running BLE + a USB radio on a weak PSU can
@@ -36204,7 +36042,7 @@ async function setBleProvisioningAutostop(cb) {
     const enabled = !!(document.getElementById('ble-provisioning-enabled') || {}).checked;
     try {
         await postAPI('/api/ble/provisioning/toggle', { enabled, autostop: !!cb.checked });
-        addConsoleMessage('Auto-stop after provisioning ' + (cb.checked ? 'on' : 'off'), 'success');
+        addConsoleMessage('Stop after a phone connects: ' + (cb.checked ? 'on' : 'off'), 'success');
         setTimeout(loadBleProvisioning, 600);
     } catch (e) {
         console.error('[BLE] autostop set error:', e);
@@ -36216,7 +36054,7 @@ async function setBleProvisioningAutostop(cb) {
 async function readvertiseBle() {
     try {
         await postAPI('/api/ble/provisioning/toggle', { enabled: true });
-        addConsoleMessage('Re-advertising over Bluetooth', 'success');
+        addConsoleMessage('Advertising over Bluetooth again', 'success');
         setTimeout(loadBleProvisioning, 600);
     } catch (e) {
         console.error('[BLE] re-advertise error:', e);
@@ -36230,15 +36068,16 @@ async function toggleBleProvisioning(checkbox) {
     if (st) st.textContent = enabled ? 'Enabling…' : 'Disabling…';
     try {
         const res = await postAPI('/api/ble/provisioning/toggle', { enabled });
-        addConsoleMessage('Bluetooth provisioning ' + (enabled ? 'enabled' : 'disabled'), 'success');
+        addConsoleMessage('Bluetooth handover ' + (enabled ? 'on' : 'off'), 'success');
         if (res && st) st.textContent = _bleProvStatusText(Object.assign({ enabled: enabled }, res));
+        // A toggle answer carries no adapter list; the reload below fills it in.
         // Re-read for the active adapter / advertised name once settled.
         setTimeout(loadBleProvisioning, 600);
         // Keep watching while it is still registering.
         if (enabled && res && !res.running) _bleProvPollUntilSettled();
     } catch (e) {
         console.error('[BLE] provisioning toggle error:', e);
-        addConsoleMessage('Failed to update Bluetooth provisioning', 'error');
+        addConsoleMessage('Failed to update Bluetooth handover', 'error');
         checkbox.checked = !enabled;
         if (st) st.textContent = 'Failed to update.';
     }

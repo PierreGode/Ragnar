@@ -112,7 +112,7 @@ approaches:
 The mobile app normally reaches units over Tailscale — the phone is on the
 tailnet, so switching units just repoints at another peer's `100.x` address.
 But when the phone reaches a unit **directly** — over the
-[Bluetooth handover](bluetooth-pan.md) LAN address, or any plain LAN IP — the
+[Bluetooth handover](ble_provisioning.md) LAN address, or any plain LAN IP — the
 phone is *not* on the tailnet and cannot dial a peer's `100.x`. So the
 directly-connected unit acts as a **gateway**: it is on the tailnet, so it
 relays the app's requests to any other unit and returns the reply. The phone

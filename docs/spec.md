@@ -281,7 +281,7 @@
 The Settings (Configuration) tab groups its many sections behind a sub-tab bar
 (`showConfigSubtab()` in `ragnar_modern.js`, mirroring `showNetworkSubtab()`):
 **System** (System Management), **Network** (Network Scanning), **Bluetooth**
-(handover + access point/PAN), **Wardriving**, **Security** (Security +
+(handover), **Wardriving**, **Security** (Security +
 Pwnagotchi Bridge), **Integrations** (AI + Push Notifications), and **Advanced**
 (Hardware Resource Configuration + the raw fine-tune form). Each group lives in a
 `#cfg-sub-*` wrapper (`.cfg-subview`) that is show/hidden with the `hidden`

@@ -1,10 +1,29 @@
-# BLE Provisioning
+# Bluetooth handover
 
-> **Note (deprecated client path).** The Ragnar mobile app no longer uses
-> Bluetooth to find a box — it connects over the [Ragnar Mesh](mesh.md)
-> (Tailscale) and selects units by their `tag:ragnar-mesh` tag. This BLE
-> peripheral still ships and works, but nothing currently consumes it; it is
-> kept for other provisioning clients and may be retired later.
+How the [Ragnar Mobile](https://github.com/PierreGode/Ragnarmobile) app finds a
+unit without anyone typing an IP address. It is the only Bluetooth path between
+the app and a unit.
+
+## Using it
+
+1. On the unit: **Settings → Bluetooth → Bluetooth handover → on**. The card
+   shows the name it advertises (`Ragnar-xxxx`) and the address it hands out.
+2. Put the phone on the **same network** as the unit.
+3. In the app: **Connect → Bluetooth → Find Ragnar over Bluetooth**.
+
+The app scans for the unit, reads its address over Bluetooth and connects to
+that address over Wi-Fi. Bluetooth carries the address and nothing else, which
+is why the phone and the unit have to share a network. There is no pairing.
+
+> **The Bluetooth access point (PAN) is gone.** Earlier releases had a second
+> card that turned the unit into a Bluetooth network access point. Android
+> connects that profile but never runs IP over it, so the app could not reach a
+> unit that way. The card, `bt_pan.py` and the `/api/bt/pan/*` routes were
+> removed. A unit that had it switched on removes its `pan0` bridge, DHCP
+> server and pairing agent, and stops being discoverable for pairing, the first
+> time it starts after the update.
+
+## How it works
 
 `ble_provisioning.py` is a BlueZ GATT peripheral that lets a client discover a
 box over Bluetooth and learn how to reach it over IP.
@@ -41,15 +60,16 @@ to enumerate as `hci0`.
 
 ## Web config
 
-The Ragnar web UI → **Config → Bluetooth Provisioning** has an enable toggle
-and an adapter picker (each controller is listed, the built-in one tagged).
+**Settings → Bluetooth → Bluetooth handover** has the on/off switch, the
+advertised name and the address handed to the app. A unit with more than one
+Bluetooth controller also gets an adapter picker (the built-in one is tagged);
+with a single controller there is nothing to pick and the picker is hidden.
 These write `ble_provisioning_enabled` and `ble_provisioning_adapter`;
-switching the adapter restarts the peripheral on the new one. The mobile app's
-Settings tab exposes the same enable toggle.
+switching the adapter restarts the peripheral on the new one.
 
 ## Auto-stop after provisioning
 
-`ble_provisioning_autostop` (a checkbox on the same card) makes the peripheral
+`ble_provisioning_autostop` (**Stop once a phone has connected** on the same card) makes the peripheral
 **free the adapter once a phone has provisioned**. When a central reads the
 network-status or AP-credentials characteristic, a short grace timer
 (`AUTOSTOP_GRACE_MS`, 15 s, reset on each read) arms; when it expires the
@@ -58,7 +78,7 @@ Bluetooth work (`bt_scanner`, WIDS).
 
 This is for **single-radio** boxes. The trade-off: once stopped, the app can no
 longer rediscover the box over Bluetooth until it advertises again — use the
-**Re-advertise** button (shown once auto-stopped) or re-toggle enable. With two
+**Advertise again** button (shown once auto-stopped) or re-toggle enable. With two
 controllers you don't need this: leave provisioning always-on on the built-in
 radio and let the USB dongle scan.
 
@@ -71,7 +91,7 @@ server is constructed.
 
 ## Enabling it
 
-Once — over IP, from the mobile app's **Box** tab, or directly:
+Once — on the card above, or directly:
 
 ```bash
 curl -X POST http://<box>:8000/api/ble/provisioning/toggle \
@@ -81,7 +101,8 @@ curl -X POST http://<box>:8000/api/ble/provisioning/toggle \
 After that the phone can discover the box over Bluetooth on every later
 connect. The setting persists and the peripheral comes back up on boot.
 
-- `GET  /api/ble/provisioning`        → `{enabled, running, error, name}`
+- `GET  /api/ble/provisioning`        → `{enabled, running, starting, error, hint, name, addresses, adapters, …}`
+  (`addresses` is what the app is handed, as `ip:port`)
 - `POST /api/ble/provisioning/toggle` → `{enabled}` (omit to flip)
 
 ## GATT service

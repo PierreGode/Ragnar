@@ -327,6 +327,16 @@ def _ble_adapters():
         return []
 
 
+def _ble_addresses():
+    """The addresses the handover gives the app, as "ip:port". Never raises."""
+    try:
+        import ble_provisioning
+        port = int(os.environ.get('RAGNAR_API_PORT') or shared_data.config.get('web_port') or 8000)
+        return [f"{i['ip']}:{port}" for i in ble_provisioning._interfaces()]
+    except Exception:
+        return []
+
+
 def _ble_power():
     """Pi power/under-voltage health. Running BLE + a USB radio on an
     under-volting Pi can reset the whole board — surface it so the user knows
@@ -378,6 +388,9 @@ def ble_provisioning_status():
         'adapter': shared_data.config.get('ble_provisioning_adapter', ''),
         'active_adapter': adapter,
         'adapters': _ble_adapters(),
+        # What a phone is handed, so the card can show it (and warn when the
+        # box has no address to hand over at all).
+        'addresses': _ble_addresses(),
         'autostop': bool(shared_data.config.get('ble_provisioning_autostop', False)),
         # True once a phone provisioned and the peripheral freed the adapter.
         'autostopped': autostopped,
@@ -403,8 +416,7 @@ def ble_provisioning_toggle():
     # Auto-stop is NOT construction-time: the loop thread reads self.auto_stop
     # live in _on_provisioned(), so the running peripheral just gets told the
     # new value. Tearing down and re-registering the GATT app for it meant
-    # flipping this checkbox bounced BLE (and, with bt-pan holding the adapter,
-    # took the process down with it) for a setting that needed no teardown.
+    # flipping this checkbox bounced BLE for a setting that needed no teardown.
     if 'autostop' in payload:
         new_autostop = bool(payload.get('autostop'))
         shared_data.config['ble_provisioning_autostop'] = new_autostop
@@ -445,162 +457,44 @@ def ble_provisioning_toggle():
 
 
 # ---------------------------------------------------------------------------
-# Bluetooth PAN (NAP) — a direct Bluetooth link to the box for the Ragnar Mobile
-# app when Tailscale/Wi-Fi can't reach it. Opt-in (bt_pan_enabled) and fully
-# reversible (disabling removes the bridge + NAP). Android-only. See bt_pan.py.
-# Unlike BLE provisioning this carries a real IP link, so the app talks ordinary
-# HTTP over it — the waterfall and everything else work unchanged.
+# Bluetooth PAN (NAP) was removed: Android never runs IP over a Bluetooth PAN, so
+# it could not carry the app. The BLE handover above is the Bluetooth path. A box
+# that had the PAN switched on still has its bridge, DHCP server, pairing agent
+# and a discoverable adapter after updating — undo those once, at boot.
 # ---------------------------------------------------------------------------
-def _start_bt_pan():
-    """Start the NAP server if config enables it. Never raises."""
+
+def _retire_bt_pan():
+    """Undo a previously enabled Bluetooth PAN. Idempotent; never raises."""
     try:
-        if not shared_data.config.get('bt_pan_enabled', False):
+        was_on = bool(shared_data.config.pop('bt_pan_enabled', False))
+        if not (was_on or os.path.exists('/sys/class/net/pan0')):
             return False
-        import bt_pan
-        return bool(bt_pan.start().get('running'))
-    except Exception as e:  # pragma: no cover - hardware dependent
-        logger.error(f"BT PAN failed to start: {e}")
+
+        def _quiet(cmd):
+            try:
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=6)
+            except Exception:
+                pass
+
+        try:
+            with open('/tmp/ragnar/btpan-dnsmasq.pid') as f:
+                os.kill(int(f.read().strip()), signal.SIGTERM)
+        except Exception:
+            pass
+        _quiet(['pkill', '-x', 'bt-network'])
+        _quiet(['pkill', '-x', 'bt-agent'])
+        _quiet(['ip', 'link', 'set', 'pan0', 'down'])
+        _quiet(['ip', 'link', 'del', 'pan0'])
+        _quiet(['bluetoothctl', 'discoverable', 'off'])
+        _quiet(['bluetoothctl', 'pairable', 'off'])
+        if was_on:
+            shared_data.save_config()
+        logger.info("Bluetooth PAN retired (bridge, DHCP and pairing agent removed)")
+        return True
+    except Exception as e:
+        logger.error(f"Bluetooth PAN cleanup error: {e}")
         return False
 
-
-def _stop_bt_pan():
-    try:
-        import bt_pan
-        bt_pan.stop()
-    except Exception as e:  # pragma: no cover
-        logger.error(f"BT PAN stop error: {e}")
-
-
-@app.route('/api/bt/pan/status', methods=['GET'])
-def bt_pan_status():
-    enabled = bool(shared_data.config.get('bt_pan_enabled', False))
-    try:
-        import bt_pan
-        st = bt_pan.status()
-    except Exception as e:  # pragma: no cover
-        st = {'running': False, 'available': False, 'error': str(e)}
-    st['enabled'] = enabled
-    return jsonify(st)
-
-
-@app.route('/api/bt/pan/toggle', methods=['POST'])
-def bt_pan_toggle():
-    payload = request.get_json(silent=True) or {}
-    enable = bool(payload.get('enabled', not shared_data.config.get('bt_pan_enabled', False)))
-    if enable:
-        import bt_pan
-        # Dependencies missing? Kick off the install in the background and tell
-        # the UI to show progress; it re-issues enable once they are present.
-        # Don't persist bt_pan_enabled yet — a lean box would then try (and fail)
-        # to start the NAP on every boot until the packages actually land.
-        if bt_pan.missing_tools():
-            inst = bt_pan.install_deps()
-            resp = {'enabled': False, 'running': False, 'installing': True}
-            resp.update(inst)
-            return jsonify(resp), 200
-        shared_data.config['bt_pan_enabled'] = True
-        shared_data.save_config()
-        ok = _start_bt_pan()
-        try:
-            st = bt_pan.status()
-        except Exception:
-            st = {}
-        st['enabled'] = True
-        if not ok and not st.get('error'):
-            st['error'] = ('NAP did not come up — is a Bluetooth controller present '
-                           'and unblocked?')
-        return jsonify(st), 200
-    shared_data.config['bt_pan_enabled'] = False
-    shared_data.save_config()
-    _stop_bt_pan()
-    return jsonify({'enabled': False, 'running': False})
-
-
-@app.route('/api/bt/pan/install', methods=['POST'])
-def bt_pan_install():
-    """Install the NAP's missing apt dependencies in the background."""
-    try:
-        import bt_pan
-        return jsonify(bt_pan.install_deps())
-    except Exception as e:  # pragma: no cover
-        return jsonify({'running': False, 'done': True, 'ok': False, 'error': str(e)}), 500
-
-
-@app.route('/api/bt/pan/install-log', methods=['GET'])
-def bt_pan_install_log():
-    """Progress + streamed log for the dependency install (polled by the UI)."""
-    try:
-        import bt_pan
-        return jsonify(bt_pan.install_status())
-    except Exception as e:  # pragma: no cover
-        return jsonify({'running': False, 'done': True, 'ok': False, 'error': str(e)}), 500
-
-
-@app.route('/api/bt/pan/devices', methods=['GET'])
-def bt_pan_devices():
-    """Paired/connected Bluetooth devices, so the operator can forget a stale one."""
-    try:
-        import bt_pan
-        return jsonify(bt_pan.list_devices())
-    except Exception as e:  # pragma: no cover
-        return jsonify({'success': False, 'error': str(e), 'devices': []}), 500
-
-
-@app.route('/api/bt/pan/forget', methods=['POST'])
-def bt_pan_forget():
-    """Remove a device's bond from the box (fixes 'incorrect PIN' on re-pair)."""
-    data = request.get_json(silent=True) or {}
-    try:
-        import bt_pan
-        r = bt_pan.forget_device(data.get('address', ''))
-        return jsonify(r), (200 if r.get('success') else 400)
-    except Exception as e:  # pragma: no cover
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/bt/pan/clear-keys', methods=['POST'])
-def bt_pan_clear_keys():
-    """Forget every Bluetooth bond on the box — clean-slate re-pair.
-
-    Fixes a phone stuck on 'incorrect PIN or passkey', which is a stale-link-key
-    mismatch, not a real PIN (this NAP pairs with 'just works')."""
-    try:
-        import bt_pan
-        r = bt_pan.clear_keys()
-        return jsonify(r), (200 if r.get('success') else 400)
-    except Exception as e:  # pragma: no cover
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/bt/pan/client/connect', methods=['POST'])
-def bt_pan_client_connect():
-    """Connect the box to a phone's Bluetooth tethering (box as PAN client).
-
-    The direction Android supports: the phone shares via Bluetooth tethering and
-    the box joins it at 192.168.44.2, so the app reaches the box at that IP."""
-    data = request.get_json(silent=True) or {}
-    try:
-        import bt_pan
-        r = bt_pan.client_connect(data.get('address'))
-        return jsonify(r), (200 if r.get('success') else 400)
-    except Exception as e:  # pragma: no cover
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/bt/pan/client/disconnect', methods=['POST'])
-def bt_pan_client_disconnect():
-    """Drop the box's PAN-client link to the phone."""
-    try:
-        import bt_pan
-        return jsonify(bt_pan.client_disconnect())
-    except Exception as e:  # pragma: no cover
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/bt/pan/client/status', methods=['GET'])
-def bt_pan_client_status():
-    """Whether the box is currently a PAN client of a phone's tethering."""
-    try:
-        import bt_pan
-        return jsonify(bt_pan.client_status())
-    except Exception as e:  # pragma: no cover
-        return jsonify({'success': False, 'error': str(e)}), 500
 
 # ============================================================================
 # MESH GATEWAY (hub mode)
@@ -33056,16 +32950,8 @@ def run_server(host='0.0.0.0', port=8000, ssl_cert=None, ssl_key=None, https_por
                 logger.error(f"BLE provisioning boot error: {_ble_err}")
         socketio.start_background_task(_boot_ble)
 
-        # Bring up the Bluetooth PAN (NAP) if enabled — same deferred, never-fatal
-        # treatment as BLE, so a missing/blocked Bluetooth stack can't hold up the
-        # web server or crash boot.
-        def _boot_bt_pan():
-            try:
-                if _start_bt_pan():
-                    logger.info("Bluetooth PAN (NAP) up on 192.168.44.1")
-            except Exception as _btp_err:  # pragma: no cover
-                logger.error(f"BT PAN boot error: {_btp_err}")
-        socketio.start_background_task(_boot_bt_pan)
+        # One-time cleanup for boxes that had the removed Bluetooth PAN enabled.
+        socketio.start_background_task(_retire_bt_pan)
 
         logger.info("✅ All background threads started successfully")
 

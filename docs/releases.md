@@ -4,6 +4,17 @@
 
 ### 2026-11-15
 
+#### chore(bluetooth): one Bluetooth card that works — the access point (PAN) is removed
+*branch `chore/bluetooth-handover-only`*
+
+- **Settings → Bluetooth now has one card: Bluetooth handover.** It is the way the [Ragnar Mobile](https://github.com/PierreGode/Ragnarmobile) app finds a unit: the app reads the unit's address over Bluetooth and connects over Wi-Fi.
+- **Removed: Bluetooth access point (PAN).** Android connects that profile but never runs IP over it, so the app could not reach a unit through it. Gone with it: the card, `bt_pan.py`, every `/api/bt/pan/*` route, the paired-devices list and the "Clear all Bluetooth pairings" button (the handover needs no pairing), and the `bluez-tools` / `bridge-utils` packages from the installers.
+- **A unit that had the access point on cleans up by itself** the first time it starts after the update: the `pan0` bridge, its DHCP server and the pairing agent are removed and the adapter stops being discoverable for pairing. Turn on **Bluetooth handover** instead.
+- **The handover card is simpler.** One switch, the name the unit advertises, and the address the app will be handed (with a warning when the unit has no network address to hand over). The adapter picker only appears on a unit with more than one Bluetooth controller.
+- `GET /api/ble/provisioning` gains `addresses`.
+- Docs: [ble_provisioning.md](ble_provisioning.md) (now "Bluetooth handover"); `bluetooth-pan.md` is removed.
+- Tested on the dev unit (Pi 5): the access point torn down, the handover advertising as `Ragnar-b4e2`. Not yet read from a phone in this change.
+
 #### feat(wardriving): use the phone's GPS — no receiver needed
 *branch `feat/phone-gps`*
 

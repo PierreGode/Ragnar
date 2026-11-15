@@ -436,6 +436,16 @@ Source: blewatch.md
 Source: blewatch.md
 <!-- proof: docs/blewatch.md | Network → Diagnostics → L2 tab -->
 
+### How does the mobile app find a unit over Bluetooth?
+Turn on **Bluetooth handover** under Settings → Bluetooth, then tap **Find Ragnar over Bluetooth** in the app. The app reads the unit's address over Bluetooth and connects over Wi-Fi, so the phone and the unit must be on the same network.
+Source: ble_provisioning.md
+<!-- proof: docs/ble_provisioning.md | **Settings → Bluetooth → Bluetooth handover → on** -->
+
+### Can the mobile app talk to a unit over Bluetooth alone?
+No. Bluetooth only hands over the unit's address; everything else runs over Wi-Fi. The old Bluetooth access point (PAN) was removed because Android never runs IP over it.
+Source: ble_provisioning.md
+<!-- proof: docs/ble_provisioning.md | Bluetooth carries the address and nothing else -->
+
 ## Alerts and reporting
 
 ### What is Watchtower?

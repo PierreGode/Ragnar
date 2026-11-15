@@ -8814,75 +8814,46 @@
                 </div><!-- /cfg-sub-network -->
 
                 <div id="cfg-sub-bluetooth" class="cfg-subview hidden">
-                <!-- Bluetooth handover Section.
-                     The Ragnar mobile app can find this box over BLE and read
-                     its LAN IP (see ble_provisioning.py + the app's src/ble.ts),
-                     then connect over Wi-Fi. Bluetooth carries only the address;
-                     it is NOT a data link (Android won't run IP over BT PAN). -->
+                <!-- Bluetooth handover — the only Bluetooth path to the app.
+                     The Ragnar mobile app finds this box over BLE and reads its
+                     LAN IP (ble_provisioning.py + the app's src/ble.ts), then
+                     connects over Wi-Fi. Bluetooth carries only the address. -->
                 <div id="ble-provisioning-section" class="mb-8">
                     <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Bluetooth handover</h3>
 
                     <div class="glass rounded-lg p-4 mb-4">
                         <div class="flex items-center justify-between">
                             <div>
-                                <h4 class="font-medium">Discoverable over Bluetooth</h4>
-                                <p class="text-xs text-gray-500 mt-1">Lets the Ragnar mobile app find this box and read its IP over Bluetooth. Provisioning only — all real traffic stays on Wi-Fi.</p>
+                                <h4 class="font-medium">Let the app find this box</h4>
+                                <p class="text-xs text-gray-500 mt-1">The Ragnar mobile app finds this box over Bluetooth and reads its address — no typing an IP. Everything else then runs over Wi-Fi, so the phone and the box must be on the same network.</p>
                             </div>
                             <label class="toggle-switch relative inline-flex items-center cursor-pointer">
                                 <input type="checkbox" id="ble-provisioning-enabled" class="sr-only peer" onchange="toggleBleProvisioning(this)">
                                 <div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
                             </label>
                         </div>
-                        <div class="mt-4">
+                        <p id="ble-provisioning-status" class="text-sm mt-3 text-gray-400">—</p>
+                        <p id="ble-provisioning-address" class="hidden text-xs mt-1 text-gray-500"></p>
+                        <button id="ble-provisioning-readvertise" class="hidden mt-3 px-3 py-1.5 rounded-lg bg-Ragnar-600 hover:bg-Ragnar-500 text-white text-sm" onclick="readvertiseBle()">Advertise again</button>
+                        <p id="ble-provisioning-power" class="hidden text-xs mt-3 px-3 py-2 rounded-lg bg-amber-900/40 border border-amber-700 text-amber-200"></p>
+                        <!-- Only shown when the box has more than one Bluetooth radio. -->
+                        <div id="ble-provisioning-adapter-wrap" class="hidden mt-4">
                             <label class="block text-sm text-gray-400 mb-1">Bluetooth adapter</label>
                             <select id="ble-provisioning-adapter" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm" onchange="setBleProvisioningAdapter(this)">
                                 <option value="">Auto — prefer built-in radio</option>
                             </select>
-                            <p class="text-xs text-gray-500 mt-2">Advertise on the built-in radio and keep a USB dongle (e.g. Alfa) free for scanning. It shares the adapter with the BLE overlay scanner, so pick a dedicated one when you have two.</p>
+                            <p class="text-xs text-gray-500 mt-2">Advertise on the built-in radio and keep a USB dongle free for scanning.</p>
                         </div>
                         <div class="mt-4 flex items-center justify-between">
                             <div>
-                                <h4 class="font-medium text-sm">Auto-stop after provisioning</h4>
-                                <p class="text-xs text-gray-500 mt-1">Free the radio once a phone has read the box's address. For single-radio boxes — the app must re-enable discovery to find the box again.</p>
+                                <h4 class="font-medium text-sm">Stop once a phone has connected</h4>
+                                <p class="text-xs text-gray-500 mt-1">Frees the Bluetooth radio for scanning after the app has read the address. Leave off to stay findable.</p>
                             </div>
                             <label class="toggle-switch relative inline-flex items-center cursor-pointer">
                                 <input type="checkbox" id="ble-provisioning-autostop" class="sr-only peer" onchange="setBleProvisioningAutostop(this)">
                                 <div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
                             </label>
                         </div>
-                        <button id="ble-provisioning-readvertise" class="hidden mt-3 px-3 py-1.5 rounded-lg bg-Ragnar-600 hover:bg-Ragnar-500 text-white text-sm" onclick="readvertiseBle()">Re-advertise</button>
-                        <p id="ble-provisioning-power" class="hidden text-xs mt-3 px-3 py-2 rounded-lg bg-amber-900/40 border border-amber-700 text-amber-200"></p>
-                        <p id="ble-provisioning-status" class="text-xs mt-3 text-gray-500">—</p>
-                    </div>
-                </div>
-
-                <!-- Bluetooth access point (PAN) — a direct Bluetooth link to
-                     the box for the Ragnar mobile app when Tailscale/Wi-Fi can't
-                     reach it. Unlike BLE provisioning above, this is a real IP
-                     link, so the app talks ordinary HTTP over it. -->
-                <div id="bt-pan-section" class="mb-8">
-                    <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Bluetooth access point</h3>
-                    <div class="glass rounded-lg p-4 mb-4">
-                        <div class="flex items-center justify-between">
-                            <div>
-                                <h4 class="font-medium">Bluetooth access point (PAN)</h4>
-                                <p class="text-xs text-gray-500 mt-1">Let the Ragnar mobile app reach this box over a direct Bluetooth link when Tailscale or Wi-Fi can't. Pair the box in the phone's Bluetooth settings and turn on tethering; the app connects to <span class="font-mono">192.168.44.1:8000</span>. Android only. The link carries no default route, so it never touches the phone's internet or this box's other networks.</p>
-                            </div>
-                            <label class="toggle-switch relative inline-flex items-center cursor-pointer">
-                                <input type="checkbox" id="bt-pan-enabled" class="sr-only peer" onchange="toggleBtPan(this)">
-                                <div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
-                            </label>
-                        </div>
-                        <button id="bt-pan-install" class="hidden mt-3 px-3 py-1.5 rounded-lg bg-Ragnar-600 hover:bg-Ragnar-500 text-white text-sm" onclick="installBtPanDeps(false)">Install dependencies</button>
-                        <p id="bt-pan-status" class="text-xs mt-3 text-gray-500">—</p>
-                        <pre id="bt-pan-log" class="hidden mt-2 max-h-40 overflow-auto text-[11px] leading-snug bg-black/40 border border-slate-700 rounded-lg p-2 text-gray-400 whitespace-pre-wrap"></pre>
-                        <div id="bt-pan-devices-wrap" class="hidden mt-4">
-                            <div class="text-xs text-gray-400 mb-2">Paired devices</div>
-                            <div id="bt-pan-devices" class="space-y-2"></div>
-                            <p class="text-[11px] text-gray-500 mt-2">Forget a device here if it can't re-pair (a stale bond on the box causes an "incorrect PIN" error). The phone must also forget it on its side.</p>
-                        </div>
-                        <button id="bt-pan-clear" class="hidden mt-4 px-3 py-1.5 rounded-lg border border-red-700 text-red-300 hover:bg-red-900/40 text-sm" onclick="clearBtPanKeys()">Clear all Bluetooth pairings</button>
-                        <p id="bt-pan-clear-hint" class="hidden text-[11px] text-gray-500 mt-1">Wipes every stored bond on the box in one go. Use when a phone keeps failing with <span class="font-mono">"incorrect PIN or passkey"</span> — then forget "Ragnar" on the phone too and pair fresh.</p>
                     </div>
                 </div>
 
@@ -10217,7 +10188,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261114-camfiles"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261115-handover"></script>
 
 
 
