@@ -47,11 +47,18 @@ Use [Raspberry Pi Imager](https://www.raspberrypi.com/software/):
 
 1. **Choose OS → Use custom**, and select the downloaded
    `RagnarOS-*.img.xz` from the project's [GitHub Releases](https://github.com/PierreGode/Ragnar/releases).
-2. Click the gear / **Edit Settings** and set, at minimum, a **username and
-   password** (Raspberry Pi OS no longer ships a default login) and your
-   **Wi-Fi** if you want it to join your network straight away. These are
-   standard Raspberry Pi OS settings and work normally on this image.
+2. Optional: click the gear / **Edit Settings** and set your **Wi-Fi** if you
+   want it to join your network straight away, and your own **username and
+   password**. These are standard Raspberry Pi OS settings and work normally
+   on this image.
 3. Write the card, put it in the Pi, power on.
+
+**Login.** The image already has an account, so the first boot never stops to
+ask for one (that question needs a keyboard and a screen): user **`ragnar`**,
+password **`ragnar`**, with `sudo`. Change the password on your first login
+with `passwd`; SSH is on. A username and password set in Raspberry Pi Imager
+replace it. Images older than this change (standard up to 1.11.0, CardputerZero
+1.0.0) have no preset account: set one in Imager.
 
 You can also flash it with any tool that writes a `.img` — decompress first with
 `xz -d RagnarOS-*.img.xz`.
@@ -164,8 +171,9 @@ What is different from the standard image:
   SQLMap, ZAP) and AirSnitch are left out. Ragnar can
   [hand those scans to a bigger unit](mesh.md) on the mesh instead.
 
-Flashing and first boot are the same as above: set a username, password and
-Wi-Fi in Raspberry Pi Imager, or join the **`Ragnar`** access point afterwards.
+Flashing and first boot are the same as above: the login is `ragnar` /
+`ragnar` (change it with `passwd`), and you set Wi-Fi in Raspberry Pi Imager or
+join the **`Ragnar`** access point afterwards.
 The image is the same Raspberry Pi OS Lite underneath, so it can also be made
 by hand: flash Raspberry Pi OS Lite (64-bit) and run `install_ragnar.sh`,
 choosing the CardputerZero option.

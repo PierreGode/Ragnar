@@ -325,8 +325,11 @@ gets it.
 
 **The quick way: flash the image.** Download
 `RagnarOS-CardputerZero-arm64.img.xz` from [ragnar.life](https://ragnar.life/),
-write it to the card with Raspberry Pi Imager (**Use custom**; set a username,
-password and Wi-Fi in its settings) and power on. The screen, keyboard, camera
+write it to the card with Raspberry Pi Imager (**Use custom**; Wi-Fi can be
+set in its settings) and power on. The image logs in as `ragnar` / `ragnar`
+(change it with `passwd`), so the first boot does not stop to ask for an
+account; image 1.0.0 did, and needs a username and password set in Imager.
+The screen, keyboard, camera
 and boot screen work from the first start, and a fitted LoRa Cap becomes a
 Meshtastic node on first boot. See
 [Ragnar OS → The CardputerZero image](ragnar-os.md#the-cardputerzero-image).

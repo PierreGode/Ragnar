@@ -4,6 +4,13 @@
 
 ### 2026-11-15
 
+#### docs(os): the images come with a ready account (ragnar / ragnar)
+*branch `docs/os-image-default-login`*
+
+- **No keyboard needed on first boot.** The standard and CardputerZero images used to stop on the first boot and ask, on the console, for a user name to replace `pi`. From the next image release the account is made at build time: user `ragnar`, password `ragnar`, with `sudo`. Change the password with `passwd`. A username and password set in Raspberry Pi Imager still replace it.
+- Images released before this (standard up to 1.11.0, CardputerZero 1.0.0) are unchanged: set the account in Raspberry Pi Imager when flashing them.
+- Docs: [ragnar-os.md](ragnar-os.md#flashing-it), [M5StackCardputerZero.md](M5StackCardputerZero.md). The change itself is in the build repository; nothing in this repo's code changes.
+
 #### feat(os): a Ragnar OS image for the M5Stack CardputerZero
 *branch `feat/cardputer-os-image`*
 
