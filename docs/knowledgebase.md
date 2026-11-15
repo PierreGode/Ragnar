@@ -560,9 +560,14 @@ Source: wardriving.md
 <!-- proof: docs/wardriving.md | Optional USB GPS receiver -->
 
 ### Do I need a GPS for wardriving?
-A USB GPS is optional and is auto-detected at startup, but it is what provides positions.
+A USB GPS is optional and is auto-detected at startup. Without one, the Ragnar Mobile app can supply the position from your phone.
 Source: wardriving.md
 <!-- proof: docs/wardriving.md | Optional USB GPS receiver -->
+
+### Can I use my phone's GPS for wardriving?
+Yes. In the Ragnar Mobile app turn on Wardrive → Live → Phone GPS. During a drive the app sends the phone's location to the unit about once a second. A GPS receiver on the unit still wins when it has a fix.
+Source: wardriving.md
+<!-- proof: docs/wardriving.md | turn on **Wardrive → Live → Phone GPS** -->
 
 ### What formats can wardriving export?
 WiGLE CSV and KML, plus a printable Wi-Fi survey report.

@@ -377,6 +377,9 @@ class GPSManager:
         # Set by update_external_fix(); cleared once a local receiver
         # produces a real fix.
         self._external_source = None
+        # Horizontal accuracy (m) reported by an external source that knows it
+        # (a phone); None for local receivers, which report HDOP instead.
+        self.accuracy_m = None
         # Self-aided start (gps_assist): pre-load last-known position, NTP time
         # and the receiver's own saved almanac/ephemeris so a battery-less
         # u-blox cold boot behaves like a warm/hot start. Orbit data lives next
@@ -809,6 +812,7 @@ class GPSManager:
                 'satellites_in_view': self.satellites_in_view,
                 'snr_max': self.snr_max,
                 'hdop': self.hdop,
+                'accuracy_m': self.accuracy_m if self._external_source else None,
                 # TTFF once fixed; until then, how long we have been searching.
                 'ttff_seconds': self.ttff_seconds,
                 'searching_seconds': (round(time.time() - self.start_time, 1)
@@ -829,7 +833,8 @@ class GPSManager:
             }
 
     def update_external_fix(self, lat, lon, alt=None, speed_kmh=None,
-                            satellites=None, hdop=None, source='companion'):
+                            satellites=None, hdop=None, source='companion',
+                            course=None, accuracy_m=None, epoch=None):
         """Inject a position from an external source (e.g. a USB-connected
         Piglet/HuginnESP companion that has its own GPS receiver).
 
@@ -838,6 +843,11 @@ class GPSManager:
         all see a position. A local receiver always wins: if NMEA from the
         directly-attached GPS arrived within the last 5 s we ignore the
         external update.
+
+        A phone (the Ragnar mobile app) also passes ``course``, its horizontal
+        ``accuracy_m`` and the fix time ``epoch`` (seconds). The fix time sets
+        the system clock under the same rules as GPS time from a receiver
+        (only while NTP is not synced, after agreeing samples).
         """
         if lat is None or lon is None:
             return False
@@ -845,6 +855,8 @@ class GPSManager:
             lat = float(lat)
             lon = float(lon)
         except (TypeError, ValueError):
+            return False
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
             return False
         # Reject the "no fix yet" sentinel many modules emit (0.0, 0.0 is
         # in the Gulf of Guinea — practically never a real wardriving fix).
@@ -883,6 +895,15 @@ class GPSManager:
                     self.hdop = float(hdop)
                 except (TypeError, ValueError):
                     pass
+            if course is not None:
+                try:
+                    self.course = float(course)
+                except (TypeError, ValueError):
+                    pass
+            try:
+                self.accuracy_m = float(accuracy_m) if accuracy_m is not None else None
+            except (TypeError, ValueError):
+                self.accuracy_m = None
             if self.fix_quality <= 0:
                 self.fix_quality = 1
             self.last_update = now
@@ -891,6 +912,11 @@ class GPSManager:
             self.connected = True
             self.error = None
             self._external_source = source
+        if epoch is not None:
+            try:
+                self._maybe_set_clock(float(epoch))
+            except (TypeError, ValueError):
+                pass
         return True
 
     def _read_loop_gpsd(self):

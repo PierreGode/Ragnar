@@ -76,6 +76,9 @@ required).
 
 Optional USB GPS receiver (NMEA via pyserial). Auto-detected at startup.
 
+No receiver? The phone can supply the position instead: see
+[Phone GPS](#phone-gps-ragnar-mobile-app).
+
 **u-blox receivers stuck in UBX binary mode.** Some u-blox 7 USB pucks
 (VID 1546) come up emitting only UBX binary frames instead of NMEA, which
 looks like a healthy receiver that never finds a position ("Searching..."
@@ -470,12 +473,54 @@ default on):
 Data recorded before a fix, while the clock was still wrong, is corrected by
 the same repair when the step happens.
 
+### Phone GPS (Ragnar Mobile app)
+
+A unit with no GPS receiver can take its position from the phone in the same
+car. In the [Ragnar Mobile](https://github.com/PierreGode/Ragnarmobile) app,
+turn on **Wardrive → Live → Phone GPS**. While a drive runs, the app sends the
+phone's location to the unit about once a second, and the unit pins networks,
+Bluetooth devices and cell towers to it exactly as it does with a receiver. The
+feed keeps running with the phone locked or the app in the background.
+
+- **A receiver on the unit wins.** If a GPS receiver is attached and has a fix
+  of its own (updated in the last 5 s), phone fixes are ignored; the app shows
+  that. When the receiver loses its fix, the phone takes over again.
+- **Only good fixes are sent.** The app does not send a fix whose accuracy is
+  worse than 60 m (a phone indoors, positioned by Wi-Fi or cell towers), so
+  networks are not pinned to the wrong street.
+- **Stale after 10 s**, like any GPS source: if the phone stops sending, the
+  unit has no fix until it resumes.
+- **Before a drive starts** the unit also accepts phone fixes, so the GPS card
+  shows the fix first. The app itself only sends during a drive.
+- **Clock.** The phone's fix time sets the unit's clock under the same rules as
+  [GPS time from a receiver](#clock-from-gps-offline-boots): only while NTP is
+  not synced, after three agreeing fixes.
+- **Not available from the phone:** satellite counts, SNR and the sky view.
+  The phone reports accuracy in metres instead (`accuracy_m`); HDOP is filled
+  with an estimate (accuracy ÷ 5 m).
+
+`/api/wardriving/gps` reports `source: phone` while the phone is the source.
+
+**API** — `POST /api/wardriving/gps/phone` (login required, like every other
+write):
+
+```json
+{"lat": 59.3293, "lon": 18.0686, "alt": 22.0, "speed_kmh": 38.2,
+ "course": 62.0, "accuracy": 5.2, "ts": 1794768955123}
+```
+
+Only `lat` and `lon` are required. `accuracy` is in metres, `ts` is the fix
+time in epoch milliseconds. The reply is
+`{"success": true, "accepted": true, "source": "phone", "has_fix": true, "running": false}`;
+`accepted` is `false` when a receiver on the unit is being used instead. Any
+client can use this endpoint, not only the app.
+
 ### Status Fields (`/api/wardriving/gps`)
 
 | Field | Meaning |
 |-------|---------|
 | `connected` | Port open and reader thread alive |
-| `source` | `gpsd` or `serial` |
+| `source` | `gpsd` or `serial`; `phone` or a companion's name when the position is fed from outside |
 | `port` | Device path |
 | `has_fix` | `fix_quality > 0` and lat/lon set and `last_update` within 10 s |
 | `fix_quality` | `0` no fix, `1` GPS, `2` DGPS |
@@ -483,6 +528,7 @@ the same repair when the step happens.
 | `satellites_in_view` | Total visible across constellations (from GSV) |
 | `snr_max` | Highest current SNR, dB-Hz |
 | `hdop` | Horizontal dilution of precision |
+| `accuracy_m` | Horizontal accuracy in metres, when the source reports it (a phone); otherwise `null` |
 | `latitude` / `longitude` / `altitude` | Most recent position |
 | `speed_kmh` / `course` | Velocity / heading |
 | `last_update` | Epoch of last GGA/RMC with position info |
