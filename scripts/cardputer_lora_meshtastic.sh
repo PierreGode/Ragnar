@@ -58,6 +58,10 @@ add_repository() {
     url="$OBS/$target"
     log "adding Meshtastic's package repository ($target)"
     mkdir -p "$(dirname "$KEYRING")" "$(dirname "$SOURCES")"
+    # A fresh Raspberry Pi OS Lite may have neither tool.
+    if [ -z "$ROOT" ] && { ! command -v gpg >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; }; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gnupg curl >/dev/null 2>&1 || true
+    fi
     if ! curl -fsSL "$url/Release.key" | gpg --dearmor > "$KEYRING.tmp" 2>/dev/null \
         || [ ! -s "$KEYRING.tmp" ]; then
         rm -f "$KEYRING.tmp"
@@ -111,6 +115,22 @@ EOF
     log "set a region before transmitting, e.g.: meshtastic --host 127.0.0.1 --set lora.region EU_868"
 }
 
+# The daemon only: installed, but neither configured nor started. For an
+# image build, where there is no Cap to look for. `install` does the rest on
+# the device once the Cap is fitted, and then needs no internet.
+package() {
+    if ! have_daemon && [ -z "$ROOT" ]; then
+        log "installing meshtasticd (left switched off until the LoRa Cap is fitted)"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y meshtasticd >/dev/null 2>&1 || {
+            add_repository && DEBIAN_FRONTEND=noninteractive apt-get install -y meshtasticd 2>&1 | tail -3
+        }
+    fi
+    have_daemon || { log "meshtasticd could not be installed"; return 1; }
+    sysctl_ disable meshtasticd.service
+    rm -f "$ROOT/etc/systemd/system/multi-user.target.wants/meshtasticd.service"
+    log "meshtasticd installed, not enabled"
+}
+
 remove() {
     rm -f "$CONF" "$DROPIN"
     mkdir -p "$(dirname "$OPTOUT")" && : > "$OPTOUT"
@@ -131,7 +151,8 @@ status() {
 
 case "${1:-}" in
     install) install ;;
+    package) package ;;
     remove) remove ;;
     status) status ;;
-    *) echo "usage: $0 install|remove|status"; exit 2 ;;
+    *) echo "usage: $0 install|package|remove|status"; exit 2 ;;
 esac

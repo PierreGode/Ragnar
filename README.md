@@ -35,7 +35,7 @@ sudo chmod +x install_ragnar.sh && sudo ./install_ragnar.sh
 
 Prefer containers? Run the headless web UI on any Linux host with `docker compose up -d --build`, then open **http://<host-ip>:8000**. Pi-only hardware (e-Paper, GPS, SDR, Wi-Fi monitor mode) isn't available in a container — see the [Docker Guide](docs/DOCKER.md).
 
-Don't want to run the installer at all? Flash **[Ragnar OS](docs/ragnar-os.md)** — a prebuilt Raspberry Pi image with Ragnar already installed and enabled. Write it with Raspberry Pi Imager, boot, open the web UI. For an offensive/red-team build with onboard-Wi-Fi monitor mode and the full toolset, flash **[Ragnar OS Ulfberht](docs/ragnar-os-ulfberht.md)** (built on a Kali ARM base).
+Don't want to run the installer at all? Flash **[Ragnar OS](docs/ragnar-os.md)** — a prebuilt Raspberry Pi image with Ragnar already installed and enabled. Write it with Raspberry Pi Imager, boot, open the web UI. For an offensive/red-team build with onboard-Wi-Fi monitor mode and the full toolset, flash **[Ragnar OS Ulfberht](docs/ragnar-os-ulfberht.md)** (built on a Kali ARM base). For the M5Stack CardputerZero there is [its own image](docs/ragnar-os.md#the-cardputerzero-image), with the screen and keyboard working from the first boot.
 
 More: [Install Guide](docs/INSTALL.md) · [Ragnar OS image](docs/ragnar-os.md) · [Ragnar OS Ulfberht](docs/ragnar-os-ulfberht.md) · [Releasing OS images](docs/releasing-os-images.md) · [AP Mode / getting on a network](docs/RagnarAP.md) · [Updating Ragnar](docs/updates.md) · [Releases (per-PR log)](docs/releases.md) · [Release Notes](docs/RELEASE_NOTES.md).
 

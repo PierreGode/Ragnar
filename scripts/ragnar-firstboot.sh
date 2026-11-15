@@ -165,6 +165,15 @@ if [ -n "$CONF_DISPLAY" ]; then
     fi
 fi
 
+# ── CardputerZero image: finish the hardware setup on the real board ────────
+# The image is built with no board to look at, so what depends on the fitted
+# Cap is done here: with the LoRa Cap on, meshtasticd (already on the image)
+# is configured and started. Needs no internet.
+if [ -f /etc/ragnar-cardputer-image ] && [ -f "$RAGNAR_PATH/scripts/cardputer_hardware.sh" ]; then
+    log "CardputerZero image — setting up the fitted hardware"
+    bash "$RAGNAR_PATH/scripts/cardputer_hardware.sh" setup 2>&1 | while IFS= read -r line; do log "$line"; done
+fi
+
 # ── 3c. HDMI kiosk on by default for capable boards ─────────────────────────
 # On a board with more than ~2 GiB RAM, bring up the on-screen kiosk (Chromium
 # full-screen on HDMI) in landscape by default, so flashing the image and

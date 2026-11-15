@@ -131,6 +131,8 @@ splash_board() {
 
 splash_prepare() {
     [ -n "$SPLASH_STATE" ] && return 0
+    # An image is built on some other machine: its screen is not ours to draw on.
+    [ "${IMAGE_BUILD:-false}" = true ] && { SPLASH_STATE="no"; return 0; }
     splash_board || return 0                  # asked again once the menu is answered
     SPLASH_STATE="no"
     command -v python3 >/dev/null 2>&1 || return 0
@@ -3091,7 +3093,11 @@ except:
     setup_services
 
     # A stock CardputerZero keeps the LCD and keyboard with its own launcher.
-    if [ "$CARDPUTER_MODE" = true ]; then
+    if [ "$CARDPUTER_MODE" = true ] && [ "$IMAGE_BUILD" = true ]; then
+        # Building the CardputerZero image: there is no board to ask, so
+        # everything the board needs is written into the image.
+        bash "$ragnar_PATH/scripts/cardputer_hardware.sh" image
+    elif [ "$CARDPUTER_MODE" = true ]; then
         bash "$ragnar_PATH/scripts/cardputer_takeover.sh" apply
         # Camera tools + expansion-header checks
         bash "$ragnar_PATH/scripts/cardputer_hardware.sh" setup

@@ -2,8 +2,9 @@
 
 The **Release OS images** workflow (`.github/workflows/release-os-images.yml`) is a
 one-click, manually-triggered pipeline that cuts a fresh release of the Ragnar OS
-images — the standard (defensive) edition and the Ulfberht (offensive) edition —
-and follows each build through to a published, downloadable release.
+images — the standard (defensive) edition, the Ulfberht (offensive) edition and
+the M5Stack CardputerZero image — and follows each build through to a published,
+downloadable release.
 
 It lives in this **public** repo on purpose: anyone with write access here (for
 example a collaborator such as `solarflere`) can start a release from the Actions
@@ -16,10 +17,11 @@ tab without needing direct access to the private build repo.
 
    | Input | Default | Meaning |
    |---|---|---|
-   | `which` | `both` | Release `both` images, or just `standard` / `ulfberht`. |
+   | `which` | `both` | `both` = standard + Ulfberht, `all` = those two plus the CardputerZero image, or just one: `standard` / `ulfberht` / `cardputer`. |
    | `bump` | `minor` | How to bump each edition's version: `minor` (1.7.0 → 1.8.0), `patch` (→ 1.7.1) or `major` (→ 2.0.0). Ignored for an edition where you type an explicit version. |
    | `std_version` | *(blank)* | Explicit standard version, e.g. `1.8.0`. Blank = auto-bump from the latest `os-v*` release. |
    | `ulf_version` | *(blank)* | Explicit Ulfberht version, e.g. `1.5.0`. Blank = auto-bump from the latest `os-ulfberht-v*` release. |
+   | `cpz_version` | *(blank)* | Explicit CardputerZero version, e.g. `1.1.0`. Blank = auto-bump from the latest `os-cardputer-v*` release (`1.0.0` when there is none yet). |
    | `dry_run` | `false` | Only print the versions it *would* release, create no tags. Handy to double-check the numbers **and to confirm the cross-repo token is healthy** before committing to a ~3-hour release. |
 
 3. Click **Run workflow** and watch it. The run page (and its summary) shows the
@@ -41,20 +43,20 @@ Actions tab (this repo)
 Release OS images
    │  1. compute next versions → print the Release plan (or use your overrides)
    │  2. validate RAGNAROS_DISPATCH_TOKEN (present, unexpired, Contents:write + Actions:read)
-   │  3. create tags  os-v<X.Y.Z>  and  os-ulfberht-v<X.Y.Z>  in PierreGode/RagnarOS
+   │  3. create tags  os-v<X.Y.Z> / os-ulfberht-v<X.Y.Z> / os-cardputer-v<X.Y.Z>  in PierreGode/RagnarOS
    ▼
 RagnarOS build workflows (tag-triggered, self-hosted Pi runner)
    │  build image → upload to ragnar.life → publish GitHub Release here
    ▼
 Release OS images (same run, still watching)
-   │  4. wait for both builds, verify the release + ragnar.life manifest
+   │  4. wait for the builds, verify the release + ragnar.life manifest
    │  5. mark the standard release as "Latest"
    ▼
 Done — images live at https://ragnar.life/ and on the Releases page
 ```
 
 The image builds themselves are defined in the private `PierreGode/RagnarOS` repo
-(`build-os-image.yml` / `build-ulfberht-image.yml`). They fire on a tag push, build
+(`build-os-image.yml` / `build-ulfberht-image.yml` / `build-cardputer-image.yml`). They fire on a tag push, build
 natively on the self-hosted `ragnar-os-builder` runner (the project's Raspberry Pi),
 upload the `.img.xz` to ragnar.life, and publish the GitHub Release back onto this
 repo. This pipeline just creates the tags and babysits the result.
@@ -96,11 +98,12 @@ passes with a warning so you have time to rotate it.
 
 ## Notes
 
-- The two images version **independently** (standard is currently ahead of Ulfberht),
-  so each is bumped from its own latest release.
+- The images version **independently** (standard is currently ahead of Ulfberht,
+  and the CardputerZero image starts at 1.0.0), so each is bumped from its own
+  latest release.
 - Builds share the single Pi runner, so they run **back-to-back**, not in parallel —
-  expect roughly 2½–3 hours for both.
-- The standard edition is deliberately kept as the **Latest** release; Ulfberht
-  publishes last and would otherwise take the badge.
+  expect roughly 2½–3 hours for `both`, and about an hour more for `all`.
+- The standard edition is deliberately kept as the **Latest** release; the other
+  editions publish later and would otherwise take the badge.
 - Re-running with a version that already has a tag fails fast ("tag exists") — bump
   to a higher number.
