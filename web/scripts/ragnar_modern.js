@@ -16723,8 +16723,8 @@ async function loadConfigData() {
         // Load wardriving on-boot toggle state (card is in config page)
         loadWardrivingOnBootState();
 
-        // Load Bluetooth provisioning toggle + adapter picker state
-        loadBleProvisioning();
+        // Load Bluetooth card state (mobile app over Bluetooth)
+        loadBle();
 
         // Load GPS-backfill opt-in state (gates the map Backfill GPS button)
         loadWardrivingBackfillState();
@@ -35950,14 +35950,13 @@ async function loadWardrivingOnBootState() {
     } catch (e) { /* silent */ }
 }
 
-// ---- Bluetooth handover (mobile-app discovery) ----
-// Advertises a BLE GATT service so the Ragnar mobile app can find this box and
-// read its IP. Off by default (shares the adapter with the BLE overlay
-// scanner). See ble_provisioning.py + docs/ble_provisioning.md.
-function _bleProvStatusText(d) {
+// ---- Ragnar Mobile over Bluetooth ----
+// Advertises a BLE service the mobile app finds and talks to (the Bluetooth
+// link). Off by default (shares the adapter with the BLE overlay scanner).
+// See ble_peripheral.py, ble_link.py + docs/bluetooth.md.
+function _bleStatusText(d) {
     if (!d.enabled) return 'Off.';
-    if (d.autostopped) return 'A phone has connected — advertising stopped to free the radio.';
-    if (d.running) return '● Findable as ' + (d.name || 'Ragnar') + (d.active_adapter && (d.adapters || []).length > 1 ? ' on ' + d.active_adapter : '') + '.';
+    if (d.running) return '● On — the app finds this box as ' + (d.name || 'Ragnar') + (d.active_adapter && (d.adapters || []).length > 1 ? ' (' + d.active_adapter + ')' : '') + '.';
     if (d.error) return 'On, but not advertising: ' + d.error + (d.hint ? ' — ' + d.hint : '');
     // Still registering with BlueZ — slow boards can take a while. Anything
     // else with no error is a state we have not heard back about yet.
@@ -35968,32 +35967,30 @@ function _bleProvStatusText(d) {
 // Poll until the peripheral settles. Registration on a slow board (Pi Zero 2 W)
 // can outlast the request that started it, and a single follow-up read then
 // caught it mid-start and left "Enabling…" on screen permanently.
-function _bleProvPollUntilSettled(tries) {
+function _blePollUntilSettled(tries) {
     tries = (typeof tries === 'number') ? tries : 8;
     if (tries <= 0) return;
     setTimeout(async () => {
         let d = null;
         try {
-            const res = await fetch('/api/ble/provisioning');
+            const res = await fetch('/api/ble/status');
             d = await res.json();
         } catch (e) { /* transient; keep trying */ }
-        await loadBleProvisioning();
+        await loadBle();
         // Keep going only while it is still coming up.
         if (d && d.enabled && !d.running && !d.error) {
-            _bleProvPollUntilSettled(tries - 1);
+            _blePollUntilSettled(tries - 1);
         }
     }, 1500);
 }
 
-async function loadBleProvisioning() {
+async function loadBle() {
     try {
-        const res = await fetch('/api/ble/provisioning');
+        const res = await fetch('/api/ble/status');
         const d = await res.json();
-        const cb = document.getElementById('ble-provisioning-enabled');
+        const cb = document.getElementById('ble-enabled');
         if (cb) cb.checked = !!d.enabled;
-        const asCb = document.getElementById('ble-provisioning-autostop');
-        if (asCb) asCb.checked = !!d.autostop;
-        const sel = document.getElementById('ble-provisioning-adapter');
+        const sel = document.getElementById('ble-adapter');
         if (sel) {
             // Rebuild options: Auto + each controller, tagging the built-in one.
             const current = d.adapter || '';
@@ -36007,45 +36004,28 @@ async function loadBleProvisioning() {
             sel.value = current;
         }
         // One radio = nothing to choose; keep the card to a single switch.
-        const selWrap = document.getElementById('ble-provisioning-adapter-wrap');
+        const selWrap = document.getElementById('ble-adapter-wrap');
         if (selWrap) selWrap.classList.toggle('hidden', (d.adapters || []).length < 2);
-        // The address the app will be handed, so "same network" is checkable.
-        const addr = document.getElementById('ble-provisioning-address');
-        if (addr) {
-            const list = (d.addresses || []).join(', ');
-            addr.textContent = list
-                ? 'Hands the app: ' + list
-                : 'This box has no network address yet — connect it to Wi-Fi or Ethernet first.';
-            addr.classList.toggle('text-amber-300', !list);
-            addr.classList.toggle('hidden', !d.enabled);
-        }
-        // Bluetooth link: switch, code and who is on it.
+        // The link code and who is on the link.
         const link = d.link || {};
-        const lw = document.getElementById('ble-link-wrap');
-        if (lw) lw.classList.toggle('hidden', !d.enabled);
-        const lcb = document.getElementById('ble-link-enabled');
-        if (lcb) lcb.checked = !!link.enabled;
         const lcw = document.getElementById('ble-link-code-wrap');
-        if (lcw) lcw.classList.toggle('hidden', !(link.enabled && link.code));
+        if (lcw) lcw.classList.toggle('hidden', !link.code);
         const lc = document.getElementById('ble-link-code');
         if (lc && link.code) lc.textContent = link.code.slice(0, 4) + ' ' + link.code.slice(4);
         const ls = document.getElementById('ble-link-status');
         if (ls) {
             const bits = [];
             if (link.locked_for) bits.push('Locked for ' + link.locked_for + ' s after wrong codes');
-            else if (link.connected) bits.push('● ' + link.connected + (link.connected === 1 ? ' phone' : ' phones') + ' on the link');
-            else bits.push('No phone on the link right now');
+            else if (link.connected) bits.push('● ' + link.connected + (link.connected === 1 ? ' phone' : ' phones') + ' connected');
+            else bits.push('Ready for a phone');
             if (link.requests) bits.push(link.requests + ' requests · ' + Math.round((link.bytes_out || 0) / 1024) + ' kB sent');
             ls.textContent = bits.join(' · ');
         }
         const ll = document.getElementById('ble-link-login');
         if (ll) ll.classList.toggle('hidden', !!link.login);
-        // Show the Advertise-again button only once it has auto-stopped.
-        const rebtn = document.getElementById('ble-provisioning-readvertise');
-        if (rebtn) rebtn.classList.toggle('hidden', !(d.enabled && d.autostopped));
         // Under-voltage warning: running BLE + a USB radio on a weak PSU can
         // reset the whole Pi. Surface it so a "crash" reads as power, not code.
-        const pw = document.getElementById('ble-provisioning-power');
+        const pw = document.getElementById('ble-power');
         if (pw) {
             if (d.power && d.power.message) {
                 pw.textContent = '⚠ ' + d.power.message;
@@ -36054,88 +36034,51 @@ async function loadBleProvisioning() {
                 pw.classList.add('hidden');
             }
         }
-        const st = document.getElementById('ble-provisioning-status');
-        if (st) st.textContent = _bleProvStatusText(d);
+        const st = document.getElementById('ble-status');
+        if (st) st.textContent = _bleStatusText(d);
     } catch (e) { /* silent */ }
-}
-
-async function setBleProvisioningAutostop(cb) {
-    const enabled = !!(document.getElementById('ble-provisioning-enabled') || {}).checked;
-    try {
-        await postAPI('/api/ble/provisioning/toggle', { enabled, autostop: !!cb.checked });
-        addConsoleMessage('Stop after a phone connects: ' + (cb.checked ? 'on' : 'off'), 'success');
-        setTimeout(loadBleProvisioning, 600);
-    } catch (e) {
-        console.error('[BLE] autostop set error:', e);
-        addConsoleMessage('Failed to set auto-stop', 'error');
-        cb.checked = !cb.checked;
-    }
-}
-
-async function setBleLink(cb) {
-    const enabled = !!(document.getElementById('ble-provisioning-enabled') || {}).checked;
-    try {
-        await postAPI('/api/ble/provisioning/toggle', { enabled, link: !!cb.checked });
-        addConsoleMessage('App over Bluetooth ' + (cb.checked ? 'on' : 'off'), 'success');
-        setTimeout(loadBleProvisioning, 400);
-    } catch (e) {
-        console.error('[BLE] link set error:', e);
-        addConsoleMessage('Failed to change the Bluetooth link', 'error');
-        cb.checked = !cb.checked;
-    }
 }
 
 async function newBleLinkCode() {
     if (!confirm('Make a new link code? Phones that used the old one will ask for the new one.')) return;
-    const enabled = !!(document.getElementById('ble-provisioning-enabled') || {}).checked;
+    const enabled = !!(document.getElementById('ble-enabled') || {}).checked;
     try {
-        await postAPI('/api/ble/provisioning/toggle', { enabled, new_link_code: true });
+        await postAPI('/api/ble/toggle', { enabled, new_link_code: true });
         addConsoleMessage('New Bluetooth link code', 'success');
-        setTimeout(loadBleProvisioning, 400);
+        setTimeout(loadBle, 400);
     } catch (e) {
         console.error('[BLE] new code error:', e);
         addConsoleMessage('Failed to make a new code', 'error');
     }
 }
 
-async function readvertiseBle() {
-    try {
-        await postAPI('/api/ble/provisioning/toggle', { enabled: true });
-        addConsoleMessage('Advertising over Bluetooth again', 'success');
-        setTimeout(loadBleProvisioning, 600);
-    } catch (e) {
-        console.error('[BLE] re-advertise error:', e);
-        addConsoleMessage('Failed to re-advertise', 'error');
-    }
-}
-
-async function toggleBleProvisioning(checkbox) {
+async function toggleBle(checkbox) {
     const enabled = !!checkbox.checked;
-    const st = document.getElementById('ble-provisioning-status');
+    const st = document.getElementById('ble-status');
     if (st) st.textContent = enabled ? 'Enabling…' : 'Disabling…';
     try {
-        const res = await postAPI('/api/ble/provisioning/toggle', { enabled });
-        addConsoleMessage('Bluetooth handover ' + (enabled ? 'on' : 'off'), 'success');
-        if (res && st) st.textContent = _bleProvStatusText(Object.assign({ enabled: enabled }, res));
+        const res = await postAPI('/api/ble/toggle', { enabled });
+        addConsoleMessage('App over Bluetooth ' + (enabled ? 'on' : 'off'), 'success');
+        if (res && st) st.textContent = _bleStatusText(Object.assign({ enabled: enabled }, res));
         // A toggle answer carries no adapter list; the reload below fills it in.
         // Re-read for the active adapter / advertised name once settled.
-        setTimeout(loadBleProvisioning, 600);
+        setTimeout(loadBle, 600);
         // Keep watching while it is still registering.
-        if (enabled && res && !res.running) _bleProvPollUntilSettled();
+        if (enabled && res && !res.running) _blePollUntilSettled();
     } catch (e) {
-        console.error('[BLE] provisioning toggle error:', e);
-        addConsoleMessage('Failed to update Bluetooth handover', 'error');
+        console.error('[BLE] toggle error:', e);
+        addConsoleMessage('Failed to change Bluetooth', 'error');
         checkbox.checked = !enabled;
         if (st) st.textContent = 'Failed to update.';
     }
 }
 
-async function setBleProvisioningAdapter(sel) {
-    const enabled = !!(document.getElementById('ble-provisioning-enabled') || {}).checked;
+async function setBleAdapter(sel) {
+    const enabled = !!(document.getElementById('ble-enabled') || {}).checked;
     try {
-        await postAPI('/api/ble/provisioning/toggle', { enabled, adapter: sel.value });
+        await postAPI('/api/ble/toggle', { enabled, adapter: sel.value });
         addConsoleMessage('Bluetooth adapter set to ' + (sel.value || 'auto'), 'success');
-        setTimeout(loadBleProvisioning, 600);
+        setTimeout(loadBle, 600);
     } catch (e) {
         console.error('[BLE] adapter set error:', e);
         addConsoleMessage('Failed to set Bluetooth adapter', 'error');

@@ -436,20 +436,20 @@ Source: blewatch.md
 Source: blewatch.md
 <!-- proof: docs/blewatch.md | Network → Diagnostics → L2 tab -->
 
-### How does the mobile app find a unit over Bluetooth?
-Turn on **Let the app find this box** under Settings → Bluetooth, then tap **Find Ragnar over Bluetooth** in the app. On the same network the app then connects over Wi-Fi; with no network it stays on Bluetooth.
-Source: ble_provisioning.md
-<!-- proof: docs/ble_provisioning.md | **Settings → Bluetooth → Let the app find this box → on** -->
+### How does the mobile app connect over Bluetooth?
+Turn on **Use the app over Bluetooth** under Settings → Bluetooth, then tap **Connect over Bluetooth** in the app and enter the link code shown on that card. The app talks to the unit over Bluetooth itself.
+Source: bluetooth.md
+<!-- proof: docs/bluetooth.md | **Settings → Bluetooth → Use the app over Bluetooth → on** -->
 
-### Can the mobile app talk to a unit over Bluetooth alone?
-Yes, for small things. The Bluetooth link carries the dashboard numbers, wardriving status and controls, Phone GPS and other actions. Live streams such as the RF waterfall and very large lists still need Wi-Fi or the mesh.
-Source: ble_provisioning.md
-<!-- proof: docs/ble_provisioning.md | live streams such as the RF waterfall (refused -->
+### What works in the mobile app over Bluetooth?
+The dashboard numbers, wardriving with Phone GPS, alerts, device inventory, toggles and other actions. Live streams such as the RF waterfall run over the mesh or Wi-Fi.
+Source: bluetooth.md
+<!-- proof: docs/bluetooth.md | Live streams such as the RF waterfall, and the full web UI, run over the mesh or -->
 
 ### What is the Bluetooth link code?
-An 8-digit code shown under Settings → Bluetooth. The app asks for it once before it may use the unit over Bluetooth. **New code** replaces it and signs every phone out of the link.
-Source: ble_provisioning.md
-<!-- proof: docs/ble_provisioning.md | A phone must prove it knows the unit's 8-digit **link code** -->
+An 8-digit code shown under Settings → Bluetooth. The app asks for it once per unit. **New code** replaces it and signs every phone out.
+Source: bluetooth.md
+<!-- proof: docs/bluetooth.md | A phone proves it knows the unit's 8-digit **link code** -->
 
 ## Alerts and reporting
 

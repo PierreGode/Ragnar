@@ -4,18 +4,19 @@
 
 ### 2026-11-15
 
-#### feat(bluetooth): use the app over Bluetooth — no Wi-Fi needed; the access point (PAN) is removed
-*branch `chore/bluetooth-handover-only`*
+#### feat(bluetooth): the mobile app talks to the unit over Bluetooth
+*branch `feat/bluetooth-link`*
 
-- **Bluetooth link.** With no network between the phone and the unit — in a car, in the field — the [Ragnar Mobile](https://github.com/PierreGode/Ragnarmobile) app now keeps working over Bluetooth: dashboard numbers, wardriving status and start/stop, Phone GPS, alerts, toggles and other actions. The app's ordinary requests travel over BLE and are answered by the same routes as over HTTP. Docs: [ble_provisioning.md](ble_provisioning.md#bluetooth-link).
-- **Small data only.** Answers are compressed (the test unit's 33 kB device list crossed as 2.7 kB). Live streams such as the RF waterfall, and answers still over 128 kB after compression, are refused and the app says that view needs Wi-Fi.
-- **Link code.** A phone must know the unit's 8-digit code, shown under Settings → Bluetooth; the app asks once. Nothing is paired. Wrong guesses lock the link. The unit's login still applies after the code. On a unit with no login password the code is the only protection, and the card says so.
-- **Wardriving without a GPS receiver or a hotspot:** Phone GPS reaches the unit over the link, so the phone and the unit no longer need a shared network in the car.
-- **Settings → Bluetooth is one card.** Find switch, advertised name, the address handed to the app, the link switch and code. The adapter picker only appears on a unit with more than one Bluetooth controller.
-- **Removed: Bluetooth access point (PAN).** Android connects that profile but never runs IP over it. Gone with it: the card, `bt_pan.py`, every `/api/bt/pan/*` route, the paired-devices list, the "Clear all Bluetooth pairings" button, and the `bluez-tools` / `bridge-utils` packages from the installers. A unit that had it on cleans up by itself the first time it starts after the update.
-- **New:** `ble_link.py`; config `ble_link_enabled` (default on), `ble_link_code`; `GET /api/ble/provisioning` gains `addresses` and `link`; `POST /api/ble/provisioning/toggle` takes `link` and `new_link_code`. A development simulator, `POST /api/ble/link/sim`, is off unless `ble_link_sim` is set.
-- Needs the matching Ragnar Mobile release.
-- Tested on the dev unit (Pi 5): the link driven through the real GATT characteristics over D-Bus, and the whole app run through the simulator. **Not yet tested from a phone over the air** — real speed, and the link next to the unit's own Bluetooth scanning during a drive, are unmeasured.
+- **Bluetooth is the connection.** The [Ragnar Mobile](https://github.com/PierreGode/Ragnarmobile) app finds the nearest unit and talks to it over Bluetooth (BLE): dashboard numbers, wardriving status and start/stop, Phone GPS, alerts, device inventory, toggles and other actions. The phone and the unit only have to be within radio range. Docs: [bluetooth.md](bluetooth.md).
+- **How it works.** The app's ordinary requests travel over BLE and are answered by the same routes as over HTTP (`ble_link.py`). Answers are compressed: the test unit's 33 kB device list crosses as 2.7 kB.
+- **Live streams and the web UI run over the mesh or Wi-Fi.** Over Bluetooth a stream, or an answer above 128 kB compressed, is declined and the app says so.
+- **Link code.** The unit shows an 8-digit code under Settings → Bluetooth; the app asks for it once per unit. Wrong guesses lock the link. The unit's login applies after the code.
+- **Wardriving with the phone as GPS** now works with the phone and the unit simply in the same car.
+- **Settings → Bluetooth is one card with one switch:** *Use the app over Bluetooth*, the advertised name, the link code and who is connected. A unit with several Bluetooth controllers also gets an adapter picker.
+- **Replaces the IP handover.** Bluetooth used to hand the app the unit's IP address for a Wi-Fi connection. That is gone, along with the network-status and hotspot characteristics and "auto-stop after provisioning". **Update the mobile app together with the unit:** an older app finds the unit but cannot connect over Bluetooth.
+- **Removed: Bluetooth access point (PAN)** — the card, `bt_pan.py`, every `/api/bt/pan/*` route, the paired-devices list and the `bluez-tools` / `bridge-utils` packages. A unit that had it on cleans up by itself the first time it starts after the update.
+- **New:** `ble_link.py`; config `ble_link_code`; `GET /api/ble/status` gains `link`; `POST /api/ble/toggle` takes `new_link_code`. A development simulator, `POST /api/ble/link/sim`, runs when `ble_link_sim` is set.
+- Tested on the dev unit (Pi 5): the link driven through the real GATT characteristics over D-Bus, and the whole app run through the simulator. **A phone test over the air is still to do** — real speed, and the link next to the unit's own Bluetooth scanning during a drive.
 
 #### feat(wardriving): use the phone's GPS — no receiver needed
 *branch `feat/phone-gps`*
@@ -2032,7 +2033,7 @@ A single consolidated PR (supersedes the earlier #991/#992/#993, closed to avoid
 #### [#822](https://github.com/PierreGode/Ragnar/pull/822) — fix(config): only restart the service for settings that actually need it
 *Merged 2026-09-20 · branch `fix/restart-only-when-needed` · 7 file(s), +277 / −15*
 
-- **Docs:** [ble_provisioning.md](ble_provisioning.md), [spec.md](spec.md)
+- **Docs:** [bluetooth.md](bluetooth.md), [spec.md](spec.md)
 
 #### [#821](https://github.com/PierreGode/Ragnar/pull/821) — fix(network): stop every target flapping Offline/Degraded between scans
 *Merged 2026-09-20 · branch `fix/host-liveness-flapping` · 5 file(s), +399 / −17*
@@ -3767,7 +3768,7 @@ A single consolidated PR (supersedes the earlier #991/#992/#993, closed to avoid
 *Merged 2026-07-28 · branch `feat/ragnarmobile-tailscale` · 3 file(s), +53 / −10*
 
 - docs: mobile app discovers the mesh via /api/mesh/status, no token
-- **Docs:** [README (root)](../README.md), [ble_provisioning.md](ble_provisioning.md), [mesh.md](mesh.md)
+- **Docs:** [README (root)](../README.md), [bluetooth.md](bluetooth.md), [mesh.md](mesh.md)
 
 ### 2026-07-27
 
@@ -3876,18 +3877,18 @@ A single consolidated PR (supersedes the earlier #991/#992/#993, closed to avoid
 #### [#492](https://github.com/PierreGode/Ragnar/pull/492) — BLE provisioning: confirm Invalid Parameters is the controller, not us
 *Merged 2026-07-25 · branch `fix/ble-adv-register-failed` · 3 file(s), +116 / −4*
 
-- **Docs:** [ble_provisioning.md](ble_provisioning.md)
+- **Docs:** [bluetooth.md](bluetooth.md)
 
 #### [#491](https://github.com/PierreGode/Ragnar/pull/491) — BLE provisioning: name the real reason a controller refuses to advertise
 *Merged 2026-07-25 · branch `fix/ble-adv-register-failed` · 3 file(s), +528 / −31*
 
 - BLE provisioning: detect the raw-HCI scan BlueZ can't see
-- **Docs:** [ble_provisioning.md](ble_provisioning.md)
+- **Docs:** [bluetooth.md](bluetooth.md)
 
 #### [#490](https://github.com/PierreGode/Ragnar/pull/490) — BLE provisioning: survive a controller that refuses the advertisement
 *Merged 2026-07-25 · branch `fix/ble-adv-register-failed` · 5 file(s), +452 / −23*
 
-- **Docs:** [ble_provisioning.md](ble_provisioning.md)
+- **Docs:** [bluetooth.md](bluetooth.md)
 
 #### [#489](https://github.com/PierreGode/Ragnar/pull/489) — Serve the dashboard, not the captive portal, on a 192.168.4.0/24 LAN
 *Merged 2026-07-25 · branch `fix/wifi-portal-blocks-dashboard` · 5 file(s), +501 / −33*
@@ -3907,7 +3908,7 @@ A single consolidated PR (supersedes the earlier #991/#992/#993, closed to avoid
 #### [#487](https://github.com/PierreGode/Ragnar/pull/487) — BLE provisioning: fix the leak behind RegisterApplication AlreadyExists
 *Merged 2026-07-25 · branch `fix/ble-already-exists` · 3 file(s), +92 / −4*
 
-- **Docs:** [ble_provisioning.md](ble_provisioning.md)
+- **Docs:** [bluetooth.md](bluetooth.md)
 
 #### [#486](https://github.com/PierreGode/Ragnar/pull/486) — Kiosk: stop calling a slow install a failure, and report the real error
 *Merged 2026-07-25 · branch `fix/kiosk-install-progress` · 4 file(s), +106 / −3*
@@ -3921,7 +3922,7 @@ A single consolidated PR (supersedes the earlier #991/#992/#993, closed to avoid
 - Fix the two package failures a fresh install actually reports
 - Repair an interrupted dpkg state instead of failing on it
 - BLE provisioning: stop reporting a slow start as a permanent 'Enabling...'
-- **Docs:** [INSTALL.md](INSTALL.md), [ble_provisioning.md](ble_provisioning.md)
+- **Docs:** [INSTALL.md](INSTALL.md), [bluetooth.md](bluetooth.md)
 
 #### [#484](https://github.com/PierreGode/Ragnar/pull/484) — Installer: repair a tarball install instead of skipping it
 *Merged 2026-07-25 · branch `fix/installer-repairs-tarball-install` · 2 file(s), +38 / −3*
@@ -3932,7 +3933,7 @@ A single consolidated PR (supersedes the earlier #991/#992/#993, closed to avoid
 *Merged 2026-07-25 · branch `fix/install-package-resilience` · 4 file(s), +212 / −25*
 
 - Installer: stop a broken git from wrecking the install layout
-- **Docs:** [INSTALL.md](INSTALL.md), [ble_provisioning.md](ble_provisioning.md)
+- **Docs:** [INSTALL.md](INSTALL.md), [bluetooth.md](bluetooth.md)
 
 ### 2026-07-24
 
@@ -3957,7 +3958,7 @@ A single consolidated PR (supersedes the earlier #991/#992/#993, closed to avoid
 *Merged 2026-07-24 · branch `feat/ble-provisioning-config` · 5 file(s), +342 / −17*
 
 - BLE provisioning: auto-stop after provisioning to free the adapter
-- **Docs:** [ble_provisioning.md](ble_provisioning.md)
+- **Docs:** [bluetooth.md](bluetooth.md)
 
 #### [#476](https://github.com/PierreGode/Ragnar/pull/476) — README: mention the mobile app and BLE provisioning
 *Merged 2026-07-24 · branch `feat/ble-provisioning` · 1 file(s), +7 / −0*
@@ -3967,7 +3968,7 @@ A single consolidated PR (supersedes the earlier #991/#992/#993, closed to avoid
 #### [#475](https://github.com/PierreGode/Ragnar/pull/475) — Add BLE provisioning peripheral for the mobile app
 *Merged 2026-07-24 · branch `feat/ble-provisioning` · 5 file(s), +912 / −4*
 
-- **Docs:** [ble_provisioning.md](ble_provisioning.md)
+- **Docs:** [bluetooth.md](bluetooth.md)
 
 #### [#473](https://github.com/PierreGode/Ragnar/pull/473) — Net-diag LCD: add BT and ZIGBEE scan cards to the 1.44" HAT
 *Merged 2026-07-24 · branch `netdiag-bt-zigbee-cards` · 5 file(s), +214 / −19*

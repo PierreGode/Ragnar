@@ -219,13 +219,6 @@ def test_compressible_answers_pass_and_incompressible_ones_are_refused(hub):
     assert p.req('GET', '/api/csv') == (200, b'a,b\n1,2\n')
 
 
-def test_switching_the_link_off_refuses_everything(hub):
-    cfg = {'ble_link_code': '12345678', 'ble_link_enabled': False}
-    off = LinkHub(_app(), get_config=lambda: cfg)
-    p = Phone(off)
-    assert p.call({'t': 'hello', 'cid': 'c'})[0] == 403
-
-
 def test_a_code_is_created_and_saved_when_there_is_none():
     cfg, saved = {}, []
     hub = LinkHub(_app(), get_config=lambda: cfg, save_config=lambda: saved.append(1))
@@ -242,3 +235,14 @@ def test_whole_message_path_used_by_the_simulator(hub):
         hub.message('sim:a', json.dumps({'t': 'req', 'm': 'GET', 'p': '/api/ping'}).encode()))
     assert status == 200 and is_json and json.loads(body)['pong'] is True
     assert unpack_response(hub.message('sim:b', json.dumps({'t': 'req', 'm': 'GET', 'p': '/api/ping'}).encode()))[0] == 401
+
+
+def test_what_is_readable_before_the_code_names_only_a_ragnar():
+    """The one readable characteristic is open to anyone in radio range, so it
+    must not say where the unit is or what it runs."""
+    import ble_peripheral
+    info = ble_peripheral.DataProviders('/nonexistent', 'hci0', lambda: {}, link=object()).device_info()
+    assert set(info) == {'name', 'box_id', 'link'} and info['link'] == 1
+    assert ble_peripheral.DataProviders('/nonexistent', 'hci0', lambda: {}).device_info()['link'] == 0
+    for gone in ('net_status', 'ap_creds', 'apply_ap'):
+        assert not hasattr(ble_peripheral.DataProviders, gone)

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Bluetooth link — the mobile app's small requests, carried over BLE.
 
-The Bluetooth handover (ble_provisioning.py) only tells the app where the unit
-is on the network. This module lets the app keep working when there is no
-network between the phone and the unit at all — in a car, in the field: the
-app's ordinary API requests travel over two GATT characteristics and are
-answered by the same Flask routes that answer them over HTTP.
+This is how the mobile app talks to a unit over Bluetooth, with no network
+between the phone and the unit at all — in a car, in the field: the app's
+ordinary API requests travel over two GATT characteristics and are answered by
+the same Flask routes that answer them over HTTP. Bluetooth never hands out
+the unit's IP address; it carries the requests themselves.
 
 It is for SMALL things: dashboard numbers, wardrive status, start/stop, the
 phone's GPS fixes, toggles. BLE moves some tens of kB/s, so a response that is
@@ -29,7 +29,7 @@ Access
     over HTTP. The traffic is not encrypted beyond what BLE itself does — the
     same as the app's plain HTTP on a local network.
 
-This file has no D-Bus or GLib in it: ble_provisioning.py owns the radio and
+This file has no D-Bus or GLib in it: ble_peripheral.py owns the radio and
 hands frames in and out, so everything here is testable without Bluetooth.
 """
 
@@ -181,7 +181,7 @@ class _Peer:
 
 
 class LinkHub:
-    """Answers link messages. Owns no radio — see ble_provisioning.py."""
+    """Answers link messages. Owns no radio — see ble_peripheral.py."""
 
     def __init__(self, app, get_config: Callable[[], dict], logger=None,
                  save_config: Optional[Callable[[], None]] = None):
@@ -207,9 +207,6 @@ class LinkHub:
             return cfg if cfg is not None else {}
         except Exception:
             return {}
-
-    def enabled(self) -> bool:
-        return bool(self._cfg().get('ble_link_enabled', True))
 
     def code(self) -> str:
         """The link code, created the first time it is needed."""
@@ -302,8 +299,6 @@ class LinkHub:
 
     def _handle(self, peer: _Peer, msg: dict) -> bytes:
         kind = msg.get('t')
-        if not self.enabled():
-            return _json_response(403, {'error': 'The Bluetooth link is switched off on this unit.'})
         if kind == 'hello':
             peer.nonce = secrets.token_hex(16)
             peer.authed = False

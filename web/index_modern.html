@@ -8814,68 +8814,41 @@
                 </div><!-- /cfg-sub-network -->
 
                 <div id="cfg-sub-bluetooth" class="cfg-subview hidden">
-                <!-- Ragnar Mobile over Bluetooth: handover + Bluetooth link.
-                     The Ragnar mobile app finds this box over BLE and reads its
-                     LAN IP (ble_provisioning.py + the app's src/ble.ts), then
-                     connects over Wi-Fi — or, with no network between them,
-                     keeps talking over BLE (ble_link.py). -->
-                <div id="ble-provisioning-section" class="mb-8">
+                <!-- Ragnar Mobile over Bluetooth. The mobile app finds this box
+                     over BLE and talks to it over BLE (ble_peripheral.py owns
+                     the radio, ble_link.py the protocol). -->
+                <div id="ble-section" class="mb-8">
                     <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Ragnar Mobile over Bluetooth</h3>
 
                     <div class="glass rounded-lg p-4 mb-4">
                         <div class="flex items-center justify-between">
                             <div>
-                                <h4 class="font-medium">Let the app find this box</h4>
-                                <p class="text-xs text-gray-500 mt-1">The Ragnar mobile app finds this box over Bluetooth and reads its address — no typing an IP. On the same network it then connects over Wi-Fi.</p>
+                                <h4 class="font-medium">Use the app over Bluetooth</h4>
+                                <p class="text-xs text-gray-500 mt-1">The Ragnar mobile app finds this box and talks to it over Bluetooth: status, wardriving, Phone GPS and controls. Live streams such as the waterfall run over the mesh or Wi-Fi.</p>
                             </div>
                             <label class="toggle-switch relative inline-flex items-center cursor-pointer">
-                                <input type="checkbox" id="ble-provisioning-enabled" class="sr-only peer" onchange="toggleBleProvisioning(this)">
+                                <input type="checkbox" id="ble-enabled" class="sr-only peer" onchange="toggleBle(this)">
                                 <div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
                             </label>
                         </div>
-                        <p id="ble-provisioning-status" class="text-sm mt-3 text-gray-400">—</p>
-                        <p id="ble-provisioning-address" class="hidden text-xs mt-1 text-gray-500"></p>
-                        <button id="ble-provisioning-readvertise" class="hidden mt-3 px-3 py-1.5 rounded-lg bg-Ragnar-600 hover:bg-Ragnar-500 text-white text-sm" onclick="readvertiseBle()">Advertise again</button>
-                        <p id="ble-provisioning-power" class="hidden text-xs mt-3 px-3 py-2 rounded-lg bg-amber-900/40 border border-amber-700 text-amber-200"></p>
-                        <!-- Bluetooth link: the app's small requests over BLE (ble_link.py). -->
-                        <div id="ble-link-wrap" class="hidden mt-4 pt-4 border-t border-slate-700">
-                            <div class="flex items-center justify-between">
-                                <div>
-                                    <h4 class="font-medium text-sm">Use the app over Bluetooth</h4>
-                                    <p class="text-xs text-gray-500 mt-1">With no Wi-Fi between the phone and this box — in the car, in the field — the app keeps working over Bluetooth: status, wardriving, Phone GPS and controls. Maps, long lists and live streams still need Wi-Fi.</p>
-                                </div>
-                                <label class="toggle-switch relative inline-flex items-center cursor-pointer">
-                                    <input type="checkbox" id="ble-link-enabled" class="sr-only peer" onchange="setBleLink(this)">
-                                    <div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
-                                </label>
+                        <p id="ble-status" class="text-sm mt-3 text-gray-400">—</p>
+                        <div id="ble-link-code-wrap" class="hidden mt-4 pt-4 border-t border-slate-700">
+                            <div class="text-xs text-gray-400">Link code — the app asks for it once</div>
+                            <div class="flex items-center flex-wrap gap-3 mt-1">
+                                <span id="ble-link-code" class="font-mono text-2xl tracking-widest text-white">—</span>
+                                <button class="px-3 py-1.5 rounded-lg border border-slate-600 text-gray-300 hover:bg-slate-700 text-xs" onclick="newBleLinkCode()">New code</button>
                             </div>
-                            <div id="ble-link-code-wrap" class="hidden mt-3">
-                                <div class="text-xs text-gray-400">Link code — the app asks for it once</div>
-                                <div class="flex items-center flex-wrap gap-3 mt-1">
-                                    <span id="ble-link-code" class="font-mono text-2xl tracking-widest text-white">—</span>
-                                    <button class="px-3 py-1.5 rounded-lg border border-slate-600 text-gray-300 hover:bg-slate-700 text-xs" onclick="newBleLinkCode()">New code</button>
-                                </div>
-                                <p id="ble-link-status" class="text-xs mt-2 text-gray-500"></p>
-                                <p id="ble-link-login" class="hidden text-xs mt-2 px-3 py-2 rounded-lg bg-amber-900/40 border border-amber-700 text-amber-200">This box has no login password, so the link code is the only thing between a nearby phone and its controls. Keep the code private, or set a password under Security.</p>
-                            </div>
+                            <p id="ble-link-status" class="text-xs mt-2 text-gray-500"></p>
+                            <p id="ble-link-login" class="hidden text-xs mt-2 px-3 py-2 rounded-lg bg-amber-900/40 border border-amber-700 text-amber-200">The link code is what protects this box over Bluetooth — keep it private. A login password under Security adds a second lock.</p>
                         </div>
+                        <p id="ble-power" class="hidden text-xs mt-3 px-3 py-2 rounded-lg bg-amber-900/40 border border-amber-700 text-amber-200"></p>
                         <!-- Only shown when the box has more than one Bluetooth radio. -->
-                        <div id="ble-provisioning-adapter-wrap" class="hidden mt-4">
+                        <div id="ble-adapter-wrap" class="hidden mt-4">
                             <label class="block text-sm text-gray-400 mb-1">Bluetooth adapter</label>
-                            <select id="ble-provisioning-adapter" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm" onchange="setBleProvisioningAdapter(this)">
+                            <select id="ble-adapter" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm" onchange="setBleAdapter(this)">
                                 <option value="">Auto — prefer built-in radio</option>
                             </select>
                             <p class="text-xs text-gray-500 mt-2">Advertise on the built-in radio and keep a USB dongle free for scanning.</p>
-                        </div>
-                        <div class="mt-4 flex items-center justify-between">
-                            <div>
-                                <h4 class="font-medium text-sm">Stop once a phone has connected</h4>
-                                <p class="text-xs text-gray-500 mt-1">Frees the Bluetooth radio for scanning after the app has read the address. Leave off to stay findable.</p>
-                            </div>
-                            <label class="toggle-switch relative inline-flex items-center cursor-pointer">
-                                <input type="checkbox" id="ble-provisioning-autostop" class="sr-only peer" onchange="setBleProvisioningAutostop(this)">
-                                <div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
-                            </label>
                         </div>
                     </div>
                 </div>
@@ -10211,7 +10184,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261115-blelink"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261115-bleonly"></script>
 
 
 
