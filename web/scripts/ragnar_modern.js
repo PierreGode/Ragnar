@@ -36019,6 +36019,27 @@ async function loadBleProvisioning() {
             addr.classList.toggle('text-amber-300', !list);
             addr.classList.toggle('hidden', !d.enabled);
         }
+        // Bluetooth link: switch, code and who is on it.
+        const link = d.link || {};
+        const lw = document.getElementById('ble-link-wrap');
+        if (lw) lw.classList.toggle('hidden', !d.enabled);
+        const lcb = document.getElementById('ble-link-enabled');
+        if (lcb) lcb.checked = !!link.enabled;
+        const lcw = document.getElementById('ble-link-code-wrap');
+        if (lcw) lcw.classList.toggle('hidden', !(link.enabled && link.code));
+        const lc = document.getElementById('ble-link-code');
+        if (lc && link.code) lc.textContent = link.code.slice(0, 4) + ' ' + link.code.slice(4);
+        const ls = document.getElementById('ble-link-status');
+        if (ls) {
+            const bits = [];
+            if (link.locked_for) bits.push('Locked for ' + link.locked_for + ' s after wrong codes');
+            else if (link.connected) bits.push('● ' + link.connected + (link.connected === 1 ? ' phone' : ' phones') + ' on the link');
+            else bits.push('No phone on the link right now');
+            if (link.requests) bits.push(link.requests + ' requests · ' + Math.round((link.bytes_out || 0) / 1024) + ' kB sent');
+            ls.textContent = bits.join(' · ');
+        }
+        const ll = document.getElementById('ble-link-login');
+        if (ll) ll.classList.toggle('hidden', !!link.login);
         // Show the Advertise-again button only once it has auto-stopped.
         const rebtn = document.getElementById('ble-provisioning-readvertise');
         if (rebtn) rebtn.classList.toggle('hidden', !(d.enabled && d.autostopped));
@@ -36048,6 +36069,32 @@ async function setBleProvisioningAutostop(cb) {
         console.error('[BLE] autostop set error:', e);
         addConsoleMessage('Failed to set auto-stop', 'error');
         cb.checked = !cb.checked;
+    }
+}
+
+async function setBleLink(cb) {
+    const enabled = !!(document.getElementById('ble-provisioning-enabled') || {}).checked;
+    try {
+        await postAPI('/api/ble/provisioning/toggle', { enabled, link: !!cb.checked });
+        addConsoleMessage('App over Bluetooth ' + (cb.checked ? 'on' : 'off'), 'success');
+        setTimeout(loadBleProvisioning, 400);
+    } catch (e) {
+        console.error('[BLE] link set error:', e);
+        addConsoleMessage('Failed to change the Bluetooth link', 'error');
+        cb.checked = !cb.checked;
+    }
+}
+
+async function newBleLinkCode() {
+    if (!confirm('Make a new link code? Phones that used the old one will ask for the new one.')) return;
+    const enabled = !!(document.getElementById('ble-provisioning-enabled') || {}).checked;
+    try {
+        await postAPI('/api/ble/provisioning/toggle', { enabled, new_link_code: true });
+        addConsoleMessage('New Bluetooth link code', 'success');
+        setTimeout(loadBleProvisioning, 400);
+    } catch (e) {
+        console.error('[BLE] new code error:', e);
+        addConsoleMessage('Failed to make a new code', 'error');
     }
 }
 

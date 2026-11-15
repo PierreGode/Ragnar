@@ -437,14 +437,19 @@ Source: blewatch.md
 <!-- proof: docs/blewatch.md | Network → Diagnostics → L2 tab -->
 
 ### How does the mobile app find a unit over Bluetooth?
-Turn on **Bluetooth handover** under Settings → Bluetooth, then tap **Find Ragnar over Bluetooth** in the app. The app reads the unit's address over Bluetooth and connects over Wi-Fi, so the phone and the unit must be on the same network.
+Turn on **Let the app find this box** under Settings → Bluetooth, then tap **Find Ragnar over Bluetooth** in the app. On the same network the app then connects over Wi-Fi; with no network it stays on Bluetooth.
 Source: ble_provisioning.md
-<!-- proof: docs/ble_provisioning.md | **Settings → Bluetooth → Bluetooth handover → on** -->
+<!-- proof: docs/ble_provisioning.md | **Settings → Bluetooth → Let the app find this box → on** -->
 
 ### Can the mobile app talk to a unit over Bluetooth alone?
-No. Bluetooth only hands over the unit's address; everything else runs over Wi-Fi. The old Bluetooth access point (PAN) was removed because Android never runs IP over it.
+Yes, for small things. The Bluetooth link carries the dashboard numbers, wardriving status and controls, Phone GPS and other actions. Live streams such as the RF waterfall and very large lists still need Wi-Fi or the mesh.
 Source: ble_provisioning.md
-<!-- proof: docs/ble_provisioning.md | Bluetooth carries the address and nothing else -->
+<!-- proof: docs/ble_provisioning.md | live streams such as the RF waterfall (refused -->
+
+### What is the Bluetooth link code?
+An 8-digit code shown under Settings → Bluetooth. The app asks for it once before it may use the unit over Bluetooth. **New code** replaces it and signs every phone out of the link.
+Source: ble_provisioning.md
+<!-- proof: docs/ble_provisioning.md | A phone must prove it knows the unit's 8-digit **link code** -->
 
 ## Alerts and reporting
 

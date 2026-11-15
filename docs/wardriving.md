@@ -515,6 +515,10 @@ time in epoch milliseconds. The reply is
 `accepted` is `false` when a receiver on the unit is being used instead. Any
 client can use this endpoint, not only the app.
 
+**No shared network needed.** If the phone cannot reach the unit over Wi-Fi, the
+app uses the [Bluetooth link](ble_provisioning.md#bluetooth-link) and the fixes
+travel over Bluetooth. Connect with **Connect → Bluetooth** in the app.
+
 ### Status Fields (`/api/wardriving/gps`)
 
 | Field | Meaning |

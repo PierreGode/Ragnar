@@ -1,36 +1,83 @@
-# Bluetooth handover
+# Ragnar Mobile over Bluetooth
 
-How the [Ragnar Mobile](https://github.com/PierreGode/Ragnarmobile) app finds a
-unit without anyone typing an IP address. It is the only Bluetooth path between
-the app and a unit.
+Two things the [Ragnar Mobile](https://github.com/PierreGode/Ragnarmobile) app
+does with a unit over Bluetooth (BLE). Both live on one card:
+**Settings → Bluetooth**.
+
+| | What it does | Needs a network between phone and unit |
+|---|---|---|
+| **Handover** | The app finds the unit and reads its address, then connects over Wi-Fi. | Yes |
+| **Bluetooth link** | The app keeps working over Bluetooth itself: status, wardriving, Phone GPS, controls. | No |
 
 ## Using it
 
-1. On the unit: **Settings → Bluetooth → Bluetooth handover → on**. The card
-   shows the name it advertises (`Ragnar-xxxx`) and the address it hands out.
-2. Put the phone on the **same network** as the unit.
-3. In the app: **Connect → Bluetooth → Find Ragnar over Bluetooth**.
+1. On the unit: **Settings → Bluetooth → Let the app find this box → on**. The
+   card shows the name it advertises (`Ragnar-xxxx`), the address it hands out
+   and the **link code**.
+2. In the app: **Connect → Bluetooth → Find Ragnar over Bluetooth**.
+3. If the phone can reach the unit over Wi-Fi, the app connects over Wi-Fi. If
+   it cannot — the unit is in a car with no network — the app asks for the link
+   code once and stays on Bluetooth. **Stay on Bluetooth (no Wi-Fi)** skips the
+   Wi-Fi attempt.
 
-The app scans for the unit, reads its address over Bluetooth and connects to
-that address over Wi-Fi. Bluetooth carries the address and nothing else, which
-is why the phone and the unit have to share a network. There is no pairing.
+There is no pairing in either case.
 
-> **The Bluetooth access point (PAN) is gone.** Earlier releases had a second
-> card that turned the unit into a Bluetooth network access point. Android
-> connects that profile but never runs IP over it, so the app could not reach a
-> unit that way. The card, `bt_pan.py` and the `/api/bt/pan/*` routes were
-> removed. A unit that had it switched on removes its `pan0` bridge, DHCP
-> server and pairing agent, and stops being discoverable for pairing, the first
-> time it starts after the update.
+## Bluetooth link
+
+The app's ordinary API requests travel over two extra GATT characteristics and
+are answered by the same routes that answer them over HTTP (`ble_link.py`). So
+every screen of the app works without being rebuilt for Bluetooth — as long as
+the answer is small.
+
+- **Good over Bluetooth:** the dashboard numbers, wardriving status, start and
+  stop, [Phone GPS](wardriving.md#phone-gps-ragnar-mobile-app) (the phone's
+  position, once a second), alerts, toggles and other actions.
+- **Needs Wi-Fi or the mesh:** live streams such as the RF waterfall (refused
+  with `415`), and any answer still larger than 128 kB after compression
+  (refused with `413`). The app shows "Too much data for Bluetooth".
+- **Speed:** BLE moves some tens of kB per second. Answers are compressed, which
+  for JSON is typically ten to one: the 33 kB device list of the test unit
+  crossed as 2.7 kB.
+
+**Access.** A phone must prove it knows the unit's 8-digit **link code**, shown
+on the card. The code itself is never sent: the phone answers a one-time
+challenge with an HMAC of it. Five wrong answers lock the link for a minute,
+doubling up to fifteen. **New code** on the card replaces it and signs every
+phone out of the link. After the code, the unit's own login applies exactly as
+it does over HTTP — the app shows its login screen.
+
+The traffic is not encrypted beyond what BLE itself does, the same as the app's
+plain HTTP on a local network. On a unit with **no login password** the link
+code is the only thing between a nearby phone and the unit's controls; the card
+says so. Set a password under Settings → Security, or switch **Use the app over
+Bluetooth** off.
+
+**Switching it off.** *Use the app over Bluetooth* on the card
+(`ble_link_enabled`). The handover keeps working.
+
+**Reviewing it without a phone.** With `ble_link_sim: true` in the config, the
+unit accepts link messages over HTTP at `POST /api/ble/link/sim` and the browser
+build of the app offers *Simulate the Bluetooth link* on its Connect screen. The
+same hub answers — same code check, same size limits — and the app feeds the
+answer back at about BLE speed. Off by default; leave it off on a unit in use.
+
+> **The Bluetooth access point (PAN) is gone.** Earlier releases had a card that
+> turned the unit into a Bluetooth network access point. Android connects that
+> profile but never runs IP over it, so the app could not reach a unit that way.
+> The card, `bt_pan.py` and the `/api/bt/pan/*` routes were removed. A unit that
+> had it switched on removes its `pan0` bridge, DHCP server and pairing agent,
+> and stops being discoverable for pairing, the first time it starts after the
+> update.
 
 ## How it works
 
 `ble_provisioning.py` is a BlueZ GATT peripheral that lets a client discover a
 box over Bluetooth and learn how to reach it over IP.
 
-## What it is — and isn't
+## Why the handover exists, and why the link is for small data
 
-It is **provisioning only**. No dashboard data ever crosses Bluetooth:
+The handover moves one small answer; the link moves small answers. Neither is a
+way to run the whole dashboard over Bluetooth:
 
 - iOS cannot use Bluetooth Classic / RFCOMM without MFi hardware, so BLE GATT
   is the only cross-platform option — and GATT manages only ~5–20 KB/s.
@@ -38,9 +85,10 @@ It is **provisioning only**. No dashboard data ever crosses Bluetooth:
   belongs on Wi-Fi. The box already runs hostapd for the no-infrastructure
   case.
 
-So the peripheral answers exactly one question — *where do I find this box on
-IP?* — then gets out of the way. Everything it exposes fits inside a single
-512-byte GATT attribute, so neither side implements chunking.
+So the handover answers exactly one question — *where do I find this box on
+IP?* — and everything it exposes fits inside a single 512-byte GATT attribute.
+The link is the part that chunks: messages are cut into frames that fit the
+connection's MTU and reassembled on the other side.
 
 ## Off by default
 
@@ -60,7 +108,7 @@ to enumerate as `hci0`.
 
 ## Web config
 
-**Settings → Bluetooth → Bluetooth handover** has the on/off switch, the
+**Settings → Bluetooth** has the on/off switch, the
 advertised name and the address handed to the app. A unit with more than one
 Bluetooth controller also gets an adapter picker (the built-in one is tagged);
 with a single controller there is nothing to pick and the picker is hidden.
@@ -74,7 +122,8 @@ switching the adapter restarts the peripheral on the new one.
 network-status or AP-credentials characteristic, a short grace timer
 (`AUTOSTOP_GRACE_MS`, 15 s, reset on each read) arms; when it expires the
 peripheral stops advertising and releases the controller for Ragnar's other
-Bluetooth work (`bt_scanner`, WIDS).
+Bluetooth work (`bt_scanner`, WIDS). A phone that is using the Bluetooth link
+keeps the peripheral up: every answer starts the countdown again.
 
 This is for **single-radio** boxes. The trade-off: once stopped, the app can no
 longer rediscover the box over Bluetooth until it advertises again — use the
@@ -117,6 +166,13 @@ the app can scan filtered by it and iOS can discover in the background.
 | Network status | `7322574d-…` | read, notify | `{api_port, ifaces:[{name,ip}], ap_active, ap_ssid}` |
 | AP credentials | `2fdc016e-…` | encrypted read | `{ssid, psk}` |
 | AP control | `b8a58eb8-…` | encrypted write | `{action: "start_ap"｜"stop_ap"}` |
+| Link RX | `a3f1c2d4-…f601` | write | one frame of a request (app → unit) |
+| Link TX | `a3f1c2d4-…f602` | notify | one frame of an answer (unit → app) |
+
+Link wire format: frame = `id:u16 | seq:u16 (bit 15 = last) | payload`;
+request = JSON `{"t":"hello"|"auth"|"req", …}`; answer =
+`status:u16 | flags:u8 | body` (flag 1 = zlib, 2 = JSON). `net_status` carries
+`link: true` when the unit offers the link.
 
 The two AP characteristics require a bonded (encrypted) link, so BlueZ runs
 pairing on first use — the hotspot key is never exposed on an open link, and

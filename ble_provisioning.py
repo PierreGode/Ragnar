@@ -175,7 +175,11 @@ class DataProviders:
         get_config: Callable[[], dict],
         get_ap_state: Optional[Callable[[], dict]] = None,
         set_ap: Optional[Callable[[bool], bool]] = None,
+        link=None,
     ):
+        # ble_link.LinkHub, or None: carries the app's small requests over BLE
+        # (two extra characteristics on the same service).
+        self.link = link
         self.base_dir = base_dir
         self.hci = hci
         self._get_config = get_config
@@ -222,6 +226,8 @@ class DataProviders:
             'ifaces': _interfaces(),
             'ap_active': bool(ap.get('active', False)),
             'ap_ssid': ap.get('ssid'),
+            # The app may keep talking to this unit over Bluetooth (ble_link.py).
+            'link': bool(self.link is not None and self.link.enabled()),
         }
 
     def ap_creds(self) -> dict:
@@ -401,6 +407,22 @@ class BleProvisioningServer:
                 pass
         self._stop_timer = self._glib.timeout_add(AUTOSTOP_GRACE_MS, self._autostop_fire)
 
+    def _link_activity(self) -> None:
+        """A phone is using the Bluetooth link (called from a worker thread).
+        If auto-stop is counting down, start the count again: stopping would
+        unregister the service and cut the phone off mid-drive."""
+        if self._stop_timer is None or self._glib is None:
+            return
+
+        def _rearm():
+            self._on_provisioned()
+            return False  # one-shot
+
+        try:
+            self._glib.idle_add(_rearm)
+        except Exception:
+            pass
+
     def _autostop_fire(self):
         self._stop_timer = None
         self._autostopped = True
@@ -496,6 +518,8 @@ class BleProvisioningServer:
                           'GATT; expect the registration below to be refused',
                           'warning')
 
+            if self.providers.link is not None:
+                self.providers.link.on_activity = self._link_activity
             app = _Application(bus, self.providers, self._on_provisioned)
             self._app_path = app.path
             adv = _Advertisement(bus, 0, self.providers, includes=includes,
@@ -751,6 +775,14 @@ def _build_dbus_classes():
                                on_read=on_provisioned),
                 ApControlCharacteristic(bus, 3, self, providers),
             ]
+            if providers.link is not None:
+                import ble_link
+                tx = LinkTxCharacteristic(bus, 4, self, ble_link.CHAR_LINK_TX)
+                self.characteristics += [
+                    tx,
+                    LinkRxCharacteristic(bus, 5, self, ble_link.CHAR_LINK_RX,
+                                         providers.link, tx),
+                ]
 
         def get_path(self):
             return dbus.ObjectPath(self.path)
@@ -846,6 +878,78 @@ def _build_dbus_classes():
                 self.providers.apply_ap(False)
             else:
                 raise NotSupported()
+
+        @dbus.service.method(GATT_CHRC, in_signature='a{sv}', out_signature='ay')
+        def ReadValue(self, options):
+            raise NotSupported()
+
+    class LinkTxCharacteristic(Characteristic):
+        """Unit → app. Answers leave as notifications, a frame each.
+
+        push() is called from the link's worker threads; the frames are queued
+        and sent from the GLib loop, a few per tick, so a long answer does not
+        hold the loop or hand BlueZ a megabyte at once.
+        """
+
+        BURST = 6
+        TICK_MS = 15
+
+        def __init__(self, bus, index, service, uuid):
+            super().__init__(bus, index, service, uuid, ['notify'], reader=lambda: b'')
+            from gi.repository import GLib
+            import collections
+            self._glib = GLib
+            self._queue = collections.deque()
+            self._pumping = False
+
+        def push(self, frames):
+            self._queue.extend(frames)
+            self._glib.idle_add(self._kick)
+
+        def _kick(self):
+            if not self._pumping:
+                self._pumping = True
+                self._glib.timeout_add(self.TICK_MS, self._pump)
+            return False  # one-shot
+
+        def _pump(self):
+            if not self.notifying:
+                self._queue.clear()         # nobody is listening any more
+            for _ in range(self.BURST):
+                if not self._queue:
+                    break
+                frame = self._queue.popleft()
+                self.PropertiesChanged(
+                    GATT_CHRC,
+                    {'Value': dbus.Array([dbus.Byte(b) for b in frame], signature='y')},
+                    [],
+                )
+            if self._queue:
+                return True                 # keep ticking
+            self._pumping = False
+            return False
+
+        @dbus.service.method(GATT_CHRC, in_signature='a{sv}', out_signature='ay')
+        def ReadValue(self, options):
+            raise NotSupported()
+
+    class LinkRxCharacteristic(Characteristic):
+        """App → unit. Each write is one frame of a request."""
+
+        def __init__(self, bus, index, service, uuid, hub, tx):
+            super().__init__(bus, index, service, uuid,
+                             ['write', 'write-without-response'], reader=lambda: b'')
+            self.hub = hub
+            self.tx = tx
+
+        @dbus.service.method(GATT_CHRC, in_signature='aya{sv}')
+        def WriteValue(self, value, options):
+            device = str(options.get('device', 'unknown'))
+            try:
+                mtu = int(options.get('mtu', 23))
+            except Exception:
+                mtu = 23
+            self.hub.on_frame(device, bytes(bytearray(value)), mtu, self.tx.push)
 
         @dbus.service.method(GATT_CHRC, in_signature='a{sv}', out_signature='ay')
         def ReadValue(self, options):
@@ -1307,7 +1411,7 @@ def _caps_summary(hci: str, caps: dict) -> str:
 
 
 def build_server(base_dir, get_config, get_ap_state=None, set_ap=None,
-                 logger=None, adapter=None) -> Optional[BleProvisioningServer]:
+                 logger=None, adapter=None, link=None) -> Optional[BleProvisioningServer]:
     """Construct (but do not start) a server, or None if no adapter exists."""
     cfg = {}
     try:
@@ -1319,7 +1423,7 @@ def build_server(base_dir, get_config, get_ap_state=None, set_ap=None,
         if logger:
             logger.warning('[ble-prov] no Bluetooth adapter available')
         return None
-    providers = DataProviders(base_dir, hci, get_config, get_ap_state, set_ap)
+    providers = DataProviders(base_dir, hci, get_config, get_ap_state, set_ap, link=link)
     return BleProvisioningServer(
         providers, logger=logger,
         auto_stop=bool(cfg.get('ble_provisioning_autostop', False)),

@@ -4,16 +4,18 @@
 
 ### 2026-11-15
 
-#### chore(bluetooth): one Bluetooth card that works — the access point (PAN) is removed
+#### feat(bluetooth): use the app over Bluetooth — no Wi-Fi needed; the access point (PAN) is removed
 *branch `chore/bluetooth-handover-only`*
 
-- **Settings → Bluetooth now has one card: Bluetooth handover.** It is the way the [Ragnar Mobile](https://github.com/PierreGode/Ragnarmobile) app finds a unit: the app reads the unit's address over Bluetooth and connects over Wi-Fi.
-- **Removed: Bluetooth access point (PAN).** Android connects that profile but never runs IP over it, so the app could not reach a unit through it. Gone with it: the card, `bt_pan.py`, every `/api/bt/pan/*` route, the paired-devices list and the "Clear all Bluetooth pairings" button (the handover needs no pairing), and the `bluez-tools` / `bridge-utils` packages from the installers.
-- **A unit that had the access point on cleans up by itself** the first time it starts after the update: the `pan0` bridge, its DHCP server and the pairing agent are removed and the adapter stops being discoverable for pairing. Turn on **Bluetooth handover** instead.
-- **The handover card is simpler.** One switch, the name the unit advertises, and the address the app will be handed (with a warning when the unit has no network address to hand over). The adapter picker only appears on a unit with more than one Bluetooth controller.
-- `GET /api/ble/provisioning` gains `addresses`.
-- Docs: [ble_provisioning.md](ble_provisioning.md) (now "Bluetooth handover"); `bluetooth-pan.md` is removed.
-- Tested on the dev unit (Pi 5): the access point torn down, the handover advertising as `Ragnar-b4e2`. Not yet read from a phone in this change.
+- **Bluetooth link.** With no network between the phone and the unit — in a car, in the field — the [Ragnar Mobile](https://github.com/PierreGode/Ragnarmobile) app now keeps working over Bluetooth: dashboard numbers, wardriving status and start/stop, Phone GPS, alerts, toggles and other actions. The app's ordinary requests travel over BLE and are answered by the same routes as over HTTP. Docs: [ble_provisioning.md](ble_provisioning.md#bluetooth-link).
+- **Small data only.** Answers are compressed (the test unit's 33 kB device list crossed as 2.7 kB). Live streams such as the RF waterfall, and answers still over 128 kB after compression, are refused and the app says that view needs Wi-Fi.
+- **Link code.** A phone must know the unit's 8-digit code, shown under Settings → Bluetooth; the app asks once. Nothing is paired. Wrong guesses lock the link. The unit's login still applies after the code. On a unit with no login password the code is the only protection, and the card says so.
+- **Wardriving without a GPS receiver or a hotspot:** Phone GPS reaches the unit over the link, so the phone and the unit no longer need a shared network in the car.
+- **Settings → Bluetooth is one card.** Find switch, advertised name, the address handed to the app, the link switch and code. The adapter picker only appears on a unit with more than one Bluetooth controller.
+- **Removed: Bluetooth access point (PAN).** Android connects that profile but never runs IP over it. Gone with it: the card, `bt_pan.py`, every `/api/bt/pan/*` route, the paired-devices list, the "Clear all Bluetooth pairings" button, and the `bluez-tools` / `bridge-utils` packages from the installers. A unit that had it on cleans up by itself the first time it starts after the update.
+- **New:** `ble_link.py`; config `ble_link_enabled` (default on), `ble_link_code`; `GET /api/ble/provisioning` gains `addresses` and `link`; `POST /api/ble/provisioning/toggle` takes `link` and `new_link_code`. A development simulator, `POST /api/ble/link/sim`, is off unless `ble_link_sim` is set.
+- Needs the matching Ragnar Mobile release.
+- Tested on the dev unit (Pi 5): the link driven through the real GATT characteristics over D-Bus, and the whole app run through the simulator. **Not yet tested from a phone over the air** — real speed, and the link next to the unit's own Bluetooth scanning during a drive, are unmeasured.
 
 #### feat(wardriving): use the phone's GPS — no receiver needed
 *branch `feat/phone-gps`*

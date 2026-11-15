@@ -237,6 +237,19 @@ def api_provenance():
 
 _ble_server = None
 _ble_lock = threading.Lock()
+_ble_link_hub = None
+
+
+def _ble_link():
+    """The Bluetooth link hub (ble_link.py): answers the app's small requests
+    over BLE through these same Flask routes. One per process."""
+    global _ble_link_hub
+    if _ble_link_hub is None:
+        import ble_link
+        _ble_link_hub = ble_link.LinkHub(
+            app, get_config=lambda: shared_data.config, logger=logger,
+            save_config=shared_data.save_config)
+    return _ble_link_hub
 
 
 def _ble_ap_state():
@@ -296,6 +309,7 @@ def _start_ble_provisioning():
                 get_ap_state=_ble_ap_state,
                 set_ap=_ble_set_ap,
                 logger=logger,
+                link=_ble_link(),
             )
             if _ble_server is None:
                 return False
@@ -335,6 +349,21 @@ def _ble_addresses():
         return [f"{i['ip']}:{port}" for i in ble_provisioning._interfaces()]
     except Exception:
         return []
+
+
+def _ble_link_status(advertising):
+    """Link card state. The code is only handed to a caller who may see the
+    Settings page anyway (this route sits behind the normal login)."""
+    try:
+        hub = _ble_link()
+        st = hub.status()
+        st['enabled'] = hub.enabled()
+        st['code'] = hub.code() if advertising and st['enabled'] else None
+        st['login'] = bool(auth_mgr.is_configured())
+        st['sim'] = bool(shared_data.config.get('ble_link_sim', False))
+        return st
+    except Exception as e:
+        return {'enabled': False, 'error': str(e)}
 
 
 def _ble_power():
@@ -391,6 +420,8 @@ def ble_provisioning_status():
         # What a phone is handed, so the card can show it (and warn when the
         # box has no address to hand over at all).
         'addresses': _ble_addresses(),
+        # The Bluetooth link: the app's small requests over BLE (ble_link.py).
+        'link': _ble_link_status(enabled and running),
         'autostop': bool(shared_data.config.get('ble_provisioning_autostop', False)),
         # True once a phone provisioned and the peripheral freed the adapter.
         'autostopped': autostopped,
@@ -424,6 +455,15 @@ def ble_provisioning_toggle():
             if _ble_server is not None:
                 _ble_server.set_auto_stop(new_autostop)
 
+    # The link switch and "new code" are live too: the hub reads the config on
+    # every message, so neither needs the peripheral rebuilt.
+    if 'link' in payload:
+        shared_data.config['ble_link_enabled'] = bool(payload.get('link'))
+    if payload.get('new_link_code'):
+        import ble_link
+        shared_data.config['ble_link_code'] = ble_link.new_code()
+        _ble_link().forget_clients()
+
     shared_data.config['ble_provisioning_enabled'] = enable
     shared_data.save_config()
 
@@ -454,6 +494,19 @@ def ble_provisioning_toggle():
         return jsonify({'enabled': True, 'running': True, 'starting': False})
     _stop_ble_provisioning()
     return jsonify({'enabled': False, 'running': False})
+
+
+@app.route('/api/ble/link/sim', methods=['POST'])
+def ble_link_sim():
+    """Development only (config ``ble_link_sim``): one Bluetooth-link message
+    in, its answer out, over HTTP. The browser build of the app has no
+    Bluetooth, so this is how the link is reviewed from a desk — same hub, same
+    code check, same size limits as on the air. Off unless switched on."""
+    if not shared_data.config.get('ble_link_sim', False):
+        return jsonify({'error': 'not enabled'}), 404
+    peer = 'sim:' + (request.headers.get('X-Link-Peer') or request.remote_addr or '?')[:64]
+    out = _ble_link().message(peer, request.get_data(cache=False) or b'')
+    return Response(out, mimetype='application/octet-stream')
 
 
 # ---------------------------------------------------------------------------
@@ -833,6 +886,11 @@ def check_authentication():
     # Whitelist: paths that must be accessible without authentication
     whitelist_prefixes = ['/login', '/api/auth/', '/api/kill', '/api/provenance']
     if any(path.startswith(p) for p in whitelist_prefixes):
+        return
+    # The Bluetooth-link simulator (development, off by default) is its own
+    # gate: every message it carries is checked against the link code and then
+    # against this very function, exactly like a message off the air.
+    if path == '/api/ble/link/sim' and shared_data.config.get('ble_link_sim', False):
         return
     # Public read so the login page renders in the configured language.
     if path == '/api/i18n/language' and request.method == 'GET':
