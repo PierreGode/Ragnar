@@ -17699,16 +17699,65 @@ def wardriving_gps():
     """Get current GPS status and position."""
     try:
         engine = _get_wardriving_engine()
-        if engine._gps:
-            status = engine._gps.get_status()
+        # The session's reader; between sessions, a phone-fed one (mobile app).
+        gps = engine._gps or engine.current_gps()
+        if gps:
+            status = gps.get_status()
             # Include the per-satellite sky list so the live fullscreen sky view
             # can poll this cheap, uncached endpoint instead of the heavy,
             # 5 s-cached /diagnostics one.
-            status['sky'] = engine._gps.get_sky_view()
+            status['sky'] = gps.get_sky_view()
             return jsonify(status)
         return jsonify({'connected': False, 'error': 'GPS not initialized'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/wardriving/gps/phone', methods=['POST'])
+def wardriving_gps_phone():
+    """Take a position fix from a phone (the Ragnar mobile app), so a unit
+    without a GPS receiver can still pin what it scans.
+
+    Body: {"lat": .., "lon": .., "alt": m, "speed_kmh": .., "course": deg,
+           "accuracy": m, "ts": fix time in epoch ms, "source": "phone"}
+    Only lat/lon are required. A local receiver with a fresh fix wins: the
+    reply then has accepted=false and names the source in use.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+
+        def _num(key, lo=None, hi=None):
+            v = data.get(key)
+            if v is None or isinstance(v, bool):
+                return None
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                return None
+            if v != v or v in (float('inf'), float('-inf')):
+                return None
+            if (lo is not None and v < lo) or (hi is not None and v > hi):
+                return None
+            return v
+
+        lat, lon = _num('lat', -90, 90), _num('lon', -180, 180)
+        if lat is None or lon is None:
+            return jsonify({'success': False, 'error': 'lat and lon are required'}), 400
+        ts = _num('ts', 0)
+        source = re.sub(r'[^A-Za-z0-9 _.-]', '', str(data.get('source') or 'phone'))[:24] or 'phone'
+        engine = _get_wardriving_engine()
+        accepted = engine.phone_gps_fix(
+            lat, lon, alt=_num('alt', -1000, 20000), speed_kmh=_num('speed_kmh', 0, 1500),
+            course=_num('course', 0, 360), accuracy_m=_num('accuracy', 0, 100000),
+            epoch=(ts / 1000.0) if ts else None, source=source)
+        gps = engine.current_gps()
+        st = gps.get_status() if gps else {}
+        return jsonify({'success': True, 'accepted': bool(accepted),
+                        'source': st.get('source'), 'has_fix': bool(st.get('has_fix')),
+                        'running': bool(engine._running)})
+    except Exception as e:
+        logger.error(f"Wardriving phone GPS error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 def _start_gps_manager(engine):
     """Create and start the wardriving engine's GPSManager (without starting

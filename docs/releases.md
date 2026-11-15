@@ -4,6 +4,17 @@
 
 ### 2026-11-15
 
+#### feat(wardriving): use the phone's GPS — no receiver needed
+*branch `feat/phone-gps`*
+
+- **Phone GPS.** A unit with no GPS receiver can take its position from the phone in the same car. In the [Ragnar Mobile](https://github.com/PierreGode/Ragnarmobile) app, turn on **Wardrive → Live → Phone GPS**: during a drive the app sends the phone's location about once a second and the unit pins everything it finds to it. Docs: [wardriving.md](wardriving.md#phone-gps-ragnar-mobile-app).
+- **A receiver on the unit still wins** when it has a fix of its own; the phone takes over when it does not.
+- **New endpoint** `POST /api/wardriving/gps/phone` (`lat`, `lon`, optional `alt`, `speed_kmh`, `course`, `accuracy`, `ts`). The unit accepts fixes between drives too, so the GPS card shows the fix before Start.
+- `/api/wardriving/gps` reports `source: phone` and a new `accuracy_m` field (metres). The phone's fix time sets the clock under the same rules as GPS time from a receiver.
+- `/api/wardriving/gps` used to answer "GPS not initialized" between drives even with a standby reader open; it now reports that reader.
+- Needs the matching Ragnar Mobile release, which also adds a live map, a searchable network list and uploads to WiGLE / WDGWars / Wardrift from the phone.
+- Tested on the dev unit with posted fixes. Not yet driven with a phone.
+
 #### docs(os): the images come with a ready account (ragnar / ragnar)
 *branch `docs/os-image-default-login`*
 

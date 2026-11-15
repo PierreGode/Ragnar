@@ -2096,6 +2096,8 @@ class WardrivingEngine:
         self._cell_thread = None
         self._gps = None
         self._standby_gps = None   # GPS reader for when no session runs (see standby_gps)
+        self._phone_gps = None     # receiver-less manager fed by the mobile app (see phone_gps_fix)
+        self._phone_gps_last = 0.0
         self.session = None
         self.scan_interval = 2  # seconds between scans (fast!)
         self.interfaces = []     # WiFi interfaces to use
@@ -2359,12 +2361,67 @@ class WardrivingEngine:
                 pass
             logger.info("Standby GPS reader closed")
 
+    # ── Phone GPS ──────────────────────────────────────────────────────────
+    # The Ragnar mobile app can feed the phone's own location to the box, so a
+    # unit with no GPS receiver still pins what it scans. Fixes go into the
+    # session's reader while one runs (a GPSManager exists even when no
+    # receiver was found). Between sessions they go to a standby reader if one
+    # is open, else to a receiver-less manager kept only for the phone, so the
+    # GPS status shows the fix before Start is pressed.
+    PHONE_GPS_FRESH_SECONDS = 30
+
+    def phone_gps_fix(self, lat, lon, alt=None, speed_kmh=None, course=None,
+                      accuracy_m=None, epoch=None, source='phone'):
+        """Feed one phone fix to whichever GPS manager is current. Returns
+        True when it was taken (False: invalid, or a local receiver has a fresh
+        fix of its own and wins)."""
+        mgr = self._gps if (self._gps is not None and (self._running or self._starting)) else None
+        if mgr is None:
+            mgr = self._standby_gps
+        if mgr is None:
+            if self._phone_gps is None:
+                from gps_manager import GPSManager
+                self._phone_gps = GPSManager(
+                    state_file=os.path.join(self.data_dir, 'last_gps.json'),
+                    assist=False,
+                    set_clock=self.shared_data.config.get('wardriving_gps_set_clock', True))
+                self._phone_gps.start_time = time.time()
+            mgr = self._phone_gps
+        hdop = None
+        if accuracy_m is not None:
+            try:
+                # Rough HDOP equivalent (accuracy ~ HDOP x 5 m) so everything
+                # that stores HDOP per sighting keeps a comparable number.
+                hdop = round(max(0.5, float(accuracy_m) / 5.0), 1)
+            except (TypeError, ValueError):
+                accuracy_m = None
+        ok = mgr.update_external_fix(lat, lon, alt, speed_kmh=speed_kmh, hdop=hdop,
+                                     source=source, course=course,
+                                     accuracy_m=accuracy_m, epoch=epoch)
+        if ok:
+            self._phone_gps_last = time.time()
+        return ok
+
+    def current_gps(self):
+        """The GPS manager whose state describes 'now', or None: the
+        session's while one runs, else the standby reader, else the phone-fed
+        manager while the phone is still sending."""
+        if self._gps is not None and (self._running or self._starting):
+            return self._gps
+        if self._standby_gps is not None:
+            return self._standby_gps
+        if (self._phone_gps is not None
+                and time.time() - self._phone_gps_last < self.PHONE_GPS_FRESH_SECONDS):
+            return self._phone_gps
+        return None
+
     def start(self, interfaces=None, gps_port=None, device_name=None):
         """Start a wardriving session."""
         if self._running:
             return {'error': 'Already running'}
         # The session opens the GPS itself: one reader per port.
         self.stop_standby_gps()
+        self._phone_gps = None      # the phone's next fix lands in the session reader
 
         # Flag the bring-up window so the display flips to wardriving mode right
         # away (see __init__). Cleared once _running goes True, on early error
@@ -3261,8 +3318,8 @@ class WardrivingEngine:
         # the !running case ensures the status reflects current hardware.
         if self._gps and self._running:
             gps_status = self._gps.get_status()
-        elif self._standby_gps is not None:
-            gps_status = self._standby_gps.get_status()
+        elif self.current_gps() is not None:
+            gps_status = self.current_gps().get_status()
         else:
             now = time.time()
             # detect_gps_device opens/reads serial ports (up to ~1.5s x 4 bauds
