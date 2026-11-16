@@ -407,7 +407,23 @@ class LinkHub:
             return
         msg_id, raw = done
         # Opened here, in arrival order: the request counter must only go up.
-        self._pool.submit(self._answer, peer, msg_id, self._open(peer, raw), send)
+        self._dispatch(self._answer, peer, msg_id, self._open(peer, raw), send)
+
+    def _dispatch(self, fn, *args) -> None:
+        """Run an answer off the GLib loop. Prefers the pool; falls back to a
+        short-lived thread.
+
+        Python 3.14's ThreadPoolExecutor refuses new work with "cannot schedule
+        new futures after interpreter shutdown" once it believes the interpreter
+        is finalising. A long-lived Ragnar (seen on the Python 3.14 image) trips
+        that check while the web app is still serving, which left every phone's
+        hello unanswered and the app timing out. The answer still has to go out,
+        so fall back to a plain daemon thread when the pool refuses it."""
+        try:
+            self._pool.submit(fn, *args)
+        except RuntimeError:
+            threading.Thread(target=fn, args=args, daemon=True,
+                             name='ble-link-answer').start()
 
     def drop_peer(self, peer_key: str) -> None:
         with self._lock:

@@ -4,6 +4,14 @@
 
 ### 2026-11-16
 
+#### fix(bluetooth): the app connects on Python 3.14 boxes (Kali/Ulfberht)
+
+*branch `fix/ble-link-py314-pool`*
+
+- **The app connected but every attempt timed out on a Kali/Ulfberht box.** The link hands each answer to a `ThreadPoolExecutor`. On Python 3.14 (the Kali image; the Debian image is on 3.13) that pool refuses new work on a long-lived process with `RuntimeError: cannot schedule new futures after interpreter shutdown`, even while the web app is still serving. The phone connected, subscribed and its hello was received and decoded, but the worker that builds the reply never ran, so no notification was ever sent and the app timed out. The dev box (Debian/3.13) was unaffected, which is why it worked only there.
+- **Fix:** when the pool refuses the work, the answer is sent on a short-lived thread instead (`_dispatch` in `ble_link.py`). Diagnosed on a Pi 5 running Kali (Python 3.14.8) with a radio capture and in-process logging: the phone's `StartNotify` + hello arrived, the frame reassembled, and the only failure was `self._pool.submit` raising. Regression test added (`test_answers_still_go_out_when_the_thread_pool_refuses`).
+
+
 #### fix(bluetooth): the card says why the switch did not take
 *branch `fix/ble-card-during-update`*
 
