@@ -17044,6 +17044,19 @@ def wardrift_factions():
     return jsonify(body), status
 
 
+@app.route('/api/wardriving/wardrift/outposts')
+def wardrift_outposts():
+    """Proxy GET /v1/outposts — the towers and keeps in a bbox (kind, defence,
+    owner, position), for the map's keep/tower markers."""
+    try:
+        args = {k: float(request.args.get(k)) for k in ('west', 'south', 'east', 'north')}
+    except (TypeError, ValueError):
+        return jsonify({'error': 'west/south/east/north required'}), 400
+    q = '&'.join(f'{k}={v}' for k, v in args.items())
+    body, status = _wardrift_authed_get('/v1/outposts?' + q)
+    return jsonify(body), status
+
+
 @app.route('/api/wardriving/wardrift/guild')
 def wardrift_guild():
     """Proxy GET /v1/guilds/me — the player's guild, or null when in none."""
