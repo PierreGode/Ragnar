@@ -4,6 +4,12 @@
 
 ### 2026-11-16
 
+#### feat(wardriving): proxy WDGWars coverage cells for the app's map overlay
+
+*branch `feat/wardrift-wdgwars-cells`*
+
+- Adds `GET /api/wardriving/wdgwars/cells` — the player's WDGWars coverage grid (0.02° cells, each with the AP count logged there), proxied from `wdgwars.pl/api/me/cells`. The app's map now carries two branded overlay buttons: the Wardrift logo toggles the conquered-territory hexes and keeps/towers, and the WDGWars logo toggles this coverage grid (WDGWars is a scoreboard game with no faction territory, so the overlay is your footprint rather than contested ground). Same read-only, browser-via-box pattern and 409-on-missing-key as the other WDGWars read proxy.
+
 #### feat(wardriving): read proxies for the app's Wardrift and WDGWars game tabs
 
 *branch `feat/wardrift-wdgwars-read-proxies`*

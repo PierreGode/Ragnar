@@ -17087,6 +17087,25 @@ def wdgwars_me():
     return jsonify(body), (200 if r.ok else 502)
 
 
+@app.route('/api/wardriving/wdgwars/cells')
+def wdgwars_cells():
+    """Proxy GET wdgwars.pl /api/me/cells — the player's coverage grid (0.02°
+    cells, each with the AP count logged there), for the map's WDGWars overlay."""
+    key = (shared_data.config.get('wdg_key') or '').strip()
+    if not key:
+        return jsonify({'error': 'WDGWars API key not set', 'unconfigured': True}), 409
+    try:
+        import requests
+        r = requests.get('https://wdgwars.pl/api/me/cells',
+                         headers={'X-API-Key': key}, timeout=20)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+    if r.status_code in (401, 403):
+        return jsonify({'error': 'WDGWars key rejected — check it under accounts', 'unconfigured': True}), 409
+    body = _wardrift_body(r)
+    return jsonify(body), (200 if r.ok else 502)
+
+
 # ---------------------------------------------------------------------------
 # ADS-B -> Wardrift (Aircraft Watch). The radar (adsb.py) logs the UNIQUE
 # aircraft seen each UTC day; this uploads that day's SBS log to Wardrift
