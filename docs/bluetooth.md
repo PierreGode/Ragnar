@@ -130,6 +130,16 @@ answer back at about BLE speed. It is a development switch and defaults to off.
   point on removes its `pan0` bridge, DHCP server and pairing agent the first
   time it starts after the update.
 
+- **Old pairings are removed.** The app connects without pairing. A phone,
+  tablet or computer still paired with the unit from the access-point days kept
+  a saved copy of the unit's services and reported "This Ragnar is too old".
+  When the link starts, the unit removes its pairings with phones, tablets and
+  computers; the Android app removes its own half and connects again. Pairings
+  with other devices (controllers, speakers, sensors) stay.
+- **Faster to find.** While the link is on the unit advertises every
+  100–150 ms (the kernel default is 1.28 s), so the app connects within a
+  second or two.
+
 ## CLI / troubleshooting
 
 ```bash

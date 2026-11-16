@@ -4,6 +4,13 @@
 
 ### 2026-11-16
 
+#### fix(bluetooth): the app connects — old pairings removed, faster advertising
+*branch `fix/ble-link-connect`*
+
+- **"This Ragnar is too old" on a phone that was paired before.** A phone still paired with the unit from the Bluetooth access-point releases works from its saved copy of the unit's services, which has no link in it, so the app never reached the link. When the link starts, the unit removes its pairings with phones, tablets and computers (`drop_phone_pairings` in `ble_peripheral.py`). Pairings with other devices stay. The Android app removes its half of the pairing and connects again.
+- **"Connection timed out".** The unit advertised every 1.28 s (the kernel default), and a phone could spend its whole connect timeout waiting to catch one advertisement. The link now sets 100–150 ms (`set_fast_advertising`).
+- Tested on the dev unit with a radio capture: advertising interval 100–150 ms, the tablet's pairing removed, an LE controller's pairing kept.
+
 #### fix(wardriving): Bluetooth devices get their measured signal strength
 *branch `fix/wardrive-bt-rssi`*
 

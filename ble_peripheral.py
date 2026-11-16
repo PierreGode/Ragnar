@@ -98,6 +98,80 @@ def _box_id(hci: str) -> str:
         return '0000'
 
 
+# Advertising interval while the link waits for the app, in units of 0.625 ms:
+# 100-150 ms. The kernel default is 1.28 s, at which a phone can need most of
+# its connect timeout just to catch one advertisement.
+ADV_INTERVAL = (160, 240)
+
+
+def set_fast_advertising(hci: str, interval=ADV_INTERVAL, root: str = '/sys/kernel/debug/bluetooth') -> bool:
+    """Ask the controller for short advertising intervals. True when both were set."""
+    lo, hi = interval
+    base = os.path.join(root, hci)
+    try:
+        with open(os.path.join(base, 'adv_max_interval')) as fh:
+            current_max = int(fh.read().strip() or 0)
+        # The kernel refuses min > max, so write them in the order that keeps
+        # the pair valid at every step.
+        order = [('adv_min_interval', lo), ('adv_max_interval', hi)]
+        if lo > current_max:
+            order.reverse()
+        for name, value in order:
+            with open(os.path.join(base, name), 'w') as fh:
+                fh.write(str(value))
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def is_phone_class(cls) -> bool:
+    """A Bluetooth Class of Device whose major class is Computer or Phone."""
+    try:
+        return ((int(cls) >> 8) & 0x1F) in (1, 2)
+    except (TypeError, ValueError):
+        return False
+
+
+def stale_phone_pairings(objects: dict, adapter_path: str) -> list:
+    """Paired phones/tablets/computers under an adapter, from GetManagedObjects.
+
+    The app talks to the unit over an open GATT link secured by the link code;
+    no pairing is involved. A phone that is still paired from an earlier
+    release keeps its saved copy of the unit's services and never sees the
+    link characteristics, so those pairings are removed when the link starts.
+    """
+    out = []
+    for path, ifaces in objects.items():
+        dev = ifaces.get('org.bluez.Device1')
+        if not dev or not str(path).startswith(adapter_path + '/'):
+            continue
+        if bool(dev.get('Paired')) and 'Class' in dev and is_phone_class(dev.get('Class')):
+            out.append((str(path), str(dev.get('Alias') or dev.get('Address') or path)))
+    return out
+
+
+def drop_phone_pairings(bus, adapter_path: str, log=None) -> int:
+    """Remove the pairings ``stale_phone_pairings`` finds. Returns how many."""
+    import dbus
+    removed = 0
+    try:
+        om = dbus.Interface(bus.get_object(BLUEZ, '/'), 'org.freedesktop.DBus.ObjectManager')
+        adapter = dbus.Interface(bus.get_object(BLUEZ, adapter_path), ADAPTER_IFACE)
+        for path, name in stale_phone_pairings(om.GetManagedObjects(), adapter_path):
+            try:
+                adapter.RemoveDevice(dbus.ObjectPath(path))
+                removed += 1
+                if log:
+                    log(f'removed the old pairing with {name} — the app connects without one')
+            except Exception as e:  # noqa: BLE001
+                if log:
+                    log(f'could not remove the old pairing with {name}: {e}', 'warning')
+    except Exception:  # noqa: BLE001
+        pass
+    return removed
+
+
+
 class DataProviders:
     """Everything the peripheral needs to answer a read, gathered behind
     small callables so the webapp can inject live state and tests can stub it.
@@ -291,6 +365,11 @@ class BlePeripheral:
                 props.Set(ADAPTER_IFACE, 'Discoverable', dbus.Boolean(False))
             except Exception:
                 pass  # non-fatal; LE advertising is independent of this
+
+            drop_phone_pairings(bus, adapter_path, self._log)
+            if not set_fast_advertising(self.providers.hci):
+                self._log(f'{self.providers.hci}: could not shorten the advertising '
+                          'interval — the app may take longer to connect', 'warning')
 
             self._gatt_manager = dbus.Interface(adapter_obj, GATT_MANAGER)
             self._adv_manager = dbus.Interface(adapter_obj, LE_ADV_MANAGER)
