@@ -4,6 +4,13 @@
 
 ### 2026-11-16
 
+#### feat(wardriving): read proxies for the app's Wardrift and WDGWars game tabs
+
+*branch `feat/wardrift-wdgwars-read-proxies`*
+
+- **The Ragnar Mobile app now shows the Wardrift and WDGWars games beside the drive** — a conquered-territory overlay on the map and per-service stats tabs. The native app reads the games directly; a desktop browser build cannot (CORS), so it reads through the box, which already holds the Wardrift session and the WDGWars key. These routes proxy the reads: `GET /api/wardriving/wardrift/territory` (H3 hexes each faction holds, in a `west/south/east/north` bbox), `/factions`, `/guild` (the player's guild, or null), and `/wdgwars/me` (WDGWars stats).
+- The existing `/api/wardriving/wardrift/dashboard` now shares a helper (`_wardrift_authed_get`) and, like the new routes, answers **409** (not 401) when the Wardrift/WDGWars session is missing or expired — the box's own 401 means "log in to Ragnar", and the two must not be confused. The web dashboard card already keyed off `!ok` + `expired`, so it is unaffected. All reads are read-only; no route changes game state.
+
 #### fix(bluetooth): the app connects on Python 3.14 boxes (Kali/Ulfberht)
 
 *branch `fix/ble-link-py314-pool`*
