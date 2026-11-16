@@ -19,15 +19,20 @@ needs Wi-Fi. Streams (the waterfall, event streams) are refused with 415.
 
 Wire format
     frame    = id:u16 | seq:u16 (bit 15 = last frame) | payload      (big endian)
-    request  = UTF-8 JSON  {"t":"hello"|"auth"|"req", ...}
-    response = status:u16 | flags:u8 | body       flags: 1 = zlib, 2 = JSON
+    message  = UTF-8 JSON {"t":"hello"|"auth", ...}            (opening the link)
+             | 0x00 | counter:u64 | sealed JSON {"t":"req", ...}     (a request)
+    answer   = status:u16 | flags:u8 | body       flags: 1 = zlib, 2 = JSON
+             | 0xFF 0xFF | sealed answer                  (the answer to a request)
 
-Access
-    Nothing is paired. A phone proves it knows the unit's link code (shown on
-    Settings → Bluetooth) with an HMAC over a nonce, so the code itself never
-    crosses the air. After that the unit's own login still applies, exactly as
-    over HTTP. The traffic is not encrypted beyond what BLE itself does — the
-    same as the app's plain HTTP on a local network.
+Access and encryption
+    The link code (shown on Settings → Bluetooth) is the key to the link. Phone
+    and unit run SPAKE2 over it (Ed25519 group, libsodium): each side proves it
+    knows the code and both end up with fresh session keys, while someone
+    listening learns nothing they can test a guess against. Guessing therefore
+    takes one connection per guess, and the unit locks after five wrong ones.
+    Every request and answer after that is sealed with ChaCha20-Poly1305 under
+    those keys; a request counter that only goes up stops replays. The unit's
+    own login still applies on top, exactly as over HTTP.
 
 This file has no D-Bus or GLib in it: ble_peripheral.py owns the radio and
 hands frames in and out, so everything here is testable without Bluetooth.
@@ -49,7 +54,7 @@ from typing import Callable, Optional
 CHAR_LINK_RX = 'a3f1c2d4-5b6e-4f70-8a91-b2c3d4e5f601'   # app → unit, write
 CHAR_LINK_TX = 'a3f1c2d4-5b6e-4f70-8a91-b2c3d4e5f602'   # unit → app, notify
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 FRAME_HEADER = 4
 LAST = 0x8000
 
@@ -82,9 +87,125 @@ def new_code() -> str:
     return f'{secrets.randbelow(10 ** 8):08d}'
 
 
-def auth_mac(code: str, nonce: str, cid: str) -> str:
-    """What a phone must send to prove it knows the code."""
-    return hmac.new(code.encode(), f'{nonce}:{cid}'.encode(), hashlib.sha256).hexdigest()
+# ---------------------------------------------------------------------------
+# Key exchange and sealing — shared verbatim with the app (src/linkproto.ts)
+# ---------------------------------------------------------------------------
+#
+#   w = SHA-512("ragnar-link-v2/w" | code)  reduced to a scalar
+#   app:   X = x·G + w·M          unit:  Y = y·G + w·N
+#   K = x·(Y − w·N) = y·(X − w·M)
+#   prk = SHA-256("ragnar-link-v2" | lp(cid) | lp(X) | lp(Y) | lp(K) | lp(w))
+#   key(label) = HMAC-SHA256(prk, label)       lp(b) = len:u16 | b
+#
+# M and N are fixed points nobody knows a logarithm of:
+# from_uniform(SHA-256("ragnar-link-v2/M")) and (".../N").
+
+try:
+    from nacl import bindings as _na
+    CRYPTO_OK = bool(_na.has_crypto_core_ed25519)
+except Exception:  # pragma: no cover - PyNaCl is in requirements.txt
+    _na = None
+    CRYPTO_OK = False
+
+_CTX = b'ragnar-link-v2'
+_M = bytes.fromhex('54d28217e7247d0c21a3df6dad1279f144259dd04bae51e7dca6a732446b2115')
+_N = bytes.fromhex('8d6bece57b38af98b2c111ea50f54c697e2360af125e0ffedf7f9ccdc7b26aae')
+SEALED_REQUEST = b'\x00'
+SEALED_ANSWER = b'\xff\xff'
+
+
+def _lp(data: bytes) -> bytes:
+    return struct.pack('>H', len(data)) + data
+
+
+def _code_scalar(code: str) -> bytes:
+    return _na.crypto_core_ed25519_scalar_reduce(
+        hashlib.sha512(_CTX + b'/w' + code.encode()).digest())
+
+
+def _random_scalar() -> bytes:
+    return _na.crypto_core_ed25519_scalar_reduce(os.urandom(64))
+
+
+def _session_keys(cid: str, X: bytes, Y: bytes, K: bytes, w: bytes) -> dict:
+    prk = hashlib.sha256(_CTX + _lp(cid.encode()) + _lp(X) + _lp(Y) + _lp(K) + _lp(w)).digest()
+
+    def key(label: bytes) -> bytes:
+        return hmac.new(prk, label, hashlib.sha256).digest()
+
+    return {'proof_app': key(b'proof app'), 'proof_unit': key(b'proof unit'),
+            'a2u': key(b'app to unit'), 'u2a': key(b'unit to app')}
+
+
+def unit_exchange(code: str, cid: str, X: bytes, y: Optional[bytes] = None):
+    """The unit's half: (Y, session keys) for a phone's X. ValueError if X is
+    not a point a real phone would send."""
+    try:
+        if len(X) != 32 or not _na.crypto_core_ed25519_is_valid_point(X):
+            raise ValueError('bad point')
+        w = _code_scalar(code)
+        y = y or _random_scalar()
+        Y = _na.crypto_core_ed25519_add(
+            _na.crypto_scalarmult_ed25519_base_noclamp(y),
+            _na.crypto_scalarmult_ed25519_noclamp(w, _N))
+        K = _na.crypto_scalarmult_ed25519_noclamp(
+            y, _na.crypto_core_ed25519_sub(X, _na.crypto_scalarmult_ed25519_noclamp(w, _M)))
+    except ValueError:
+        raise
+    except Exception as e:           # libsodium refuses the identity point
+        raise ValueError(str(e))
+    return Y, _session_keys(cid, X, Y, K, w)
+
+
+def app_start(code: str, x: Optional[bytes] = None):
+    """The phone's half, first step: (x, X). Here for the tests and tools; the
+    app does the same in linkproto.ts."""
+    x = x or _random_scalar()
+    X = _na.crypto_core_ed25519_add(
+        _na.crypto_scalarmult_ed25519_base_noclamp(x),
+        _na.crypto_scalarmult_ed25519_noclamp(_code_scalar(code), _M))
+    return x, X
+
+
+def app_finish(code: str, cid: str, x: bytes, X: bytes, Y: bytes) -> dict:
+    """The phone's half, second step: the session keys."""
+    if len(Y) != 32 or not _na.crypto_core_ed25519_is_valid_point(Y):
+        raise ValueError('bad point')
+    w = _code_scalar(code)
+    try:
+        K = _na.crypto_scalarmult_ed25519_noclamp(
+            x, _na.crypto_core_ed25519_sub(Y, _na.crypto_scalarmult_ed25519_noclamp(w, _N)))
+    except Exception as e:
+        raise ValueError(str(e))
+    return _session_keys(cid, X, Y, K, w)
+
+
+def _nonce(counter: int) -> bytes:
+    return b'\x00\x00\x00\x00' + struct.pack('>Q', counter)
+
+
+def seal_request(key: bytes, counter: int, plain: bytes) -> bytes:
+    return SEALED_REQUEST + struct.pack('>Q', counter) + \
+        _na.crypto_aead_chacha20poly1305_ietf_encrypt(plain, b'req', _nonce(counter), key)
+
+
+def open_request(key: bytes, raw: bytes):
+    """(counter, plain). Raises on anything not sealed with ``key``."""
+    counter = struct.unpack('>Q', raw[1:9])[0]
+    return counter, _na.crypto_aead_chacha20poly1305_ietf_decrypt(
+        raw[9:], b'req', _nonce(counter), key)
+
+
+def seal_answer(key: bytes, counter: int, plain: bytes) -> bytes:
+    """An answer is sealed under its request's counter, which ties the two."""
+    return SEALED_ANSWER + _na.crypto_aead_chacha20poly1305_ietf_encrypt(
+        plain, b'res', _nonce(counter), key)
+
+
+def open_answer(key: bytes, counter: int, raw: bytes) -> bytes:
+    if raw[:2] != SEALED_ANSWER:
+        raise ValueError('not sealed')
+    return _na.crypto_aead_chacha20poly1305_ietf_decrypt(raw[2:], b'res', _nonce(counter), key)
 
 
 # ---------------------------------------------------------------------------
@@ -173,11 +294,16 @@ class _Peer:
 
     def __init__(self):
         self.rx = Reassembler()
-        self.nonce = secrets.token_hex(16)
         self.cid: Optional[str] = None
-        self.authed = False
+        self.pending: Optional[dict] = None   # keys of an exchange not yet proven
+        self.keys: Optional[dict] = None      # keys of the open link
+        self.counter = 0                      # highest request counter seen
         self.frame_size = 20
         self.last = time.monotonic()
+
+    @property
+    def authed(self) -> bool:
+        return self.keys is not None
 
 
 class LinkHub:
@@ -264,29 +390,70 @@ class LinkHub:
         if done is None:
             return
         msg_id, raw = done
-        self._pool.submit(self._answer, peer, msg_id, raw, send)
+        # Opened here, in arrival order: the request counter must only go up.
+        self._pool.submit(self._answer, peer, msg_id, self._open(peer, raw), send)
 
     def drop_peer(self, peer_key: str) -> None:
         with self._lock:
             self._peers.pop(peer_key, None)
 
     # -- answering ---------------------------------------------------------
-    def _answer(self, peer: _Peer, msg_id: int, raw: bytes, send) -> None:
-        try:
+    def _open(self, peer: _Peer, raw: bytes) -> dict:
+        """Read one message: a sealed request, or the plain JSON that opens the
+        link. Returns a job for _run()."""
+        relink = {'out': _json_response(401, {'error': 'link code required', 'link_auth': True})}
+        if raw[:1] == SEALED_REQUEST:
+            with self._lock:
+                keys = peer.keys
+                if not keys or len(raw) < 9 + 16:
+                    return relink
+                try:
+                    counter, plain = open_request(keys['a2u'], raw)
+                except Exception:
+                    return relink
+                if counter <= peer.counter:
+                    return relink
+                peer.counter = counter
             try:
-                msg = json.loads(raw.decode('utf-8'))
-                if not isinstance(msg, dict):
+                msg = json.loads(plain.decode('utf-8'))
+                if not isinstance(msg, dict) or msg.get('t') != 'req':
                     raise ValueError
             except Exception:
-                out = _json_response(400, {'error': 'bad request'})
+                return {'out': _json_response(400, {'error': 'bad request'}),
+                        'seal': (keys['u2a'], counter)}
+            return {'req': msg, 'seal': (keys['u2a'], counter)}
+        try:
+            msg = json.loads(raw.decode('utf-8'))
+            if not isinstance(msg, dict):
+                raise ValueError
+        except Exception:
+            return {'out': _json_response(400, {'error': 'bad request'})}
+        if msg.get('t') in ('hello', 'auth'):
+            return {'plain': msg}
+        return relink            # a request is only ever answered sealed
+
+    def _run(self, peer: _Peer, job: dict) -> bytes:
+        try:
+            if 'req' in job:
+                out = self._request(peer, job['req'])
+            elif 'plain' in job:
+                out = self._hello(peer, job['plain']) if job['plain']['t'] == 'hello' \
+                    else self._auth(peer, job['plain'])
             else:
-                out = self._handle(peer, msg)
+                out = job['out']
         except Exception as e:  # never let a worker die silently
             if self.logger:
                 self.logger.error(f'[ble-link] {e}')
             out = _json_response(500, {'error': 'link error'})
+        if 'seal' in job:
+            key, counter = job['seal']
+            out = seal_answer(key, counter, out)
         with self._lock:
             self._stats['bytes_out'] += len(out)
+        return out
+
+    def _answer(self, peer: _Peer, msg_id: int, job: dict, send) -> None:
+        out = self._run(peer, job)
         try:
             send(split_frames(msg_id, out, peer.frame_size))
         except Exception:
@@ -297,41 +464,63 @@ class LinkHub:
             except Exception:
                 pass
 
-    def _handle(self, peer: _Peer, msg: dict) -> bytes:
-        kind = msg.get('t')
-        if kind == 'hello':
-            peer.nonce = secrets.token_hex(16)
-            peer.authed = False
-            peer.cid = str(msg.get('cid') or '')[:64] or None
-            return _json_response(200, {
-                'v': PROTOCOL_VERSION, 'nonce': peer.nonce,
-                'max_response': MAX_RESPONSE_BYTES,
-            })
-        if kind == 'auth':
-            return self._auth(peer, msg)
-        if kind == 'req':
-            if not peer.authed:
-                return _json_response(401, {'error': 'link code required', 'link_auth': True})
-            return self._request(peer, msg)
-        return _json_response(400, {'error': 'unknown message'})
-
-    def _auth(self, peer: _Peer, msg: dict) -> bytes:
-        now = time.monotonic()
+    def _locked(self) -> Optional[bytes]:
         with self._lock:
-            wait = self._locked_until - now
+            wait = self._locked_until - time.monotonic()
         if wait > 0:
             return _json_response(429, {'error': 'Too many wrong codes. Try again later.',
                                         'retry_in': int(wait) + 1})
-        if not peer.cid:
+        return None
+
+    def _hello(self, peer: _Peer, msg: dict) -> bytes:
+        """First step: the phone's X in, the unit's Y out."""
+        with self._lock:
+            peer.pending = peer.keys = None
+            peer.counter = 0
+        if not CRYPTO_OK:
+            return _json_response(503, {'error': 'This Ragnar is missing PyNaCl — run its update.'})
+        if msg.get('v') != PROTOCOL_VERSION:
+            return _json_response(426, {'error': 'Update the Ragnar Mobile app.',
+                                        'v': PROTOCOL_VERSION})
+        locked = self._locked()
+        if locked:
+            return locked
+        cid = str(msg.get('cid') or '')[:64]
+        try:
+            X = bytes.fromhex(str(msg.get('x') or ''))
+            if not cid:
+                raise ValueError('no client id')
+            Y, keys = unit_exchange(self.code(), cid, X)
+        except ValueError:
+            return _json_response(400, {'error': 'bad hello'})
+        with self._lock:
+            peer.cid = cid
+            peer.pending = keys
+        return _json_response(200, {'v': PROTOCOL_VERSION, 'y': Y.hex(),
+                                    'max_response': MAX_RESPONSE_BYTES})
+
+    def _auth(self, peer: _Peer, msg: dict) -> bytes:
+        """Second step: the phone proves it reached the same keys (it knows the
+        code); the unit proves the same back."""
+        locked = self._locked()
+        if locked:
+            return locked
+        with self._lock:
+            keys, peer.pending = peer.pending, None    # one attempt per hello
+        if not keys:
             return _json_response(400, {'error': 'hello first'})
-        want = auth_mac(self.code(), peer.nonce, peer.cid)
-        ok = hmac.compare_digest(want, str(msg.get('mac') or ''))
-        # A nonce is good for one attempt, right or wrong.
-        peer.nonce = secrets.token_hex(16)
+        try:
+            proof = bytes.fromhex(str(msg.get('proof') or ''))
+        except ValueError:
+            proof = b''
+        ok = hmac.compare_digest(keys['proof_app'], proof)
+        now = time.monotonic()
         with self._lock:
             if ok:
                 self._fails = 0
                 self._lock_len = LOCK_START_S
+                peer.keys = keys
+                peer.counter = 0
             else:
                 self._fails += 1
                 self._stats['refused'] += 1
@@ -340,10 +529,8 @@ class LinkHub:
                     self._locked_until = now + self._lock_len
                     self._lock_len = min(self._lock_len * 2, LOCK_MAX_S)
         if not ok:
-            return _json_response(401, {'error': 'Wrong link code.', 'nonce': peer.nonce,
-                                        'link_auth': True})
-        peer.authed = True
-        return _json_response(200, {'ok': True})
+            return _json_response(401, {'error': 'Wrong link code.', 'link_auth': True})
+        return _json_response(200, {'ok': True, 'proof': keys['proof_unit'].hex()})
 
     def _request(self, peer: _Peer, msg: dict) -> bytes:
         method = str(msg.get('m') or 'GET').upper()
@@ -435,16 +622,7 @@ class LinkHub:
             if peer is None:
                 peer = self._peers[peer_key] = _Peer()
             peer.last = time.monotonic()
-        try:
-            msg = json.loads(raw.decode('utf-8'))
-            if not isinstance(msg, dict):
-                raise ValueError
-        except Exception:
-            return _json_response(400, {'error': 'bad request'})
-        out = self._handle(peer, msg)
-        with self._lock:
-            self._stats['bytes_out'] += len(out)
-        return out
+        return self._run(peer, self._open(peer, raw))
 
 
 if __name__ == '__main__':  # tiny self-check, no Bluetooth needed

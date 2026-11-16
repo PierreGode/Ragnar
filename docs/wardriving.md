@@ -690,6 +690,7 @@ Falls back to linear when either endpoint speed is NULL or both are zero. The ch
 | POST | `/api/wardriving/device_name` | Set device name |
 | GET/POST | `/api/wardriving/on_boot` | Auto-start on boot |
 | GET/POST | `/api/wardriving/upload-config` | Upload creds status (never reveals secrets), auto-upload settings (`auto_upload`, `auto_upload_targets` list) and `recent` upload outcomes / save them |
+| GET/POST | `/api/wardriving/upload-accounts` | The accounts themselves — `{wigle: {name, token}, wdgwars: {key}, wardrift: {token, username, base_url}}` — so Ragnar Mobile and the unit hold one set. POST replaces each service present (empty values clear it) |
 | POST | `/api/wardriving/upload/<id>` | Upload a session — body `{"target": "wigle"\|"wdgwars"\|"wardrift"\|"both"\|"all"\|"a,b", "force": false}` |
 | POST | `/api/wardriving/wardrift/signin` | Sign in to Wardrift (`username`, `password`); stores only the session token |
 | POST | `/api/wardriving/wardrift/signout` | Forget the Wardrift session token |

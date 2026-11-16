@@ -11,6 +11,8 @@
 - **How it works.** The app's ordinary requests travel over BLE and are answered by the same routes as over HTTP (`ble_link.py`). Answers are compressed: the test unit's 33 kB device list crosses as 2.7 kB.
 - **Live streams and the web UI run over the mesh or Wi-Fi.** Over Bluetooth a stream, or an answer above 128 kB compressed, is declined and the app says so.
 - **Link code.** The unit shows an 8-digit code under Settings → Bluetooth; the app asks for it once per unit. Wrong guesses lock the link. The unit's login applies after the code.
+- **Encrypted.** Every connection runs a key exchange from the link code (SPAKE2, libsodium) with proof in both directions, then seals every request and answer with ChaCha20-Poly1305. New keys on every reconnect; recorded requests cannot be replayed. New requirement: `pynacl`.
+- **One set of upload accounts.** The app and the unit share the WiGLE / WDGWars / Wardrift accounts: the app copies them both ways in the background each time it connects. New endpoint `GET/POST /api/wardriving/upload-accounts`.
 - **Wardriving with the phone as GPS** now works with the phone and the unit simply in the same car.
 - **Settings → Bluetooth is one card with one switch:** *Use the app over Bluetooth*, the advertised name, the link code and who is connected. A unit with several Bluetooth controllers also gets an adapter picker.
 - **Replaces the IP handover.** Bluetooth used to hand the app the unit's IP address for a Wi-Fi connection. That is gone, along with the network-status and hotspot characteristics and "auto-stop after provisioning". **Update the mobile app together with the unit:** an older app finds the unit but cannot connect over Bluetooth.

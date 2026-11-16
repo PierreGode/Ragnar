@@ -16837,6 +16837,53 @@ def wardriving_upload_config():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/wardriving/upload-accounts', methods=['GET', 'POST'])
+def wardriving_upload_accounts():
+    """The upload accounts themselves, so Ragnar Mobile and the unit share one
+    set: the app reads them here and sends back any it holds that the unit lacks.
+
+    GET  -> {"wigle": {"name", "token"}, "wdgwars": {"key"},
+             "wardrift": {"token", "username", "base_url"}}
+    POST -> the same shape; each service present replaces that service here
+            (empty values clear it). Answers like GET.
+    """
+    cfg = shared_data.config
+    try:
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            patch = {}
+            for service, fields in (('wigle', (('name', 'wigle_api_name'), ('token', 'wigle_api_token'))),
+                                    ('wdgwars', (('key', 'wdg_key'),)),
+                                    ('wardrift', (('token', 'wardrift_session_token'),))):
+                got = data.get(service)
+                if not isinstance(got, dict):
+                    continue
+                for name, key in fields:
+                    val, err = _clean_credential(got.get(name))
+                    if err:
+                        return jsonify({'error': err}), 400
+                    patch[key] = val
+                if service == 'wardrift':
+                    patch['wardrift_username'] = str(got.get('username') or '').strip()[:64] \
+                        if patch['wardrift_session_token'] else ''
+            if patch:
+                cfg.update(patch)
+                shared_data.save_config()
+
+        def val(key):
+            return (cfg.get(key) or '').strip()
+
+        return jsonify({
+            'wigle': {'name': val('wigle_api_name'), 'token': val('wigle_api_token')},
+            'wdgwars': {'key': val('wdg_key')},
+            'wardrift': {'token': val('wardrift_session_token'),
+                         'username': val('wardrift_username'), 'base_url': _wardrift_base()},
+        })
+    except Exception as e:
+        logger.error(f"Wardriving upload-accounts error: {e}")
+        return jsonify({'error': 'Could not read the upload accounts'}), 500
+
+
 @app.route('/api/wardriving/upload/<session_id>', methods=['POST'])
 def wardriving_upload(session_id):
     """Upload a session's WiGLE CSV to WiGLE, WDGWars and/or Wardrift.

@@ -36,25 +36,59 @@ data for Bluetooth".
 
 ## Access
 
-A phone proves it knows the unit's 8-digit **link code**, shown on the card. The
-phone answers a one-time challenge with an HMAC of the code, so the code itself
-stays off the air. Five wrong answers lock the link for a minute, doubling up to
-fifteen. **New code** on the card replaces the code and signs every phone out.
+A phone proves it knows the unit's 8-digit **link code**, shown on the card, and
+the unit proves the same to the phone. Five wrong codes lock the link for a
+minute, doubling up to fifteen. **New code** on the card replaces the code and
+signs every phone out.
 
 After the code, the unit's own login applies exactly as it does over HTTP: the
 app shows its login screen. The link code is what protects a unit over
 Bluetooth; a login password under Settings → Security adds a second lock.
 
 What a phone can read before it has proven the code is `{name, box_id, link}` —
-enough to recognise a Ragnar. Traffic on the link has the privacy of BLE itself,
-the same as the app's plain HTTP on a local network.
+enough to recognise a Ragnar.
+
+## Encryption
+
+Every connection starts with a handshake, and everything after it is encrypted.
+
+1. **Key exchange from the code (SPAKE2).** Phone and unit each combine the link
+   code with a fresh random secret and exchange the results. Both arrive at the
+   same session keys when they used the same code. Someone recording the
+   exchange gets nothing to test guesses against, so a code can only be tried
+   one connection at a time, against the lockout above.
+2. **Proof both ways.** The phone shows the unit it reached the keys, then the
+   unit shows the phone. A device that only pretends to be your Ragnar fails
+   here, before the app sends it anything.
+3. **Sealed traffic.** Each request and each answer is encrypted and
+   authenticated with ChaCha20-Poly1305 under those keys. Requests carry a
+   counter that only goes up, so a recorded request cannot be replayed, and an
+   answer only opens for the request it belongs to.
+
+Keys last for one connection: every reconnect runs the handshake again with new
+secrets. The phone remembers the code, so this happens by itself.
+
+The group arithmetic and the cipher come from libsodium (PyNaCl) on the unit and
+from the audited `@noble` libraries in the app. `tests/test_ble_link.py` and the
+app's `tests/linkproto.test.ts` check the same known-answer values, so the two
+sides are proven to agree byte for byte.
+
+## Upload accounts
+
+The app and the unit share one set of WiGLE / WDGWars / Wardrift accounts. Each
+time the app connects it reads the unit's accounts, keeps any it did not have,
+and hands the unit any that only the phone holds — in the background, over the
+encrypted link. An account entered in the app is saved on both at once.
+`GET/POST /api/wardriving/upload-accounts`; details in
+[wardriving.md](wardriving.md).
 
 ## How it is built
 
 - `ble_peripheral.py` owns the radio: adapter choice, advertising, the D-Bus
   GATT objects. Config `ble_enabled`, `ble_adapter`.
-- `ble_link.py` owns the protocol and runs with plain Python: frames, the code
-  check, dispatch into Flask, size limits. Config `ble_link_code`.
+- `ble_link.py` owns the protocol and runs with plain Python: frames, the key
+  exchange and sealing, dispatch into Flask, size limits. Config
+  `ble_link_code`. Needs `pynacl` (in `requirements.txt`).
 
 **Adapter.** The peripheral uses the built-in controller by default so a USB
 dongle stays free for scanning. A unit with more than one controller gets an
