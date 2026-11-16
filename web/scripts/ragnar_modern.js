@@ -36069,8 +36069,28 @@ async function toggleBle(checkbox) {
         console.error('[BLE] toggle error:', e);
         addConsoleMessage('Failed to change Bluetooth', 'error');
         checkbox.checked = !enabled;
-        if (st) st.textContent = 'Failed to update.';
+        if (st) st.textContent = await _bleFailureText(e);
     }
+}
+
+// Why the switch did not take. An update puts the new page on disk minutes
+// before the service restarts into the new code, so the page can be asking a
+// Ragnar that is still finishing that update.
+async function _bleFailureText(err) {
+    try {
+        const u = await fetchAPI('/api/system/update-status');
+        const pu = (u && u.post_update) || {};
+        if ((u && u.update_in_progress) || pu.state === 'running') {
+            return 'Ragnar is finishing an update' + (pu.step ? ' (' + pu.step + ')' : '') +
+                ' and restarts when it is done. Switch this on after the restart.';
+        }
+    } catch (_) { /* fall through to the plain reason */ }
+    const status = err && (err.status || (err.response && err.response.status));
+    if (status === 404 || status === 405) {
+        return 'This page is newer than the running Ragnar. Press Restart Service under Config → System Management, then switch this on.';
+    }
+    const why = err && err.message ? String(err.message) : '';
+    return why ? 'Bluetooth did not change: ' + why : 'Bluetooth did not change. Try again.';
 }
 
 async function setBleAdapter(sel) {

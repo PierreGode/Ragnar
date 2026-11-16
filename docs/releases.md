@@ -4,6 +4,12 @@
 
 ### 2026-11-16
 
+#### fix(bluetooth): the card says why the switch did not take
+*branch `fix/ble-card-during-update`*
+
+- **"Failed to update." right after updating.** An update puts the new page on disk at once and restarts Ragnar when dependencies and network tools are installed, which took 17 minutes on the unit this was seen on. Until then the page was asking the previous Ragnar, which has no Bluetooth switch. The card now reads the update status and says "Ragnar is finishing an update (step) and restarts when it is done". With no update running and an older Ragnar still loaded it points to Restart Service; any other failure shows the reason the unit gave.
+- Checked on a unit mid-update: the switch answered 404/405 until the post-update run reached its restart, then worked.
+
 #### fix(bluetooth): switching the link off and on no longer ends Ragnar
 *branch `fix/ble-single-peripheral`*
 

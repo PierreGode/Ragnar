@@ -154,6 +154,12 @@ python3 ble_peripheral.py selftest      # register with BlueZ, verify, unregiste
 python3 ble_peripheral.py run           # advertise until Ctrl-C
 ```
 
+**The switch does not take right after an update.** The update restarts Ragnar
+only when dependencies and network tools are installed, which can take 15–20
+minutes on a small board. The card says "Ragnar is finishing an update" until
+then; switch Bluetooth on after the restart. The Update card shows the same
+steps.
+
 **"Starting — registering with BlueZ…" that never finishes.** Registering the
 GATT application and advertisement takes noticeably longer on a slow board (a
 Pi Zero 2 W), and can outlast the wait inside the API call that started it.
