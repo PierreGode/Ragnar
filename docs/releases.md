@@ -4,6 +4,14 @@
 
 ### 2026-11-16
 
+#### fix(bluetooth): switching the link off and on no longer ends Ragnar
+*branch `fix/ble-single-peripheral`*
+
+- **Off, then on, ended the Ragnar service.** The link's private D-Bus connection is closed when the link stops, and libdbus ends the process (`_exit(1)`) when a private connection closes. systemd restarted Ragnar, and each time the Bluetooth service kept the dead process's advertisement. A unit that had been toggled a few times advertised several copies of the link (4 on a Pi Zero 2 W whose controller supports 3) and the app could not hold a connection to it. The connection is now told not to end the process.
+- **One peripheral at a time.** Starting, stopping and the switch run under one lock. A start that is still registering with BlueZ (a Pi Zero 2 W needs longer than the wait) is waited for rather than started again, and a stop that arrives during registration is honoured once registration finishes.
+- A unit that was toggled before this update still has the stale advertisements until it reboots.
+- Tested on the dev unit: 15 overlapping on/off requests, all answered, service not restarted, advertisement count 1 when on and 0 when off.
+
 #### fix(bluetooth): answers reach the app — smaller frames on the link
 *branch `fix/ble-link-frame-size`*
 

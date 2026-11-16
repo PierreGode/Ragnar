@@ -237,6 +237,10 @@ def api_provenance():
 
 _ble_server = None
 _ble_lock = threading.Lock()
+# One start/stop at a time. _ble_lock only guards the reference (the status
+# route takes it and must stay quick); this one is held across a whole start
+# or stop, so two requests never build or tear down a peripheral together.
+_ble_op_lock = threading.RLock()
 _ble_link_hub = None
 
 
@@ -254,6 +258,11 @@ def _ble_link():
 
 def _start_ble():
     """Start the peripheral if config enables it. Never raises."""
+    with _ble_op_lock:
+        return _start_ble_locked()
+
+
+def _start_ble_locked():
     global _ble_server
     try:
         if not shared_data.config.get('ble_enabled', False):
@@ -267,8 +276,15 @@ def _start_ble():
         old = None
         with _ble_lock:
             if _ble_server is not None:
-                if _ble_server.status().get('running'):
+                _st = _ble_server.status()
+                if _st.get('running'):
                     return True
+                if _st.get('starting'):
+                    # Still registering with BlueZ (a Pi Zero 2 W needs longer
+                    # than start() waits). Building a second peripheral now
+                    # would register the link twice; the caller reads
+                    # 'starting' from the status and keeps polling.
+                    return False
                 old, _ble_server = _ble_server, None
         if old is not None:
             # Outside the lock: stop() joins the loop thread and would otherwise
@@ -304,10 +320,14 @@ def _start_ble():
 
 def _stop_ble():
     global _ble_server
-    with _ble_lock:
-        if _ble_server is not None:
-            _ble_server.stop()
-            _ble_server = None
+    with _ble_op_lock:
+        with _ble_lock:
+            old, _ble_server = _ble_server, None
+        if old is not None:
+            try:
+                old.stop()      # outside _ble_lock: it joins the loop thread
+            except Exception as e:
+                logger.warning(f"Bluetooth peripheral stop: {e}")
 
 
 def _ble_adapters():
@@ -412,6 +432,11 @@ def ble_toggle():
     shared_data.config['ble_enabled'] = enable
     shared_data.save_config()
 
+    with _ble_op_lock:
+        return _ble_apply_toggle(enable, needs_restart)
+
+
+def _ble_apply_toggle(enable, needs_restart):
     if enable:
         # Restart when the adapter changed, or when it had stopped.
         # A peripheral that is merely still registering is NOT stopped — tearing
