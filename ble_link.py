@@ -289,6 +289,23 @@ def _json_response(status: int, obj: dict) -> bytes:
 # Sessions
 # ---------------------------------------------------------------------------
 
+def answer_frame_size(mtu) -> int:
+    """Largest answer frame for a connection's ATT MTU.
+
+    A notification's own header is 3 bytes. Another 9 are left free: with a
+    phone that accepts several notifications in one packet (every recent
+    Android), BlueZ adds a length field per value, and a value that fills the
+    MTU to the last byte is never sent — nor is anything after it. Measured on
+    a Pi 5 with BlueZ 5.82: 514-byte frames at MTU 517 stopped every answer.
+    Never below the BLE floor of 20.
+    """
+    try:
+        mtu = int(mtu or 23)
+    except (TypeError, ValueError):
+        mtu = 23
+    return max(20, min(mtu, 517) - 12)
+
+
 class _Peer:
     """A phone on the air right now (one BLE connection)."""
 
@@ -380,8 +397,7 @@ class LinkHub:
             if peer is None:
                 peer = self._peers[peer_key] = _Peer()
             peer.last = now
-            # 3 bytes of ATT header come off the MTU; never below the BLE floor.
-            peer.frame_size = max(20, min(int(mtu or 23), 517) - 3)
+            peer.frame_size = answer_frame_size(mtu)
         try:
             done = peer.rx.feed(bytes(frame))
         except ValueError:

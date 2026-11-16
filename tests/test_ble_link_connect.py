@@ -58,3 +58,14 @@ def test_only_paired_phones_under_this_adapter_are_stale():
         ADAPTER: {'org.bluez.Adapter1': {}},
     }
     assert bp.stale_phone_pairings(objects, ADAPTER) == [(f'{ADAPTER}/dev_AA', 'Tablet')]
+
+
+def test_answer_frames_leave_headroom_under_the_mtu():
+    import ble_link
+    # 3 bytes of notification header plus room for BlueZ's per-value length
+    # field: a frame that fills the MTU is never sent, nor anything after it.
+    assert ble_link.answer_frame_size(517) == 505
+    assert ble_link.answer_frame_size(185) == 173
+    assert ble_link.answer_frame_size(4096) == 505
+    for bad in (23, 0, None, 'x'):
+        assert ble_link.answer_frame_size(bad) == 20
