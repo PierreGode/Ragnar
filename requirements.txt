@@ -8,6 +8,7 @@ netifaces==0.11.0
 ping3>=4.0.0
 get-mac>=0.9.0
 paramiko>=3.0.0
+pynacl>=1.5.0
 smbprotocol>=1.10.0
 pysmb>=1.2.0
 pymysql>=1.0.0

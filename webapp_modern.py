@@ -227,45 +227,38 @@ def api_provenance():
         })
 
 # ============================================================================
-# BLE PROVISIONING
-# The Bluetooth GATT peripheral the mobile app uses to discover this box and
-# learn its IP (see ble_provisioning.py + Ragnarmobile docs/PROTOCOL.md). It is
-# provisioning-only: no dashboard data ever crosses Bluetooth. Off by default,
-# because advertising as a peripheral contends with bt_scanner's active scans
-# on the same adapter.
+# RAGNAR MOBILE OVER BLUETOOTH
+# The BLE peripheral the mobile app finds and talks to (ble_peripheral.py owns
+# the radio, ble_link.py the protocol). The app's requests cross as BLE frames
+# and are answered by these same Flask routes. Off by default, because
+# advertising as a peripheral contends with bt_scanner's active scans on the
+# same adapter.
 # ============================================================================
 
 _ble_server = None
 _ble_lock = threading.Lock()
+_ble_link_hub = None
 
 
-def _ble_ap_state():
-    """Live hotspot state for the netStatus characteristic."""
-    active = bool(getattr(shared_data, 'wardrive_ap_active', False))
-    wm = getattr(shared_data, 'wifi_manager', None)
-    ssid = None
-    if active:
-        ssid = getattr(wm, 'ap_ssid', None) or shared_data.config.get('wifi_ap_ssid', 'Ragnar')
-    return {'active': active, 'ssid': ssid}
+def _ble_link():
+    """The Bluetooth link hub (ble_link.py): answers the app's small requests
+    over BLE through these same Flask routes. One per process."""
+    global _ble_link_hub
+    if _ble_link_hub is None:
+        import ble_link
+        _ble_link_hub = ble_link.LinkHub(
+            app, get_config=lambda: shared_data.config, logger=logger,
+            save_config=shared_data.save_config)
+    return _ble_link_hub
 
 
-def _ble_set_ap(on):
-    """Bring the hotspot up/down from a bonded AP-control write."""
-    wm = getattr(shared_data, 'wifi_manager', None)
-    if wm is None:
-        raise RuntimeError('Wi-Fi manager not available')
-    if on:
-        return bool(wm.enable_ap_mode_from_web())
-    return bool(wm.stop_ap_mode())
-
-
-def _start_ble_provisioning():
+def _start_ble():
     """Start the peripheral if config enables it. Never raises."""
     global _ble_server
     try:
-        if not shared_data.config.get('ble_provisioning_enabled', False):
+        if not shared_data.config.get('ble_enabled', False):
             return False
-        import ble_provisioning
+        import ble_peripheral
         # Retire any previous peripheral BEFORE building a new one. Overwriting
         # the reference used to drop a still-registered server on the floor —
         # its GLib thread and, worse, its BlueZ registration of the fixed path
@@ -290,27 +283,26 @@ def _start_ble_provisioning():
             # Another caller may have started one while we were stopping.
             if _ble_server is not None and _ble_server.status().get('running'):
                 return True
-            _ble_server = ble_provisioning.build_server(
+            _ble_server = ble_peripheral.build_server(
                 base_dir,
                 get_config=lambda: shared_data.config,
-                get_ap_state=_ble_ap_state,
-                set_ap=_ble_set_ap,
                 logger=logger,
+                link=_ble_link(),
             )
             if _ble_server is None:
                 return False
             server = _ble_server
         # start() blocks until BlueZ registers or the wait times out. Do that
-        # OUTSIDE the lock: GET /api/ble/provisioning takes the same lock, so
+        # OUTSIDE the lock: GET /api/ble/status takes the same lock, so
         # holding it here made the status the UI polls hang for the full wait —
         # exactly while the user is watching for it to come up.
         return server.start()
     except Exception as e:  # pragma: no cover - hardware/D-Bus dependent
-        logger.error(f"BLE provisioning failed to start: {e}")
+        logger.error(f"Bluetooth peripheral failed to start: {e}")
         return False
 
 
-def _stop_ble_provisioning():
+def _stop_ble():
     global _ble_server
     with _ble_lock:
         if _ble_server is not None:
@@ -321,10 +313,24 @@ def _stop_ble_provisioning():
 def _ble_adapters():
     """Available Bluetooth controllers for the config picker. Never raises."""
     try:
-        import ble_provisioning
-        return ble_provisioning.list_controllers()
+        import ble_peripheral
+        return ble_peripheral.list_controllers()
     except Exception:
         return []
+
+
+def _ble_link_status(advertising):
+    """Link card state. The code is only handed to a caller who may see the
+    Settings page anyway (this route sits behind the normal login)."""
+    try:
+        hub = _ble_link()
+        st = hub.status()
+        st['code'] = hub.code() if advertising else None
+        st['login'] = bool(auth_mgr.is_configured())
+        st['sim'] = bool(shared_data.config.get('ble_link_sim', False))
+        return st
+    except Exception as e:
+        return {'code': None, 'error': str(e)}
 
 
 def _ble_power():
@@ -341,16 +347,15 @@ def _ble_power():
     return None
 
 
-@app.route('/api/ble/provisioning', methods=['GET'])
-def ble_provisioning_status():
-    enabled = bool(shared_data.config.get('ble_provisioning_enabled', False))
+@app.route('/api/ble/status', methods=['GET'])
+def ble_status():
+    enabled = bool(shared_data.config.get('ble_enabled', False))
     running = False
     starting = False
     error = None
     hint = None
     name = None
     adapter = None
-    autostopped = False
     with _ble_lock:
         if _ble_server is not None:
             st = _ble_server.status()
@@ -360,7 +365,6 @@ def ble_provisioning_status():
             hint = st.get('hint')
             name = st.get('name')
             adapter = st.get('adapter')
-            autostopped = bool(st.get('autostopped'))
     return jsonify({
         'enabled': enabled,
         'running': running,
@@ -375,48 +379,41 @@ def ble_provisioning_status():
         'hint': hint,
         'name': name,
         # Configured preference ('' = auto: prefer the built-in controller).
-        'adapter': shared_data.config.get('ble_provisioning_adapter', ''),
+        'adapter': shared_data.config.get('ble_adapter', ''),
         'active_adapter': adapter,
         'adapters': _ble_adapters(),
-        'autostop': bool(shared_data.config.get('ble_provisioning_autostop', False)),
-        # True once a phone provisioned and the peripheral freed the adapter.
-        'autostopped': autostopped,
+        # The Bluetooth link: the app's requests over BLE (ble_link.py).
+        'link': _ble_link_status(enabled and running),
         # Power warning (under-voltage) — running BLE + a USB radio on a weak
         # PSU can reset the Pi; None when healthy.
         'power': _ble_power(),
     })
 
 
-@app.route('/api/ble/provisioning/toggle', methods=['POST'])
-def ble_provisioning_toggle():
+@app.route('/api/ble/toggle', methods=['POST'])
+def ble_toggle():
     payload = request.get_json(silent=True) or {}
-    enable = bool(payload.get('enabled', not shared_data.config.get('ble_provisioning_enabled', False)))
+    enable = bool(payload.get('enabled', not shared_data.config.get('ble_enabled', False)))
 
     # An adapter change needs the peripheral rebuilt: the controller is chosen
     # when the server is constructed and cannot be swapped on a live one.
     needs_restart = False
     if 'adapter' in payload:
         new_adapter = (payload.get('adapter') or '').strip()
-        if new_adapter != shared_data.config.get('ble_provisioning_adapter', ''):
-            shared_data.config['ble_provisioning_adapter'] = new_adapter
+        if new_adapter != shared_data.config.get('ble_adapter', ''):
+            shared_data.config['ble_adapter'] = new_adapter
             needs_restart = True
-    # Auto-stop is NOT construction-time: the loop thread reads self.auto_stop
-    # live in _on_provisioned(), so the running peripheral just gets told the
-    # new value. Tearing down and re-registering the GATT app for it meant
-    # flipping this checkbox bounced BLE (and, with bt-pan holding the adapter,
-    # took the process down with it) for a setting that needed no teardown.
-    if 'autostop' in payload:
-        new_autostop = bool(payload.get('autostop'))
-        shared_data.config['ble_provisioning_autostop'] = new_autostop
-        with _ble_lock:
-            if _ble_server is not None:
-                _ble_server.set_auto_stop(new_autostop)
+    # A new code is live at once: the hub reads it from the config per message.
+    if payload.get('new_link_code'):
+        import ble_link
+        shared_data.config['ble_link_code'] = ble_link.new_code()
+        _ble_link().forget_clients()
 
-    shared_data.config['ble_provisioning_enabled'] = enable
+    shared_data.config['ble_enabled'] = enable
     shared_data.save_config()
 
     if enable:
-        # Restart when a setting changed, or when re-arming after an auto-stop.
+        # Restart when the adapter changed, or when it had stopped.
         # A peripheral that is merely still registering is NOT stopped — tearing
         # it down here would abort a start that was about to succeed.
         with _ble_lock:
@@ -426,8 +423,8 @@ def ble_provisioning_toggle():
                 _st = _ble_server.status()
                 stopped = not _st.get('running') and not _st.get('starting')
         if needs_restart or stopped:
-            _stop_ble_provisioning()
-        ok = _start_ble_provisioning()
+            _stop_ble()
+        ok = _start_ble()
         if not ok:
             with _ble_lock:
                 st = _ble_server.status() if _ble_server else {}
@@ -440,172 +437,79 @@ def ble_provisioning_toggle():
             return jsonify({'enabled': True, 'running': False,
                             'starting': False, 'error': err}), 200
         return jsonify({'enabled': True, 'running': True, 'starting': False})
-    _stop_ble_provisioning()
+    _stop_ble()
     return jsonify({'enabled': False, 'running': False})
 
 
+@app.route('/api/ble/link/sim', methods=['POST'])
+def ble_link_sim():
+    """Development only (config ``ble_link_sim``): one Bluetooth-link message
+    in, its answer out, over HTTP. The browser build of the app has no
+    Bluetooth, so this is how the link is reviewed from a desk — same hub, same
+    code check, same size limits as on the air. Off unless switched on."""
+    if not shared_data.config.get('ble_link_sim', False):
+        return jsonify({'error': 'not enabled'}), 404
+    peer = 'sim:' + (request.headers.get('X-Link-Peer') or request.remote_addr or '?')[:64]
+    out = _ble_link().message(peer, request.get_data(cache=False) or b'')
+    return Response(out, mimetype='application/octet-stream')
+
+
 # ---------------------------------------------------------------------------
-# Bluetooth PAN (NAP) — a direct Bluetooth link to the box for the Ragnar Mobile
-# app when Tailscale/Wi-Fi can't reach it. Opt-in (bt_pan_enabled) and fully
-# reversible (disabling removes the bridge + NAP). Android-only. See bt_pan.py.
-# Unlike BLE provisioning this carries a real IP link, so the app talks ordinary
-# HTTP over it — the waterfall and everything else work unchanged.
+# Settings from earlier Bluetooth designs, carried forward once at boot.
+#  - the peripheral's keys were named after "provisioning" (it used to hand the
+#    app an IP address); they are now ble_enabled / ble_adapter
+#  - the Bluetooth PAN (NAP) is gone: Android never ran IP over it. A box that
+#    had it on still has its bridge, DHCP server, pairing agent and a
+#    discoverable adapter after updating, so those are undone here.
 # ---------------------------------------------------------------------------
-def _start_bt_pan():
-    """Start the NAP server if config enables it. Never raises."""
+
+def _migrate_bluetooth_config():
+    """Idempotent; never raises. Returns True when something was changed."""
     try:
-        if not shared_data.config.get('bt_pan_enabled', False):
-            return False
-        import bt_pan
-        return bool(bt_pan.start().get('running'))
-    except Exception as e:  # pragma: no cover - hardware dependent
-        logger.error(f"BT PAN failed to start: {e}")
+        cfg = shared_data.config
+        changed = False
+        for old, new in (('ble_provisioning_enabled', 'ble_enabled'),
+                         ('ble_provisioning_adapter', 'ble_adapter')):
+            if old in cfg:
+                cfg.setdefault(new, cfg.pop(old))
+                changed = True
+        for gone in ('ble_provisioning_autostop', 'ble_link_enabled'):
+            if cfg.pop(gone, None) is not None:
+                changed = True
+        pan_on = bool(cfg.pop('bt_pan_enabled', False))
+        changed = changed or pan_on
+
+        if pan_on or os.path.exists('/sys/class/net/pan0'):
+            def _quiet(cmd):
+                try:
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=6)
+                except Exception:
+                    pass
+
+            try:
+                with open('/tmp/ragnar/btpan-dnsmasq.pid') as f:
+                    os.kill(int(f.read().strip()), signal.SIGTERM)
+            except Exception:
+                pass
+            _quiet(['pkill', '-x', 'bt-network'])
+            _quiet(['pkill', '-x', 'bt-agent'])
+            _quiet(['ip', 'link', 'set', 'pan0', 'down'])
+            _quiet(['ip', 'link', 'del', 'pan0'])
+            _quiet(['bluetoothctl', 'discoverable', 'off'])
+            _quiet(['bluetoothctl', 'pairable', 'off'])
+            logger.info("Bluetooth PAN retired (bridge, DHCP and pairing agent removed)")
+        if changed:
+            shared_data.save_config()
+        return changed
+    except Exception as e:
+        logger.error(f"Bluetooth settings migration error: {e}")
         return False
 
-
-def _stop_bt_pan():
-    try:
-        import bt_pan
-        bt_pan.stop()
-    except Exception as e:  # pragma: no cover
-        logger.error(f"BT PAN stop error: {e}")
-
-
-@app.route('/api/bt/pan/status', methods=['GET'])
-def bt_pan_status():
-    enabled = bool(shared_data.config.get('bt_pan_enabled', False))
-    try:
-        import bt_pan
-        st = bt_pan.status()
-    except Exception as e:  # pragma: no cover
-        st = {'running': False, 'available': False, 'error': str(e)}
-    st['enabled'] = enabled
-    return jsonify(st)
-
-
-@app.route('/api/bt/pan/toggle', methods=['POST'])
-def bt_pan_toggle():
-    payload = request.get_json(silent=True) or {}
-    enable = bool(payload.get('enabled', not shared_data.config.get('bt_pan_enabled', False)))
-    if enable:
-        import bt_pan
-        # Dependencies missing? Kick off the install in the background and tell
-        # the UI to show progress; it re-issues enable once they are present.
-        # Don't persist bt_pan_enabled yet — a lean box would then try (and fail)
-        # to start the NAP on every boot until the packages actually land.
-        if bt_pan.missing_tools():
-            inst = bt_pan.install_deps()
-            resp = {'enabled': False, 'running': False, 'installing': True}
-            resp.update(inst)
-            return jsonify(resp), 200
-        shared_data.config['bt_pan_enabled'] = True
-        shared_data.save_config()
-        ok = _start_bt_pan()
-        try:
-            st = bt_pan.status()
-        except Exception:
-            st = {}
-        st['enabled'] = True
-        if not ok and not st.get('error'):
-            st['error'] = ('NAP did not come up — is a Bluetooth controller present '
-                           'and unblocked?')
-        return jsonify(st), 200
-    shared_data.config['bt_pan_enabled'] = False
-    shared_data.save_config()
-    _stop_bt_pan()
-    return jsonify({'enabled': False, 'running': False})
-
-
-@app.route('/api/bt/pan/install', methods=['POST'])
-def bt_pan_install():
-    """Install the NAP's missing apt dependencies in the background."""
-    try:
-        import bt_pan
-        return jsonify(bt_pan.install_deps())
-    except Exception as e:  # pragma: no cover
-        return jsonify({'running': False, 'done': True, 'ok': False, 'error': str(e)}), 500
-
-
-@app.route('/api/bt/pan/install-log', methods=['GET'])
-def bt_pan_install_log():
-    """Progress + streamed log for the dependency install (polled by the UI)."""
-    try:
-        import bt_pan
-        return jsonify(bt_pan.install_status())
-    except Exception as e:  # pragma: no cover
-        return jsonify({'running': False, 'done': True, 'ok': False, 'error': str(e)}), 500
-
-
-@app.route('/api/bt/pan/devices', methods=['GET'])
-def bt_pan_devices():
-    """Paired/connected Bluetooth devices, so the operator can forget a stale one."""
-    try:
-        import bt_pan
-        return jsonify(bt_pan.list_devices())
-    except Exception as e:  # pragma: no cover
-        return jsonify({'success': False, 'error': str(e), 'devices': []}), 500
-
-
-@app.route('/api/bt/pan/forget', methods=['POST'])
-def bt_pan_forget():
-    """Remove a device's bond from the box (fixes 'incorrect PIN' on re-pair)."""
-    data = request.get_json(silent=True) or {}
-    try:
-        import bt_pan
-        r = bt_pan.forget_device(data.get('address', ''))
-        return jsonify(r), (200 if r.get('success') else 400)
-    except Exception as e:  # pragma: no cover
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/bt/pan/clear-keys', methods=['POST'])
-def bt_pan_clear_keys():
-    """Forget every Bluetooth bond on the box — clean-slate re-pair.
-
-    Fixes a phone stuck on 'incorrect PIN or passkey', which is a stale-link-key
-    mismatch, not a real PIN (this NAP pairs with 'just works')."""
-    try:
-        import bt_pan
-        r = bt_pan.clear_keys()
-        return jsonify(r), (200 if r.get('success') else 400)
-    except Exception as e:  # pragma: no cover
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/bt/pan/client/connect', methods=['POST'])
-def bt_pan_client_connect():
-    """Connect the box to a phone's Bluetooth tethering (box as PAN client).
-
-    The direction Android supports: the phone shares via Bluetooth tethering and
-    the box joins it at 192.168.44.2, so the app reaches the box at that IP."""
-    data = request.get_json(silent=True) or {}
-    try:
-        import bt_pan
-        r = bt_pan.client_connect(data.get('address'))
-        return jsonify(r), (200 if r.get('success') else 400)
-    except Exception as e:  # pragma: no cover
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/bt/pan/client/disconnect', methods=['POST'])
-def bt_pan_client_disconnect():
-    """Drop the box's PAN-client link to the phone."""
-    try:
-        import bt_pan
-        return jsonify(bt_pan.client_disconnect())
-    except Exception as e:  # pragma: no cover
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/bt/pan/client/status', methods=['GET'])
-def bt_pan_client_status():
-    """Whether the box is currently a PAN client of a phone's tethering."""
-    try:
-        import bt_pan
-        return jsonify(bt_pan.client_status())
-    except Exception as e:  # pragma: no cover
-        return jsonify({'success': False, 'error': str(e)}), 500
 
 # ============================================================================
 # MESH GATEWAY (hub mode)
 # ============================================================================
-# When the app reaches THIS unit directly (e.g. over the Bluetooth-handover LAN
+# When the app reaches THIS unit directly (over Bluetooth, or a LAN
 # address) it can still drive the rest of the fleet: it tags a request with
 # `X-Ragnar-Target: <peer node id>`, and this unit — which is on the tailnet —
 # relays the whole request to that peer and returns the reply. The phone talks
@@ -939,6 +843,11 @@ def check_authentication():
     # Whitelist: paths that must be accessible without authentication
     whitelist_prefixes = ['/login', '/api/auth/', '/api/kill', '/api/provenance']
     if any(path.startswith(p) for p in whitelist_prefixes):
+        return
+    # The Bluetooth-link simulator (development, off by default) is its own
+    # gate: every message it carries is checked against the link code and then
+    # against this very function, exactly like a message off the air.
+    if path == '/api/ble/link/sim' and shared_data.config.get('ble_link_sim', False):
         return
     # Public read so the login page renders in the configured language.
     if path == '/api/i18n/language' and request.method == 'GET':
@@ -16926,6 +16835,53 @@ def wardriving_upload_config():
     except Exception as e:
         logger.error(f"Wardriving upload-config error: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/wardriving/upload-accounts', methods=['GET', 'POST'])
+def wardriving_upload_accounts():
+    """The upload accounts themselves, so Ragnar Mobile and the unit share one
+    set: the app reads them here and sends back any it holds that the unit lacks.
+
+    GET  -> {"wigle": {"name", "token"}, "wdgwars": {"key"},
+             "wardrift": {"token", "username", "base_url"}}
+    POST -> the same shape; each service present replaces that service here
+            (empty values clear it). Answers like GET.
+    """
+    cfg = shared_data.config
+    try:
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            patch = {}
+            for service, fields in (('wigle', (('name', 'wigle_api_name'), ('token', 'wigle_api_token'))),
+                                    ('wdgwars', (('key', 'wdg_key'),)),
+                                    ('wardrift', (('token', 'wardrift_session_token'),))):
+                got = data.get(service)
+                if not isinstance(got, dict):
+                    continue
+                for name, key in fields:
+                    val, err = _clean_credential(got.get(name))
+                    if err:
+                        return jsonify({'error': err}), 400
+                    patch[key] = val
+                if service == 'wardrift':
+                    patch['wardrift_username'] = str(got.get('username') or '').strip()[:64] \
+                        if patch['wardrift_session_token'] else ''
+            if patch:
+                cfg.update(patch)
+                shared_data.save_config()
+
+        def val(key):
+            return (cfg.get(key) or '').strip()
+
+        return jsonify({
+            'wigle': {'name': val('wigle_api_name'), 'token': val('wigle_api_token')},
+            'wdgwars': {'key': val('wdg_key')},
+            'wardrift': {'token': val('wardrift_session_token'),
+                         'username': val('wardrift_username'), 'base_url': _wardrift_base()},
+        })
+    except Exception as e:
+        logger.error(f"Wardriving upload-accounts error: {e}")
+        return jsonify({'error': 'Could not read the upload accounts'}), 500
 
 
 @app.route('/api/wardriving/upload/<session_id>', methods=['POST'])
@@ -33045,27 +33001,19 @@ def run_server(host='0.0.0.0', port=8000, ssl_cert=None, ssl_key=None, https_por
         socketio.start_background_task(mesh_monitor_loop)
         socketio.start_background_task(cellular_uplink_monitor_loop)
 
-        # Bring up the BLE provisioning peripheral if the user has enabled it.
+        # Bring up the Bluetooth peripheral if the user has enabled it.
         # Deferred so a slow/absent Bluetooth stack never delays the web server
         # binding; it runs its own GLib loop thread regardless.
         def _boot_ble():
             try:
-                if _start_ble_provisioning():
-                    logger.info("BLE provisioning peripheral advertising")
+                # First: settings from earlier Bluetooth designs (renamed keys,
+                # a leftover PAN), so the start below reads the current ones.
+                _migrate_bluetooth_config()
+                if _start_ble():
+                    logger.info("Bluetooth peripheral advertising")
             except Exception as _ble_err:  # pragma: no cover
-                logger.error(f"BLE provisioning boot error: {_ble_err}")
+                logger.error(f"Bluetooth peripheral boot error: {_ble_err}")
         socketio.start_background_task(_boot_ble)
-
-        # Bring up the Bluetooth PAN (NAP) if enabled — same deferred, never-fatal
-        # treatment as BLE, so a missing/blocked Bluetooth stack can't hold up the
-        # web server or crash boot.
-        def _boot_bt_pan():
-            try:
-                if _start_bt_pan():
-                    logger.info("Bluetooth PAN (NAP) up on 192.168.44.1")
-            except Exception as _btp_err:  # pragma: no cover
-                logger.error(f"BT PAN boot error: {_btp_err}")
-        socketio.start_background_task(_boot_bt_pan)
 
         logger.info("✅ All background threads started successfully")
 

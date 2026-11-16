@@ -436,6 +436,31 @@ Source: blewatch.md
 Source: blewatch.md
 <!-- proof: docs/blewatch.md | Network → Diagnostics → L2 tab -->
 
+### How does the mobile app connect over Bluetooth?
+Turn on **Use the app over Bluetooth** under Settings → Bluetooth, then tap **Connect over Bluetooth** in the app and enter the link code shown on that card. The app talks to the unit over Bluetooth itself.
+Source: bluetooth.md
+<!-- proof: docs/bluetooth.md | **Settings → Bluetooth → Use the app over Bluetooth → on** -->
+
+### What works in the mobile app over Bluetooth?
+The dashboard numbers, wardriving with Phone GPS, alerts, device inventory, toggles and other actions. Live streams such as the RF waterfall run over the mesh or Wi-Fi.
+Source: bluetooth.md
+<!-- proof: docs/bluetooth.md | Live streams such as the RF waterfall, and the full web UI, run over the mesh or -->
+
+### What is the Bluetooth link code?
+An 8-digit code shown under Settings → Bluetooth. The app asks for it once per unit. **New code** replaces it and signs every phone out.
+Source: bluetooth.md
+<!-- proof: docs/bluetooth.md | A phone proves it knows the unit's 8-digit **link code** -->
+
+### Is the Bluetooth connection to the mobile app encrypted?
+Yes. Every connection starts with a key exchange from the link code (SPAKE2), both sides prove they know the code, and every request and answer after that is encrypted with ChaCha20-Poly1305. Each reconnect uses new keys.
+Source: bluetooth.md
+<!-- proof: docs/bluetooth.md | Every connection starts with a handshake, and everything after it is encrypted. -->
+
+### Do I enter my WiGLE, WDGWars and Wardrift accounts on both the unit and the phone?
+Once is enough. Ragnar Mobile and the unit share one set: each time the app connects it copies accounts in both directions in the background, so an account set up on either is on the other too.
+Source: bluetooth.md
+<!-- proof: docs/bluetooth.md | The app and the unit share one set of WiGLE / WDGWars / Wardrift accounts. -->
+
 ## Alerts and reporting
 
 ### What is Watchtower?

@@ -1,4 +1,4 @@
-"""Tests for how the BLE provisioning peripheral shapes its advertisement.
+"""Tests for how the Bluetooth peripheral shapes its advertisement.
 
 Background: a user's box reported
 
@@ -22,7 +22,7 @@ import re
 
 import pytest
 
-import ble_provisioning as bp
+import ble_peripheral as bp
 
 
 # --- what to ask a given controller for ------------------------------------
@@ -127,8 +127,8 @@ def test_full_rung_carries_name_and_txpower():
 
 
 def test_every_rung_stays_connectable():
-    # 'broadcast' is diagnostic only: a phone cannot connect to it, so GATT
-    # provisioning would be impossible. Degrading must never reach for it.
+    # 'broadcast' is diagnostic only: a phone cannot connect to it, so the
+    # app could never talk to the unit. Degrading must never reach for it.
     for includes, with_name in bp.adv_ladder(['tx-power']):
         assert str(_advertisement(includes, with_name)['Type']) == 'peripheral'
 

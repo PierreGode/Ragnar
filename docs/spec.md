@@ -281,7 +281,7 @@
 The Settings (Configuration) tab groups its many sections behind a sub-tab bar
 (`showConfigSubtab()` in `ragnar_modern.js`, mirroring `showNetworkSubtab()`):
 **System** (System Management), **Network** (Network Scanning), **Bluetooth**
-(handover + access point/PAN), **Wardriving**, **Security** (Security +
+(the mobile app over Bluetooth), **Wardriving**, **Security** (Security +
 Pwnagotchi Bridge), **Integrations** (AI + Push Notifications), and **Advanced**
 (Hardware Resource Configuration + the raw fine-tune form). Each group lives in a
 `#cfg-sub-*` wrapper (`.cfg-subview`) that is show/hidden with the `hidden`
@@ -314,10 +314,10 @@ whose value actually **changed**", never "the key is present".
   `restart_reason` (the key that changed), and the UI says so before the socket
   drops.
 - Feature toggles own their own live-apply path and must never reach for a
-  service restart. BLE provisioning is the worked example: the **adapter**
+  service restart. Bluetooth peripheral is the worked example: the **adapter**
   picker rebuilds the peripheral (the controller is bound at construction),
   while **auto-stop after provisioning** is read live on the loop thread and is
-  applied to the running peripheral via `BleProvisioningServer.set_auto_stop()`.
+  applied to the running peripheral via `BlePeripheral.set_auto_stop()`.
 
 ## 14. Folder Structure Highlights
 | Path | Purpose |

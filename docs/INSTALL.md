@@ -388,10 +388,8 @@ sudo apt-get update && sudo apt-get upgrade -y
   libopenjp2-7 \
   nmap \
   libopenblas-dev \
-  bluez-tools \
   bluez \
   dhcpcd5 \
-  bridge-utils \
   python3-pil
 
 

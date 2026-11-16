@@ -1,116 +1,142 @@
-# BLE Provisioning
+# Ragnar Mobile over Bluetooth
 
-> **Note (deprecated client path).** The Ragnar mobile app no longer uses
-> Bluetooth to find a box — it connects over the [Ragnar Mesh](mesh.md)
-> (Tailscale) and selects units by their `tag:ragnar-mesh` tag. This BLE
-> peripheral still ships and works, but nothing currently consumes it; it is
-> kept for other provisioning clients and may be retired later.
+The [Ragnar Mobile](https://github.com/PierreGode/Ragnarmobile) app finds a unit
+over Bluetooth (BLE) and talks to it over Bluetooth. The phone and the unit only
+have to be within radio range of each other — in a car, in the field, on a desk.
 
-`ble_provisioning.py` is a BlueZ GATT peripheral that lets a client discover a
-box over Bluetooth and learn how to reach it over IP.
+## Using it
 
-## What it is — and isn't
+1. On the unit: **Settings → Bluetooth → Use the app over Bluetooth → on**. The
+   card shows the name the unit advertises (`Ragnar-xxxx`) and its **link code**.
+2. In the app: **Connect → Bluetooth → Connect over Bluetooth**. The app picks
+   the nearest Ragnar.
+3. Enter the link code. The app remembers it for that unit.
 
-It is **provisioning only**. No dashboard data ever crosses Bluetooth:
+## What it carries
 
-- iOS cannot use Bluetooth Classic / RFCOMM without MFi hardware, so BLE GATT
-  is the only cross-platform option — and GATT manages only ~5–20 KB/s.
-- Ragnar's real API (hundreds of KB per response, plus a Socket.IO stream)
-  belongs on Wi-Fi. The box already runs hostapd for the no-infrastructure
-  case.
+The app's ordinary API requests travel over two GATT characteristics and are
+answered by the same routes that answer them over HTTP (`ble_link.py`). Every
+screen of the app therefore works over Bluetooth as it is:
 
-So the peripheral answers exactly one question — *where do I find this box on
-IP?* — then gets out of the way. Everything it exposes fits inside a single
-512-byte GATT attribute, so neither side implements chunking.
+- the dashboard numbers and system health,
+- wardriving: live status, start and stop, sessions, and
+  [Phone GPS](wardriving.md#phone-gps-ragnar-mobile-app) — the phone's position,
+  once a second,
+- alerts, sensing, device inventory,
+- toggles and other actions, and switching to another unit through this one.
 
-## Off by default
+Answers are compressed before they are sent, typically ten to one for JSON: the
+test unit's 33 kB device list crosses as 2.7 kB. BLE moves some tens of kB per
+second, so the link is sized for answers up to 128 kB compressed.
 
-The service is disabled unless `ble_provisioning_enabled` is set. Advertising
-as a peripheral contends with `bt_scanner.py`'s active discovery on the same
-adapter, so turning it on is a deliberate choice. On a box with a single
-controller, run the BLE overlay scans and the provisioning peripheral at
-different times; with two controllers, pin the peripheral to one with
-`ble_provisioning_adapter`.
+Live streams such as the RF waterfall, and the full web UI, run over the mesh or
+Wi-Fi (the app's **Network** tab). Over Bluetooth a stream is answered with
+`415` and an answer above the size limit with `413`; the app shows "Too much
+data for Bluetooth".
 
-**Adapter choice.** Linux/BlueZ runs multiple controllers at once (unlike
-Windows, which allows one Bluetooth radio). The Pi's onboard radio sits on the
-UART bus; a USB dongle (e.g. an Alfa) enumerates on USB. With no explicit
-`ble_provisioning_adapter`, the peripheral prefers the **built-in** controller
-so the dongle stays free for the active scanners — even if the dongle happened
-to enumerate as `hci0`.
+## Access
 
-## Web config
+A phone proves it knows the unit's 8-digit **link code**, shown on the card, and
+the unit proves the same to the phone. Five wrong codes lock the link for a
+minute, doubling up to fifteen. **New code** on the card replaces the code and
+signs every phone out.
 
-The Ragnar web UI → **Config → Bluetooth Provisioning** has an enable toggle
-and an adapter picker (each controller is listed, the built-in one tagged).
-These write `ble_provisioning_enabled` and `ble_provisioning_adapter`;
-switching the adapter restarts the peripheral on the new one. The mobile app's
-Settings tab exposes the same enable toggle.
+After the code, the unit's own login applies exactly as it does over HTTP: the
+app shows its login screen. The link code is what protects a unit over
+Bluetooth; a login password under Settings → Security adds a second lock.
 
-## Auto-stop after provisioning
+What a phone can read before it has proven the code is `{name, box_id, link}` —
+enough to recognise a Ragnar.
 
-`ble_provisioning_autostop` (a checkbox on the same card) makes the peripheral
-**free the adapter once a phone has provisioned**. When a central reads the
-network-status or AP-credentials characteristic, a short grace timer
-(`AUTOSTOP_GRACE_MS`, 15 s, reset on each read) arms; when it expires the
-peripheral stops advertising and releases the controller for Ragnar's other
-Bluetooth work (`bt_scanner`, WIDS).
+## Encryption
 
-This is for **single-radio** boxes. The trade-off: once stopped, the app can no
-longer rediscover the box over Bluetooth until it advertises again — use the
-**Re-advertise** button (shown once auto-stopped) or re-toggle enable. With two
-controllers you don't need this: leave provisioning always-on on the built-in
-radio and let the USB dongle scan.
+Every connection starts with a handshake, and everything after it is encrypted.
 
-Toggling the checkbox applies to the **running** peripheral — the flag is read
-live when a central provisions, so nothing is torn down and re-registered for
-it. Turning it off also cancels a grace timer a read has already armed, so the
-peripheral won't stop once more after you asked it not to. Only the **adapter**
-picker rebuilds the peripheral, because the controller is chosen when the
-server is constructed.
+1. **Key exchange from the code (SPAKE2).** Phone and unit each combine the link
+   code with a fresh random secret and exchange the results. Both arrive at the
+   same session keys when they used the same code. Someone recording the
+   exchange gets nothing to test guesses against, so a code can only be tried
+   one connection at a time, against the lockout above.
+2. **Proof both ways.** The phone shows the unit it reached the keys, then the
+   unit shows the phone. A device that only pretends to be your Ragnar fails
+   here, before the app sends it anything.
+3. **Sealed traffic.** Each request and each answer is encrypted and
+   authenticated with ChaCha20-Poly1305 under those keys. Requests carry a
+   counter that only goes up, so a recorded request cannot be replayed, and an
+   answer only opens for the request it belongs to.
 
-## Enabling it
+Keys last for one connection: every reconnect runs the handshake again with new
+secrets. The phone remembers the code, so this happens by itself.
 
-Once — over IP, from the mobile app's **Box** tab, or directly:
+The group arithmetic and the cipher come from libsodium (PyNaCl) on the unit and
+from the audited `@noble` libraries in the app. `tests/test_ble_link.py` and the
+app's `tests/linkproto.test.ts` check the same known-answer values, so the two
+sides are proven to agree byte for byte.
 
-```bash
-curl -X POST http://<box>:8000/api/ble/provisioning/toggle \
-     -H 'Content-Type: application/json' -d '{"enabled":true}'
-```
+## Upload accounts
 
-After that the phone can discover the box over Bluetooth on every later
-connect. The setting persists and the peripheral comes back up on boot.
+The app and the unit share one set of WiGLE / WDGWars / Wardrift accounts. Each
+time the app connects it reads the unit's accounts, keeps any it did not have,
+and hands the unit any that only the phone holds — in the background, over the
+encrypted link. An account entered in the app is saved on both at once.
+`GET/POST /api/wardriving/upload-accounts`; details in
+[wardriving.md](wardriving.md).
 
-- `GET  /api/ble/provisioning`        → `{enabled, running, error, name}`
-- `POST /api/ble/provisioning/toggle` → `{enabled}` (omit to flip)
+## How it is built
 
-## GATT service
+- `ble_peripheral.py` owns the radio: adapter choice, advertising, the D-Bus
+  GATT objects. Config `ble_enabled`, `ble_adapter`.
+- `ble_link.py` owns the protocol and runs with plain Python: frames, the key
+  exchange and sealing, dispatch into Flask, size limits. Config
+  `ble_link_code`. Needs `pynacl` (in `requirements.txt`).
 
-Advertised name `Ragnar-<id>` (id = last 2 bytes of the adapter address).
-Service UUID `fc453ae1-7464-49fb-9018-52ded4f4086d`, in the advertisement so
-the app can scan filtered by it and iOS can discover in the background.
+**Adapter.** The peripheral uses the built-in controller by default so a USB
+dongle stays free for scanning. A unit with more than one controller gets an
+adapter picker on the card.
+
+**API.**
+
+- `GET  /api/ble/status` → `{enabled, running, starting, error, hint, name, adapters, link: {code, connected, requests, bytes_out, locked_for, login}, …}`
+- `POST /api/ble/toggle` → `{enabled}`; also takes `adapter` and `new_link_code: true`.
+
+**GATT service** `fc453ae1-7464-49fb-9018-52ded4f4086d`, advertised as
+`Ragnar-<id>` (id = last 2 bytes of the adapter address).
 
 | Characteristic | UUID | Access | Payload |
 |---|---|---|---|
-| Device info | `8c310633-…` | read | `{name, hostname, model, version, box_id}` |
-| Network status | `7322574d-…` | read, notify | `{api_port, ifaces:[{name,ip}], ap_active, ap_ssid}` |
-| AP credentials | `2fdc016e-…` | encrypted read | `{ssid, psk}` |
-| AP control | `b8a58eb8-…` | encrypted write | `{action: "start_ap"｜"stop_ap"}` |
+| Device info | `8c310633-…` | read | `{name, box_id, link}` |
+| Link RX | `a3f1c2d4-…f601` | write | one frame of a request (app → unit) |
+| Link TX | `a3f1c2d4-…f602` | notify | one frame of an answer (unit → app) |
 
-The two AP characteristics require a bonded (encrypted) link, so BlueZ runs
-pairing on first use — the hotspot key is never exposed on an open link, and
-an unauthenticated peer cannot toggle the box's uplink.
+**Wire format.** frame = `id:u16 | seq:u16 (bit 15 = last) | payload`, sized to
+the connection's MTU. Request = JSON `{"t":"hello"|"auth"|"req", …}`. Answer =
+`status:u16 | flags:u8 | body` (flag 1 = zlib, 2 = JSON).
 
-The app picks a reachable address from the interface list the same way
-Ragnar's net-diag does: wired, then USB ethernet, then `wlan1`, then `wlan0`.
+**Reviewing it from a desk.** With `ble_link_sim: true` in the config, the unit
+accepts link messages over HTTP at `POST /api/ble/link/sim`, and the browser
+build of the app offers **Simulate Bluetooth** on its Connect screen. The same
+hub answers, with the same code check and size limits, and the app feeds the
+answer back at about BLE speed. It is a development switch and defaults to off.
+
+## Changed from earlier releases
+
+- **Bluetooth is now the connection itself.** Earlier releases used Bluetooth to
+  hand the app the unit's IP address, after which the app connected over Wi-Fi
+  ("handover"). The app now talks to the unit over Bluetooth. An app version
+  from before this change finds the unit but cannot connect; update the app.
+- **Removed:** the network-status, hotspot-credentials and hotspot-control
+  characteristics, the "auto-stop" option, and the Bluetooth access
+  point (PAN) with `bt_pan.py` and `/api/bt/pan/*`. A unit that had the access
+  point on removes its `pan0` bridge, DHCP server and pairing agent the first
+  time it starts after the update.
 
 ## CLI / troubleshooting
 
 ```bash
-sudo python3 ble_provisioning.py doctor   # why isn't it advertising?
-python3 ble_provisioning.py info          # print the payloads, no Bluetooth
-python3 ble_provisioning.py selftest      # register with BlueZ, verify, unregister
-python3 ble_provisioning.py run           # advertise until Ctrl-C
+sudo python3 ble_peripheral.py doctor   # why isn't it advertising?
+python3 ble_peripheral.py info          # print the payloads, no Bluetooth
+python3 ble_peripheral.py selftest      # register with BlueZ, verify, unregister
+python3 ble_peripheral.py run           # advertise until Ctrl-C
 ```
 
 **"Starting — registering with BlueZ…" that never finishes.** Registering the
@@ -126,7 +152,7 @@ registration left behind by an earlier run blocks every later start — and it
 used to persist until the whole Ragnar process restarted. Two faults caused it,
 both fixed: teardown ran the advertisement and application unregisters in one
 `try`, so the routine failure of the first (BlueZ releases the advertisement
-itself on **auto-stop**) skipped the second; and restarting the peripheral
+itself) skipped the second; and restarting the peripheral
 replaced the server object without stopping the old one, orphaning its
 registration. A start that still meets `AlreadyExists` now reclaims the path and
 retries once, so a box already stuck heals itself on the next enable. If you see
@@ -166,14 +192,14 @@ another. The causes, in the order they turn up:
   running?" check reads clean while the controller is in fact busy and refuses
   to advertise. This is the most likely reason a box that used to advertise
   suddenly won't. Ragnar detects these directly from the process list and calls
-  them out; stop the scan/pentest (or use a second controller) and re-enable
-  provisioning. `hcitool lescan` in particular often leaves the radio wedged
+  them out; stop the scan/pentest (or use a second controller) and switch
+  Bluetooth back on. `hcitool lescan` in particular often leaves the radio wedged
   when killed, so a `hciconfig hciX reset` (or `bluetoothctl power off/on`) may
   be needed after — which is what the automatic power-cycle retry does.
 
 A refused advertisement is retried down a ladder of progressively smaller ones
 — the same advertisement once more, then without `tx-power`, then the bare
-service UUID — because a box findable by service UUID alone still provisions
+service UUID — because a box findable by service UUID alone still works
 (the app scans filtered by that UUID). If every rung is refused, the controller
 is **power-cycled once** and the whole ladder retried, which clears the wedged
 case. Only then is it reported as a failure — and the message carries the
@@ -218,7 +244,7 @@ too — so this is the controller/firmware, NOT Ragnar. Use a different adapter.
 
 An `Invalid Parameters (0x0d)` with that confirmation is a controller that
 simply won't advertise on this firmware/driver — the reliable fix is to
-provision on the **built-in** radio (the doctor names it) and leave the dongle
+use the **built-in** radio (the doctor names it) and leave the dongle
 for scanning.
 
 **Start with `doctor`.** It is the "the toggle does nothing" tool: it checks
