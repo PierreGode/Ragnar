@@ -69,3 +69,42 @@ def test_answer_frames_leave_headroom_under_the_mtu():
     assert ble_link.answer_frame_size(4096) == 505
     for bad in (23, 0, None, 'x'):
         assert ble_link.answer_frame_size(bad) == 20
+
+
+def _peripheral(monkeypatch, run):
+    import threading
+    p = bp.BlePeripheral.__new__(bp.BlePeripheral)
+    p._running = False
+    p._error = p._hint = p._mainloop = p._thread = None
+    p._stop_requested = False
+    p._ready = threading.Event()
+    monkeypatch.setattr(bp.BlePeripheral, '_run_loop', run)
+    return p
+
+
+def test_start_waits_for_a_start_already_in_progress(monkeypatch):
+    import threading
+    release, started = threading.Event(), []
+
+    def slow(self):
+        started.append(1)
+        release.wait(5)
+        self._running = True
+        self._ready.set()
+
+    p = _peripheral(monkeypatch, slow)
+    assert p.start(timeout=0.2) is False        # still registering
+    assert p.start(timeout=0.2) is False        # must not start a second loop
+    release.set()
+    assert p.start(timeout=3) is True
+    assert started == [1]
+
+
+def test_stop_during_start_is_remembered(monkeypatch):
+    import threading
+    release = threading.Event()
+    p = _peripheral(monkeypatch, lambda self: release.wait(5))
+    p.start(timeout=0.1)
+    p.stop()                                     # no main loop exists yet
+    assert p._stop_requested is True
+    release.set()

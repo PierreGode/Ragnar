@@ -140,6 +140,11 @@ answer back at about BLE speed. It is a development switch and defaults to off.
   100–150 ms (the kernel default is 1.28 s), so the app connects within a
   second or two.
 
+- **The app finds the unit and cannot stay connected, on a unit updated from a
+  release before 2026-11-16:** reboot it once. Switching the link off and on
+  used to restart Ragnar and leave extra advertisements behind in the Bluetooth
+  service; `bluetoothctl show` lists them as `ActiveInstances` (1 is correct).
+
 ## CLI / troubleshooting
 
 ```bash

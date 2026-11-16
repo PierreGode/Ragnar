@@ -235,6 +235,11 @@ class BlePeripheral:
         self.adv_type = adv_type
         self._thread: Optional[threading.Thread] = None
         self._mainloop = None
+        # Set by stop(). The loop thread checks it, so a stop that arrives
+        # while the thread is still registering with BlueZ (seconds, on a
+        # Pi Zero 2 W) is honoured instead of leaving a registered peripheral
+        # behind that nothing owns.
+        self._stop_requested = False
         self._glib = None
         self._error: Optional[str] = None
         # Plain-language next step for an error the user can act on.
@@ -263,6 +268,12 @@ class BlePeripheral:
         """Start the peripheral. Returns True once advertising, else False."""
         if self._running:
             return True
+        t = self._thread
+        if t is not None and t.is_alive():
+            # Still registering from an earlier start(): wait for that one.
+            self._ready.wait(timeout)
+            return self._running and self._error is None
+        self._stop_requested = False
         self._error = None
         self._hint = None
         self._ready.clear()
@@ -275,6 +286,7 @@ class BlePeripheral:
         return self._running and self._error is None
 
     def stop(self) -> None:
+        self._stop_requested = True
         if self._mainloop is not None:
             try:
                 self._mainloop.quit()
@@ -286,8 +298,8 @@ class BlePeripheral:
         # collide with lingering handlers. Never join ourselves (on_error calls
         # stop() from inside the loop thread).
         t = self._thread
-        if t is not None and t is not threading.current_thread():
-            t.join(timeout=4)
+        if t is not None and t is not threading.current_thread() and t.is_alive():
+            t.join(timeout=6)
 
     def status(self) -> dict:
         # 'starting' separates "still registering with BlueZ" from "failed".
@@ -346,6 +358,13 @@ class BlePeripheral:
                 bus = dbus.SystemBus(private=True, mainloop=mainloop)
             except TypeError:  # very old dbus-python without the kwarg
                 bus = dbus.SystemBus(private=True)
+            # A private libdbus connection ends the whole process (_exit(1)) when
+            # it is closed or lost, unless told otherwise. stop() closes this
+            # one, so without this every off-then-on of the link killed Ragnar.
+            try:
+                bus.set_exit_on_disconnect(False)
+            except Exception:
+                pass
             self._bus = bus
 
             adapter_path = f'/org/bluez/{self.providers.hci}'
@@ -554,7 +573,15 @@ class BlePeripheral:
                 error_handler=lambda e: on_error(e, 'RegisterAdvertisement'),
             )
 
-            self._mainloop.run()
+            def _stop_check():
+                if self._stop_requested:
+                    self._mainloop.quit()
+                    return False
+                return True
+            GLib.timeout_add(500, _stop_check)
+
+            if not self._stop_requested:
+                self._mainloop.run()
 
             # Clean unregister on the way out — each in its OWN try block.
             # Sharing one meant a throwing UnregisterAdvertisement skipped
