@@ -2,6 +2,17 @@
 
 ## Releases
 
+### 2026-11-16
+
+#### fix(wardriving): Bluetooth devices get their measured signal strength
+*branch `fix/wardrive-bt-rssi`*
+
+- **Real RSSI.** A drive recorded every Bluetooth device at −80 dBm (−85 for the BLE-only pass): the scan read `bluetoothctl devices`, which prints no signal strength. The scan now runs a BlueZ discovery over D-Bus and stores the RSSI BlueZ measured for each device.
+- **Only what is in range.** `bluetoothctl devices` also returned BlueZ's remembered devices from earlier. The D-Bus scan keeps the devices heard during that scan, so the per-scan count and the session total reflect the drive.
+- **Type.** Devices are recorded as `Classic` or `BLE`.
+- A unit without `python3-dbus` keeps the earlier text scan.
+- Tested on the dev unit (Pi 5, built-in controller, with the mobile app's Bluetooth link running on the same controller): 14 devices, −47 to −74 dBm.
+
 ### 2026-11-15
 
 #### feat(bluetooth): the mobile app talks to the unit over Bluetooth

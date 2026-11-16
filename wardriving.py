@@ -4448,16 +4448,26 @@ class WardrivingEngine:
         logger.info("Bluetooth scan loop stopped")
 
     def _scan_bluetooth(self):
-        """Scan for Bluetooth Classic + BLE devices."""
-        devices = []
-        seen_macs = set()
+        """Scan for Bluetooth Classic + BLE devices in range right now.
 
+        BlueZ discovery over D-Bus gives every device with its measured signal
+        strength, and only the ones heard during this scan. Without python-dbus
+        the bluetoothctl / hcitool text scan below still finds devices, but
+        those tools print no signal strength, so it records a nominal one.
+        """
         # Ensure Bluetooth is not soft-blocked
         try:
             subprocess.run(['sudo', 'rfkill', 'unblock', 'bluetooth'],
                            capture_output=True, timeout=3)
         except Exception:
             pass
+
+        measured = self._scan_bluetooth_dbus()
+        if measured is not None:
+            return measured
+
+        devices = []
+        seen_macs = set()
 
         # Method 1: bluetoothctl (Classic + BLE)
         try:
@@ -4510,6 +4520,36 @@ class WardrivingEngine:
         except Exception as e:
             logger.warning(f"hcitool lescan failed: {e}")
 
+        return devices
+
+    @staticmethod
+    def _scan_bluetooth_dbus(duration=5):
+        """One BlueZ discovery: [{mac, name, rssi, type}] with the measured RSSI,
+        or None when D-Bus discovery is not available on this unit."""
+        try:
+            import bt_scanner
+            ctrl = bt_scanner._pick_controller()
+            if not ctrl:
+                return None
+            found, reason = bt_scanner._discover_dbus(ctrl['hci'], duration)
+        except Exception as e:
+            logger.debug(f"BT D-Bus scan unavailable: {e}")
+            return None
+        if found is None:
+            logger.debug(f"BT D-Bus scan unavailable: {reason}")
+            return None
+        devices = []
+        for d in found:
+            mac = d.get('mac')
+            if not mac:
+                continue
+            devices.append({
+                'mac': mac,
+                'name': d.get('name') or '',
+                'rssi': d['rssi'],
+                # A class of device is only reported by Bluetooth Classic.
+                'type': 'Classic' if d.get('cls') else 'BLE',
+            })
         return devices
 
     # ------------------------------------------------------------------
