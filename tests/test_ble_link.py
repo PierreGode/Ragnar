@@ -355,3 +355,15 @@ def test_what_is_readable_before_the_code_names_only_a_ragnar():
     assert ble_peripheral.DataProviders('/nonexistent', 'hci0', lambda: {}).device_info()['link'] == 0
     for gone in ('net_status', 'ap_creds', 'apply_ap'):
         assert not hasattr(ble_peripheral.DataProviders, gone)
+
+
+def test_answers_still_go_out_when_the_thread_pool_refuses(hub):
+    """Python 3.14's ThreadPoolExecutor can refuse new work with "cannot
+    schedule new futures after interpreter shutdown" on a long-lived process
+    that is still serving. The link must fall back to a plain thread so a
+    phone's hello is still answered (otherwise every Kali/3.14 box times out)."""
+    def refuse(*a, **k):
+        raise RuntimeError('cannot schedule new futures after interpreter shutdown')
+    hub._pool.submit = refuse
+    status, body = Phone(hub).hello('12345678')
+    assert status == 200 and 'y' in body
