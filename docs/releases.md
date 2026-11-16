@@ -4,6 +4,12 @@
 
 ### 2026-11-16
 
+#### fix(bluetooth): answers reach the app — smaller frames on the link
+*branch `fix/ble-link-frame-size`*
+
+- **The app connected, then every request timed out.** The link cut its answers into frames that filled the connection's packet size (514 bytes at MTU 517). With a phone that accepts several notifications in one packet (every recent Android), BlueZ adds a length field per value; a frame that large was never sent, and no later answer was either. Frames are now 12 bytes under the MTU (505 at MTU 517, `answer_frame_size` in `ble_link.py`).
+- Tested on the dev unit with an Android tablet and a radio capture: before, no answer after the first large one; after, 55 notifications in 90 s, full-size ones included.
+
 #### fix(bluetooth): the app connects — old pairings removed, faster advertising
 *branch `fix/ble-link-connect`*
 
