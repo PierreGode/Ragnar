@@ -16987,22 +16987,104 @@ def wardrift_signout():
     return jsonify({'success': True})
 
 
+def _wardrift_authed_get(path, allow_404=False):
+    """GET a Wardrift endpoint with the stored session token.
+
+    Returns (body, http_status). A missing or expired Wardrift session answers
+    409 (not 401): the box's own 401 means the browser must log in to Ragnar,
+    and these two must not be confused. With allow_404, a Wardrift 404 comes
+    back as (None, 200) — used for 'am I in a guild?', where none is not error.
+    """
+    token = (shared_data.config.get('wardrift_session_token') or '').strip()
+    if not token:
+        return {'error': 'Not signed in to Wardrift', 'expired': True}, 409
+    try:
+        import requests
+        r = requests.get(_wardrift_base() + path,
+                         headers={'Authorization': f'Bearer {token}'}, timeout=25)
+    except Exception as e:
+        return {'error': str(e)}, 502
+    if r.status_code == 401:
+        return {'error': 'Wardrift session expired - sign in again', 'expired': True}, 409
+    if allow_404 and r.status_code == 404:
+        return None, 200
+    body = _wardrift_body(r)
+    if not r.ok:
+        return (body if isinstance(body, dict) else {'error': f'HTTP {r.status_code}'}), 502
+    return body, 200
+
+
 @app.route('/api/wardriving/wardrift/dashboard')
 def wardrift_dashboard():
     """Proxy GET /v1/dashboard with the stored session token (player stats)."""
-    token = (shared_data.config.get('wardrift_session_token') or '').strip()
-    if not token:
-        return jsonify({'error': 'Not signed in to Wardrift'}), 401
+    body, status = _wardrift_authed_get('/v1/dashboard')
+    return jsonify(body), status
+
+
+@app.route('/api/wardriving/wardrift/territory')
+def wardrift_territory():
+    """Proxy GET /v1/territory — the H3 hexes each faction holds, in a bbox.
+
+    The browser build reads the game through here (CORS blocks it from calling
+    wardrift.net directly); the native app calls wardrift.net itself.
+    """
+    try:
+        args = {k: float(request.args.get(k)) for k in ('west', 'south', 'east', 'north')}
+    except (TypeError, ValueError):
+        return jsonify({'error': 'west/south/east/north required'}), 400
+    q = '&'.join(f'{k}={v}' for k, v in args.items())
+    body, status = _wardrift_authed_get('/v1/territory?' + q)
+    return jsonify(body), status
+
+
+@app.route('/api/wardriving/wardrift/factions')
+def wardrift_factions():
+    """Proxy GET /v1/factions — id, name and colour per faction."""
+    body, status = _wardrift_authed_get('/v1/factions')
+    return jsonify(body), status
+
+
+@app.route('/api/wardriving/wardrift/outposts')
+def wardrift_outposts():
+    """Proxy GET /v1/outposts — the towers and keeps in a bbox (kind, defence,
+    owner, position), for the map's keep/tower markers."""
+    try:
+        args = {k: float(request.args.get(k)) for k in ('west', 'south', 'east', 'north')}
+    except (TypeError, ValueError):
+        return jsonify({'error': 'west/south/east/north required'}), 400
+    q = '&'.join(f'{k}={v}' for k, v in args.items())
+    body, status = _wardrift_authed_get('/v1/outposts?' + q)
+    return jsonify(body), status
+
+
+@app.route('/api/wardriving/wardrift/guild')
+def wardrift_guild():
+    """Proxy GET /v1/guilds/me — the player's guild, or null when in none."""
+    body, status = _wardrift_authed_get('/v1/guilds/me', allow_404=True)
+    return jsonify(body), status
+
+
+@app.route('/api/wardriving/wdgwars/me')
+def wdgwars_me():
+    """Proxy GET wdgwars.pl /api/me with the stored API key (player stats).
+
+    WDGWars (WiGLE 2.0) is a stats-and-leaderboard game, not a territory one,
+    so this is the one read the WDGW screen needs. The browser build reads it
+    through here (CORS); the native app calls wdgwars.pl directly. A missing or
+    rejected key answers 409 (not the box's own 401)."""
+    key = (shared_data.config.get('wdg_key') or '').strip()
+    if not key:
+        return jsonify({'error': 'WDGWars API key not set', 'unconfigured': True}), 409
     try:
         import requests
-        r = requests.get(_wardrift_base() + '/v1/dashboard',
-                         headers={'Authorization': f'Bearer {token}'}, timeout=20)
-        body = _wardrift_body(r)
-        if r.status_code == 401:
-            return jsonify({'error': 'Wardrift session expired - sign in again', 'expired': True}), 401
-        return jsonify(body), (200 if r.ok else 502)
+        r = requests.get('https://wdgwars.pl/api/me',
+                         headers={'X-API-Key': key}, timeout=20)
     except Exception as e:
         return jsonify({'error': str(e)}), 502
+    if r.status_code in (401, 403):
+        return jsonify({'error': 'WDGWars key rejected — check it under accounts', 'unconfigured': True}), 409
+    body = _wardrift_body(r)
+    return jsonify(body), (200 if r.ok else 502)
 
 
 # ---------------------------------------------------------------------------
