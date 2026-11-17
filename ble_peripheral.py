@@ -379,6 +379,16 @@ class BlePeripheral:
             # earlier builds that (wrongly) forced Discoverable on permanently.
             props = dbus.Interface(adapter_obj, DBUS_PROPS)
             props.Set(ADAPTER_IFACE, 'Powered', dbus.Boolean(True))
+            # The app secures the link itself (link code + SPAKE2 + ChaCha20), so
+            # BLE pairing/bonding is neither used nor wanted. Left Pairable, the
+            # adapter lets iOS offer to bond on first access and raise a
+            # "RagnarPwn wants to pair" prompt — repeatedly, since the box also
+            # drops phone bonds below. Turn pairing off: no characteristic needs
+            # encryption, so everything still works over the open GATT link.
+            try:
+                props.Set(ADAPTER_IFACE, 'Pairable', dbus.Boolean(False))
+            except Exception:
+                pass  # non-fatal
             try:
                 props.Set(ADAPTER_IFACE, 'DiscoverableTimeout', dbus.UInt32(180))
                 props.Set(ADAPTER_IFACE, 'Discoverable', dbus.Boolean(False))

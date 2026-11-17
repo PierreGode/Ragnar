@@ -2,6 +2,20 @@
 
 ## Releases
 
+### 2026-11-17
+
+#### feat(wardriving): the Bluetooth device list is paginated and sortable
+
+*branch `feat/wardrive-bt-recent-slice`*
+
+- **`/api/wardriving/bluetooth` now accepts `limit`, `offset`, `sort` (including `last_seen`) and `order`, and reports the true `total`** — the same shape as the networks endpoint. The live app map can pull just the most-recently-seen slice over a thin Bluetooth link instead of the whole table; there are often more Bluetooth devices than Wi-Fi networks, so the full list was the heaviest payload on the link and the slowest to arrive. With no parameters the endpoint returns every device, exactly as before, so older app versions are unaffected.
+
+#### fix(bluetooth): the box no longer asks the phone to pair
+
+*branch `fix/ble-no-pairing`*
+
+- **iPhone kept showing "RagnarPwn wants to pair with your iPhone" over and over** while connected. The app's Bluetooth link is secured entirely at the app layer (link code + SPAKE2 + ChaCha20) and no GATT characteristic requires encryption, so BLE pairing/bonding is never used — but the adapter was left `Pairable`, so iOS offered to bond on first access and re-prompted (the box also drops phone bonds on start, which kept the loop going). The adapter is now set `Pairable = False` in `ble_peripheral.py` alongside the existing `Discoverable = False`; everything still works over the open GATT link, with no pairing prompt. (Applied live with `bluetoothctl pairable off` and persisted in code.)
+
 ### 2026-11-16
 
 #### feat(wardriving): proxy WDGWars coverage cells for the app's map overlay
