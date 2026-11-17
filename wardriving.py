@@ -1153,15 +1153,31 @@ class WardrivingSession:
                 logger.error(f"Get networks error: {e}")
                 return []
 
-    def get_bluetooth_devices(self):
-        """Get all discovered Bluetooth devices."""
+    def get_bluetooth_devices(self, limit=None, offset=0, sort_by='best_rssi', order='DESC'):
+        """Get discovered Bluetooth devices, optionally paginated and sorted.
+
+        Mirrors get_networks: the live map pulls the most-recently-seen slice
+        (sort_by='last_seen') over a thin link instead of the whole table. With
+        no limit it returns everything, as before. sort_by/order map to literal
+        SQL fragments so an ORDER BY can never carry attacker-controlled text.
+        """
+        _SORT_COLS = {
+            'best_rssi': 'best_rssi', 'rssi': 'rssi', 'name': 'name',
+            'first_seen': 'first_seen', 'last_seen': 'last_seen',
+            'scan_count': 'scan_count',
+        }
+        sort_col = _SORT_COLS.get(sort_by, 'best_rssi')
+        order_sql = 'ASC' if str(order).upper() == 'ASC' else 'DESC'
         with self._lock:
             try:
                 with sqlite3.connect(self.db_path) as conn:
                     conn.row_factory = sqlite3.Row
-                    rows = conn.execute(
-                        "SELECT * FROM bluetooth_devices ORDER BY rssi DESC"
-                    ).fetchall()
+                    sql = "SELECT * FROM bluetooth_devices ORDER BY " + sort_col + " " + order_sql
+                    params = ()
+                    if limit is not None:
+                        sql += " LIMIT ? OFFSET ?"
+                        params = (limit, offset)
+                    rows = conn.execute(sql, params).fetchall()
                     return [dict(r) for r in rows]
             except Exception:
                 return []

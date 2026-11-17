@@ -18185,6 +18185,11 @@ def wardriving_bluetooth():
     try:
         engine = _get_wardriving_engine()
         session_id = request.args.get('session_id')
+        raw_limit = request.args.get('limit')
+        limit = _safe_int(raw_limit, None, min_v=1, max_v=5000) if raw_limit is not None else None
+        offset = _safe_int(request.args.get('offset'), 0, min_v=0)
+        sort_by = request.args.get('sort', 'best_rssi')
+        order = request.args.get('order', 'DESC')
         if session_id and (not engine.session or engine.session.session_id != session_id):
             from wardriving import WardrivingSession
             session = WardrivingSession(engine.data_dir, session_id=session_id)
@@ -18192,8 +18197,11 @@ def wardriving_bluetooth():
             session = engine.session
         else:
             return jsonify({'devices': [], 'total': 0})
-        devices = session.get_bluetooth_devices()
-        return jsonify({'devices': devices, 'total': len(devices)})
+        devices = session.get_bluetooth_devices(limit=limit, offset=offset, sort_by=sort_by, order=order)
+        # total is the whole count (a limited fetch returns fewer), so the app
+        # can show "N of M" and know there is more behind the live slice.
+        total = session.get_stats().get('bluetooth_devices', len(devices))
+        return jsonify({'devices': devices, 'total': total})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

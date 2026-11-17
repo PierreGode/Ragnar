@@ -4,6 +4,12 @@
 
 ### 2026-11-17
 
+#### feat(wardriving): the Bluetooth device list is paginated and sortable
+
+*branch `feat/wardrive-bt-recent-slice`*
+
+- **`/api/wardriving/bluetooth` now accepts `limit`, `offset`, `sort` (including `last_seen`) and `order`, and reports the true `total`** — the same shape as the networks endpoint. The live app map can pull just the most-recently-seen slice over a thin Bluetooth link instead of the whole table; there are often more Bluetooth devices than Wi-Fi networks, so the full list was the heaviest payload on the link and the slowest to arrive. With no parameters the endpoint returns every device, exactly as before, so older app versions are unaffected.
+
 #### fix(bluetooth): the box no longer asks the phone to pair
 
 *branch `fix/ble-no-pairing`*
