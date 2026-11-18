@@ -6331,6 +6331,146 @@ function runPing() { return _ndRunText('ping-target', 'ping-results', '/api/net/
 function runTraceroute() { return _ndRunText('trace-target', 'trace-results', '/api/net/traceroute', 'Tracing', 'runTraceroute'); }
 function runWhois() { return _ndRunText('whois-target', 'whois-results', '/api/net/whois', 'Looking up', 'runWhois'); }
 
+// ---- RDAP (structured successor to WHOIS, with WHOIS fallback) --------------
+const _RDAP_STATUS_STYLE = {
+    found:           ['bg-green-950/40 border-green-900 text-green-400', 'found'],
+    not_found:       ['bg-slate-800 border-slate-700 text-slate-300', 'not found'],
+    no_rdap_service: ['bg-slate-800 border-slate-700 text-slate-300', 'no RDAP service'],
+    no_service:      ['bg-slate-800 border-slate-700 text-slate-300', 'no service'],
+    invalid:         ['bg-amber-950/50 border-amber-800 text-amber-300', 'invalid input'],
+    error:           ['bg-red-950/60 border-red-800 text-red-300', 'error'],
+};
+function _rdapContact(c) {
+    if (!c || typeof c !== 'object') return '';
+    const who = c.name || c.org || c.handle || '';
+    const bits = [];
+    if (who) bits.push(escapeHtml(who));
+    if (c.email) bits.push(escapeHtml((Array.isArray(c.email) ? c.email.join(', ') : c.email)));
+    if (c.tel) bits.push(escapeHtml((Array.isArray(c.tel) ? c.tel.join(', ') : c.tel)));
+    if (c.country && !who) bits.push(escapeHtml(c.country));
+    return bits.join(' · ');
+}
+function _rdapRow(label, value, opts) {
+    if (value === null || value === undefined || value === '' ||
+        (Array.isArray(value) && !value.length)) return '';
+    const v = Array.isArray(value) ? value.join(', ') : String(value);
+    const o = opts || {};
+    const vcls = (o.mono ? 'font-mono ' : '') + (o.strong ? 'text-gray-100 ' : 'text-gray-300 ') + 'break-words text-right';
+    return `<div class="flex justify-between gap-3 py-1 border-t border-slate-800/70">
+        <span class="text-xs uppercase tracking-wide text-gray-500 shrink-0">${escapeHtml(label)}</span>
+        <span class="${vcls}">${o.html ? v : escapeHtml(v)}</span></div>`;
+}
+function _rdapResultHtml(rec) {
+    const r = rec.result || {};
+    const ev = r.events || {};
+    let h = '';
+    if (r.object === 'domain') {
+        const reg = r.registrar;
+        h += _rdapRow('Domain', (r.name || rec.normalized || '') + (r.unicode_name && r.unicode_name !== r.name ? ' (' + r.unicode_name + ')' : ''), { strong: true });
+        if (rec.matched_name && rec.matched_name !== rec.normalized)
+            h += _rdapRow('Note', rec.normalized + ' is not registered itself; showing ' + rec.matched_name);
+        if (reg) h += _rdapRow('Registrar', (reg.name || '?') + (reg.iana_id ? ' (IANA ' + reg.iana_id + ')' : ''));
+        h += _rdapRow('Registered', ev.registration);
+        h += _rdapRow('Expires', ev.expiration);
+        h += _rdapRow('Changed', ev['last changed']);
+        h += _rdapRow('Status', r.status);
+        h += _rdapRow('Nameservers', r.nameservers, { mono: true });
+        h += _rdapRow('DNSSEC', r.dnssec === true ? 'signed' : r.dnssec === false ? 'unsigned' : null);
+        h += _rdapRow('Registrant', _rdapContact(r.registrant), { html: true });
+        h += _rdapRow('Abuse', _rdapContact(r.abuse), { html: true, strong: true });
+        const ref = rec.referral;
+        if (ref && ref.ok && ref.result) {
+            h += `<div class="mt-2 pt-1 text-xs text-gray-500">— registrar record (${escapeHtml(ref.source_url || ref.url || '')})</div>`;
+            h += _rdapRow('Registrant', _rdapContact(ref.result.registrant), { html: true });
+            h += _rdapRow('Abuse', _rdapContact(ref.result.abuse), { html: true, strong: true });
+            h += _rdapRow('Expires', (ref.result.events || {}).expiration);
+        } else if (ref && !ref.ok) {
+            h += _rdapRow('Referral', (ref.url || '') + ' failed: ' + (ref.error || ''));
+        }
+    } else if (r.object === 'autnum') {
+        const rng = r.start == null ? null : (r.start === r.end ? 'AS' + r.start : 'AS' + r.start + ' – AS' + r.end);
+        h += _rdapRow('ASN', rng, { strong: true });
+        h += _rdapRow('Name', r.name);
+        h += _rdapRow('Handle', r.handle, { mono: true });
+        h += _rdapRow('Type', r.type);
+        h += _rdapRow('Country', r.country);
+        h += _rdapRow('Status', r.status);
+        h += _rdapRow('Registrant', _rdapContact(r.registrant), { html: true });
+        h += _rdapRow('NOC', _rdapContact(r.noc), { html: true });
+        h += _rdapRow('Abuse', _rdapContact(r.abuse), { html: true, strong: true });
+        h += _rdapRow('Registered', ev.registration);
+        h += _rdapRow('Changed', ev['last changed']);
+    } else if (r.object === 'ip network') {
+        h += _rdapRow('Network', (r.cidrs && r.cidrs.length) ? r.cidrs.join(', ') : (r.start ? r.start + ' – ' + r.end : ''), { mono: true, strong: true });
+        if (r.cidrs && r.cidrs.length && r.start) h += _rdapRow('Range', r.start + ' – ' + r.end, { mono: true });
+        h += _rdapRow('Name', r.name);
+        h += _rdapRow('Handle', r.handle, { mono: true });
+        h += _rdapRow('Type', r.type);
+        h += _rdapRow('Country', r.country);
+        h += _rdapRow('Parent', r.parent, { mono: true });
+        h += _rdapRow('Registrant', _rdapContact(r.registrant), { html: true });
+        h += _rdapRow('Abuse', _rdapContact(r.abuse), { html: true, strong: true });
+        h += _rdapRow('Registered', ev.registration);
+        h += _rdapRow('Changed', ev['last changed']);
+        (rec.origin_as || []).forEach(oa => {
+            if (oa.ok && oa.result) {
+                h += `<div class="mt-2 pt-1 text-xs text-gray-500">— origin AS${escapeHtml(String(oa.asn))} (${escapeHtml(oa.source_url || '')})</div>`;
+                h += _rdapRow('AS name', oa.result.name);
+                h += _rdapRow('AS org', _rdapContact(oa.result.registrant), { html: true });
+                h += _rdapRow('AS abuse', _rdapContact(oa.result.abuse), { html: true, strong: true });
+            } else {
+                h += _rdapRow('Origin AS', 'AS' + oa.asn + ': ' + (oa.error || oa.status || ''));
+            }
+        });
+    }
+    return h;
+}
+async function runRdap() {
+    const input = document.getElementById('rdap-target');
+    const out = document.getElementById('rdap-results');
+    if (!input || !out) return;
+    const target = (input.value || '').trim();
+    if (!target) { input.focus(); return; }
+    const noWhois = !!(document.getElementById('rdap-no-whois') || {}).checked;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    _ndBusy(btn, true, 'Looking up');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Querying the registry for ' + escapeHtml(target) + '…</p>';
+    try {
+        const d = await postAPI('/api/net/rdap', { target, whois_fallback: !noWhois });
+        if (!d || d.success === false) {
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml((d && d.error) || 'failed') + '</p>';
+            return;
+        }
+        const proto = d.protocol === 'whois' ? ['bg-amber-950/50 border-amber-800 text-amber-300', 'WHOIS'] : ['bg-green-950/40 border-green-900 text-green-400', 'RDAP'];
+        const [scls, slabel] = _RDAP_STATUS_STYLE[d.status] || ['bg-slate-800 border-slate-700 text-slate-400', d.status || 'unknown'];
+        const kindBits = [d.kind, d.family].filter(Boolean).join(' ');
+        let h = `<div class="flex flex-wrap items-center gap-2 mb-2">
+            <span class="px-2 py-0.5 rounded border text-xs font-semibold ${proto[0]}">${proto[1]}</span>
+            <span class="px-2 py-0.5 rounded border text-xs ${scls}">${escapeHtml(slabel)}</span>
+            <span class="text-xs text-gray-500">${escapeHtml(d.normalized || d.query || '')}${kindBits ? ' · ' + escapeHtml(kindBits) : ''}${d.mapped_from ? ' · mapped from ' + escapeHtml(d.mapped_from) : ''}</span>
+            ${d.source_url || d.server ? '<span class="text-xs text-gray-600 font-mono break-all">' + escapeHtml(d.source_url || d.server) + '</span>' : ''}
+        </div>`;
+        if (d.ok && d.result) {
+            h += '<div class="rounded-lg bg-slate-900/60 border border-slate-800 px-3 py-1">' + _rdapResultHtml(d) + '</div>';
+        } else {
+            if (d.error) h += '<p class="text-sm text-amber-300 mb-1">' + escapeHtml(d.error) + '</p>';
+            if (d.retry_after) h += '<p class="text-xs text-gray-400">Retry-After: ' + escapeHtml(String(d.retry_after)) + '</p>';
+            if (Array.isArray(d.tried) && d.tried.length) h += '<p class="text-xs text-gray-500">Tried: ' + escapeHtml(d.tried.join(', ')) + (d.server ? ' @ ' + escapeHtml(d.server) : '') + '</p>';
+        }
+        (d.notes || []).forEach(n => { h += '<p class="text-xs text-gray-500 mt-1">note: ' + escapeHtml(n) + '</p>'; });
+        if (d.report) {
+            h += `<details class="mt-2"><summary class="text-xs text-gray-500 cursor-pointer hover:text-gray-300">Full report${d.whois_text ? ' + raw WHOIS' : ''}</summary>
+                <pre class="mt-2 text-xs font-mono bg-slate-900/70 rounded p-3 overflow-x-auto whitespace-pre-wrap max-h-96">${escapeHtml(d.report)}${d.whois_text ? '\n\n-- raw WHOIS --\n' + escapeHtml(d.whois_text) : ''}</pre></details>`;
+        }
+        out.innerHTML = h;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
 // Fill the MTR start-point dropdown with this host's local IPv4 addresses.
 async function populateMtrSources() {
     const sel = document.getElementById('mtr-source');

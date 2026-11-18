@@ -261,6 +261,65 @@ def do_whois(target):
     return {'success': True, 'output': (res['out'] or res['err']).strip(), 'error': None}
 
 
+# --------------------------------------------------------------------------
+# RDAP lookup — the structured successor to WHOIS (RFC 9082/9083), with an
+# automatic WHOIS (RFC 3912) fallback for the TLDs that still have no RDAP
+# service. Kept alongside do_whois, not a replacement: WHOIS still works and
+# some ccTLDs are WHOIS-only. Engine vendored at python/rdap_lookup.py (stdlib
+# only; runs on the Pi Zero 2W floor). Active tool: every lookup queries a
+# registry / RIR (HTTPS for RDAP, TCP/43 for the WHOIS fallback).
+_RDAP_PY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+# Pin the IANA bootstrap / WHOIS-server cache to the repo data dir (the service
+# runs as root, so ~/.cache would be /root/.cache — data/ is where the rest of
+# Ragnar's cached registry data lives, e.g. ip_intel_cache.json).
+_RDAP_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'data', 'rdap_cache')
+
+
+def _rdap_import():
+    """Import the vendored rdap_lookup engine (python/ on sys.path). Pure stdlib."""
+    if _RDAP_PY_DIR not in sys.path:
+        sys.path.insert(0, _RDAP_PY_DIR)
+    import rdap_lookup
+    return rdap_lookup
+
+
+def do_rdap(target, whois_fallback=True, referral=True, asn_chain=True,
+            raw=False, timeout=15.0):
+    """RDAP lookup for a domain, IP, CIDR prefix or ASN (RFC 9082/9083), with an
+    automatic WHOIS fallback for TLDs that have no RDAP service. Returns the
+    engine's structured record (query / kind / protocol / result / notes …) with
+    a pre-rendered `report` text, so the UI can show the normalized fields and a
+    whois-style text block. Detection-only in the sense that it never changes
+    anything, but it DOES transmit: it queries IANA + the RIR / registry."""
+    target = str(target).strip()
+    if not target:
+        return {'success': False, 'error': 'no target'}
+    try:
+        rl = _rdap_import()
+    except Exception as exc:
+        return {'success': False, 'error': 'rdap engine unavailable: %s' % exc}
+    try:
+        os.makedirs(_RDAP_CACHE_DIR, exist_ok=True)
+    except OSError:
+        pass
+    try:
+        bs = rl.Bootstrap(cache_dir=_RDAP_CACHE_DIR, timeout=timeout)
+        ws = (rl.WhoisServers(_RDAP_CACHE_DIR, timeout) if whois_fallback else None)
+        cli = rl.Client(bs, timeout=timeout, referral=referral,
+                        asn_chain=asn_chain, raw=raw, whois=ws)
+        rec = cli.lookup(target)
+        rec['report'] = rl.render_text(rec)
+    except Exception as exc:
+        return {'success': False, 'error': 'rdap lookup failed: %s: %s'
+                % (type(exc).__name__, exc)}
+    # `success` means the tool ran; `ok` / `status` carry the lookup outcome
+    # (found / not_found / no_rdap_service / error), the same split do_ip_intel
+    # uses. A not-found or a RIR error is still a successful run of the tool.
+    rec['success'] = True
+    return rec
+
+
 def do_ip_intel(target, offline=False):
     """Attribute an IP address — country, ASN, network owner, abuse contact.
 
@@ -32311,6 +32370,16 @@ def register_network_diagnostics(app, logger=None):
             return _bad('Invalid target')
         _log(f"net/whois {target}")
         return jsonify(do_whois(target))
+
+    @app.route('/api/net/rdap', methods=['POST'])
+    def net_rdap():
+        data = request.get_json(silent=True) or {}
+        target = (data.get('target') or '').strip()
+        if not _valid_target(target):
+            return _bad('Invalid target')
+        whois_fallback = data.get('whois_fallback', True) is not False
+        _log(f"net/rdap {target}" + ('' if whois_fallback else ' (no-whois)'))
+        return jsonify(do_rdap(target, whois_fallback=whois_fallback))
 
     @app.route('/api/net/ip-intel', methods=['POST'])
     def net_ip_intel():

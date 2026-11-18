@@ -4,6 +4,15 @@
 
 ### 2026-11-18
 
+#### feat(netdiag): RDAP lookup — the structured successor to WHOIS (WHOIS kept)
+
+*branch `feature/rdap-service`*
+
+- **New L7 Diagnostics card, RDAP**, next to the existing Whois card (Whois is kept, not replaced). RDAP (RFC 9082/9083) is the registries' JSON API that is replacing the free-text WHOIS protocol. The card looks up a **domain, IP, CIDR prefix or ASN**, picks the authoritative server from the IANA bootstrap (RFC 9224, cached 24 h under `data/rdap_cache/`), and returns normalized fields — registrar (+ IANA ID), dates, status, nameservers, DNSSEC, owning network / AS range and the **abuse contact**. It follows the registry → registrar referral for domains and pulls the **origin AS** for ARIN IP space.
+- **WHOIS fallback built in:** for the TLDs that still have no RDAP service, it falls back to WHOIS over TCP/43 automatically and parses the reply into the same fields, so one lookup covers both. Every record is tagged `protocol: rdap` or `protocol: whois`; the full report (and raw WHOIS text when used) is under *Full report*. Unlike the Whois card it needs no `whois` binary.
+- Engine vendored at `python/rdap_lookup.py` (Python stdlib only; 189/189 hermetic self-test, `python/selftest_rdap_lookup.py`). Adapter `do_rdap` + `POST /api/net/rdap`; cache pinned to `data/rdap_cache/` (gitignored). Live-verified against ARIN / Verisign / DENIC. `tests/test_rdap_lookup.py` runs the self-test and an offline adapter check.
+- **Docs:** [nettools.md](nettools.md#rdap)
+
 #### feat(netdiag): HTTP Watch — passive cleartext HTTP/1.x, h2c and gRPC observer
 
 *branch `feature/http-watch`*
