@@ -2298,6 +2298,9 @@ def _net_integrity_check_once():
         ('dns_passive', 'DNS', lambda: watch(nd.do_dns_watch, interface=cap_iface)),
         ('ftp', 'FTP', lambda: watch(nd.do_ftp_watch, interface=cap_iface)),
         ('smtp', 'SMTP', lambda: watch(nd.do_smtp_watch, interface=cap_iface)),
+        # Cleartext HTTP/1.x + h2c + gRPC: smuggling / desync, HTTP.sys CVE shapes,
+        # credentials in the clear (redacted), h2 Rapid Reset / CONTINUATION abuse.
+        ('http', 'HTTP', lambda: watch(nd.do_http_watch, interface=cap_iface)),
         ('modbus', 'Modbus', lambda: watch(nd.do_modbus_watch, interface=cap_iface)),
     ]
 

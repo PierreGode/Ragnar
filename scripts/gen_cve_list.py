@@ -61,6 +61,8 @@ FILE_OWNERS = {
     'python/certwatch.py': 'Cert Watch',
     'python/certwatch_selftest.py': 'Cert Watch',
     'python/ssdpwatch_selftest.py': 'SSDP/UPnP Watch',
+    'python/httpwatch.py': 'HTTP Watch',
+    'python/httpwatch_selftest.py': 'HTTP Watch',
     'actions/ble_pentest.py': 'BLE Pentest (active)',
 }
 FILE_PREFIX_OWNERS = {'python/dns_doctor_passive/': 'DNS Watch',
@@ -118,6 +120,7 @@ ND_PREFIXES = [
     ('_dns_dnssec', 'DNS Doctor (active)'), ('_dns_selftest', 'DNS Doctor (active)'),
     ('do_dns_doctor', 'DNS Doctor (active)'), ('do_dns_watch', 'DNS Watch'),
     ('_ssdp', 'SSDP/UPnP Watch'), ('_SSDP', 'SSDP/UPnP Watch'), ('do_ssdp', 'SSDP/UPnP Watch'),
+    ('_http', 'HTTP Watch'), ('_HTTP', 'HTTP Watch'), ('do_http', 'HTTP Watch'),
     ('_snmp', 'SNMP Watch'),
     ('_FTP', 'FTP Watch'), ('_ftp', 'FTP Watch'), ('do_ftp', 'FTP Watch'),
     ('_SMTP', 'SMTP Watch'), ('_smtp', 'SMTP Watch'), ('do_smtp', 'SMTP Watch'),
@@ -166,6 +169,15 @@ IGNORED_CVES = {'CVE-2024-99999',
                 # on, and CVE-2026-50346 is a local vector (AV:L) that never crosses
                 # the wire. The conformance harness fails if any is ever claimed.
                 'CVE-2021-36936', 'CVE-2021-36947', 'CVE-2026-50346'}
+# Per-file CVEs that file only names (another detector's discipline, a corrected
+# mis-attribution), so they count as context there and never as a detection.
+FILE_CONTEXT_CVES = {
+    # httpwatch: CVE-2018-0732 is cited as TLS Watch's catalog discipline; CVE-2026-41417
+    # is named in the CVE-2026-42580 note and the self-test only to record that it was
+    # once mis-attributed to HTTP-004 and is deferred (see DEFERRED_CVES).
+    'python/httpwatch.py': {'CVE-2018-0732', 'CVE-2026-41417'},
+    'python/httpwatch_selftest.py': {'CVE-2026-41417'},
+}
 # Per-CVE owner overrides where a shared helper names another vendor's CVE.
 CVE_OWNER_OVERRIDE = {'CVE-2021-0254': 'Juniper Guard'}
 # Owners (or owner+CVE) whose mention is context/reference, not a detection.
@@ -232,7 +244,8 @@ NAMES = {
     'CVE-2021-0254': 'Junos overlayd VXLAN RCE', 'CVE-2021-1675': 'PrintNightmare',
     'CVE-2021-34527': 'PrintNightmare', 'CVE-2021-1678': 'Print spooler RPC relay (IRemoteWinSpool)',
     'CVE-2021-36942': 'PetitPotam', 'CVE-2021-31166': 'HTTP.sys Accept-Encoding',
-    'CVE-2022-21907': 'HTTP.sys Accept-Encoding', 'CVE-2021-25220': 'MaginotDNS',
+    'CVE-2022-21907': 'HTTP.sys HTTP Trailer Support RCE', 'CVE-2021-25220': 'MaginotDNS',
+    'CVE-2015-1635': 'MS15-034 HTTP.sys Range overflow', 'CVE-2023-44487': 'HTTP/2 Rapid Reset',
     'CVE-2022-26809': 'RPC runtime bind_ack underflow', 'CVE-2022-26925': 'PetitPotam-class LSA coercion',
     'CVE-2022-33647': 'Kerberos RC4-MD4 downgrade', 'CVE-2022-33679': 'Kerberos RC4-MD4 downgrade',
     'CVE-2023-48795': 'Terrapin', 'CVE-2023-50387': 'KeyTrap', 'CVE-2023-50868': 'NSEC3 CPU exhaustion',
@@ -332,10 +345,13 @@ def sr_reference_span(lines):
     return -1, -1
 
 
+DEFERRED_CVE_FILES = {'python/radiuswatch.py', 'python/httpwatch.py'}
+
+
 def deferred_span(lines):
-    """(start, end) line indexes of radiuswatch's DEFERRED_CVES dict literal. CVEs
-    named there are triaged-and-rejected (undetectable passively — DHCP decoder, EAP-pwd
-    side channels, logrotate priv-esc), so they are context, never detected."""
+    """(start, end) line indexes of a module's DEFERRED_CVES dict literal (radiuswatch,
+    httpwatch). CVEs named there are triaged-and-rejected (undetectable passively, below
+    the bar, or another watcher's), so they are context, never detected."""
     for i, l in enumerate(lines):
         if l.startswith('DEFERRED_CVES'):
             for j in range(i + 1, len(lines)):
@@ -364,7 +380,8 @@ def collect():
         if not any(CVE_RE.search(l) for l in lines):
             continue
         sr_a, sr_b = sr_reference_span(lines) if path == 'sr_mplswatch.py' else (-1, -1)
-        df_a, df_b = deferred_span(lines) if path == 'python/radiuswatch.py' else (-1, -1)
+        df_a, df_b = (deferred_span(lines) if path in DEFERRED_CVE_FILES
+                      else (-1, -1))
         owner = None
         nxt = next_owners(lines) if path == 'network_diagnostics.py' else []
         doc_end = module_docstring_end(lines)
@@ -404,6 +421,8 @@ def collect():
                     status = 'detected'
                 det = CVE_OWNER_OVERRIDE.get(cve, det)
                 if cve in CONTEXT_CVES and status == 'detected':
+                    status = 'context'
+                if cve in FILE_CONTEXT_CVES.get(path, ()) and status == 'detected':
                     status = 'context'
                 owners[cve].add((det, status))
     return owners, mentions

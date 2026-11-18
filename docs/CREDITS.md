@@ -14,9 +14,9 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **375 CVEs detected from the wire.** 439 distinct CVE IDs are named across Ragnar's
-  code; 375 of them a passive detector actually identifies. The rest are named, not detected:
-  55 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
+- **386 CVEs detected from the wire.** 455 distinct CVE IDs are named across Ragnar's
+  code; 386 of them a passive detector actually identifies. The rest are named, not detected:
+  60 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
   cannot reconstruct on the wire — the Ripple20 IPv6 bug CVE-2020-11897, which APC Guard
@@ -26,14 +26,18 @@ behind them is Solarflere's work.
   and **RADIUS Watch's ten triaged/deferred CVEs** — the FreeRADIUS DHCP-decoder set, the
   EAP-pwd side channels and a logrotate priv-esc, all undetectable from a passive RADIUS vantage,
   and **RDP Watch's CVE-2005-1794** Standard-RDP-Security MITM, carried as a posture reference
-  on RDP-001/RDP-002 only — RDP Watch is a posture/abuse module with no CVE codes of its own),
+  on RDP-001/RDP-002 only — RDP Watch is a posture/abuse module with no CVE codes of its own —
+  and **HTTP Watch's five deferred CVEs** — the gRPC accept-loop bug with no wire artifact, two
+  gRPC HPACK / `-bin` bugs below the 6.5 bar, a grpc-js local-API prototype pollution and Netty's
+  `setUri()` library misuse, whose wire effect the generic smuggling rules already catch),
   3 in card prose as related context, and 6 **active** BLE
   checks in the BLE Pentest action. Every one is listed, with its detector and status, in the
   generated **[CVE Index](CVE.md)**.
 - **28 years of coverage** — from **CVE-1999-0113** (the rlogin `-froot` bypass) to
   **CVE-2026-102019**.
 - **Two CISA KEV entries** join the corpus with SMTP Watch (CVE-2019-10149, CVE-2018-6789),
-  and APC Guard adds the KEV-listed Ripple20 CVE-2020-11899.
+  and APC Guard adds the KEV-listed Ripple20 CVE-2020-11899. HTTP Watch adds two more:
+  **MS15-034** (CVE-2015-1635) and **HTTP/2 Rapid Reset** (CVE-2023-44487).
 - **Arista Guard v4** tracks 17 EOS switch/router CVEs across posture / exposure / attack —
   BlastRADIUS (CVE-2024-3596, now scoped to Arista hardware learned from LLDP), regreSSHion,
   gNOI authorization bypass (CVE-2025-1260 / CVE-2025-0936), the actively-exploited
@@ -63,8 +67,8 @@ behind them is Solarflere's work.
   infinite loop), **ROCA** (`CVE-2017-15361` — the Infineon RSA key-generation fingerprint) and
   **`CVE-2025-58188`** (a DSA public key that panics Go's `crypto/x509` chain validation). Handshake-level
   CVEs stay with TLS Watch; these are the certificate-bytes half.
-- Weighted to the current threat wave (all named IDs): **50 CVEs from 2023, 62 from 2024, 48 from 2025, and
-  60 from 2026**, with a nine-strong 2021 cluster from the LLDP SB220 / RV / TRENDnet /
+- Weighted to the current threat wave (all named IDs): **56 CVEs from 2023, 63 from 2024, 49 from 2025, and
+  66 from 2026**, with a nine-strong 2021 cluster from the LLDP SB220 / RV / TRENDnet /
   QNAP families and a deep 2020–2022 CDP seam (30 / 37 / 29) that the CDP Watch **LCDPwn**
   expansion widened — the Video Surveillance 7000/8000 set, the Cisco ATA 190 cluster,
   Unified CM, FortiSwitch and lldpd.
@@ -140,6 +144,22 @@ behind them is Solarflere's work.
   UPnP device description where it crossed the wire (never fetched), plus MAC OUI when present. It
   **carries no CVE** and adds nothing to the counts above — wire-side UPnP/DLNA device ID, alongside
   the Matter / Thread / Z-Wave census and the LoRaWAN fingerprint.
+- **HTTP / h2c / gRPC** — the new passive **HTTP Watch** reads cleartext HTTP/1.x, h2c and gRPC
+  (28 codes) and adds **eleven** detected CVEs. Request smuggling is one RFC 9112 grammar engine —
+  a Content-Length framer and a Transfer-Encoding framer run side by side, and a desync is reported
+  when they end a message at different offsets *and* the leftover parses as a request line — with
+  the smuggling CVEs riding as screening rows: Netty's HTTP/1.0 Content-Length guard
+  (**CVE-2026-42584**), chunk-size overflow (**CVE-2026-42580**) and quoted chunk extensions
+  (**CVE-2026-42585**), Jetty's "funky chunks" (**CVE-2026-2332**) and http4s Ember's
+  case-sensitive Transfer-Encoding (**CVE-2026-69205**). It names the **HTTP.sys** shapes —
+  **MS15-034** (**CVE-2015-1635**, CISA KEV, a Range end at or beyond 2^63 parsed as an integer
+  rather than string-matched) — and co-detects the Accept-Encoding crash and trailer cases
+  (CVE-2021-31166 / CVE-2022-21907) alongside RPC Watch. On h2c / gRPC: **HTTP/2 Rapid Reset**
+  (**CVE-2023-44487**, CISA KEV, scaled to the server's own `MAX_CONCURRENT_STREAMS`),
+  CONTINUATION and HPACK abuse (**CVE-2023-32731** / **CVE-2023-33953**) and the gRPC
+  te / `:scheme` header abort (**CVE-2023-1428**). It also reads **credentials in the clear**,
+  including the FS S3150-8T2F credential cookie (**CVE-2025-25613**), and every password, token
+  and cookie value is replaced by an 8-hex SHA-256 tag before it reaches a finding.
 - **SNMP / multicast / time-plane** — the in-app **SNMP Watch** now reads raw BER off the
   wire for **USM HMAC truncation** (CVE-2008-0960), **Cisco SNMP RCE** (CVE-2017-6736..6744,
   CISA KEV), **snmptrapd overflow** (CVE-2025-68615) and **net-snmp VACM malformed-OID**

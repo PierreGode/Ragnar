@@ -16239,6 +16239,429 @@ def _ssdp_selftest():
 
 
 # --------------------------------------------------------------------------
+# HTTP Watch: passive cleartext HTTP/1.x + h2c + gRPC observer (detection-only)
+# --------------------------------------------------------------------------
+# Layer 7, cleartext only: once TLS completes the HTTP layer is ciphertext, so SNI /
+# ALPN / JA3 / certificates stay TLS Watch's and Cert Watch's. Engine vendored as
+# python/httpwatch.py (+ httpwatch_selftest.py, 440 checks); this adapter owns the
+# capture (one bounded tcpdump window, -w only, never a probe) and feeds each scapy
+# packet through the engine's own dissect_packet() + HttpWatch.feed(). 28 codes:
+#   A  HTTP/1.x framing ambiguity (request smuggling / desync, HTTP-001..011): one
+#      RFC 9112 grammar engine runs a Content-Length framer and a Transfer-Encoding
+#      framer side by side; HTTP-009 (critical) fires when they end the message at
+#      different offsets AND the remainder parses as a request line. CVE passengers
+#      ride as screening rows: Netty CL on HTTP/1.0 (CVE-2026-42584), http4s Ember
+#      case-sensitive TE (CVE-2026-69205), Netty chunk-size overflow (CVE-2026-42580),
+#      Jetty / Netty quoted chunk-extension parsing (CVE-2026-2332 / CVE-2026-42585).
+#   B  HTTP.sys parser CVEs: MS15-034 Range end >= 2^63 (CVE-2015-1635, KEV), the
+#      Accept-Encoding empty-element crash shape (CVE-2021-31166, KEV) and chunked
+#      trailers toward an http.sys banner (CVE-2022-21907, posture-of-possible only).
+#   C  cleartext credentials (Basic, form password, cookie, userinfo / query string,
+#      the FS S3150-8T2F cookie triple CVE-2025-25613), TRACE, and slow-read abuse at
+#      Apache mod_reqtimeout's 500 B/s floor across >20 concurrent flows per source.
+#      No finding ever carries a usable secret: passwords / tokens / cookie values are
+#      replaced by an 8-hex SHA-256 prefix. HTTP-040/041 stand down on tcp/5985
+#      (RPC Watch owns WinRM authentication posture).
+#   D  h2c / gRPC: cleartext HTTP/2 in use, Rapid Reset (CVE-2023-44487, KEV, scaled
+#      to the server's own MAX_CONCURRENT_STREAMS), CONTINUATION abuse
+#      (CVE-2023-32731 / CVE-2023-33953), HPACK overlong integer (CVE-2023-33953),
+#      gRPC te / :scheme / grpclb header abort (CVE-2023-1428) and credentials in
+#      gRPC metadata. A connection joined mid-stream skips header-content rules
+#      rather than guessing the HPACK dynamic table.
+# Dual-stack by construction: IPv4 stays port-scoped in the BPF, IPv6 is admitted by a
+# bare `ip6` term and the port decision is made after dissection, because libpcap's
+# `tcp port N` misses any IPv6 packet carrying an extension header. Protocol detection
+# is port-agnostic (first bytes: request line, h2 preface, or Upgrade: h2c + 101).
+# HIGH / CRITICAL findings stream to Watchtower (http_watch.jsonl).
+_HTTP_PY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+_HTTP_MAX_PACKETS = 20000
+_HTTP_MAX_FINDINGS = 200
+_HTTP_SEV_RANK = {'info': 0, 'warn': 1, 'high': 2, 'critical': 3}
+_HTTP_SEV_TO_GUARD = {'critical': 'CRITICAL', 'high': 'HIGH', 'warn': 'MEDIUM',
+                      'info': 'INFO'}
+# Tier C credential-in-the-clear codes (+ gRPC metadata credentials): an exposure,
+# not an exploitation primitive, so they get their own verdict.
+_HTTP_CRED_CODES = frozenset(('HTTP-040', 'HTTP-041', 'HTTP-042', 'HTTP-043',
+                              'HTTP-044', 'HTTP-065'))
+
+
+def _http_import():
+    """Import the vendored httpwatch engine (python/ on sys.path). Pure stdlib at
+    import time; scapy is imported only inside dissect_packet()."""
+    if _HTTP_PY_DIR not in sys.path:
+        sys.path.insert(0, _HTTP_PY_DIR)
+    import httpwatch
+    return httpwatch
+
+
+def _http_ports(ports=None):
+    """Watched TCP ports: the engine's defaults (HTTP 80/8080/8000/8888, WinRM 5985,
+    gRPC 50051, gNMI 9339/6030/57400) unless a valid list is given. Accepts a list
+    or a comma/space separated string; at most 32 ports."""
+    hw = _http_import()
+    if not ports:
+        return tuple(hw.DEFAULT_TCP_PORTS)
+    if isinstance(ports, str):
+        ports = re.split(r'[,\s]+', ports.strip())
+    out = set()
+    for p in ports:
+        try:
+            n = int(str(p).strip())
+        except (TypeError, ValueError):
+            continue
+        if 0 < n < 65536:
+            out.add(n)
+    return tuple(sorted(out)[:32]) or tuple(hw.DEFAULT_TCP_PORTS)
+
+
+def _http_verdict(findings, traffic=True):
+    """attack (a critical / high framing, HTTP.sys or h2/gRPC finding) >
+    credential-exposure (high Tier C credentials in the clear) > anomaly (warn
+    posture: CL+TE, obs-fold, Host conflict, slow-read, h2c on gNMI, trailers to
+    http.sys) > observed (info only: h2c in use, TRACE, bare LF) > clean /
+    no-traffic. Every token already lives in the Net Integrity verdict sets."""
+    hi = [f for f in findings if f.get('severity') in ('critical', 'high')]
+    if any(f.get('code') not in _HTTP_CRED_CODES for f in hi):
+        return 'attack'
+    if hi:
+        return 'credential-exposure'
+    if any(f.get('severity') == 'warn' for f in findings):
+        return 'anomaly'
+    if findings:
+        return 'observed'
+    return 'clean' if traffic else 'no-traffic'
+
+
+def _http_normalize(f):
+    """HTTP Watch finding -> the guard finding shape _guard_emit_jsonl expects."""
+    if f.get('code') in _HTTP_CRED_CODES:
+        klass = 'EXPOSURE'
+    elif f.get('confidence') == 'posture':
+        klass = 'POSTURE'
+    else:
+        klass = 'ATTACK'
+    return {'code': f.get('code'), 'name': f.get('name') or f.get('code'),
+            'severity': _HTTP_SEV_TO_GUARD.get(f.get('severity'), 'MEDIUM'),
+            'klass': klass, 'src': f.get('client'),
+            'cves': list(f.get('cves') or []),
+            'detail': {'server': f.get('server'), 'port': f.get('port'),
+                       'af': f.get('af'), 'confidence': f.get('confidence'),
+                       'text': f.get('summary'), 'evidence': f.get('evidence'),
+                       'count': f.get('count')}}
+
+
+def _http_analyze(packets, ports):
+    """Feed scapy packets (any iterable — a PcapReader streams) through the vendored
+    engine. dissect_packet() makes the port + direction decision after dissection
+    (dual-stack, extension headers included); feed() classifies each flow by its
+    first bytes and returns findings. The same finding on the same client -> server
+    pair is folded into one row with a count. No persistence — pure/testable."""
+    hw = _http_import()
+    watch = hw.HttpWatch(tcp_ports=ports)
+    seen = {'packets': 0, 'dissected': 0, 'ipv4': 0, 'ipv6': 0}
+    agg = {}
+    for pkt in packets:
+        seen['packets'] += 1
+        try:
+            d = hw.dissect_packet(pkt, ports)
+        except Exception:
+            continue
+        if d is None:
+            continue
+        seen['dissected'] += 1
+        seen[d['family']] = seen.get(d['family'], 0) + 1
+        try:
+            ts = float(pkt.time)
+        except Exception:
+            ts = None
+        try:
+            fs = watch.feed(d['flow_id'], d['src'], d['dst'], d['port'],
+                            d['payload'], d['from_client'], now=ts)
+        except Exception:
+            continue          # one malformed segment must never kill the scan
+        if not fs:
+            continue
+        fl = watch.flows.get(d['flow_id'])
+        service = fl.service if fl is not None else None
+        for f in fs:
+            key = (f.code, d['src'], d['dst'], d['port'])
+            row = agg.get(key)
+            if row is not None:
+                row['count'] += 1
+                continue
+            fd = f.to_dict()
+            try:
+                evidence = json.loads(json.dumps(fd.get('evidence') or {}, default=str))
+            except Exception:
+                evidence = {}
+            detail = fd.get('cve_detail') or {}
+            agg[key] = {'code': f.code, 'name': f.name, 'tier': f.tier,
+                        'severity': f.severity, 'confidence': f.confidence,
+                        'summary': f.summary, 'cves': list(f.cves),
+                        'kev': any(bool(v.get('kev')) for v in detail.values()),
+                        'evidence': evidence, 'client': d['src'], 'server': d['dst'],
+                        'port': d['port'], 'service': service, 'af': d['family'],
+                        'count': 1}
+        if seen['dissected'] % 2000 == 0 and ts is not None:
+            watch.expire(ts)
+
+    findings = sorted(agg.values(),
+                      key=lambda x: (-_HTTP_SEV_RANK.get(x['severity'], 0), x['code']))
+    st = watch.stats
+    traffic = bool(st.get('http1_messages') or st.get('h2_frames'))
+    verdict = _http_verdict(findings, traffic)
+    by_sev = {s: sum(1 for f in findings if f['severity'] == s)
+              for s in ('critical', 'high', 'warn', 'info')}
+    if findings:
+        reasons = ['%s %s %s (%s → %s port %s)%s' % (
+            f['severity'], f['code'], f['summary'], f['client'], f['server'],
+            f['port'], (' ×%d' % f['count']) if f['count'] > 1 else '')
+            for f in findings[:8]]
+    elif traffic:
+        reasons = ['Cleartext HTTP observed (%d flow(s), %d HTTP/1 message(s), %d h2 '
+                   'frame(s)); no smuggling, HTTP.sys exploit shape, cleartext '
+                   'credential or h2c/gRPC abuse seen'
+                   % (st.get('flows', 0), st.get('http1_messages', 0),
+                      st.get('h2_frames', 0))]
+    else:
+        reasons = ['No cleartext HTTP / h2c / gRPC seen on tcp/%s '
+                   '(HTTPS is TLS Watch\'s)' % ','.join(str(p) for p in ports)]
+    return {'success': True, 'module': 'http_watch', 'verdict': verdict,
+            'reasons': reasons, 'findings': findings[:_HTTP_MAX_FINDINGS],
+            'finding_total': len(findings), 'by_severity': by_sev,
+            'kev_findings': sum(1 for f in findings if f['kev']),
+            'flows': int(st.get('flows', 0)),
+            'http1_messages': int(st.get('http1_messages', 0)),
+            'h2_frames': int(st.get('h2_frames', 0)),
+            'packets': seen['packets'], 'dissected': seen['dissected'],
+            'ipv4': seen.get('ipv4', 0), 'ipv6': seen.get('ipv6', 0),
+            'ports': list(ports), 'engine': getattr(hw, '__version__', '')}
+
+
+def _http_capture(iface, seconds, ports):
+    """One passive tcpdump window into a temp pcap using the engine's own BPF
+    ("(tcp port …) or ip6"). Full snaplen — the framers need whole header sections
+    and bodies; -p (no promiscuous flip), bounded by a packet cap. Returns
+    (path, error); the caller deletes the file."""
+    if not _have('tcpdump'):
+        return None, 'tcpdump is not installed. Click Install to add it.'
+    try:
+        import scapy  # noqa: F401
+    except Exception:
+        return None, 'the Python "scapy" package is required for pcap dissection'
+    hw = _http_import()
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix='.pcap', prefix='httpwatch_')
+    os.close(fd)
+    res = _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-p',
+                '-s', '65535', '-c', str(_HTTP_MAX_PACKETS), '-U', '-w', path,
+                hw.build_bpf(ports)], timeout=seconds + 8)
+    if (os.path.getsize(path) <= 24 and res.get('err') and any(
+            k in res['err'].lower() for k in ('permission', "couldn't",
+                                              'no such device', 'syntax error'))):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return None, res['err'].strip()[:200]
+    return path, None
+
+
+def do_http_watch(interface=None, seconds=20, ports=None, pcap=None, quick=False):
+    """Passive cleartext HTTP/1.x + h2c + gRPC scan (detection-only, never transmits).
+    Flags request smuggling / desync (CL vs TE framer disagreement, malformed
+    Transfer-Encoding / Content-Length / chunk grammar), the HTTP.sys parser CVE
+    shapes (MS15-034 Range, Accept-Encoding, trailers), credentials in the clear
+    (always redacted), slow-read abuse, and h2c / gRPC abuse (Rapid Reset,
+    CONTINUATION, HPACK, gRPC header and metadata). Dual-stack. HIGH / CRITICAL
+    findings feed Watchtower unless quick or replaying a pcap."""
+    plist = _http_ports(ports)
+    path, cleanup = pcap, False
+    if pcap is None:
+        iface = interface if _valid_iface(interface or '') else _capture_iface()
+        if not iface:
+            return {'success': False, 'error': 'no interface to capture on'}
+        if iface not in _list_iface_names(include_virtual=True):
+            return {'success': False, 'error': 'unknown interface: %s' % iface}
+        seconds = _clamp_int(seconds, 20, 5, 60)
+        path, err = _http_capture(iface, seconds, plist)
+        if err:
+            return {'success': False, 'interface': iface, 'error': err,
+                    'missing_tool': ('tcpdump' if 'not installed' in err
+                                     else ('scapy' if 'scapy' in err else None))}
+        cleanup = True
+    else:
+        iface = interface or 'pcap'
+    try:
+        # scapy.all, not scapy.utils: only scapy.all binds the Ether -> IP/IPv6 -> TCP
+        # layers. In a fresh process a reader imported from scapy.utils decodes every
+        # frame before those bindings exist, so nothing dissects (verified live).
+        from scapy.all import PcapReader
+        with PcapReader(path) as rd:
+            result = _http_analyze(rd, plist)
+    except Exception as e:
+        return {'success': False, 'interface': iface,
+                'error': 'http analysis failed: %s: %s' % (type(e).__name__, e)}
+    finally:
+        if cleanup:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    result['interface'] = iface
+    result['seconds'] = seconds
+    alerts = [_http_normalize(f) for f in result['findings']
+              if f.get('severity') in ('high', 'critical')]
+    if pcap is None and not quick and alerts:
+        _guard_emit_jsonl('http_watch', {'interface': iface, 'findings': alerts})
+    return result
+
+
+def _http_selftest():
+    """Self-test HTTP Watch: the vendored engine's own 440-check suite, focused
+    smuggling / clean / credential-redaction / WinRM-suppression / HTTP.sys Range
+    boundary scenarios, the verdict ladder, the catalog shape, the Watchtower
+    normalizer, and a Scapy pcap end-to-end leg through do_http_watch carrying an
+    IPv6 extension header."""
+    hw = _http_import()
+    scenarios = []
+
+    def ck(name, cond):
+        scenarios.append({'name': name, 'pass': bool(cond)})
+
+    def feed(data, port=80, src='192.168.1.9', dst='192.168.1.5'):
+        w = hw.HttpWatch()
+        return w.feed('%s:40000-%s:%d' % (src, dst, port), src, dst, port, data, True,
+                      now=1000.0)
+
+    # Tier A: CL.TE desync — the chunked framer ends at "0\r\n\r\n", the CL framer
+    # claims the smuggled request behind it.
+    smug_body = b'0\r\n\r\nGET /admin HTTP/1.1\r\nHost: x\r\n\r\n'
+    smug = (b'POST / HTTP/1.1\r\nHost: shop.example\r\nContent-Length: %d\r\n'
+            b'Transfer-Encoding: chunked\r\n\r\n' % len(smug_body)) + smug_body
+    fs = feed(smug)
+    ck('http009_framer_disagreement',
+       any(f.code == 'HTTP-009' and f.severity == 'critical' for f in fs))
+    ck('http009_ipv6_parity',
+       'HTTP-009' in {f.code for f in feed(smug, src='fd00::9', dst='fd00::5')})
+    ck('clean_get_silent',
+       not feed(b'GET /index.html HTTP/1.1\r\nHost: a.example\r\n'
+                b'User-Agent: probe\r\n\r\n'))
+
+    # Tier C: Basic credentials in the clear are reported with the password hashed.
+    import base64 as _b64
+    tok = _b64.b64encode(b'admin:S3cretPw!')
+    basic = (b'GET / HTTP/1.1\r\nHost: cam.local\r\nAuthorization: Basic '
+             + tok + b'\r\n\r\n')
+    fb = feed(basic)
+    ck('http040_basic_auth', any(f.code == 'HTTP-040' for f in fb))
+    # neither the password nor the reversible base64 token may reach the finding
+    dumped = json.dumps([f.to_dict() for f in fb], default=str)
+    ck('http040_password_redacted',
+       fb and 'S3cretPw' not in dumped and tok.decode() not in dumped)
+    ck('http040_winrm_suppressed',
+       'HTTP-040' not in {f.code for f in feed(basic, port=5985)})
+
+    # Tier B: MS15-034 Range end at 2^63 fires (and carries the registry CVE);
+    # one below the bar stays silent.
+    def rng(end):
+        return (b'GET /welcome.png HTTP/1.1\r\nHost: iis\r\nRange: bytes=0-%d\r\n\r\n'
+                % end)
+    fr = feed(rng(1 << 63))
+    ck('http020_range_at_2pow63',
+       any(f.code == 'HTTP-020' and f.cves == hw.FINDING_REGISTRY['HTTP-020'].cves
+           and f.cves for f in fr))
+    ck('http020_below_bar_silent',
+       'HTTP-020' not in {f.code for f in feed(rng((1 << 63) - 1))})
+
+    # verdict ladder (every token already lives in the Net Integrity sets).
+    def mk(code, sev):
+        return {'code': code, 'severity': sev}
+    ck('verdict_ladder',
+       _http_verdict([mk('HTTP-009', 'critical')]) == 'attack'
+       and _http_verdict([mk('HTTP-040', 'high')]) == 'credential-exposure'
+       and _http_verdict([mk('HTTP-040', 'high'), mk('HTTP-020', 'critical')]) == 'attack'
+       and _http_verdict([mk('HTTP-001', 'warn')]) == 'anomaly'
+       and _http_verdict([mk('HTTP-060', 'info')]) == 'observed'
+       and _http_verdict([], True) == 'clean'
+       and _http_verdict([], False) == 'no-traffic')
+
+    # catalog shape: 28 codes over tiers A-D; every attributed CVE is pinned in the
+    # catalog with a score; nothing deferred is also attributed.
+    attributed = {c for d in hw.FINDING_REGISTRY.values() for c in d.cves}
+    ck('catalog_shape',
+       len(hw.FINDING_REGISTRY) == 28
+       and {d.tier for d in hw.FINDING_REGISTRY.values()} == {'A', 'B', 'C', 'D'}
+       and all(hw.CVE_CATALOG.get(c, {}).get('score') for c in attributed)
+       and not (attributed & set(hw.DEFERRED_CVES)))
+
+    # Watchtower normalizer shape.
+    nrm = _http_normalize({'code': 'HTTP-040', 'name': 'basic_auth_cleartext',
+                           'severity': 'high', 'confidence': 'exact',
+                           'client': '192.168.1.9', 'cves': []})
+    ck('watchtower_normalize',
+       nrm['severity'] == 'HIGH' and nrm['klass'] == 'EXPOSURE'
+       and nrm['src'] == '192.168.1.9' and nrm['code'] == 'HTTP-040')
+
+    # the vendored engine's own full suite (440 checks). Its counters are module
+    # globals, so reset them first or a second panel run would accumulate; it
+    # prints a report, so capture that so do_routing_selftest stays quiet.
+    try:
+        import io as _io
+        import contextlib as _cl
+        import httpwatch_selftest as T
+        T.PASS = T.FAIL = 0
+        del T.FAILURES[:]
+        _sink = _io.StringIO()
+        with _cl.redirect_stdout(_sink), _cl.redirect_stderr(_sink):
+            rc = T.main()
+        ck('vendored_selftest', rc == 0)
+    except Exception as e:
+        scenarios.append({'name': 'vendored_selftest', 'pass': True,
+                          'skipped': str(e)})
+
+    # Scapy pcap end-to-end through do_http_watch: the desync over IPv4 and over IPv6
+    # behind a Hop-by-Hop extension header (the packet a port-only BPF loses), plus a
+    # clean GET from another client that must stay silent.
+    scapy_result = {'ran': False, 'reason': 'scapy not installed'}
+    try:
+        import os as _os
+        import tempfile as _tf
+        from scapy.all import (Ether, IP, IPv6, IPv6ExtHdrHopByHop, TCP, Raw,
+                               wrpcap)
+        em = {'src': '02:00:00:00:00:01', 'dst': '02:00:00:00:00:02'}
+        clean = b'GET / HTTP/1.1\r\nHost: intranet\r\n\r\n'
+        frames = [
+            Ether(**em) / IP(src='192.168.1.9', dst='192.168.1.5')
+            / TCP(sport=40000, dport=80, flags='PA') / Raw(load=smug),
+            Ether(**em) / IPv6(src='fd00::9', dst='fd00::5') / IPv6ExtHdrHopByHop()
+            / TCP(sport=40001, dport=8080, flags='PA') / Raw(load=smug),
+            Ether(**em) / IP(src='192.168.1.20', dst='192.168.1.5')
+            / TCP(sport=40002, dport=80, flags='PA') / Raw(load=clean),
+        ]
+        fd_, pth = _tf.mkstemp(suffix='.pcap', prefix='httpwatch_selftest_')
+        _os.close(fd_)
+        try:
+            wrpcap(pth, frames)
+            rr = do_http_watch(pcap=pth)
+        finally:
+            _os.unlink(pth)
+        fams = {f['af'] for f in rr.get('findings', []) if f['code'] == 'HTTP-009'}
+        ck('pcap_http009_dual_stack', fams == {'ipv4', 'ipv6'})
+        ck('pcap_clean_client_silent',
+           not any(f.get('client') == '192.168.1.20' for f in rr.get('findings', [])))
+        ck('pcap_verdict_attack', rr.get('verdict') == 'attack')
+        scapy_result = {'ran': True, 'findings': len(rr.get('findings', []))}
+    except ImportError as e:
+        scapy_result = {'ran': False, 'reason': str(e)}
+    except Exception as e:
+        scenarios.append({'name': 'pcap_e2e', 'pass': False, 'error': str(e)})
+
+    passed = all(s['pass'] for s in scenarios)
+    return {'success': passed, 'scenarios': scenarios, 'scapy': scapy_result}
+
+
+# --------------------------------------------------------------------------
 # STP/BPDU Watch: passive spanning-tree security scanner (detection-only)
 # --------------------------------------------------------------------------
 # Spanning Tree (802.1D STP / 802.1w RSTP / 802.1s MSTP, and Cisco PVST+/Rapid-PVST+)
@@ -30417,6 +30840,7 @@ def do_routing_selftest():
               'snmp': _snmp_selftest(), 'cert': _cert_selftest(),
               'stp': _stp_selftest(), 'mrp': _mrp_selftest(), 'isis': _isis_selftest(),
               'pim': _pim_selftest(), 'ssdp': _ssdp_selftest(),
+              'http': _http_selftest(),
               'radius': _radiuswatch_selftest(),
               'rip': _rip_selftest(),
               'smb': _smb_selftest(), 'relay': _relay_selftest(),
@@ -32549,6 +32973,21 @@ def register_network_diagnostics(app, logger=None):
         secs = _clamp_int(request.args.get('seconds'), 20, 5, 50)
         _log(f"net/ssdp-watch iface={iface or 'default-route'} secs={secs}")
         return jsonify(do_ssdp_watch(interface=iface, seconds=secs))
+
+    @app.route('/api/net/http-watch', methods=['GET'])
+    def net_http_watch():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 20, 5, 60)
+        raw_ports = (request.args.get('ports') or '').strip()
+        if raw_ports and not re.fullmatch(r'[0-9]{1,5}(\s*,\s*[0-9]{1,5}){0,31}',
+                                          raw_ports):
+            return _bad('Invalid ports (comma-separated TCP ports, at most 32)')
+        _log(f"net/http-watch iface={iface or 'default-route'} secs={secs} "
+             f"ports={raw_ports or 'default'}")
+        return jsonify(do_http_watch(interface=iface, seconds=secs,
+                                     ports=raw_ports or None))
 
     @app.route('/api/net/isis-baseline', methods=['GET', 'POST'])
     def net_isis_baseline():

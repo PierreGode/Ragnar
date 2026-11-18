@@ -10,9 +10,9 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **439** distinct CVE IDs
-- **375** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
-- **55** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
+- **455** distinct CVE IDs
+- **386** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **60** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
 - Range **CVE-1999-0113** → **CVE-2026-102019**
@@ -31,18 +31,18 @@ detector works is in [nettools.md](nettools.md).
 | 2012 | 1 |
 | 2013 | 6 |
 | 2014 | 8 |
-| 2015 | 13 |
+| 2015 | 14 |
 | 2016 | 8 |
 | 2017 | 19 |
 | 2018 | 13 |
 | 2019 | 20 |
-| 2020 | 35 |
+| 2020 | 36 |
 | 2021 | 42 |
 | 2022 | 35 |
-| 2023 | 50 |
-| 2024 | 62 |
-| 2025 | 48 |
-| 2026 | 60 |
+| 2023 | 56 |
+| 2024 | 63 |
+| 2025 | 49 |
+| 2026 | 66 |
 
 ## By detector
 
@@ -66,6 +66,7 @@ detector works is in [nettools.md](nettools.md).
 | DNS Watch | 44 |
 | EIGRP Watch | 3 |
 | FTP Watch | 3 |
+| HTTP Watch | 20 |
 | ICMP Watch | 3 |
 | IGMP / MLD Watch | 3 |
 | IPsec / IKE Watch | 5 |
@@ -136,6 +137,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2014-9298](https://nvd.nist.gov/vuln/detail/CVE-2014-9298) |  | detected | NTP Watch | — |
 | [CVE-2014-9750](https://nvd.nist.gov/vuln/detail/CVE-2014-9750) |  | detected | NTP Watch | — |
 | [CVE-2014-9751](https://nvd.nist.gov/vuln/detail/CVE-2014-9751) |  | detected | NTP Watch | — |
+| [CVE-2015-1635](https://nvd.nist.gov/vuln/detail/CVE-2015-1635) | MS15-034 HTTP.sys Range overflow | detected | HTTP Watch | — |
 | [CVE-2015-1892](https://nvd.nist.gov/vuln/detail/CVE-2015-1892) |  | detected | DNS Watch | — |
 | [CVE-2015-2808](https://nvd.nist.gov/vuln/detail/CVE-2015-2808) | Bar Mitzvah (RC4) | detected | TLS Watch | — |
 | [CVE-2015-2809](https://nvd.nist.gov/vuln/detail/CVE-2015-2809) |  | detected | DNS Watch | — |
@@ -181,7 +183,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2018-0155](https://nvd.nist.gov/vuln/detail/CVE-2018-0155) |  | detected | BFD Watch | — |
 | [CVE-2018-0395](https://nvd.nist.gov/vuln/detail/CVE-2018-0395) |  | detected | LLDP Watch | — |
 | [CVE-2018-0466](https://nvd.nist.gov/vuln/detail/CVE-2018-0466) | Cisco IOS-XR OSPFv3 DoS | context only | OSPF Watch | — |
-| [CVE-2018-0732](https://nvd.nist.gov/vuln/detail/CVE-2018-0732) | Oversized DH prime (client DoS) | detected | TLS Watch | — |
+| [CVE-2018-0732](https://nvd.nist.gov/vuln/detail/CVE-2018-0732) | Oversized DH prime (client DoS) | detected | TLS Watch | HTTP Watch |
 | [CVE-2018-1111](https://nvd.nist.gov/vuln/detail/CVE-2018-1111) | DynoRoot | detected | DHCP Guardian | — |
 | [CVE-2018-5389](https://nvd.nist.gov/vuln/detail/CVE-2018-5389) |  | detected | IPsec / IKE Watch | — |
 | [CVE-2018-6789](https://nvd.nist.gov/vuln/detail/CVE-2018-6789) | Exim AUTH base64 overflow | detected | SMTP Watch | — |
@@ -226,6 +228,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2020-3543](https://nvd.nist.gov/vuln/detail/CVE-2020-3543) | LCDPwn (Video Surveillance 8000) | detected | CDP Watch | — |
 | [CVE-2020-3544](https://nvd.nist.gov/vuln/detail/CVE-2020-3544) | LCDPwn (Video Surveillance 8000) | detected | CDP Watch | — |
 | [CVE-2020-7121](https://nvd.nist.gov/vuln/detail/CVE-2020-7121) |  | detected | LLDP Watch | — |
+| [CVE-2020-7768](https://nvd.nist.gov/vuln/detail/CVE-2020-7768) |  | context only | HTTP Watch | — |
 | [CVE-2020-8616](https://nvd.nist.gov/vuln/detail/CVE-2020-8616) | NXNSAttack | detected | DNS Watch | — |
 | [CVE-2020-8622](https://nvd.nist.gov/vuln/detail/CVE-2020-8622) |  | detected | DNS Watch | — |
 | [CVE-2020-8625](https://nvd.nist.gov/vuln/detail/CVE-2020-8625) |  | detected | DNS Watch | — |
@@ -271,7 +274,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2021-26111](https://nvd.nist.gov/vuln/detail/CVE-2021-26111) | FortiSwitch lldpmedd memory exhaustion | detected | CDP Watch, LLDP Watch | — |
 | [CVE-2021-28510](https://nvd.nist.gov/vuln/detail/CVE-2021-28510) |  | detected | PTP Watch | — |
 | [CVE-2021-28801](https://nvd.nist.gov/vuln/detail/CVE-2021-28801) |  | detected | LLDP Watch | — |
-| [CVE-2021-31166](https://nvd.nist.gov/vuln/detail/CVE-2021-31166) | HTTP.sys Accept-Encoding | detected | RPC / NetLogon Watch | — |
+| [CVE-2021-31166](https://nvd.nist.gov/vuln/detail/CVE-2021-31166) | HTTP.sys Accept-Encoding | detected | HTTP Watch, RPC / NetLogon Watch | — |
 | [CVE-2021-33315](https://nvd.nist.gov/vuln/detail/CVE-2021-33315) |  | detected | LLDP Watch | — |
 | [CVE-2021-33316](https://nvd.nist.gov/vuln/detail/CVE-2021-33316) |  | detected | LLDP Watch | — |
 | [CVE-2021-33317](https://nvd.nist.gov/vuln/detail/CVE-2021-33317) |  | detected | LLDP Watch | — |
@@ -297,7 +300,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2022-20804](https://nvd.nist.gov/vuln/detail/CVE-2022-20804) | Cisco Unified CM CDP DoS | detected | CDP Watch | — |
 | [CVE-2022-20824](https://nvd.nist.gov/vuln/detail/CVE-2022-20824) | Cisco NX-OS/FXOS CDP RCE | detected | CDP Watch | — |
 | [CVE-2022-20968](https://nvd.nist.gov/vuln/detail/CVE-2022-20968) | Cisco IP Phone 7800/8800 CDP stack overflow | detected | CDP Watch | — |
-| [CVE-2022-21907](https://nvd.nist.gov/vuln/detail/CVE-2022-21907) | HTTP.sys Accept-Encoding | detected | RPC / NetLogon Watch | — |
+| [CVE-2022-21907](https://nvd.nist.gov/vuln/detail/CVE-2022-21907) | HTTP.sys HTTP Trailer Support RCE | detected | HTTP Watch, RPC / NetLogon Watch | — |
 | [CVE-2022-24805](https://nvd.nist.gov/vuln/detail/CVE-2022-24805) |  | detected | SNMP Watch | — |
 | [CVE-2022-24807](https://nvd.nist.gov/vuln/detail/CVE-2022-24807) |  | detected | SNMP Watch | — |
 | [CVE-2022-26125](https://nvd.nist.gov/vuln/detail/CVE-2022-26125) |  | context only | SR-MPLS Watch | — |
@@ -321,6 +324,8 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2022-41861](https://nvd.nist.gov/vuln/detail/CVE-2022-41861) |  | detected | RADIUS Watch | — |
 | [CVE-2022-43681](https://nvd.nist.gov/vuln/detail/CVE-2022-43681) |  | context only | BGP Path Watch | — |
 | [CVE-2022-45313](https://nvd.nist.gov/vuln/detail/CVE-2022-45313) |  | detected | MikroTik Guard | — |
+| [CVE-2023-1428](https://nvd.nist.gov/vuln/detail/CVE-2023-1428) |  | detected | HTTP Watch | — |
+| [CVE-2023-4785](https://nvd.nist.gov/vuln/detail/CVE-2023-4785) |  | context only | HTTP Watch | — |
 | [CVE-2023-20024](https://nvd.nist.gov/vuln/detail/CVE-2023-20024) | Cisco SB switch web-UI DoS | detected | Cisco Guard | — |
 | [CVE-2023-20049](https://nvd.nist.gov/vuln/detail/CVE-2023-20049) |  | detected | BFD Watch | — |
 | [CVE-2023-20089](https://nvd.nist.gov/vuln/detail/CVE-2023-20089) |  | detected | LLDP Watch | — |
@@ -354,6 +359,9 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2023-24545](https://nvd.nist.gov/vuln/detail/CVE-2023-24545) |  | detected | Arista Guard | — |
 | [CVE-2023-31490](https://nvd.nist.gov/vuln/detail/CVE-2023-31490) |  | detected | SR-MPLS Watch | — |
 | [CVE-2023-32154](https://nvd.nist.gov/vuln/detail/CVE-2023-32154) |  | detected | MikroTik Guard | — |
+| [CVE-2023-32731](https://nvd.nist.gov/vuln/detail/CVE-2023-32731) |  | detected | HTTP Watch | — |
+| [CVE-2023-32732](https://nvd.nist.gov/vuln/detail/CVE-2023-32732) |  | context only | HTTP Watch | — |
+| [CVE-2023-33953](https://nvd.nist.gov/vuln/detail/CVE-2023-33953) |  | detected | HTTP Watch | — |
 | [CVE-2023-36844](https://nvd.nist.gov/vuln/detail/CVE-2023-36844) |  | detected | Juniper Guard | — |
 | [CVE-2023-36845](https://nvd.nist.gov/vuln/detail/CVE-2023-36845) |  | detected | Juniper Guard | — |
 | [CVE-2023-36846](https://nvd.nist.gov/vuln/detail/CVE-2023-36846) |  | detected | Juniper Guard | — |
@@ -364,6 +372,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2023-41910](https://nvd.nist.gov/vuln/detail/CVE-2023-41910) | lldpd cdp_decode OOB read | detected | CDP Watch | — |
 | [CVE-2023-42118](https://nvd.nist.gov/vuln/detail/CVE-2023-42118) |  | detected | DNS Watch | — |
 | [CVE-2023-44204](https://nvd.nist.gov/vuln/detail/CVE-2023-44204) |  | context only | SR-MPLS Watch | — |
+| [CVE-2023-44487](https://nvd.nist.gov/vuln/detail/CVE-2023-44487) | HTTP/2 Rapid Reset | detected | HTTP Watch | — |
 | [CVE-2023-47234](https://nvd.nist.gov/vuln/detail/CVE-2023-47234) |  | context only | BGP Path Watch | — |
 | [CVE-2023-47235](https://nvd.nist.gov/vuln/detail/CVE-2023-47235) |  | context only | BGP Path Watch | — |
 | [CVE-2023-47310](https://nvd.nist.gov/vuln/detail/CVE-2023-47310) |  | detected | MikroTik Guard | — |
@@ -377,6 +386,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2024-6387](https://nvd.nist.gov/vuln/detail/CVE-2024-6387) | regreSSHion | detected | Arista Guard, SSH Watch | — |
 | [CVE-2024-6409](https://nvd.nist.gov/vuln/detail/CVE-2024-6409) |  | detected | Arista Guard | — |
 | [CVE-2024-6858](https://nvd.nist.gov/vuln/detail/CVE-2024-6858) |  | detected | Arista Guard | — |
+| [CVE-2024-7246](https://nvd.nist.gov/vuln/detail/CVE-2024-7246) |  | context only | HTTP Watch | — |
 | [CVE-2024-9448](https://nvd.nist.gov/vuln/detail/CVE-2024-9448) |  | detected | Arista Guard | — |
 | [CVE-2024-10918](https://nvd.nist.gov/vuln/detail/CVE-2024-10918) | libmodbus over-length reply | detected | Modbus Watch | — |
 | [CVE-2024-11185](https://nvd.nist.gov/vuln/detail/CVE-2024-11185) |  | detected | Arista Guard | — |
@@ -459,6 +469,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2025-20702](https://nvd.nist.gov/vuln/detail/CVE-2025-20702) | Airoha RACE | active check | BLE Pentest (active) | — |
 | [CVE-2025-21595](https://nvd.nist.gov/vuln/detail/CVE-2025-21595) |  | card text only | Juniper Guard | — |
 | [CVE-2025-22474](https://nvd.nist.gov/vuln/detail/CVE-2025-22474) | Dell OS10 SSRF | detected | Dell Guard | — |
+| [CVE-2025-25613](https://nvd.nist.gov/vuln/detail/CVE-2025-25613) |  | detected | HTTP Watch | — |
 | [CVE-2025-26651](https://nvd.nist.gov/vuln/detail/CVE-2025-26651) |  | detected | RPC / NetLogon Watch | — |
 | [CVE-2025-29969](https://nvd.nist.gov/vuln/detail/CVE-2025-29969) | EventLogin | detected | RPC / NetLogon Watch | — |
 | [CVE-2025-33073](https://nvd.nist.gov/vuln/detail/CVE-2025-33073) | SMB reflective relay | detected | SMB / Kerberos Watch | — |
@@ -482,6 +493,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2025-61481](https://nvd.nist.gov/vuln/detail/CVE-2025-61481) |  | detected | MikroTik Guard | — |
 | [CVE-2025-68615](https://nvd.nist.gov/vuln/detail/CVE-2025-68615) | snmptrapd overflow | detected | SNMP Watch | — |
 | [CVE-2026-2291](https://nvd.nist.gov/vuln/detail/CVE-2026-2291) |  | detected | DNS Watch | — |
+| [CVE-2026-2332](https://nvd.nist.gov/vuln/detail/CVE-2026-2332) |  | detected | HTTP Watch | — |
 | [CVE-2026-4890](https://nvd.nist.gov/vuln/detail/CVE-2026-4890) |  | detected | DNS Watch | — |
 | [CVE-2026-4891](https://nvd.nist.gov/vuln/detail/CVE-2026-4891) |  | detected | DNS Watch | — |
 | [CVE-2026-5172](https://nvd.nist.gov/vuln/detail/CVE-2026-5172) |  | detected | DNS Watch | — |
@@ -517,8 +529,12 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2026-37461](https://nvd.nist.gov/vuln/detail/CVE-2026-37461) |  | context only | BGP Path Watch | — |
 | [CVE-2026-37462](https://nvd.nist.gov/vuln/detail/CVE-2026-37462) |  | context only | BGP Path Watch | — |
 | [CVE-2026-41089](https://nvd.nist.gov/vuln/detail/CVE-2026-41089) | LongLogon | detected | LDAP Watch | — |
+| [CVE-2026-41417](https://nvd.nist.gov/vuln/detail/CVE-2026-41417) |  | context only | HTTP Watch | — |
+| [CVE-2026-42580](https://nvd.nist.gov/vuln/detail/CVE-2026-42580) |  | detected | HTTP Watch | — |
+| [CVE-2026-42584](https://nvd.nist.gov/vuln/detail/CVE-2026-42584) |  | detected | HTTP Watch | — |
+| [CVE-2026-42585](https://nvd.nist.gov/vuln/detail/CVE-2026-42585) |  | detected | HTTP Watch | — |
 | [CVE-2026-42944](https://nvd.nist.gov/vuln/detail/CVE-2026-42944) |  | detected | DNS Watch | — |
-| [CVE-2026-47291](https://nvd.nist.gov/vuln/detail/CVE-2026-47291) |  | detected | TLS Watch | — |
+| [CVE-2026-47291](https://nvd.nist.gov/vuln/detail/CVE-2026-47291) |  | detected | TLS Watch | HTTP Watch |
 | [CVE-2026-50502](https://nvd.nist.gov/vuln/detail/CVE-2026-50502) |  | detected | RPC / NetLogon Watch | — |
 | [CVE-2026-52346](https://nvd.nist.gov/vuln/detail/CVE-2026-52346) |  | detected | TLS Watch | — |
 | [CVE-2026-52688](https://nvd.nist.gov/vuln/detail/CVE-2026-52688) |  | detected | DNS Watch | — |
@@ -530,6 +546,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2026-56719](https://nvd.nist.gov/vuln/detail/CVE-2026-56719) |  | detected | MikroTik Guard | — |
 | [CVE-2026-67276](https://nvd.nist.gov/vuln/detail/CVE-2026-67276) | MikroTrick SSH key forgery (RouterOS) | detected | MikroTik Guard | — |
 | [CVE-2026-67281](https://nvd.nist.gov/vuln/detail/CVE-2026-67281) |  | detected | MikroTik Guard | — |
+| [CVE-2026-69205](https://nvd.nist.gov/vuln/detail/CVE-2026-69205) |  | detected | HTTP Watch | — |
 | [CVE-2026-73458](https://nvd.nist.gov/vuln/detail/CVE-2026-73458) |  | detected | BFD Watch | — |
 | [CVE-2026-75029](https://nvd.nist.gov/vuln/detail/CVE-2026-75029) |  | detected | DNS Watch | — |
 | [CVE-2026-76163](https://nvd.nist.gov/vuln/detail/CVE-2026-76163) |  | detected | DNS Watch | — |

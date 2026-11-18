@@ -185,6 +185,12 @@ DEFAULT_SOURCES = {
     # (CVE-2018-6789, KEV) — do_smtp_watch.
     'smtp_watch':    {'label': 'SMTP Watch (Exim expansion / SNI / AUTH b64)',
                       'paths': ['/var/log/ragnar/smtp_watch.jsonl']},
+    # Cleartext HTTP/1.x + h2c + gRPC (do_http_watch): CL/TE framer disagreement
+    # (request smuggling / desync), HTTP.sys MS15-034 Range and Accept-Encoding
+    # shapes, credentials in the clear (always redacted), h2 Rapid Reset /
+    # CONTINUATION / HPACK abuse and gRPC header violations. HIGH/CRITICAL only.
+    'http_watch':    {'label': 'HTTP Watch (smuggling / HTTP.sys / cleartext creds / h2c-gRPC)',
+                      'paths': ['/var/log/ragnar/http_watch.jsonl']},
     # Modbus/TCP posture: off-baseline writes, FC8 Force Listen Only / restart, UMAS
     # + the ModiPwn sequence (CVE-2021-22779) and malformed MBAP/PDU framing — the
     # libmodbus trigger (CVE-2019-14462/14463, CVE-2024-10918) — do_modbus_watch.

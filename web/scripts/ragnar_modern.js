@@ -1600,6 +1600,7 @@ function showNetworkSubtab(name, layer) {
         _fhrpFillIfaces();
         _bgpFillIfaces();
         _ssdpFillIfaces();
+        _httpFillIfaces();
     } else if (name === 'interfaces') {
         loadNetworkIdentity();
         loadInterfaces();
@@ -12323,6 +12324,99 @@ async function runSsdpWatch() {
     }
 }
 
+// ---- HTTP Watch (passive cleartext HTTP/1.x + h2c + gRPC observer) ----------
+const _HTTP_VERDICT_STYLE = {
+    'no-traffic':          ['bg-slate-800 border-slate-700 text-slate-300', '— No cleartext HTTP / h2c / gRPC on the watched ports during this window'],
+    clean:                 ['bg-green-950/40 border-green-900 text-green-400', '✓ Cleartext HTTP healthy — consistent framing, no HTTP.sys exploit shape, credentials or h2c/gRPC abuse'],
+    observed:              ['bg-sky-950/40 border-sky-900 text-sky-300', 'ℹ Informational — h2c in use, a TRACE request or bare-LF line endings'],
+    anomaly:               ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ HTTP posture issue — CL+TE in one message, obs-fold, Host conflict, slow-read, h2c on gNMI or trailers toward http.sys'],
+    'credential-exposure': ['bg-red-950/60 border-red-800 text-red-300', '🛑 Credentials in the clear — Basic / form / cookie / URL / gRPC metadata secrets on cleartext HTTP (values redacted)'],
+    attack:                ['bg-red-950/60 border-red-800 text-red-300', '🛑 HTTP attack shape — request smuggling / desync, HTTP.sys exploit, or h2c/gRPC abuse'],
+    unknown:               ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _HTTP_SEV_COLOR = { critical: 'text-red-400', high: 'text-red-300', warn: 'text-amber-300', info: 'text-sky-300' };
+function _httpFillIfaces() {
+    const sel = document.getElementById('http-iface');
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+function _httpEvidence(ev) {
+    // Evidence is already redacted server-side (8-hex SHA-256 tags for secrets).
+    if (!ev || typeof ev !== 'object') return '';
+    return Object.entries(ev).filter(([k]) => k !== 'note').slice(0, 6).map(([k, v]) => {
+        const val = (v && typeof v === 'object') ? JSON.stringify(v) : String(v);
+        return `<span class="text-gray-500">${escapeHtml(k)}:</span> ${escapeHtml(val.length > 80 ? val.slice(0, 80) + '…' : val)}`;
+    }).join(' · ');
+}
+async function runHttpWatch() {
+    const out = document.getElementById('http-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('http-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('http-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    const portsEl = document.getElementById('http-ports');
+    const ports = portsEl && portsEl.value ? portsEl.value.replace(/\s+/g, '') : '';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing cleartext HTTP / h2c / gRPC on the segment…</p>';
+    try {
+        _httpFillIfaces();
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '') + (ports ? '&ports=' + encodeURIComponent(ports) : '');
+        const d = await fetchAPI('/api/net/http-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool === 'tcpdump') extra = ' <button onclick="installNetTool(\'tcpdump\', this, runHttpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _HTTP_VERDICT_STYLE[d.verdict] || _HTTP_VERDICT_STYLE.unknown;
+        const s = d.by_severity || {};
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2 break-words">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ports ${escapeHtml((d.ports || []).join(','))} · ${d.flows || 0} flow(s) · ${d.http1_messages || 0} HTTP/1 msg(s) · ${d.h2_frames || 0} h2 frame(s) · IPv4 ${d.ipv4 || 0} / IPv6 ${d.ipv6 || 0} seg(s) · ${s.critical || 0} critical, ${s.high || 0} high, ${s.warn || 0} warn, ${s.info || 0} info${d.kev_findings ? ` · <span class="text-red-300">${d.kev_findings} on CISA KEV</span>` : ''}</p>`;
+        if ((d.findings || []).length) {
+            html += '<div class="overflow-x-auto"><table class="nd-card-table min-w-full text-xs text-gray-300"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Code</th><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Client → server</th><th class="px-2 py-1">AF</th><th class="px-2 py-1">CVE</th><th class="px-2 py-1">Finding</th></tr></thead><tbody>';
+            d.findings.forEach(f => {
+                const sev = _HTTP_SEV_COLOR[f.severity] || 'text-gray-400';
+                const cves = (f.cves || []).join(', ');
+                const ev = _httpEvidence(f.evidence);
+                html += `<tr class="border-t border-slate-800 align-top">
+                    <td class="nd-card-head px-2 py-1 font-mono whitespace-nowrap ${sev}" data-label="Code">${escapeHtml(f.code)} <span class="text-gray-500">tier ${escapeHtml(f.tier || '')}</span>${f.count > 1 ? ` <span class="text-gray-500">×${f.count}</span>` : ''}</td>
+                    <td class="px-2 py-1 whitespace-nowrap ${sev}" data-label="Severity">${escapeHtml(f.severity)} <span class="text-gray-500">${escapeHtml(f.confidence || '')}</span></td>
+                    <td class="px-2 py-1 font-mono text-gray-400 whitespace-nowrap" data-label="Client → server">${escapeHtml(f.client || '')} → ${escapeHtml(f.server || '')}:${escapeHtml(String(f.port || ''))}</td>
+                    <td class="px-2 py-1 text-gray-400 whitespace-nowrap" data-label="AF">${escapeHtml(f.af || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400 whitespace-nowrap" data-label="CVE">${cves ? escapeHtml(cves) + (f.kev ? ' <span class="text-red-300">KEV</span>' : '') : '—'}</td>
+                    <td class="px-2 py-1 whitespace-normal" style="min-width:14rem" data-label="Finding">${escapeHtml(f.summary || f.name || '')}${ev ? `<div class="text-[11px] text-gray-400 mt-0.5 break-words">${ev}</div>` : ''}</td>
+                </tr>`;
+            });
+            html += '</tbody></table></div>';
+            if (d.finding_total > (d.findings || []).length) {
+                html += `<p class="text-xs text-gray-500 mt-1">Showing ${d.findings.length} of ${d.finding_total} findings (highest severity first).</p>`;
+            }
+        } else if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
 // ---- FHRP Watch (passive HSRP/VRRP/GLBP/CARP hijack scanner) ----------------
 const _FHRP_VERDICT_STYLE = {
     clean:              ['bg-green-950/40 border-green-900 text-green-400', '✓ FHRP groups/speakers/GLBP forwarders match the trusted baseline'],
@@ -12740,7 +12834,7 @@ async function runRoutingSelftest() {
             : 'Scapy: <span class="text-amber-300">not installed</span> — end-to-end leg skipped';
         if (instBtn) instBtn.classList.toggle('hidden', !!d.scapy_available);
 
-        const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory)', ssh: 'SSH Watch (regreSSHion / Terrapin)', telnet: 'Telnet Watch (CVE-2026-24061 / 32746)', ftp: 'FTP Watch (ProFTPD mod_copy / quoted verb)', smtp: 'SMTP Watch (Exim expansion / SNI / AUTH b64)', ble: 'BLE Watch (Bluetooth LE clone/spoof/MITM)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', lldp: 'LLDP Watch (802.1AB malformed TLV / CVE screening)', oam: 'OAM Watch (802.3ah Link OAM loopback / flag forgery)', cfm: 'CFM Watch (802.1ag / Y.1731 service OAM)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
+        const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory)', ssh: 'SSH Watch (regreSSHion / Terrapin)', telnet: 'Telnet Watch (CVE-2026-24061 / 32746)', ftp: 'FTP Watch (ProFTPD mod_copy / quoted verb)', smtp: 'SMTP Watch (Exim expansion / SNI / AUTH b64)', http: 'HTTP Watch (smuggling / HTTP.sys / cleartext creds / h2c-gRPC)', ble: 'BLE Watch (Bluetooth LE clone/spoof/MITM)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', lldp: 'LLDP Watch (802.1AB malformed TLV / CVE screening)', oam: 'OAM Watch (802.3ah Link OAM loopback / flag forgery)', cfm: 'CFM Watch (802.1ag / Y.1731 service OAM)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
                         arp: 'ARP Poisoning (incl. HSRP/VRRP virtual-MAC awareness)', dns: 'DNS Doctor (poison parser / anchors / ASN)',
                         mac: 'MAC Watch (spoof / vendor-OUI / randomization / HSRP-VRRP virtual-MAC)', dhcp: 'DHCP Guardian (rogue server / starvation)',
                         lacp: 'LACP Watch (802.1AX LAG-hijack / flapping)', rpc: 'RPC/NetLogon Watch (Zerologon / DCSync / WinRM)',
@@ -12757,7 +12851,7 @@ async function runRoutingSelftest() {
             '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
             '<tr class="text-left text-gray-500"><th class="px-2 py-1">Scanner</th><th class="px-2 py-1">Scenarios</th><th class="px-2 py-1">End-to-end</th><th class="px-2 py-1">Result</th></tr>' +
             '</thead><tbody>';
-        const order = ['igmp', 'ipv6', 'ndp', 'raguard', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'ssh', 'telnet', 'stp', 'smb', 'relay', 'ldap', 'dtp', 'cdp', 'lldp', 'vtp', 'eigrp', 'isis', 'fhrp', 'ospf', 'arp', 'mac', 'dhcp', 'dns', 'bgp', 'lacp', 'oam', 'cfm', 'rpc', 'bfd', 'ptp', 'srmpls', 'ipsec', 'dns_passive', 'ftp', 'smtp', 'modbus', 'cisco_guard', 'juniper_guard', 'arista_guard', 'comware_guard', 'mikrotik_guard', 'aruba_guard', 'apc_guard', 'liebert_guard', 'dell_guard', 'bgp_speaker', 'path_asymmetry'];
+        const order = ['igmp', 'ipv6', 'ndp', 'raguard', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'ssh', 'telnet', 'stp', 'smb', 'relay', 'ldap', 'dtp', 'cdp', 'lldp', 'vtp', 'eigrp', 'isis', 'fhrp', 'ospf', 'arp', 'mac', 'dhcp', 'dns', 'bgp', 'lacp', 'oam', 'cfm', 'rpc', 'bfd', 'ptp', 'srmpls', 'ipsec', 'dns_passive', 'ftp', 'smtp', 'http', 'modbus', 'cisco_guard', 'juniper_guard', 'arista_guard', 'comware_guard', 'mikrotik_guard', 'aruba_guard', 'apc_guard', 'liebert_guard', 'dell_guard', 'bgp_speaker', 'path_asymmetry'];
         // Append any suite the backend returned that isn't in the preferred order,
         // so a newly-wired detector can never again be counted toward pass/fail yet
         // stay invisible in the table.
