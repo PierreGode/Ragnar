@@ -140,6 +140,8 @@ $RECYCLE.BIN/
 data/rf_settings.json    # per-box RF settings; the shipped defaults live in rtl_sdr.py
 data/logs/
 data/output/
+# RDAP/WHOIS IANA bootstrap + whois-server cache (fetched at runtime)
+data/rdap_cache/
 backup/backups/
 backup/uploads/
 

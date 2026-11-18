@@ -82,6 +82,7 @@ matrix to zoom (`/web/images/osi/`).
 | [DNS Doctor (poisoning check)](#dns-doctor) | Diagnostics · L7 | `POST /api/net/dns` |
 | [Captive Portal Check](#captive-portal-check) | Diagnostics · L7 | `GET /api/net/captive-portal` |
 | [DHCP Snooping (inline)](#dhcp-snooping-inline) | Diagnostics · L7 | `GET /api/net/dhcp-snoop` + `/dhcp-snoop/status`, `/config`, `/setup` |
+| [RDAP](#rdap) | Diagnostics · L7 | `POST /api/net/rdap` |
 | [WHOIS](#whois) | Diagnostics · L7 | `POST /api/net/whois` |
 | [IP Attribution (country/ASN/ISP/abuse)](ip-intel.md) | Diagnostics · L7 | `POST /api/net/ip-intel` |
 | [Speed Test](#speed-test) | Diagnostics · L7 | `POST /api/net/speedtest` |
@@ -377,8 +378,33 @@ addresses before use.
 
 - Endpoint: `POST /api/net/mtr` · binary: `mtr` (`mtr-tiny`)
 
+### RDAP
+Registration data for a **domain, IP address, CIDR prefix or ASN** — the structured
+successor to WHOIS (RFC 9082/9083). RDAP is the registries' JSON API that is replacing
+the free-text WHOIS protocol; this queries it first, picking the authoritative server
+from the **IANA bootstrap** registries (RFC 9224, cached 24 h under `data/rdap_cache/`),
+and **falls back to WHOIS (TCP/43)** automatically for the TLDs that still have no RDAP
+service — parsed into the same fields — so one lookup covers both. Output is normalized:
+registrar (+ IANA ID), registration / expiry / last-changed dates, status, nameservers,
+DNSSEC, the owning network / AS range, and the **abuse contact** (searched through nested
+entities). For a domain it follows the registry → registrar referral; for an IP it also
+pulls the **origin AS** where the registry publishes it (ARIN space). Every record is
+tagged `protocol: rdap` or `protocol: whois`, and the full server-rendered report (and raw
+WHOIS text, when used) is available under *Full report*.
+
+Engine vendored at `python/rdap_lookup.py` (Python stdlib only, runs on the Pi Zero 2W
+floor). **Active tool**: every lookup queries IANA + a registry / RIR over the network; it
+never changes anything. Unlike the WHOIS card it needs no `whois` binary — the WHOIS
+fallback speaks TCP/43 directly, over IPv4 or IPv6. Kept **alongside** WHOIS, not a
+replacement: the raw-text WHOIS card below still works and some ccTLDs are WHOIS-only.
+
+- Endpoint: `POST /api/net/rdap` (`{target, whois_fallback}`) — returns the structured
+  record (`kind`, `protocol`, `status`, `result`, `report`, `notes`, origin AS / referral)
+
 ### WHOIS
-Registration/ownership lookup for a domain or IP.
+Raw WHOIS registration text for a domain or IP (the classic TCP/43 lookup via the `whois`
+binary). For normalized fields plus ASN / prefix support and automatic RDAP, use
+[RDAP](#rdap) above.
 
 - Endpoint: `POST /api/net/whois` · binary: `whois`
 

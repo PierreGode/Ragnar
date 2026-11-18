@@ -2711,10 +2711,21 @@
                             </details>
                             <div id="dhcp-snoop-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
                         </div>
+                        <!-- RDAP (the structured successor to WHOIS) -->
+                        <div id="rdap-card" class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
+                            <h3 class="text-lg font-semibold mb-1">RDAP <span class="text-xs font-normal text-gray-500">(registration data · the structured successor to WHOIS · RFC 9082/9083)</span></h3>
+                            <p class="text-sm text-gray-400 mb-3">Registration data for a <strong>domain, IP address, CIDR prefix or ASN</strong> — registrar, dates, status, nameservers, DNSSEC, the owning network and the <strong>abuse contact to report it to</strong>. Queries <strong>RDAP</strong> first (the registries' JSON API that is replacing WHOIS), and automatically falls back to <strong>WHOIS</strong> for the TLDs that have no RDAP service yet, so one lookup covers both. For an IP it also pulls the origin AS where the registry publishes it. The classic <a href="#whois-card" onclick="revealNetCard('whois-card'); return false;" class="text-cyan-400 underline">Whois</a> raw-text lookup is still below.</p>
+                            <div class="flex flex-col sm:flex-row gap-2">
+                                <input id="rdap-target" type="text" inputmode="url" autocomplete="off" placeholder="domain, IP, CIDR or ASN (e.g. example.com · 8.8.8.8 · 192.0.2.0/24 · AS15169)" class="w-full flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm" onkeydown="if(event.key==='Enter')runRdap()">
+                                <button onclick="runRdap()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Lookup</button>
+                            </div>
+                            <label class="flex items-center gap-2 mt-2 text-xs text-gray-500"><input id="rdap-no-whois" type="checkbox" class="accent-Ragnar-600"> RDAP only — don't fall back to WHOIS</label>
+                            <div id="rdap-results" class="hidden mt-3 text-sm"></div>
+                        </div>
                         <!-- Whois -->
-                        <div class="glass rounded-xl p-4 sm:p-6">
+                        <div id="whois-card" class="glass rounded-xl p-4 sm:p-6">
                             <h3 class="text-lg font-semibold mb-1">Whois</h3>
-                            <p class="text-sm text-gray-400 mb-3">Registration data for a domain or IP.</p>
+                            <p class="text-sm text-gray-400 mb-3">Raw WHOIS registration text for a domain or IP (the classic TCP/43 lookup). For normalized fields and ASN / prefix support, use <a href="#rdap-card" onclick="revealNetCard('rdap-card'); return false;" class="text-cyan-400 underline">RDAP</a> above.</p>
                             <div class="flex flex-col sm:flex-row gap-2">
                                 <input id="whois-target" type="text" inputmode="url" autocomplete="off" placeholder="domain or IP" class="w-full flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm" onkeydown="if(event.key==='Enter')runWhois()">
                                 <button onclick="runWhois()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Lookup</button>
@@ -10207,7 +10218,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20261118-http-watch"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20261118-rdap"></script>
 
 
 
