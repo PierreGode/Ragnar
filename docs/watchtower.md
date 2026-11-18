@@ -116,6 +116,15 @@ KEV) lands as **critical**; the expansion *attempt*, a malformed SNI / client-ce
 (**CVE-2019-15846**), an overlong EHLO/HELO line (**CVE-2019-16928**) and an AUTH base64
 token of length 4n+3 (**CVE-2018-6789**, KEV) as **high**. Banner version ranges are low-confidence posture and stay out of the feed.
 
+[`http_watch`](nettools.md#http-watch) (HTTP Watch) appends its **HIGH/CRITICAL** findings
+to `/var/log/ragnar/http_watch.jsonl` (deduplicated per code + client). A **request-smuggling
+desync** (Content-Length and Transfer-Encoding framers disagree and the leftover is a request
+line), a **MS15-034** Range at or beyond 2^63 (**CVE-2015-1635**, KEV) and the HTTP.sys
+**Accept-Encoding** crash shape (**CVE-2021-31166**, KEV) land as **critical**; malformed
+TE / CL / chunk grammar, **HTTP/2 Rapid Reset** (**CVE-2023-44487**, KEV), CONTINUATION /
+HPACK / gRPC header abuse and **credentials in the clear** (class `EXPOSURE`, values already
+redacted to an 8-hex SHA-256 tag) as **high**. Warn / info posture stays in the card.
+
 [`modbus_watch`](nettools.md#modbus--lorawan-watch) (Modbus & LoRaWAN Watch) appends its **HIGH** and
 **MEDIUM** findings to `/var/log/ragnar/modbus_watch.jsonl` (deduplicated per code + master).
 A write from a master outside the learned baseline, FC8 **Force Listen Only** and the

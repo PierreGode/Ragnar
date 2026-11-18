@@ -56,6 +56,7 @@ matrix to zoom (`/web/images/osi/`).
 | [DHCP Guardian](#dhcp-guardian) | Diagnostics · L7 | `GET /api/net/dhcp-guardian`, `POST /api/net/dhcp-baseline` |
 | [DNS Watch (passive)](#dns-watch) | Diagnostics · L7 | `GET /api/net/dns-watch` |
 | [SSDP / UPnP Watch](#ssdp--upnp-watch) | Diagnostics · L7 | `GET /api/net/ssdp-watch` |
+| [HTTP Watch](#http-watch) | Diagnostics · L7 | `GET /api/net/http-watch` |
 | [NTP Watch](#ntp-watch) | Diagnostics · L7 | `GET /api/net/ntp-watch`, `POST /api/net/ntp-baseline` |
 | [SNMP Watch](#snmp-watch) | Diagnostics · L7 | `GET /api/net/snmp-watch`, `POST /api/net/snmp-baseline` |
 | [RADIUS Watch](#radius-watch) | Diagnostics · L7 | `GET /api/net/radius-watch` |
@@ -703,6 +704,78 @@ device fingerprint in Modbus & LoRaWAN Watch. The card renders it as a Device ce
 - Endpoint: `GET /api/net/ssdp-watch` (`?interface=<nic>&seconds=5..50`) — returns `findings` and
   the v2 `devices` census
 
+### HTTP Watch
+**Detection-only** passive observer for **cleartext HTTP/1.x, h2c and gRPC** — it reads bytes other
+hosts already sent and transmits nothing (no Range test request, no h2 PING, no active verification).
+HTTP over TLS is ciphertext after the handshake, so SNI / ALPN / JA4 / certificates stay with
+[TLS Watch](#tls-watch) and Cert Watch; the http.sys-over-TLS record flood (CVE-2026-47291) is TLS
+Watch's. One bounded `tcpdump` window (full snaplen, `-p`, packet cap), each packet dissected and fed
+through the vendored engine (`python/httpwatch.py`). **28 codes** in four tiers, each with a
+confidence class — `exact` (the observation is the condition), `shape` (the malformation is read
+directly; whether the receiver is vulnerable is not observable), `heuristic` (a threshold or a
+name-matched field) or `posture`:
+
+- **Tier A — framing ambiguity / request smuggling** (`HTTP-001..011`). One RFC 9112 grammar engine
+  runs a **Content-Length framer and a Transfer-Encoding framer side by side**; `HTTP-009`
+  (critical) fires when they end the message at different offsets **and** the leftover bytes parse as
+  a request line — the smuggled request is quoted in the evidence. A message carrying both headers is
+  held until the Content-Length window fills (bounded at 64 KiB, so a bogus length cannot stall the
+  flow). The supporting rules flag CL + TE together (`HTTP-001`, high on HTTP/1.0), a
+  Transfer-Encoding that is not a clean coding list ending in `chunked`, signed / padded /
+  contradictory Content-Length, non-hex or over-64-bit chunk sizes, malformed chunk extensions, bare
+  LF / CR terminators, whitespace before the colon, obs-fold in a request, ambiguous response
+  framing and Host conflicts. CVEs ride as screening rows on those rules: Netty's HTTP/1.0
+  Content-Length guard (`CVE-2026-42584`), chunk-size overflow (`CVE-2026-42580`) and quoted chunk
+  extensions (`CVE-2026-42585`), Jetty's chunk-extension CRLF (`CVE-2026-2332`) and http4s Ember's
+  case-sensitive Transfer-Encoding (`CVE-2026-69205`). **Best tap**: between the load balancer / TLS
+  terminator and the origin, where a forwarded request still carries the ambiguity.
+- **Tier B — HTTP.sys** (`HTTP-020..022`): a Range end position at or beyond 2^63 — parsed as an
+  integer, so whitespace / multi-range / missing-unit evasions do not slip past (**MS15-034**,
+  `CVE-2015-1635`, CISA KEV); an empty Accept-Encoding list element after an unknown coding, the
+  public crash shape (`CVE-2021-31166`, CISA KEV); and a chunked request carrying trailers, raised to
+  warn toward a `Microsoft-HTTPAPI` / `Microsoft-IIS` banner (`CVE-2022-21907`, posture — the
+  malformation was never published and `EnableTrailerSupport` is invisible from a tap). An attempt
+  against a patched server is still reported: the attempt is the event. RPC Watch co-detects the
+  Accept-Encoding shape on WinRM.
+- **Tier C — posture** (`HTTP-040..047`): HTTP Basic, form passwords, credential cookies, the
+  **FS S3150-8T2F** username / password / `GSESSIONID` cookie (`CVE-2025-25613` — firmware version
+  is not on the wire, so it says *verify this device*), userinfo / query-string credentials, TRACE,
+  and **slow-headers / slow-body** abuse at Apache `mod_reqtimeout`'s 500 B/s floor once more than 20
+  concurrently slow flows come from one source in 60 s. **No finding ever carries a usable secret** —
+  usernames are reported, passwords / tokens / cookie values become an 8-hex SHA-256 tag (enough to
+  spot the same secret twice). `HTTP-040` / `HTTP-041` stand down on TCP/5985, where RPC Watch owns
+  WinRM authentication posture.
+- **Tier D — h2c / gRPC** (`HTTP-060..065`): cleartext HTTP/2 in use (warn on gNMI / gNOI paths);
+  **HTTP/2 Rapid Reset** (`CVE-2023-44487`, CISA KEV) counting only streams reset before the server
+  sent any frame, against twice the server's own advertised `MAX_CONCURRENT_STREAMS` within 1 s;
+  CONTINUATION abuse — a block larger than the peer's own `MAX_HEADER_LIST_SIZE`, more than 32
+  CONTINUATION frames, or a block interrupted by another frame (`CVE-2023-32731` / `CVE-2023-33953`);
+  an HPACK prefix integer with a trailing zero group (`CVE-2023-33953`); the gRPC `te` / `:scheme` /
+  `grpclb_client_stats` abort (`CVE-2023-1428`); and credentials in gRPC metadata. A connection joined
+  mid-stream cannot rebuild the HPACK dynamic table, so header-content rules are skipped there rather
+  than guessed; frame-level rules still run.
+
+**Dual-stack.** Flows are classified by their first bytes (a request line, the h2 client preface, or
+`Upgrade: h2c` answered by `101`), so h2c on port 80 is read as h2c. The capture filter keeps IPv4
+port-scoped and admits IPv6 with a bare `ip6` term — `(tcp port 80 or …) or ip6` — because libpcap's
+`tcp port N` misses any IPv6 packet carrying an extension header; the port decision for IPv6 is made
+after dissection. Default ports: 80, 8080, 8000, 8888 (HTTP), 5985 (WinRM), 50051 (gRPC), 9339 /
+6030 / 57400 (gNMI); the card takes a custom comma-separated list.
+
+**Verdicts**: `attack` (a critical / high framing, HTTP.sys or h2c / gRPC finding) ·
+`credential-exposure` (high cleartext-credential findings) · `anomaly` (warn posture) · `observed`
+(info only — h2c in use, TRACE, bare LF) · `clean` · `no-traffic`. The same finding on the same
+client → server pair is folded into one row with a count. HTTP Watch runs in the **Network Integrity**
+rotation, and its HIGH / CRITICAL findings stream to **Watchtower** (`/var/log/ragnar/http_watch.jsonl`).
+The engine also states its considered-and-rejected CVEs (`DEFERRED_CVES`) — no wire artifact, below
+the 6.5 bar, a local-API defect, or another watcher's — so the CVE count never quietly overstates.
+Detector Self-Test runs the engine's 440-check suite plus smuggling, redaction, WinRM-suppression,
+Range-boundary and verdict scenarios and a Scapy pcap leg carrying an IPv6 Hop-by-Hop header.
+
+- Endpoint: `GET /api/net/http-watch` (`?interface=<nic>&seconds=5..60&ports=80,8080,…`) — returns
+  `verdict`, `findings` (code, tier, severity, confidence, CVEs + KEV flag, redacted evidence,
+  client / server / port / address family, count), `by_severity` and flow / message counts
+
 ### MAC Watch
 **Detection-only** MAC-spoofing + randomization monitor — it *never spoofs or
 randomizes anything itself*. Passive: it reads the kernel neighbour table
@@ -864,8 +937,10 @@ check, the [DHCP Guardian](#dhcp-guardian) rogue-server check, and the instant
 
 **Extended monitoring** (on by default alongside the monitor) additionally
 **rotates the whole passive-scanner suite** through the background poller —
-STP · DTP · CDP · VTP · IGMP · IPv6 first-hop · NDP · FHRP · OSPF · EIGRP · IS-IS · BGP · SMB ·
-Relay/Coercion · NTP · ICMP · SNMP · Cert · TLS · LDAP · Cisco/Juniper/Arista/Comware Guards.
+ARP frames · STP · DTP · CDP · LLDP · VTP · IGMP · IPv6 first-hop · NDP · FHRP · OSPF · EIGRP ·
+IS-IS · BGP · SMB · Relay/Coercion · NTP · ICMP · SNMP · Cert · TLS · LDAP · SSH · Telnet · LACP ·
+Link OAM · CFM · RPC · RDP · BFD · SR-MPLS · IPsec · DNS · FTP · SMTP · HTTP · Modbus ·
+Cisco/Juniper/Arista/Comware Guards.
 The vendor switch/router guards (Cisco/Juniper/Arista/Comware) are **LAN-only** —
 the rotation runs them only when a genuine wired uplink is up (over that wired
 NIC, never `wlan0`), so a Wi-Fi-only unit never auto-runs them and Comware can't

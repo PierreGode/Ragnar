@@ -2,6 +2,18 @@
 
 ## Releases
 
+### 2026-11-18
+
+#### feat(netdiag): HTTP Watch — passive cleartext HTTP/1.x, h2c and gRPC observer
+
+*branch `feature/http-watch`*
+
+- **New L7 card, HTTP Watch (28 codes, detection-only).** It reads cleartext HTTP/1.x, h2c and gRPC off the wire and transmits nothing. It runs a Content-Length framer and a Transfer-Encoding framer side by side and flags **request smuggling / desync** when they end a message at different offsets and the leftover parses as a request line (`HTTP-009`, critical, with the smuggled request line in the evidence), plus the malformed TE / CL / chunk grammar that smuggling rides on. It names the **HTTP.sys** shapes (MS15-034 Range overflow, the Accept-Encoding crash, trailers toward an http.sys host), flags **credentials in the clear** with every password, token and cookie value replaced by an 8-hex SHA-256 tag, flags slow-read abuse, and on **h2c / gRPC** flags HTTP/2 Rapid Reset, CONTINUATION and HPACK abuse and the gRPC header abort. Dual-stack, including IPv6 behind extension headers; flows are classified by their first bytes, so h2c on port 80 is read as h2c.
+- **CVE index 439 → 455 named, 375 → 386 detected.** Eleven new detected CVEs (CVE-2015-1635 MS15-034 and CVE-2023-44487 Rapid Reset, both CISA KEV; CVE-2023-1428, CVE-2023-32731, CVE-2023-33953, CVE-2025-25613, CVE-2026-2332, CVE-2026-42580, CVE-2026-42584, CVE-2026-42585, CVE-2026-69205); CVE-2021-31166 / CVE-2022-21907 are now co-detected with RPC Watch; five considered-and-rejected CVEs are listed as context. `gen_cve_list.py` now reads a `DEFERRED_CVES` block in any listed module (not only RADIUS Watch's) and supports per-file context-only mentions, and CVE-2022-21907's label is corrected to the trailer-support bug.
+- Engine vendored as `python/httpwatch.py` + `httpwatch_selftest.py` (440/440). The in-app adapter `do_http_watch` adds `GET /api/net/http-watch` (`interface`, `seconds`, `ports`), joins the **Network Integrity** rotation, and streams HIGH / CRITICAL findings to **Watchtower** (`http_watch.jsonl`). Detector Self-Test gains an `http` suite (15 scenarios, including a Scapy pcap leg with an IPv6 Hop-by-Hop header). Results collapse to labelled cards on phones.
+- The TLS Watch links on the RADIUS and HTTP cards now open the TLS Watch card.
+- **Docs:** [nettools.md](nettools.md#http-watch), [CVE index](CVE.md), [CREDITS.md](CREDITS.md), [README (root)](../README.md)
+
 ### 2026-11-17
 
 #### feat(wardriving): the Bluetooth device list is paginated and sortable
