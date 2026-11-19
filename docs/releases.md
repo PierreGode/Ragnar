@@ -4,6 +4,14 @@
 
 ### 2026-11-18
 
+#### docs(net): refresh the OSI visibility matrix — RDAP added at L7
+
+*branch `feature/rdap-visibility-matrix`*
+
+- **Visibility matrix refreshed** (2160×5184): the **L7** band's active-tools row now carries **RDAP** next to **WHOIS** (`DNS Doctor · Captive Portal Check · WHOIS · RDAP · speed test · public-IP / ASN · IP Attribution · DHCP snoop`), matching the new RDAP card. Only L7 changed — L2–L6 and L1 are byte-identical in the new master.
+- `web/images/osi/matrix_full.jpg` + the docs copy (`docs/ragnar_osi_visibility_matrix.jpg`) replaced, all seven per-layer bands (`matrix_l1…l7.jpg`) re-cut from it at the unchanged band edges, and the **16 matrix cache-bust URLs** bumped to `?v=20261118-rdap-matrix`.
+- **Docs:** [nettools.md › Module visibility matrix](nettools.md#module-visibility-matrix).
+
 #### feat(netdiag): RDAP lookup — the structured successor to WHOIS (WHOIS kept)
 
 *branch `feature/rdap-service`*
