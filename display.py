@@ -934,6 +934,40 @@ class Display:
         except Exception:
             return False
 
+    # --- CardputerZero manual display blank ("0" key) ---------------------
+
+    def _cardputer_display_off(self):
+        """True when the CardputerZero keyboard has blanked the display. On
+        every other board the listener has no such flag, so this is False."""
+        return bool(getattr(self.button_listener, 'display_off', False))
+
+    def _set_cardputer_backlight(self, on):
+        """Switch the LCD backlight through the st7789v2 driver, if this panel
+        has one. Returns True when the driver reports it acted."""
+        epd = getattr(self.epd_helper, 'epd', None)
+        if epd is not None and hasattr(epd, 'set_backlight'):
+            try:
+                return bool(epd.set_backlight(on))
+            except Exception as e:
+                logger.warning("CardputerZero backlight %s failed: %s",
+                               "on" if on else "off", e)
+        return False
+
+    def _run_display_off(self):
+        """Hold the screen dark while the "0"-key blank is set: backlight off,
+        then idle (Ragnar keeps running) until the key is pressed again or the
+        service stops. Re-lights the backlight on the way out so the next frame
+        is visible. The web preview (screen.png) keeps its last frame."""
+        if not self._set_cardputer_backlight(False):
+            logger.info("CardputerZero: display-off requested but the backlight "
+                        "could not be switched; idling anyway")
+        try:
+            while (self._cardputer_display_off()
+                   and not self.shared_data.display_should_exit):
+                time.sleep(0.1)
+        finally:
+            self._set_cardputer_backlight(True)
+
     def _get_cached_page_data(self, key, fetch_fn, ttl=10):
         """Get cached page data, refreshing if older than ttl seconds."""
         if not hasattr(self, '_page_cache'):
@@ -1019,7 +1053,7 @@ class Display:
     # drive the LCD HAT's input layers (cardputer_input.py): F/X/Z/C are the
     # joystick directions, OK (Enter) its centre press, Esc goes back.
     _KEYBOARD_HINTS = {
-        "K1:Home K2:Flip K3:Next K4:Rst": "F/X/Z/C:Page OK:Diag Esc:Home A:Auto P:Cam Bksp:Flip",
+        "K1:Home K2:Flip K3:Next K4:Rst": "F/X/Z/C:Page OK:Diag Esc:Home A:Auto P:Cam 0:Off Bksp:Flip",
         "K2 back · press=open":           "F/X:Move  OK:Open  Esc:Back",
         "K1 back to pages":               "OK:Close  Esc:Back",
         "K1Exit K2WiFi K3AP":             "Z/C:Page Esc:Exit Bksp:WiFi Tab:AP",
@@ -1993,6 +2027,11 @@ class Display:
         next_web = 0.0
         try:
             while getattr(bl, 'camera_mode', False) and not self.shared_data.display_should_exit:
+                # "0" blanks the screen from the camera view too; any recording
+                # keeps running (it is driven in pi_camera, not here).
+                if self._cardputer_display_off():
+                    self._run_display_off()
+                    continue
                 now = time.monotonic()
                 problem = None
                 if not holding and now >= next_try:
@@ -5087,6 +5126,12 @@ class Display:
         self.manual_mode_txt = ""
         while not self.shared_data.display_should_exit:
             try:
+                # CardputerZero: the "0" key blanks the LCD (manual, no
+                # auto-off). Turn the backlight off and idle here until it is
+                # pressed again, then re-light and fall through to redraw.
+                if self._cardputer_display_off():
+                    self._run_display_off()
+                    continue
                 self.epd_helper.init_partial_update()
                 # Pull latest orientation settings so web toggles take effect without restarting the service.
                 self.screen_reversed = self.shared_data.screen_reversed

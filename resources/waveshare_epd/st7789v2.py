@@ -209,6 +209,47 @@ class EPD:
                 pass
         logger.info("CardputerZero display sleeping")
 
+    def set_backlight(self, on):
+        """Turn the LCD backlight on or off, leaving the panel otherwise
+        initialised. Used by the CardputerZero's manual display-off key ("0"):
+        Ragnar keeps running and the frame buffer keeps its contents; only the
+        light goes out. Returns True when the state was changed through a
+        mechanism we trust (so the caller can tell a real blank from a no-op)."""
+        if not self._initialized:
+            return False
+        if self._transport == "fb":
+            return self._fb_set_backlight(on)
+        if self._transport == "spi":
+            ioe = self._ensure_ioe()
+            if ioe is None:
+                return False
+            return ioe.backlight_on() if on else ioe.backlight_off()
+        return False
+
+    def _fb_set_backlight(self, on):
+        """Framebuffer path: on = unblank + full brightness (the same path init
+        uses to wake the panel); off = blank the framebuffer and set every
+        backlight device to zero."""
+        if on:
+            self._wake_panel(self._fb_path)
+            return True
+        changed = False
+        node = os.path.basename(self._fb_path)
+        try:
+            with open(f"{_SYS_GRAPHICS}/{node}/blank", "w") as f:
+                f.write("1")   # FB_BLANK_POWERDOWN
+            changed = True
+        except OSError:
+            pass
+        for base in glob.glob(f"{_SYS_BACKLIGHT}/*"):
+            try:
+                with open(f"{base}/brightness", "w") as f:
+                    f.write("0")
+                changed = True
+            except OSError:
+                pass
+        return changed
+
     # ------------------------------------------------------------------
     # Blit dispatch
     # ------------------------------------------------------------------
