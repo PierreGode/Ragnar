@@ -166,17 +166,24 @@ press, and **Esc** goes back.
 | **Esc** | back to the main screen | close a result, then leave diagnostics | back to the Ragnar screens |
 | `A` | page autoscroll on / off | | |
 | `P` | camera screen on / off (works from any screen) | | |
+| `0` | display on / off — a manual blank (works from any screen) | | |
 | **fn** + Backspace (**del**) | Grove port 5 V on / off (works from any screen, saved) | | |
 | Space | diagnostics on | diagnostics off | back to the Ragnar screens |
 | Backspace | flip the screen 180° | card list | reconnect to a known Wi-Fi |
 | Tab | next page (hold: restart Ragnar) | auto-switch cards on / off | phone-access AP on / off |
 
 The footer of each screen names the keys that apply there, for example
-`F/X/Z/C:Page OK:Diag Esc:Home A:Auto P:Cam Bksp:Flip`. The main screen has no footer;
+`F/X/Z/C:Page OK:Diag Esc:Home A:Auto P:Cam 0:Off Bksp:Flip`. The main screen has no footer;
 the keys work there all the same.
 
 These are the 1.44" LCD HAT's controls on a keyboard; see
 [Display Controls](DISPLAY_CONTROLS.md) for what each mode does.
+
+**Display off (`0`).** Press `0` to turn the screen off — a manual blank, with no
+auto-off timer. The backlight goes out and Ragnar keeps running behind it (a
+wardrive, a scan or a recording carries on); press `0` again to bring the screen
+back. It works from any screen, including the camera view. While the screen is
+off the web dashboard's live preview holds its last frame.
 
 **Key echo.** For two seconds after a key press, the bottom-left corner names the
 key and what it did (`F: up`, `OK: OK`, `Q (code 11): no action`). Most keys have

@@ -2,6 +2,16 @@
 
 ## Releases
 
+### 2026-11-19
+
+#### feat(cardputer): the `0` key turns the display off and on
+
+*branch `feat/cardputer-display-off`*
+
+- **A manual display blank on the CardputerZero.** Press **`0`** to turn the LCD off; press it again to bring it back. It is a manual toggle with **no auto-off timer** — the screen stays off until you press `0` again. Ragnar keeps running behind the dark screen (a wardrive, a scan or a camera recording carries on), so this saves battery and keeps the unit discreet without stopping anything. Works from every screen, the camera view included.
+- **How it works:** the backlight is switched through the ST7789V3 driver — brightness `0` plus a framebuffer blank on the kernel-framebuffer path, or the M5IOE1 expander's backlight PWM on the native-SPI path. While the screen is off the display loop idles instead of redrawing; the web dashboard's live preview holds its last frame until the screen comes back.
+- The footer hint and the on-screen key echo name the key (`0:Off` / `Display off` / `Display on`). See [M5StackCardputerZero.md](M5StackCardputerZero.md).
+
 ### 2026-11-18
 
 #### docs(net): refresh the OSI visibility matrix — RDAP added at L7

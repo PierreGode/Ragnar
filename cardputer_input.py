@@ -118,10 +118,12 @@ EVDEV_KEY_NAMES = {
 #   Backspace      KEY2      Tab  KEY3      A  page autoscroll on / off
 #   P              the camera screen on / off. On it: OK takes a photo or
 #                  starts / stops a video, Z / C switch between photo and video
+#   0              the display (backlight) on / off — a manual blank, no
+#                  auto-off; Ragnar keeps running behind the dark screen
 #   fn + Backspace the key's "del" legend: Grove port 5 V on / off (saved)
 KEY_ACTIONS = {"F": "up", "X": "down", "Z": "left", "C": "right", "OK": "press",
                "Esc": "back", "Space": "key1", "Bksp": "key2", "Tab": "key3",
-               "A": "auto", "P": "camera"}
+               "A": "auto", "P": "camera", "0": "display"}
 
 # Raw TCA8418 key code -> logical action, used only on the direct I2C path.
 DEFAULT_KEYMAP = {str(matrix_code(*KEY_MATRIX[name])): action
@@ -172,6 +174,7 @@ DEFAULT_EVDEV_KEYMAP = {
     "15": "key3",    # Tab       → next page (long: restart) / toggle AP
     "30": "auto",    # A         → page autoscroll on / off
     "25": "camera",  # P         → camera screen on / off
+    "11": "display", # 0         → display (backlight) on / off
     "111": "grove",  # fn + Backspace (Del) → Grove port 5 V on / off
 }
 
@@ -179,7 +182,7 @@ DEFAULT_EVDEV_KEYMAP = {
 _MODIFIER_CODES = {0x185, 0x17f, 464, 42, 54, 29, 97, 56, 100, 125, 126, 127}
 
 _VALID_ACTIONS = {"up", "down", "left", "right", "press", "key1", "key2", "key3",
-                  "back", "auto", "camera", "grove"}
+                  "back", "auto", "camera", "grove", "display"}
 CAMERA_NOTE_SECONDS = 2.5
 _KEYMAP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "config", "cardputer_keymap.json")
@@ -288,6 +291,10 @@ class CardputerInputListener(LCDHATInputListener):
         self.camera_video = False  # OK records a video instead of taking a photo
         self.camera_busy = False   # a photo is being taken
         self.camera_note = None    # (text, show until) for the camera screen
+        # Manual display blank (the "0" key). display.py reads display_off and
+        # turns the backlight off / on; display_seq lets its sleep wake at once.
+        self.display_off = False
+        self.display_seq = 0
 
     # --- Lifecycle --------------------------------------------------------
 
@@ -576,7 +583,9 @@ class CardputerInputListener(LCDHATInputListener):
     # --- Keyboard-specific keys -------------------------------------------
 
     def _on_input_press(self, name):
-        if name == "grove":
+        if name == "display":
+            self._toggle_display()
+        elif name == "grove":
             self._toggle_grove()
         elif name == "camera":
             self._set_camera(not self.camera_mode)
@@ -592,14 +601,31 @@ class CardputerInputListener(LCDHATInputListener):
         else:
             super()._on_input_press(name)
 
+    # --- Manual display blank -----------------------------------------------
+
+    def _toggle_display(self):
+        """The "0" key: blank the LCD (backlight off) or wake it again. A
+        manual toggle only — there is no auto-off. The flag is read by the
+        display loop (display.py), which owns the panel and switches the
+        backlight; here we only record the wish and nudge it to act now."""
+        self.display_off = not self.display_off
+        self.display_seq += 1
+        result = "Display off" if self.display_off else "Display on"
+        logger.info("CardputerZero 0: %s", result)
+        # The echo is drawn before the blank takes effect, so "Display off"
+        # is the last thing shown; "Display on" rides the first lit frame.
+        if self.last_key:
+            self.last_key = (self.last_key[0], result, time.monotonic())
+        self.key_seq += 1
+
     # --- Grove port power ---------------------------------------------------
 
     def _on_input_release(self, name):
-        if name != "grove":
+        if name not in ("grove", "display"):
             super()._on_input_release(name)
 
     def _on_input_held(self, name):
-        if name != "grove":
+        if name not in ("grove", "display"):
             super()._on_input_held(name)
 
     def _toggle_grove(self):
