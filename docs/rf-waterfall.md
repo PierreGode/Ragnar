@@ -183,10 +183,23 @@ scrolling it at **that panel's own measured data rate** until real data resumes.
 There is no manual scroll-rate control: every waterfall simply follows the rate
 its data actually arrives — a fast engine scrolls fast, a ~1/s sweep scrolls at
 ~1/s. New spectrum still appears at the engine's true rate, and **Rows/s** still
-reports it. A fast engine (IQ ~16/s, ESP-SDR ~50/s) always has rows buffered
-ahead, so the hold never engages. A *genuine* stall (the tab was backgrounded, or
+reports it. A fast engine (IQ ~16/s, HackRF 20/s, ESP-SDR ~50/s) always has rows
+buffered ahead, so the hold never engages. A *genuine* stall (the tab was backgrounded, or
 the backend wedged) stops the hold after a few seconds and the panel shows its
 "waiting" veil rather than scrolling stale data forever.
+
+**HackRF row rate.** `hackrf_sweep` completes the 100 MHz 2.4 GHz band about
+every 17 ms — far faster than a waterfall should scroll — so the backend
+max-holds the sweeps into rows on a fixed 50 ms grid: exactly **20 rows/s**, each
+stamped with its grid time so the scroll is even. Each row max-holds ~3 sweeps,
+so a short burst between rows is still caught. A wide span whose sweep takes
+longer than 50 ms (5 / 6 GHz) gives one row per sweep instead.
+
+**Re-sync after a restart.** If the capture restarts underneath an open page —
+another tab or browser started it, or Ragnar restarted — its row counter starts
+again from 0. The page notices on its next poll (the counter it gets back is
+lower than the one it asked from) and re-syncs at once, instead of showing a
+frozen panel until the counter catches up.
 
 - **IQ FFT (real-time)** — for any span that fits a **single RTL-SDR tune**
   (≤ `rtl_sdr._IQ_MAX_SPAN_HZ`, ~2.8 MHz: zooms, manual tunes, Z-Wave regions,
