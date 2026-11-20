@@ -50,7 +50,7 @@ matrix to zoom (`/web/images/osi/`).
 | [Network Integrity Monitor](#-network-integrity-monitor) | Diagnostics · Overview | `GET /api/net/integrity` + config |
 | [Watchtower (unified watcher alerts)](watchtower.md) | Diagnostics · Overview | `GET /api/net/watchtower` + config |
 | [Incident correlation (attack chains)](incident-correlation.md) | Diagnostics · Overview | `GET /api/net/incidents` + config |
-| [Detector Self-Test](#detector-self-test) | Diagnostics · Overview | `GET /api/net/routing-selftest` |
+| [Detector Self-Test](#detector-self-test) | Diagnostics · Overview | `GET /api/net/routing-selftest` (sync) · `POST /api/net/routing-selftest/start` + `GET /api/net/routing-selftest/status` (async) |
 | [PCAP Analyzer](#pcap-analyzer) | Diagnostics · Overview | `POST /api/net/pcap` |
 | [On-Screen Network Diagnostic Mode](#-on-screen-network-diagnostic-mode) | Diagnostics · Overview (toggle) | config `network_diagnostic_mode` |
 | [DHCP Guardian](#dhcp-guardian) | Diagnostics · L7 | `GET /api/net/dhcp-guardian`, `POST /api/net/dhcp-baseline` |
@@ -170,7 +170,12 @@ installed it also runs the end-to-end packet-crafting leg for the capture-based
 scanners, and Cert Watch grades a real self-signed cert over a local (loopback)
 handshake. This is how you confirm the routing-security detectors are working on a
 given box without waiting for a real attack — endpoint `GET /api/net/routing-selftest`.
-The same checks run headless via
+The sweep fans out to ~60 suites, so on a small single-core board it runs for minutes.
+For clients that can't hold a request open that long (the mobile app, and the box's own
+web panel), start it in the background and poll: `POST /api/net/routing-selftest/start`
+kicks it off (idempotent while one is running) and `GET /api/net/routing-selftest/status`
+returns `{status: idle|running|done|error, elapsed, result}` — `result` carrying the same
+report the sync endpoint returns once `status` is `done`. The same checks run headless via
 `python3 network_diagnostics.py {igmp,ipv6,raguard,ntp,icmp,snmp,tls,ospf,bgp}-selftest` and each module's
 `selftest()`.
 
