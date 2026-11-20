@@ -177,7 +177,9 @@ kicks it off (idempotent while one is running) and `GET /api/net/routing-selftes
 returns `{status: idle|running|done|error, elapsed, result}` — `result` carrying the same
 report the sync endpoint returns once `status` is `done`. The same checks run headless via
 `python3 network_diagnostics.py {igmp,ipv6,raguard,ntp,icmp,snmp,tls,ospf,bgp}-selftest` and each module's
-`selftest()`.
+`selftest()`. The self-test is the first of several tiers each module passes before it ships; the
+rest (conformance, cross-check against independent oracles, lab, bite harness) are described in
+[Testing Tiers](testing-tiers.md).
 
 ---
 
