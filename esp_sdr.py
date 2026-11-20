@@ -107,6 +107,47 @@ _STRIDE_UNITS = {
 
 _LEASE_TIMEOUT = 5.0                    # seconds to acquire the serial lease
 _CMD_TIMEOUT = 2.0                      # seconds to read a text reply
+_WRITE_TIMEOUT = 1.0                    # a device that stops reading must not hang us
+
+# Other Espressif firmware Ragnar talks to (a Huginn wardrive node, a Piglet)
+# identifies itself in the first lines it prints. Seeing one of these while
+# probing means "not an ESP-SDR": stop at once and leave that port alone for a
+# while, instead of re-probing it on every status poll — writing probe bytes
+# into a Huginn every 8-15 s, and (without a write timeout) blocking a web
+# request thread forever on one whose input had backed up.
+_FOREIGN_MARKERS = ((b'HuginnESP', "Huginn"), (b'[CYCLE]', "Huginn"),
+                    (b'"type":"WIFI"', "Huginn"), (b'"type":"BLE"', "Huginn"),
+                    (b'PigletCore', "Piglet Core"), (b'RagnarCoord', "Piglet Coordinator"),
+                    (b'WigleWifi', "Piglet"))
+#
+# Opening an ESP32-C5's USB-Serial-JTAG port resets the chip (measured on a
+# Huginn T-Dongle-C5, even with DTR/RTS held low), so a just-reset Huginn
+# only shows ROM boot text inside the probe window. A port that never answers
+# as an ESP-SDR is therefore also left alone for a while. The verdict is tied
+# to the device node itself — a re-plug or re-flash re-enumerates USB and gets
+# a new node, which is probed straight away; the chip resets the probe causes
+# do not re-enumerate.
+_NOT_SDR_TTL = 600.0                    # foreign firmware seen: leave it 10 min
+_NO_ANSWER_TTL = 300.0                  # no ESP-SDR answer: leave it 5 min
+_SETTLE_S = 20.0                        # a node younger than this may still be booting
+_not_sdr = {}                           # device -> (expires monotonic, label, node key)
+
+
+def _node_key(dev):
+    """Identity of the device node; changes when USB re-enumerates."""
+    try:
+        st = os.stat(dev)
+        return (st.st_rdev, st.st_ino, st.st_ctime)
+    except OSError:
+        return None
+
+
+def _remember_not_sdr(dev, ttl, label):
+    _not_sdr[dev] = (time.monotonic() + ttl, label, _node_key(dev))
+
+
+class _ForeignFirmware(Exception):
+    """The port answered with another firmware's output (Huginn, Piglet ...)."""
 
 # Frequency trim (FOFS). The ESP32 has no TCXO; its crystal runs a few ppm off
 # and drifts with temperature. The S3/S31 firmware accepts `FOFS <kHz>` — a PLL
@@ -358,12 +399,22 @@ def _esp_ports():
                 continue
             if (p.vid == _ESP_VID) or (p.device and "ttyACM" in p.device):
                 ports.append(p.device)
+    # Never probe a port another Ragnar component holds (a wardrive Huginn, the
+    # serial console, the GPS ...): opening it would split its byte stream.
+    try:
+        import serial_claims
+        held = serial_claims.claimed(exclude_owner="esp-sdr")
+        if held:
+            ports = [d for d in ports if os.path.realpath(d) not in held]
+    except Exception:
+        pass
     return ports
 
 
 def _open(dev, timeout=_CMD_TIMEOUT):
     """Open a port without touching DTR/RTS (toggling them resets the ESP32)."""
-    port = serial.Serial(port=None, baudrate=_BAUD, timeout=timeout)
+    port = serial.Serial(port=None, baudrate=_BAUD, timeout=timeout,
+                         write_timeout=_WRITE_TIMEOUT)
     port.dtr = False
     port.rts = False
     port.port = dev
@@ -399,8 +450,12 @@ def _sync_lease(port, timeout=_LEASE_TIMEOUT):
                     port.flush()
                 except Exception:
                     pass
-                if port.readline().strip() == b"OK":
+                line = port.readline()
+                if line.strip() == b"OK":
                     return True
+                for mark, label in _FOREIGN_MARKERS:
+                    if mark in line:
+                        raise _ForeignFirmware(label)
             except serial.SerialException:
                 time.sleep(0.15)
         return False
@@ -488,6 +543,9 @@ def _probe_once(dev):
         except Exception:
             out["profiles"] = []
         return out
+    except _ForeignFirmware as exc:
+        _remember_not_sdr(dev, _NOT_SDR_TTL, str(exc))
+        return None
     except Exception:
         return None
     finally:
@@ -509,8 +567,13 @@ def _probe(dev, attempts=2):
         ident = _probe_once(dev)
         if ident:
             return ident
+        if dev in _not_sdr:                 # another firmware answered: no retry
+            return None
         if i + 1 < attempts:
             time.sleep(0.25)
+    key = _node_key(dev)
+    if key and time.time() - key[2] >= _SETTLE_S:   # settled and still silent
+        _remember_not_sdr(dev, _NO_ANSWER_TTL, "no ESP-SDR answer")
     return None
 
 
@@ -1093,11 +1156,18 @@ def _probe_first():
     if cached and (now - _detect_cache["ts"]) < _DETECT_TTL:
         return cached
     order = []
+    present = _esp_ports()
     if cached:
         order.append(cached["port"])
-    for dev in _esp_ports():
+    for dev in present:
         if dev not in order:
             order.append(dev)
+    mono = time.monotonic()
+    for dev in list(_not_sdr):              # unplugged/re-flashed, or expired: forget
+        exp, _label, key = _not_sdr[dev]
+        if dev not in present or exp <= mono or key != _node_key(dev):
+            _not_sdr.pop(dev, None)
+    order = [d for d in order if d not in _not_sdr]
     for dev in order:
         ident = _probe(dev)
         if ident:
@@ -1127,7 +1197,11 @@ def detect():
             err = "No Espressif serial device found on USB"
         else:
             err = "Espressif device present but not running ESP-SDR firmware"
-        return {"available": False, "error": err, "ports_seen": ports}
+        out = {"available": False, "error": err, "ports_seen": ports}
+        other = {d: v[1] for d, v in _not_sdr.items() if d in ports}
+        if other:
+            out["other_firmware"] = other   # e.g. {"/dev/ttyACM1": "Huginn"}
+        return out
     _capture._identity = ident      # keep the known device fresh for fast retunes
     return {"available": True, "port": ident["port"],
             "model_name": ident.get("chip", "ESP-SDR"),
@@ -1314,6 +1388,79 @@ def selftest():
     dto = _tone_offset(diff, tlo, thi, 2_437_000_000, min_snr=6.0)
     check("tone offset (differenced) isolates the pilot from the ambient hump",
           dto and abs(dto["offset_khz"] - 40) < 12, "%.1f" % (dto["offset_khz"] if dto else 0))
+
+    # --- probing another firmware (a Huginn) must end fast and be remembered ---
+    if serial is not None:
+        class _HuginnPort:                  # what a Huginn prints back
+            def __init__(self, stuck=False):
+                self.timeout, self.stuck, self.writes = 0.2, stuck, 0
+            def write(self, b):
+                self.writes += 1
+                if self.stuck:              # input backed up: a bounded write times out
+                    raise serial.SerialTimeoutException("Write timeout")
+                return len(b)
+            def flush(self): pass
+            def readline(self):
+                return b'{"type":"BLE","mac":"73:d2:44:4f:48:75","name":"","rssi":-73}\n'
+            def reset_input_buffer(self): pass
+            def close(self): pass
+        real_open, saved = _open, dict(_not_sdr)
+        try:
+            hp = _HuginnPort()
+            globals()["_open"] = lambda dev, timeout=_CMD_TIMEOUT: hp
+            t0 = time.monotonic()
+            got = _probe("/dev/selftest-huginn")
+            check("probe: Huginn output -> not an ESP-SDR, after one write",
+                  got is None and hp.writes == 1 and time.monotonic() - t0 < 1.0,
+                  "writes=%d" % hp.writes)
+            check("probe: Huginn verdict remembered (no re-probe each poll)",
+                  _not_sdr.get("/dev/selftest-huginn", (0, ""))[1] == "Huginn",
+                  str(_not_sdr.get("/dev/selftest-huginn")))
+            # a silent port: remembered once settled, never while just plugged in
+            import tempfile as _tf
+            with _tf.NamedTemporaryFile() as fresh:
+                silent = _HuginnPort(); silent.readline = lambda: b""
+                globals()["_open"] = lambda dev, timeout=_CMD_TIMEOUT: silent
+                _probe(fresh.name, attempts=1)
+                check("probe: a just-plugged silent port is not written off yet",
+                      fresh.name not in _not_sdr)
+                st_old = time.time() - _SETTLE_S - 5
+                real_key = globals()["_node_key"]
+                globals()["_node_key"] = lambda d: (0, 0, st_old) if d == fresh.name else real_key(d)
+                try:
+                    _probe(fresh.name, attempts=1)
+                    check("probe: a settled silent port is left alone for a while",
+                          _not_sdr.get(fresh.name, (0, ""))[1] == "no ESP-SDR answer")
+                finally:
+                    globals()["_node_key"] = real_key
+            sp = _HuginnPort(stuck=True)
+            sp.readline = lambda: b""
+            globals()["_open"] = lambda dev, timeout=_CMD_TIMEOUT: sp
+            t0 = time.monotonic()
+            ok_lease = _sync_lease(sp, timeout=0.6)
+            check("lease: a port that stops reading gives up at the deadline (no hang)",
+                  ok_lease is False and time.monotonic() - t0 < 2.0,
+                  "%.2fs" % (time.monotonic() - t0))
+        finally:
+            globals()["_open"] = real_open
+            _not_sdr.clear(); _not_sdr.update(saved)
+        seen = {}
+
+        class _Capture:                     # records how _open() builds the port
+            def __init__(self, **kw):
+                seen.update(kw)
+                raise OSError("selftest: no device")
+        real_serial = serial.Serial
+        try:
+            serial.Serial = _Capture
+            try:
+                _open("/dev/selftest-none")
+            except OSError:
+                pass
+        finally:
+            serial.Serial = real_serial
+        check("_open() sets a write timeout", seen.get("write_timeout") == _WRITE_TIMEOUT,
+              str(seen.get("write_timeout")))
 
     ok_all = all(x["ok"] for x in results)
     return {"ok": ok_all, "checks": results,

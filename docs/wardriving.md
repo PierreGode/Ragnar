@@ -174,11 +174,33 @@ When a HuginnESP companion is detected, Ragnar issues `wardrive` once at handsha
 | Phase | Duration | Activity | Mode label |
 |-------|----------|----------|------------|
 | WiFi  | ~2–5 s   | Per-channel active scans walking a weighted channel list | `wardrive` |
-| BLE   | 1.5 s    | `BLE_MODE_ALL` — every advertisement emitted as JSON | `wardrive` |
+| BLE   | 1.5 s    | `BLE_MODE_ALL` — one JSON line per device per phase (strongest RSSI) | `wardrive` |
 
 The WiFi phase walks a fixed channel schedule that visits high-traffic channels (1/6/11 on 2.4 GHz, the non-DFS UNII subset on 5 GHz) several times per pass and the rarer/DFS channels once. Each per-channel scan emits results immediately on completion, so observations stream in throughout the phase rather than batching at the end of a full sweep. On the C5 dual-band build the full schedule is ~50 channels; on the S3 (2.4 GHz only) it's ~20.
 
-The firmware also keeps a bounded on-device set of recently-emitted BSSIDs and suppresses duplicate emissions within a wardrive session — the same AP scanned on the same channel four times per cycle is only sent once. The set resets every time the host issues `wardrive`, so stopping and starting a session re-emits every visible BSSID. Ragnar's `upsert_network` still dedupes on receive; on-device dedup primarily saves serial bytes and host parse time.
+The firmware also keeps a bounded on-device set of recently-emitted BSSIDs and suppresses duplicate emissions within one pass — the channel list revisits 1/6/11 and the main 5 GHz channels, but an AP is sent once per pass. The set resets at the start of every pass, so each AP is re-sent once per cycle with a fresh position. BLE works the same way: during the BLE phase each device is held once (strongest RSSI, first name seen) and printed when the phase ends, instead of one line per advertisement — that cut a measured 64 lines per phase to the 23 devices behind them. Ragnar's `upsert_network` still dedupes on receive; on-device dedup saves serial bytes.
+
+### Serial throughput (why a slow host loses data)
+
+A Huginn prints about **9 lines/s** with BLE coalescing (about 16–20 before it,
+mostly repeated BLE advertisements), and its USB-serial link **drops whatever
+the host does not read in time** — the dongle keeps scanning at full speed, the
+output is simply lost. Measured on a T-Dongle-C5: a host reading 5 lines/s lost
+about 88 % of Wi-Fi sightings; a Pi Zero 2 W that parsed and committed each line
+before reading the next lost about 95 % of a walk.
+
+So Ragnar splits the work: the serial thread **only reads**, putting each line
+into a queue together with the GPS fix of that moment, and a worker parses the
+queue every 0.5 s inside **one database transaction**. Every database write uses
+`synchronous=NORMAL` (WAL), and the Wi-Fi scan loop commits once per scan
+instead of once per network. Replaying 3,589 recorded Huginn lines through the
+old and new paths stores identical rows; on the real dongle with a slow host
+simulated (100 ms per commit) the old path stored 61 Wi-Fi sightings in 90 s,
+the new one 215.
+
+Each companion in `/api/wardriving/status` reports `serial_backlog` (lines read
+but not yet stored) and `serial_dropped` (lines lost because the queue was
+full — nonzero means this host cannot keep up with the companion at all).
 
 Flipper / AirTag / skimmer / BLE-spam alerts still fire passively from the same BLE phase. Dedicated evil-twin/pineapple scan windows are not included in the wardrive loop — run `pineap` manually if a one-shot evil-twin check is needed.
 

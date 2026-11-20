@@ -24,6 +24,17 @@ firmware folds it into **on-chip FFT power spectra** streamed over the chip's
 native USB serial link. Flash an ESP32 with the ESP-SDR firmware, plug it into
 the Pi's USB, and the panel flips live.
 
+- **Detection leaves other ESP32s alone.** Every Espressif USB device looks the
+  same until it is opened, so the panel probes them — but it skips any port
+  another part of Ragnar holds (a wardrive Huginn, the serial console, the
+  GPS), recognises a Huginn or Piglet by its output and leaves it alone for
+  10 minutes, and leaves a port that never answers as an ESP-SDR alone for 5.
+  Re-plugging or re-flashing a board re-enumerates it, so it is probed again at
+  once. Every probe write has a 1 s timeout, so a device that stops reading can
+  never hang the status request. (Opening an ESP32-C5's USB port resets the
+  chip; before this, an idle Huginn on a box with this page open was reset
+  twice every 8–15 s.)
+
 - Unlike the HackRF (which *sweeps* a wide range) the ESP captures one fixed FFT
   **window** at a time — centre = the band's centre frequency, span = the sample
   rate (16/40/80 MHz). A narrower zoom drops to a lower sample rate for finer

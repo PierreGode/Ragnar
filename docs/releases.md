@@ -4,6 +4,19 @@
 
 ### 2026-11-20
 
+#### fix(wardriving): Huginn data lost on slow hosts — read/parse split, batched writes; ESP-SDR probe stops hijacking Huginns
+
+*branch `fix/huginn-serial-throughput`*
+
+- **A walk with a Pi Zero 2 W + Huginn caught 80 Wi-Fi networks where a standalone C5 caught 331.** Measured on the same T-Dongle-C5: the dongle scans fine (52/52 channels every ~3.5 s) but its USB-serial link **drops whatever the host doesn't read in time**, and Ragnar parsed and committed every line before reading the next — on a Pi Zero swapping to its SD card that was ~1 line/s against the ~16–20 the Huginn prints. A 5 lines/s reader lost ~88 % of Wi-Fi sightings; the walk lost ~95 %.
+- **Serial read is now split from parse + store** (`_SerialLinePipeline`): the serial thread only reads lines into a queue (with the GPS fix of that moment); a worker parses them every 0.5 s in **one transaction** (`WardrivingSession.batch()`). Used by both the Huginn and the Piglet / Core / Coordinator loops. The Wi-Fi scan loop now commits once per scan instead of once per network.
+- **Every write connection now runs `synchronous=NORMAL`**: the PRAGMA is per-connection, so setting it once in `_init_db` never reached the per-row connections, which committed with `FULL` (an fsync per sighting).
+- Companion status gains `serial_backlog` and `serial_dropped`.
+- **Verified:** replaying 3,589 recorded Huginn lines through old and new code stores identical rows (15 networks, 39 BLE, same counts/RSSI). On the real dongle with a slow host simulated (100 ms/commit, 5 ms/statement) for 90 s: old 8.5 lines/s read, **61** Wi-Fi sightings; new 15.9 lines/s (the Huginn's full rate), **215** sightings, 0 dropped, 246 commits instead of 717. Wardrive tests 27 passed; full suite 2060 passed (the 2 failures — `test_env_manager`, `test_zap_target_resolve` — fail identically on `main`).
+- **ESP-SDR detection no longer hijacks a Huginn.** `esp_sdr.detect()` (polled by the RF Waterfall page) opened every Espressif port with **no write timeout**: on a plugged-in Huginn a status request sat in `serial.write` forever (py-spy), holding the port; and since opening an ESP32-C5's USB port resets the chip, an idle Huginn was reset twice every 8–15 s — until it stopped reading input. Now it skips ports held by other components (`serial_claims`), bounds every write to 1 s, recognises Huginn/Piglet output, and leaves a non-ESP-SDR port alone (10 min seen / 5 min silent) until it re-enumerates. Live: 1st poll 6.3 s, later polls **0.00 s with no port opened**; a wardrive-held port is never listed. `esp_sdr` selftest 29/29 (+6).
+- Firmware side (HuginnESP, separate PR): BLE coalesced to one line per device per phase — 80 → 26.6 lines per cycle, Huginn output 19.9 → 8.7 lines/s.
+- **Docs:** [wardriving.md › Serial throughput](wardriving.md#serial-throughput-why-a-slow-host-loses-data), [rf-waterfall.md › ESP-SDR panel](rf-waterfall.md#esp-sdr-panel-esp32-on-chip-fft).
+
 #### fix(sdr): HackRF waterfall was dark and laggy — own colour window, playout servo, 20 rows/s
 
 *branch `fix/hackrf-waterfall-colour-window`*
