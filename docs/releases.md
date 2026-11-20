@@ -2,6 +2,16 @@
 
 ## Releases
 
+### 2026-11-20
+
+#### fix(sdr): HackRF waterfall was all dark — give it its own colour window
+
+*branch `fix/hackrf-waterfall-colour-window`*
+
+- **The HackRF panel on `/rf-waterfall` streamed (LIVE, peaks and the Signals list all updating) but the waterfall stayed black.** Every panel shared one default colour window, Ref +5 dB / Range 35 (−30 … +5), which suits the RTL-SDR's dBFS levels. `hackrf_sweep` reports far lower: measured at the default LNA 24 / VGA 20, the noise floor sits at about −68 dB, the 90th percentile at −51 and only 1 % of samples rise above −30, so ~99 % of the waterfall mapped to black and the spectrum trace was clipped off the bottom.
+- **The HackRF panel now starts at Ref −10 dB / Range 60 (−70 … −10)**, which brackets its noise floor and its Wi-Fi/Bluetooth peaks — the same per-radio override the CC1101 panel already uses. RTL-SDR, ESP-SDR and CC1101 defaults are unchanged. A display range you saved yourself still wins; **Fit to signal** (or **A**) re-fits it.
+- **Docs:** [rf-waterfall.md › Display range](rf-waterfall.md#display-range) (per-radio defaults table; the old "Auto is the default" text was stale), [rf-waterfall-guide.md](rf-waterfall-guide.md).
+
 ### 2026-11-19
 
 #### feat(cardputer): the `0` key turns the display off and on

@@ -15,7 +15,8 @@ the layout still makes sense.
 ## Start here
 
 0. Nothing needs configuring first: the gain is managed, the detector is RMS and
-   the display range follows the noise floor. Anything you change is remembered.
+   each panel starts with a colour window matched to its radio. Anything you
+   change is remembered.
 1. Pick a **band** (e.g. `433`) or type a centre frequency into **Tune**.
 2. Let it run a few seconds so **Max-hold** and the **Signals** list fill in.
 3. **Click a signal.** The marker snaps to its peak and prints frequency, level,
@@ -56,9 +57,11 @@ with averaging, the FFT window and the number of display columns, in
   most, *Rectangular* for the sharpest possible peaks (and the worst leakage).
 
 **Display range** decides how the colours map to dB (**⚙ Settings → Display
-range**). *Auto* tracks the measured noise floor. To dig out something weak, set
-**Ref level** (the top of the scale) and a narrower **Range**, or press **Fit to
-signal**. The colour bar on the right edge of each waterfall always shows the
+range**). Each panel starts with a window matched to its radio (the HackRF's
+levels sit much lower than the RTL-SDR's); *Auto* tracks the measured noise
+floor instead. To dig out something weak, set **Ref level** (the top of the
+scale) and a narrower **Range**, or press **Fit to signal** — also the quick fix
+if a waterfall ever looks all dark. The colour bar on the right edge of each waterfall always shows the
 range in use, and the whole waterfall — including rows already on screen —
 recolours as you change it. Five palettes are available in the top bar.
 

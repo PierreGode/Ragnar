@@ -221,7 +221,7 @@ survive a restart; a fresh install has no such file and gets the defaults below.
 | **Averaging** | 24 windows | Uses most of each row's samples for the estimate. It averages *within* a row, so it does not blur bursts across time. |
 | **Window** | Hann | The general-purpose compromise between resolution and leakage. |
 | **Columns** | 480 | Matches a typical display width without wasting CPU. |
-| **Display range** | Auto | Follows the measured noise floor, so the picture is usable before anything is configured. |
+| **Display range** | Per radio — RTL-SDR / ESP-SDR Ref **+5 dB** · Range **35**; HackRF Ref **−10 dB** · Range **60**; CC1101 Ref **−40 dB** · Range **70** | The HackRF and CC1101 report on very different dB scales from the RTL-SDR, so they get their own starting window. See [Display range](#display-range). |
 
 ### Managed gain
 
@@ -343,12 +343,22 @@ dongle still busy is retried before falling back to the slower sweep.
 ## Display range
 
 
-**⚙ Settings → Display range** sets the colour scale. **Auto** (the default)
-keeps the old behaviour: the bottom follows the measured noise floor and the top
-is fixed at −20 dB. Drag **Ref level** (top of the scale) or **Range** (dB from
-top to bottom), or press **Fit to signal**, which sets the top just above the
-strongest signal on screen and the bottom just under the noise floor. The
-setting is remembered per panel.
+**⚙ Settings → Display range** sets the colour scale: **Ref level** (top of the
+scale) and **Range** (dB from top to bottom). The radios report on different dB
+scales, so the HackRF and CC1101 panels start from their own default window:
+
+| Panel | Default window | Why |
+|---|---|---|
+| RTL-SDR, ESP-SDR | Ref **+5 dB**, Range **35** (−30 … +5) | The shared default, set for the RTL-SDR's dBFS levels (IQ FFT noise in the −40s/−30s, strong signals toward 0). |
+| HackRF | Ref **−10 dB**, Range **60** (−70 … −10) | `hackrf_sweep` levels sit much lower: at the default LNA 24 / VGA 20 the noise floor is about −68 dB and Wi-Fi/Bluetooth peaks land between −50 and −15 dB. The shared −30 … +5 window left ~99 % of the HackRF waterfall black. |
+| CC1101 | Ref **−40 dB**, Range **70** (−110 … −40) | Absolute RSSI in dBm, noise near −100. |
+
+Drag **Ref level** or **Range**, press **Fit to signal** (or **A**) to set the top
+just above the strongest signal on screen and the bottom just under the noise
+floor, or switch to **Auto**, where the bottom follows the measured noise floor
+and the top is fixed at −20 dB. The setting is remembered per panel (per
+browser), and a remembered setting wins over the default — so if a panel looks
+all dark after a gain change, press **Fit to signal**.
 
 The page keeps a history of every row it has shown (about 10 MB per panel), so a
 range or palette change **recolours the whole waterfall at once**, not just new

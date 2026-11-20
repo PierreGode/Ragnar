@@ -3568,6 +3568,7 @@
     api:{status:'/api/net/sdr/status',start:'/api/net/sdr/start',stop:'/api/net/sdr/stop',frames:'/api/net/sdr/frames'},
     synth:hackrfSynth, synthDefault:'2.4', synthBands:true, decode:false, zwave:true, minSpan:2,
     hwLo:1, hwHi:6000, tuneSpan:20,   // HackRF One: 1 MHz-6 GHz (sweeps every mesh/LoRa overlay band too)
+    disp:{ref:-10,range:60},          // hackrf_sweep dB sits far lower than RTL dBFS: noise ~-68, peaks -50..-15 at LNA 24/VGA 20; the shared +5/-30 window painted 99% of it black
     liveBands:SUBGHZ_BANDS.concat([{id:'2.4',label:'2.4G'},{id:'5',label:'5G'},{id:'6',label:'6G'}]), defaultBand:'2.4' });
   scopes.push(hackrf); stack.appendChild(hackrf.el);
   // ESP-SDR: an ESP32 running the ESP-SDR firmware streams on-chip FFT spectra
