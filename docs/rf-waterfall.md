@@ -170,7 +170,10 @@ the scroll-speed setting.
 buffer and the page plays them back behind a fixed ~0.6 s latency, each row at
 its **own producer timestamp** — so the scroll speed is exactly the rate the SDR
 produced rows, with no rate estimate to drift and no catch-up surge when poll or
-network timing jitters.
+network timing jitters. The playhead is held on that target by nudging its pace
+at most ±12% in either direction, so time lost to a slow frame or a busy browser
+is won back within a few seconds instead of piling up (measured: rows drawn
+~0.7 s after capture; an 800 ms stall heals in ~7 s).
 
 **No freeze on a slow sweep.** When the engine produces rows *slower* than a
 smooth scroll — the `rtl_power` sweep updates only ~1×/s, and a wide span retunes
@@ -180,10 +183,23 @@ scrolling it at **that panel's own measured data rate** until real data resumes.
 There is no manual scroll-rate control: every waterfall simply follows the rate
 its data actually arrives — a fast engine scrolls fast, a ~1/s sweep scrolls at
 ~1/s. New spectrum still appears at the engine's true rate, and **Rows/s** still
-reports it. A fast engine (IQ ~16/s, ESP-SDR ~50/s) always has rows buffered
-ahead, so the hold never engages. A *genuine* stall (the tab was backgrounded, or
+reports it. A fast engine (IQ ~16/s, HackRF 20/s, ESP-SDR ~50/s) always has rows
+buffered ahead, so the hold never engages. A *genuine* stall (the tab was backgrounded, or
 the backend wedged) stops the hold after a few seconds and the panel shows its
 "waiting" veil rather than scrolling stale data forever.
+
+**HackRF row rate.** `hackrf_sweep` completes the 100 MHz 2.4 GHz band about
+every 17 ms — far faster than a waterfall should scroll — so the backend
+max-holds the sweeps into rows on a fixed 50 ms grid: exactly **20 rows/s**, each
+stamped with its grid time so the scroll is even. Each row max-holds ~3 sweeps,
+so a short burst between rows is still caught. A wide span whose sweep takes
+longer than 50 ms (5 / 6 GHz) gives one row per sweep instead.
+
+**Re-sync after a restart.** If the capture restarts underneath an open page —
+another tab or browser started it, or Ragnar restarted — its row counter starts
+again from 0. The page notices on its next poll (the counter it gets back is
+lower than the one it asked from) and re-syncs at once, instead of showing a
+frozen panel until the counter catches up.
 
 - **IQ FFT (real-time)** — for any span that fits a **single RTL-SDR tune**
   (≤ `rtl_sdr._IQ_MAX_SPAN_HZ`, ~2.8 MHz: zooms, manual tunes, Z-Wave regions,
@@ -221,7 +237,7 @@ survive a restart; a fresh install has no such file and gets the defaults below.
 | **Averaging** | 24 windows | Uses most of each row's samples for the estimate. It averages *within* a row, so it does not blur bursts across time. |
 | **Window** | Hann | The general-purpose compromise between resolution and leakage. |
 | **Columns** | 480 | Matches a typical display width without wasting CPU. |
-| **Display range** | Auto | Follows the measured noise floor, so the picture is usable before anything is configured. |
+| **Display range** | Per radio — RTL-SDR / ESP-SDR Ref **+5 dB** · Range **35**; HackRF Ref **−10 dB** · Range **60**; CC1101 Ref **−40 dB** · Range **70** | The HackRF and CC1101 report on very different dB scales from the RTL-SDR, so they get their own starting window. See [Display range](#display-range). |
 
 ### Managed gain
 
@@ -343,12 +359,22 @@ dongle still busy is retried before falling back to the slower sweep.
 ## Display range
 
 
-**⚙ Settings → Display range** sets the colour scale. **Auto** (the default)
-keeps the old behaviour: the bottom follows the measured noise floor and the top
-is fixed at −20 dB. Drag **Ref level** (top of the scale) or **Range** (dB from
-top to bottom), or press **Fit to signal**, which sets the top just above the
-strongest signal on screen and the bottom just under the noise floor. The
-setting is remembered per panel.
+**⚙ Settings → Display range** sets the colour scale: **Ref level** (top of the
+scale) and **Range** (dB from top to bottom). The radios report on different dB
+scales, so the HackRF and CC1101 panels start from their own default window:
+
+| Panel | Default window | Why |
+|---|---|---|
+| RTL-SDR, ESP-SDR | Ref **+5 dB**, Range **35** (−30 … +5) | The shared default, set for the RTL-SDR's dBFS levels (IQ FFT noise in the −40s/−30s, strong signals toward 0). |
+| HackRF | Ref **−10 dB**, Range **60** (−70 … −10) | `hackrf_sweep` levels sit much lower: at the default LNA 24 / VGA 20 the noise floor is about −68 dB and Wi-Fi/Bluetooth peaks land between −50 and −15 dB. The shared −30 … +5 window left ~99 % of the HackRF waterfall black. |
+| CC1101 | Ref **−40 dB**, Range **70** (−110 … −40) | Absolute RSSI in dBm, noise near −100. |
+
+Drag **Ref level** or **Range**, press **Fit to signal** (or **A**) to set the top
+just above the strongest signal on screen and the bottom just under the noise
+floor, or switch to **Auto**, where the bottom follows the measured noise floor
+and the top is fixed at −20 dB. The setting is remembered per panel (per
+browser), and a remembered setting wins over the default — so if a panel looks
+all dark after a gain change, press **Fit to signal**.
 
 The page keeps a history of every row it has shown (about 10 MB per panel), so a
 range or palette change **recolours the whole waterfall at once**, not just new

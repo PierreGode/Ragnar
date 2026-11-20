@@ -2,6 +2,20 @@
 
 ## Releases
 
+### 2026-11-20
+
+#### fix(sdr): HackRF waterfall was dark and laggy — own colour window, playout servo, 20 rows/s
+
+*branch `fix/hackrf-waterfall-colour-window`*
+
+- **The HackRF panel on `/rf-waterfall` streamed (LIVE, peaks and the Signals list all updating) but the waterfall stayed black.** Every panel shared one default colour window, Ref +5 dB / Range 35 (−30 … +5), which suits the RTL-SDR's dBFS levels. `hackrf_sweep` reports far lower: measured at the default LNA 24 / VGA 20, the noise floor sits at about −68 dB, the 90th percentile at −51 and only 1 % of samples rise above −30, so ~99 % of the waterfall mapped to black and the spectrum trace was clipped off the bottom.
+- **The HackRF panel now starts at Ref −10 dB / Range 60 (−70 … −10)**, which brackets its noise floor and its Wi-Fi/Bluetooth peaks — the same per-radio override the CC1101 panel already uses. RTL-SDR, ESP-SDR and CC1101 defaults are unchanged. A display range you saved yourself still wins; **Fit to signal** (or **A**) re-fits it.
+- **Every live panel drew rows 2.6 s after capture instead of the intended ~0.6 s**, so the waterfall and spectrum trace felt laggy. The playout projects the live edge from the newest row's timestamp; each poll re-anchors it, and because a row's age on arrival varies, the edge dips back a little on some polls. The playhead was clamped down to every dip and never moved back up, so it ratcheted onto its 2 s floor (0.6 + 2.0 = 2.6 s — measured exactly that, with 23 rows waiting in the queue). The playhead is now servoed onto the target by nudging its pace at most ±12% both ways, and re-anchored after the big history paint on load. Measured in a browser against the live HackRF: **0.7 s steady** (5 rows queued), 59 fps, 1.3 ms per row; an 800 ms main-thread stall heals back to 0.68 s in ~7 s. Applies to the RTL-SDR, ESP-SDR and CC1101 panels too — they share the playout loop.
+- **HackRF rows raised from 10/s to 20/s, and now truly 20.** The backend timed each row from the moment of the previous one, so every row waited for one more whole sweep: a nominal 10/s delivered 9.2/s, and 20/s would have delivered only 15/s (3 sweeps of ~16.6 ms fall just short of 50 ms). Rows now sit on a fixed 50 ms grid (`_dwell_tick`, pure + 5 new selftest checks, 38/38) and are stamped with their grid time, so the page scrolls evenly. Measured on the live HackRF: every gap exactly 50.0 ms, 20.00 rows/s; the page shows 20 rows/s at 0.6 s latency, 59.7 fps. Wide spans whose sweep takes longer than 50 ms still give one row per sweep.
+- **The page now re-syncs when the capture restarts underneath it** (another tab or browser started it, or Ragnar restarted). The backend's counter restarts at 0 and the page kept asking for rows newer than its old counter, so it froze until the counter caught up — about as long as the page had been open. Tested by renumbering the counter mid-stream in a browser: fixed page 120 rows in the next 6 s, old behaviour 12 then frozen.
+- The dashboard's in-console Waterfall view keeps its 200 ms poll (~4 rows per poll now); its comment is corrected.
+- **Docs:** [rf-waterfall.md › Display range](rf-waterfall.md#display-range) (per-radio defaults table; the old "Auto is the default" text was stale), the *Steady flow*, *HackRF row rate* and *Re-sync after a restart* notes, [rf-waterfall-guide.md](rf-waterfall-guide.md), [rf-api.md](rf-api.md) (`seq` restart + HackRF row grid).
+
 ### 2026-11-19
 
 #### feat(cardputer): the `0` key turns the display off and on

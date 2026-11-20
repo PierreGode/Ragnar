@@ -152,8 +152,31 @@ _DEFAULT_VGA = 20         # HackRF VGA/baseband gain (0-62, 2 dB steps)
 # (max-hold) into rows produced at a fixed cadence, the way a real spectrum-
 # analyzer waterfall dwells. That yields a smooth, steady scroll and, as a
 # bonus, each row now catches bursty transmitters that fired between frames.
-_DISPLAY_HZ = 10          # waterfall rows emitted per second (steady scroll rate)
+# 20 rows/s matches the feel of the RTL-SDR's IQ engine (~16/s); the 2.4 GHz band
+# completes a sweep every ~17 ms, so each row still max-holds ~3 sweeps.
+_DISPLAY_HZ = 20          # waterfall rows emitted per second (steady scroll rate)
 _DISPLAY_INTERVAL = 1.0 / _DISPLAY_HZ
+
+
+def _dwell_tick(next_push, now, interval=None):
+    """Row scheduler for one completed sweep (pure, selftested).
+
+    Returns ``(push, stamp, next_push)``. Rows sit on a fixed grid of
+    ``interval`` seconds, so the average rate is exactly ``_DISPLAY_HZ``.
+    Timing each wait from the moment of the previous push instead lost up to
+    one whole sweep per row (measured 9.2 rows/s at a nominal 10). Each row is
+    stamped with its grid time — at most one sweep earlier than the sweep that
+    completed it — so the page, which plays rows back at their own timestamps,
+    scrolls at an even cadence. When sweeps are slower than the grid (a wide
+    5/6 GHz span) every sweep becomes a row, stamped when it completed, and
+    the grid restarts from there rather than bursting to catch up.
+    """
+    interval = _DISPLAY_INTERVAL if interval is None else interval
+    if now < next_push:
+        return False, None, next_push
+    if now - next_push < interval:          # on the grid
+        return True, next_push, next_push + interval
+    return True, now, now + interval        # behind the grid: one row now, re-anchor
 
 
 # --------------------------------------------------------------------------
@@ -471,7 +494,7 @@ class SweepCapture:
         # _DISPLAY_INTERVAL seconds, so the waterfall scrolls at a steady rate
         # no matter how fast (or how burstily) hackrf_sweep retunes the band.
         accum = None
-        last_push = time.time()
+        next_push = time.time() + _DISPLAY_INTERVAL
         try:
             for line in self._proc.stdout:
                 if self._stop.is_set():
@@ -483,11 +506,10 @@ class SweepCapture:
                 if frame is None:
                     continue
                 accum = _merge_max(accum, frame)
-                now = time.time()
-                if now - last_push >= _DISPLAY_INTERVAL:
-                    self._push_frame(accum)
+                push, stamp, next_push = _dwell_tick(next_push, time.time())
+                if push:
+                    self._push_frame(accum, ts=stamp)
                     accum = None
-                    last_push = now
         except Exception as exc:  # pragma: no cover - defensive
             self._error = str(exc)
         finally:
@@ -499,11 +521,12 @@ class SweepCapture:
                     and not self._error and self._stderr_tail):
                 self._error = self._stderr_tail
 
-    def _push_frame(self, grid):
+    def _push_frame(self, grid, ts=None):
         ints = [int(round(v)) for v in grid]
         with self._lock:
             self._seq += 1
-            self._frames.append({"seq": self._seq, "ts": time.time(),
+            self._frames.append({"seq": self._seq,
+                                 "ts": time.time() if ts is None else ts,
                                  "power": ints})
             if len(self._frames) > _RING_FRAMES:
                 self._frames = self._frames[-_RING_FRAMES:]
@@ -826,6 +849,26 @@ def selftest():
     acc = _merge_max(acc, [-40, -95, -90])
     check("coalesce: keeps the per-bucket peak across sweeps",
           acc == [-40, -30, -90], str(acc))
+
+    # --- row scheduler: exact rate on a fast band, one row per slow sweep ---
+    def _sim(period, secs, interval=0.05):
+        t, nxt, stamps, comp = 1000.0, 1000.0 + interval, [], []
+        while t < 1000.0 + secs:
+            t += period
+            push, stamp, nxt = _dwell_tick(nxt, t, interval)
+            if push:
+                stamps.append(stamp); comp.append(t)
+        return stamps, comp
+    st, cp = _sim(0.0166, 10.0)            # 2.4 GHz band: a sweep every ~16.6 ms
+    gaps = [round(b - a, 6) for a, b in zip(st, st[1:])]
+    check("dwell: fast band emits exactly 20 rows/s", 198 <= len(st) <= 200, str(len(st)))
+    check("dwell: fast-band rows evenly stamped", set(gaps) == {0.05}, str(sorted(set(gaps))[:5]))
+    check("dwell: stamp within one sweep of the sweep that completed it",
+          all(0 <= c - s < 0.0166 + 1e-9 for s, c in zip(st, cp)))
+    st, cp = _sim(0.12, 3.0)               # wide 5/6 GHz span: slower than the grid
+    check("dwell: slow sweeps give one row each, stamped at completion, no burst",
+          len(st) == len(cp) == 25 and st == cp, str(len(st)))
+    check("dwell: no row before the grid tick", _dwell_tick(10.0, 9.99, 0.05)[0] is False)
 
     # --- status() must not re-probe the HackRF while a sweep is streaming ---
     # Opening hackrf_info over USB during a live sweep knocks it offline a few

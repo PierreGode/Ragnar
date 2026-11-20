@@ -2002,8 +2002,15 @@
   Scope.prototype.STALL_MS=15000;   // silence this long = a real wedge, not a restart gap
   Scope.prototype.livePoll=function(){
     if(!running || this.mode!=='live' || this.decoding || this.replaying) return;
-    var self=this;
-    fetch(this.cfg.api.frames+'?since='+this.seq).then(function(r){return r.json();}).then(function(d){
+    var self=this, askedSeq=this.seq;   // NB: not `since` — the callback's own `var since` (stall check) would hoist over it
+    fetch(this.cfg.api.frames+'?since='+askedSeq).then(function(r){return r.json();}).then(function(d){
+      // The capture restarted underneath this page (another tab or browser
+      // started it, or Ragnar restarted): the backend's counter went back to 0,
+      // so "rows newer than <old seq>" would return nothing until it caught up
+      // — minutes of a frozen panel at 20 rows/s. Re-sync from 0. Compared with
+      // the seq THIS request asked from, so a late out-of-order reply can't
+      // trigger a false reset (and a double paint of the history).
+      if(typeof d.seq==='number' && d.seq<askedSeq){ self.seq=0; return; }
       self.liveErr=d.error||null; var lo,hi;
       if(d.band_mhz){lo=d.band_mhz[0];hi=d.band_mhz[1];}
       else if(d.band_hz){lo=d.band_hz[0]/1e6;hi=d.band_hz[1]/1e6;}
@@ -3568,6 +3575,7 @@
     api:{status:'/api/net/sdr/status',start:'/api/net/sdr/start',stop:'/api/net/sdr/stop',frames:'/api/net/sdr/frames'},
     synth:hackrfSynth, synthDefault:'2.4', synthBands:true, decode:false, zwave:true, minSpan:2,
     hwLo:1, hwHi:6000, tuneSpan:20,   // HackRF One: 1 MHz-6 GHz (sweeps every mesh/LoRa overlay band too)
+    disp:{ref:-10,range:60},          // hackrf_sweep dB sits far lower than RTL dBFS: noise ~-68, peaks -50..-15 at LNA 24/VGA 20; the shared +5/-30 window painted 99% of it black
     liveBands:SUBGHZ_BANDS.concat([{id:'2.4',label:'2.4G'},{id:'5',label:'5G'},{id:'6',label:'6G'}]), defaultBand:'2.4' });
   scopes.push(hackrf); stack.appendChild(hackrf.el);
   // ESP-SDR: an ESP32 running the ESP-SDR firmware streams on-chip FFT spectra
@@ -3674,7 +3682,7 @@
     // ~1/s on the wide sweep) with no rate estimate to drift and no catch-up
     // surge. A gap in the data simply pauses the scroll; a long stall (hidden
     // tab / stalled backend) skips forward once rather than crawling through it.
-    var LAT=0.6, MAXLAG=2.0;
+    var LAT=0.6, MAXLAG=2.0, SLEW=0.12;
     scopes.forEach(function(s){
       if(s.mode!=='live'||s.decoding||s.replaying||!s._liveQ) return;
       var q=s._liveQ, newest=s._newestTs; if(newest==null){ return; }
@@ -3683,13 +3691,25 @@
       // that made the scroll lumpy). Producer and browser clocks both run in
       // real time, so this stays honest.
       var live=newest+(performance.now()/1000-(s._newestWall||0));
-      if(s._play==null) s._play=live-LAT;             // prime the playhead
-      s._play+=dt;                                    // advance at 1x real time
       var cap=live-LAT;
-      if(s._play>cap) s._play=cap;                    // never outrun the buffer
+      if(s._play==null) s._play=cap;                  // prime the playhead
+      // Servo the playhead onto its target (live - LAT): advance at 1x, nudged
+      // at most ±12% toward the target. The projected live edge is a sawtooth —
+      // every poll re-anchors it to the newest row's timestamp, whose age on
+      // arrival varies — so clamping the playhead down to each dip and never
+      // back up ratcheted it onto the MAXLAG floor: the waterfall settled a
+      // steady LAT+MAXLAG = 2.6 s behind real time. The servo averages the
+      // sawtooth out and also heals time lost to a slow frame (dt is capped).
+      var err=cap-s._play;
+      s._play+=dt*(1+Math.max(-SLEW,Math.min(SLEW,err*0.5)));
+      if(s._play>live-0.1) s._play=live-0.1;          // never outrun the data edge
       if(s._play<cap-MAXLAG) s._play=cap-MAXLAG;      // after a stall, skip, don't crawl
       var g=0;
       while(q.length && q[0].t<=s._play && g++<300){ var it=q.shift(); s.pushRow(it.power,it.lo,it.hi,it.floor); }
+      // A backlog (the first poll's ~60 s of history, or rows that piled up
+      // behind a stall) is painted in one go; the time that took is not
+      // playback time, so re-anchor instead of starting that far behind.
+      if(g>=60) s._play=newest+(performance.now()/1000-(s._newestWall||0))-LAT;
       // Keep the flow constant across producer gaps. A fast engine (IQ, 16/s)
       // always has rows buffered ahead, so q stays deep and this never fires; a
       // slow or bursty one (rtl_power ~1/s, a wide HackRF sweep) drains the queue

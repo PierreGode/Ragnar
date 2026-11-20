@@ -2640,9 +2640,9 @@ function _wifiSdrStart() {
             if (res && res.error) { s.error = res.error; _wifiDrawWaterfall(); return; }
             if (s.poll) clearInterval(s.poll);
             s.running = true;
-            // Poll faster than the backend's ~10 rows/s cadence so each row is
-            // pulled in and painted individually — a smooth scroll rather than a
-            // burst of rows jumping in every poll.
+            // The backend emits 20 rows/s, so each 200 ms poll pulls ~4 rows.
+            // Not polled faster: every poll repaints the whole view cell by cell
+            // (rows × 512 fillRects), so doubling the poll doubles that cost.
             s.poll = setInterval(_wifiSdrPoll, 200);
         }).catch(() => { s.error = 'Failed to start SDR'; _wifiDrawWaterfall(); });
 }

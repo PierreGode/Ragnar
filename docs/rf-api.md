@@ -34,6 +34,9 @@ interrupting whatever is running — see [Concurrency](#concurrency).
 A frame is `{seq, ts, power[]}` where `power` has `bins` entries spread evenly
 over `band_hz`. Poll `frames` with the last `seq` you saw; nothing is lost
 between polls as long as you keep up (the ring holds a few hundred rows).
+`seq` starts again at 0 whenever a capture (re)starts, and every reply carries the
+current counter as a top-level `seq`: a reply whose `seq` is lower than the one you
+asked from means the capture restarted — poll again from 0.
 
 `gain` takes a number in dB, `"managed"` (the default: the gain is held where
 the front end has headroom, see
@@ -124,7 +127,8 @@ All under `/api/net/rtl/analyze/`. Selection arguments are shared:
 
 - **HackRF sweep**: `GET /api/net/sdr/status`, `POST /api/net/sdr/start`
   (`{lo_mhz, hi_mhz, lna, vga, amp, antenna, bin_hz}`), `POST …/sdr/stop`,
-  `GET …/sdr/frames?since=`.
+  `GET …/sdr/frames?since=`. Rows come at 20/s on a fixed 50 ms grid (one per
+  sweep on a span too wide to sweep in 50 ms); a row's `ts` is its grid time.
 - **Local Radio**: `GET /api/net/radio/status`, `GET /api/net/radio/stream`
   (MP3 stream; `{freq_mhz, mode, squelch}` as query parameters),
   `POST /api/net/radio/stop`.
