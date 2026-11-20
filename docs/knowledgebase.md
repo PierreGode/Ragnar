@@ -41,6 +41,11 @@ Source: wifi-defense.md
 Source: nettools.md
 <!-- proof: docs/nettools.md | With ~70 modules across the layers -->
 
+### How are Ragnar's detection modules tested for accuracy?
+Each module passes a stack of test tiers: its own self-test, a conformance harness, a cross-check against independent tools such as Scapy and tshark, a sealed lab, and a bite harness that injects bugs to prove the tests catch them. The self-test also runs on the box from **Detector Self-Test**.
+Source: testing-tiers.md
+<!-- proof: docs/testing-tiers.md | a tier only counts if a bite mutation inside its subject area moves it -->
+
 ### How do I find a module in Network Diagnostics?
 Use the search box above the layer buttons. Type a protocol, vendor or CVE.
 Source: nettools.md

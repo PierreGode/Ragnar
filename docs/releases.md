@@ -4,6 +4,14 @@
 
 ### 2026-11-20
 
+#### docs: Testing Tiers glossary, how each detection module is tested for accuracy
+*branch `docs/module-testing-glossary`*
+
+- **New page [testing-tiers.md](testing-tiers.md).** A glossary of the tiers every detection module passes: module self-test with golden bytes, conformance harness, cross-check against independent oracles (Scapy, real TLS/SSH stacks, FRR, tshark, counterfactual models), README and systemd unit verifiers, sealed-namespace lab and pcap replay, and the bite harness that injects regressions to prove each tier catches them. Also covers the drift and guard checks run inside the tiers and the lab techniques.
+- **Where each tier lives.** A closing section says which tiers ship with the vendored modules (self-tests, some conformance/xcheck files under `python/`) and which stay with the module's build.
+- **Linked from** the [docs index](README.md), the root [README](../README.md) (Authority Verification) and the [Detector Self-Test](nettools.md#detector-self-test) section. One new [knowledgebase.md](knowledgebase.md) entry so the chat assistant can answer "how are the modules tested?".
+- **Docs only.** No code change.
+
 #### fix(wardriving): Huginn data lost on slow hosts — read/parse split, batched writes; ESP-SDR probe stops hijacking Huginns
 
 *branch `fix/huginn-serial-throughput`*

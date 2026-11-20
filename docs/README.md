@@ -74,5 +74,6 @@ browse than search.
 ## Reference & project
 - [System Specification](spec.md) — architecture & boot sequence
 - [Comparative Grade](grade.md)
+- [Testing Tiers](testing-tiers.md) — glossary of how each detection module is tested for accuracy: self-test, conformance, cross-check oracles, lab, and the bite harness that tests the tests
 - [Credits & Attribution](CREDITS.md) — the people whose work Ragnar is built on, including the CVE research behind the passive detection suite
 - [Contributing](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md)
