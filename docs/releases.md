@@ -4,13 +4,14 @@
 
 ### 2026-11-20
 
-#### fix(sdr): HackRF waterfall was all dark — give it its own colour window
+#### fix(sdr): HackRF waterfall was all dark and 2.6 s behind — own colour window + playout servo
 
 *branch `fix/hackrf-waterfall-colour-window`*
 
 - **The HackRF panel on `/rf-waterfall` streamed (LIVE, peaks and the Signals list all updating) but the waterfall stayed black.** Every panel shared one default colour window, Ref +5 dB / Range 35 (−30 … +5), which suits the RTL-SDR's dBFS levels. `hackrf_sweep` reports far lower: measured at the default LNA 24 / VGA 20, the noise floor sits at about −68 dB, the 90th percentile at −51 and only 1 % of samples rise above −30, so ~99 % of the waterfall mapped to black and the spectrum trace was clipped off the bottom.
 - **The HackRF panel now starts at Ref −10 dB / Range 60 (−70 … −10)**, which brackets its noise floor and its Wi-Fi/Bluetooth peaks — the same per-radio override the CC1101 panel already uses. RTL-SDR, ESP-SDR and CC1101 defaults are unchanged. A display range you saved yourself still wins; **Fit to signal** (or **A**) re-fits it.
-- **Docs:** [rf-waterfall.md › Display range](rf-waterfall.md#display-range) (per-radio defaults table; the old "Auto is the default" text was stale), [rf-waterfall-guide.md](rf-waterfall-guide.md).
+- **Every live panel drew rows 2.6 s after capture instead of the intended ~0.6 s**, so the waterfall and spectrum trace felt laggy. The playout projects the live edge from the newest row's timestamp; each poll re-anchors it, and because a row's age on arrival varies, the edge dips back a little on some polls. The playhead was clamped down to every dip and never moved back up, so it ratcheted onto its 2 s floor (0.6 + 2.0 = 2.6 s — measured exactly that, with 23 rows waiting in the queue). The playhead is now servoed onto the target by nudging its pace at most ±12% both ways, and re-anchored after the big history paint on load. Measured in a browser against the live HackRF: **0.7 s steady** (5 rows queued), 59 fps, 1.3 ms per row; an 800 ms main-thread stall heals back to 0.68 s in ~7 s. Applies to the RTL-SDR, ESP-SDR and CC1101 panels too — they share the playout loop.
+- **Docs:** [rf-waterfall.md › Display range](rf-waterfall.md#display-range) (per-radio defaults table; the old "Auto is the default" text was stale) and the *Steady flow* note, [rf-waterfall-guide.md](rf-waterfall-guide.md).
 
 ### 2026-11-19
 

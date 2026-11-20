@@ -311,7 +311,7 @@ sweep.
 - LoRa / Z-Wave / mesh overlays show energy and occupancy, not decoded traffic.
 - Levels are relative dB until you calibrate against a known source; even then
   it is a one-point calibration, not a laboratory standard.
-- The live view sits ~0.8 s behind real time. That buffer is what keeps the
+- The live view sits ~0.7 s behind real time. That buffer is what keeps the
   scroll steady.
 - Wide bands are swept at ~1 row/s, so a very short burst can be missed there.
   Zoom into a span that fits one tune to catch it.

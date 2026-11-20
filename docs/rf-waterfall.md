@@ -170,7 +170,10 @@ the scroll-speed setting.
 buffer and the page plays them back behind a fixed ~0.6 s latency, each row at
 its **own producer timestamp** — so the scroll speed is exactly the rate the SDR
 produced rows, with no rate estimate to drift and no catch-up surge when poll or
-network timing jitters.
+network timing jitters. The playhead is held on that target by nudging its pace
+at most ±12% in either direction, so time lost to a slow frame or a busy browser
+is won back within a few seconds instead of piling up (measured: rows drawn
+~0.7 s after capture; an 800 ms stall heals in ~7 s).
 
 **No freeze on a slow sweep.** When the engine produces rows *slower* than a
 smooth scroll — the `rtl_power` sweep updates only ~1×/s, and a wide span retunes

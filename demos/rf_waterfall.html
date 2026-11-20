@@ -3675,7 +3675,7 @@
     // ~1/s on the wide sweep) with no rate estimate to drift and no catch-up
     // surge. A gap in the data simply pauses the scroll; a long stall (hidden
     // tab / stalled backend) skips forward once rather than crawling through it.
-    var LAT=0.6, MAXLAG=2.0;
+    var LAT=0.6, MAXLAG=2.0, SLEW=0.12;
     scopes.forEach(function(s){
       if(s.mode!=='live'||s.decoding||s.replaying||!s._liveQ) return;
       var q=s._liveQ, newest=s._newestTs; if(newest==null){ return; }
@@ -3684,13 +3684,25 @@
       // that made the scroll lumpy). Producer and browser clocks both run in
       // real time, so this stays honest.
       var live=newest+(performance.now()/1000-(s._newestWall||0));
-      if(s._play==null) s._play=live-LAT;             // prime the playhead
-      s._play+=dt;                                    // advance at 1x real time
       var cap=live-LAT;
-      if(s._play>cap) s._play=cap;                    // never outrun the buffer
+      if(s._play==null) s._play=cap;                  // prime the playhead
+      // Servo the playhead onto its target (live - LAT): advance at 1x, nudged
+      // at most ±12% toward the target. The projected live edge is a sawtooth —
+      // every poll re-anchors it to the newest row's timestamp, whose age on
+      // arrival varies — so clamping the playhead down to each dip and never
+      // back up ratcheted it onto the MAXLAG floor: the waterfall settled a
+      // steady LAT+MAXLAG = 2.6 s behind real time. The servo averages the
+      // sawtooth out and also heals time lost to a slow frame (dt is capped).
+      var err=cap-s._play;
+      s._play+=dt*(1+Math.max(-SLEW,Math.min(SLEW,err*0.5)));
+      if(s._play>live-0.1) s._play=live-0.1;          // never outrun the data edge
       if(s._play<cap-MAXLAG) s._play=cap-MAXLAG;      // after a stall, skip, don't crawl
       var g=0;
       while(q.length && q[0].t<=s._play && g++<300){ var it=q.shift(); s.pushRow(it.power,it.lo,it.hi,it.floor); }
+      // A backlog (the first poll's ~60 s of history, or rows that piled up
+      // behind a stall) is painted in one go; the time that took is not
+      // playback time, so re-anchor instead of starting that far behind.
+      if(g>=60) s._play=newest+(performance.now()/1000-(s._newestWall||0))-LAT;
       // Keep the flow constant across producer gaps. A fast engine (IQ, 16/s)
       // always has rows buffered ahead, so q stays deep and this never fires; a
       // slow or bursty one (rtl_power ~1/s, a wide HackRF sweep) drains the queue
