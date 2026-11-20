@@ -13,6 +13,8 @@ import queue
 import sqlite3
 import threading
 import subprocess
+import collections
+from contextlib import contextmanager
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -254,6 +256,9 @@ class _CompanionState:
         # Huginn runtime-config push queue (webapp → listener thread)
         self.huginn_config_queue: queue.Queue = queue.Queue()
         self.huginn_handshake_pushed: bool = False
+        # Serial read -> parse/store split (_SerialLinePipeline), set by the
+        # listener while it runs; exposed for the backlog / drop counters.
+        self.pipeline = None
         # Per-connection scan state
         self.current_esp_mode: str = 'wifi'
         # True while the companion is in HuginnESP's wardrive loop. In that mode
@@ -326,6 +331,10 @@ class _CompanionState:
             'esp_ble_count':     self.esp_ble_count,
             'esp_zigbee_count':  self.esp_zigbee_count,
             'esp_alerts':        self.esp_alerts[-5:],
+            # Lines read but not yet stored, and lines lost to a full queue —
+            # nonzero dropped means this host can't keep up with the companion.
+            'serial_backlog':    self.pipeline.backlog() if self.pipeline else 0,
+            'serial_dropped':    self.pipeline.dropped if self.pipeline else 0,
         }
 
 
@@ -349,6 +358,89 @@ def _wigle_time_to_iso(value):
     return dt.isoformat()
 
 
+_NO_POS = object()   # _parse_serial_line: "look the GPS fix up now"
+
+
+class _SerialLinePipeline:
+    """Read a companion's serial port on one thread, parse + store on another.
+
+    A Huginn prints ~16-20 lines/s (mostly BLE) and its USB-serial link DROPS
+    whatever the host does not read in time — the dongle keeps scanning at full
+    speed, the output is simply lost. Measured on a T-Dongle-C5: a reader doing
+    5 lines/s lost ~88 % of Wi-Fi sightings; on a busy Pi Zero 2 W, which
+    parsed and committed each line before reading the next, ~95 % of a walk
+    never arrived. So the serial thread now only reads: each line goes into a
+    queue with the GPS fix of the moment it arrived, and this worker parses the
+    queue in batches, one DB transaction per batch.
+    """
+
+    MAX_QUEUE = 50000        # ~40 min of Huginn output; oldest dropped beyond it
+    INTERVAL_S = 0.5         # batch cadence
+    MAX_BATCH = 2000         # lines per transaction (keeps the session lock short)
+
+    def __init__(self, engine, companion):
+        self._engine = engine
+        self._companion = companion
+        self._q = collections.deque(maxlen=self.MAX_QUEUE)
+        self._stop = threading.Event()
+        self._thread = None
+        self.dropped = 0          # lines lost because the queue was full
+        self.processed = 0
+
+    def start(self):
+        self._thread = threading.Thread(
+            target=self._run, daemon=True,
+            name=f"wardriving-parse-{os.path.basename(self._companion.port or '?')}")
+        self._thread.start()
+        return self
+
+    def put(self, line):
+        """Queue one line (called on the serial thread — must stay cheap)."""
+        gps = self._engine._gps
+        pos = gps.get_position() if gps else None
+        if len(self._q) == self._q.maxlen:
+            self.dropped += 1
+        self._q.append((line, pos))
+
+    def backlog(self):
+        return len(self._q)
+
+    def _run(self):
+        while True:
+            stopping = self._stop.wait(self.INTERVAL_S)
+            self._drain_all()
+            if stopping:
+                return
+
+    def _drain_all(self):
+        while self._q:
+            items = []
+            while self._q and len(items) < self.MAX_BATCH:
+                items.append(self._q.popleft())
+            session = self._engine.session
+            if session is None:
+                return
+            try:
+                with session.batch():
+                    for line, pos in items:
+                        try:
+                            self._engine._parse_serial_line(line, self._companion, pos=pos)
+                        except Exception as e:
+                            logger.debug(f"[{self._companion.port}] parse error: {e!r}")
+                self.processed += len(items)
+            except Exception as e:
+                logger.warning(f"[{self._companion.port}] batch write failed: {e!r}")
+
+    def stop(self, timeout=10):
+        """Process everything still queued, then end the worker."""
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout)
+        if self.dropped:
+            logger.warning(f"[{self._companion.port}] {self.dropped} serial line(s) "
+                           f"dropped: the parse queue was full")
+
+
 class WardrivingSession:
     """Represents a single wardriving session with its own SQLite DB."""
 
@@ -361,8 +453,58 @@ class WardrivingSession:
         self.end_time = None
         self.network_count = 0
         self.unique_bssids = set()
-        self._lock = threading.Lock()
+        # Re-entrant: batch() holds it for a whole batch while the upserts
+        # inside take it again.
+        self._lock = threading.RLock()
+        self._tls = threading.local()      # .conn = the open batch connection
         self._init_db()
+
+    @staticmethod
+    def _open(db_path):
+        conn = sqlite3.connect(db_path, timeout=5)
+        # synchronous is a per-CONNECTION setting: _init_db() setting it once
+        # never reached the per-write connections, so every sighting committed
+        # with the default FULL — an fsync of the WAL per row, which on an
+        # SD-card Pi Zero (also swapping to that card) was the bottleneck.
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+
+    @contextmanager
+    def _db(self):
+        """Connection for one write — or the open batch()'s shared one."""
+        shared = getattr(self._tls, 'conn', None)
+        if shared is not None:
+            yield shared                    # batch(): its commit covers this write
+            return
+        conn = self._open(self.db_path)
+        try:
+            with conn:                      # commit (or roll back) this write
+                yield conn
+        finally:
+            conn.close()
+
+    @contextmanager
+    def batch(self):
+        """Run many writes in ONE transaction on ONE connection.
+
+        A companion streaming ~20 lines/s (Huginn) or a scan returning ~50
+        networks used to open a connection and commit once per row. Inside a
+        batch every upsert shares a single connection and commits once at the
+        end. Nested batches join the outer one. Keep batches short: the session
+        lock is held for the whole batch.
+        """
+        if getattr(self._tls, 'conn', None) is not None:
+            yield
+            return
+        with self._lock:
+            conn = self._open(self.db_path)
+            self._tls.conn = conn
+            try:
+                with conn:
+                    yield
+            finally:
+                self._tls.conn = None
+                conn.close()
 
     def _init_db(self):
         """Create the session database tables."""
@@ -662,7 +804,7 @@ class WardrivingSession:
 
         with self._lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
+                with self._db() as conn:
                     existing = conn.execute(
                         "SELECT rssi, best_rssi, scan_count FROM networks WHERE bssid = ?",
                         (bssid,)
@@ -765,7 +907,7 @@ class WardrivingSession:
         """Log a GPS trackpoint (at `timestamp`, default now)."""
         with self._lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
+                with self._db() as conn:
                     conn.execute(
                         "INSERT INTO gps_track (timestamp, latitude, longitude, altitude, speed_kmh, satellites, hdop) VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (timestamp or time.time(), lat, lon, alt, speed, satellites, hdop)
@@ -800,7 +942,7 @@ class WardrivingSession:
         now = seen_at or datetime.now(timezone.utc).isoformat()
         with self._lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
+                with self._db() as conn:
                     existing = conn.execute(
                         """SELECT scan_count, rssi, best_rssi, latitude, longitude,
                                   pending_lat, pending_lon, pending_count
@@ -905,7 +1047,7 @@ class WardrivingSession:
         now = seen_at or datetime.now(timezone.utc).isoformat()
         with self._lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
+                with self._db() as conn:
                     existing = conn.execute(
                         "SELECT scan_count FROM cell_towers WHERE cell_id = ?", (cell_id,)
                     ).fetchone()
@@ -947,7 +1089,7 @@ class WardrivingSession:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
+                with self._db() as conn:
                     existing = conn.execute(
                         "SELECT scan_count, best_rssi FROM zigbee_devices WHERE addr = ?",
                         (addr,)
@@ -3731,20 +3873,21 @@ class WardrivingEngine:
                     for t in threads:
                         t.join(timeout=20)
 
-                for iface, networks in results.items():
-                    for net in networks:
-                        self.session.upsert_network(
-                            bssid=net['bssid'],
-                            ssid=net['ssid'],
-                            security=net['security'],
-                            channel=net['channel'],
-                            frequency=net['frequency'],
-                            rssi=net['rssi'],
-                            lat=lat, lon=lon, alt=alt,
-                            speed=speed, hdop=hdop,
-                            interface=iface
-                        )
-                        total_found += 1
+                with self.session.batch():      # one commit per scan, not per network
+                    for iface, networks in results.items():
+                        for net in networks:
+                            self.session.upsert_network(
+                                bssid=net['bssid'],
+                                ssid=net['ssid'],
+                                security=net['security'],
+                                channel=net['channel'],
+                                frequency=net['frequency'],
+                                rssi=net['rssi'],
+                                lat=lat, lon=lon, alt=alt,
+                                speed=speed, hdop=hdop,
+                                interface=iface
+                            )
+                            total_found += 1
 
                 self.networks_per_scan = total_found
                 self.scans_completed += 1
@@ -4871,6 +5014,8 @@ class WardrivingEngine:
                     # doesn't, and the live stream carries on either way).
                     if companion.name in ('Piglet', 'Piglet Core'):
                         self._piglet_sync(ser, companion, _readline)
+                    pipe = _SerialLinePipeline(self, companion).start()
+                    companion.pipeline = pipe
                     while self._running and companion.port in self._companions:
                         if companion.piglet_sync_request:
                             companion.piglet_sync_request = False
@@ -4884,7 +5029,7 @@ class WardrivingEngine:
                                 if line:
                                     if len(_sample_lines) < 3:
                                         _sample_lines.append(line[:120])
-                                    self._parse_serial_line(line, companion)
+                                    pipe.put(line)
                             now_ts = time.time()
                             if now_ts - _last_devcheck >= 5.0:
                                 _last_devcheck = now_ts
@@ -4905,6 +5050,7 @@ class WardrivingEngine:
                         except Exception as e:
                             logger.warning(f"[wardriving] {companion.port} read error: {e!r}")
                             break
+                    pipe.stop()
                     try:
                         ser.close()
                     except Exception:
@@ -4964,13 +5110,17 @@ class WardrivingEngine:
 
         last_config_drain = time.time()
         last_role_check = time.time()
+        # This thread only reads; parsing + DB writes run on the pipeline's
+        # worker so the port is always drained (Huginn drops unread output).
+        pipe = _SerialLinePipeline(self, companion).start()
+        companion.pipeline = pipe
         while self._running and companion.port in self._companions:
             try:
                 raw = ser.readline()
                 if raw:
                     line = raw.decode('utf-8', errors='replace').strip()
                     if line:
-                        self._parse_serial_line(line, companion)
+                        pipe.put(line)
                 now = time.time()
                 if now - last_config_drain > 5:
                     self._drain_huginn_queue(ser, companion)
@@ -4994,6 +5144,7 @@ class WardrivingEngine:
                 logger.debug(f"Serial read error (huginn) on {companion.port}: {e}")
                 break
 
+        pipe.stop()          # parse whatever is still queued before the final flush
         if companion.serial_entry_buffer.get('bssid'):
             pos = self._gps.get_position() if self._gps else None
             self._flush_serial_entry(
@@ -5073,12 +5224,17 @@ class WardrivingEngine:
                 ports.append(c.port)
         return ports
 
-    def _parse_serial_line(self, line: str, companion: '_CompanionState'):
-        """Parse a single line from one ESP32 serial companion."""
+    def _parse_serial_line(self, line: str, companion: '_CompanionState', pos=_NO_POS):
+        """Parse a single line from one ESP32 serial companion.
+
+        ``pos`` is the GPS fix from when the line was READ (the pipeline parses
+        it a moment later); omitted, the current fix is used.
+        """
         if not self.session:
             return
 
-        pos = self._gps.get_position() if self._gps else None
+        if pos is _NO_POS:
+            pos = self._gps.get_position() if self._gps else None
         gps_lat = pos['lat'] if pos else None
         gps_lon = pos['lon'] if pos else None
         gps_alt = pos.get('alt') if pos else None
