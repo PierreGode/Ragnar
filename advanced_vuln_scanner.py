@@ -1042,7 +1042,7 @@ class AdvancedVulnScanner:
         # board has enough RAM to run it (zap_enabled). The frontend uses
         # zap_installed / zap_ram_ok to tell "not installed" apart from
         # "needs 8GB" so it can grey the panel with the right reason.
-        zap_installed = self._tool_paths.get('zap') is not None
+        zap_installed = self._tool_paths.get('zap') is not None or bool(getattr(self, '_zap_remote_url', ''))
         zap_ram_ok = bool(getattr(self, '_zap_enabled', False))
         zap_available = zap_installed and zap_ram_ok
         zap_running = self._is_zap_running() if zap_available else False
