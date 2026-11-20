@@ -33931,6 +33931,32 @@ def register_network_diagnostics(app, logger=None):
         _log("net/sdr/selftest")
         return jsonify(sdr_spectrum.selftest())
 
+    # Raw-IQ capture to a SigMF recording (hackrf_transfer, ci8) for the Signal
+    # Analyzer. Pauses the sweep while it records. Sessions are listed, renamed,
+    # deleted and downloaded through the shared /api/net/rtl/iq/* +
+    # /api/net/rtl/analyze/list routes — they all read data/iq_captures/.
+    @app.route('/api/net/sdr/iq/start', methods=['POST'])
+    def net_sdr_iq_start():
+        data = request.get_json(silent=True) or {}
+        if data.get('center_hz') is None:
+            return _bad('center_hz required')
+        _log(f"net/sdr/iq/start center={data.get('center_hz')} span={data.get('span_hz')} "
+             f"secs={data.get('seconds')}")
+        return jsonify(sdr_spectrum.iq_capture_start(
+            data.get('center_hz'), span_hz=data.get('span_hz'),
+            seconds=data.get('seconds', 2.0), name=data.get('name'), label=data.get('label'),
+            lna=data.get('lna'), vga=data.get('vga'), amp=data.get('amp'),
+            antenna=data.get('antenna')))
+
+    @app.route('/api/net/sdr/iq/status', methods=['GET'])
+    def net_sdr_iq_status():
+        return jsonify(sdr_spectrum.iq_capture_status())
+
+    @app.route('/api/net/sdr/iq/stop', methods=['POST'])
+    def net_sdr_iq_stop():
+        _log("net/sdr/iq/stop")
+        return jsonify(sdr_spectrum.iq_capture_stop())
+
     # ------------------------------------------------------------------
     # True-RF spectrum / waterfall via an ESP-SDR node (esp_sdr.py).
     # An ESP32 running the ESP-SDR firmware (espargos.net/espsdr) streams

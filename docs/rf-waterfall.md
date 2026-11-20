@@ -969,8 +969,9 @@ browser; FM broadcast is demodulated at 48 kHz directly.
 ## Raw-IQ capture (SigMF)
 
 
-The RTL panel's record bar has an **⤓ SigMF** button that captures raw baseband
-IQ to a [SigMF](https://sigmf.org) recording — a `.sigmf-data` file (the RTL's
+The RTL panel's record bar — and the HackRF panel's IQ bar, see
+[HackRF raw-IQ capture](#hackrf-raw-iq-capture) — has an **⤓ SigMF** button that
+captures raw baseband IQ to a [SigMF](https://sigmf.org) recording — a `.sigmf-data` file (the RTL's
 native `cu8` complex-uint8 samples) plus a `.sigmf-meta` JSON sidecar with the
 tune frequency, sample rate, UTC datetime, a sha512 of the data and the band
 label. SigMF is the open interoperability standard, so a capture opens directly
@@ -995,6 +996,43 @@ capture's own window (centre ± half the sample rate). Writing the file always
 takes priority: rows are only computed when there is time for them, so a
 recording is never shortened or thinned for the sake of the display. Band and
 zoom changes wait until the capture finishes.
+
+### HackRF raw-IQ capture
+
+`hackrf_sweep` only measures power per bin, so the HackRF panel records raw IQ
+with `hackrf_transfer` instead. The panel's IQ bar (under the markers row) works
+like the RTL one:
+
+1. **Zoom in on the signal** (or drop a marker on it) — the recording is centred
+   on the marker, else on the view centre.
+2. Set the **seconds** box next to *IQ* and press **⤓ SigMF**.
+3. When it finishes, press **📈 Open in Analyzer** — or pick it later from
+   **Sessions** and press **📈 Analyzer**. Sessions from both radios share one
+   list.
+
+- **Sample rate = 3× the span on screen**, 2–20 MS/s. A 2 MHz zoom records at
+  6 MS/s; a full 100 MHz view records 20 MS/s (40 MB/s) around the marker, which
+  covers the marker ± ~3.3 MHz. One capture is capped at 200 MB (5 s at 20 MS/s).
+- **Offset tuning.** The HackRF has a strong, narrow DC spike at its tuned
+  centre. The radio tunes 0.2× the sample rate *above* your target, so the
+  spike lands just outside the window you asked for, and the window stays
+  inside the HackRF's baseband filter (±0.375× the sample rate). The SigMF
+  `core:frequency` is the real tuned frequency, so the Analyzer's axis is true.
+  The spike still appears in the Analyzer as a narrow line at the tuned centre
+  (its survey lists it as a 100 %-duty carrier) — that is the radio, not a
+  transmitter.
+- **What is saved:** `ci8` samples (`.sigmf-data`) and a `.sigmf-meta` with the
+  sample rate, tuned frequency, UTC time, sha512, the GPS fix when there is one,
+  the LNA/VGA/amp/antenna-power settings, `ragnar:target_hz`, and an annotation
+  marking the requested window. Gains come from the panel's own settings.
+- **One radio:** the sweep pauses while it records and resumes on its own. While
+  a capture runs, the status poll never opens the radio, and a sweep start from
+  another tab is refused until the capture is done.
+- If the capture takes much longer than its length, the disk could not keep up
+  (an SD card at 20 MS/s); the result says so — zoom in for a lower rate.
+- Backend: `sdr_spectrum.iq_plan()` + `iq_capture_*`; routes
+  `/api/net/sdr/iq/{start,status,stop}`. Listing, rename, delete and download use
+  the shared `/api/net/rtl/iq/*` routes.
 
 ## What a capture records about itself
 

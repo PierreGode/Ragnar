@@ -237,6 +237,11 @@ outdoors, and worse indoors.
   2 MS/s. The waterfall keeps scrolling while it records, showing the capture's
   own window, so you can see what you are getting. Retuning waits until it
   finishes.
+- **HackRF:** its panel has the same **⤓ SigMF** button in its IQ bar. Zoom in on
+  the signal first: it records at 3× the span on screen (2–20 MS/s, up to
+  40 MB/s), tuned a little above the target to keep its DC spike off the signal.
+  The sweep pauses while it records, then **📈 Open in Analyzer**. See
+  [HackRF raw-IQ capture](rf-waterfall.md#hackrf-raw-iq-capture).
 - **Trigger & capture** (⚙ Settings) records *on a condition* instead of on
   hope. Set a limit line or learn a mask, choose how many seconds before and
   after the event you want, and arm it. The radio keeps a rolling buffer, so

@@ -577,6 +577,9 @@ _capture = SweepCapture()
 
 def start(band="2.4", lna=None, vga=None, lo_mhz=None, hi_mhz=None,
           amp=None, antenna=None, bin_hz=None):
+    if _iqcap.busy():
+        return {"ok": False, "error": "a raw-IQ capture is using the HackRF — the sweep "
+                                      "resumes when it finishes"}
     d = detect()
     if not d.get("available"):
         return {"ok": False, "error": d.get("error", "no SDR")}
@@ -603,8 +606,17 @@ def status():
                   "device_present": True, "streaming": True})
         d.setdefault("bands", sorted(BANDS.keys()))
         st["detect"] = d
+    elif _iqcap.busy() or tx_active():
+        # A raw-IQ capture or the TX pilot tone holds the radio: same rule —
+        # never open it with hackrf_info underneath them.
+        d = dict(_capture._detect_cache or {})
+        d.update({"available": True, "tools_installed": True,
+                  "device_present": True, "streaming": False})
+        d.setdefault("bands", sorted(BANDS.keys()))
+        st["detect"] = d
     else:
         st["detect"] = detect()
+    st["iq_capturing"] = _iqcap.busy()
     return st
 
 
@@ -722,6 +734,283 @@ def tx_tone_stop():
 def tx_active():
     """True while a pilot tone is transmitting."""
     return _TX_PROC is not None and _TX_PROC.poll() is None
+
+
+# --------------------------------------------------------------------------
+# Raw-IQ capture to SigMF (for the Signal Analyzer)
+# --------------------------------------------------------------------------
+# hackrf_sweep reports only power per bin; the Signal Analyzer needs raw IQ.
+# hackrf_transfer -r records interleaved signed 8-bit I/Q — SigMF "ci8", which
+# sigmf_analyzer decodes natively — into data/iq_captures/, next to the RTL-SDR's
+# captures, so the same Sessions list, rename, delete, download and Analyzer
+# links serve both radios. Sweep and capture share one radio: a capture pauses
+# the sweep, and the page resumes it when the capture is done.
+#
+# Offset tuning: the HackRF has a strong DC / LO-leakage spike at its tuned
+# centre. Tuning straight onto a signal buries it under that spike, so the LO
+# sits above the target (iq_plan). SigMF core:frequency records the real LO, so
+# the analyzer's frequency axis stays true; an annotation marks the window asked
+# for.
+
+_IQ_SR_MIN = 2_000_000          # hackrf_transfer sample-rate range
+_IQ_SR_MAX = 20_000_000
+_IQ_MAX_BYTES = 200_000_000     # one capture (ci8 = 2 B/sample): 20 MS/s -> 5 s
+_IQ_MAX_SECONDS = 30.0
+_IQ_SPAN_FACTOR = 3.0           # sample rate = 3x the span asked for...
+_IQ_LO_OFFSET = 0.2             # ...with the LO 0.2 x sample rate above the target
+
+
+def _iq_cap_dir():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "iq_captures")
+
+
+def _iq_safe(name):
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(name or "")).strip("._")[:80]
+
+
+def iq_plan(target_hz, span_hz=None):
+    """Sample rate, LO and the usable window for a capture around ``target_hz``
+    (pure, selftested).
+
+    The HackRF's baseband filter defaults to 0.75 x the sample rate, so only
+    LO +/- 0.375 sr is clean. The target goes at LO - 0.2 sr: the requested
+    span (sr / 3 wide) then runs from LO - 0.367 sr to LO - 0.033 sr — inside
+    the filter on one side, clear of the DC spike on the other. At the 20 MS/s
+    ceiling that is the target +/- ~3.3 MHz; a wider view than that cannot be
+    recorded in one tune, so the window is centred on the target instead.
+    """
+    target_hz = int(float(target_hz))
+    try:
+        span = float(span_hz) if span_hz not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        span = 0.0
+    sr = int(min(_IQ_SR_MAX, max(_IQ_SR_MIN, round(span * _IQ_SPAN_FACTOR))))
+    sr -= sr % 1000                                      # tidy kHz-step rate
+    off = int(round(sr * _IQ_LO_OFFSET))
+    half = sr / (2.0 * _IQ_SPAN_FACTOR)                  # usable half-window
+    return {"lo_hz": target_hz + off, "sr_hz": sr, "offset_hz": off,
+            "target_hz": target_hz,
+            "want_lo_hz": int(target_hz - half), "want_hi_hz": int(target_hz + half)}
+
+
+class HackrfIqCapture:
+    """One-shot bounded raw-IQ capture to a SigMF recording (background thread)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._proc = None
+        self._thread = None
+        self._stop = threading.Event()
+        self._reset()
+
+    def _reset(self):
+        self._name = None
+        self._plan = None
+        self._nsamp = 0
+        self._want_bytes = 0
+        self._seconds = 0.0
+        self._started = None
+        self._done = False
+        self._error = None
+        self._warning = None
+        self._path = None
+
+    def busy(self):
+        return bool(self._thread and self._thread.is_alive())
+
+    def start(self, target_hz, span_hz=None, seconds=2.0, name=None, label=None,
+              lna=None, vga=None, amp=None, antenna=None):
+        try:
+            target_hz = int(float(target_hz))
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "center_hz / seconds must be numeric"}
+        if not (1_000_000 <= target_hz <= 6_000_000_000):
+            return {"ok": False, "error": "centre frequency out of HackRF reach (1 MHz - 6 GHz)"}
+        if not os.path.exists(_HACKRF_TRANSFER):
+            return {"ok": False, "error": "hackrf_transfer not installed (apt install hackrf)"}
+        if tx_active():
+            return {"ok": False, "error": "the HackRF is transmitting a pilot tone — stop it first"}
+        plan = iq_plan(target_hz, span_hz)
+        seconds = max(0.1, min(_IQ_MAX_SECONDS, seconds,
+                               _IQ_MAX_BYTES / (2.0 * plan["sr_hz"])))
+        # Default to the sweep's own gains (0 dB is a valid setting, so no `or`).
+        lna_v = _clamp(lna if lna is not None else _capture._lna, 0, 40, _DEFAULT_LNA)
+        lna_v -= lna_v % 8
+        vga_v = _clamp(vga if vga is not None else _capture._vga, 0, 62, _DEFAULT_VGA)
+        vga_v -= vga_v % 2
+        if amp is None:
+            amp = getattr(_capture, "_amp", False)
+        if antenna is None:
+            antenna = getattr(_capture, "_antenna", False)
+        amp_v = str(amp).lower() in ("1", "true", "on", "yes")
+        ant_v = str(antenna).lower() in ("1", "true", "on", "yes")
+        with self._lock:
+            if self.busy():
+                return {"ok": False, "error": "a capture is already running"}
+            try:
+                os.makedirs(_iq_cap_dir(), exist_ok=True)
+            except OSError as exc:
+                return {"ok": False, "error": "cannot create captures dir: %s" % exc}
+            self._reset()
+            base = _iq_safe(name) or ("hackrf-%d-%s" % (round(target_hz / 1e6),
+                                                        time.strftime("%Y%m%d-%H%M%S")))
+            self._name, self._plan, self._seconds = base, plan, seconds
+            self._nsamp = int(plan["sr_hz"] * seconds)
+            self._want_bytes = self._nsamp * 2                    # ci8: 2 bytes/sample
+            self._label = label
+            self._gains = {"lna": lna_v, "vga": vga_v, "amp": amp_v, "antenna": ant_v}
+            self._path = os.path.join(_iq_cap_dir(), base + ".sigmf-data")
+            self._started = time.time()
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run, daemon=True,
+                                            name="hackrf-iqcap")
+            self._thread.start()
+        return {"ok": True, "name": base, "center_hz": plan["lo_hz"],
+                "target_hz": target_hz, "sr_hz": plan["sr_hz"],
+                "offset_hz": plan["offset_hz"], "seconds": round(seconds, 3),
+                "want_bytes": self._want_bytes,
+                "window_hz": [plan["want_lo_hz"], plan["want_hi_hz"]]}
+
+    def _run(self):
+        plan, g = self._plan, self._gains
+        stop()                                # the sweep holds the radio — free it
+        cmd = [_HACKRF_TRANSFER, "-r", self._path, "-f", str(plan["lo_hz"]),
+               "-s", str(plan["sr_hz"]), "-n", str(self._nsamp),
+               "-l", str(g["lna"]), "-g", str(g["vga"]),
+               "-a", "1" if g["amp"] else "0", "-p", "1" if g["antenna"] else "0"]
+        err, t0 = "", None
+        # libusb needs a moment to release the sweep's claim; retry a busy open.
+        for attempt in range(4):
+            if self._stop.wait(0.5 if attempt == 0 else 0.8):
+                break
+            t0 = time.time()
+            try:
+                self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                              stderr=subprocess.PIPE, text=True)
+                _, err = self._proc.communicate()
+            except Exception as exc:
+                self._error = "failed to launch hackrf_transfer: %s" % exc
+                return
+            rc = self._proc.returncode
+            if rc == 0 or self._stop.is_set():
+                break
+            if not re.search(r"busy|hackrf_open", err or "", re.I):
+                break
+        elapsed = (time.time() - t0) if t0 else 0.0
+        if self._stop.is_set():
+            self._error = "capture cancelled"
+            self._discard()
+            return
+        have = os.path.getsize(self._path) if os.path.exists(self._path) else 0
+        if self._proc is None or self._proc.returncode != 0 or have == 0:
+            lines = [ln.strip() for ln in (err or "").splitlines() if ln.strip()]
+            bad = [ln for ln in lines if re.search(r"fail|error|not found|busy", ln, re.I)]
+            self._error = ((bad or lines or ["hackrf_transfer exited rc=%s" % (
+                self._proc.returncode if self._proc else "?")])[-1])[:200]
+            self._discard()
+            return
+        # hackrf_transfer always writes the full sample count; a disk that cannot
+        # keep up shows as a capture that took much longer than it should.
+        if elapsed > self._seconds * 1.3 + 1.5:
+            self._warning = ("took %.1f s for %.1f s of samples — the disk may not have kept "
+                             "up; try a lower sample rate (zoom in)" % (elapsed, self._seconds))
+        try:
+            self._write_meta(have)
+            self._done = True
+        except OSError as exc:
+            self._error = "capture saved but metadata write failed: %s" % exc
+
+    def _write_meta(self, nbytes):
+        import hashlib
+        import json
+        plan, g = self._plan, self._gains
+        h = hashlib.sha512()
+        with open(self._path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        dt_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._started))
+        try:                                   # share the RTL-SDR's SigMF writer + GPS fix
+            import rtl_sdr as _rtl
+            meta = _rtl.sigmf_meta(plan["lo_hz"], plan["sr_hz"], datatype="ci8",
+                                   hw="HackRF One", sha512=h.hexdigest(), dt_iso=dt_iso,
+                                   label=self._label, position=_rtl.current_position())
+        except Exception:
+            cap = {"core:sample_start": 0, "core:frequency": float(plan["lo_hz"]),
+                   "core:datetime": dt_iso}
+            meta = {"global": {"core:datatype": "ci8", "core:sample_rate": float(plan["sr_hz"]),
+                               "core:version": "1.0.0", "core:hw": "HackRF One",
+                               "core:sha512": h.hexdigest()},
+                    "captures": [cap], "annotations": []}
+            if self._label:
+                meta["annotations"].append({"core:sample_start": 0, "core:label": str(self._label)})
+        glob = meta["global"]
+        glob["core:recorder"] = "Ragnar sdr_spectrum.py (hackrf_transfer)"
+        glob["ragnar:hackrf_lna_db"] = g["lna"]
+        glob["ragnar:hackrf_vga_db"] = g["vga"]
+        glob["ragnar:hackrf_amp"] = g["amp"]
+        glob["ragnar:hackrf_antenna_power"] = g["antenna"]
+        glob["ragnar:target_hz"] = plan["target_hz"]
+        glob["ragnar:lo_offset_hz"] = plan["offset_hz"]
+        meta["annotations"].append({
+            "core:sample_start": 0, "core:sample_count": nbytes // 2,
+            "core:freq_lower_edge": float(plan["want_lo_hz"]),
+            "core:freq_upper_edge": float(plan["want_hi_hz"]),
+            "core:label": "requested window (LO tuned %d kHz above the target to keep "
+                          "the DC spike off it)" % round(plan["offset_hz"] / 1e3)})
+        with open(self._path[:-len(".sigmf-data")] + ".sigmf-meta", "w") as fh:
+            json.dump(meta, fh, indent=2)
+
+    def _discard(self):
+        try:
+            if self._path and os.path.exists(self._path):
+                os.remove(self._path)
+        except OSError:
+            pass
+
+    def stop(self):
+        self._stop.set()
+        p = self._proc
+        if p is not None and p.poll() is None:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        return {"ok": True}
+
+    def status(self):
+        with self._lock:
+            have = 0
+            try:
+                if self._path and os.path.exists(self._path):
+                    have = os.path.getsize(self._path)
+            except OSError:
+                have = 0
+            plan = self._plan or {}
+            pct = int(min(100, have * 100 / self._want_bytes)) if self._want_bytes else 0
+            return {"capturing": self.busy(), "name": self._name, "done": self._done,
+                    "error": self._error, "warning": self._warning,
+                    "center_hz": plan.get("lo_hz"), "target_hz": plan.get("target_hz"),
+                    "sr_hz": plan.get("sr_hz"), "seconds": self._seconds,
+                    "bytes": have, "want_bytes": self._want_bytes, "progress": pct}
+
+
+_iqcap = HackrfIqCapture()
+
+
+def iq_capture_start(center_hz, span_hz=None, seconds=2.0, name=None, label=None,
+                     lna=None, vga=None, amp=None, antenna=None):
+    """Record raw IQ around ``center_hz`` to SigMF. Pauses the sweep (one radio)."""
+    return _iqcap.start(center_hz, span_hz=span_hz, seconds=seconds, name=name,
+                        label=label, lna=lna, vga=vga, amp=amp, antenna=antenna)
+
+
+def iq_capture_status():
+    return _iqcap.status()
+
+
+def iq_capture_stop():
+    return _iqcap.stop()
 
 
 # --------------------------------------------------------------------------
@@ -869,6 +1158,25 @@ def selftest():
     check("dwell: slow sweeps give one row each, stamped at completion, no burst",
           len(st) == len(cp) == 25 and st == cp, str(len(st)))
     check("dwell: no row before the grid tick", _dwell_tick(10.0, 9.99, 0.05)[0] is False)
+
+    # --- raw-IQ capture plan: span kept inside the baseband filter, off DC ---
+    p = iq_plan(433_920_000, 2_000_000)
+    check("iqplan: 2 MHz span -> 6 MS/s, LO 1.2 MHz above the target",
+          p["sr_hz"] == 6_000_000 and p["lo_hz"] == 435_120_000, str(p))
+    check("iqplan: whole span inside LO +/- 0.375 sr (default baseband filter)",
+          p["want_lo_hz"] >= p["lo_hz"] - 0.375 * p["sr_hz"]
+          and p["want_hi_hz"] <= p["lo_hz"] + 0.375 * p["sr_hz"], str(p))
+    check("iqplan: DC spike (the LO) outside the requested window",
+          not (p["want_lo_hz"] <= p["lo_hz"] <= p["want_hi_hz"])
+          and p["lo_hz"] - p["want_hi_hz"] >= 0.03 * p["sr_hz"], str(p))
+    check("iqplan: span covered", p["want_hi_hz"] - p["want_lo_hz"] >= 2_000_000, str(p))
+    p = iq_plan(2_440_000_000, 100_000_000)
+    check("iqplan: wide view clamps to 20 MS/s around the target",
+          p["sr_hz"] == 20_000_000 and p["want_lo_hz"] < 2_440_000_000 < p["want_hi_hz"], str(p))
+    p = iq_plan(915_000_000, None)
+    check("iqplan: no span -> 2 MS/s floor", p["sr_hz"] == 2_000_000, str(p))
+    check("iqplan: capture names are path-safe", _iq_safe("../../etc/x y") == "etc_x_y",
+          _iq_safe("../../etc/x y"))
 
     # --- status() must not re-probe the HackRF while a sweep is streaming ---
     # Opening hackrf_info over USB during a live sweep knocks it offline a few

@@ -379,6 +379,11 @@ A spectrum page with an RTL-SDR panel and a HackRF panel. Both are receive-only.
 Source: rf-waterfall-guide.md
 <!-- proof: docs/rf-waterfall-guide.md | **receive-only** -->
 
+### How do I record the HackRF so I can open it in the Signal Analyzer?
+On the RF Waterfall's HackRF panel, zoom in on the signal (or drop a marker), set the seconds box next to IQ and press ⤓ SigMF. The sweep pauses while it records. Then press 📈 Open in Analyzer, or pick it from Sessions later.
+Source: rf-waterfall.md
+<!-- proof: docs/rf-waterfall.md | 2. Set the **seconds** box next to *IQ* and press **⤓ SigMF**. -->
+
 ### What frequencies does the RF Waterfall cover?
 The RTL-SDR panel covers about 24 MHz to 1.7 GHz. The HackRF panel covers 1 MHz to 6 GHz.
 Source: rf-waterfall-guide.md

@@ -263,6 +263,8 @@
   footer b{color:var(--ink-dim);font-weight:600}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
   @media (max-width:640px){
+    /* the ⓘ button often wraps to the far right: pin its note inside the gutters */
+    .infopop{position:fixed;left:16px;right:16px;bottom:16px;width:auto;max-height:60vh;overflow:auto}
     .rigs{align-items:flex-start}
     header{align-items:flex-start;gap:10px 16px}
     h1{font-size:30px}
@@ -910,6 +912,7 @@
     cq('.xfall').addEventListener('click',function(){ self.exportCSV('waterfall'); });
     if(cfg.tuner) this.buildTuner();
     if(cfg.record){ this.buildRecorder(); this.recBar.classList.remove('hidden'); }
+    else if(cfg.iq){ this.buildIqBar(); this.recBar.classList.remove('hidden'); }
 
     this.resize(); this.resetCanvas();
     this._ro=new ResizeObserver(function(){ if(self.resize()){ self.drawRuler(); self.placeMarker(); self.repaint(); } });
@@ -1078,40 +1081,11 @@
         +'<input type="range" class="seek" min="0" max="0" value="0">'
         +'<span class="rpos rsp"></span><button class="rdel" title="Delete this recording">&#128465;</button>'
         +'<button class="rexit">&#10005;&nbsp;Exit</button></span>'
-      +'<span class="rsp">·</span><span class="rsp">IQ</span>'
-      +'<input type="number" class="iqsec" value="2" min="0.1" max="30" step="0.5" title="Capture length (seconds)" style="width:46px;font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:3px 5px">'
-      +'<button class="iqbtn" title="Capture raw IQ to a SigMF recording — opens in GNU Radio / inspectrum / URH">&#8681;&nbsp;SigMF</button>'
-      +'<span class="iqstat rsp"></span>'
-      +'<span class="rsp">Sessions</span><select class="iqlist" title="All recorded SigMF sessions"><option value="">—</option></select>'
-      +'<button class="iqopen" title="Open the selected SigMF session in the Signal Analyzer">&#128200;&nbsp;Analyzer</button>'
-      +'<button class="iqrename" title="Rename the selected session">&#9998;&nbsp;Rename</button>'
-      +'<button class="iqdel" title="Delete the selected session">&#128465;&nbsp;Delete</button>'
-      +'<button class="iqreload" title="Refresh the session list">&#8635;</button>'
-      +'<span class="infowrap"><button class="infobtn" title="Capture size &amp; memory">&#9432;</button>'
-        +'<div class="infopop">'
-          +'<b>IQ capture &amp; memory</b><br>'
-          +'A SigMF capture is raw IQ &mdash; about <span class="k">4 MB per second</span> at 2 MS/s. '
-          +'The Analyzer loads the <b>whole file into RAM</b> as complex samples (&asymp;<b>4&times; the file size</b>).<br><br>'
-          +'On a low-memory board like a <b>Pi Zero (512 MB)</b>, keep captures small: '
-          +'<span class="warn">&le; ~50 MB (~12 s)</span> &rarr; ~200 MB RAM. '
-          +'Pi 4/5 handle hundreds of MB fine.<br><br>'
-          +'For long captures, <b>download the .sigmf-data</b> and analyse it on a desktop (GNU Radio / inspectrum / URH).'
-        +'</div></span>'
+      +'<span class="rsp">·</span>'+this._iqMarkup()
       +'<span class="rsp">·</span>'
       +'<button class="basebtn" aria-pressed="false" title="Learn a baseline spectrum, then alert on new / vanished carriers + broadband jamming (into the Watchtower feed)">&#9737;&nbsp;Baseline</button>'
       +'<span class="basestat rsp"></span>';
-    this.iqBtn=g.querySelector('.iqbtn'); this.iqSec=g.querySelector('.iqsec'); this.iqStat=g.querySelector('.iqstat');
-    this.iqBtn.addEventListener('click',function(){ self.iqCapture(); });
-    this.iqList=g.querySelector('.iqlist'); this.iqOpen=g.querySelector('.iqopen');
-    this.iqOpen.addEventListener('click',function(){ self.openInAnalyzer(); });
-    g.querySelector('.iqrename').addEventListener('click',function(){ self.renameSession(); });
-    g.querySelector('.iqdel').addEventListener('click',function(){ self.deleteSession(); });
-    g.querySelector('.iqreload').addEventListener('click',function(){ self.refreshSessions(); });
-    var ib=g.querySelector('.infobtn'), ip=g.querySelector('.infopop');
-    if(ib&&ip){ ib.addEventListener('click',function(e){ e.stopPropagation(); ip.classList.toggle('show'); });
-      document.addEventListener('click',function(e){ if(!ip.contains(e.target)&&e.target!==ib) ip.classList.remove('show'); }); }
-    this.iqList.addEventListener('dblclick',function(){ self.openInAnalyzer(); });
-    this.refreshSessions();
+    this._wireIq(g);
     this.baseBtn=g.querySelector('.basebtn'); this.baseStat=g.querySelector('.basestat');
     this.baseBtn.addEventListener('click',function(){ self.baselineToggle(); });
     this.baselinePoll();   // reflect any baseline already running server-side
@@ -1128,6 +1102,53 @@
     g.querySelector('.rexit').addEventListener('click',function(){ self.exitReplay(); });
     this.refreshRecordings();
   };
+  // ---- raw-IQ capture bar (SigMF -> Signal Analyzer) ----
+  // Shared by the RTL-SDR recorder and the HackRF panel. Sessions live in one
+  // folder (data/iq_captures), so the list / rename / delete / download links
+  // are the same for both; only the capture start + status endpoints differ.
+  Scope.prototype._iqMarkup=function(){
+    return '<span class="rsp">IQ</span>'
+      +'<input type="number" class="iqsec" value="2" min="0.1" max="30" step="0.5" title="Capture length (seconds)" style="width:46px;font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:3px 5px">'
+      +'<button class="iqbtn" title="'+(this.cfg.iq&&this.cfg.iq.hackrf
+          ?'Record raw IQ around the marker (else the view centre) to a SigMF file for the Signal Analyzer (also GNU Radio / inspectrum / URH). The sweep pauses while it records.'
+          :'Capture raw IQ to a SigMF recording — opens in GNU Radio / inspectrum / URH')+'">&#8681;&nbsp;SigMF</button>'
+      +'<span class="iqstat rsp"></span>'
+      +'<span class="rsp">Sessions</span><select class="iqlist" title="All recorded SigMF sessions"><option value="">—</option></select>'
+      +'<button class="iqopen" title="Open the selected SigMF session in the Signal Analyzer">&#128200;&nbsp;Analyzer</button>'
+      +'<button class="iqrename" title="Rename the selected session">&#9998;&nbsp;Rename</button>'
+      +'<button class="iqdel" title="Delete the selected session">&#128465;&nbsp;Delete</button>'
+      +'<button class="iqreload" title="Refresh the session list">&#8635;</button>'
+      +'<span class="infowrap"><button class="infobtn" title="Capture size &amp; memory">&#9432;</button>'
+        +'<div class="infopop">'
+          +'<b>IQ capture &amp; memory</b><br>'
+          +'A SigMF capture is raw IQ &mdash; about <span class="k">4 MB per second</span> at 2 MS/s. '
+          +(this.cfg.iq&&this.cfg.iq.hackrf
+            ?'The HackRF records at <b>3&times; the span on screen</b> (2&ndash;20 MS/s), so <b>zoom in on the signal first</b>: '
+             +'a full 100 MHz view records 20 MS/s (<span class="k">40 MB/s</span>, capped at 200 MB &asymp; 5 s) around the marker. '
+             +'It tunes a little above the target so its DC spike stays off the signal.<br><br>'
+            :'')
+          +'The Analyzer loads the <b>whole file into RAM</b> as complex samples (&asymp;<b>4&times; the file size</b>).<br><br>'
+          +'On a low-memory board like a <b>Pi Zero (512 MB)</b>, keep captures small: '
+          +'<span class="warn">&le; ~50 MB (~12 s)</span> &rarr; ~200 MB RAM. '
+          +'Pi 4/5 handle hundreds of MB fine.<br><br>'
+          +'For long captures, <b>download the .sigmf-data</b> and analyse it on a desktop (GNU Radio / inspectrum / URH).'
+        +'</div></span>';
+  };
+  Scope.prototype._wireIq=function(g){ var self=this;
+    this.iqBtn=g.querySelector('.iqbtn'); this.iqSec=g.querySelector('.iqsec'); this.iqStat=g.querySelector('.iqstat');
+    this.iqBtn.addEventListener('click',function(){ self.iqCapture(); });
+    this.iqList=g.querySelector('.iqlist'); this.iqOpen=g.querySelector('.iqopen');
+    this.iqOpen.addEventListener('click',function(){ self.openInAnalyzer(); });
+    g.querySelector('.iqrename').addEventListener('click',function(){ self.renameSession(); });
+    g.querySelector('.iqdel').addEventListener('click',function(){ self.deleteSession(); });
+    g.querySelector('.iqreload').addEventListener('click',function(){ self.refreshSessions(); });
+    var ib=g.querySelector('.infobtn'), ip=g.querySelector('.infopop');
+    if(ib&&ip){ ib.addEventListener('click',function(e){ e.stopPropagation(); ip.classList.toggle('show'); });
+      document.addEventListener('click',function(e){ if(!ip.contains(e.target)&&e.target!==ib) ip.classList.remove('show'); }); }
+    this.iqList.addEventListener('dblclick',function(){ self.openInAnalyzer(); });
+    this.refreshSessions();
+  };
+  Scope.prototype.buildIqBar=function(){ var g=this.recBar; g.innerHTML=this._iqMarkup(); this._wireIq(g); };
   // All recorded SigMF sessions (data/iq_captures) -> the Sessions dropdown, so
   // any past capture can be opened in the Analyzer, not just the latest one.
   Scope.prototype.refreshSessions=function(sel){ var self=this;
@@ -1162,35 +1183,56 @@
   // Raw-IQ capture to a SigMF recording. Centres on the marker (else the span
   // centre) at a single-tune sample rate; steals the dongle, so the live sweep
   // pauses and resumes when the capture finishes.
+  Scope.prototype._iqApi=function(){ return this.cfg.iq||{start:'/api/net/rtl/iq/start',status:'/api/net/rtl/iq/status'}; };
   Scope.prototype.iqCapture=function(){
-    var self=this; if(this._iqPoll) return;
+    var self=this, iq=this._iqApi(); if(this._iqPoll) return;
     var cMHz=(this.marker!=null)?this.marker:(this.lo+this.hi)/2;
-    var spanHz=(this.hi-this.lo)*1e6;
-    var sr=Math.min(2400000,Math.max(1000000,Math.round(Math.min(spanHz,2800000)*1.15)));
-    var body={center_hz:Math.round(cMHz*1e6),sr_hz:sr,seconds:parseFloat(this.iqSec.value)||2,
-              label:(this.zwave?this.zwave.sweepLabel:(this.liveBand||''))};
+    var spanHz=(this.hi-this.lo)*1e6, body;
+    var label=(this.zwave?this.zwave.sweepLabel:(this.liveBand||''));
+    if(iq.hackrf){
+      // The backend sizes the sample rate from the span (3x, 2-20 MS/s) and
+      // tunes ABOVE the target so the HackRF's DC spike stays off the signal.
+      body={center_hz:Math.round(cMHz*1e6),span_hz:Math.round(spanHz),seconds:parseFloat(this.iqSec.value)||2,
+            label:label,lna:this.hw.lna,vga:this.hw.vga,amp:this.hw.amp?1:0,antenna:this.hw.antenna?1:0};
+    } else {
+      var sr=Math.min(2400000,Math.max(1000000,Math.round(Math.min(spanHz,2800000)*1.15)));
+      body={center_hz:Math.round(cMHz*1e6),sr_hz:sr,seconds:parseFloat(this.iqSec.value)||2,label:label};
+    }
     this.iqStat.textContent='starting…';
-    fetch('/api/net/rtl/iq/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    fetch(iq.start,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
       .then(function(r){return r.json();}).then(function(res){
         if(!res||res.error){ self.iqStat.innerHTML='<span style="color:#fb7185">'+esc((res&&res.error)||'failed')+'</span>'; return; }
-        // The capture owns the dongle, but it feeds its own FFT rows to the
-        // waterfall — so keep polling frames and watch what is being recorded.
-        self._iqWasLive=(self.mode==='live'); self._followOnly=true;
-        if(self._iqWasLive){ self.stopLive(); self._rangeKnown=false; self.startLive(); }
+        self._iqWasLive=(self.mode==='live');
+        if(iq.hackrf){
+          // One radio: hackrf_transfer has it, so there are no sweep rows while it
+          // records. Stop polling frames and say what is being recorded.
+          if(self._poll){ clearInterval(self._poll); self._poll=null; }
+          self._iqSub=(res.sr_hz/1e6).toFixed(res.sr_hz%1e6?1:0)+' MS/s · '+res.seconds+' s · tuned to '+fmtMHz(res.center_hz/1e6)
+            +' ('+Math.round(res.offset_hz/1e3)+' kHz above '+fmtMHz(res.target_hz/1e6)+', off the DC spike). The sweep resumes when it finishes.';
+          self.showVeil('Recording raw IQ…',self._iqSub);
+        } else {
+          // The capture owns the dongle, but it feeds its own FFT rows to the
+          // waterfall — so keep polling frames and watch what is being recorded.
+          self._followOnly=true;
+          if(self._iqWasLive){ self.stopLive(); self._rangeKnown=false; self.startLive(); }
+        }
         self._iqPoll=setInterval(function(){ self.iqPoll(); },400); self.iqPoll();
       }).catch(function(){ self.iqStat.textContent='start failed'; });
   };
-  Scope.prototype.iqPoll=function(){ var self=this;
-    fetch('/api/net/rtl/iq/status').then(function(r){return r.json();}).then(function(st){
-      if(st.capturing){ self.iqStat.innerHTML='<span class="recdot">&#9679;</span> capturing '+(st.progress||0)+'%'; return; }
+  Scope.prototype.iqPoll=function(){ var self=this, iq=this._iqApi();
+    fetch(iq.status).then(function(r){return r.json();}).then(function(st){
+      if(st.capturing){ self.iqStat.innerHTML='<span class="recdot">&#9679;</span> capturing '+(st.progress||0)+'%';
+        if(iq.hackrf) self.showVeil('Recording raw IQ… '+(st.progress||0)+'%',self._iqSub||''); return; }
       if(self._iqPoll){ clearInterval(self._iqPoll); self._iqPoll=null; }
       self._followOnly=false;                       // the dongle is ours again
+      if(iq.hackrf) self.hideVeil();
       if(st.error){ self.iqStat.innerHTML='<span style="color:#fb7185">'+esc(st.error)+'</span>'; }
       else if(st.done && st.name){ var n=encodeURIComponent(st.name), mb=(st.bytes/1e6).toFixed(1);
         self.iqStat.innerHTML='<span style="color:var(--live)">&#10003; '+mb+' MB</span> '
           +'<a href="/api/net/rtl/iq/file?name='+n+'" download style="color:var(--cyan);margin:0 6px">.sigmf-data</a>'
           +'<a href="/api/net/rtl/iq/file?name='+n+'&kind=meta" download style="color:var(--cyan)">.sigmf-meta</a>'
-          +'<a href="/rf-analyzer?name='+n+'" target="_blank" style="color:var(--accent);margin-left:10px;font-weight:600">&#128200; Open in Analyzer</a>';
+          +'<a href="/rf-analyzer?name='+n+'" target="_blank" style="color:var(--accent);margin-left:10px;font-weight:600">&#128200; Open in Analyzer</a>'
+          +(st.warning?' <span style="color:var(--accent)" title="'+esc(st.warning)+'">&#9888; '+esc(st.warning)+'</span>':'');
         self.refreshSessions(st.name); }   // add the fresh capture to the Sessions dropdown
       // resume the sweep the capture interrupted
       if(self._iqWasLive && self.available){ self._iqWasLive=false; self.stopLive(); self._rangeKnown=false; self.resetCanvas(); self.startLive(); }
@@ -3575,6 +3617,7 @@
     api:{status:'/api/net/sdr/status',start:'/api/net/sdr/start',stop:'/api/net/sdr/stop',frames:'/api/net/sdr/frames'},
     synth:hackrfSynth, synthDefault:'2.4', synthBands:true, decode:false, zwave:true, minSpan:2,
     hwLo:1, hwHi:6000, tuneSpan:20,   // HackRF One: 1 MHz-6 GHz (sweeps every mesh/LoRa overlay band too)
+    iq:{start:'/api/net/sdr/iq/start',status:'/api/net/sdr/iq/status',stop:'/api/net/sdr/iq/stop',hackrf:true},   // raw IQ -> SigMF (hackrf_transfer)
     disp:{ref:-10,range:60},          // hackrf_sweep dB sits far lower than RTL dBFS: noise ~-68, peaks -50..-15 at LNA 24/VGA 20; the shared +5/-30 window painted 99% of it black
     liveBands:SUBGHZ_BANDS.concat([{id:'2.4',label:'2.4G'},{id:'5',label:'5G'},{id:'6',label:'6G'}]), defaultBand:'2.4' });
   scopes.push(hackrf); stack.appendChild(hackrf.el);

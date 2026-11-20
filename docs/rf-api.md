@@ -72,6 +72,12 @@ seconds, then restore the sweep that was running.
 | `GET /api/net/rtl/iq/list` | Captures on the box |
 | `GET /api/net/rtl/iq/file?name=…&kind=data\|meta` | Download either half of a SigMF pair |
 | `POST /api/net/rtl/iq/rename`, `…/iq/delete` | Housekeeping |
+| `POST /api/net/sdr/iq/start` | HackRF: `{center_hz, span_hz, seconds, name, label, lna, vga, amp, antenna}` — raw IQ (`ci8`) to SigMF at 3× `span_hz` (2–20 MS/s), tuned above `center_hz` off the DC spike. Pauses the sweep |
+| `GET /api/net/sdr/iq/status` | HackRF capture progress, `error`, or a `warning` if the disk fell behind |
+| `POST /api/net/sdr/iq/stop` | Stop a HackRF capture early (the partial file is discarded) |
+
+The `iq/list`, `rename`, `delete` and `file` routes cover both radios' captures
+(one folder, `data/iq_captures/`).
 
 The waterfall keeps running during a capture: the capture feeds it rows.
 

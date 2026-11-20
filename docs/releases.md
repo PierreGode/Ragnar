@@ -4,6 +4,19 @@
 
 ### 2026-11-20
 
+#### feat(sdr): HackRF raw-IQ capture to SigMF — record it, open it in the Signal Analyzer
+
+*branch `feat/hackrf-sigmf-capture`*
+
+- **The HackRF panel can now record raw IQ for the Signal Analyzer.** Until now only the RTL-SDR panel had **⤓ SigMF**; the HackRF ran `hackrf_sweep`, which measures power per bin, not IQ. Its panel now has the same IQ bar — seconds box, **⤓ SigMF**, **Sessions**, **📈 Analyzer**, Rename, Delete — recording with `hackrf_transfer` as `ci8` SigMF (which the Analyzer already decodes) into `data/iq_captures/`, the same folder and list as the RTL captures.
+- **Sample rate follows the zoom:** 3× the span on screen, 2–20 MS/s, centred on the marker (else the view centre); one capture is capped at 200 MB.
+- **Offset tuning keeps the HackRF's DC spike off the signal:** the LO sits 0.2× the sample rate above the target, so the requested window stays inside the baseband filter and clear of the spike; `core:frequency` is the real LO. Measured on a capture at Wi-Fi ch 6: spike at the LO ~50 dB over the floor and gone within 50 kHz; the requested window clean (median −81 dB). `iq_plan()` is pure with 7 selftest checks (45/45).
+- **One radio, guarded:** the sweep pauses while it records and resumes on its own; `status()` no longer opens the radio (`hackrf_info`) during a capture or the TX pilot tone — the same guard the sweep already had — and a sweep start is refused while a capture runs.
+- The `.sigmf-meta` carries the sha512, GPS fix (when there is one), LNA/VGA/amp/antenna-power, the target frequency and an annotation for the requested window. A capture that took far longer than its length is flagged (the disk could not keep up).
+- Phone: the ⓘ size note under the IQ bar now opens inside the screen gutters instead of running off the right edge (affects the RTL bar too).
+- Verified on the live HackRF: 1 s at 6 MS/s = exactly 12,000,000 bytes, status polled throughout without disturbing it; the page's button → 20.0 MB at 20 MS/s → "Open in Analyzer" → sweep back at 20 rows/s, no page errors; the Signal Analyzer opened the capture (6 MS/s, 1 s, 9 carriers, noise −83 dB).
+- **Docs:** [rf-waterfall.md › HackRF raw-IQ capture](rf-waterfall.md#hackrf-raw-iq-capture), [rf-waterfall-guide.md › Capturing and exporting](rf-waterfall-guide.md), [rf-api.md](rf-api.md), [knowledgebase.md](knowledgebase.md), [README (root)](../README.md).
+
 #### fix(sdr): HackRF waterfall was dark and laggy — own colour window, playout servo, 20 rows/s
 
 *branch `fix/hackrf-waterfall-colour-window`*
