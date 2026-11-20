@@ -30946,6 +30946,73 @@ def do_routing_selftest():
 
 
 # --------------------------------------------------------------------------
+# Async wrapper for the self-test sweep
+# --------------------------------------------------------------------------
+# do_routing_selftest() fans out to ~60 detector suites in one synchronous call;
+# on a small single-core board (a Pi Zero) that is minutes of Scapy work — longer
+# than a mobile client can hold a request open, so the sync endpoint reads as a
+# timeout even though the box is fine. Run the sweep in a background thread and
+# let callers start it, then poll for the result. One job at a time; the last
+# completed report is cached, so a poll after it finishes returns the full report
+# unchanged (same shape do_routing_selftest() returns).
+_selftest_job = {
+    'status': 'idle',      # idle | running | done | error
+    'started': None,
+    'finished': None,
+    'result': None,
+    'error': None,
+}
+_selftest_lock = threading.Lock()
+
+
+def _routing_selftest_worker():
+    try:
+        res = do_routing_selftest()
+        with _selftest_lock:
+            _selftest_job.update(result=res, error=None,
+                                 status='done', finished=time.time())
+    except Exception as exc:  # a crashing suite must not wedge the job as 'running'
+        with _selftest_lock:
+            _selftest_job.update(result=None, error=str(exc),
+                                 status='error', finished=time.time())
+
+
+def do_routing_selftest_start():
+    """Kick off the self-test sweep in the background. Idempotent while running:
+    a second start returns the in-progress job rather than launching a parallel
+    sweep (two concurrent sweeps would only fight over the one CPU)."""
+    with _selftest_lock:
+        if _selftest_job['status'] == 'running':
+            started = _selftest_job['started']
+            return {'success': True, 'status': 'running', 'already_running': True,
+                    'started': started,
+                    'elapsed': round(time.time() - started, 1) if started else 0}
+        _selftest_job.update(status='running', started=time.time(),
+                             finished=None, result=None, error=None)
+        started = _selftest_job['started']
+    threading.Thread(target=_routing_selftest_worker,
+                     name='routing-selftest', daemon=True).start()
+    return {'success': True, 'status': 'running', 'started': started}
+
+
+def do_routing_selftest_status():
+    """Poll the background self-test. Returns the job status plus, once done, the
+    full report under 'result' (so a client renders it exactly as before)."""
+    with _selftest_lock:
+        job = dict(_selftest_job)
+    out = {'success': True, 'status': job['status'],
+           'started': job['started'], 'finished': job['finished']}
+    if job['started']:
+        end = job['finished'] or time.time()
+        out['elapsed'] = round(end - job['started'], 1)
+    if job['status'] == 'done':
+        out['result'] = job['result']
+    elif job['status'] == 'error':
+        out['error'] = job['error']
+    return out
+
+
+# --------------------------------------------------------------------------
 # BGP Route Collector (receive-only speaker) + Path Asymmetry (OWD) + correlator
 # --------------------------------------------------------------------------
 # Control-plane truth (bgp_speaker.BGPSpeaker's Adj-RIB-In) tied to data-plane
@@ -33383,6 +33450,16 @@ def register_network_diagnostics(app, logger=None):
     def net_routing_selftest():
         _log("net/routing-selftest")
         return jsonify(do_routing_selftest())
+
+    @app.route('/api/net/routing-selftest/start', methods=['POST'])
+    def net_routing_selftest_start():
+        _log("net/routing-selftest start")
+        return jsonify(do_routing_selftest_start())
+
+    @app.route('/api/net/routing-selftest/status', methods=['GET'])
+    def net_routing_selftest_status():
+        _log("net/routing-selftest status")
+        return jsonify(do_routing_selftest_status())
 
     @app.route('/api/net/identity', methods=['GET'])
     def net_identity():

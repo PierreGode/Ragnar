@@ -12961,7 +12961,19 @@ async function runRoutingSelftest() {
     out.classList.remove('hidden');
     out.innerHTML = '<p class="text-sm text-gray-400">Running IGMP / OSPF / BGP detector self-tests…</p>';
     try {
-        const d = await fetchAPI('/api/net/routing-selftest');
+        // The full sweep (~60 detector suites) is minutes of Scapy work on a
+        // small board — too long to hold one request open. Start it in the
+        // background and poll, updating the running line with elapsed seconds.
+        await postAPI('/api/net/routing-selftest/start', {});
+        let d = null;
+        for (let i = 0; i < 300; i++) {            // ~15 min ceiling at 3s/poll
+            await new Promise(r => setTimeout(r, 3000));
+            const s = await fetchAPI('/api/net/routing-selftest/status');
+            if (s && s.status === 'done') { d = s.result; break; }
+            if (s && s.status === 'error') throw new Error(s.error || 'self-test failed');
+            if (out) out.innerHTML = '<p class="text-sm text-gray-400">Running IGMP / OSPF / BGP detector self-tests… '
+                + (s && s.elapsed != null ? Math.round(s.elapsed) + 's' : '') + '</p>';
+        }
         if (!d || d.success === undefined) {
             out.innerHTML = '<p class="text-sm text-red-400">Self-test failed to run.</p>';
             return;
