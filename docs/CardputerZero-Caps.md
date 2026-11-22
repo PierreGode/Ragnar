@@ -164,6 +164,13 @@ detects (an M5Stack GPS Unit is 9600). Within a minute the GPS indicator in the
 same fix (`meshtastic_share_gps`). The *System → CardputerZero hardware* panel
 shows a **GPS (Grove port)** row once the receiver is found.
 
+> **Connect it with the unit powered off.** Like the Caps, plug the GPS in before
+> you power the Cardputer on. Hot-plugging a GPS onto the live Grove 5 V rail
+> draws a current surge that can brown the board out for a moment — you may see
+> the LCD or the battery read-out glitch. (Ragnar rides a brief battery-gauge
+> glitch out now — the icon keeps its last reading and recovers on its own rather
+> than vanishing until a reboot — but a cold connect avoids the surge altogether.)
+
 > One UART, one receiver. The Grove GPS and a LoRa + GNSS Cap use the same port,
 > so use one or the other. When a LoRa + GNSS Cap is fitted, Ragnar leaves the
 > Grove probe alone and uses the Cap's GNSS.
