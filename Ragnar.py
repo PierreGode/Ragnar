@@ -99,6 +99,32 @@ class Ragnar:
         except Exception as e:
             logger.debug(f"CardputerZero Grove power not set: {e}")
 
+        # CardputerZero: a UART GPS on the Grove port (e.g. an M5Stack GPS Unit,
+        # no Cap) talks NMEA on the same /dev/ttyS0 the Cap's GNSS uses. Hand the
+        # port to it — the same way Ragnar frees the UART for the Cap — so
+        # wardriving and the Meshtastic node get a fix. In a thread: the probe
+        # listens for a few seconds and must not hold up start-up.
+        try:
+            import cardputer_caps
+            if (shared_data.config.get('cardputer_free_gnss_uart', True)
+                    and cardputer_caps.is_cardputer_zero(shared_data.config)):
+                def _grove_gps_probe():
+                    try:
+                        cardputer_caps.allow_expander(shared_data.config)
+                        g = cardputer_caps.detect_grove_gnss(
+                            shared_data.config,
+                            free_uart=bool(shared_data.config.get('cardputer_free_gnss_uart', True)))
+                        if g and g.get('present'):
+                            logger.info("CardputerZero Grove GPS on %s @ %s baud",
+                                        g.get('port'), g.get('baud'))
+                    except Exception as e:
+                        logger.debug(f"CardputerZero Grove GPS probe: {e}")
+                import threading as _threading
+                _threading.Thread(target=_grove_gps_probe, name="grove-gps-probe",
+                                  daemon=True).start()
+        except Exception as e:
+            logger.debug(f"CardputerZero Grove GPS not set: {e}")
+
         # Built-in fuel gauge (kernel power-supply class; the CardputerZero's
         # BQ27220), auto-detected
         self.builtin_battery = None
