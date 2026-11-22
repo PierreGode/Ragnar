@@ -174,9 +174,10 @@ def test_another_chip_on_the_address_is_not_taken_for_a_battery(tmp_path, bad):
     assert g.closed
 
 
-def test_i2c_gauge_reopens_after_a_bus_glitch(tmp_path):
-    """A bus error (the brownout case) closes the fd; the monitor reopens it on
-    the next poll and the reading returns, rather than staying blank."""
+def test_i2c_gauge_reopens_after_repeated_bus_errors(tmp_path):
+    """A bus error keeps the last value on show; the gauge is reopened only every
+    Nth failure (not every blip, which would thrash an already-busy bus), and the
+    reading returns once the bus is back."""
     state = {"fail": False, "opens": 0}
 
     class Flaky(FakeGauge):
@@ -191,12 +192,15 @@ def test_i2c_gauge_reopens_after_a_bus_glitch(tmp_path):
 
     m = monitor(tmp_path, opener=Flaky)       # tmp_path has no sysfs gauge → i2c path
     assert m.probe() and m.poll() and m.get_battery_level() == 55
+    opens0 = state["opens"]
     state["fail"] = True
-    assert not m.poll()                        # fd closed on the error
+    for _ in range(sb.REOPEN_EVERY):
+        assert not m.poll()
     assert m.available and m.get_battery_level() == 55   # last value still shown
-    state["fail"] = False
-    assert m.poll() and m.get_battery_level() == 55      # reopened and reading again
-    assert state["opens"] >= 2
+    assert state["opens"] == opens0                       # not reopened on every blip
+    state["fail"] = False                                 # the Nth failure closed the fd
+    assert m.poll() and m.get_battery_level() == 55       # reopened, reading again
+    assert state["opens"] == opens0 + 1
 
 
 def test_kernel_gauge_wins_over_i2c(tmp_path):

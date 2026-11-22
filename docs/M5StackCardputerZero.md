@@ -455,6 +455,28 @@ On the framebuffer path the kernel owns the expander and the backlight, which ap
 Read/modify/write is used on the expander's GPIO registers so Ragnar never clobbers the
 other pins on the same registers (which hold board power and peripheral-reset state).
 
+### If the screen blanks or the Grove/battery reading flickers
+
+The expander, the fuel gauge and the rail reads all share I²C bus 1, and on some
+units that bus is marginal — the expander intermittently stops answering for a
+moment. Because that one chip drives the backlight **and** the 5 V rails **and**
+sits next to the gauge, a blip can look like three separate faults at once: the
+LCD goes black, the Grove/Cap rail reads as "off," and the battery icon vanishes.
+It is **not** a power/undervoltage fault (`vcgencmd get_throttled` stays `0x0`).
+
+Ragnar is built to ride a blip out rather than let it stick:
+- All bus-1 access (expander + gauge) is serialised behind one lock (`i2c_bus.py`),
+  so our own threads never race a read-modify-write on the shared GPIO byte.
+- A rail read that blips keeps its **last known** value instead of reporting a
+  false "off" (`cardputer_caps._rail_last`).
+- The render loop **re-asserts the backlight every few seconds**, so if the
+  expander dropped the PWM output the screen comes back on its own.
+- The battery monitor keeps the last reading through a blip and only re-opens the
+  gauge every few failures, instead of hammering a busy bus.
+
+If a unit still blanks often, the bus itself is suspect: check the I²C pull-ups
+and the expander's solder joints, and compare against another unit.
+
 ### Environment overrides
 If a board revision moves a pin, correct it without touching code:
 

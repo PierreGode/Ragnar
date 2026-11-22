@@ -155,6 +155,17 @@ GROVE5V_PATH = os.environ.get("RAGNAR_GROVE_5V", "/sys/class/leds/grove_5v_out/b
 GROVE5V_EXPANDER_IO = 4
 _use_expander = False        # set by detect()/power_on_cap() on a known CardputerZero
 _grove_gnss = None           # cache: last detect_grove_gnss() result (dict) or None
+_rail_last = {}              # io -> last successfully-read rail state (True/False)
+
+import contextlib as _contextlib
+try:
+    import i2c_bus as _i2c_bus
+
+    def _bus_lock():
+        return _i2c_bus.lock()
+except Exception:            # pragma: no cover - keep rail access working regardless
+    def _bus_lock():
+        return _contextlib.nullcontext()
 
 
 def _expander():
@@ -179,22 +190,33 @@ def _expander_rail_state(exp, io=EXT5V_EXPANDER_IO):
 
 
 def _rail_state(path, io):
+    """True/False for a switched 5 V rail, None when the board has no such
+    switch. A rail physically holds its state, so a transient I2C read blip on
+    the expander must NOT be reported as "off" — it returns the last value we
+    actually read (sticky). Genuinely-absent switches stay None."""
     value = _read_text(path)
     if value is None:
         exp = _expander()
         if exp is None:
-            return None
+            # No expander allowed on this board → genuinely no switch (None).
+            # Expander allowed but not answering this instant → keep the last read.
+            return _rail_last.get(io) if _use_expander else None
         try:
-            return _expander_rail_state(exp, io)
+            with _bus_lock():
+                state = _expander_rail_state(exp, io)
+            _rail_last[io] = state
+            return state
         except Exception as e:
-            logger.debug(f"5 V switch: expander read failed: {e}")
-            return None
+            logger.debug(f"5 V switch: expander read failed (keeping last state): {e}")
+            return _rail_last.get(io)           # sticky through a read blip
         finally:
             exp.close()
     try:
-        return int(value) > 0
+        state = int(value) > 0
+        _rail_last[io] = state
+        return state
     except ValueError:
-        return None
+        return _rail_last.get(io)
 
 
 def _set_rail(on, path, io):
@@ -203,8 +225,14 @@ def _set_rail(on, path, io):
         if exp is None:
             return False
         try:
-            exp._set_gpio(io, bool(on))
-            return _expander_rail_state(exp, io) is bool(on)
+            with _bus_lock():
+                exp._set_gpio(io, bool(on))      # the write itself
+                try:
+                    ok = _expander_rail_state(exp, io) is bool(on)
+                except Exception:
+                    ok = True                    # write did not throw; readback blipped
+            _rail_last[io] = bool(on)            # we commanded it; remember that state
+            return ok
         except Exception as e:
             logger.warning(f"5 V switch: expander write failed: {e}")
             return False
@@ -216,6 +244,7 @@ def _set_rail(on, path, io):
     except OSError as e:
         logger.warning(f"5 V switch: cannot write {path}: {e}")
         return False
+    _rail_last[io] = bool(on)
     return _rail_state(path, io) is bool(on)
 
 

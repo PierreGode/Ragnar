@@ -2,6 +2,24 @@
 
 ## Releases
 
+### 2026-11-23
+
+#### fix(cardputer): ride out I²C expander blips — no more stuck black screen / false "Grove off" / vanishing battery
+
+*branch `fix/cardputer-i2c-expander-resilience`*
+
+Read-only diagnosis of a live unit showed the real cause of the black-screen / "Grove says off" / battery-disappears cluster: the **M5IOE1 I²C expander (0x4F) intermittently stops answering on bus 1** — seen flapping with the GPS unplugged, Grove off, and the CPU idle (so **not** power: `vcgencmd get_throttled` stayed `0x0`, and not the GPS load). That one chip drives the LCD backlight + reset **and** both 5 V rails **and** shares the bus with the fuel gauge, so a single blip looks like three faults. These changes make Ragnar ride a blip out instead of letting it stick:
+
+- **One lock for all I²C bus-1 access** (new `i2c_bus.py`): the expander (`m5ioe1.py`) and the gauge (`sysfs_battery.py`) now serialise on a shared re-entrant lock, so our own threads can't race a read-modify-write on the shared GPIO byte (where the backlight-reset bit and the rail-enable bits live together).
+- **Rail reads are sticky:** a blip on the expander keeps the **last known** rail state instead of reporting a false "off," and turning a rail on through a read-back blip no longer reports failure (`cardputer_caps`).
+- **Backlight keep-alive:** the render loop re-asserts the LCD backlight every few seconds, so if the expander dropped the PWM output the screen comes back on its own instead of staying black until a reboot.
+- **Battery monitor backs off:** it keeps the last reading through a blip and only re-opens the I²C gauge every few failures, instead of hammering an already-busy bus every poll.
+
+These are resilience fixes — they stop a marginal bus from turning into stuck, user-visible breakage. A genuinely faulty bus (pull-ups / expander solder) still needs a hardware look; the docs say how to tell.
+
+- Tests: sticky rail state + read-back-blip tolerance, battery reopen backoff, backlight keep-alive cadence; full cardputer + battery group (341) passes.
+- Docs: [M5StackCardputerZero.md → If the screen blanks or the Grove/battery reading flickers](M5StackCardputerZero.md).
+
 ### 2026-11-22
 
 #### fix(cardputer): Grove port 5 V is now OFF by default — no inrush brownout at start

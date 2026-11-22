@@ -29,10 +29,20 @@ it: see ups_hat.battery_source().
 CLI:  python3 sysfs_battery.py        one reading (exit 1 when none is found)
 """
 
+import contextlib
 import logging
 import os
 import sys
 import threading
+
+try:
+    import i2c_bus
+
+    def _bus_lock():
+        return i2c_bus.lock()
+except Exception:                      # pragma: no cover - battery must still work
+    def _bus_lock():
+        return contextlib.nullcontext()
 
 try:
     from logger import Logger
@@ -45,6 +55,7 @@ POWER_SUPPLY_ROOT = "/sys/class/power_supply"
 POLL_SECONDS = 10
 MAX_FAILURES = 6            # consecutive bad polls counted as "degraded" (logs a recovery)
 DROP_AFTER = 30            # consecutive bad polls (~5 min) before the reading is dropped
+REOPEN_EVERY = 3           # reopen the I2C gauge only every Nth failed poll, not every one
 PROBE_ATTEMPTS = 6          # the driver can bind a little after we start at boot
 
 # --- BQ27220 standard commands (little-endian 16-bit words) --------------------
@@ -161,10 +172,12 @@ class Bq27220Reader:
 
     def read(self):
         """One sample: dict(level, voltage, charging), or None when the answer
-        is not a plausible single-cell gauge reading."""
-        level = self._word(BQ_CMD_SOC)
-        voltage = self._word(BQ_CMD_VOLTAGE) / 1000.0
-        current = self._word(BQ_CMD_CURRENT)
+        is not a plausible single-cell gauge reading. Held under the shared
+        bus-1 lock so it does not interleave with the expander's reads/writes."""
+        with _bus_lock():
+            level = self._word(BQ_CMD_SOC)
+            voltage = self._word(BQ_CMD_VOLTAGE) / 1000.0
+            current = self._word(BQ_CMD_CURRENT)
         if current > 0x7FFF:
             current -= 0x10000
         if not 0 <= level <= 100:
@@ -268,7 +281,10 @@ class SysfsBatteryMonitor:
             sample = self._reader.read()
         except Exception as e:
             logger.debug(f"battery read failed: {e}")
-            self._close()                 # a stale fd: reopen (re-probe) next poll
+            # A stale fd needs a reopen, but reopening on *every* blip piles I2C
+            # traffic onto an already-busy bus. Only reopen every Nth failure.
+            if (self._failures + 1) % REOPEN_EVERY == 0:
+                self._close()             # reopen (re-probe) on the next poll
             return self._note_failure()
         if sample is None:
             return self._note_failure()
