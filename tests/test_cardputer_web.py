@@ -48,7 +48,7 @@ def test_hardware_scan_runs_in_the_background_and_is_served(web, monkeypatch):
     calls = []
 
     def detect(config=None, power=True, probe_serial=True, camera=True, reidentify=False,
-               free_uart=False):
+               free_uart=False, grove=False):
         calls.append({"probe_serial": probe_serial, "camera": camera, "reidentify": reidentify})
         return {"board": True, "ext5v": True, "cap": "lora_gnss",
                 "cap_name": "Cap LoRa-1262 + GNSS", "radios": ["SX1262"], "pins": {},
@@ -81,7 +81,7 @@ def test_gnss_port_is_not_probed_while_gps_has_it(web, monkeypatch):
     import cardputer_caps
     seen = []
     monkeypatch.setattr(cardputer_caps, "is_cardputer_zero", lambda cfg=None: True)
-    monkeypatch.setattr(cardputer_caps, "detect", lambda config=None, power=True, probe_serial=True, camera=True, reidentify=False, free_uart=False:
+    monkeypatch.setattr(cardputer_caps, "detect", lambda config=None, power=True, probe_serial=True, camera=True, reidentify=False, free_uart=False, grove=False:
                         seen.append(probe_serial) or {"board": False, "gnss": {"sentences": 0}})
     monkeypatch.setattr(web, "_cz_gnss_port_in_use", lambda: True)
     info = web._cz_detect_now()

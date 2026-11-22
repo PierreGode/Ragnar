@@ -13,6 +13,7 @@ itself (screen, keyboard, battery, install) see
 |---|---|---|
 | Any Cap, the 14-pin header | **System** → *CardputerZero hardware* | See which Cap is fitted, its radios, Cap power, and the live state of all 14 pins |
 | GNSS (LoRa Cap) | **Wardriving** tab; state also under **System** → *CardputerZero hardware* | GPS position for wardriving and maps, with no USB GPS puck |
+| GPS on the Grove port (e.g. M5Stack GPS Unit, no Cap) | **Wardriving** tab; state also under **System** → *CardputerZero hardware* | Same GPS for wardriving, maps and the Meshtastic node, straight from the Grove port |
 | LoRa SX1262 (LoRa Cap) | **Network** → **Signal Intelligence** → **Mesh Nodes** | Run it as a Meshtastic node: node list, messages, map |
 | Sub-GHz CC1101 (CC1101 Cap) | **Network** → **Signal Intelligence** → **RF Waterfall page** → *Sub-GHz (CC1101)* panel | Watch activity on 315 / 433 / 868 / 915 MHz |
 | NFC ST25R3916 (CC1101 Cap) | Not in the UI | Not supported yet |
@@ -125,6 +126,47 @@ sudo stty -F /dev/ttyS0 115200 raw && sudo cat /dev/ttyS0
 ```
 
 You should see lines starting with `$GN` or `$GP`.
+
+---
+
+## GPS on the Grove port
+
+You do not need the LoRa Cap to have GPS. The Grove port on the side is a UART
+(Port C), so a plain UART GPS — for example the **M5Stack GPS Unit** (AT6668,
+labelled *PORT.C.UART*) — plugs straight in and drives **wardriving** and the
+**Meshtastic** node, exactly like the Cap's GNSS.
+
+**Why it just works.** The Grove port's data lines are the same `/dev/ttyS0` the
+Cap's GNSS uses, so there is only one thing to arrange: the serial login prompt
+that Linux puts on that UART has to come off, or it eats the receiver's data.
+Ragnar does that the same way it does for the Cap — it powers the Grove port at
+start (`cardputer_grove_power`), listens for a receiver on the UART, and when it
+hears NMEA it hands the port to GPS (stops the login prompt, takes the serial
+console out of `cmdline.txt`, keeping `cmdline.txt.ragnar-bak`). If nothing is
+heard, the login prompt is left alone, so a unit with no Grove GPS keeps its
+serial console.
+
+**Setup:** none. Plug the GPS into the Grove port and power on. Leave **GPS
+Serial Port** on `auto` and **GPS Baud Rate** as it is — Ragnar uses the rate it
+detects (an M5Stack GPS Unit is 9600). Within a minute the GPS indicator in the
+**Wardriving** tab shows the fix, and the Meshtastic node on this unit gets the
+same fix (`meshtastic_share_gps`). The *System → CardputerZero hardware* panel
+shows a **GPS (Grove port)** row once the receiver is found.
+
+> One UART, one receiver. The Grove GPS and a LoRa + GNSS Cap use the same port,
+> so use one or the other. When a LoRa + GNSS Cap is fitted, Ragnar leaves the
+> Grove probe alone and uses the Cap's GNSS.
+
+**Switch it off:** set `cardputer_grove_gnss` to `false` to stop Ragnar probing
+the Grove port and keep the serial login console; `true` always hands the UART
+over (skip the listen). The master switch `cardputer_free_gnss_uart: false` keeps
+the serial console for both the Cap and the Grove GPS.
+
+**Check from a shell** (stop wardriving first):
+
+```bash
+sudo stty -F /dev/ttyS0 9600 raw && sudo cat /dev/ttyS0   # M5 GPS Unit is 9600
+```
 
 ---
 
@@ -436,8 +478,9 @@ All in `config/shared_config.json`; none of them is needed for normal use.
 |---|---|---|
 | `cardputer_cap_power` | `true` | Switch the header's 5 V on at start. `false`: Ragnar leaves it alone, and a Cap stays unpowered |
 | `cardputer_grove_power` | `true` | Switch the Grove port's 5 V pin on at start, so a Grove unit works when plugged in. `false`: left off. **fn** + **Backspace** (the **del** key) on the CardputerZero switches it off and on at any time and saves the choice here |
-| `cardputer_free_gnss_uart` | `true` | With the LoRa + GNSS Cap fitted, take the serial login prompt off the UART so GPS can read it. `false`: Ragnar only reports it |
-| `wardriving_gps_port` | `auto` | Which serial port the GPS reads. `auto` finds the Cap's GNSS |
+| `cardputer_free_gnss_uart` | `true` | With a GNSS receiver on the UART (the LoRa + GNSS Cap, or a GPS on the Grove port), take the serial login prompt off the UART so GPS can read it. `false`: Ragnar only reports it, and the serial console stays |
+| `cardputer_grove_gnss` | `auto` | A UART GPS on the Grove port (no Cap). `auto` listens for it and hands over the UART when heard; `true` always hands over; `false` never (keeps the serial console) |
+| `wardriving_gps_port` | `auto` | Which serial port the GPS reads. `auto` finds the Cap's GNSS or a Grove GPS |
 | `wardriving_gps_baudrate` | `9600` | Fallback only; the detected rate wins |
 
 ---

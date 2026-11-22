@@ -154,6 +154,7 @@ EXT5V_EXPANDER_IO = 13
 GROVE5V_PATH = os.environ.get("RAGNAR_GROVE_5V", "/sys/class/leds/grove_5v_out/brightness")
 GROVE5V_EXPANDER_IO = 4
 _use_expander = False        # set by detect()/power_on_cap() on a known CardputerZero
+_grove_gnss = None           # cache: last detect_grove_gnss() result (dict) or None
 
 
 def _expander():
@@ -488,6 +489,103 @@ def restore_serial_console(port=None, root="", runner=None):
     return True, "no saved cmdline.txt to restore; the login prompt is allowed again"
 
 
+def _grove_gnss_mode(config=None):
+    """cardputer_grove_gnss: 'auto' (default) finds a Grove GPS by listening;
+    'true'/'on' always hands the UART over; 'false'/'off' never does."""
+    cfg = config if config is not None else saved_config()
+    value = str(cfg.get("cardputer_grove_gnss", "auto")).strip().lower()
+    return value if value in ("auto", "true", "on", "false", "off") else "auto"
+
+
+def reset_grove_gnss():
+    """Forget the cached Grove-GPS result (a Refresh re-probes)."""
+    global _grove_gnss
+    _grove_gnss = None
+
+
+def detect_grove_gnss(config=None, free_uart=True, runner=None, force=False,
+                      baud_probe=None):
+    """A plain UART GPS on the **Grove port** (Port C), with no Cap fitted — for
+    example an M5Stack GPS Unit (AT6668). It talks NMEA on the same UART the LoRa
+    Cap's GNSS uses (`/dev/ttyS0`), so the only thing standing between it and
+    wardriving / the Meshtastic node is the serial login prompt. This finds the
+    receiver and hands the port to GPS the same way Ragnar does for the Cap.
+
+    Returns a cached dict (``present``, ``port``, ``baud``, ``sentences``,
+    ``console_conflict``, ``freed``, ``source``) or ``None`` when this is not a
+    CardputerZero or the feature is switched off. The probe needs the port to
+    itself, so an active login prompt is stopped for it; if nothing answers, the
+    prompt is started again, so a unit with no Grove GPS keeps its console."""
+    global _grove_gnss
+    if _grove_gnss is not None and not force:
+        return _grove_gnss
+    if not is_cardputer_zero(config):
+        return None
+    if _grove_gnss_mode(config) in ("false", "off"):
+        return None
+    # The Cap owns this UART when it is fitted; leave that path to the Cap.
+    if identify_cap()[0] == CAP_LORA_GNSS:
+        return None
+    # Another reader already holds the UART (a running GPS): don't open it a
+    # second time to probe — the two reads would split the receiver's data.
+    try:
+        import serial_claims
+        if os.path.realpath(GNSS_PORT) in serial_claims.claimed():
+            return None
+    except Exception:
+        pass
+
+    result = {"present": False, "port": GNSS_PORT, "baud": None, "sentences": 0,
+              "console_conflict": False, "freed": None, "source": "grove"}
+    transient = False
+    if serial_getty_active(runner=runner):
+        if not free_uart:
+            result["console_conflict"] = True
+            _grove_gnss = result
+            return result
+        _systemctl("stop", _getty_unit(), runner=runner)
+        if serial_getty_active(runner=runner):
+            result["console_conflict"] = True        # could not stop it (not root)
+            _grove_gnss = result
+            return result
+        transient = True
+
+    probe = baud_probe
+    if probe is None:
+        try:
+            from gps_manager import probe_nmea_baud as probe
+        except Exception as e:
+            logger.debug(f"Grove GNSS: no baud probe ({e})")
+            probe = lambda _port: None
+    baud = None
+    try:
+        baud = probe(GNSS_PORT)
+    except Exception as e:
+        logger.debug(f"Grove GNSS probe failed: {e}")
+
+    if baud:
+        result.update(present=True, baud=baud, sentences=3)
+        if transient:
+            ok, message = free_gnss_uart(runner=runner)
+            result["freed"] = "freed" if ok else None
+            logger.info(f"Grove GPS on {GNSS_PORT} @ {baud} baud: {message}")
+        else:
+            logger.info(f"Grove GPS on {GNSS_PORT} @ {baud} baud")
+    elif transient:
+        _systemctl("start", _getty_unit(), runner=runner)   # nothing there: give it back
+    _grove_gnss = result
+    return result
+
+
+def grove_gnss_standby():
+    """(port, baud) for the Meshtastic standby GPS reader when a Grove GPS was
+    found, else (None, None)."""
+    g = _grove_gnss
+    if g and g.get("present"):
+        return g.get("port"), g.get("baud")
+    return None, None
+
+
 def probe_gnss(port=None, baud=GNSS_BAUD, seconds=2.0, opener=None):
     """Listen for NMEA on the UART. Returns the number of valid sentences
     seen (0 = silent). Never writes to the port."""
@@ -749,7 +847,7 @@ def identify_cap(force=False):
 
 
 def detect(config=None, power=True, probe_serial=True, camera=True, reidentify=False,
-           free_uart=False):
+           free_uart=False, grove=False):
     """What is on the header and whether the camera answers.
 
     Returns a dict: board, ext5v, cap ('none' / 'lora_gnss' / 'subghz_nfc'),
@@ -792,6 +890,18 @@ def detect(config=None, power=True, probe_serial=True, camera=True, reidentify=F
         result["lora"] = lora_daemon_state()
     if result["cap"] == CAP_SUBGHZ_NFC:
         result["nfc_spi"] = os.path.exists(NFC_SPI_DEV)
+    # No LoRa+GNSS Cap, but a GPS may be on the Grove port (Port C UART). Only
+    # when the GPS reader does not already hold the port (probe_serial).
+    if grove and result["cap"] == CAP_NONE and probe_serial:
+        g = detect_grove_gnss(config, free_uart=free_uart)
+        if g is not None:
+            result["grove_gnss"] = bool(g.get("present"))
+            if g.get("present") or g.get("console_conflict"):
+                result["gnss"] = {"port": g["port"], "baud": g.get("baud"),
+                                  "sentences": g.get("sentences", 0),
+                                  "console_conflict": g.get("console_conflict", False),
+                                  "kernel_console": serial_console_on(),
+                                  "freed": g.get("freed"), "source": "grove"}
     result["camera"] = detect_camera() if camera else None
     return result
 
@@ -828,7 +938,7 @@ def main():
         # Which Cap is fitted, for the setup script: "lora_gnss", "subghz_nfc" or nothing.
         print(detect(config, probe_serial=False, camera=False).get("cap") or "")
         return 0
-    info = detect(config)
+    info = detect(config, grove=True)
     if "--json" in sys.argv:
         info["header"] = header_state()
         print(json.dumps(info, indent=2))

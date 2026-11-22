@@ -30066,6 +30066,7 @@ function updateCardputerHardwareView(d) {
         if (d.gnss) {
             let text, cls = 'pw-ok';
             const g = d.gps;
+            const label = d.gnss.source === 'grove' ? 'GPS (Grove port)' : 'GNSS';
             if (d.gnss.console_conflict) {
                 text = 'A serial login prompt is using the port'; cls = 'pw-bad';
             } else if (g && g.connected) {
@@ -30077,7 +30078,7 @@ function updateCardputerHardwareView(d) {
             } else {
                 text = 'Silent'; cls = 'pw-bad';
             }
-            rows.push(_czRow('GNSS', text, cls));
+            rows.push(_czRow(label, text, cls));
             if (d.gnss.console_conflict) {
                 rows.push(_czFix('gnss', 'Free the port for GPS',
                     'Stops the serial login prompt now and removes the serial console from cmdline.txt (a backup is kept). GPS then works for wardriving.'));

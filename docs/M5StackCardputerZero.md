@@ -258,8 +258,19 @@ Only one Cap fits at a time: both use SPI chip-select 1. The panel's **Refresh**
 button updates GNSS, camera and pin state; it only looks for a Cap again when
 none was found at start.
 
-The Grove port on the right side has its own switched 5 V output, which is also
-off by default. Ragnar does not switch that one on.
+The Grove port on the right side has its own switched 5 V output (off at
+power-on). Ragnar switches it on at start (`cardputer_grove_power: true`), so a
+Grove unit works as soon as it is plugged in; **fn** + **Backspace** toggles it.
+
+**A GPS on the Grove port.** The Grove port is a UART (Port C), so a UART GPS —
+such as the **M5Stack GPS Unit** (AT6668) — plugs straight in and feeds
+wardriving and the Meshtastic node, no Cap needed. It talks NMEA on the same
+`/dev/ttyS0` the LoRa Cap's GNSS uses, so Ragnar hands the port to it the same
+way: it listens for the receiver at start and, when it hears one, takes the
+serial login prompt off the UART so GPS can read it. Leave **GPS Serial Port**
+on `auto`; the baud is detected. See
+[CardputerZero-Caps.md → GPS on the Grove port](CardputerZero-Caps.md).
+`cardputer_grove_gnss: false` turns the probe off and keeps the serial console.
 
 ### Cap LoRa-1262 + GNSS
 

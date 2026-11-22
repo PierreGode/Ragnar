@@ -2,6 +2,18 @@
 
 ## Releases
 
+### 2026-11-22
+
+#### feat(cardputer): a GPS on the Grove port drives wardriving and Meshtastic
+
+*branch `feat/cardputer-grove-gps`*
+
+- **A UART GPS on the CardputerZero's Grove port now just works** — no LoRa Cap needed. Plug in a UART GPS such as the **M5Stack GPS Unit** (AT6668) and it feeds wardriving, the maps and the Meshtastic node, the same way the Cap's GNSS does.
+- **How:** the Grove port (Port C) is the same `/dev/ttyS0` UART the Cap's GNSS uses. Ragnar already powers the Grove port at start; it now also listens there for a receiver, and when it hears NMEA it hands the UART to GPS (stops the serial login prompt, takes the serial console out of `cmdline.txt`, keeps a `.ragnar-bak`) — exactly the hand-off it does for the Cap. If no receiver answers, the login prompt is left alone, so a unit without a Grove GPS keeps its serial console. The Meshtastic node gets the fix through the existing standby-GPS hand-over (`meshtastic_share_gps`).
+- **Config:** `cardputer_grove_gnss` (default `auto`): `auto` listens and hands over when a GPS is found, `true` always hands over, `false` never (keeps the serial console). The master switch `cardputer_free_gnss_uart` still gates both the Cap and the Grove GPS.
+- **UI:** the *System → CardputerZero hardware* panel shows a **GPS (Grove port)** row once the receiver is found. Baud is auto-detected (an M5 GPS Unit is 9600); leave **GPS Serial Port** on `auto`.
+- Docs: [CardputerZero-Caps.md → GPS on the Grove port](CardputerZero-Caps.md), [M5StackCardputerZero.md](M5StackCardputerZero.md).
+
 ### 2026-11-20
 
 #### docs: Testing Tiers glossary, how each detection module is tested for accuracy
