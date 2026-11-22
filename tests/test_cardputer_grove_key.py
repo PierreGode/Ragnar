@@ -58,6 +58,38 @@ def test_del_from_the_kernel_keyboard_toggles_grove_and_saves_it(kbd):
     assert kbd.last_key[1] == "Grove 5V on"
 
 
+def test_switching_grove_on_rescans_for_a_gps(kbd, monkeypatch):
+    """A GPS plugged into the Grove port only has power once the rail is on, so
+    switching it on must (re)detect the GPS and free the UART — no restart."""
+    import threading
+    seen = {"reset": 0, "probe": threading.Event(), "free_uart": None}
+    monkeypatch.setattr(caps, "reset_grove_gnss",
+                        lambda: seen.__setitem__("reset", seen["reset"] + 1))
+
+    def fake_detect(config=None, free_uart=True):
+        seen["free_uart"] = free_uart
+        seen["probe"].set()
+        return {"present": False}
+
+    monkeypatch.setattr(caps, "detect_grove_gnss", fake_detect)
+    kbd.GROVE_RESCAN_SETTLE = 0
+    kbd.source("evdev")
+    kbd.rail["on"] = False                        # start off
+    tap(kbd, KEY_DELETE)                          # → on
+    assert kbd.rail["on"] is True
+    assert seen["probe"].wait(5) and seen["free_uart"] is True
+    assert seen["reset"] >= 1
+
+
+def test_switching_grove_off_does_not_rescan(kbd, monkeypatch):
+    monkeypatch.setattr(caps, "detect_grove_gnss",
+                        lambda *a, **k: pytest.fail("no rescan when powering the rail off"))
+    kbd.source("evdev")
+    kbd.rail["on"] = True                         # start on
+    tap(kbd, KEY_DELETE)                          # → off
+    assert kbd.rail["on"] is False
+
+
 def test_plain_backspace_still_flips_the_screen(kbd):
     for name, code in (("evdev", KEY_BACKSPACE), ("i2c", BKSP_I2C)):
         kbd.source(name)

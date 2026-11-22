@@ -4,6 +4,17 @@
 
 ### 2026-11-22
 
+#### fix(cardputer): Grove port 5 V is now OFF by default — no inrush brownout at start
+
+*branch `fix/cardputer-grove-power-off-default`*
+
+- **The Grove port's 5 V rail now stays off at start** (the safe, stock state), instead of Ragnar powering it on. Powering a live rail when a current-drawing unit (a GPS) is plugged in draws an inrush surge that can brown the board out for a moment — a **black LCD** or a battery read-out glitch. Keeping it off until asked removes that at boot, which matters most for a unit that ships to other users.
+- **Switch it on when you want it:** **fn + Backspace** (the **del** key) or the web control. Turning it on now **also detects a Grove GPS** (frees the UART and hands it to wardriving / Meshtastic), so there is no restart needed. The choice is saved (`cardputer_grove_power`), so if you leave it on it comes back on next start.
+- **Recommended flow:** plug the GPS in with the port unpowered, then switch the rail on — the surge is then small and under your control.
+- Default change: `cardputer_grove_power` **`true` → `false`**.
+- Tests: switching Grove on rescans for a GPS; off does not. Grove-key + display groups pass.
+- Docs: [CardputerZero-Caps.md → Powering the Grove port](CardputerZero-Caps.md), [M5StackCardputerZero.md](M5StackCardputerZero.md).
+
 #### fix(cardputer): the battery read-out survives an I2C glitch instead of vanishing until a reboot
 
 *branch `fix/cardputer-grove-battery-glitch`*
