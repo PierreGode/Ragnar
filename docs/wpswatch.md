@@ -101,7 +101,7 @@ sudo python3 python/wpswatch.py --iface wlan1 -o /var/log/ragnar/wpswatch-wlan1.
 | self-test | `python3 python/wpswatch.py --self-test` | 25/25 |
 | conformance | `python3 python/wpswatch_conformance.py` | 27/27 (incl. the Version2-vs-0x104A regression) |
 | replay (real Scapy path) | `lab/make_lab_pcap.py wps … && --replay` | 8 codes observed |
-| live lab (hwsim) | `sudo lab/hwsim_lab.sh wps` | written, hardware-gated (see `lab/LAB.md`) |
+| live lab (hwsim) | `sudo lab/hwsim_lab.sh wps` | written, hardware-gated (see `docs/lab.md`) |
 
 - **Watchtower**: emits JSONL to `/var/log/wpswatch/alerts.jsonl`, wired into
   `watchtower.py` (`DEFAULT_SOURCES['wpswatch']`).

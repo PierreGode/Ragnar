@@ -76,6 +76,9 @@ required).
 
 Optional USB GPS receiver (NMEA via pyserial). Auto-detected at startup.
 
+No receiver? The phone can supply the position instead: see
+[Phone GPS](#phone-gps-ragnar-mobile-app).
+
 **u-blox receivers stuck in UBX binary mode.** Some u-blox 7 USB pucks
 (VID 1546) come up emitting only UBX binary frames instead of NMEA, which
 looks like a healthy receiver that never finds a position ("Searching..."
@@ -171,11 +174,33 @@ When a HuginnESP companion is detected, Ragnar issues `wardrive` once at handsha
 | Phase | Duration | Activity | Mode label |
 |-------|----------|----------|------------|
 | WiFi  | ~2–5 s   | Per-channel active scans walking a weighted channel list | `wardrive` |
-| BLE   | 1.5 s    | `BLE_MODE_ALL` — every advertisement emitted as JSON | `wardrive` |
+| BLE   | 1.5 s    | `BLE_MODE_ALL` — one JSON line per device per phase (strongest RSSI) | `wardrive` |
 
 The WiFi phase walks a fixed channel schedule that visits high-traffic channels (1/6/11 on 2.4 GHz, the non-DFS UNII subset on 5 GHz) several times per pass and the rarer/DFS channels once. Each per-channel scan emits results immediately on completion, so observations stream in throughout the phase rather than batching at the end of a full sweep. On the C5 dual-band build the full schedule is ~50 channels; on the S3 (2.4 GHz only) it's ~20.
 
-The firmware also keeps a bounded on-device set of recently-emitted BSSIDs and suppresses duplicate emissions within a wardrive session — the same AP scanned on the same channel four times per cycle is only sent once. The set resets every time the host issues `wardrive`, so stopping and starting a session re-emits every visible BSSID. Ragnar's `upsert_network` still dedupes on receive; on-device dedup primarily saves serial bytes and host parse time.
+The firmware also keeps a bounded on-device set of recently-emitted BSSIDs and suppresses duplicate emissions within one pass — the channel list revisits 1/6/11 and the main 5 GHz channels, but an AP is sent once per pass. The set resets at the start of every pass, so each AP is re-sent once per cycle with a fresh position. BLE works the same way: during the BLE phase each device is held once (strongest RSSI, first name seen) and printed when the phase ends, instead of one line per advertisement — that cut a measured 64 lines per phase to the 23 devices behind them. Ragnar's `upsert_network` still dedupes on receive; on-device dedup saves serial bytes.
+
+### Serial throughput (why a slow host loses data)
+
+A Huginn prints about **9 lines/s** with BLE coalescing (about 16–20 before it,
+mostly repeated BLE advertisements), and its USB-serial link **drops whatever
+the host does not read in time** — the dongle keeps scanning at full speed, the
+output is simply lost. Measured on a T-Dongle-C5: a host reading 5 lines/s lost
+about 88 % of Wi-Fi sightings; a Pi Zero 2 W that parsed and committed each line
+before reading the next lost about 95 % of a walk.
+
+So Ragnar splits the work: the serial thread **only reads**, putting each line
+into a queue together with the GPS fix of that moment, and a worker parses the
+queue every 0.5 s inside **one database transaction**. Every database write uses
+`synchronous=NORMAL` (WAL), and the Wi-Fi scan loop commits once per scan
+instead of once per network. Replaying 3,589 recorded Huginn lines through the
+old and new paths stores identical rows; on the real dongle with a slow host
+simulated (100 ms per commit) the old path stored 61 Wi-Fi sightings in 90 s,
+the new one 215.
+
+Each companion in `/api/wardriving/status` reports `serial_backlog` (lines read
+but not yet stored) and `serial_dropped` (lines lost because the queue was
+full — nonzero means this host cannot keep up with the companion at all).
 
 Flipper / AirTag / skimmer / BLE-spam alerts still fire passively from the same BLE phase. Dedicated evil-twin/pineapple scan windows are not included in the wardrive loop — run `pineap` manually if a one-shot evil-twin check is needed.
 
@@ -337,6 +362,8 @@ Auto-detected at startup, in priority order:
 3. **NMEA probe** — other `by-id` entries that aren't already claimed by an ESP companion are probed at 9600/4800/38400/115200 baud for `$GP`/`$GN`/`$GL` sentences.
 4. **Raw device nodes** — `/dev/ttyACM*`, `/dev/ttyUSB*`, `/dev/ttyS*`, `/dev/ttyAMA*`, `/dev/serial0`, `/dev/serial1` — probed the same way.
 
+The port is then opened at the baud rate the probe heard NMEA at, so a receiver that talks at 115200 (the M5Stack CardputerZero Cap's GNSS on `/dev/ttyS0`, a reconfigured u-blox) works without setting `wardriving_gps_baudrate`. A board UART named explicitly in `wardriving_gps_port` is probed once for the same reason.
+
 ### gpsd setup
 
 `gpsd` + `gpsd-clients` are installed by the wardriving installer (`install_wifi_management.sh`), which then runs `scripts/setup_gpsd.sh`:
@@ -356,12 +383,170 @@ Re-run `sudo scripts/setup_gpsd.sh` manually after swapping to a different GPS r
 - **GSV parsing.** Per-constellation `$xxGSV` sentences are aggregated; the API exposes `satellites_in_view` (sum across all reporting constellations) and `snr_max` (highest reported SNR in dB-Hz). The multi-message GSV sweep is also stitched back into a **per-satellite list** (PRN, elevation, azimuth, SNR) per constellation, which the diagnostics endpoint surfaces as `gps.sky` for the sky-view plot; the NMEA 4.10+ trailing signal-ID field is ignored. Entries that haven't been heard from in 30 s are pruned so a constellation that stops reporting doesn't inflate the total.
 - **Liveness signal.** `last_sentence` updates on any recognized NMEA line (including GSV / GSA / VTG / GLL / TXT and pre-fix GGA/RMC). `last_update` continues to mean "last positional/fix update". Together they distinguish "GPS is alive but has no fix yet" from "GPS isn't transmitting at all".
 
+### Active scans pause during a drive
+
+The orchestrator's active scans — nmap port/vulnerability scans and attack
+actions — are heavy. On a small board (Pi Zero 2 W especially) they thrash RAM
+and CPU and starve `gpsd` of the continuous serial reads a cold start needs, so
+the GPS shows satellites but never demodulates the ephemeris and never fixes.
+That is why a receiver fixes when booted alone but not once the orchestrator is
+also hammering hosts.
+
+Starting a wardriving session sets `shared_data.wardriving_session_active`, and
+the orchestrator pauses its whole active-scan/attack cycle (status
+`PAUSED_WARDRIVE`) for the duration — including aborting any per-host
+vulnerability scan already in flight. The nmap vulnerability scanner itself also
+checks the flag, so a **manually triggered** scan (from the Adv Scan tab) is
+skipped during a drive too, not only the orchestrator's automatic ones.
+**Passive wardriving capture keeps running the entire time**; only the active
+scans stop. They resume automatically when the session stops, with an immediate
+refresh rather than waiting out the old interval. This frees the CPU so
+cold-start GPS can complete during the drive.
+
+Note: this is separate from the existing **wardriving-on-boot** behaviour, which
+sets `manual_mode` so the orchestrator never starts in the first place. The flag
+above covers the case where wardriving is started *after* the orchestrator is
+already running (or scans are triggered manually). Scans launched directly from
+a shell (`nmap`, `lynis` over SSH) are outside Ragnar and are not affected.
+
+### Assisted start (position / time / orbit pre-load)
+
+The common u-blox 7 USB pucks (VK-172 class) have **no battery-backed RAM**, so
+every power-up is a full *cold start*: the receiver doesn't know where it is,
+what time it is, or where any satellite is. Before it can fix it has to
+download ~30 s of uninterrupted ephemeris per satellite, and without an almanac
+it also has to search the whole sky blind. On a marginal sky (a window, a
+dashboard, a Wi-Fi adapter right next to the puck) that often never completes.
+The same receiver fixes fine once it has *started*, because tracking needs far
+less signal than acquisition.
+
+Ragnar already knows most of what the receiver is missing, so
+[`gps_assist.py`](../gps_assist.py) hands it over at start (toggle:
+**Config → Wardriving → GPS Assisted Start**, `wardriving_gps_assist`, default on):
+
+- **Position** — the persisted last-known fix (`data/last_gps.json`),
+  declared as ±100 km so a fix from another town doesn't mislead it.
+- **Time** — the system clock, **only when the kernel reports it NTP-synced**
+  (`adjtimex`). A Pi has no RTC; booted offline it runs on fake-hwclock, and a
+  wrong time is worse than none, so an unsynced boot sends no time.
+- **Orbit data** — 5 s after the session's first fix, again 1 min later, then
+  every 5 min, Ragnar polls the receiver's own almanac (`AID-ALM`), ephemeris
+  (`AID-EPH`) and health/UTC/iono (`AID-HUI`) and saves them to
+  `data/gps_aid.json`. The schedule runs from the *first* fix, whether or not
+  the fix is still held: the receiver keeps what it decoded when a marginal fix
+  flickers. A poll that returns nothing is retried a minute later. Saves
+  **merge per satellite**, so a later poll that reports fewer satellites never
+  shrinks the saved set. Each ephemeris entry keeps its own timestamp.
+  At the next start the data is re-injected if fresh: ephemeris entries ≤ 4 h old
+  (a reboot mid-drive becomes a *hot* start), almanac/HUI ≤ 30 days (a *warm*
+  start). The status `aid_saved` counts show what is on disk in total.
+  **Orbit data is injected even on an offline boot** (no NTP), which is the
+  normal wardriving case. The receiver learns GPS time from the first
+  satellite within seconds and checks each ephemeris against its own
+  reference time, ignoring expired ones. fake-hwclock only runs *behind* real
+  time, so data that is already too old by the local clock is still skipped.
+
+It runs once per reader start, 3 s in, and only if there's no fix yet, so a
+receiver that is still tracking (service restart mid-drive) is left alone.
+Frames are standard UBX: `AID-INI`/`HUI`/`ALM`/`EPH` for u-blox 6/7/M8, plus
+`MGA-INI-POS_LLH`/`TIME_UTC` for M8/M9/M10 (a receiver ignores the class it
+doesn't implement). With gpsd they are written through gpsd's control socket
+(`/run/gpsd.sock`, `&<device>=<hex>`) and replies are read from a raw
+(`"raw":2`) watch, so Ragnar never fights gpsd for the port; on direct serial
+they go down the open port. The journal logs e.g.
+`GPS assist: pre-loaded position 59.3066,18.0256 (±100 km), time (NTP), almanac 31 SV via gpsd`,
+and the Diagnostics panel shows an **Assisted start** row.
+
+Validated on a u-blox 7 (PROTVER 14.00) via gpsd: after injection the receiver's
+own `AID-INI` readback showed the injected GPS week/TOW and position with
+100 km accuracy (before: firmware defaults, week 1691, 6 496 km).
+
+This speeds up the start; it doesn't create signal. A puck that can't hear
+satellites (behind coated glass, next to the Alfa) still needs a better spot:
+put it on a 1–2 m USB extension, face up, away from the Pi/hub/Wi-Fi adapter.
+
+### Clock from GPS (offline boots)
+
+A Raspberry Pi has no real-time clock. Booted away from Wi-Fi it starts at the
+last saved time (systemd-timesyncd's clock file) and keeps that wrong time
+until NTP can reach a server, so every sighting in a session is stamped hours
+off. In the field a whole walk was recorded 2 h 38 min early and looked
+"missing" from the session list.
+
+With **Config → Wardriving → Set Clock from GPS** (`wardriving_gps_set_clock`,
+default on):
+
+- **GPS sets the clock.** Once GPS time agrees with itself over 3 fixes and
+  differs from the system clock by more than 2 s, and only while the kernel
+  reports the clock *not* NTP-synced, `GPSManager` sets the system clock from
+  GPS time (once per reader start). This works for gpsd (`TPV.time`) and
+  direct serial (RMC time + date). NTP stays in charge whenever it is synced.
+  The Diagnostics panel shows a **Clock from GPS** row (`gps.clock_set`:
+  `{at, delta, changed}`).
+- **The running session is repaired.** A 1 Hz watch compares wall-clock time
+  with monotonic time. When the clock steps **forward** by 10 s or more during a
+  session (the GPS set above, or NTP syncing once Wi-Fi is back), every
+  timestamp recorded before the step is shifted by it: `first_seen` and
+  `last_seen` in networks, observations, Bluetooth, cells and Zigbee, the GPS
+  track, and the session start. `session_info.clock_steps` records each
+  repair. Backward steps are only logged, because old and new stamps would
+  overlap.
+
+Data recorded before a fix, while the clock was still wrong, is corrected by
+the same repair when the step happens.
+
+### Phone GPS (Ragnar Mobile app)
+
+A unit with no GPS receiver can take its position from the phone in the same
+car. In the [Ragnar Mobile](https://github.com/PierreGode/Ragnarmobile) app,
+turn on **Wardrive → Live → Phone GPS**. While a drive runs, the app sends the
+phone's location to the unit about once a second, and the unit pins networks,
+Bluetooth devices and cell towers to it exactly as it does with a receiver. The
+feed keeps running with the phone locked or the app in the background.
+
+- **A receiver on the unit wins.** If a GPS receiver is attached and has a fix
+  of its own (updated in the last 5 s), phone fixes are ignored; the app shows
+  that. When the receiver loses its fix, the phone takes over again.
+- **Only good fixes are sent.** The app does not send a fix whose accuracy is
+  worse than 60 m (a phone indoors, positioned by Wi-Fi or cell towers), so
+  networks are not pinned to the wrong street.
+- **Stale after 10 s**, like any GPS source: if the phone stops sending, the
+  unit has no fix until it resumes.
+- **Before a drive starts** the unit also accepts phone fixes, so the GPS card
+  shows the fix first. The app itself only sends during a drive.
+- **Clock.** The phone's fix time sets the unit's clock under the same rules as
+  [GPS time from a receiver](#clock-from-gps-offline-boots): only while NTP is
+  not synced, after three agreeing fixes.
+- **Not available from the phone:** satellite counts, SNR and the sky view.
+  The phone reports accuracy in metres instead (`accuracy_m`); HDOP is filled
+  with an estimate (accuracy ÷ 5 m).
+
+`/api/wardriving/gps` reports `source: phone` while the phone is the source.
+
+**API** — `POST /api/wardriving/gps/phone` (login required, like every other
+write):
+
+```json
+{"lat": 59.3293, "lon": 18.0686, "alt": 22.0, "speed_kmh": 38.2,
+ "course": 62.0, "accuracy": 5.2, "ts": 1794768955123}
+```
+
+Only `lat` and `lon` are required. `accuracy` is in metres, `ts` is the fix
+time in epoch milliseconds. The reply is
+`{"success": true, "accepted": true, "source": "phone", "has_fix": true, "running": false}`;
+`accepted` is `false` when a receiver on the unit is being used instead. Any
+client can use this endpoint, not only the app.
+
+**Over Bluetooth.** Connect with **Connect → Bluetooth** in the app and the
+fixes travel [over Bluetooth](bluetooth.md) — the phone and the unit only
+have to be in the same car.
+
 ### Status Fields (`/api/wardriving/gps`)
 
 | Field | Meaning |
 |-------|---------|
 | `connected` | Port open and reader thread alive |
-| `source` | `gpsd` or `serial` |
+| `source` | `gpsd` or `serial`; `phone` or a companion's name when the position is fed from outside |
 | `port` | Device path |
 | `has_fix` | `fix_quality > 0` and lat/lon set and `last_update` within 10 s |
 | `fix_quality` | `0` no fix, `1` GPS, `2` DGPS |
@@ -369,10 +554,14 @@ Re-run `sudo scripts/setup_gpsd.sh` manually after swapping to a different GPS r
 | `satellites_in_view` | Total visible across constellations (from GSV) |
 | `snr_max` | Highest current SNR, dB-Hz |
 | `hdop` | Horizontal dilution of precision |
+| `accuracy_m` | Horizontal accuracy in metres, when the source reports it (a phone); otherwise `null` |
 | `latitude` / `longitude` / `altitude` | Most recent position |
 | `speed_kmh` / `course` | Velocity / heading |
 | `last_update` | Epoch of last GGA/RMC with position info |
 | `last_sentence` | Epoch of last *any* parsed NMEA |
+| `assist` | What the assisted start pre-loaded: `{at, items[], via, frames}`, or `null` |
+| `aid_saved` | Last orbit-data save: `{at, alm, eph}` (SV counts), or `null` |
+| `clock_set` | Clock set from GPS: `{at, delta, changed}` (`changed: false` = clock was already right), or `null` |
 | `error` | Last error string, or `null` |
 
 ### Wardriving GPS Card (UI)
@@ -476,7 +665,7 @@ Each session writes one row to `gps_track` every 5 s while GPS has a fix:
 gps_track (timestamp, latitude, longitude, altitude, speed_kmh, satellites, hdop)
 ```
 
-> **Opt-in only.** Backfilled positions are **estimated, not measured** — interpolated coordinates, not real observations. The "Backfill GPS" map button is hidden by default; enable it under **Config → Wardriving → Allow GPS Backfill** (sets `wardriving_allow_backfill`). The endpoint returns `403` while the flag is off. Any row backfilled this way is flagged `gps_backfilled = 1` and is **excluded from WiGLE CSV export** so interpolated coordinates aren't submitted as real observations (it still appears on the map and in KML).
+> **Opt-in only.** The "Backfill GPS" map button is hidden by default; enable it under **Config → Wardriving → Allow GPS Backfill** (sets `wardriving_allow_backfill`). The endpoint returns `403` while the flag is off. Any row backfilled this way is flagged `gps_backfilled = 1`.
 
 `POST /api/wardriving/backfill_gps` (or the "Backfill GPS" button) fills in missing positions on `networks`, `bluetooth_devices`, and `cells` rows by looking up each row's `first_seen` against the breadcrumb track:
 
@@ -522,6 +711,16 @@ Falls back to linear when either endpoint speed is NULL or both are zero. The ch
 | GET/POST | `/api/wardriving/huginn_config` | Read / push HuginnESP runtime knobs |
 | POST | `/api/wardriving/device_name` | Set device name |
 | GET/POST | `/api/wardriving/on_boot` | Auto-start on boot |
+| GET/POST | `/api/wardriving/upload-config` | Upload creds status (never reveals secrets), auto-upload settings (`auto_upload`, `auto_upload_targets` list) and `recent` upload outcomes / save them |
+| GET/POST | `/api/wardriving/upload-accounts` | The accounts themselves — `{wigle: {name, token}, wdgwars: {key}, wardrift: {token, username, base_url}}` — so Ragnar Mobile and the unit hold one set. POST replaces each service present (empty values clear it) |
+| POST | `/api/wardriving/upload/<id>` | Upload a session — body `{"target": "wigle"\|"wdgwars"\|"wardrift"\|"both"\|"all"\|"a,b", "force": false}` |
+| POST | `/api/wardriving/wardrift/signin` | Sign in to Wardrift (`username`, `password`); stores only the session token |
+| POST | `/api/wardriving/wardrift/signout` | Forget the Wardrift session token |
+| GET | `/api/wardriving/wardrift/dashboard` | Proxy of Wardrift `GET /v1/dashboard` (character level, EXP, currency, route stats) |
+| GET/POST | `/api/wardriving/wardrift/mesh` | Mesh-node reporter status (node, link, ports, last report) / settings: `enabled`, `key`, `conn` (`usb`\|`wifi`), `port`, `host`, `interval`, `report_now` |
+| GET/POST | `/api/adsb/wardrift` | ADS-B → Wardrift status (today's unique aircraft, recent days, Pushover readiness) / settings: `auto`, `interval_min` |
+| POST | `/api/adsb/wardrift/upload` | Upload a day's aircraft to Wardrift — body `{"day": "YYYYMMDD"}` (default today) |
+| GET | `/api/adsb/export?day=YYYYMMDD` | Download a day's aircraft as an SBS/BaseStation log |
 
 > **Mutually exclusive with On-Screen Network Diagnostic mode.** Both take over
 > the e-Paper panel and HAT keys, so starting wardriving turns Network Diagnostic
@@ -633,8 +832,183 @@ GPS breadcrumb trail — one row every 5 s during a session, only while GPS has 
 ### WiGLE CSV
 Standard format for uploading to wigle.net. Contains MAC, SSID, AuthMode, channel, RSSI, GPS coordinates.
 
+The export (and every upload, which uses the same file) contains only
+**GPS-pinned** rows: sightings whose position lies within 50 m of the
+session's GPS track. All row types are written as one time-ordered list, each
+row's `FirstSeen` is the moment the drive was at that position, interpolated
+between the track's fixes (logged every ~9 s), so rows heard between two fixes
+don't share one timestamp while sitting 100 m apart (UTC,
+`YYYY-MM-DD HH:MM:SS`), and fields are standard CSV-quoted (an SSID with a
+comma is `"name,with,comma"`). Services that rebuild the drive route from the
+file, such as Wardrift, otherwise reject it ("The GPS trail has a few jumps").
+A session with no recorded track, such as an imported CSV, exports its
+located rows as they are.
+
 ### KML
 Google Earth format with network positions as markers.
+
+### Uploading sessions — WiGLE, WDGWars, Wardrift
+Each saved session has **↑ WDGWars**, **↑ WiGLE** and **↑ Wardrift** buttons, and
+the upload cards in the wardriving tab store credentials on the device only
+(they are excluded from fleet config export). Every upload reuses the exact WiGLE
+CSV the export produces, and a session with no GPS-located rows is refused unless
+you force it.
+
+**Auto-upload** has its own card in the wardriving tab: switch it on and tick
+the services to upload to (WiGLE, WDGWars, Wardrift). Unconfigured services
+are marked *(not set up)*.
+
+- **Every stop queues the drive.** The engine runs `SESSION_FINISHED_HOOKS`
+  from `stop()`, so it doesn't matter whether the web UI, the CYD, the display
+  keys or On-Screen Network Diagnostic mode stopped the drive, or whether the
+  boot-time engine ran it.
+- **Power cuts.** A drive cut off by a power loss has no end time. About two
+  minutes after start-up, such drives that began after auto-upload was switched
+  on (`wardriving_auto_upload_since`) are queued, unless one was already
+  uploaded, is already queued, or is still being written.
+- **Offline.** The queue (`data/pending_uploads.json`) is retried every 60 s
+  until the box is online, and only for the services that failed. A drive
+  with no GPS-pinned rows is given up after 30 tries.
+- **Wardrift verdicts.** Wardrift answers a route upload with *pending* and
+  decides later, so Ragnar follows each upload
+  (`GET /v1/wardrive/uploads/{id}`) to *succeeded* or *failed* for up to
+  45 minutes.
+- **Pushover summary.** With Pushover set up (Config → Integrations),
+  each auto-uploaded drive sends one notification once every service has a
+  final result, including Wardrift's verdict. It gives the drive (start time,
+  duration, networks, GPS-pinned rows) and each service's response, e.g.:
+
+  ```
+  Ragnar — Wardrive uploaded
+  Drive 23 Sep 18:37 · 21 min · 3579 networks · 3244 GPS-pinned
+  ✓ WDGWars: new 2911, updated 333
+  ✓ Wardrift: 3033 readings saved, +1794 XP, 102 skipped
+  ```
+
+  The title says `upload: N failed` when a service rejected the drive, and
+  `not uploaded (no GPS)` when it had nothing to send. A service that is
+  offline is retried, and the summary waits until it gets through. A 4xx
+  rejection (bad key, unconfigured service) is final and reported right
+  away. The switch is *Pushover summary after each upload* in the
+  Auto-upload card, or *Wardrive Auto-upload* in Config → Integrations
+  (`pushover_notify_wardrive_upload`, on by default). Manual ↑ uploads
+  don't notify.
+- **Recent uploads.** Every outcome, manual or automatic, is kept in
+  `data/upload_history.json` and shown under **Recent uploads** in the card:
+  ✓ uploaded (e.g. "431 readings saved, +285 XP"), ✕ failed with the reason,
+  … still processing, – skipped.
+
+### ADS-B → Wardrift (Aircraft Watch)
+Separate from ground wardrives, the [ADS-B radar](#) (`/adsb-radar`, 1090 MHz
+via dump1090) can feed Wardrift's **Aircraft Watch** (detect 10 different
+aircraft in a UTC day). Ragnar's live radar only shows what is overhead now, so
+`adsb.py` also logs every **unique ICAO** it hears per UTC day to
+`data/adsb/day_YYYYMMDD.jsonl` (one row per aircraft, plus one enrichment row
+when a callsign first becomes known). The Wardriving tab's status row shows a
+live **Aircraft** card — the day's unique count climbing as the radar hears new
+planes, with how many are overhead now (or *radar off*) underneath. Both the
+**Wardriving tab** (upload card) and the ADS-B radar page's **Wardrift Aircraft
+Watch** card upload that day's aircraft:
+
+- **Same account, same endpoint.** It uses the Wardrift sign-in from the main
+  Settings (no separate key) and POSTs to the same `/v1/wardrive/logs` the
+  wardrive route uses. Ragnar exports the day as an **SBS/BaseStation** log
+  (`# timezone=UTC` header, one `MSG` row per aircraft); Wardrift auto-detects
+  the format, credits eligible aircraft (ICAO + observation time; **no receiver
+  GPS needed**) and does **not** create a ground route.
+- **Each ICAO counts once per account per UTC day** across all uploads, so the
+  day's growing log can be re-sent safely — repeats add nothing.
+- **Manual or auto.** The ↑ *Upload today* button sends the current day; the
+  *Auto-upload while receiving* toggle re-sends the day's aircraft every
+  `adsb_wardrift_interval_min` minutes (default 30) while the radar is running
+  and only when the unique count has grown.
+- **Auto-start the radar** (opt-in, *Start the ADS-B radar when a wardrive
+  begins*; `wardriving_autostart_adsb`). When a wardrive starts, Ragnar frees
+  the RTL-SDR from the sub-GHz tools and starts the ADS-B radar, then stops it
+  when the drive ends — but only a radar it started itself, never one you
+  started by hand, and never if a radar is already running. Lets the Aircraft
+  count climb through a drive with nothing to switch on.
+- **Verdict + Pushover.** Wardrift answers *pending* then decides; Ragnar
+  follows `GET /v1/wardrive/uploads/{id}` to the result and (for auto-uploads)
+  sends a Pushover summary — *Wardrive Aircraft upload* / `pushover_notify_adsb_upload`,
+  on by default.
+- **Download.** `GET /api/adsb/export?day=YYYYMMDD` returns the day's `.sbs`.
+
+**[Wardrift](https://wardrift.net)** (faction / territory wardriving game, API at
+`https://wardrift.net/v1`, overridable via the `wardrift_base_url` config key)
+has two auth paths and Ragnar supports both:
+
+| Mode | How to set it up | What an upload does |
+|------|------------------|---------------------|
+| **Signed in** (preferred) | Enter your Wardrift username + password and hit *Sign in*. Ragnar keeps only the session token; the password is never stored. | `POST /v1/wardrive/logs` with the WiGLE CSV. The session becomes an archived route (distance, AP count, streak), public if *Public routes* is ticked. A re-upload returns `409 duplicate_route`. Wardrift also answers that while an identical earlier upload is still pending (processing a large drive can take ~10 minutes), and that one can still be rejected, so Ragnar shows it as *already has this file — check wardrift.net* rather than a success. The card shows your character level, EXP to next level, currency and lifetime routes/APs. |
+| **API key** | Paste a **character-bound** Wardrift key (`wdk_…`). | `POST /v1/ingest/signals` in batches of 250. Each row becomes a signal item (`wifi` / `bluetooth` / `cellular` / `other`) with SSID and BSSID sent **only as SHA-256 hashes**, timestamps converted to UTC. |
+
+If both are set, the signed-in route upload is used, and it falls back to the API
+key when the session has expired. For the API-key path, `sequence_no` and pending
+`idempotency_key`s persist in `data/wardriving/wardrift_state.json`. The
+idempotency key comes from the batch content, so a retry or a re-upload of the
+same session returns `duplicate: true` and doesn't award twice. A retry resends
+the same `sequence_no`. Sequences are seeded from wall-clock seconds, so losing
+the state file can't replay a lower number, and a server "replay" rejection gets
+one retry with a fresh, higher sequence. Envelopes are sent with an empty
+`signature`, so a key with a registered Ed25519 device key server-side will be
+rejected.
+
+#### Wardrift mesh node (Meshtastic)
+
+> **Coming soon.** The section is greyed out and the reporter doesn't send
+> yet (`POST /api/wardriving/wardrift/mesh` returns `409`). Setting
+> `WARDRIFT_MESH_LIVE = True` in `webapp_modern.py` switches it on.
+Wardrift also rewards running **Meshtastic** nodes (Mesh XP, currency and hex
+influence), but stock Meshtastic firmware can't make HTTP calls, so something
+has to report on the node's behalf. The **Mesh node** section of the Wardrift
+card makes Ragnar that uplink:
+
+1. Connect the node: **USB cable** into the Pi (auto-detected, or pick the
+   port), or **WiFi**. For WiFi, turn on the node's WiFi and enter its IP, e.g.
+   `192.168.1.50`; the Meshtastic API is on TCP 4403.
+2. Paste the node's **node-bound** Wardrift key (a character key is rejected),
+   pick an interval (2–30 min) and tick **Report this node**.
+
+   Your Wardrift dashboard's **API keys** panel lists each key with its
+   *device kind* and can reveal or rotate it, but it can't create one. If you
+   only have a character key, Wardrift answers `mesh endpoint requires a node
+   device`. The card then says so and waits for the next interval instead of
+   retrying. Ask Wardrift to register the node and issue its key.
+
+   Press **Reveal** before copying a key. A masked key (`●●●●`) or pasted
+   page text is refused on Save, because API keys must be plain ASCII to
+   travel in an HTTP header.
+
+Every interval Ragnar reads the node's own telemetry: uptime, battery/voltage,
+channel utilisation, TX airtime, nodes heard, and LocalStats packet counters
+(TX/RX/bad/relayed/relay-cancelled/dupes). It POSTs that to
+`/v1/ingest/mesh`, with the node id, name, hardware model and firmware in
+`metadata`. The counters are cumulative on the node, so Ragnar sends the
+difference since the previous report. The first report after setup has no
+baseline and omits them; a node reboot restarts the baseline. A failed report
+is retried with the same `idempotency_key` + `sequence_no`. The card shows
+the node, the connection, the last report and the XP/currency earned.
+
+The connection is the same one the **Mesh Nodes** page uses (one node, one
+link). If you connected the node there first, the reporter shares it instead
+of opening a second one.
+
+**Serial port safety.** Every component that opens a USB serial port
+publishes what it holds in `serial_claims.py`, and every auto-detect skips the
+others' ports:
+
+| Component | Holds | Skips |
+|-----------|-------|-------|
+| Wardriving GPS (and the device gpsd is pinned to) | the GPS | CYD, Meshtastic |
+| Wardriving companion monitor (HuginnESP/Piglet) | companion ports | CYD, Meshtastic |
+| CYD serial bridge | its CYD port | GPS, Meshtastic (wardriving yields to it) |
+| Meshtastic link | the node's port | GPS, CYD, companions |
+
+A Heltec V4 is an ESP32-S3 like a HuginnESP. Auto-detect therefore only picks
+a Meshtastic port when exactly one free candidate exists, and asks you to pick
+one otherwise. Picking a port a wardriving companion listener holds makes the
+wardriving monitor release it; the GPS and CYD ports are never taken.
 
 ### Survey report (HTML → PDF)
 A self-contained, printable **Wi-Fi survey report** — the "Report" link on each
@@ -694,7 +1068,7 @@ In modes 2 and 4 the companion has no GPS, so Ragnar's GPS is the only source.
 
 ### 4. Start Wardriving
 
-Click **Start Wardriving** in the web UI. Ragnar begins scanning with all
+Click **Start** in the **Wardriving** tab of the web UI. Ragnar begins scanning with all
 active wlan interfaces and ingesting whatever is on the serial port.
 
 ### Adapter detection — "I plugged in a third adapter but only see wlan0/wlan1"
@@ -809,11 +1183,12 @@ Piglet peripherals: I2C GPS (ATGM336H), SSD1306 OLED, SPI SD card module.
 
 ### How It Connects to Ragnar
 
-Piglet can talk to Ragnar **three ways** — all three coexist with each other and
+Piglet can talk to Ragnar **four ways** — all coexist with each other and
 with HuginnESP:
 
 | Path | When to use | Live? |
 |------|-------------|-------|
+| **USB sync of SD logs** (Piglet v2.60+) | After a solo drive: plug Piglet in, every finished drive on its SD card becomes a session | ❌ Offline |
 | **CSV import** (file upload) | After a standalone field trip where Piglet logged to its SD card | ❌ Offline |
 | **Live USB serial** (mode 3) | Piglet plugged into Ragnar — streams WigleWifi-1.4 CSV rows as it scans | ✅ Yes |
 | **Mesh Core via USB** (mode 5) | Piglet running in mesh `core` mode, plugged into Ragnar — relays its own scans **plus** every record received from mesh nodes | ✅ Yes |
@@ -830,6 +1205,67 @@ Detection signal: the boot banner contains `Piglet`, `[CORE]`, or `WigleWifi-`.
 Once identified, no commands are sent — the parser just listens. The status bar
 chip reads **Piglet · /dev/ttyACM0**.
 
+#### USB sync of solo drives (Piglet v2.60+)
+
+A drive done with Piglet on its own only exists on its SD card. Piglet firmware
+with **SerialSync** (v2.60+, `SerialSync.cpp`) answers a small line protocol on
+the same USB port it streams on, and Ragnar's [`piglet_sync.py`](../piglet_sync.py)
+pulls the files:
+
+| Host → Piglet | Piglet → host |
+|---|---|
+| `@PIGLET HELLO` | `@PH <fw> <chip> <mac> sd=<0\|1>` |
+| `@PIGLET LIST` | `@PL BEGIN`, one `@PL F <path>\t<size>\t<active>\t<mtime>` per CSV in `/logs` and `/uploaded` (`mtime` from v2.61), `@PL END <n>` |
+| `@PIGLET GET <path> [offset]` | `@PG BEGIN <path> <size> <offset>`, `@PG D <seq> <crc32> <base64 of 144 B>` …, `@PG END <path> <size> <sent>` (or `@PG ERR <why>`) |
+
+- **When it runs:** automatically **as soon as a Piglet is plugged in**
+  (`wardriving_piglet_sync`, default on), and on demand with **Import from
+  Piglet (USB)** on the Import card (`POST /api/wardriving/piglet/sync`, `GET`
+  for the last result).
+  - **Wardriving running:** the wardriving listener syncs when it attaches the
+    Piglet.
+  - **Wardriving stopped:** a plug-in watcher (`PlugWatcher`) notices the new
+    Espressif native-USB device under `/dev/serial/by-id` and syncs it once per
+    plug-in. USB-UART bridge boards (CH340/CP210x), which reset when their port
+    is opened, are never probed, and ports held by other components (serial
+    claims) are left alone.
+  - Every direct sync holds a `piglet-sync` serial claim, and only one runs at
+    a time.
+- **Newest drive first:** Piglet v2.61+ adds each file's last-write time to
+  `LIST`. Piglet sets its clock from GPS, so finished drives carry real times,
+  and Ragnar fetches the newest first. Files with unknown times come next, and
+  files that failed before come last. A full card no longer makes today's drive
+  wait behind months of old ones.
+- **Failing files:**
+  - An SD read error (`@PG ERR read-error`, v2.61+) stops that file at once.
+  - A transfer that makes no progress after 2 resumes is abandoned.
+  - A failed file waits 6 hours before it's retried, and is skipped for good
+    after 3 failed syncs (reported as `unreadable`).
+  - If the port itself disappears, the sync stops instead of failing every
+    remaining file.
+- **Integrity:** every 144-byte chunk carries its own CRC32. A damaged or
+  missing chunk, or a stalled link, resumes the transfer at the last good byte
+  (up to 8 times per file) instead of failing it. Piglet mutes ESP-IDF logging
+  while serving, because Wi-Fi driver log lines landing inside a data line
+  corrupted it. Measured at about 140 KiB/s on an ESP32-C5 (2.8 MB in about 19 s).
+- **What becomes a session:** each finished CSV becomes its own session,
+  `session_<first FirstSeen, local>_piglet.db`, with `source` noted in
+  `session_info`. The file Piglet is writing right now is skipped, because its
+  rows already arrive over the live stream. Files with **no GPS positions**
+  (indoor logs, or everything logged before a fix) are skipped and remembered.
+- **No double imports:** imports are remembered per Piglet MAC and **file
+  name** in `data/wardriving/piglet_imports.json`. Piglet moves a file from
+  `/logs` to `/uploaded` after uploading it, so the name, not the path, is its
+  identity. A failed file is retried on the next sync.
+- **Real times:** the CSV import keeps each row's `FirstSeen` (UTC) instead of
+  stamping the import time, builds the session's GPS track from the positioned
+  rows (one point per 5 s), treats `0,0` as "no position", and gives rows logged
+  before Piglet had a clock (`1970-01-01`) the file's nearest valid time. This
+  applies to the manual **Import CSV** too.
+
+Older Piglet firmware simply doesn't answer `HELLO`; Ragnar waits ~20 s and
+carries on with the live stream.
+
 #### CSV import (offline)
 
 Same end result, file-based:
@@ -837,7 +1273,7 @@ Same end result, file-based:
 1. Take Piglet out wardriving — it logs WiFi networks + GPS to SD card
 2. When home, download the CSV files via Piglet's web UI (connects to your WiFi) or remove the SD card
 3. Upload the CSV file(s) to Ragnar via **Import CSV** in the wardriving section (`POST /api/wardriving/import`)
-4. Ragnar imports all networks with GPS coordinates into the active session
+4. Ragnar imports all networks with GPS coordinates into the active session (or a new one), keeping each row's original `FirstSeen` time
 5. View the imported data on the map and in the network table
 
 ### What Gets Imported

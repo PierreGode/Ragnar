@@ -1,0 +1,19 @@
+REM Ragnar Rubber Ducky - built-in demo / validation script.
+REM
+REM SAFE: this script only TYPES text. It runs no commands and uses no
+REM Run/terminal shortcuts, so it cannot change the target host.
+REM
+REM How to validate:
+REM   1) Plug the Pi into the target host's USB port.
+REM   2) On that host, click into any text field (Notepad, a browser search
+REM      box, a chat box - anything that shows typed characters).
+REM   3) Back in Ragnar: Pentest tab > Rubber Ducky > pick this script,
+REM      pick the /dev/hidg0 target, press Execute.
+REM   4) Watch the text below appear in the focused field.
+
+DELAY 1500
+STRING Ragnar Rubber Ducky OK
+ENTER
+STRING Shift check: Hello, World! 1234567890 !?@#_+
+ENTER
+STRING If you can read these two lines, HID keystroke injection works.

@@ -2,7 +2,8 @@
 
 Ragnar ships a family of deep, continuous passive monitors that each run as their
 own daemon: [`arp_guard`](arp_guard.md), [`ndpwatch`](ndpwatch.md),
-[`wifiwatch`](wifiwatch.md), [`certwatch`](certwatch.md),
+[`wifiwatch`](wifiwatch.md), [`legacywatch`](legacywatch.md),
+[`wpswatch`](wpswatch.md), [`certwatch`](certwatch.md),
 [`snmpwatch`](snmpwatch.md), [`isiswatch`](isiswatch.md) and
 [`igmpwatch`](igmpwatch.md). They are the suite's sharpest detectors — but each
 wrote to its own log with its own schema, so there was **no single place to see
@@ -13,6 +14,176 @@ into one common shape, and shows them in one deduped feed** — in the web UI
 (Diagnostics → *Watchtower*) and, for new high/critical findings, through one
 Pushover path. It is **read-only over the log files**: it never captures a
 packet or sends one. The watchers stay the sensors; Watchtower is the aggregator.
+
+Alongside the standalone daemons, the **in-app vendor CVE guards** —
+[`cisco_guard`, `juniper_guard`, `arista_guard`](nettools.md#vendor-cve-guards),
+[`comware_guard`](nettools.md#comware-guard), `mikrotik_guard`, `aruba_guard`,
+[`apc_guard`](nettools.md#apc-guard) and [`liebert_guard`](nettools.md#liebert-guard) — append their findings as
+JSON-lines to `/var/log/ragnar/<guard>.jsonl` (time-window deduplicated so the
+background rotation cannot spam the log with a standing condition). Watchtower
+picks them up through the same glob and treats them exactly like any other
+source, so a Cisco SNMP-overflow attempt, a Comware VRF-hop or a Ripple20 tunnel
+attack on an APC card or a Misfortune Cookie banner on a Liebert card lands in the same pane and the same Pushover path as an
+ARP-poisoning or an evil-twin. Unlike the daemons, the guards need no systemd
+unit — Cisco, Juniper, Arista and Comware feed Watchtower automatically whenever
+**Extended Monitoring** is on, and MikroTik, Aruba, APC and Liebert on every scan.
+APC Guard and Liebert Guard also have opt-in continuous daemons
+(`apcguard@<iface>`, `liebert_guard@<iface>`) that write
+`/var/log/ragnar/apcguard.jsonl` and `/var/log/ragnar/liebertguard.jsonl`. Watchtower
+reads APC's native `title` and Liebert's `note` as the headline, and for Liebert's
+`server`/`client` records takes the client as the source of an attempt and the card
+itself as the source of a banner finding.
+
+The in-app **L5–L7 observers** [`ssh_watch`](nettools.md#ssh-watch) and
+[`telnet_watch`](nettools.md#telnet-watch) feed the pane the same way, appending
+their findings to `/var/log/ragnar/ssh_watch.jsonl` (**non-`info`**) and
+`/var/log/ragnar/telnet_watch.jsonl` (**HIGH/CRITICAL**, Telnet and r-services alike),
+deduplicated per code + server. Pure
+inventory/posture stays off the pane; a Terrapin exposure lands as **high** and a
+confirmed Telnet argument injection as **critical**. Both also run in the Network
+Integrity Monitor rotation, so their verdicts surface there as chips as well.
+
+Two L3 routing observers feed the pane the same way. [`icmp_watch`](nettools.md#icmp-watch)
+appends its **HIGH/CRITICAL** redirect findings to `/var/log/ragnar/icmp_watch.jsonl`
+(deduplicated per check + source) — a gateway-MAC spoof or ARP-poison-then-redirect
+lands as **critical**, an off-subnet / non-router redirect as **high**.
+[`pathwatch`](nettools.md#bgp-collector--path-asymmetry-control-plane--data-plane)
+(BGP Path Watch v2, the on-demand path-convergence probe) appends a
+**suspected/active/confirmed** convergence verdict to `/var/log/ragnar/pathwatch.jsonl`
+(deduplicated per target + severity) — a RIB-corroborated convergence event lands as
+**critical**, loss-plus-path-change as **high**.
+
+[`smb_watch`](nettools.md#smb-watch) (SMB & Kerberos Watch v2) appends a **HIGH/CRITICAL**
+verdict to `/var/log/ragnar/smb_watch.jsonl` (deduplicated per verdict + interface) — a
+static Responder challenge lands as **critical**, and Responder poisoning, SMBv1 in
+active use, Kerberos roasting/downgrade, or a KDC-error recon burst as **high**. This is
+the harvest + Kerberos half of the credential-relay chain; the Relay/Coercion Watch owns
+the relay + unsigned-target half, and Watchtower's incident-correlation engine fuses the
+two streams into one named attack chain.
+
+[`rpc_watch`](nettools.md#rpc--netlogon-watch) (RPC / NetLogon Watch) appends its
+**HIGH/CRITICAL** DCERPC / NetLogon / NTLM / WinRM findings to
+`/var/log/ragnar/rpc_watch.jsonl` (deduplicated per code + subject) — the **Zerologon**
+chain (CVE-2020-1472), an unsigned NetLogon bind, **DCSync**, DPAPI backup-key access
+and WinRM Basic/unencrypted land as **critical**, the rest of the auth-posture set as
+**high**. Authentication **coercion** is excluded from this feed on purpose: the
+Relay/Coercion Watch already streams it (see above), so the RPC/NetLogon feed never
+double-reports the same PetitPotam/PrinterBug/DFSCoerce/ShadowCoerce event.
+
+[`cfm_watch`](nettools.md#cfm-watch) (CFM Watch) appends every non-inventory finding at
+**MEDIUM** and above to `/var/log/ragnar/cfm_watch.jsonl`, deduplicated per code and
+context. These land as **critical**:
+
+- forged APS **Lockout of protection**
+- an APS Signal Fail that no visible fault corroborates
+
+These land as **high**:
+
+- a Forced Switch, protection-group takeover or churn
+- an AIS from a source that never sent a CCM
+- a MEP that moves MAC, a duplicate MEP or a MAID mismatch
+- MD-level violations, an LBM flood or an LTM sweep
+- malformed CFM, including the CVE-2020-1639 shape
+
+The CVE-2025-52961 load correlation carries the CVE id and its low confidence in the
+alert detail. MD-level / MEP / VLAN inventory stays in the card.
+
+[`oam_watch`](nettools.md#oam-watch) (OAM Watch) appends its structural and abuse findings
+at **MEDIUM** and above to `/var/log/ragnar/oam_watch.jsonl` (deduplicated per code + source
+MAC). These land as **critical**: an 802.3ah Loopback Control enable (a one-frame link
+blackhole) and its confirmed remote-loopback state, failure flags that flap while the
+session stays up, peer substitution and a second OAM speaker. Malformed OAMPDUs, discovery
+restart, capability change, a rate-cap flood and a cleartext MIB response land as **high**
+or **medium**. Link OAM has no CVEs; capability posture notes stay in the card.
+
+[`lacp_watch`](nettools.md#lacp-watch) (LACP Watch) appends its **HIGH/CRITICAL**
+slow-protocol integrity findings to `/var/log/ragnar/lacp_watch.jsonl` (deduplicated per
+code + session) — a correlated **LAG hijack** lands as **critical**, and delivery-path
+anomalies (VLAN-tagged / non-group-MAC LACPDUs), identity manipulation and sync/timeout
+flapping as **high**.
+
+[`bfd_watch`](nettools.md#bfd-watch) (BFD Watch) appends its **HIGH/CRITICAL**
+failover-manipulation findings to `/var/log/ragnar/bfd_watch.jsonl` (deduplicated per
+code + session) — a **spoofed teardown** / **forced AdminDown** / illegal **state
+regression** that induces routing reconvergence lands as **critical**, and no-auth /
+GTSM violation / malformed-or-truncated header (**CVE-2018-0155**) / auth downgrade /
+session flap as **high**.
+
+[`smtp_watch`](nettools.md#smtp-watch) (SMTP Watch) appends its **HIGH/CRITICAL** Exim
+findings to `/var/log/ragnar/smtp_watch.jsonl` (deduplicated per code + server) — a
+recipient carrying a `${...}` expansion that the server **accepted** (**CVE-2019-10149**,
+KEV) lands as **critical**; the expansion *attempt*, a malformed SNI / client-certificate DN
+(**CVE-2019-15846**), an overlong EHLO/HELO line (**CVE-2019-16928**) and an AUTH base64
+token of length 4n+3 (**CVE-2018-6789**, KEV) as **high**. Banner version ranges are low-confidence posture and stay out of the feed.
+
+[`http_watch`](nettools.md#http-watch) (HTTP Watch) appends its **HIGH/CRITICAL** findings
+to `/var/log/ragnar/http_watch.jsonl` (deduplicated per code + client). A **request-smuggling
+desync** (Content-Length and Transfer-Encoding framers disagree and the leftover is a request
+line), a **MS15-034** Range at or beyond 2^63 (**CVE-2015-1635**, KEV) and the HTTP.sys
+**Accept-Encoding** crash shape (**CVE-2021-31166**, KEV) land as **critical**; malformed
+TE / CL / chunk grammar, **HTTP/2 Rapid Reset** (**CVE-2023-44487**, KEV), CONTINUATION /
+HPACK / gRPC header abuse and **credentials in the clear** (class `EXPOSURE`, values already
+redacted to an 8-hex SHA-256 tag) as **high**. Warn / info posture stays in the card.
+
+[`modbus_watch`](nettools.md#modbus--lorawan-watch) (Modbus & LoRaWAN Watch) appends its **HIGH** and
+**MEDIUM** findings to `/var/log/ragnar/modbus_watch.jsonl` (deduplicated per code + master).
+A write from a master outside the learned baseline, FC8 **Force Listen Only** and the
+**ModiPwn** UMAS sequence (**CVE-2021-22779**) land as **high**. An unlearned master's other
+requests, FC8 restart / clear-counters, UMAS activity and malformed MBAP/PDU framing (the
+libmodbus trigger, **CVE-2019-14462** / **CVE-2019-14463** / **CVE-2024-10918**) land as
+**medium**. Enumeration, unit-ID sweeps and cleartext-segment posture stay in the card.
+
+[`lldp_watch`](nettools.md#lldp-watch) (LLDP Watch) appends its **MEDIUM** and higher
+findings to `/var/log/ragnar/lldp_watch.jsonl` (deduplicated per code + source MAC).
+Malformed-TLV CVE shapes land as **critical**: a TLV length past the frame, and an
+oversized or family-mismatched Management Address (lldpd **CVE-2015-8011**). Illegal fixed
+lengths, missing or out-of-order mandatory TLVs, malformed Chassis/Port IDs, oversized
+strings, malformed org-specific TLVs (OVS **CVE-2022-4337** / **CVE-2022-4338**), an LLDP
+flood and a forged neighbour land as **high**. Reserved TLV types, duplicates and data
+after End-of-LLDPDU land as **medium**. Vulnerable-family screening notes stay in the card.
+
+[`ftp_watch`](nettools.md#ftp-watch) (FTP Watch) appends its **HIGH/CRITICAL** ProFTPD
+findings to `/var/log/ragnar/ftp_watch.jsonl` (deduplicated per code + server) — a
+pre-authentication or anonymous **mod_copy** copy the server accepted or completed
+(**CVE-2015-3306** / **CVE-2019-12815**), or a copy into a webroot / executable destination,
+lands as **critical**; a mod_copy *attempt* and a **quoted command verb**
+(**CVE-2023-51713**) as **high**. Banner version ranges stay out of the feed: they are
+low-confidence posture, not an event.
+
+[`ptp_watch`](nettools.md#ptp-watch) (PTP Watch) appends its **HIGH/CRITICAL**
+timing-plane-manipulation findings to `/var/log/ragnar/ptp_watch.jsonl` (deduplicated per
+code + port-identity) — a grandmaster **takeover** / two sources claiming one GM identity,
+a `correctionField` or origin-timestamp **injection**, a mid-session `currentUtcOffset`
+flip, a management **SET/WRITE**, a unicast-cancel forgery, or a gPTP **multi-peer-delay
+responder** (denial-of-timing) lands as **critical**, and Announce/Sync flooding, sequence
+regression and identity-from-two-MACs as **high**.
+
+[`sr_mpls_watch`](nettools.md#sr-mpls-watch) (SR-MPLS Watch) appends its **HIGH/CRITICAL**
+label & segment-manipulation findings to `/var/log/ragnar/sr_mpls_watch.jsonl`
+(deduplicated per code + key) — a label or **SRH on a customer-facing port**
+(label-injection / VRF-hopping) lands as **critical**, and reserved/implicit-null labels
+forwarded, TTL-expiry-forwarded, SRv6 path disclosure / missing HMAC, and the SR
+control-plane tells (LDP/RSVP/BGP-SR/IS-IS-SR/OSPF-SR) as **high**.
+
+[`ipsec_watch`](nettools.md#ipsec--ike-watch) (IPsec / IKE Watch) appends its IKE
+key-exchange posture findings to `/var/log/ragnar/ipsec_watch.jsonl` (deduplicated per code
++ source) — **D(HE)at** / weak DH groups (MODP-768/1024), **SWEET32** 64-bit IKE ciphers,
+IKEv1 **Aggressive Mode**, weak PSK-hash / PRF and the stateful **DH-downgrade** correlator,
+each mapped to its CVE and surfaced as **HIGH**/**MEDIUM**. Dual-stack (IPv4 + IPv6).
+
+[`dns_watch`](nettools.md#dns-watch) (DNS Watch) appends its passive DNS-response findings to
+`/var/log/ragnar/dns_watch.jsonl` (deduplicated per code + source) — **KeyTrap** and **NSEC3**
+DNSSEC-CPU DoS (CVE-2023-50387 / CVE-2023-50868), **NXNSAttack** referral amplification,
+**MaginotDNS** out-of-bailiwick cache-poisoning, **DNSBomb** and **SAD DNS**, each mapped to
+its CVE. Colliding-key-tag / cache-poisoning findings land as **CRITICAL**, iteration/rate
+tells as **MEDIUM**. Dual-stack (A + AAAA).
+
+These vendor guards are **LAN-only**: their findings only mean anything on a
+wired switch/router uplink or a SPAN/mirror port, so the background rotation
+runs them **only when a genuine wired LAN interface is up** and always over that
+wired NIC — never `wlan0`. On a Wi-Fi-only unit they simply don't auto-run, so
+Comware can't falsely report VRF/MPLS findings off wlan. A manual scan from the
+dashboard is always available regardless of link type.
 
 ## Why one normalizer, not seven adapters
 
@@ -113,7 +284,7 @@ them (`●` present, `○` no log found / not running).
 
 **Dashboard** — a Watchtower card sits under the stats grid on the landing tab:
 severity chips (or a green *All clear*), the five newest findings, and a
-`3/7 watchers logging: ● ARP Guard ○ Cert Watch …` source line. It refreshes with
+`3/9 watchers logging: ● ARP Guard ○ Cert Watch …` source line. It refreshes with
 the dashboard (on open, then every 20s), so an active attack is visible without
 digging.
 

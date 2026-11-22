@@ -1,0 +1,8 @@
+# Drop-in example. Install as:
+#   /etc/systemd/system/dellguard@eth1.service.d/iface.conf
+#
+# RestrictNetworkInterfaces only applies when the interface name is a LITERAL. In the
+# template it must be written as %I, which systemd rejects and drops, so per-interface
+# restriction belongs here, per concrete instance.
+[Service]
+RestrictNetworkInterfaces=eth1

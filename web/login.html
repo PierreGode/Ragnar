@@ -3,6 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="/scripts/i18n/active.js"></script>
+    <script src="/scripts/i18n.js?v=20261104-i18n"></script>
     <title>Ragnar - Login</title>
     <link rel="icon" href="/images/ragnar.ico" type="image/x-icon">
     <link rel="stylesheet" href="/css/tailwind.css">
@@ -65,7 +67,12 @@
             <!-- Hardware Mismatch Warning (hidden by default) -->
             <div id="hw-mismatch-warning" class="hidden mb-4 p-3 rounded-lg bg-red-900/30 border border-red-700">
                 <p class="text-sm text-red-300">
-                    Hardware mismatch detected. This Ragnar instance is bound to different hardware.
+                    Hardware mismatch detected. This Ragnar instance is bound to different hardware
+                    (this can happen after moving the install to a new device, or a host kernel update in a VM/container).
+                </p>
+                <p class="text-sm text-red-200 mt-2">
+                    Use a <button type="button" onclick="toggleRecovery()" class="underline hover:text-white">recovery code</button>
+                    to rebind to this hardware — your data is preserved.
                 </p>
             </div>
 
@@ -138,6 +145,19 @@
                     Reset Password
                 </button>
             </form>
+
+            <!-- New recovery codes (shown only after a hardware rebind) -->
+            <div id="new-codes-panel" class="hidden mt-4">
+                <div class="p-3 rounded-lg bg-amber-900/30 border border-amber-700">
+                    <p class="text-sm text-amber-200 font-semibold">Hardware changed — rebound to this device.</p>
+                    <p class="text-sm text-amber-200/90 mt-1">Your old recovery codes no longer work. Save these new ones now:</p>
+                </div>
+                <div id="new-codes-list" class="grid grid-cols-2 gap-2 mt-3 font-mono text-sm text-sky-300"></div>
+                <button type="button" id="new-codes-continue" onclick="window.location.href='/'"
+                        class="w-full mt-4 bg-sky-600 hover:bg-sky-700 text-white font-semibold py-3 px-4 rounded-lg transition-colors">
+                    I've saved them — continue
+                </button>
+            </div>
 
             <div class="mt-4 text-center">
                 <button onclick="toggleRecovery()" class="text-sm text-gray-400 hover:text-sky-400 transition-colors">
@@ -430,8 +450,24 @@
 
                 if (data.success) {
                     stopWhispers();
-                    showStatus('recovery-status', data.message + ' Redirecting...', 'success');
-                    setTimeout(() => { window.location.href = '/'; }, 1500);
+                    if (data.recovery_codes && data.recovery_codes.length) {
+                        // Hardware rebind: show the fresh codes and let the user
+                        // save them before continuing (no auto-redirect).
+                        showStatus('recovery-status', data.message, 'success');
+                        const list = document.getElementById('new-codes-list');
+                        list.innerHTML = '';
+                        data.recovery_codes.forEach(c => {
+                            const el = document.createElement('div');
+                            el.className = 'px-2 py-1 rounded bg-slate-800 border border-slate-600 text-center';
+                            el.textContent = c;
+                            list.appendChild(el);
+                        });
+                        document.getElementById('recovery-form').classList.add('hidden');
+                        document.getElementById('new-codes-panel').classList.remove('hidden');
+                    } else {
+                        showStatus('recovery-status', data.message + ' Redirecting...', 'success');
+                        setTimeout(() => { window.location.href = '/'; }, 1500);
+                    }
                 } else {
                     stopWhispers();
                     showStatus('recovery-status', data.error || 'Recovery failed', 'error');

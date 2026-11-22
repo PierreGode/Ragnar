@@ -31,7 +31,7 @@ import urllib.error
 import socket
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed  # kept for _run_full_scan only
 from queue import Queue, Empty
@@ -77,6 +77,32 @@ class ScanStrength(Enum):
     STANDARD = "standard"
     THOROUGH = "thorough"
     INSANE = "insane"
+
+
+def _scan_row_is_fresh(row: Dict[str, Any], max_age_seconds: float = 3600.0) -> bool:
+    """True if a scan_jobs row was updated recently enough to be resurrected
+    into the active-scans list at boot.
+
+    Anything older can only be a ghost from a previous incarnation — its
+    thread died with that process — so it must stay a DB record, not appear
+    as an "active" scan with a forever-ticking duration. Accepts both the
+    SQLite CURRENT_TIMESTAMP format ('YYYY-MM-DD HH:MM:SS', UTC) and ISO with
+    'T'/'Z'; naive timestamps are treated as UTC.
+    """
+    ts = row.get('updated_at') or row.get('created_at')
+    if not ts:
+        return False
+    try:
+        text = str(ts).strip().replace(' ', 'T')
+        if text.endswith('Z'):
+            text = text[:-1] + '+00:00'
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - parsed).total_seconds()
+        return 0 <= age <= max_age_seconds
+    except (ValueError, TypeError):
+        return False
 
 
 @dataclass
@@ -141,6 +167,8 @@ class ScanProgress:
     auth_type: str = ""  # Auth type used for this scan (cookie, bearer_token, etc.)
     auth_status: str = ""  # Auth validation status (applied, verified, failed)
     delegated_to: str = ""  # Viking name of the mesh peer running this scan (delegated scans)
+    egress_iface: str = ""  # Interface the scan host routes the target over (e.g. eth0, tailscale0)
+    egress_tunneled: bool = False  # True when that interface is the Tailscale tunnel
     log_entries: List[Dict[str, str]] = field(default_factory=list)  # Buffered scan log entries
 
     def to_dict(self) -> Dict[str, Any]:
@@ -158,6 +186,8 @@ class ScanProgress:
             'auth_type': self.auth_type,
             'auth_status': self.auth_status,
             'delegated_to': self.delegated_to,
+            'egress_iface': self.egress_iface,
+            'egress_tunneled': self.egress_tunneled,
             'duration_seconds': (
                 (self.completed_at or datetime.now()) - self.started_at
             ).total_seconds() if self.started_at else 0
@@ -499,6 +529,11 @@ class AdvancedVulnScanner:
         self._zap_watchdog_stop = threading.Event()
         self._zap_user_stopped = False  # True when user explicitly stops ZAP
         self._zap_busy = False  # True during startup or active scan — suppresses watchdog
+        # Serialize ZAP-daemon scans: the daemon deadlocks when two scans run
+        # against it at once (newSession called while another spider is
+        # mid-crawl wedges every spider endpoint until the JVM is killed), so
+        # exactly one ZAP scan may run at a time — the rest fail fast.
+        self._zap_scan_lock = threading.Lock()
         self._zap_start_lock = threading.Lock()  # Prevents concurrent start_zap_daemon calls
 
         # Check capabilities
@@ -554,6 +589,15 @@ class AdvancedVulnScanner:
                     # Mark as interrupted - it was running when system restarted
                     self._db.mark_scan_interrupted(scan_id)
                     logger.info(f"Marked scan {scan_id} as interrupted")
+
+                    if not _scan_row_is_fresh(scan):
+                        # Ghost from an earlier incarnation: its thread died
+                        # with that process. Keep it as a DB record only — do
+                        # not resurrect it into active_scans with a
+                        # forever-ticking duration.
+                        logger.info(f"Scan {scan_id} marked interrupted in DB only "
+                                    f"(row not fresh enough to resurrect)")
+                        continue
 
                     # Create a progress entry for UI display
                     progress = ScanProgress(
@@ -1078,6 +1122,25 @@ class AdvancedVulnScanner:
 
         options = options or {}
 
+        # URL-based scanners (ZAP/Nikto/WhatWeb/Nuclei) need a scheme. If the
+        # user typed a bare IP/host, default to http:// so it "just works"; also
+        # lowercase an explicit scheme ('HTTP://Host' -> 'http://Host'), keeping
+        # host/path casing. nmap takes a raw host, so it's left untouched.
+        if isinstance(target, str) and scan_type != ScanType.NMAP_VULN:
+            t = target.strip()
+            if '://' in t:
+                _scheme, _rest = t.split('://', 1)
+                if _scheme.lower() in ('http', 'https'):
+                    t = _scheme.lower() + '://' + _rest
+            elif t:
+                t = 'http://' + t
+            target = t
+            # If no explicit port was given, probe for a live web port so ZAP
+            # scans the service that's actually listening instead of assuming
+            # :80 and hard-failing on an HTTPS-only or alt-port host. Skipped
+            # for nmap (raw host) by the scan_type guard above.
+            target = self._resolve_web_target(target)
+
         with self._lock:
             self._scan_counter += 1
             scan_id = f"AVS-{self._scan_counter:06d}-{int(time.time())}"
@@ -1088,6 +1151,10 @@ class AdvancedVulnScanner:
             target=target,
             status='pending'
         )
+
+        # Record how this host routes to the target (eth0 vs tailscale0), so a
+        # delegated scan can show whether it actually went through the tunnel.
+        progress.egress_iface, progress.egress_tunneled = self._target_egress(target)
 
         self.active_scans[scan_id] = progress
         self.scan_results[scan_id] = []
@@ -1189,6 +1256,11 @@ class AdvancedVulnScanner:
             progress.progress_percent = scan.get('progress_percent', progress.progress_percent)
             progress.current_check = scan.get('current_check', progress.current_check) or progress.current_check
             progress.findings_count = scan.get('findings_count', progress.findings_count)
+            # Mirror the peer's egress so the cockpit can show whether the remote
+            # scan reached the target through the tunnel (tailscale0) or its LAN.
+            if scan.get('egress_iface'):
+                progress.egress_iface = scan['egress_iface']
+                progress.egress_tunneled = bool(scan.get('egress_tunneled'))
             if scan.get('error_message'):
                 progress.error_message = scan['error_message']
             st = scan.get('status')
@@ -1628,6 +1700,36 @@ class AdvancedVulnScanner:
             flags += ['-c', '25', '-rate-limit', str(rate_limit)]
 
         return flags, env, severity, note
+
+    @staticmethod
+    def _target_egress(target: str):
+        """(iface, tunneled) for how THIS host routes to `target`.
+
+        Resolves the host, then `ip route get <ip>` and reads `dev <iface>`, so
+        the UI can show whether a scan actually leaves over the Tailscale tunnel
+        (tailscale0) or the box's own LAN. Scanner-agnostic — it's the OS routing
+        decision, so it's identical for nuclei, ZAP, nmap, etc. Best-effort."""
+        try:
+            import socket
+            import urllib.parse
+            host = (target or '').strip()
+            if '://' in host:
+                host = urllib.parse.urlparse(host).hostname or host
+            else:
+                host = host.split('/')[0].split(':')[0]
+            if not host:
+                return '', False
+            try:
+                ip = socket.gethostbyname(host)
+            except Exception:
+                ip = host  # already an IP, or unresolvable — let ip-route decide
+            out = subprocess.run(['ip', 'route', 'get', ip],
+                                 capture_output=True, text=True, timeout=5).stdout
+            m = re.search(r'\bdev\s+(\S+)', out or '')
+            iface = m.group(1) if m else ''
+            return iface, iface.startswith('tailscale')
+        except Exception:
+            return '', False
 
     @staticmethod
     def _available_mib() -> Optional[int]:
@@ -2587,8 +2689,8 @@ class AdvancedVulnScanner:
                 if not target_url:
                     return "ZAP Error: No target URL provided for scan."
 
-                # Check URL format
-                if not target_url.startswith(('http://', 'https://')):
+                # Check URL format (scheme is case-insensitive: HTTP:// / Http:// ok)
+                if not target_url.lower().startswith(('http://', 'https://')):
                     return f"ZAP Error: Invalid URL format '{target_url}'. URL must start with http:// or https://"
 
                 # Common ZAP 500 causes
@@ -2624,13 +2726,101 @@ class AdvancedVulnScanner:
         # Other HTTP errors
         return f"ZAP API error {code}: {error_detail[:200] if error_detail else 'Unknown error'}"
 
+    # Common web ports probed when the operator gives a bare host with NO explicit
+    # port. ZAP hard-validates reachability and would otherwise assume :80 and fail
+    # on a host that only serves HTTPS or runs on an alt port (Nuclei never
+    # validated, which is why it "worked" where ZAP didn't). Ordered by preference.
+    _WEB_PROBE_PORTS = (80, 443, 8080, 8443, 8000, 8888, 8081, 3000, 5000,
+                        9443, 9090, 8090, 8008, 8181)
+
+    def _probe_web_port(self, host: str, port: int, timeout: float = 2.0):
+        """Return (open: bool, scheme: str) for host:port — https if a TLS
+        handshake succeeds (self-signed tolerated), else http if the raw TCP
+        connect succeeds."""
+        import ssl
+        try:
+            raw = socket.create_connection((host, port), timeout=timeout)
+        except Exception:
+            return False, ""
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            server_hostname = None
+            try:
+                socket.inet_aton(host)
+            except OSError:
+                server_hostname = host  # SNI only for real hostnames
+            tls = ctx.wrap_socket(raw, server_hostname=server_hostname)
+            tls.close()
+            return True, "https"
+        except Exception:
+            try:
+                raw.close()
+            except Exception:
+                pass
+            return True, "http"
+
+    def _resolve_web_target(self, target: str) -> str:
+        """When `target` is a URL with no explicit port, probe common web ports
+        and rewrite it to a scheme://host[:port] that is actually listening, so
+        ZAP scans the live service instead of blindly defaulting to :80.
+
+        Respects an explicit port (returns unchanged). Returns the original
+        target unchanged if nothing is reachable (validation then reports the
+        clear per-port error)."""
+        try:
+            parsed = urllib.parse.urlparse(target)
+        except Exception:
+            return target
+        if not parsed.netloc or parsed.port:
+            return target  # no host, or operator pinned a port — respect it
+        host = parsed.netloc.split(':')[0].strip('[]')
+        if not host:
+            return target
+
+        import concurrent.futures
+        found = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self._WEB_PROBE_PORTS)) as ex:
+            futs = {ex.submit(self._probe_web_port, host, p): p
+                    for p in self._WEB_PROBE_PORTS}
+            for fut in concurrent.futures.as_completed(futs, timeout=6):
+                p = futs[fut]
+                try:
+                    ok, scheme = fut.result()
+                except Exception:
+                    ok, scheme = False, ""
+                if ok:
+                    found[p] = scheme
+        if not found:
+            return target  # nothing listening — let validation explain
+
+        # Prefer the scheme the operator implied (bare IP -> http), then the
+        # other canonical port, then the lowest-numbered open port.
+        implied = (parsed.scheme or 'http').lower()
+        order = [80, 443] if implied == 'http' else [443, 80]
+        chosen_port = next((p for p in order if p in found),
+                           min(found.keys()))
+        scheme = found[chosen_port]
+        rest = parsed.path or ''
+        if parsed.query:
+            rest += '?' + parsed.query
+        if (scheme == 'http' and chosen_port == 80) or (scheme == 'https' and chosen_port == 443):
+            resolved = f"{scheme}://{host}{rest}"
+        else:
+            resolved = f"{scheme}://{host}:{chosen_port}{rest}"
+        if resolved != target:
+            logger.info(f"[TARGET-RESOLVE] {target} -> {resolved} "
+                        f"(open web ports: {sorted(found)})")
+        return resolved
+
     def _validate_target_url(self, target: str) -> Tuple[bool, str]:
         """Validate that a target URL is properly formatted and potentially reachable"""
         if not target:
             return False, "Target URL is empty"
 
-        # Check URL scheme
-        if not target.startswith(('http://', 'https://')):
+        # Check URL scheme (case-insensitive: HTTP:// / Http:// are fine)
+        if not target.lower().startswith(('http://', 'https://')):
             return False, f"Invalid URL scheme. URL must start with http:// or https://, got: {target[:50]}"
 
         # Parse URL
@@ -2641,16 +2831,41 @@ class AdvancedVulnScanner:
         except Exception as e:
             return False, f"URL parsing error: {e}"
 
+        # A dotted-quad with an out-of-range octet ("712.20.10.1") is NOT a valid
+        # IP — Python then treats it as a hostname and DNS fails, giving the
+        # misleading "cannot resolve hostname". Catch it with a clear message.
+        host_only = parsed.netloc.split(':')[0].strip('[]')
+        if re.match(r'^\d{1,5}(\.\d{1,5}){3}$', host_only):
+            try:
+                import ipaddress
+                ipaddress.ip_address(host_only)
+            except ValueError:
+                bad = next((o for o in host_only.split('.')
+                            if not (o.isdigit() and 0 <= int(o) <= 255)), None)
+                hint = f" — octet '{bad}' is over 255" if bad else ""
+                return False, (f"'{host_only}' is not a valid IP address{hint}. "
+                               f"Check for a typo (an iPhone hotspot gateway is 172.20.10.1, not 712.20.10.1).")
+
         # Quick connectivity check (with short timeout)
         try:
             host = parsed.netloc.split(':')[0]
-            port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+            scheme = (parsed.scheme or 'http').lower()
+            port = parsed.port or (443 if scheme == 'https' else 80)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5)
             result = sock.connect_ex((host, port))
             sock.close()
             if result != 0:
-                return False, f"Cannot connect to {host}:{port}. Target may be unreachable or firewall is blocking."
+                # Explain the port: an unspecified http:// target defaults to 80,
+                # which is where "unexpected :80" comes from — the tool isn't
+                # adding it, http just *means* port 80.
+                hint = ""
+                if not parsed.port:
+                    hint = (f" Port {port} is the default for {scheme}:// — if the service "
+                            f"listens on another port or uses HTTPS, say so, "
+                            f"e.g. http://{host}:8080 or https://{host}.")
+                return False, (f"Cannot connect to {host}:{port}. Target may be unreachable, "
+                               f"firewalled, or not listening on that port.{hint}")
         except socket.gaierror:
             return False, f"Cannot resolve hostname: {parsed.netloc}. Check if the URL is correct."
         except socket.timeout:
@@ -3536,11 +3751,18 @@ class AdvancedVulnScanner:
 
     def _run_zap_spider(self, scan_id: str, target: str, options: Dict):
         """Run ZAP spider to discover URLs"""
+        # Serialize ZAP scans: a second scan against the same daemon deadlocks
+        # it (newSession while another spider is mid-crawl), so refuse instead.
+        if not self._zap_scan_lock.acquire(timeout=60):
+            raise RuntimeError('Another ZAP scan is already running against the daemon — '
+                               'concurrent ZAP scans deadlock it. Wait for the running scan '
+                               'to finish and retry.')
         self._zap_busy = True
         try:
             self._run_zap_spider_inner(scan_id, target, options)
         finally:
             self._zap_busy = False
+            self._zap_scan_lock.release()
 
     def _run_zap_spider_inner(self, scan_id: str, target: str, options: Dict):
         """Inner spider logic — called with busy-flag protection."""
@@ -3677,11 +3899,17 @@ class AdvancedVulnScanner:
 
     def _run_zap_active_scan(self, scan_id: str, target: str, options: Dict):
         """Run ZAP active vulnerability scan with strength-aware configuration."""
+        # Serialize ZAP scans (see _zap_scan_lock) — refuse instead of deadlocking.
+        if not self._zap_scan_lock.acquire(timeout=60):
+            raise RuntimeError('Another ZAP scan is already running against the daemon — '
+                               'concurrent ZAP scans deadlock it. Wait for the running scan '
+                               'to finish and retry.')
         self._zap_busy = True
         try:
             self._run_zap_active_scan_inner(scan_id, target, options)
         finally:
             self._zap_busy = False
+            self._zap_scan_lock.release()
 
     def _run_zap_active_scan_inner(self, scan_id: str, target: str, options: Dict):
         """Inner active scan logic — called with busy-flag protection."""
@@ -4265,11 +4493,17 @@ class AdvancedVulnScanner:
         Standard  (3 phases): Spider → AJAX Spider → Active Scan
         Thorough+ (5 phases): Spider → AJAX Spider → Active Scan → ragnar-fuzz → JSON Reflections
         """
+        # Serialize ZAP scans (see _zap_scan_lock) — refuse instead of deadlocking.
+        if not self._zap_scan_lock.acquire(timeout=60):
+            raise RuntimeError('Another ZAP scan is already running against the daemon — '
+                               'concurrent ZAP scans deadlock it. Wait for the running scan '
+                               'to finish and retry.')
         self._zap_busy = True
         try:
             self._run_zap_full_scan_inner(scan_id, target, options)
         finally:
             self._zap_busy = False
+            self._zap_scan_lock.release()
 
     def _run_zap_full_scan_inner(self, scan_id: str, target: str, options: Dict):
         """Inner full scan logic — called with busy-flag protection."""
@@ -5518,15 +5752,21 @@ class AdvancedVulnScanner:
                 refs = alert['reference'].split('\n')
                 references.extend([r.strip() for r in refs if r.strip()])
 
-            # Parse URL for host/port
+            # Parse URL for host/port. ZAP normalises URLs to an explicit port
+            # ("http://host:80/"), so netloc carries a :80/:443 the user never
+            # typed. Keep the real port in the port field but drop the *default*
+            # port from the displayed host so it reads "host" not "host:80".
             url = alert.get('url', '')
             host = url
             port = None
             try:
                 parsed = urllib.parse.urlparse(url)
-                host = parsed.netloc
+                host = parsed.hostname or parsed.netloc
                 if parsed.port:
                     port = parsed.port
+                    default_port = 443 if parsed.scheme == 'https' else 80
+                    if parsed.port != default_port:
+                        host = f"{parsed.hostname}:{parsed.port}"
             except Exception:
                 pass
 
@@ -6047,7 +6287,7 @@ class AdvancedVulnScanner:
             result['recommendations'].append("Provide a valid URL starting with http:// or https://")
             return result
 
-        if not target.startswith(('http://', 'https://')):
+        if not target.lower().startswith(('http://', 'https://')):
             result['valid'] = False
             result['errors'].append(f"Invalid URL scheme: {target[:30]}")
             result['recommendations'].append("URL must start with http:// or https://")
@@ -6629,18 +6869,21 @@ class AdvancedVulnScanner:
                 del self.scan_results[scan_id]
                 deleted = True
 
-        # Remove from database
+        # Remove from database — scans are persisted to whichever per-network
+        # DB was active when they ran, so delete from every known DB, not just
+        # the current one (otherwise the delete silently misses rows and a
+        # leftover 'running' row gets resurrected at every boot).
         if self._db:
             try:
-                with self._db.get_connection() as conn:
-                    cursor = conn.cursor()
-                    # Delete findings for this scan
-                    cursor.execute("DELETE FROM scan_findings WHERE scan_id = ?", (scan_id,))
-                    # Delete scan job record
-                    cursor.execute("DELETE FROM scan_jobs WHERE scan_id = ?", (scan_id,))
-                    conn.commit()
-                deleted = True
-                logger.info(f"Deleted scan {scan_id} from database")
+                removed = self._db.delete_scan_everywhere(scan_id)
+                if removed:
+                    deleted = True
+                elif not deleted:
+                    # No rows anywhere and nothing in memory — report failure
+                    # so the UI stops claiming success on no-op deletes.
+                    deleted = False
+                logger.info(f"Deleted scan {scan_id} from database "
+                            f"({removed} job rows across all network DBs)")
             except Exception as e:
                 logger.error(f"Error deleting scan from database: {e}")
 
@@ -6655,15 +6898,14 @@ class AdvancedVulnScanner:
             self.active_scans.clear()
             self.scan_results.clear()
 
-        # Clear database
+        # Clear database — every network DB, not just the current one (scans
+        # are persisted to whichever network was active when they ran).
         if self._db:
             try:
-                with self._db.get_connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("DELETE FROM scan_findings")
-                    cursor.execute("DELETE FROM scan_jobs")
-                    conn.commit()
-                logger.info("Deleted all scans from database")
+                removed = self._db.delete_all_scan_jobs_everywhere()
+                count += removed
+                logger.info(f"Deleted all scans from database "
+                            f"({removed} job rows across all network DBs)")
             except Exception as e:
                 logger.error(f"Error clearing scans from database: {e}")
 

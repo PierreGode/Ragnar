@@ -10,13 +10,36 @@ device that's already sitting on the segment you care about, so it sees what the
 segment sees — plus the everyday diagnostics you'd normally reach for a laptop
 and a bag of CLI tools to do.
 
-It is split into three sub-tabs: **Diagnostics**, **Switch & L2/L3**, and
-**Interfaces**.
+It is split into two sub-tabs: **Diagnostics** and **Interfaces**. Diagnostics
+holds every module, sorted by the **OSI layer** it mostly watches — a row of layer
+buttons (**Overview · L7 · L6 · L5 · L4 · L3 · L2 · L1**) switches between them, and
+each layer lists its passive detectors first and its active tools after. A module that
+acts on more than one layer sits at the one it mostly watches (the matrix below). The
+over-the-air RF tools live in **Signal Intelligence**.
+
+With ~70 modules across the layers, a **search box** sits above the layer buttons:
+type any protocol, vendor or CVE (`BLE`, `OSPF`, `Zerologon`, `MikroTik`, `CVE-2020-1472`)
+and the matching module cards from **every** layer appear instantly, each under its
+layer label, with a running match count. It matches each term at a word boundary
+(so `ble` finds **BLE Watch** but not "ta*ble*") across the card's title and
+description, and multiple words are AND-ed. Clear the box (the **Clear** button or
+*Esc*) — or tap any layer button — to return to the normal single-layer view.
 
 > **Co-authored by [Solarflere](https://www.instagram.com/solarflere).** The
 > Authority Verification suite was designed and built in collaboration with Solarflere.
+### Module visibility matrix
 
-<img width="2160" height="3648" alt="image" src="https://github.com/user-attachments/assets/3041e65a-9f14-44d7-b955-fbc6a7687e71" />
+Every module by OSI layer and **vantage tier** — what a tap has to see for a clean
+verdict to mean anything (A VLAN-wide · B link-local · C on-path unicast · D configured
+peer · E active / local · RF over-the-air). The Diagnostics layer buttons follow it.
+
+The matrix is also in the web UI as a reference guide: **Overview** has a collapsible
+*Module visibility matrix* card with the whole graphic, and every layer panel (L7 … L1)
+opens with its own band of it (with the tier legend), so the tier of each module is right
+next to its card. The images load only when you expand a card; tap one to open the full
+matrix to zoom (`/web/images/osi/`).
+
+<img src="ragnar_osi_visibility_matrix.jpg" alt="Ragnar module visibility matrix: OSI layer × vantage tier" width="1080" />
 
 
 
@@ -24,53 +47,87 @@ It is split into three sub-tabs: **Diagnostics**, **Switch & L2/L3**, and
 
 | Tool | Sub-tab | Endpoint |
 |------|---------|----------|
-| [Ping](#ping) | Diagnostics | `POST /api/net/ping` |
-| [Traceroute](#traceroute) | Diagnostics | `POST /api/net/traceroute` |
-| [MTR](#mtr) | Diagnostics | `POST /api/net/mtr` |
-| [WHOIS](#whois) | Diagnostics | `POST /api/net/whois` |
-| [IP Attribution (country/ASN/ISP/abuse)](ip-intel.md) | Diagnostics | `POST /api/net/ip-intel` |
-| [DNS Doctor (poisoning check)](#dns-doctor) | Diagnostics | `POST /api/net/dns` |
-| [ARP Poisoning](#arp-poisoning) | Diagnostics | `GET /api/net/arp-check`, `/arp-baseline` |
-| [MAC Watch](#mac-watch) | Diagnostics | `GET /api/net/mac-watch`, `POST /api/net/mac-watch-reset` |
-| [DHCP Guardian](#dhcp-guardian) | Switch & L2/L3 | `GET /api/net/dhcp-guardian`, `POST /api/net/dhcp-baseline` |
-| [DHCP Snooping (inline)](#dhcp-snooping-inline) | Switch & L2/L3 | `GET /api/net/dhcp-snoop` + `/dhcp-snoop/status`, `/config`, `/setup` |
-| [Network Integrity Monitor](#-network-integrity-monitor) | Diagnostics | `GET /api/net/integrity` + config |
-| [Watchtower (unified watcher alerts)](watchtower.md) | Diagnostics | `GET /api/net/watchtower` + config |
-| [Incident correlation (attack chains)](incident-correlation.md) | Diagnostics | `GET /api/net/incidents` + config |
-| [Path MTU / Black-hole](#path-mtu--black-hole) | Diagnostics | `POST /api/net/pmtu` |
-| [Captive Portal Check](#captive-portal-check) | Diagnostics | `GET /api/net/captive-portal` |
-| [LAN Throughput (iperf3)](#lan-throughput-iperf3) | Diagnostics | `POST /api/net/iperf3`, `/iperf3-server` |
-| [Speed Test](#speed-test) | Diagnostics | `POST /api/net/speedtest` |
-| [Live Flow Telemetry](#live-flow-telemetry) | Diagnostics | `GET /api/net/flows` |
-| [PTP Timing Detection](#ptp-timing-detection) | Diagnostics | `POST /api/net/ptp` |
-| [On-Screen Network Diagnostic Mode](#-on-screen-network-diagnostic-mode) | Diagnostics (toggle) | config `network_diagnostic_mode` |
-| [Switch Discovery + PoE](#switch-discovery-lldp--cdpv1v2--edp--fdp) | Switch & L2/L3 | `GET /api/net/lldp` |
-| [ARP Scan](#arp-scan) | Switch & L2/L3 | `GET /api/net/arp-scan` |
-| [L2 Link Health](#l2-link-health) | Switch & L2/L3 | `POST /api/net/l2-health` |
-| [IGMP Watch](#igmp-watch) | Switch & L2/L3 | `GET /api/net/igmp-watch`, `POST /api/net/igmp-baseline` |
-| [TLS Watch](#tls-watch) | Switch & L2/L3 | `GET /api/net/tls-watch` |
-| [IPv6 First-Hop Watch](#ipv6-first-hop-watch) | Switch & L2/L3 | `GET /api/net/ipv6-watch`, `POST /api/net/ipv6-baseline` |
-| [NDP Watch](#ndp-watch) | Switch & L2/L3 | `GET /api/net/ndp-watch`, `POST /api/net/ndp-baseline` |
-| [IPv6 RA Guard](#ipv6-ra-guard) | Diagnostics | `GET /api/net/raguard`, `POST /api/net/raguard` `{action: harden}` |
-| [NTP Watch](#ntp-watch) | Diagnostics | `GET /api/net/ntp-watch`, `POST /api/net/ntp-baseline` |
-| [ICMP Watch](#icmp-watch) | Switch & L2/L3 | `GET /api/net/icmp-watch`, `POST /api/net/icmp-baseline` |
-| [SNMP Watch](#snmp-watch) | Diagnostics | `GET /api/net/snmp-watch`, `POST /api/net/snmp-baseline` |
-| [Cert Watch](#cert-watch) | Diagnostics | `POST /api/net/cert-watch`, `POST /api/net/cert-baseline` |
-| [STP/BPDU Watch](#stpbpdu-watch) | Switch & L2/L3 | `GET /api/net/stp-watch`, `POST /api/net/stp-baseline` |
-| [DTP Watch](#dtp-watch) | Switch & L2/L3 | `GET /api/net/dtp-watch`, `POST /api/net/dtp-baseline` |
-| [CDP Watch](#cdp-watch) | Switch & L2/L3 | `GET /api/net/cdp-watch`, `POST /api/net/cdp-baseline` |
-| [VTP Watch](#vtp-watch) | Switch & L2/L3 | `GET /api/net/vtp-watch`, `POST /api/net/vtp-baseline` |
-| [SMB Watch](#smb-watch) | Switch & L2/L3 | `GET /api/net/smb-watch`, `POST /api/net/smb-baseline` |
-| [Relay/Coercion Watch](#relaycoercion-watch) | Switch & L2/L3 | `GET /api/net/relay-watch`, `POST /api/net/relay-baseline` |
-| [LDAP Watch](#ldap-watch) | Switch & L2/L3 | `GET /api/net/ldap-watch` |
-| [FHRP Watch](#fhrp-watch) | Switch & L2/L3 | `GET /api/net/fhrp-watch`, `POST /api/net/fhrp-baseline` |
-| [EIGRP Watch](#eigrp-watch) | Switch & L2/L3 | `GET /api/net/eigrp-watch`, `POST /api/net/eigrp-baseline` |
-| [IS-IS Watch](#is-is-watch) | Switch & L2/L3 | `GET /api/net/isis-watch`, `POST /api/net/isis-baseline` |
-| [OSPF Security Scanner](#ospf-security-scanner) | Switch & L2/L3 | `GET /api/net/ospf-watch`, `POST /api/net/ospf-baseline` |
-| [BGP Path Watch](#bgp-path-watch) | Switch & L2/L3 | `GET /api/net/bgp-watch`, `POST /api/net/bgp-baseline` |
-| [BGP Collector & Path Asymmetry](#bgp-collector--path-asymmetry-control-plane--data-plane) | Switch & L2/L3 | `GET/POST /api/net/bgp-collector`, `/api/net/owd-reflector`, `POST /api/net/path-asymmetry` |
-| [Locate Port](#locate-port) | Switch & L2/L3 | `POST /api/net/locate-port` |
-| [PCAP Analyzer](#pcap-analyzer) | Switch & L2/L3 | `POST /api/net/pcap` |
+| [Network Integrity Monitor](#-network-integrity-monitor) | Diagnostics · Overview | `GET /api/net/integrity` + config |
+| [Watchtower (unified watcher alerts)](watchtower.md) | Diagnostics · Overview | `GET /api/net/watchtower` + config |
+| [Incident correlation (attack chains)](incident-correlation.md) | Diagnostics · Overview | `GET /api/net/incidents` + config |
+| [Detector Self-Test](#detector-self-test) | Diagnostics · Overview | `GET /api/net/routing-selftest` (sync) · `POST /api/net/routing-selftest/start` + `GET /api/net/routing-selftest/status` (async) |
+| [PCAP Analyzer](#pcap-analyzer) | Diagnostics · Overview | `POST /api/net/pcap` |
+| [On-Screen Network Diagnostic Mode](#-on-screen-network-diagnostic-mode) | Diagnostics · Overview (toggle) | config `network_diagnostic_mode` |
+| [DHCP Guardian](#dhcp-guardian) | Diagnostics · L7 | `GET /api/net/dhcp-guardian`, `POST /api/net/dhcp-baseline` |
+| [DNS Watch (passive)](#dns-watch) | Diagnostics · L7 | `GET /api/net/dns-watch` |
+| [SSDP / UPnP Watch](#ssdp--upnp-watch) | Diagnostics · L7 | `GET /api/net/ssdp-watch` |
+| [HTTP Watch](#http-watch) | Diagnostics · L7 | `GET /api/net/http-watch` |
+| [NTP Watch](#ntp-watch) | Diagnostics · L7 | `GET /api/net/ntp-watch`, `POST /api/net/ntp-baseline` |
+| [SNMP Watch](#snmp-watch) | Diagnostics · L7 | `GET /api/net/snmp-watch`, `POST /api/net/snmp-baseline` |
+| [RADIUS Watch](#radius-watch) | Diagnostics · L7 | `GET /api/net/radius-watch` |
+| [Modbus & LoRaWAN Watch](#modbus--lorawan-watch) | Diagnostics · L7 | `GET /api/net/modbus-watch`, `GET/POST /api/net/modbus-baseline`, `GET /api/net/lorawan-watch` |
+| [SMB Watch](#smb-watch) | Diagnostics · L7 | `GET /api/net/smb-watch`, `POST /api/net/smb-baseline` |
+| [LDAP Watch](#ldap-watch) | Diagnostics · L7 | `GET /api/net/ldap-watch` |
+| [RPC / NetLogon Watch](#rpc--netlogon-watch) | Diagnostics · L7 | `GET /api/net/rpc-watch` |
+| [Relay/Coercion Watch](#relaycoercion-watch) | Diagnostics · L7 | `GET /api/net/relay-watch`, `POST /api/net/relay-baseline` |
+| [SMTP Watch](#smtp-watch) | Diagnostics · L7 | `GET /api/net/smtp-watch` |
+| [FTP Watch](#ftp-watch) | Diagnostics · L7 | `GET /api/net/ftp-watch` |
+| [BGP Path Watch](#bgp-path-watch) | Diagnostics · L7 | `GET /api/net/bgp-watch`, `POST /api/net/bgp-baseline` |
+| [BGP Collector & Path Asymmetry](#bgp-collector--path-asymmetry-control-plane--data-plane) | Diagnostics · L7 | `GET/POST /api/net/bgp-collector`, `/api/net/owd-reflector`, `POST /api/net/path-asymmetry` |
+| [IPsec / IKE Watch](#ipsec--ike-watch) | Diagnostics · L7 | `GET /api/net/ipsec-watch` |
+| [Cisco Guard](#cisco-guard) | Diagnostics · L7 | `GET /api/net/cisco-guard` |
+| [Juniper Guard](#juniper-guard) | Diagnostics · L7 | `GET /api/net/juniper-guard` |
+| [Arista Guard](#arista-guard) | Diagnostics · L7 | `GET /api/net/arista-guard` |
+| [Comware Guard](#comware-guard) | Diagnostics · L7 | `GET /api/net/comware-guard` |
+| [Dell Guard (daemon control)](#dell-guard-standalone-daemon) | Diagnostics · L7 | `GET/POST /api/net/dell-guard` |
+| [MikroTik Guard](#mikrotik-switch-and-router-guard) | Diagnostics · L7 | `GET /api/net/mikrotik-guard` |
+| [Aruba Guard](#aruba-guard) | Diagnostics · L7 | `GET /api/net/aruba-guard` |
+| [APC Guard](#apc-guard) | Diagnostics · L7 | `GET /api/net/apc-guard` |
+| [Liebert Guard](#liebert-guard) | Diagnostics · L7 | `GET /api/net/liebert-guard` |
+| [DNS Doctor (poisoning check)](#dns-doctor) | Diagnostics · L7 | `POST /api/net/dns` |
+| [Captive Portal Check](#captive-portal-check) | Diagnostics · L7 | `GET /api/net/captive-portal` |
+| [DHCP Snooping (inline)](#dhcp-snooping-inline) | Diagnostics · L7 | `GET /api/net/dhcp-snoop` + `/dhcp-snoop/status`, `/config`, `/setup` |
+| [RDAP](#rdap) | Diagnostics · L7 | `POST /api/net/rdap` |
+| [WHOIS](#whois) | Diagnostics · L7 | `POST /api/net/whois` |
+| [IP Attribution (country/ASN/ISP/abuse)](ip-intel.md) | Diagnostics · L7 | `POST /api/net/ip-intel` |
+| [Speed Test](#speed-test) | Diagnostics · L7 | `POST /api/net/speedtest` |
+| [TLS Watch](#tls-watch) | Diagnostics · L6 | `GET /api/net/tls-watch` |
+| [Cert Watch](#cert-watch) | Diagnostics · L6 | `POST /api/net/cert-watch`, `POST /api/net/cert-baseline` |
+| [SSH Watch](#ssh-watch) | Diagnostics · L5 | `GET /api/net/ssh-watch` |
+| [Telnet Watch](#telnet-watch) | Diagnostics · L5 | `GET /api/net/telnet-watch` |
+| [RDP Watch](#rdp-watch) | Diagnostics · L5 | `GET /api/net/rdp-watch` |
+| [Live Flow Telemetry](#live-flow-telemetry) | Diagnostics · L4 | `GET /api/net/flows` |
+| [LAN Throughput (iperf3)](#lan-throughput-iperf3) | Diagnostics · L4 | `POST /api/net/iperf3`, `/iperf3-server` |
+| [IGMP Watch](#igmp-watch) | Diagnostics · L3 | `GET /api/net/igmp-watch`, `POST /api/net/igmp-baseline` |
+| [OSPF Security Scanner](#ospf-security-scanner) | Diagnostics · L3 | `GET /api/net/ospf-watch`, `POST /api/net/ospf-baseline` |
+| [EIGRP Watch](#eigrp-watch) | Diagnostics · L3 | `GET /api/net/eigrp-watch`, `POST /api/net/eigrp-baseline` |
+| [RIP Watch](#rip-watch) | Diagnostics · L3 | `GET /api/net/rip-watch`, `POST /api/net/rip-baseline` |
+| [PIM / MSDP Watch](#pim--msdp-watch) | Diagnostics · L3 | `GET /api/net/pim-watch` |
+| [FHRP Watch](#fhrp-watch) | Diagnostics · L3 | `GET /api/net/fhrp-watch`, `POST /api/net/fhrp-baseline` |
+| [IPv6 First-Hop Watch](#ipv6-first-hop-watch) | Diagnostics · L3 | `GET /api/net/ipv6-watch`, `POST /api/net/ipv6-baseline` |
+| [NDP Watch](#ndp-watch) | Diagnostics · L3 | `GET /api/net/ndp-watch`, `POST /api/net/ndp-baseline` |
+| [ICMP Watch](#icmp-watch) | Diagnostics · L3 | `GET /api/net/icmp-watch`, `POST /api/net/icmp-baseline` |
+| [BFD Watch](#bfd-watch) | Diagnostics · L3 | `GET /api/net/bfd-watch` |
+| [SR-MPLS Watch](#sr-mpls-watch) | Diagnostics · L3 | `GET /api/net/srmpls-watch` |
+| [Ping](#ping) | Diagnostics · L3 | `POST /api/net/ping` |
+| [Traceroute](#traceroute) | Diagnostics · L3 | `POST /api/net/traceroute` |
+| [MTR](#mtr) | Diagnostics · L3 | `POST /api/net/mtr` |
+| [Path MTU / Black-hole](#path-mtu--black-hole) | Diagnostics · L3 | `POST /api/net/pmtu` |
+| [IPv6 RA Guard](#ipv6-ra-guard) | Diagnostics · L3 | `GET /api/net/raguard`, `POST /api/net/raguard` `{action: harden}` |
+| [MAC Watch](#mac-watch) | Diagnostics · L2 | `GET /api/net/mac-watch`, `POST /api/net/mac-watch-reset` |
+| [ARP Poisoning](#arp-poisoning) | Diagnostics · L2 | `GET /api/net/arp-check`, `/arp-baseline` |
+| [Switch Discovery + PoE](#switch-discovery-lldp--cdpv1v2--edp--fdp) | Diagnostics · L2 | `GET /api/net/lldp` |
+| [STP/BPDU Watch](#stpbpdu-watch) | Diagnostics · L2 | `GET /api/net/stp-watch`, `POST /api/net/stp-baseline` |
+| [MRP Watch](#mrp-watch) | Diagnostics · L2 | `GET /api/net/mrp-watch` |
+| [DTP Watch](#dtp-watch) | Diagnostics · L2 | `GET /api/net/dtp-watch`, `POST /api/net/dtp-baseline` |
+| [CDP Watch](#cdp-watch) | Diagnostics · L2 | `GET /api/net/cdp-watch`, `POST /api/net/cdp-baseline` |
+| [LLDP Watch](#lldp-watch) | Diagnostics · L2 | `GET /api/net/lldp-watch`, `GET/POST /api/net/lldp-baseline` |
+| [VTP Watch](#vtp-watch) | Diagnostics · L2 | `GET /api/net/vtp-watch`, `POST /api/net/vtp-baseline` |
+| [IS-IS Watch](#is-is-watch) | Diagnostics · L2 | `GET /api/net/isis-watch`, `POST /api/net/isis-baseline` |
+| [PTP Watch](#ptp-watch) | Diagnostics · L2 | `GET /api/net/ptp-watch` |
+| [PTP Timing Detection](#ptp-timing-detection) | Diagnostics · L2 | `POST /api/net/ptp` |
+| [LACP Watch](#lacp-watch) | Diagnostics · L2 | `GET /api/net/lacp-watch` |
+| [OAM Watch](#oam-watch) | Diagnostics · L2 | `GET /api/net/oam-watch`, `POST /api/net/oam-reset` |
+| [CFM Watch](#cfm-watch) | Diagnostics · L2 | `GET /api/net/cfm-watch`, `POST /api/net/cfm-reset`, `GET|POST /api/net/cfm-ring`, `GET|POST /api/net/cfm-evc` |
+| [L2 Link Health](#l2-link-health) | Diagnostics · L2 | `POST /api/net/l2-health` |
+| [ARP Scan](#arp-scan) | Diagnostics · L2 | `GET /api/net/arp-scan` |
+| [Locate Port](#locate-port) | Diagnostics · L1 | `POST /api/net/locate-port` |
+| [Cellular Uplink Fallback](cellular-uplink.md) | Interfaces | `GET /api/cellular/status` |
 | [Interfaces](#interface-list) | Interfaces | `GET /api/net/interfaces` |
 | [Network Identity](#network-identity) | Interfaces | `GET /api/net/identity` |
 | [ISP / WAN + VPN Detection](#isp--wan-detection) | Interfaces | `GET /api/net/isp` |
@@ -98,24 +155,31 @@ Installable packages are whitelisted (`iputils-ping`, `traceroute`, `mtr-tiny`,
 command.
 
 **Scapy** (for the routing-scanner end-to-end self-test) is installable the same
-way — the **Detector Self-Test** panel in Switch & L2/L3 has an **Install Scapy**
+way — the **Detector Self-Test** panel (Diagnostics · Overview) has an **Install Scapy**
 button that installs `python3-scapy` (falling back to `pip`). It's optional: the
 IGMP / OSPF / BGP scanners work fully without it; Scapy only adds the end-to-end
 leg that crafts real packets → pcap → `tcpdump` → parse to exercise the whole
 capture path.
 
-### Detector Self-Test (Switch & L2/L3)
+### Detector Self-Test
 A one-click **Run self-test** that validates the IGMP, **IPv6 first-hop**, **NDP**, **RA Guard**,
-**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **VTP**, **SMB**, **Relay/Coercion**, **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the **BGP speaker** (codec/framer/FSM/RIB) and
+**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **LLDP**, **VTP**, **SMB**, **Relay/Coercion**, **SSH** (regreSSHion/Terrapin), **Telnet**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **Link OAM** (802.3ah loopback blackhole), **CFM / Y.1731** (protection-switch forgery), **BFD** (failover manipulation), **PTP** (grandmaster takeover), **SR-MPLS** (label/segment injection), **IPsec/IKE** (D(HE)at / weak-DH / SWEET32 / Aggressive-Mode), **DNS Watch** (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS cache-poisoning / SAD DNS), **Modbus & LoRaWAN Watch** (PLC writes / Force Listen Only / UMAS / libmodbus framing; LoRaWAN GWMP backhaul census / impersonation / downlink injection / replay), **RADIUS Watch** (BlastRADIUS / FreeRADIUS CVEs / RADIUS-EAP auth posture), **EIGRP**, **IS-IS**, **RIP** (RIP/RIPng injection/hijack/malformation), **PIM / MSDP** (multicast RP-hijack / Register & SA injection / DR hijack / flood), **FHRP**, OSPF and BGP detectors — plus the cross-protocol **D(HE)at** (CVE-2002-20001) coverage that also names finite-field-DH exposure in TLS and SSH — the vendor CVE guards (**Cisco**, **Juniper**, **Arista**, **Comware**, **MikroTik**, **Aruba** and **Dell** — Dell Guard is a standalone daemon, so the panel runs its offline classifier self-test) — plus the **BGP speaker** (codec/framer/FSM/RIB), the Pathwatch v6 passive tiers (**BGPsec** posture/downgrade, **SR-Policy/BGP-LS**, dual-stack **tap**) and
 **path-asymmetry / OWD** engine — by running each classifier against crafted attack
 captures (no root, no external network) and reports per-suite pass/fail. With Scapy
 installed it also runs the end-to-end packet-crafting leg for the capture-based
 scanners, and Cert Watch grades a real self-signed cert over a local (loopback)
 handshake. This is how you confirm the routing-security detectors are working on a
 given box without waiting for a real attack — endpoint `GET /api/net/routing-selftest`.
-The same checks run headless via
+The sweep fans out to ~60 suites, so on a small single-core board it runs for minutes.
+For clients that can't hold a request open that long (the mobile app, and the box's own
+web panel), start it in the background and poll: `POST /api/net/routing-selftest/start`
+kicks it off (idempotent while one is running) and `GET /api/net/routing-selftest/status`
+returns `{status: idle|running|done|error, elapsed, result}` — `result` carrying the same
+report the sync endpoint returns once `status` is `done`. The same checks run headless via
 `python3 network_diagnostics.py {igmp,ipv6,raguard,ntp,icmp,snmp,tls,ospf,bgp}-selftest` and each module's
-`selftest()`.
+`selftest()`. The self-test is the first of several tiers each module passes before it ships; the
+rest (conformance, cross-check against independent oracles, lab, bite harness) are described in
+[Testing Tiers](testing-tiers.md).
 
 ---
 
@@ -165,7 +229,8 @@ The display auto-cycles six pages every **5 seconds**:
    WAN) originate from. ↑/↓ highlights **Auto** or an interface, press selects
    it; `*` marks the active choice and each row shows the NIC's IP, *no IP* or
    *down*. **Auto** follows a fixed priority — **built-in Ethernet → USB
-   Ethernet → wlan1 → wlan0** — taking the first interface that is up and
+   Ethernet → wlan1 → wlan0 → cellular** (tethered hotspot, last; pin it to
+   test the cellular link) — taking the first interface that is up and
    addressed (and, for the speed test, verified able to reach the internet with
    a device-bound probe), so a plugged-in cable is what gets tested instead of
    whatever holds the default route. The selection resets to Auto each time the
@@ -228,7 +293,7 @@ press is never blocked, and the panel wakes immediately on a press rather than
 waiting out the 5 s cycle.
 
 The speed test and pings originate from the **priority interface** — built-in
-Ethernet → USB Ethernet → wlan1 → wlan0, first one up and addressed (the speed
+Ethernet → USB Ethernet → wlan1 → wlan0 → cellular, first one up and addressed (the speed
 test also verifies it can reach the internet) — not from whatever holds the
 default route, so plugging in a cable is enough to test the cable. The result
 page shows the interface used.
@@ -262,7 +327,7 @@ The functions selectable inside each card (Up/Down, then press):
 | **IP** | **Ping gateway** (LAN) · **Ping internet** (`8.8.8.8`, WAN) · **DNS Doctor** (poison/hijack verdict) · **Speed test** |
 | **DHCP** / **WIFI** / **SIGNAL** | read-only (no functions) |
 | **SPECTRUM** | Up/Down selects the **band** (2.4 / 5 / 6 GHz) whose live channel-occupancy spectrum is drawn (scanned on the widest-band adapter — plug in the Alfa for 5/6 GHz); press does nothing (nothing to run) |
-| **IFACE** | Up/Down highlights **Auto** or a NIC; press **pins the egress tests** (Speed test / pings) to it. Auto = built-in eth → USB eth → wlan1 → wlan0 |
+| **IFACE** | Up/Down highlights **Auto** or a NIC; press **pins the egress tests** (Speed test / pings) to it. Auto = built-in eth → USB eth → wlan1 → wlan0 → cellular |
 | **BT** | **Scan BT** — press runs a ~8 s Bluetooth/BLE discovery sweep; the card then shows that result (with its age) until you scan again |
 | **ZIGBEE** | **Scan Zigbee** — press runs a ~8 s 802.15.4 sniff on the HuginnESP; the card then shows that result (with its age) until you scan again |
 
@@ -282,11 +347,13 @@ page (tap) or restart the service (hold).
 
 ---
 
-## 🩺 Diagnostics
+## 🩺 Reachability & service checks
 
 Reachability, path and bandwidth testing to any target — plus application-layer
 service-security checks (**NTP** time integrity, **SNMP** cleartext exposure, and
-**TLS/certificate** hygiene).
+**TLS/certificate** hygiene). The sections below are grouped by topic; in the web UI
+each card sits under its OSI layer in **Diagnostics** — see the [tool index](#tool-index)
+for which layer.
 
 ### Ping
 ICMP echo to a host or IP. Reports the raw output plus a parsed summary
@@ -318,8 +385,33 @@ addresses before use.
 
 - Endpoint: `POST /api/net/mtr` · binary: `mtr` (`mtr-tiny`)
 
+### RDAP
+Registration data for a **domain, IP address, CIDR prefix or ASN** — the structured
+successor to WHOIS (RFC 9082/9083). RDAP is the registries' JSON API that is replacing
+the free-text WHOIS protocol; this queries it first, picking the authoritative server
+from the **IANA bootstrap** registries (RFC 9224, cached 24 h under `data/rdap_cache/`),
+and **falls back to WHOIS (TCP/43)** automatically for the TLDs that still have no RDAP
+service — parsed into the same fields — so one lookup covers both. Output is normalized:
+registrar (+ IANA ID), registration / expiry / last-changed dates, status, nameservers,
+DNSSEC, the owning network / AS range, and the **abuse contact** (searched through nested
+entities). For a domain it follows the registry → registrar referral; for an IP it also
+pulls the **origin AS** where the registry publishes it (ARIN space). Every record is
+tagged `protocol: rdap` or `protocol: whois`, and the full server-rendered report (and raw
+WHOIS text, when used) is available under *Full report*.
+
+Engine vendored at `python/rdap_lookup.py` (Python stdlib only, runs on the Pi Zero 2W
+floor). **Active tool**: every lookup queries IANA + a registry / RIR over the network; it
+never changes anything. Unlike the WHOIS card it needs no `whois` binary — the WHOIS
+fallback speaks TCP/43 directly, over IPv4 or IPv6. Kept **alongside** WHOIS, not a
+replacement: the raw-text WHOIS card below still works and some ccTLDs are WHOIS-only.
+
+- Endpoint: `POST /api/net/rdap` (`{target, whois_fallback}`) — returns the structured
+  record (`kind`, `protocol`, `status`, `result`, `report`, `notes`, origin AS / referral)
+
 ### WHOIS
-Registration/ownership lookup for a domain or IP.
+Raw WHOIS registration text for a domain or IP (the classic TCP/43 lookup via the `whois`
+binary). For normalized fields plus ASN / prefix support and automatic RDAP, use
+[RDAP](#rdap) above.
 
 - Endpoint: `POST /api/net/whois` · binary: `whois`
 
@@ -346,13 +438,202 @@ Alongside the per-resolver table it runs active poisoning probes and returns a
 - **DoH cross-check** — resolves the same name over Cloudflare DoH (encrypted,
   tamper-resistant) and compares to the plaintext answer; a mismatch is a strong
   sign of on-path :53 spoofing.
+- **Known-answer anchors** — checks domains with a stable, published answer
+  (`dns.google`→8.8.8.8); a resolver whose answer
+  shares nothing with the documented set is drift/poisoning.
+- **ASN-level consensus** — maps each resolver's answers to their origin ASN (via
+  Team Cymru) and flags a system resolver answering in a *different ASN* than the
+  public resolvers. Unlike the raw-IP "divergence" soft signal, this survives
+  CDN/anycast (which share an ASN), so an ASN mismatch is a **strong** signal.
+- **DNSSEC negative control** — `dnssec-failed.org` *must* SERVFAIL on a
+  validating resolver; if it resolves, DNSSEC validation is broken here
+  (downgrade/stripping) and the AD/SERVFAIL signals can't be trusted this cycle.
+- **Transport race** — sends one query and briefly listens for a *second,
+  conflicting* answer — the signature of an off-path spoofer racing the real
+  resolver (Kaminsky cache-poisoning). Plain UDP; needs no elevated privileges.
+- **Dual-stack cross-family** (v3) — resolves the **AAAA (IPv6)** family through
+  the same resolvers and applies the bogon-for-a-public-name and DoH checks to it,
+  then compares the two families' *verdicts* — never their raw addresses, since
+  legitimate setups (tunnel brokers, split-CDN edges) announce A and AAAA from
+  different ASNs. When exactly **one** family is flagged it is the
+  **selective single-family hijack** signature: an attacker who poisons only IPv6
+  (the less-monitored path, which RFC 6724 makes dual-stack clients *prefer*) stays
+  invisible to an A-only check. "Both flagged" is not re-alarmed, and a silent
+  AAAA family (single-stack host) is simply not compared.
+- **DNSSEC-CVE posture** (v4) — reads the target **zone's own** DNSKEY / NSEC3PARAM
+  through a trusted resolver and flags **KeyTrap** (`CVE-2023-50387`): distinct DNSKEYs
+  that **share a key tag** (a validator must try every one against each signature), or an
+  excessive **DNSKEY × RRSIG** crypto product; and **NSEC3 over-iteration**
+  (`CVE-2023-50868`, iterations above the RFC 9276 ceiling of 0). Returned in the
+  `dnssec_cve` field. Fail-open — a resolver/parse hiccup never blocks the poison verdict.
+  (The full DNSSEC-CVE + over-DNS attack set is caught passively by [DNS Watch](#dns-watch).)
 
-Strong signals (NXDOMAIN rewrite, bogon answer, DoH mismatch) → **hijacked**;
-soft signals (SERVFAIL, divergence) → **suspicious**. The verdict is shown as a
+Strong signals (NXDOMAIN rewrite, bogon answer, DoH mismatch, anchor mismatch,
+ASN divergence, failed DNSSEC control, transport race, AAAA bogon / cross-family
+divergence) → **hijacked**; soft signals (SERVFAIL, raw-IP divergence) →
+**suspicious**. The verdict is shown as a
 banner in the web panel, is available on the e-Paper **KEY4-long** result page,
 and drives the [Network Integrity Monitor](#-network-integrity-monitor).
 
 - Endpoint: `POST /api/net/dns` `{name}` · binaries: `dig` (`dnsutils`), `curl`
+
+### DNS Watch
+A **passive** DNS-response threat detector on port **53** — **detection-only**, it never
+transmits (unlike the active [DNS Doctor](#dns-doctor), which queries resolvers). It observes
+DNS answers already on the wire and flags weaknesses in the record structure, dual-stack (A +
+AAAA, byte-identical logic). The engine is the vendored `python/dns_doctor_passive/` package;
+its no-transmit invariant is AST-enforced in its own conformance. Findings (code `DNSD-nnn`):
+
+- **KeyTrap** (`CVE-2023-50387`) — `DNSD-001` colliding DNSKEY key tags, `DNSD-002` an RRSIG
+  burst over one RRset, `DNSD-003` a DNSKEY × RRSIG crypto product that forces a validator
+  into quadratic signature verification. Stateless — visible in the record counts.
+- **NSEC3** (`CVE-2023-50868`) — `DNSD-010` iteration count above the RFC 9276 ceiling of 0;
+  `DNSD-021` the closest-encloser CPU-exhaustion pattern (baseline-gated).
+- **NXNSAttack** (`CVE-2020-8616`) — `DNSD-004` a glueless out-of-bailiwick NS overflow,
+  `DNSD-005` a correlated burst — referral amplification.
+- **MaginotDNS** (attack class `CVE-2021-25220`) — `DNSD-006` an authority/additional record
+  outside the queried zone's bailiwick that the response itself does not account for:
+  cache-poisoning record injection. **v12** fixes a false positive on reverse zones. Reverse
+  DNS at an ISP produces out-of-bailiwick data all day (referral glue for a customer's name
+  server, RFC 2317 / CNAME chains into customer domains), and it was reported as a critical
+  finding. Each such record is now classified from the single packet:
+  - **glue**: an A/AAAA in the additional section whose owner is the target of an *anchored*
+    NS record → `DNSD-170`, notice;
+  - **chain**: a record owned by a CNAME/DNAME chain target reachable from the query name, or
+    an NS/SOA for an ancestor of one → `DNSD-170`, notice;
+  - **everything else** → `DNSD-006`, critical, as before.
+
+  An NS record is *anchored* only if its owner is inside the queried zone or at/above a chain
+  target, so a forged `victim.example NS ns.attacker.example` cannot excuse its own glue: both
+  records stay `DNSD-006`. The chain walk stops at 16 hops or on a loop, and nothing past the
+  stop is excused (`chain_truncated` in the evidence). `DNSD-170` (`OUT_OF_BAILIWICK_ACCOUNTED`,
+  no CVE) keeps the record visible, once per responder + zone + owner, and seeing it constantly
+  on an ISP resolver tap is correct. The CVE field of `DNSD-006` now reads
+  `attack class: CVE-2021-25220, CVE-2025-40778`: the detector is structural and has no version
+  awareness, so the CVEs name the shape being matched, not a vulnerable build. Still critical:
+  an out-of-bailiwick NS/SOA with no chain tie, a record nothing in the response references,
+  and glue whose NS is itself out of bailiwick.
+- **DNSBomb** (`CVE-2024-33655`) — `DNSD-020` a short-TTL burst far above a zone's learned
+  rate: the pulsing-amplification accumulation phase (baseline-gated).
+- **SAD DNS** (`CVE-2020-25705`) — `DNSD-030` two conflicting responses to one outstanding
+  query (a forged response raced the real one), `DNSD-031` low outbound source-port entropy
+  (medium confidence — `CVE-2025-40780`, a weak PRNG for both source port and query ID, makes
+  low entropy evidence of a defective resolver). `DNSD-006` also flags unsolicited RRs the
+  query never asked for (`CVE-2025-40778`); `DNSD-001` also names `CVE-2026-19668`.
+- **Malformed records aimed at resolver parsers** — `DNSD-008` a compression pointer that
+  loops, points forward or into RDATA (`CVE-2026-81642` Unbound, `CVE-2026-2291` /
+  `CVE-2026-5172` dnsmasq); `DNSD-009` structurally invalid DNSKEY rdata (`CVE-2025-8677`
+  BIND, `CVE-2026-4890` / `CVE-2026-4891` dnsmasq).
+- **DNSSEC structural integrity** — `DNSD-040` an RRSIG claiming more labels than its owner
+  (`CVE-2026-11721` BIND, `CVE-2026-52688` PowerDNS Recursor); `DNSD-041` an NSEC next-name
+  outside its zone (`CVE-2026-13321`); `DNSD-042` an NSEC3 owner outside the queried zone —
+  parent apex-hash impersonation (`CVE-2026-10723`); `DNSD-043` NSEC and NSEC3 for one zone in
+  one response with only one half signed (`CVE-2026-13204`); `DNSD-044` a **SIG/KEY record whose
+  rdata length overflows the 16-bit size Windows DNS allocates** — **SIGRed** (`CVE-2020-1350`,
+  CVSS 10.0, CISA KEV).
+- **Protocol abuse** — `DNSD-050` an SVCB/HTTPS AliasMode fanning out to many ServiceMode
+  records (`CVE-2026-81563` / `CVE-2026-81736`); `DNSD-051` a repeated single-instance EDNS
+  option (`CVE-2026-42944`); `DNSD-052` identical SOA/CNAME/DNAME records repeated
+  (`CVE-2026-75029`); `DNSD-053` a TKEY query — an attack *attempt*, not a vulnerable
+  resolver (`CVE-2026-76163`), also a TKEY whose SPNEGO/ASN.1 lengths are self-contradictory —
+  the BIND GSS-TSIG overflow (`CVE-2020-8625` / `CVE-2021-25216`); `DNSD-054` a TSIG response
+  assertion that answered NOERROR with a failed/empty MAC (`CVE-2020-8622`).
+- **Zone transfer** — `DNSD-060` a multi-message TCP AXFR/IXFR that completed with unsigned
+  intermediate messages and no final TSIG (`CVE-2026-19033`). TCP is parsed per segment (no
+  stream reassembly); the capture uses a full 65535-byte snaplen so large transfer segments
+  are not truncated. `DNSD-062` an IXFR stream carrying an SOA record whose **owner name is not
+  the zone apex** — per ISC this makes the receiving BIND delete the zone's own SOA and then
+  terminate on the next refresh (`CVE-2021-25214`); IXFR legitimately carries many SOA records,
+  so the owner name is the discriminator, never the count.
+  Plus `DNSD-007` a malformed/truncated response (TuDoor class) and `DNSD-011` an unsupported
+  DNSSEC algorithm.
+- **mDNS tier (v6, UDP/5353)** — mDNS and unicast DNS share a wire format but not a rule set,
+  so the mDNS detectors run **only** on 5353 and the unicast detectors **only** on 53 (every
+  `.local` name is out of bailiwick for any zone, so cross-running them would false-fire). A
+  **Matter/Thread census**, informational and once per instance — `DNSD-070` a Matter
+  operational node (`_matter._tcp`), `DNSD-071` a commissionable device (`_matterc._udp`, open
+  to pairing right now), `DNSD-072` a commissioner (`_matterd._udp`), `DNSD-073` a Thread
+  border router (`_meshcop._udp`), `DNSD-078` a Thread border agent advertising the ephemeral-key
+  commissioning endpoint (`_meshcop-e._udp`), and (v10) `DNSD-079` a Silicon Labs **Z-Wave Z/IP
+  Gateway** (`_z-wave._udp`, IANA UDP 4123 / DTLS 41230) — wired evidence of a Z-Wave mesh on the
+  IP side without any 800–900 MHz radio, like the Matter/Thread entries. **(v11)** the Z/IP entry
+  now carries a fingerprint parsed from the announcement — device type, the Z-Wave **home ID** (the
+  leading 32 bits of the `[hex]` instance token), the multichannel **endpoint**, **product ID** and
+  the raw **security-class hex** (S0/S2 not decoded — the hex is reported verbatim, never guessed) —
+  but **no user-set device name**: Z-Wave node names are set in the controller and live inside the
+  encrypted Z/IP tunnel (DTLS 41230), which a passive tap cannot read. These are the only plane that
+  names those fabrics on the IP side, never an alarm. And the RFC 6762 / CERT **VU#550620** scope family — `DNSD-074` an mDNS
+  packet whose IP TTL / hop-limit is not 255 (it crossed a router or was not link-local;
+  config-free), `DNSD-075` an mDNS source outside the capture interface's own subnets (off-link),
+  and `DNSD-076` an mDNS responder answering an off-link **unicast** destination — an open
+  reflector: DDoS amplification fuel and a service-inventory leak (`CVE-2015-2809` Avahi,
+  `CVE-2017-6520` eCos, `CVE-2015-1892` OS X). `DNSD-075/076` arm from the interface's subnets
+  and stay silent without them. This tier never judges mDNS name *poisoning* (LLMNR/NBT-NS/mDNS
+  spoofing stays with [SMB Watch](#smb-watch)); the three remote Avahi crafted-packet bugs
+  (CVE-2008-5081 / CVE-2010-2244 / CVE-2011-1002) are named only to document why they are out
+  of scope (~5.0 CVSS v2, under the bar, not in CISA KEV).
+- **DDNS tier (v7, RFC 2136 opcode 5)** — a dynamic UPDATE forks to its own rule set (a writer is
+  not a resolver, so the unicast detectors never run on it). `DNSD-080` an UPDATE carrying no TSIG
+  and no SIG(0) that was answered **NOERROR** — the zone accepts unauthenticated writes (a UDP
+  source-IP ACL is exactly this and is itself the finding, a spoofable source being the whole
+  problem); `DNSD-081` an UPDATE answered NOERROR while its TSIG reports BADSIG/BADKEY/BADTIME or
+  carries an empty/truncated MAC — a **completed** authentication bypass, not an attempt
+  (`CVE-2017-3143`); `DNSD-082` an UPDATE from outside an operator-supplied permitted-updater list
+  (silent without that config — a learned allowlist would arm itself from whatever it saw first,
+  so it is deliberately not learned, and the in-app watcher leaves it unset).
+- **rDNS tier (v7, reverse DNS)** — no CVE, posture only. `DNSD-090` a reverse lookup for RFC 1918
+  / CGNAT / link-local / ULA space addressed to a resolver **outside private space** — internal
+  topology leaking to the public DNS (armed in the in-app watcher with the private-address table
+  itself, so a private PTR to a public resolver fires while an on-net resolver stays silent);
+  `DNSD-091` one source issuing many `ip6.arpa` queries that share a long leading nibble prefix in
+  one window — IPv6 reverse-tree enumeration (needs no baseline; the common-prefix rule is what
+  separates it from bulk reverse lookups).
+- **Link-local name-resolution & transport posture (v8)** — v8 captures four more protocols
+  (5353 already; now **5355 LLMNR**, **137 NBT-NS**, **853 DoT/DoQ**) and owns their *posture* — the
+  vulnerable **query** is the finding — while the **poisoned answer** stays with [SMB Watch](#smb-watch)
+  (Responder/Inveigh). *Unicast DNS-SD:* `DNSD-100` a `_services._dns-sd._udp` PTR query over
+  **unicast** DNS (enumerates every service type a zone publishes in one question; the same query
+  on `.local` is ordinary Bonjour and is not flagged), `DNSD-101` a DNS-SD PTR response fanning out
+  to excessive instances. *LLMNR (RFC 4795):* `DNSD-110` LLMNR in use at all (unauthenticated by
+  design, MS recommends disabling), `DNSD-111` a query to a multicast group other than
+  `224.0.0.252` / `ff02::1:3` (RFC 4795 says silently discard), `DNSD-112` a **WPAD** query over
+  LLMNR (the host will take proxy config from the first responder). *NBT-NS (RFC 1001/1002):*
+  `DNSD-120` NBT-NS in use, `DNSD-121` a **WPAD** query over NBNS — the MS16-077 fallback flaw
+  exploited *via NetBIOS name responses* (`CVE-2016-3213` / `CVE-2016-3236`), `DNSD-122` an NBSTAT
+  node-status sweep (host + domain-role enumeration). *Encrypted-DNS transport:* `DNSD-130` a DoT
+  session (TCP 853) and `DNSD-131` a DoQ session (UDP 853, confirmed by a QUIC long header) — census
+  only, flagged whether the server is inside the own-resolver prefixes (DoT to your resolver is good
+  practice, past it a bypass; armed in-app with the private-address table), `DNSD-132` an SVCB DDR/DNR
+  discovery probe, `DNSD-133` a cleartext query resolving a known public DoH hostname (a correlation
+  record TLS Watch can later join on an SNI). *TSIG / SIG(0):* `DNSD-140` a deprecated TSIG algorithm
+  (hmac-md5 / hmac-sha1), `DNSD-141` a TSIG fudge far above RFC 8945's 300 s (the fudge is the replay
+  window), `DNSD-142` a SIG(0) transaction signature observed.
+- **SPF / libspf2 parser tier (v9)** — SPF records are the one piece of DNS content a mail server
+  *compiles*, so an SPF TXT record whose shape reaches a known libspf2 parser bug is a finding; every
+  threshold here was read out of libspf2's own source (the record supplies the syntax, the mail
+  transaction supplies the attacker byte a DNS tap never sees, so these are high-severity *exposure*
+  shapes, not confirmed exploitation). `DNSD-150` an **uppercase** macro letter — the flag that routes
+  expansion through the `url_encode` `sprintf("%%%02x", …)` sign-extension (`CVE-2021-33912`); `DNSD-151`
+  the same with the `r` reversal transformer (`CVE-2021-33913`); `DNSD-152` a TXT record named by an
+  earlier `exp=` modifier carrying a literal large enough to exhaust the 511-byte compile budget —
+  reported only on the correlated `exp=` target, never on a large TXT alone (`CVE-2021-20314`); `DNSD-153`
+  a term packing ~127 macro variables so the budget subtraction underflows a `size_t` (`CVE-2023-42118`).
+- **TCP stream reassembly (v9)** — the TCP path now reassembles DNS streams (bounded: 4 MB total,
+  128 KB/stream, 256 streams), which both de-truncates large/zone-transfer messages and adds `DNSD-160`
+  a **segment-overlap mismatch** — two TCP segments covering one sequence range with **different** bytes.
+  Reassembly keeps the first copy and reports the attempt, because a first-wins sensor and a last-wins
+  resolver would otherwise parse different DNS messages out of one stream — the classic Ptacek-Newsham
+  (1998) passive-tap insertion/evasion, whose only benign causes are a rewriting middlebox or a broken
+  stack. Reassembly is internal to the engine, so the in-app capture is unchanged (still feeds frames).
+
+The stateless detectors (KeyTrap, NSEC3 iteration, bailiwick, algorithm) fire on a single
+response; the **baseline-gated** ones (DNSBomb, NXNS burst, NSEC3-encloser, water-torture,
+port-entropy) accumulate across the capture, so a longer window catches more. HIGH/CRITICAL
+findings feed [Watchtower](watchtower.md). dnspython + scapy back the self-test's frame
+builders. The active [DNS Doctor](#dns-doctor) also folds the stateless KeyTrap / NSEC3
+checks into a targeted lookup.
+- Endpoint: `GET /api/net/dns-watch` `{interface, seconds}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py dns-watch [--iface I] [--seconds N] [--json]` · `dns-passive-selftest`
 
 ### ARP Poisoning
 Detects **ARP spoofing / MITM** from the kernel neighbour table (`ip neigh`) —
@@ -379,21 +660,161 @@ is the *active* complement to the passive duplicate-IP check in
 [L2 Link Health](#l2-link-health), and it feeds the
 [Network Integrity Monitor](#-network-integrity-monitor).
 
-This snapshot view is complemented by a **standalone live-stream monitor** —
-[arp_guard](arp_guard.md) (`python/arp_guard.py`) — a four-layer packet pipeline
-(binding-flap · gratuitous-ARP rate/breadth · per-packet structural sanity ·
-out-of-band trusted-MAC pins) that catches the attack **in progress** (a raw-byte
-parser, JSON-lines alerts, pcap `--replay`, and a hardened daemon), which a
-neighbour-table snapshot can't see.
+The snapshot is optionally deepened by a **passive ARP-frame capture** the neighbour
+table can never see. Run in the [Network Integrity Monitor](#-network-integrity-monitor)
+rotation (an opt-in `capture_seconds` window; the fast per-cycle check stays a pure table
+read), it folds live-frame signals into the same verdict:
+
+- **Reply-shape MITM tells** → **spoofed**: an ARP reply whose sender-hardware address
+  (`is-at`) differs from its Ethernet source, or an unsolicited **broadcast reply** — both
+  classic poisoning-tool tells — plus 0.0.0.0 / multicast-sender malformed replies.
+- **Request rate / breadth & gratuitous floods**: one MAC sweeping many distinct targets
+  or flooding requests/gratuitous announcements — the shared shape behind the **Juniper ARP
+  control-plane DoS family** (CVE-2018-0063 / CVE-2019-0033 / CVE-2021-0216 / CVE-2021-0292),
+  attached as *related context, not a per-CVE identification*. Own NICs, the gateway and a
+  confirmed FHRP virtual MAC are exempted so a router legitimately fronting the segment is
+  never flagged.
+
+A full **standalone live-stream monitor** — [arp_guard](arp_guard.md)
+(`python/arp_guard.py`) — remains available as a five-layer packet pipeline with JSON-lines
+alerts, pcap `--replay` and a hardened daemon.
 
 - Endpoints: `GET /api/net/arp-check`,
-  `GET|POST /api/net/arp-baseline` `{action:reset}` · uses `ip neigh` (iproute2)
+  `GET|POST /api/net/arp-baseline` `{action:reset}` · uses `ip neigh` (iproute2) + an
+  optional passive `tcpdump ... arp` capture
+
+### SSDP / UPnP Watch
+**Detection-only** passive SSDP / UPnP protocol scanner — it opens a receive socket and
+nothing else (never probes, never M-SEARCHes). SSDP is the UPnP Device Architecture
+**discovery** plane (HTTPU over `UDP/1900`, IPv4 `239.255.255.250` and IPv6 `FF0X::C`), with
+**GENA** eventing (TCP `SUBSCRIBE`/`UNSUBSCRIBE`) and **IGD** port-mapping control (TCP SOAP
+`WANIPConnection`/`WANPPPConnection`) riding whatever description port a device advertised in
+`LOCATION`. All three run in the clear on every home / small-site IoT segment.
+
+The one qualifying **protocol** CVE is **CallStranger** (`CVE-2020-12695`): a spec-level GENA
+flaw, not an implementation bug — a `SUBSCRIBE` whose `CALLBACK` URL points **off-link** turns
+the device into a reflector or data-exfiltration relay. Because it lives in the specification it
+persists in any stack that has not taken the 2020 UDA revision, independent of device age.
+Vendor / implementation CVEs (libupnp, MiniUPnPd, the Windows SSDP service) are deliberately out
+of scope — that is the vendor gate.
+
+**25 finding codes** across three tiers:
+- **Tier A — discovery** (`SSDP-010..024`): off-link unicast M-SEARCH reflection probes,
+  unicast `ssdp:all` inventory sweeps, responses sent off-link, per-responder duplicate and
+  response-storm amplification, multicast TTL / hop-limit scope escape (above the UDA 2–4 range),
+  wider-than-link IPv6 scope (`FF05/FF08/FF0E`), NOTIFY `LOCATION` advert spoofing, `ssdp:byebye`
+  eviction floods, BOOTID regression, and malformed / oversized messages.
+- **Tier B — GENA eventing** (`SSDP-001..005`): the CallStranger off-link `CALLBACK`
+  (`SSDP-001`), a `CALLBACK` host that differs from the subscriber (`SSDP-002`) and multiple
+  `CALLBACK` URLs (`SSDP-003`) — the three CVE-bearing codes — plus odd-scheme / sensitive-port
+  callbacks and unbounded GENA `TIMEOUT`.
+- **Tier C — IGD control** (`SSDP-030..034`): an `AddPortMapping` whose `NewInternalClient` is a
+  **third party** (a pinhole punched for someone else), control arriving from an **off-link**
+  (WAN-side) source, mappings aimed at an infrastructure / admin port, a `DeletePortMapping` for a
+  mapping the requester never created, and unbounded lease durations.
+
+**Dual-stack** with full IPv4 / IPv6 parity (`SSDP-016` is IPv6-only by definition). The capture
+filter is coarse by design (`(udp port 1900) or tcp`) with the precision in Python, because a
+payload-byte BPF is IPv4-only and would go blind on every IPv6 `SUBSCRIBE`. No baseline / learning
+period — every rule is per-packet or per-exchange in a bounded window. On-link means
+RFC1918 / ULA / link-local / loopback plus the capture interface's own subnets; **CGNAT**
+(`100.64.0.0/10`) is deliberately treated as off-link (carrier space upstream of the CPE). Engine
+vendored at `python/ssdpwatch.py`.
+
+**v2 — passive device census / fingerprint (no new code, no CVE).** Alongside the findings, v2
+returns a `devices` inventory: one record per UPnP/DLNA device seen advertising (`NOTIFY`) or
+answering (an M-SEARCH **response**; an M-SEARCH *query* is a control point, not a device, so it is
+not inventoried). Each record carries the device's **vendor / model / friendlyName** parsed from the
+`SERVER` token and, where the UPnP **device description** XML crossed the wire, from its
+`friendlyName` / `manufacturer` / `modelName` — read only if seen, **never fetched** — plus the
+**MAC OUI** vendor when a MAC is recoverable. No OUI registry file is bundled, so an OUI vendor is
+reported raw (unresolved) rather than guessed, and no names are invented. The engine's `_wanted()`
+packet filter now also admits HTTP responses and description-XML continuations so a description that
+spans TCP segments is reassembled (the BPF is unchanged). This is wire-side UPnP/DLNA device ID,
+the same treatment as the Matter / Thread / Z-Wave census in DNS Doctor and the LoRaWAN gateway /
+device fingerprint in Modbus & LoRaWAN Watch. The card renders it as a Device census table.
+
+- Endpoint: `GET /api/net/ssdp-watch` (`?interface=<nic>&seconds=5..50`) — returns `findings` and
+  the v2 `devices` census
+
+### HTTP Watch
+**Detection-only** passive observer for **cleartext HTTP/1.x, h2c and gRPC** — it reads bytes other
+hosts already sent and transmits nothing (no Range test request, no h2 PING, no active verification).
+HTTP over TLS is ciphertext after the handshake, so SNI / ALPN / JA4 / certificates stay with
+[TLS Watch](#tls-watch) and Cert Watch; the http.sys-over-TLS record flood (CVE-2026-47291) is TLS
+Watch's. One bounded `tcpdump` window (full snaplen, `-p`, packet cap), each packet dissected and fed
+through the vendored engine (`python/httpwatch.py`). **28 codes** in four tiers, each with a
+confidence class — `exact` (the observation is the condition), `shape` (the malformation is read
+directly; whether the receiver is vulnerable is not observable), `heuristic` (a threshold or a
+name-matched field) or `posture`:
+
+- **Tier A — framing ambiguity / request smuggling** (`HTTP-001..011`). One RFC 9112 grammar engine
+  runs a **Content-Length framer and a Transfer-Encoding framer side by side**; `HTTP-009`
+  (critical) fires when they end the message at different offsets **and** the leftover bytes parse as
+  a request line — the smuggled request is quoted in the evidence. A message carrying both headers is
+  held until the Content-Length window fills (bounded at 64 KiB, so a bogus length cannot stall the
+  flow). The supporting rules flag CL + TE together (`HTTP-001`, high on HTTP/1.0), a
+  Transfer-Encoding that is not a clean coding list ending in `chunked`, signed / padded /
+  contradictory Content-Length, non-hex or over-64-bit chunk sizes, malformed chunk extensions, bare
+  LF / CR terminators, whitespace before the colon, obs-fold in a request, ambiguous response
+  framing and Host conflicts. CVEs ride as screening rows on those rules: Netty's HTTP/1.0
+  Content-Length guard (`CVE-2026-42584`), chunk-size overflow (`CVE-2026-42580`) and quoted chunk
+  extensions (`CVE-2026-42585`), Jetty's chunk-extension CRLF (`CVE-2026-2332`) and http4s Ember's
+  case-sensitive Transfer-Encoding (`CVE-2026-69205`). **Best tap**: between the load balancer / TLS
+  terminator and the origin, where a forwarded request still carries the ambiguity.
+- **Tier B — HTTP.sys** (`HTTP-020..022`): a Range end position at or beyond 2^63 — parsed as an
+  integer, so whitespace / multi-range / missing-unit evasions do not slip past (**MS15-034**,
+  `CVE-2015-1635`, CISA KEV); an empty Accept-Encoding list element after an unknown coding, the
+  public crash shape (`CVE-2021-31166`, CISA KEV); and a chunked request carrying trailers, raised to
+  warn toward a `Microsoft-HTTPAPI` / `Microsoft-IIS` banner (`CVE-2022-21907`, posture — the
+  malformation was never published and `EnableTrailerSupport` is invisible from a tap). An attempt
+  against a patched server is still reported: the attempt is the event. RPC Watch co-detects the
+  Accept-Encoding shape on WinRM.
+- **Tier C — posture** (`HTTP-040..047`): HTTP Basic, form passwords, credential cookies, the
+  **FS S3150-8T2F** username / password / `GSESSIONID` cookie (`CVE-2025-25613` — firmware version
+  is not on the wire, so it says *verify this device*), userinfo / query-string credentials, TRACE,
+  and **slow-headers / slow-body** abuse at Apache `mod_reqtimeout`'s 500 B/s floor once more than 20
+  concurrently slow flows come from one source in 60 s. **No finding ever carries a usable secret** —
+  usernames are reported, passwords / tokens / cookie values become an 8-hex SHA-256 tag (enough to
+  spot the same secret twice). `HTTP-040` / `HTTP-041` stand down on TCP/5985, where RPC Watch owns
+  WinRM authentication posture.
+- **Tier D — h2c / gRPC** (`HTTP-060..065`): cleartext HTTP/2 in use (warn on gNMI / gNOI paths);
+  **HTTP/2 Rapid Reset** (`CVE-2023-44487`, CISA KEV) counting only streams reset before the server
+  sent any frame, against twice the server's own advertised `MAX_CONCURRENT_STREAMS` within 1 s;
+  CONTINUATION abuse — a block larger than the peer's own `MAX_HEADER_LIST_SIZE`, more than 32
+  CONTINUATION frames, or a block interrupted by another frame (`CVE-2023-32731` / `CVE-2023-33953`);
+  an HPACK prefix integer with a trailing zero group (`CVE-2023-33953`); the gRPC `te` / `:scheme` /
+  `grpclb_client_stats` abort (`CVE-2023-1428`); and credentials in gRPC metadata. A connection joined
+  mid-stream cannot rebuild the HPACK dynamic table, so header-content rules are skipped there rather
+  than guessed; frame-level rules still run.
+
+**Dual-stack.** Flows are classified by their first bytes (a request line, the h2 client preface, or
+`Upgrade: h2c` answered by `101`), so h2c on port 80 is read as h2c. The capture filter keeps IPv4
+port-scoped and admits IPv6 with a bare `ip6` term — `(tcp port 80 or …) or ip6` — because libpcap's
+`tcp port N` misses any IPv6 packet carrying an extension header; the port decision for IPv6 is made
+after dissection. Default ports: 80, 8080, 8000, 8888 (HTTP), 5985 (WinRM), 50051 (gRPC), 9339 /
+6030 / 57400 (gNMI); the card takes a custom comma-separated list.
+
+**Verdicts**: `attack` (a critical / high framing, HTTP.sys or h2c / gRPC finding) ·
+`credential-exposure` (high cleartext-credential findings) · `anomaly` (warn posture) · `observed`
+(info only — h2c in use, TRACE, bare LF) · `clean` · `no-traffic`. The same finding on the same
+client → server pair is folded into one row with a count. HTTP Watch runs in the **Network Integrity**
+rotation, and its HIGH / CRITICAL findings stream to **Watchtower** (`/var/log/ragnar/http_watch.jsonl`).
+The engine also states its considered-and-rejected CVEs (`DEFERRED_CVES`) — no wire artifact, below
+the 6.5 bar, a local-API defect, or another watcher's — so the CVE count never quietly overstates.
+Detector Self-Test runs the engine's 440-check suite plus smuggling, redaction, WinRM-suppression,
+Range-boundary and verdict scenarios and a Scapy pcap leg carrying an IPv6 Hop-by-Hop header.
+
+- Endpoint: `GET /api/net/http-watch` (`?interface=<nic>&seconds=5..60&ports=80,8080,…`) — returns
+  `verdict`, `findings` (code, tier, severity, confidence, CVEs + KEV flag, redacted evidence,
+  client / server / port / address family, count), `by_severity` and flow / message counts
 
 ### MAC Watch
 **Detection-only** MAC-spoofing + randomization monitor — it *never spoofs or
 randomizes anything itself*. Passive: it reads the kernel neighbour table
 (`ip neigh`) and, optionally, runs an `arp-scan` sweep to widen coverage. Three
-jobs, rolled into one **clean / randomization / suspicious / spoofed** verdict:
+jobs, rolled into one **clean / randomization / fhrp / suspicious / spoofed**
+verdict:
 
 1. **Spoofing / cloning** (current *and* past):
    - **Disguised vendor** — a registered vendor OUI wearing the
@@ -412,8 +833,86 @@ jobs, rolled into one **clean / randomization / suspicious / spoofed** verdict:
 3. **Tracking** — an IP that cycles through **≥2 randomized MACs** over time is
    one device rotating to hide; its addresses are grouped into a followable
    track so it can be traced across the MACs it hides behind.
+4. **FHRP (HSRP/VRRP/GLBP) virtual-MAC awareness** — first-hop-redundancy
+   protocols give several physical routers one shared *virtual* MAC that is
+   legitimately shared and **moves between boxes on failover** — behaviour a
+   naive identity monitor misreads as spoofing. MAC Watch recognizes the
+   virtual-MAC formats (HSRP v1 `00:00:0c:07:ac:GG`, HSRP v2 `00:00:0c:9f:fX:XX`,
+   VRRP `00:00:5e:00:01:VV`, VRRPv3/IPv6 `00:00:5e:00:02:VV`, GLBP `00:07:b4:…`)
+   so the gateway's redundancy MAC is **inventoried (INFO), never flagged as a
+   clone/spoof**. The inverse is the alarm: it learns which IPs are FHRP VIPs
+   (any IP ever answered by a virtual MAC, plus declared `fhrp_declared_vips`)
+   and raises **spoofed** if a VIP is suddenly answered by a *non-virtual* MAC —
+   an ARP-spoof of the redundancy group. This is the identity-forensics side of
+   the `arp_guard` / [FHRP Watch](#fhrp-watch) cross-pivot; reconcile its
+   inventory against FHRP Watch findings.
+5. **IPv6 / NDP identity** — MAC↔IPv6 bindings are collected from the NDP
+   neighbour cache (`ip -6 neigh`) and checked with the v6-native identity test:
+   **`eui64_mismatch`**, where a SLAAC modified-EUI-64 address embeds its owner's
+   MAC (RFC 4291) but the cache binds it to a *different* MAC — a MAC-identity
+   contradiction (**suspicious**; proxy-NDP can also explain it, so it is not
+   escalated to spoofed). This is kept deliberately **separate from the IPv4
+   clone logic**: a healthy IPv6 host holds a link-local plus several
+   SLAAC/temporary globals on one MAC, so "many IPs per MAC" is normal for v6 and
+   must never read as a clone. True NDP cache poisoning is
+   [ndpwatch](watchtower.md)'s job — macwatch only consumes NDP to learn
+   bindings.
+6. **L2 security (MACsec / 802.1X-EAPOL / MKA)** — **opt-in passive sniff.** The
+   neighbour-table/arp-scan model above can only see what reaches the ARP/NDP
+   caches; the link-security control plane rides dedicated EtherTypes that never
+   do. Tick **L2 security** (`l2sec=1`) to add a short, harmless capture
+   (`tcpdump`, no frames emitted) of MACsec (802.1AE, `0x88E5`) and 802.1X /
+   EAPOL / MKA (`0x888E`), parse the SecTAG and EAPOL headers directly off the
+   wire, and fold the result into the verdict:
+   - **MACSEC-010** — a MACsec **packet number that rolls backwards** inside one
+     secure association (replay protection off, or an active replay) → **spoofed**.
+   - **MACSEC-011** — a secure-channel **SCI whose system-identifier contradicts
+     the frame's own source MAC** (a spoofed secure channel) → **spoofed**.
+   - **MACSEC-012** — a **confidentiality downgrade**: an association once seen
+     encrypted (`TCI.E=1`) now arriving integrity-only (forced cipher-off) → **spoofed**.
+   - **EAPOL-010** — an **EAPOL-Logoff burst** that force-deauthenticates an
+     802.1X port (port-access denial of service) → **spoofed**.
+   - **EAPOL-011** — an **EAPOL-Start flood** (supplicant-impersonation / access
+     flood) → **suspicious**.
+   - **MACSEC-013 / EAPOL-012 / MKA-010** — MACsec channels, 802.1X port
+     authentication, and MKA key-agreement participants that are legitimately in
+     use are **inventoried (INFO), never flagged**.
+   This is posture detection, not a CVE probe — MAC Watch carries no CVEs. Off by
+   default so the background / e-Paper path stays fast; enable it per scan.
+7. **Wi-Fi HaLow (802.11ah) radio-presence census** — a **capture-free** census
+   of **bridged HaLow radios**, folded into every scan (it reasons over the same
+   neighbour-table / NDP data as the rest of the watcher). HaLow has no backhaul
+   protocol of its own — it is native 802.11 bridged or routed onto Ethernet — so
+   the only wire signal is *radio identity*, and this is a **presence census, not
+   HaLow traffic visibility** (a radio in router/NAT mode is invisible and its
+   absence is never treated as evidence). Five codes, all INFO except the posture
+   note (**no CVEs**):
+   - **HALOW-01** — the **Morse Micro OUI `0C:BF:74`** (the one HaLow silicon with
+     a dedicated OUI) seen as an on-segment L2 binding — a bridged HaLow radio.
+   - **HALOW-02** — the same radio recovered from an **EUI-64 IPv6 identifier**
+     (`0ebf:74ff:fe…`, the U/L-bit-flipped OUI), which survives routing and so is
+     off-segment-capable where IPv4 NAT would hide the client entirely.
+   - **HALOW-03** — **host pairing**: a Morse MAC whose NIC suffix equals a
+     non-Morse vendor MAC's suffix — the MM6108 blank-OTP fallback where the radio
+     MAC is `0C:BF:74` + the host `eth0`'s last three octets, i.e. radio and host
+     are one box.
+   - **HALOW-04** — a **derived VIF** (locally-administered first octet + Morse
+     `BF:74`), only ever reported when an exact-OUI sibling on the same NIC suffix
+     corroborates it (it never fires alone — and this same gate is why a
+     legitimate MM6108 VIF is not mis-reported as a disguised vendor OUI).
+   - **HALOW-05** — **posture (LOW):** a HaLow radio not covered by the HaLow
+     allowlist (`halow_allow` in the store — accepts full MACs or bare 3-octet NIC
+     suffixes; **empty by default**, so every radio flags until an operator lists
+     it — nothing trusted implicitly). A visibility note, not an alarm.
 
-Every MAC is classified as **Vendor** (universal/burned-in), **Spoofed**
+   This is the on-the-wire, **radio-free** device-ID sibling of the Thread /
+   Matter / Z-Wave census ([DNS Doctor](#dns-doctor)) and the LoRaWAN fingerprint
+   ([Modbus & LoRaWAN Watch](#modbus--lorawan-watch)). The result groups the raw
+   per-code findings into one device per NIC suffix, showing the legs it was seen
+   through (`v4-L2`, `v6-L2`, `v6-routed`).
+
+Every MAC is classified as **Vendor** (universal/burned-in), **FHRP virtual**
+(HSRP/VRRP/GLBP redundancy), **Spoofed**
 (vendor OUI + LAA bit), **Randomized** (privacy), or **Virtual/VM**. Vendor
 names come from the `arp-scan` / `nmap` OUI database
 (`/usr/share/arp-scan/ieee-oui.txt`, ~35k prefixes) with a built-in seed
@@ -438,9 +937,11 @@ limited. True device tracking across a MAC *and* IP change needs 802.11
 probe-request fingerprinting, which is monitor-mode only; MAC Watch labels its
 tracking as the neighbour-table approximation.
 
-- Endpoints: `GET /api/net/mac-watch` `?scan=0|1&interface=<if>`,
+- Endpoints: `GET /api/net/mac-watch` `?scan=0|1&interface=<if>&l2sec=0|1&l2sec_seconds=<2-30>`,
   `POST /api/net/mac-watch-reset` · store: `data/mac_watch.json` · uses
-  `ip neigh` (iproute2) + optional `arp-scan`; OUI DB from `arp-scan`/`nmap`
+  `ip neigh` (iproute2) + optional `arp-scan`; OUI DB from `arp-scan`/`nmap`;
+  the opt-in L2-security sniff uses `tcpdump` + `scapy` (best-effort — silently
+  skipped when absent)
 
 ### 🛡️ Network Integrity Monitor
 The one **passive, alerting** tool in the suite (everything else is on-demand).
@@ -469,8 +970,16 @@ check, the [DHCP Guardian](#dhcp-guardian) rogue-server check, and the instant
 
 **Extended monitoring** (on by default alongside the monitor) additionally
 **rotates the whole passive-scanner suite** through the background poller —
-STP · DTP · CDP · VTP · IGMP · IPv6 first-hop · NDP · FHRP · OSPF · EIGRP · IS-IS · BGP · SMB ·
-Relay/Coercion · NTP · ICMP · SNMP · Cert · TLS · LDAP. Because each of those
+ARP frames · STP · DTP · CDP · LLDP · VTP · IGMP · IPv6 first-hop · NDP · FHRP · OSPF · EIGRP ·
+IS-IS · BGP · SMB · Relay/Coercion · NTP · ICMP · SNMP · Cert · TLS · LDAP · SSH · Telnet · LACP ·
+Link OAM · CFM · RPC · RDP · BFD · SR-MPLS · IPsec · DNS · FTP · SMTP · HTTP · Modbus ·
+Cisco/Juniper/Arista/Comware Guards.
+The vendor switch/router guards (Cisco/Juniper/Arista/Comware) are **LAN-only** —
+the rotation runs them only when a genuine wired uplink is up (over that wired
+NIC, never `wlan0`), so a Wi-Fi-only unit never auto-runs them and Comware can't
+falsely report VRF/MPLS findings off wlan. Each stays available on demand via
+its **Scan** button regardless of link type.
+Because each of those
 does a short `tcpdump` capture, they're run a **round-robin batch at a time**
 (default 3 per cycle, configurable) so a cycle stays ~1 minute; a full sweep
 completes over several cycles, and each scanner self-noops cheaply when its
@@ -592,13 +1101,15 @@ general UDP ports and the 802.1AS ethertype and reports whether a grandmaster is
 announcing, the message types, and the domain(s). This is a field "is PTP here?"
 check; precise clock-offset measurement needs a running `ptp4l`. (Standardised
 TWAMP/OWAMP SLA testing is a natural next step but needs a cooperating reflector
-on the far end.)
+on the far end.) For the passive **security** monitor of the same timing plane —
+grandmaster takeover, time injection, gPTP peer-delay attacks — see
+[PTP Watch](#ptp-watch).
 
 - Endpoint: `POST /api/net/ptp` `{interface, seconds}` · binary: `tcpdump`
 
 ### IPv6 RA Guard
 The **defence** half of IPv6 first-hop security. Where
-[IPv6 First-Hop Watch](#ipv6-first-hop-watch) (Switch & L2/L3) **detects** a rogue
+[IPv6 First-Hop Watch](#ipv6-first-hop-watch) (Diagnostics · L3) **detects** a rogue
 RA / DHCPv6 / ICMPv6-Redirect on the wire, RA Guard audits **this host's own IPv6
 settings** so a rogue first-hop can't take effect even if it reaches you — and can
 **harden** them in one click. It is active but sends **no packets**: it reads
@@ -655,19 +1166,100 @@ per-packet Unix timestamp via `-tt`) is parsed and classified:
   sources agree to well under a second passively). This is the core attack: someone
   is serving a skewed clock. If *every* source agrees but all disagree with the
   local clock, that's flagged too (the host clock is wrong, or all sources shifted).
+- **On-path injection** — the same **origin nonce** (the client's transmit timestamp,
+  echoed in the Originator field) carried by **two different servers**. A client's
+  per-request nonce is held by exactly one real server — the one that answered that
+  query — so a second source echoing it is a forged or racing reply. This is the
+  passive analogue of the active anti-spoof echo check, with no probe sent.
 - **Rogue server** — an NTP server answering on the segment that **isn't in the
   learned baseline**. Clients may silently prefer it.
-- **Kiss-o'-Death** — a **stratum-0** reply (RFC 5905 KoD, e.g. `RATE` / `DENY`). A
-  rogue uses KoD to make clients **back off legitimate time sources** — a time-sync
-  DoS that softens them up for a rogue server.
+- **Kiss-o'-Death** — a **stratum-0** reply (RFC 5905 KoD, e.g. `RATE` / `DENY` /
+  `RSTR`). A rogue uses KoD to make clients **back off legitimate time sources** — a
+  time-sync DoS (**CVE-2015-7704 / CVE-2015-7705**). A genuine KoD is a *response* and
+  must echo the client's transmit nonce, so a KoD with a **zero origin timestamp** (or
+  from a source that never served normal time) is flagged as **likely-spoofed**
+  off-path DoS *(new in v6)*.
 - **Stratum spoof** — a source claiming **Stratum 1** (primary / GPS reference) it
   shouldn't, or a known server **lowering its stratum** to win client preference.
 - **Broadcast** — a **mode-Broadcast** time source: hosts in broadcast client mode
   accept it blindly, a classic injection vector on modern unicast networks.
-- **Recon** — NTP **mode 6/7** (`ntpq` control / `monlist`) traffic: reconnaissance
-  or amplification abuse.
+- **Recon** — NTP **mode 6** (`ntpq` control) is status enumeration / recon; **mode 7**
+  (`ntpdc` private / **monlist**) is the **CVE-2013-5211** amplification vector — one
+  small monlist query returns up to 600 recent clients, the reflection primitive behind
+  the 2013-14 NTP DDoS wave. The two modes are named separately *(new in v6)*.
+- **Loopback-source ACL bypass *(new in v6)*** — an NTP packet with a **loopback source
+  address** (`127.0.0.0/8`) on the segment. Loopback never crosses a wire, so this is
+  spoofed to look local and **bypass `ntpd` `restrict`/ACL rules** to reach mode 6/7
+  (**CVE-2014-9298 / CVE-2014-9751**) — a zero-false-positive `auth-bypass` by
+  construction. *(v11:)* the IPv6 `::1` source and an IPv4-mapped `::ffff:127.x` are caught
+  too.
 - **Anomaly** — an implausible **root dispersion**, a **leap-alarm** (unsynchronized)
-  source, or a **reference-ID loop** (refid equals the source's own address).
+  source, a **reference-ID loop** (refid equals the source's own address), a server
+  reporting **Stratum 16** (unsynchronized) or a **reserved stratum > 16** (malformed),
+  or a server answering with an **obsolete NTPv1/v2** (v0 is invalid) — modern servers
+  speak v3/v4, so an old version on a reply is legacy or crafted.
+- **Autokey** — an **Autokey** (RFC 5906) **extension field** on the wire. Autokey is
+  deprecated and is the network-reachable attack surface for **CVE-2014-9295** (the
+  `ntpd` `crypto_recv()` stack-overflow → **RCE** as the ntpd user) and its siblings
+  (CVE-2014-9750, CVE-2016-1547). The capture adds `-x`, so the NTP payload bytes are
+  reconstructed and the extension field is parsed directly (independent of the
+  dissector). Fires on **any** NTP packet — server replies *and* inbound client/peer
+  packets — because the overflow is delivered *to* the victim. Ordinary symmetric-key
+  authentication (a 4/20/24-octet MAC) is **not** Autokey and never trips it — the
+  28-octet RFC 7822 extension-field floor separates the two.
+- **Autokey exploit** — a **malformed** Autokey EF: the declared length or the
+  internal **value length** (`crypto_recv()`'s copy length) runs **past the packet**,
+  is **misaligned**, or is structurally impossible. That value-length overflow is the
+  specific signature of **CVE-2014-9295 / CVE-2014-9750** and escalates to a
+  **critical** verdict (ranked as such by the Network Integrity Monitor).
+- **Auth bypass — crypto-NAK *(new in v4)*** — a **4-octet MAC** (a key ID with an
+  **empty digest**) is a *crypto-NAK*. On a **symmetric** association (modes 1/2) that
+  is the **CVE-2015-7871** (&ldquo;NAK to the Future&rdquo;) authentication-bypass path:
+  `ntpd` < 4.2.8p4 mobilizes an unauthenticated peer that can then steer the clock, so
+  it escalates to a **critical `auth-bypass`** verdict. A crypto-NAK is a legitimate
+  protocol element in general (&ldquo;I cannot authenticate you&rdquo;), so a NAK in
+  client/server mode is only **noted** (`anomaly`) — the exploit is the peer modes. The
+  4-octet trailer is read from the reconstructed `-x` bytes, with a fallback to the
+  reported NTP length; a real extension field is ≥ 28 bytes, so a 4-byte trailer is
+  unambiguous.
+- **Zero origin timestamp *(new in v4)*** — a **mode-4 server reply** whose **origin
+  timestamp is all-zero** echoes no request the client actually sent — an **off-path
+  spoofed response** or origin-check bypass (**CVE-2016-7431** / **CVE-2015-8138** /
+  **CVE-2020-11868**, the last reaching the same signature by blocking sync in
+  `ntpd` < 4.2.8p14), surfaced as **`time-injection`**. It is distinct from the
+  transmit-offset check (a bad time *value*) and the on-path nonce collision (a
+  *non-zero* nonce reused). Gated to server replies: mode 3 (client), mode 5 (broadcast)
+  and the first packet of a symmetric exchange legitimately carry a zero origin, so
+  those never false-positive.
+
+- **Crash / overrun shapes *(new in v11)*** — verdict **`crash-exploit`** (critical):
+  - an **oversize NTP datagram** — a UDP payload over 1,500 bytes, larger than any
+    legitimate NTP message, NTS and Autokey included: the ntpd < 4.2.8p9 remote-crash
+    vector (**CVE-2016-9312**). It is measured on tcpdump's reported NTP length, so the
+    512-byte capture snaplen does not hide it. A datagram beyond the path MTU arrives
+    fragmented and only its first fragment matches, so this sees an oversize datagram
+    delivered intact (jumbo / virtual segments), not a fragmented one.
+  - a **mode-6 control header whose `count`** exceeds the 468-octet spec maximum **or** the
+    datagram itself — the out-of-bounds read in ntpsec < 1.1.3 `process_control()` /
+    `ctl_getitem()` (**CVE-2019-6444 / CVE-2019-6443**). Zero false positives by
+    construction: a conformant request or response cannot declare more data than it
+    carries (a real full-size `ntpq` response is exactly 468 and is reported as recon
+    only).
+- **Dual-stack *(new in v11)*** — IPv6 NTP is parsed and classified like IPv4 (earlier
+  builds silently skipped every v6 packet), and the capture filter adds the shared IPv6
+  extension-header clause, so NTP behind a Destination-Options, Routing or first-fragment
+  header — which plain `udp port 123` drops — still reaches the classifier.
+- **Fix *(v11)*:** the Autokey extension-field check now runs only on modes 1–5, as
+  upstream does. The bytes after a mode-6/7 header are control or private data, so a normal
+  full-size `ntpq` status response was previously misread as a **malformed Autokey EF**
+  (a false critical `autokey-exploit`). The length checks also use the true wire length,
+  not the snaplen-truncated bytes.
+
+> **Not covered (from the v11 evaluation):** CVE-2021-22212 (weak keys never on the wire),
+> CVE-2019-6442 / 6445 (need an authenticated attacker), CVE-2023-4012 (needs per-association
+> request/response state), CVE-2016-9310 (score and description unpinned), CVE-2020-13817
+> (wire-indistinguishable) and CVE-2016-7428 (poll-interval changes are routine). The
+> standalone module's opt-in `--probe` mode transmits and is not part of Ragnar.
 
 The **first scan learns** the trusted time source(s) + their stratum into
 `data/ntp_watch.json`; after a legitimate NTP change, click **Trust current** to
@@ -688,7 +1280,7 @@ python3 network_diagnostics.py ntp-selftest    # self-test the detectors, no roo
 ```
 
 `ntp-selftest` drives the real parser + classifier with synthetic captures (clean /
-time-injection / rogue-server / kod / stratum-spoof / broadcast / recon / anomaly /
+time-injection / rogue-server / kod / stratum-spoof / broadcast / recon / anomaly / v11 crash-exploit (oversize, count overrun), IPv6, ::1, the 468-byte ntpq false-positive guard /
 parse), and — when [Scapy](https://scapy.net) is installed — crafts a real NTP
 server reply into a pcap and parses it back through `tcpdump`, exercising the
 capture→parse path end to end.
@@ -705,7 +1297,11 @@ a `SetRequest` crosses the wire — lets an attacker who captured it **reconfigu
 device**: change routes, ACLs, SNMP itself, or bounce interfaces. **v3** fixes this
 with the User Security Model (authentication + privacy/encryption). This scanner is
 **passive and detection-only**: one short `tcpdump` window over UDP **161/162**,
-parsed and classified. It never sends an SNMP request. What it flags:
+parsed and classified. It never sends an SNMP request. **Dual-stack** — SNMP running
+over **IPv6** transport is parsed and classified exactly like IPv4 (the community
+exposure, amplification and enumeration logic keys on the address string, so it is
+already family-agnostic once the line parses; an IPv4-only parser would silently miss
+every v6 agent). What it flags:
 
 - **Write-exposed** — a `SetRequest` in v1/v2c: a **write community is on the wire**,
   i.e. sniff it and you own the device. The most severe finding.
@@ -722,6 +1318,22 @@ parsed and classified. It never sends an SNMP request. What it flags:
   reflection / amplification DDoS vector (a small request eliciting a huge response).
 - **Enumeration** — one host issuing many `GetNext` / `GetBulk` requests: walking the
   MIB (SNMP reconnaissance).
+- **Exploit — raw-BER CVE signatures *(new in v4)*** — the tcpdump text decode cannot see
+  the byte-level fields these CVEs key on, so a **second, concurrent full-snaplen capture**
+  is decoded by a vendored dependency-free **BER parser** (`python/snmp_cve.py`) and run
+  through four detectors. Any hit escalates to a **critical `exploit`** verdict:
+  - **SNMPv3 USM HMAC truncation / absence** (**CVE-2008-0960**) — `authFlag` set but
+    `msgAuthenticationParameters` is **empty or < 12 bytes**, the auth-bypass on the wire
+    (a vulnerable agent verifies only the bytes supplied). Engine-discovery messages carry
+    `authFlag` clear and are never flagged.
+  - **Cisco IOS/IOS XE SNMP RCE** (**CVE-2017-6736..6744**, CISA KEV) — a varbind OID under
+    a Cisco-named vulnerable MIB (ALPS-MIB, transmission.94, …); an **absurd sub-identifier
+    count** (> 25 arcs, how the public PoC smuggles shellcode) is the *attempt* tier,
+    touching the MIB at all is the *exposure* tier.
+  - **net-snmp snmptrapd overflow** (**CVE-2025-68615**) — an **oversized field** (> 512 B
+    community / `msgUserName` / octet-string varbind) in a trap to **UDP/162**.
+  - **net-snmp VACM malformed-OID** (**CVE-2022-24805/24807/24809/24810**) — a `Set` /
+    `GetNext` OID that names a VACM table column then supplies a **truncated INDEX**.
 - **Clean** — only **SNMPv3** (authenticated/encrypted), or no SNMP at all.
 
 The parser reads tcpdump's SNMP decode, including its convention of **omitting
@@ -757,6 +1369,184 @@ ifAdminStatus / …), and the community-reuse correlator — see
 
 - Endpoint: `GET /api/net/snmp-watch` `{interface, seconds}`,
   `POST /api/net/snmp-baseline` `{action: reset}` · binary: `tcpdump`
+
+### RADIUS Watch
+A **passive**, vendor-neutral RADIUS / EAP security scanner — the dedicated RADIUS
+protocol detector. RADIUS (RFC 2865; auth UDP 1812/1645, accounting 1813/1646, CoA
+3799) carries network **authentication** — 802.1X, Wi-Fi, VPN and admin logins — in
+the clear, protected only by `MD5(secret ‖ Request-Authenticator)`. **Detection-only**:
+no socket, no probe, scapy loaded lazily only on the live path. Attribute values
+(passwords, secrets, `State`, `Proxy-State`, `Reply-Message`, VSA contents) **never
+enter a finding** — findings carry digests, lengths and booleans only.
+
+It **takes over the Blast-RADIUS (`CVE-2024-3596`) engine** that previously lived,
+un-gated and suite-wide, in [Arista Guard](#arista-guard)'s `rule_radius` (the seven
+migrated codes keep their digits: `AG-101 → RDW-101` … `AG-214 → RDW-214`; as of Arista
+Guard **v4** those `AG-1xx`/`AG-2xx` RADIUS codes are retained but **scoped to Arista
+hardware** learned from LLDP, so the two detectors no longer double-fire on non-Arista
+RADIUS traffic), and adds
+RADIUS/EAP authentication posture plus the FreeRADIUS CVEs that have a deterministic
+wire shape. **Direction is decided by the RADIUS *code*, never the port** — fixing an
+`aristaguard` blind spot where `1812 → 1812` proxy traffic read every response as a
+request (and so missed injected `Proxy-State`). The engine keeps **no baseline**, so a
+single capture is self-contained. Engine vendored at `python/radiuswatch.py`
+(self-contained stdlib + pure-Python EC math — no new dependency).
+
+**19 finding codes** in two bands — **1xx exposure** (scoped by `known_infra`) and
+**2xx attack** (never scoped):
+
+- **Exposure (8):** `RDW-101` cleartext RADIUS observed · `RDW-102` Access-Request with
+  no Message-Authenticator · `RDW-110` unauthenticated response · `RDW-120` PAP over UDP
+  · `RDW-121` CHAP in use · `RDW-122` weak EAP method answered (MD5/LEAP) · `RDW-124` CoA
+  without M-A · `RDW-125` a NAS↔server pair that speaks RadSec **and** cleartext RADIUS.
+- **Attack (11):** `RDW-201` forgery (a `Proxy-State` collision block over the structural
+  bound — Blast-RADIUS) · `RDW-212` `Proxy-State` injected on the NAS-side leg (the forged
+  Access-Accept, request↔response correlated) · `RDW-213` non-UTF-8 `Reply-Message` ·
+  `RDW-214` opaque high-entropy Vendor-Specific exfil · `RDW-215` malformed WiMAX VSA
+  (`CVE-2017-10979`/`-10984`) · `RDW-216` zero-length concat attribute (`CVE-2017-10985`)
+  · `RDW-217` EAP-pwd reflected Commit — Dragonblood (`CVE-2019-11234`) · `RDW-218` EAP-pwd
+  invalid Commit, scalar/curve checks (`CVE-2019-11235`) · `RDW-219` EAP-SIM unknown
+  non-skippable attribute (`CVE-2022-41860`) · `RDW-220` Ascend abinary filter overflow
+  (`CVE-2022-41861`) · `RDW-221` short Ascend secret (`CVE-2017-10978`). `RDW-123` and
+  `RDW-202` are retired and never reused.
+
+**9 tracked CVEs** (`CVE-2024-3596` Blast-RADIUS + the 8 FreeRADIUS shapes above) are
+detected by wire shape — whether the server runs a vulnerable FreeRADIUS is not
+observable passively. **10 CVEs are triaged and deferred** (carried in `DEFERRED_CVES`,
+disjoint from the catalog, counted as *context*, never detected): the six FreeRADIUS
+**DHCP-decoder** CVEs (`CVE-2017-10980/81/82/83/86/87` — UDP 67, not the RADIUS wire),
+three **EAP-pwd side channels** (`CVE-2019-17185`/`-13456`, `CVE-2022-41859` — nothing
+anomalous on the wire) and a **logrotate** local priv-esc (`CVE-2019-10143`).
+
+RadSec's TLS/DTLS transport on 2083 (RFC 6614 / 7360) and RADIUS/1.1 (RFC 9765) are
+[TLS Watch](#tls-watch)'s job; RADIUS Watch only records RadSec **presence** and raises
+`RDW-125` when the same pair also falls back to cleartext. The capture filter admits the
+RADIUS/CoA/RadSec ports plus IPv6 behind a Hop-by-Hop/Routing/Fragment/AH/Dest-Options
+extension header (the bounded walk decides in software) and VLAN-tagged frames.
+*(Migration note: Arista Guard still also detects `CVE-2024-3596` until its `rule_radius`
+is retired in a follow-up; Arista Guard keeps its EOS-specific CVEs.)*
+
+- Endpoint: `GET /api/net/radius-watch` `{interface, seconds}` · binary: `tcpdump`
+
+### Modbus & LoRaWAN Watch
+A **passive** Modbus/TCP posture monitor for OT / PLC segments, plus a **LoRaWAN gateway-backhaul
+tier** (its own scan, below). It is **detection-only** and
+never sends a Modbus request. Modbus/TCP (`tcp/502`) has no authentication and no
+encryption, so any host that can reach a PLC can write its coils and registers. Most of
+what matters is therefore posture: **who is talking to the PLCs and what are they telling
+them to do**. The CVE layer is small and says plainly what it can and cannot show.
+
+**Learn, then arm.** The first Modbus ADU seen starts a **learning window** (one hour by
+default). During it, every master that sends a request is recorded per slave address and
+unit ID, separately for IPv4 and IPv6. When the window closes, requests from any other
+master alert. The baseline is kept in `data/modbus_watch.json`, so the window spans
+manual scans and the background rotation. **Arm now** ends learning early and keeps what
+was learned. **Re-learn** forgets the baseline after a legitimate SCADA/HMI change.
+
+Nineteen finding codes (`MBW-nnn`) — the twelve Modbus codes below, plus seven LoRaWAN backhaul
+codes (`MBW-100..106`) under the **LoRaWAN gateway backhaul** tier further down:
+
+| Code | Finding | Severity |
+|------|---------|----------|
+| `MBW-001` | Write (FC5/6/15/16/21/22/23) from a master outside the baseline | high |
+| `MBW-002` | FC8 sub-function 4 **Force Listen Only**: the slave silently stops answering | high |
+| `MBW-003` | FC8 restart communications / clear counters | medium |
+| `MBW-004` | Any other function code from a master outside the baseline | medium |
+| `MBW-010` | Schneider **UMAS** (FC90) activity | medium |
+| `MBW-011` | **ModiPwn** read-primitive then write/reconfigure over UMAS within 30 s (**CVE-2021-22779**) | high |
+| `MBW-020` | Read Device Identification (FC43/MEI 14) burst: 3 or more in 10 s | low |
+| `MBW-021` | Unit-ID sweep: one source hitting 8 or more unit IDs on one host in 10 s | low |
+| `MBW-030` | Malformed MBAP/PDU framing (libmodbus trigger: **CVE-2019-14462**, **CVE-2019-14463**, **CVE-2024-10918**) | medium |
+| `MBW-040` | Modbus outside the declared OT subnet(s) | low |
+| `MBW-041` | Plain `502` to a host also seen on Modbus Security (`802`/TLS) | info |
+| `MBW-042` | Cleartext Modbus on `502`, **no** secure Modbus ever seen for the peer (v2) | info |
+
+`MBW-030` compares the MBAP length field with the bytes that actually arrived, and an FC15/FC16
+byte count with its quantity and its trailing data. This is the input shape of the
+libmodbus out-of-bounds reads and over-length reply. It is a **trigger** finding: it shows
+the packet, but it cannot confirm the PLC runs libmodbus. A malformed ADU is not used for
+the abuse checks. `MBW-040` only runs once you declare OT subnet(s) in the card or with
+`--ot-subnet`; the list is saved with the baseline. Modbus Security on `802` is TLS, so
+only its presence is recorded. **`MBW-042` (v2)** is the cleartext-posture floor: after the
+learning window, any plaintext `502` to a slave for which **no** `802`/TLS session has ever
+been seen fires once per (family, slave) — the "this PLC has no secure-Modbus option in
+use" inventory. It is orthogonal to the abuse/framing codes (a legitimate learned master
+still exposes the slave), and the cadence is deliberate: an `802` session seen during
+learning suppresses it, and a slave later seen on `802` is reported as `MBW-041` instead,
+never re-reported as `042`.
+
+**Dual-stack.** IPv4 and IPv6 are tracked separately end to end: a master learned on IPv6 is
+not trusted on IPv4. The sensor walks IPv6 extension headers to reach the TCP header. The
+capture filter admits IPv6 whose first next-header is not TCP, UDP or ICMPv6, because a
+plain `tcp port 502` filter can never match a segment behind an extension header. Capture is
+at full snaplen so a truncated segment is never misread as malformed framing.
+
+Verdicts: `clean` < `learning` (Modbus seen, baseline still being built) < `exposure`
+(low/info only) < `suspicious` (a medium finding) < **`plc-abuse`** (a high finding; pages
+in the [Network Integrity Monitor](#-network-integrity-monitor)). HIGH and MEDIUM findings
+feed [Watchtower](watchtower.md). The card and the API collapse the engine's per-request
+findings into one row per code, master, slave and unit, with a count.
+
+Out of scope: **Modbus RTU/serial**, which a network tap cannot see. Upstream's sealed
+network-namespace lab (tier 5) is not shipped. On a namespace with a working IPv6 stack its
+IPv6 leg runs over `::1`, so the "attacker" and the learned master share one address and
+`MBW-001` cannot fire. The Detector Self-Test covers that case instead by replaying IPv4,
+IPv6 and IPv6-with-extension-header pcaps with distinct master and attacker addresses.
+
+#### LoRaWAN gateway backhaul (v3)
+
+A **second, separate scan** (`do_lorawan_watch`, its own button with **no arming timer**) reads the
+**Semtech GWMP packet-forwarder** backhaul between a LoRa gateway and its network server
+(`udp/1700`). GWMP has no authentication and no encryption, so an 8-byte gateway EUI is the only
+identity and every uplink / downlink PHYPayload crosses in the clear. This is the **wire side only**
+— the radio link belongs to the SDR suite, and LoRa Basics Station (TLS) and MQTT-forwarder
+backhauls are opaque to a passive tap. It **maps to no CVE** (protocol / spec-level properties, not
+implementation bugs) and has **no learning window and no baseline**: the server identity is the
+destination of the gateway's own `PULL_DATA`, so nothing an attacker sends can nominate itself, and
+LoRa traffic never touches the Modbus baseline (which would otherwise leave later Modbus masters
+unlearned). This is how Ragnar now decodes and IDs **LoRaWAN** on the wire / WiFi without a radio,
+alongside Matter / Thread / Z-Wave in [DNS Doctor](#dns-watch) (Zigbee still needs a radio).
+
+| Code | Finding | Severity |
+|------|---------|----------|
+| `MBW-100` | LoRaWAN gateway backhaul present (census; carries the fingerprint by reference) | info |
+| `MBW-101` | Backhaul cleartext — PHYPayloads recoverable off the link | medium |
+| `MBW-102` | One gateway EUI claimed from two source addresses (impersonation) | high |
+| `MBW-103` | `PULL_RESP` downlink from an address that is not this gateway's server (injection) | high |
+| `MBW-104` | JoinRequest **DevNonce** reuse (join replay or a non-compliant device) | medium |
+| `MBW-105` | Uplink **frame-counter reset** (high-water > 1024, next ≤ 16; a 16-bit wrap is not a reset) | high |
+| `MBW-106` | Gateway **location** in the cleartext `stat` block (rounded to ~100 m) | medium |
+
+**Fingerprinting (MBW-100 metadata, no device names).** LoRaWAN carries no user-set names, so this
+IDs by identifiers and behaviour, the same treatment Matter / Thread / Z-Wave get in DNS Doctor:
+the **gateway and DevEUI vendor** (first-three-byte OUI against the bundled IEEE registry snapshot
+`oui_snapshot.dat` — 35k entries, searched by `seek`, not loaded into RAM), the **JoinEUI**, the
+**DevAddr → NetID → operator** (bundled list: the two spec-reserved private NetIDs and TTN; anything
+else reported as its type/value, never guessed), the **regional band** (a frequency inside
+overlapping plans reports every candidate), and a per-DevAddr behavioural profile (datarate,
+channel / sub-band, RSSI/SNR range, uplink cadence once ≥ 8 are seen, FPort set and the ADR bit).
+The fingerprint is held **by reference**, so a finding rendered later shows the running counts.
+Application payloads stay encrypted under AppSKey.
+
+Verdicts (LoRaWAN scan): `clean` < `backhaul` (a cleartext gateway link is present — MBW-100/101, or
+the MBW-106 location leak) < `suspicious` (a DevNonce replay) < **`lora-abuse`** (impersonation,
+downlink injection or an FCnt reset). HIGH and MEDIUM LoRaWAN findings ride the same
+[Watchtower](watchtower.md) `modbus_watch` source. **Dual-stack**, including IPv6 behind extension
+headers; the capture filter is `udp port 1700 or (ip6 and not tcp/udp/icmp6)` so a GWMP datagram
+behind an extension header is not missed.
+
+- Endpoints: `GET /api/net/modbus-watch` `{interface, seconds, ot}` (`ot` = comma-separated
+  CIDRs; when present, even empty, it replaces the saved list) ·
+  `GET/POST /api/net/modbus-baseline` `{action: arm|reset|config, ot: [...]}` ·
+  `GET /api/net/lorawan-watch` `{interface, seconds}` (the LoRaWAN scan — no baseline, no arming) ·
+  binary: `tcpdump` · Python: `scapy`
+- CLI: `python3 network_diagnostics.py modbus-watch [--iface I] [--seconds N]
+  [--ot-subnet CIDR ...] [--pcap FILE [--learn S]] [--json]` (`--pcap` replays a file
+  against a fresh baseline and does not save it)
+- Vendored engine: `python/modbuswatch/` (Solarflere): `parser`, `state`, `findings`,
+  `sensor`, `lora` (hand-rolled Semtech GWMP + LoRaWAN PHYPayload decoder), `fingerprint`
+  (with the bundled `oui_snapshot.dat` IEEE OUI registry), plus the standalone `modbuswatch.py`
+  entrypoint
 
 ### Cert Watch
 Internal networks are full of TLS services — router/switch admin UIs, NAS boxes,
@@ -815,9 +1605,13 @@ grades it through the real handshake path — no root, no network.
   `POST /api/net/cert-baseline` `{action: reset}` · Python: `cryptography` ·
   binary: `tcpdump` (discovery only)
 
-## 🔌 Switch & L2/L3
+## 🔌 Switch, routing & protocol watchers
 
-Layer-2 discovery: what switch you're plugged into, and what else is on the
+Switch discovery, then the passive protocol watchers from L2 to L7 and the vendor CVE
+guards. In the web UI each sits under its OSI layer in **Diagnostics** (see the
+[tool index](#tool-index)).
+
+Layer-2 discovery first: what switch you're plugged into, and what else is on the
 segment.
 
 ### Switch Discovery (LLDP / CDPv1/v2 / EDP / FDP)
@@ -898,7 +1692,7 @@ export to CSV.
 hadn't covered, and arguably the highest-value one after DNS: whoever answers
 DHCP hands you your gateway and DNS, so a rogue DHCP server is a turnkey
 man-in-the-middle. **Detection-only** — it never runs a DHCP server or hands out
-leases. Two signals, rolled into a **clean / rogue / starvation** verdict:
+leases. Three signals, rolled into a **clean / suspicious / rogue / starvation** verdict:
 
 - **Rogue / fake DHCP server** — an active `broadcast-dhcp-discover` provokes
   *every* DHCP server on the segment to OFFER. More than one distinct server, a
@@ -914,6 +1708,14 @@ leases. Two signals, rolled into a **clean / rogue / starvation** verdict:
   (chaddr) behind them; a burst of many distinct chaddrs in a few seconds is the
   pool-exhaustion signature (the classic precursor that clears the field for a
   rogue server) → **starvation**.
+- **Option-borne CVEs (v3)** — the same passive window is scapy-parsed for raw DHCP
+  options: **TunnelVision** (CVE-2024-3661) — a DHCP option 121 / Microsoft 249 pushing
+  classless static routes that **cover the default route**, steering VPN traffic outside
+  the tunnel (→ **suspicious**, since a legitimate policy route can also use option 121) —
+  and **DynoRoot-class command injection** (CVE-2018-1111) — shell metacharacters (`` ` ``,
+  `$(`, `|`, `;`, quote+`&`) inside an RFC-text option like hostname/domain-name (→
+  **rogue**, unambiguous). The two Microsoft heap-overflow CVEs (CVE-2026-50518 /
+  CVE-2026-56159) are deferred — no published trigger, so no passive signature exists.
 
 The result shows the verdict, every DHCP server that answered (server-id,
 offered gateway/DNS, lease, and a trusted / new / rogue badge), the starvation
@@ -986,23 +1788,42 @@ interface.
 - Endpoint: `POST /api/net/l2-health` `{interface?, seconds}` · binary: `tcpdump`
 
 ### IGMP Watch
-A **passive** IGMP-snooping security scanner for the IPv4 multicast control
-plane — **detection-only**: it never joins a group, sends a query, or becomes a
-querier. One short `tcpdump` window is parsed and classified into four things:
+A **passive** IGMP + **MLD** multicast-control security scanner — **detection-only**:
+it never joins a group, sends a query, or becomes a querier. It covers **both** the IPv4
+multicast control plane (**IGMP** v1/v2/v3) and its IPv6 parallel (**MLD** — MLDv1 RFC 2710
+maps onto the v2 model, MLDv2 RFC 3810 onto v3; ICMPv6 types 130/131/132/143 behind a
+Hop-by-Hop Router Alert). One short `tcpdump` window per family (captured concurrently, so
+the scan stays fast; MLD is decoded from raw bytes since tcpdump's MLD text under-parses
+MLDv2 records) is parsed and classified into four things. **Querier election and version
+tracking are per address family** — an IGMP querier and an MLD querier coexisting on a
+dual-stack segment is normal and never reads as "two queriers":
 
 - **Storm / flood** — an IGMP report/query rate far above normal (IGMP is
   intrinsically low-volume), or a single source flooding reports. This is a real
   multicast DoS and a switch-CPU exhaustion vector.
-- **Anomaly** — more than one **querier** on the segment. There must be exactly
-  one; a second, lower-IP querier is the classic *"become the querier to draw
-  all multicast to yourself"* attack. Also flags mixed query versions
-  (a v3→v2/v1 downgrade), a **spoofed querier** (a query sourced from 0.0.0.0), a
-  message that arrived with an **IP TTL other than 1** (IGMP is link-local — a
-  higher TTL means off-link injection / a spoofed source), a report/leave for a
-  **non-multicast** (outside 224.0.0.0/4) address, a **membership report for a
-  reserved group** (224.0.0.1 all-hosts / .2 all-routers — never joined via
-  IGMP), and a **join/leave flap** (a host toggling a group, thrashing the
-  snooping table). A per-source **leave flood** is flagged as a storm.
+- **Anomaly** — more than one **querier** on the segment *of a given family*. There must
+  be exactly one; a second, lower-address querier is the classic *"become the querier to
+  draw all multicast to yourself"* attack. Also flags mixed query versions
+  (a v3→v2/v1 IGMP downgrade, or an MLDv2→MLDv1 downgrade), a **spoofed querier** (a query
+  sourced from `0.0.0.0` for IGMP or `::` for MLD), a message that arrived with an **IP
+  TTL / IPv6 hop-limit other than 1** (both are link-local — a higher value means off-link
+  injection / a spoofed source), a report/leave for a **non-multicast** address (outside
+  224.0.0.0/4 for IGMP or ff00::/8 for MLD), a **membership report for a reserved group**
+  (224.0.0.1 all-hosts / .2 all-routers, or `ff02::1` all-nodes / `ff02::2` all-routers —
+  never joined), and a **join/leave flap** (a host toggling a group, thrashing the
+  snooping table). A per-source **leave flood** is flagged as a storm. It also folds in
+  three **malformed-control CVE signatures** *(new in v4)* — pure structural predicates,
+  both address families (IGMP and MLD):
+  - **Fragmented membership** (**CVE-2019-5608**) — IGMP/MLD is fixed-footprint link-local
+    control and must never be fragmented; an MF flag / non-zero fragment offset (IPv4) or an
+    IPv6 Fragment header (MLD) is the fragment-reassembly overflow signature.
+  - **Invalid group-record type** (**CVE-2025-50681**) — an IGMPv3/MLDv2 report record whose
+    type is outside `IS_IN/IS_EX/TO_IN/TO_EX/ALLOW/BLOCK` (1-6); tcpdump renders it as
+    `[v3-report-#N]`.
+  - **Query source-count overrun** (**CVE-2026-53275**) — an IGMPv3/MLDv2 query whose
+    declared source count overruns the datagram (tcpdump's `[invalid number of sources]`;
+    the MLD leg bounds the check by the IPv6 payload-length so a snaplen-truncated large
+    query never false-positives).
 - **Reconnaissance** — one host joining a wide spread of **distinct groups** —
   multicast stream enumeration.
 - **Unauthorized join** — a host on an **admin-scoped** (239/8), **globally-scoped**
@@ -1027,9 +1848,10 @@ python3 network_diagnostics.py igmp-selftest     # self-test the detectors, no r
 `igmp-selftest` drives the real parser + classifier with synthetic captures
 (clean / storm / rogue-querier / recon / unauthorized / spoofed-querier /
 bad-TTL / non-multicast / reserved-group / join-leave-flap / leave-storm / v3
-group-record parse), and — when [Scapy](https://scapy.net) is installed —
-additionally crafts real IGMP packets into a pcap and parses them back through
-`tcpdump`, exercising the capture→parse path end to end.
+group-record parse / the three CVE structural detections on both IGMP and MLD),
+and — when [Scapy](https://scapy.net) is installed — additionally crafts real IGMP
+packets into a pcap and parses them back through `tcpdump`, exercising the
+capture→parse path end to end.
 
 For a **standalone deep monitor** — a pure-Python binary IGMP decoder with the
 full control-plane detector matrix (flood / anomaly / recon / policy), a
@@ -1045,13 +1867,88 @@ A **passive** TLS/QUIC handshake observer — the session/presentation-layer
 (OSI L5/L6) detector, companion to the active [Cert Watch](#cert-watch). It is
 **detection-only**: it never connects or probes, it sniffs handshakes off the
 wire. One short `tcpdump` window over the TLS ports (443/8443/993/995/465/990/
-4433) and QUIC (UDP/443) is dissected and, per handshake, yields:
+4433, plus **RadSec TCP/2083** and **Modbus-Security TCP/802** *(new in v8)*),
+QUIC (UDP/443) and **DTLS/RadSec (UDP/2083)** *(new in v8)* is dissected and, per
+handshake, yields:
 
 - **Fingerprints** — **JA4** and **JA4_r** (raw) client fingerprints to the FoxIO
   specification, plus legacy **JA3 / JA3S**. Match a client JA4 against a denylist
   of known-bad families.
 - **Identity / negotiation** — SNI, ALPN, offered vs. negotiated TLS version,
   chosen cipher, ECH presence.
+- **SWEET32 / `CVE-2016-2183` *(new in v3)*** — when the server negotiates a 64-bit
+  block cipher (DES/3DES), the ServerHello carries that suite in cleartext, so it is
+  named as **`cve_2016_2183_negotiated`** (high, *exposure* class — the vulnerable
+  condition is observed directly, not inferred from a version banner). A client that
+  merely *offers* 3DES is recorded as **`cve_2016_2183_client_offer`** (info,
+  *posture*) — near-universal for years and harmless unless a server takes the offer.
+  RC2/IDEA 64-bit suites share the birthday-bound weakness but fall outside the CVE's
+  named DES/3DES scope, so they get a distinct **`weak_block_cipher_64bit`** (warn)
+  that keeps the CVE's coverage claim exact. NVD/CISA-ADP score the CVE 7.5 HIGH.
+- **RC4 / `CVE-2013-2566` + `CVE-2015-2808` *(new in v4)*** — when the server negotiates
+  an RC4 suite, both RC4 CVEs (keystream biases; the Invariance Weakness that Bar Mitzvah
+  exploits) are attached to the `weak_cipher` finding as *exposure*-class attribution — the
+  negotiated suite **is** the vulnerable condition, so nothing is inferred and no second
+  code is raised. RC4 lives in its own table, so even the KRB5/PSK RC4 suites the generic
+  legacy list misses are named.
+- **SSL Death Alert / `CVE-2016-8610` *(new in v4)*** — the record layer, not a handshake
+  field: **`cve_2016_8610_alert_flood`** counts *plaintext* warning-alert records during the
+  handshake (they precede any key, so their level and count are read directly), per
+  direction. A run of **≥ 6** consecutive warnings is *warn* — six exceeds the five OpenSSL's
+  own fix permits (`SSL_R_TOO_MANY_WARN_ALERTS`); **≥ 100** escalates to *high* as a
+  deliberate CPU-exhaustion flood. Alerts after ChangeCipherSpec are encrypted and not
+  counted. 7.5 HIGH (Red Hat / IBM agree).
+- **Truncated record / `CVE-2017-3731` *(new in v4)*** — **`cve_2017_3731_short_record`**
+  (warn, *attack-shape*): a complete protected `application_data` record whose declared
+  length is below the 16-byte authenticator both vulnerable ciphers append — impossible for
+  a well-formed record, exactly the underflow the fix guards — seen against a susceptible
+  cipher (RC4-MD5 or ChaCha20-Poly1305). It reports an attack **shape** against a
+  susceptible cipher, never a vulnerable host: whether the peer is 32-bit or which OpenSSL
+  it runs is not on the wire. **`CVE-2016-2108`** (OpenSSL ASN.1 negative-zero corruption)
+  is *deliberately not* detected — the crafted ASN.1 that triggers it reaches the decoder
+  in no field a passive tap can read; the decision is recorded in-code so the absence is
+  reviewable.
+- **Heartbleed / `CVE-2014-0160` *(new in v7)*** — **`cve_2014_0160_heartbleed`** (high,
+  *attack-shape*): a **cleartext TLS heartbeat request** (record content type 24) whose
+  declared `payload_length` is larger than the record that carries it — `3 + payload_length
+  + 16 > record_length` — the buffer over-read shape. Observable because the reference
+  exploit sends the malformed heartbeat right after the ClientHello, **before** the
+  handshake completes, so the heartbeat record is still cleartext and its length field is
+  readable; a heartbeat after the encrypted boundary is invisible (an explicit blind spot).
+  It reports that an over-read was *attempted*, not that the peer is a vulnerable OpenSSL.
+  7.5 HIGH (NVD, CISA KEV).
+- **Oversized DH prime / `CVE-2018-0732` *(new in v7)*** — **`cve_2018_0732_oversized_dh_prime`**
+  (warn, *exposure*): a **ServerKeyExchange** for a finite-field DHE suite carrying a DH prime
+  above the **10000-bit** ceiling OpenSSL's own fix enforces, so a client doing the modexp
+  burns CPU — the mirror image of D(HE)at (server-attacks-client). The prime size is measured
+  directly from the cleartext SKE (TLS 1.2 DHE only; TLS 1.3/QUIC have no ServerKeyExchange),
+  which also recovers the real group size for the D(HE)at accounting. NVD 7.5 HIGH; OpenSSL
+  rates it Low (*disputed*).
+- **SNI host_name over-read / `CVE-2026-52346` *(new in v11)*** — **`cve_2026_52346_sni_overread`**
+  (high / warn, *attack*): a ClientHello whose declared SNI `host_name` length runs past one of its
+  four RFC 6066 nested containers — the MikroTik RouterOS `xt_tls` out-of-bounds read. Pure arithmetic
+  on the declared lengths, the same shape as the Heartbleed `payload_length` check; **high** only when
+  the read passes the captured handshake message itself (nothing in the packet can satisfy it), **warn**
+  for an inner-container overrun (equally illegal, but not provably off-packet from a reassembled view).
+  The scan runs *independent of* the ClientHello parse (which raises on exactly these over-claims) and
+  scopes out the benign `no_sni` notice when an over-read is present. Fires on TLS, DTLS and QUIC. The
+  wire evidence is a generic TLS grammar violation, so TLS Watch owns it while the RouterOS version
+  bounds live in [MikroTik Guard](#mikrotik-guard); every finding carries `precondition_unobserved`
+  (the device needs a `tls-host` firewall rule, not observable from a tap). Reporter-scored 7.5; no NVD
+  record, so no CVSS vector is invented.
+- **http.sys record-cadence flood / `CVE-2026-47291` *(new in v11)*** — **`cve_2026_47291_record_flood`**
+  (warn / high, *attack*): the `http.sys` per-request buffer-reference-array integer overflow
+  (MSRC 9.8). One reference is added per HTTP/1.x header line, and this is **reachable over TLS only** —
+  SChannel hands `http.sys` one buffer per decrypted record, so one header line per record gives a 1:1
+  count, while plaintext TCP coalescing prevents it. The discriminator is therefore **record cadence**,
+  read off cleartext record headers: a run of client `application_data` records with no server response,
+  the **non-full** ones (below the negotiated ciphertext maximum) the primary signal. Tiers at 1,000
+  (warn), 4,096 and 65,536 non-full records, plus a size-agnostic `padded_or_bulk` catch-all for TLS 1.3
+  record padding. Armed on HTTP/1.x only (h2/h3 excluded from the ServerHello ALPN on TLS 1.2, or the
+  client offer on TLS 1.3); never on QUIC/DTLS. Carries `precondition_unobserved` (needs
+  `MaxRequestBytes` ≥ 262144; the default is not exploitable) and `confidence: heuristic`. **In-app
+  snapshot scope:** fires on the clean no-server-response flood a bounded capture catches, and defers
+  the interleaved keep-alive/multi-request case to the streaming daemon.
 - **Certificate posture (TLS 1.2 over TCP only)** — subject/issuer, SANs, validity
   window, self-issued flag, signature hash, and findings: `cert_expired`,
   `cert_not_yet_valid`, `cert_self_signed`, `cert_short_chain`, `cert_weak_sig`,
@@ -1071,10 +1968,47 @@ the client's Destination Connection ID plus a public constant salt (RFC 9001
 active operation. The client Initial's CRYPTO stream is reassembled into the
 ClientHello and fingerprinted with proto `q`.
 
+**DTLS / RadSec *(new in v8)*.** DTLS handshakes on the DTLS port (UDP/2083,
+RadSec over DTLS, RFC 7360) are decoded from their cleartext `DTLSPlaintext`
+records: handshake fragments are reassembled per `message_seq` (out-of-order,
+overlapping and whole-flight retransmits tolerated, each message yielded once), a
+`HelloVerifyRequest` cookie is stripped, and the ClientHello / ServerHello /
+Certificate then run through the **same** parser as TLS — so JA4 (proto **`d`**),
+cipher and version checks and (for **DTLS 1.2**, whose certificate is cleartext)
+the `cert_*` findings all apply unchanged. DTLS version numbering is **inverted**
+(`0xfefd` is DTLS 1.2, `0xfefc` DTLS 1.3, *lower is newer*), so every version
+comparison maps to the TLS version each is defined against before ordering — a raw
+`< TLS 1.2` test would wave DTLS 1.0 straight through. The record-layer *volume*
+detectors (alert flood, Heartbleed, short record, SWEET32 and D(HE)at accounting)
+stay **TLS-over-TCP only**: datagram transport has its own retransmission/replay
+model their accounting does not transfer to unexamined. `--no-quic` drops QUIC but
+keeps the DTLS port.
+
+**Service-port labels *(new in v8)*.** A flow whose server-side port is a known
+secure-transport port carries a `service` tag — **`radsec`** (RADIUS-over-TLS,
+TCP/2083, RFC 6614; over DTLS, UDP/2083) or **`modbus-security`** (Modbus/TCP
+Security, TCP/802, "mbaps") — so the traffic is identifiable without re-deriving it
+from the 5-tuple (shown as a badge in the session table). Ports outside the table
+carry no label rather than a guessed one. Both RadSec and Modbus/TCP Security
+mandate mutual TLS and TLS 1.2+, so a legacy version on those ports raises the
+existing `*_legacy_version` findings; cleartext Modbus posture stays
+[Modbus & LoRaWAN Watch](#modbus--lorawan-watch)'s job (MBW-041/042) and is not duplicated here.
+
 The verdict escalates to **compromised** on an `sni_cert_mismatch` or JA4 denylist
-hit, **suspicious** on any other high/warn finding (weak cipher, expired cert,
-legacy version), else **clean**. Needs a SPAN/mirror port to see other hosts on a
-switched segment.
+hit, **suspicious** on any other high/warn finding (weak/RC4 cipher, SWEET32, an
+alert flood or truncated record, expired cert, legacy version) — these are exposures
+and attack shapes, not a broken session — else **clean**. Needs a SPAN/mirror port to
+see other hosts on a switched segment.
+
+**Dual-stack capture *(new in v5)*.** The capture filter is port-scoped for IPv4 and
+plain IPv6 (libpcap's `port` primitive matches both), and now also admits **IPv6
+traffic behind an extension header** — a narrow next-header clause
+(`ip6[6]` ∈ Hop-by-Hop/Routing/Fragment/AH/Dest-Opts), since `port` reads the
+transport port at a fixed offset that an EH chain shifts, so an EH-bearing TLS/QUIC
+flow would otherwise be dropped by the kernel filter before `parse_pcap` (which walks
+the chain via scapy) sees it. It is **not** a blanket `or ip6` — that would copy the
+whole v6 stream to userspace to drop it in Python, a needless load on a Pi Zero 2W —
+the same next-header-qualified shape the in-app vendor guards use.
 
 **Deduplicated results.** A browser routinely opens several parallel connections
 to the same host, and a QUIC client may retransmit its Initial — all with an
@@ -1089,6 +2023,15 @@ so a completed handshake is never masked by an aborted one.
 the BSD/MIT that covers the rest, so it lives in a separate, clearly identified
 file (`ja4s.py`) and is **off by default** — Ragnar never computes it unless the
 operator sets both `tls_watch.ENABLE_JA4S` and `tls_watch.ACKNOWLEDGE_JA4S_LICENSE`.
+
+**D(HE)at (CVE-2002-20001).** A finite-field DHE key exchange makes the server perform a
+modular exponentiation per handshake, and it cannot tell a real DH public key from a random
+number without first paying that cost — so a client can force the work cheaply. TLS Watch
+flags a negotiated DHE cipher suite or a TLS 1.3 **ffdhe** group as a
+`cve_2002_20001_dhe_offered` exposure (warn for a large group — OpenSSL 3.x and OpenJDK
+default to **ffdhe8192**), and a single source repeating DHE handshakes across the capture as
+a `cve_2002_20001_dheat_flood` attack, tiered by group size (larger groups need far fewer
+requests). ECDHE is never flagged (cheap, not this CVE). Related: CVE-2022-40735, CVE-2024-41996.
 
 There is also a small **CLI**:
 
@@ -1127,6 +2070,12 @@ ICMPv6 RA/RS/Redirect + DHCPv6 (udp 546/547) is parsed and classified:
   in the baseline. This is **mitm6's signature**: it answers DHCPv6 solicits handing
   out the attacker as **DNS** (no gateway — it pairs with WPAD) to relay and
   NTLM-capture.
+- **Link-local DNS (`DNS6_LINKLOCAL`)** — a DHCPv6 server advertising a
+  **link-local (`fe80::`) DNS resolver**. A resolver is *never* legitimately
+  link-local, so this is the **definitive mitm6 tell** and fires **zero-config** —
+  no baseline, no allowlist, and even for an otherwise-trusted server (mitm6 wins
+  the SOLICIT race and hands the client its own link-local address as the DNS
+  server). It is the one DHCPv6 signature that needs no per-site tuning.
 - **Rogue redirect** — an **ICMPv6 Redirect** (type 137) from a source that isn't a
   known router: the IPv6 twin of the ICMP-redirect MITM, steering your IPv6 traffic
   through an attacker's next-hop. (Harden the host against these with
@@ -1218,10 +2167,11 @@ and tell a victim *"for destination X, use next-hop Y instead"* — steering tha
 traffic **through the attacker**. It needs **no ARP poisoning and no gateway
 compromise**, and historically most hosts honoured redirects by default, so it's an
 easy, quiet insertion. Related L3 ICMP abuses ride the same wire. This scanner is
-**passive and detection-only**: one short `tcpdump` window over IPv4 `icmp`, parsed
-and classified against the host's **authoritative default gateway** (never learned
-from redirect sources — those could be the attacker). It never sends an ICMP packet.
-What it flags:
+**passive and detection-only** and now covers **both stacks**: one short `tcpdump`
+window over IPv4 `icmp` plus a concurrent `icmp6` window for **ICMPv6 Redirects
+(type 137)**, parsed and classified against the host's **authoritative IPv4 and
+IPv6 default gateways** (never learned from redirect sources — those could be the
+attacker). It never sends a packet. What it flags:
 
 - **Redirect** — an ICMP Redirect steering traffic to a **next-hop that isn't a
   known gateway** (attacker insertion), or **from a source that isn't the gateway**
@@ -1237,13 +2187,65 @@ What it flags:
 - **Recon** — ICMP **timestamp / address-mask / information** requests that
   enumerate hosts and leak facts.
 
+**Redirect/ARP-poison layer (v3).** The capture now also carries the Ethernet
+header (`tcpdump -e`) and `arp`, so each redirect is run through the vendored v3
+detector ([`icmpwatch.py`](../icmpwatch.py)) for the full **RFC 1122 acceptance
+rules** and **L2 identity** correlation on top of the coarse gateway check:
+
+- **gateway_mac_mismatch** (CRITICAL) — a redirect claims a known gateway's IP but
+  arrives from a **foreign source MAC** (the gateway MAC is taken from the host
+  neighbour table, so this fires even without a legitimate gateway ARP in the
+  window): IP-spoofed impersonation.
+- **gateway_arp_conflict / redirect_via_poisoned_gw** (CRITICAL) — the gateway a
+  redirect is issued *by*, or points the victim *at*, has a **contested ARP
+  binding** (a second live MAC): the poison-then-redirect MITM, corroborated
+  across L2 and L3 independently.
+- **source_not_gateway / new_gw_off_subnet / new_gw_not_router** (HIGH),
+  **new_gw_equals_victim / invalid_code / malformed** (MEDIUM), degenerate targets
+  (LOW), plus **redirect_burst / redirect_dest_sweep** rate checks.
+
+**IPv6 leg — ICMPv6 Redirect (type 137), RFC 4861 §8.1.** IPv6 validates redirects
+far more strictly than IPv4, and — usefully for a passive monitor — the rules are
+exact protocol MUSTs, so these fire **zero-config on any segment**. The type-137
+message is decoded from raw bytes (its `tcpdump` text is terse and version-varying),
+then fed to the same engine as a `family=6` event:
+
+- **nd_hop_limit_invalid** (HIGH) — Hop Limit ≠ 255. No router forwards a packet and
+  leaves it at 255, so 255 is *proof* the sender is on-link; anything else is an
+  off-link spoof. The exact check IPv4 can only approximate with the TTL heuristic.
+- **nd_source_not_link_local** (HIGH) — the source is not a link-local (`fe80::`)
+  address, which RFC 4861 requires of a legitimate router redirect.
+- **nd_target_invalid** (HIGH) — the Target is neither link-local nor equal to the
+  Destination (the IPv6 analog of `new_gw_off_subnet`).
+- **nd_target_lla_mismatch** (CRITICAL) — the redirect's **Target Link-Layer
+  Address** option hands the victim a MAC that isn't among the target's legitimate
+  MACs — the packet itself installs a poisoned mapping (IPv4 redirects carry no MAC,
+  so this is a v6-only tell). Plus **invalid_code** (v6 code must be 0), and the same
+  `source_not_gateway` / `new_gw_not_router` checks against the host's IPv6 router.
+
+The IPv6 capture runs **concurrently** with the IPv4 one, so dual-stack coverage
+costs a single capture window, not two.
+
+The per-redirect findings are shown under **Redirect analysis** in the card
+(severity-chipped, most-severe first). The ARP frames are context only — they are
+never counted toward the ICMP flood/volume math and icmpwatch is **not** an ARP
+IDS (that stays [`arp_guard`](arp_guard.md)'s job).
+
 The host's default gateway is **always trusted**, plus any gateway learned into
 `data/icmp_watch.json` on the first scan; after a legitimate router change click
 **Trust current** to re-seed. Every result carries a **mitigation advisory**:
 ignore redirects on hosts (`net.ipv4.conf.all.accept_redirects=0`) and stop sending
 them on the gateway (`send_redirects=0`), disable IRDP, and rate-limit / filter the
-recon ICMP types at the edge. **ICMPv6 Redirects (type 137)** are covered separately
-by [IPv6 First-Hop Watch](#ipv6-first-hop-watch).
+recon ICMP types at the edge. On IPv6, ignore redirects with
+`net.ipv6.conf.all.accept_redirects=0` (also audited/hardenable from **IPv6 RA
+Guard**). **IPv6 First-Hop Watch** still covers rogue RA / DHCPv6; the ICMPv6
+**Redirect** now gets its full RFC 4861 §8.1 validation here.
+
+> **Watchtower feed.** HIGH/CRITICAL redirect findings (IPv4 and IPv6) are appended
+> as JSON-lines to `/var/log/ragnar/icmp_watch.jsonl` (deduplicated per check +
+> source), so the [Watchtower](watchtower.md) unified pane and single Pushover path
+> fold in redirect MITM / ARP-poison correlation automatically. The standalone engine
+> ships a 121-test self-test: `python3 icmpwatch_selftest.py`.
 
 Small **CLI** (no web app needed):
 
@@ -1258,42 +2260,108 @@ when [Scapy](https://scapy.net) is installed — crafts a real ICMP Redirect int
 pcap and parses it back through `tcpdump`, exercising the capture→parse path end to
 end.
 
+**CVE-2020-16898 "Bad Neighbor" (v4).** Alongside redirects it captures **Router
+Advertisements** (type 134) and reads the raw ND options: an **RDNSS** option (type 25) whose
+length field is **even** is flagged CRITICAL — RFC 8106 fixes that length at an odd `1+2N`, so
+an even value is the Windows TCP/IP stack buffer-overflow trigger (CVSS 8.8, `nd_ra_rdnss_malformed`).
+It also flags a **zero-length** ND option (`nd_option_length_zero`, a parser-loop trap) and an
+option that **overruns** the message (`nd_option_length_invalid`). *(v2)* A malformed **DNSSL**
+option (type 31) — a domain-name field over 256 bytes, or a label length that overruns the
+option — is flagged as `nd_ra_dnssl_malformed`, the **CVE-2020-16899** (Windows TCP/IP) /
+**CVE-2020-25583** (FreeBSD `rtsold`) out-of-bounds-read trigger. These fold into the same
+`ra-attack` verdict and [Watchtower](watchtower.md) path as the redirect findings. (The
+host-hardening side — `accept_ra*` sysctls — lives in [IPv6 RA Guard](#ipv6-ra-guard); the
+RA-packet CVEs land here, where the RA options are actually parsed.)
+
 - Endpoint: `GET /api/net/icmp-watch` `{interface, seconds}`,
   `POST /api/net/icmp-baseline` `{action: reset}` · binary: `tcpdump`
 
 ### STP/BPDU Watch
-A **passive** spanning-tree security scanner covering **802.1D STP / 802.1w RSTP /
-802.1s MSTP** (IEEE group MAC `01:80:c2:00:00:00`) and **Cisco PVST+ / Rapid-PVST+**
-(per-VLAN, group MAC `01:00:0c:cc:cc:cd`). **Detection-only** — it never sends a BPDU.
+A **passive** spanning-tree **security** scanner (**v2**) covering **802.1D STP /
+802.1w RSTP / 802.1s MSTP** (IEEE group MAC `01:80:c2:00:00:00`) and **Cisco PVST+ /
+Rapid-PVST+** (per-VLAN, group MAC `01:00:0c:cc:cc:cd`). **Detection-only** — it never
+sends a BPDU. v2 moves from the earlier presence sketch to a full **byte-level
+decoder** (vendored engine `python/stpwatch.py`): 802.1D Config/TCN, RSTP port roles
+and proposal/agreement, MSTP CIST + the MST config-ID (region name, revision, 16-byte
+digest) **and every 16-octet MSTI Configuration Message**, and PVST+/RPVST+ over SNAP,
+with one/two VLAN tags (QinQ) — running **31 checks (STP-001..031)** across six
+families. **No CVEs** — BPDUs are unauthenticated **by design**, so every check is
+behavioural/spec-derived (a Sept 2026 CVE sweep found nothing passively detectable at
+CVSS ≥ 6.5 that qualified).
 
-Spanning tree prevents L2 loops by electing a **root bridge** (the switch with the
-numerically lowest Bridge ID = priority + MAC) and blocking redundant paths back
-toward it. BPDUs carry the election and are multicast in the clear with **no
-authentication**, so an attacker who injects a BPDU claiming a **superior root**
-(priority 0 — the Yersinia "claim root role" move) wins the election, becomes the
-root bridge, and the tree reconverges to pull traffic through them (subnet-wide L2
-MITM). BPDU/TCN floods force constant reconvergence (DoS) and MAC-table flushing
-(which turns the switch into a hub — an aid to sniffing). What it flags:
+Spanning tree prevents L2 loops by electing a **root bridge** (lowest Bridge ID =
+priority + MAC) and blocking redundant paths back toward it. BPDUs carry the election,
+multicast in the clear with **no authentication**, so an attacker who injects a BPDU
+claiming a **superior root** (priority 0 — the Yersinia "claim root role" move) wins,
+becomes the root bridge, and the tree reconverges to pull traffic through them
+(subnet-wide L2 MITM). Findings fold into a verdict bucket:
 
-- **root-hijack** — a BPDU advertising a root **superior** to the baseline root
-  (lower priority, or equal priority + lower MAC): a root-bridge takeover. This is
-  the top finding — an active L2 MITM.
-- **rogue-bridge** — a new bridge (Bridge-ID MAC) participating in spanning tree that
-  isn't in the baseline (an unexpected switch, or a spoofed bridge).
-- **bpdu-flood** — an elevated BPDU rate: a reconvergence-storm DoS.
-- **topology-change** — TCN / TC-flag churn: repeated topology changes flushing the
-  MAC tables (instability, or a TCN-flood attack).
+- **root-hijack** — a BPDU advertising a root **superior** to the baseline (`STP-002`),
+  **or a regional-root takeover inside a single MST instance** (`STP-024`): a root
+  takeover and active L2 MITM. This is the top finding.
+- **rogue-bridge** — a new bridge (`STP-004`), a **BPDU on a declared edge/access port**
+  (`STP-005`, a BPDU-Guard gap), or two distinct roots advertised at once (`STP-019`).
+- **bpdu-flood** — a TCN / BPDU / RSTP-proposal storm (`STP-006/007/008/016`): a
+  reconvergence-storm DoS.
+- **topology-change** — TCN / root-change churn (`STP-001/003/023/025/030`) flushing
+  MAC tables (instability, or a TCN-flood).
+- **anomaly** — any other field-sanity (priority floor, bogus source MAC, illegal
+  timers, message-age/path-cost), MST digest/region, or **per-MSTI** violation
+  (`STP-009..015`, `021/022`, `023..031`).
+
+**The per-MSTI tier** is the subtle one: an attacker already inside a legitimate MST
+region (correct region name + digest, so `STP-021/022` stay silent) can leave every
+CIST field untouched and forge a superior regional root, a sub-floor priority, or a
+zero internal path cost inside **one MSTI's own 16-octet record** — a real traffic
+redirect on whichever VLANs map to that instance. The engine deserializes every
+record, keys state on `(iface, region, MSTID)`, re-runs the CIST reasoning per
+instance, and scopes findings `vlan=MSTI:<n>`. One frame carrying twelve MSTI records
+is still **one BPDU**, so rate/hello/silence stay on the CIST and a wide region never
+self-reports as a storm.
 
 The BPF is `(ether dst 01:80:c2:00:00:00) or (ether dst 01:00:0c:cc:cc:cd)`, captured
-with `tcpdump -e` for the sender MAC. For PVST+ the per-VLAN root is carried in the
-Bridge-ID's extended system-id, so the scanner tracks a root **per VLAN/instance**.
-The first scan **learns** the current root(s) and legitimate bridges as the baseline
-(`data/stp_watch.json`); after a legitimate topology change, click "Trust current".
-The real hardening — which this tool exists to nudge you toward — is **BPDU Guard**
-(+ PortFast) on edge/access ports and **Root Guard** on ports toward downstream
-switches, plus pinning your real root/backup-root to priority 0/4096. **API:**
-`GET /api/net/stp-watch`, `POST /api/net/stp-baseline`. **CLI:** `stp-watch`,
+to a **raw pcap** (the v2 engine decodes from the MAC header). The first scan
+**learns** the current root(s), bridges, MST regions and per-MSTI regional roots as
+the baseline (`data/stp_watch.json`) during a short grace window; after a legitimate
+topology change, click "Trust current". The real hardening this tool nudges you toward
+is **BPDU Guard** (+ PortFast) on edge/access ports and **Root Guard** toward
+downstream switches, plus pinning your real root/backup-root to priority 0/4096.
+**API:** `GET /api/net/stp-watch`, `POST /api/net/stp-baseline`. **CLI:** `stp-watch`,
 `stp-selftest`.
+
+### MRP Watch
+A **passive** monitor for the standards-based **dynamic registration** protocols —
+the siblings of Cisco's VTP: 802.1ak **MVRP** (EtherType `0x88F5`, dst
+`01:80:C2:00:00:21`) and **MMRP** (`0x88F6`, dst `...:20`), plus legacy 802.1D
+**GVRP/GMRP** (no EtherType, LLC/802.3-length framed to the same two MACs).
+**Detection-only** — it never transmits. This is **not** IEC 62439-2 ring-redundancy
+"MRP"; it is the VLAN/multicast registration plane. Vendored pure-python engine
+`python/mrpwatch.py` (**21 codes**, **no CVEs** — none exist for any of the four
+protocols, same shape as STP).
+
+**MVRP and MMRP use different EtherTypes**, so the capture admits **both** plus the
+whole GARP application block — `ether proto 0x88f5 or ether proto 0x88f6 or (ether[0:4]
+= 0x0180c200 and ether[4:2] >= 0x0020 and ether[4:2] <= 0x002f)` — a filter on `0x88F5`
+alone would silently drop 100% of MMRP. Findings fold into a
+**clean / observed / suspicious / attack** verdict:
+
+- **Posture (`MRP-001..007`)** — which protocol(s) are in use (INFO/LOW), a
+  mixed-generation note, a `known_vlans` baseline note, and an unknown GARP
+  application on `:22`–`:2f` (reported, never decoded).
+- **Attack / abuse (`MRP-101..108`)** — a **LeaveAll flood** from one source
+  (`101/103/105/107`, HIGH) forces network-wide re-registration (the standards-based
+  sibling of the VTP bomb `vtpwatch` detects); a **registration burst for
+  never-before-seen VLANs/groups** (`102/104/106/108`, MEDIUM) is a VLAN-hopping setup
+  signal. Rate alerts **latch** — a sustained flood is one finding, not one per frame.
+- **Structural (`MRP-120..125`)** — VectorAttribute / GARP-attribute overruns, missing
+  end marks (strict mode), unexpected ProtocolVersion, and base-6 vector-byte
+  violations.
+
+Optionally supply your **known VLANs** as an operator baseline: it escalates an
+out-of-baseline registration burst from MEDIUM to HIGH, but **never gates detection**.
+On a predominantly Cisco segment (VTP/DTP preferred) this may legitimately see no
+traffic — an environment fact, not a fault. **API:** `GET /api/net/mrp-watch`
+(`?seconds=&interface=&known_vlans=`). **CLI:** `mrp-watch`, `mrp-selftest`.
 
 ### SMB Watch
 A **passive** Windows-endpoint attack-surface scanner in three parts (one capture),
@@ -1319,8 +2387,14 @@ poisoner. What it flags:
 
 - **poisoning** — a host answering LLMNR/NBT-NS (Responder/Inveigh), or an mDNS host
   claiming foreign / high-value names. **WPAD** and ISATAP targeting is called out.
-- **spoof-conflict** — one name answered by two hosts with different IPs (a poisoner
-  racing the real owner).
+- **spoof-conflict** — one host name answered by two hosts with different IPs (a poisoner
+  racing the real owner). Only **A / AAAA** records count, compared within one address
+  family: mDNS **DNS-SD** service-type PTRs (e.g. every AirPlay device answering
+  `_companion-link._tcp.local`) are service discovery, not a conflict, and mDNS goodbye
+  records (TTL 0) are withdrawals. Announcers are identified by MAC **and** source IP; the
+  only multi-address shape treated as benign is one host announcing the **same** full address
+  set every time — so a poisoner listing the victim's IP beside its own, or answering from a
+  reused MAC, still raises the conflict.
 - **smbv1-active** / **smbv1-offered** — SMBv1 in use, or merely offered.
 - **name-exposure** — LLMNR/NBT-NS queries present at all: hosts are one Responder
   away from credential theft; disable via GPO.
@@ -1343,7 +2417,51 @@ keeps working on packets truncated by the capture snaplen. What it flags:
 - **krb-downgrade** — the KDC actually **issues a DES/RC4 ticket** (weak encryption in
   real use), or a client offers **only** weak etypes (AES stripped/disabled).
 - **krb-exposure** — RC4/DES still **enabled alongside** AES (legacy encryption that a
-  roaster can force).
+  roaster can force). *v2:* an **AS-REQ** that still offers RC4 alongside AES is now
+  flagged here too (sharper when the client lists RC4 as its *top* preference).
+- **krb-recon** *(v2)* — a **burst of KDC errors toward one requester** within the
+  window: many `C_PRINCIPAL_UNKNOWN` replies are **user enumeration** (mapping which
+  accounts exist), many `PREAUTH_FAILED` replies are **password spray / AS-REP-roast
+  probing**. Characteristic of pre-attack reconnaissance against the domain. *Fix:*
+  alert on the spike, lock/deny the source, and enforce lockout + pre-auth.
+
+**NTLM relay tells (v2).** SMB Watch already sees the `SESSION_SETUP` that carries the
+NTLMSSP blob and holds the passive name-resolution map, so it adds two relay tells the
+[Relay/Coercion Watch](#relaycoercion-watch) can't see (that watch owns the
+**challenge-reuse** and **unsigned-SMB-target** halves — this deliberately does not
+duplicate them):
+
+- **responder-challenge** — a server issued the **fixed Responder/Inveigh challenge**
+  (`0x1122334455667788`). A rogue authentication server is on the wire harvesting
+  NetNTLM responses — flagged on a *single* sighting (Relay Watch's reuse rule needs the
+  challenge from two servers). **CRITICAL.**
+- **ntlm-workstation-mismatch** — a Type-3 `AUTHENTICATE` whose stated **workstation**
+  doesn't match the connecting host's passively-resolved name. Relayed auth carries the
+  *victim's* workstation, not the relay box's — a relay tell. Stays silent unless the
+  source has a confident name, so it doesn't false-positive.
+
+**Part 4 — named CVEs on the wire (v3).** The same byte-level parse names the specific
+flaws that are legible in the traffic:
+
+- **smbghost-exploit** / **smbghost-exposure** — **SMBGhost** (CVE-2020-0796). *Exposure:*
+  an SMB **3.1.1 negotiate response** advertising the compression-capabilities context.
+  *Exploit:* a **compression-transform header** (`\xfcSMB`) whose decompressed size + offset
+  overflow 32 bits — the integer-overflow primitive. **CRITICAL** / **HIGH.**
+- **eternalblue-probe** — an SMBv1 **TRANS2 SESSION_SETUP** (CVE-2017-0144 / MS17-010), the
+  EternalBlue exploit primitive; the SMBv1-in-use posture is separately flagged as
+  **smbv1-active** (also CVE-2017-0144).
+- **krb-rc4md4** — Kerberos **RC4-MD4** (etype **-128**) offered in a request, granted in a
+  reply enc-part, or advertised by the KDC in a **KRB-ERROR PA-ETYPE-INFO2** — the
+  **CVE-2022-33679 / CVE-2022-33647** downgrade-injection signature (no modern stack ever
+  touches etype -128). **CRITICAL.**
+- **smb-reflection** — the **reflective-relay** primitive (CVE-2025-33073): an SMB session
+  whose **client == server** (the loopback), or a **marshalled CREDENTIAL_TARGET_INFORMATION
+  blob** in a resolved name or Kerberos SPN. **CRITICAL.**
+
+Cross-module fusion (a live poisoner **and** an unsigned relay target, or a directed
+Kerberos→SMB edge) is left to [Watchtower](watchtower.md) and the incident-correlation
+engine, which already fuse the separate watchers' alert streams into named attack chains
+— it is **not** re-implemented inline here.
 
 Kerberos attack verdicts are **never** baselined away; the baseline only remembers the
 **known KDC IPs + realms** to annotate output (a *new* KDC is called out).
@@ -1357,7 +2475,11 @@ announcing themselves), any SMBv1 hosts, and the Kerberos KDCs/realms as the bas
 **never** baselined away. The hardening it nudges toward: disable SMBv1, turn off
 LLMNR (GPO) and NBT-NS (per-adapter / DHCP option 001), enforce **SMB signing** so
 captured NTLM can't be relayed, and set accounts/DCs to **AES-only** Kerberos with
-pre-auth required. **API:** `GET /api/net/smb-watch`, `POST /api/net/smb-baseline`.
+pre-auth required. A **HIGH/CRITICAL** verdict (poisoning, SMBv1-active, spoof-conflict,
+kerberoast, AS-REP-roast, krb-downgrade, krb-recon, responder-challenge) is appended to
+`/var/log/ragnar/smb_watch.jsonl` (verdict-deduplicated over the window), so
+[Watchtower](watchtower.md) folds it into the unified pane + single Pushover path.
+**API:** `GET /api/net/smb-watch`, `POST /api/net/smb-baseline`.
 **CLI:** `smb-watch`, `smb-selftest`.
 
 ### Relay/Coercion Watch
@@ -1371,7 +2493,11 @@ it to another service and act as the victim (`ntlmrelayx`). **Detection-only**
 
 - **coercion-attempt** — an MSRPC call over 445/135 that forces a host to
   authenticate, identified by the interface UUID in the RPC bind (matched by its
-  DCE/RPC little-endian wire encoding): **PetitPotam** (MS-EFSRPC), **PrinterBug /
+  DCE/RPC little-endian wire encoding): **PetitPotam** (MS-EFSRPC — attributed to
+  **CVE-2021-36942** when the stream also carries an `EfsRpcOpenFileRaw` request, EFSR
+  opnum 0: the August 2021 patch fixed *only* that method, which is why the downlevel
+  variants stayed exploitable and CVE-2022-26925 followed; an EFSR bind with no opnum 0 is
+  still coercion, just unattributed), **PrinterBug /
   SpoolSample** (MS-RPRN, plus the coercion opnum 65/66 to avoid flagging legit
   printing), **DFSCoerce** (MS-DFSNM), **ShadowCoerce** (MS-FSRVP).
 - **relay-suspected** — the *same* NTLMSSP server challenge seen from **two different
@@ -1381,14 +2507,120 @@ it to another service and act as the victim (`ntlmrelayx`). **Detection-only**
   relayable in the first place.
 
 The BPF is `tcp port 445 or tcp port 139 or tcp port 135`, captured at snaplen 1024 so
-the RPC bind/opnum and NTLMSSP messages stay intact; **Scapy** dissects it. The first
-scan **learns** the accepted unsigned servers as the baseline
-(`data/relay_watch.json`); coercion and relay signals are **never** baselined away.
+the RPC bind/opnum and NTLMSSP messages stay intact; **Scapy** dissects it. The watch is
+**dual-stack (IPv4 + IPv6)**: those port primitives make libpcap capture SMB/MSRPC over
+both families, the parser reads either IP layer, and coercion/relay/signing detection is
+payload-based and address-family-agnostic — so every finding fires identically over IPv6
+(covered by dedicated IPv6 self-test legs). The first scan **learns** the accepted
+unsigned servers as the baseline (`data/relay_watch.json`); coercion and relay signals
+are **never** baselined away.
 The hardening it drives: enforce **SMB signing** everywhere, enable **LDAP signing +
 channel binding** on DCs, turn on **Extended Protection for Authentication (EPA)**,
 disable the Print Spooler on DCs, and patch (or RPC-filter) the coercion vectors.
 **API:** `GET /api/net/relay-watch`, `POST /api/net/relay-baseline`. **CLI:**
 `relay-watch`, `relay-selftest`.
+
+### RPC / NetLogon Watch
+A **passive** DCERPC / NetLogon / WinRM authentication-**posture** monitor —
+**detection-only**, it transmits nothing, decrypts nothing and captures no
+credentials. The per-PDU security trailer (`auth_type` / `auth_level`) is cleartext
+at *every* authentication level, including `PKT_PRIVACY`, so the question that matters
+most — *is this call integrity-protected?* — is answerable from a mirror port even
+when the RPC stub itself is sealed. The DCERPC parser is written from scratch against
+DCE 1.1 / [MS-RPCE] (it is **not** BER/ASN.1); named-pipe DCERPC is carved out of
+SMB2 `WRITE` / `READ` / `IOCTL FSCTL_PIPE_TRANSCEIVE` on 445/139, because PetitPotam
+rides `\pipe\lsarpc`, DFSCoerce `\pipe\netdfs` and Zerologon works fine over
+`\pipe\netlogon`. What it flags, across five categories:
+
+- **netlogon / Zerologon** — the **CVE-2020-1472** chain caught at four independent
+  points: an all-zero `ClientChallenge` (`RPC-ZEROLOGON-ZERO-CHALLENGE`), an all-zero
+  `ClientCredential` (`RPC-ZEROLOGON-ZERO-CREDENTIAL`), the ~256-iteration brute-force
+  loop (`RPC-ZEROLOGON-BRUTE-FORCE`), and the machine-account password reset that
+  follows a hit (`RPC-NETLOGON-PASSWORD-RESET-AFTER-BRUTE`). Plus secure-channel
+  posture: Secure RPC / sign+seal cleared (`RPC-NETLOGON-NO-SECURE-RPC`), unsigned
+  bind (`RPC-NETLOGON-UNSIGNED-BIND`), no-AES/weak crypto, a channel to a host outside
+  the configured DC set (`RPC-NETLOGON-UNEXPECTED-SERVER`), and password get/set. The
+  credential is located by a **self-validating NDR forward-walk** — it is *not* at a
+  fixed offset, because NDR inserts 0–3 bytes of alignment padding before the ULONG
+  `NegotiateFlags`; every NetLogon finding records `field_confidence` of `exact` or
+  `tail-anchored`.
+- **auth** — DCERPC auth-trailer posture: bind with no auth trailer on a sensitive
+  interface, association below `PKT_INTEGRITY`, alter-context/rebind **downgrade**, and
+  the NTLM weaknesses (NTLMv1, no extended session security, no SIGN/SEAL, no MIC,
+  anonymous, LM session key). One NTLMSSP analyser serves RPC security trailers, WinRM
+  `Authorization` headers and (opt-in) SMB2 session setup. *(v2:)* the **RemoteRegistry
+  NTLM-relay fallback** (`RPC-WINREG-RELAY-FALLBACK`, **CVE-2024-43532**) — WinReg binding
+  over direct `ncacn_ip_tcp` (not `\pipe\winreg`) at `RPC_C_AUTHN_LEVEL_CONNECT`, the
+  unsigned condition an NTLM relay to AD CS needs. *(v3:)* the **IRemoteWinSpool relay
+  level** (`RPC-WINSPOOL-RELAY-LEVEL`, **CVE-2021-1678**) — MS-PAR bound below
+  `RPC_C_AUTHN_LEVEL_PKT_PRIVACY`, the level Microsoft's fix requires (enforced by default
+  since June 2021). At the bind it is **high** posture — an unpatched host or a live relay,
+  *not* proof of exploitation; a call to `RpcAsyncInstallPrinterDriverFromPackage`
+  (opnum 62) on that association escalates to **critical**, the exploit step. A driver
+  install at packet privacy, and MS-RPRN at the same level, stay quiet. The engine also
+  attributes an EFSR `EfsRpcOpenFileRaw` coercion call to **CVE-2021-36942**; like all
+  coercion codes that is surfaced by Relay/Coercion Watch (below), not double-reported
+  here.
+- **interface** — **DCSync** (DRSUAPI `DRSGetNCChanges`, opnum 3), remote-exec
+  primitives (svcctl / atsvc / winreg), DPAPI domain **backup-key** access (MS-BKRP),
+  and endpoint-mapper **sweeps** at an enumeration rate. *(v2:)* **PrintNightmare**
+  (`RPC-PRINTNIGHTMARE-DRIVER-ADD`, **CVE-2021-1675 / CVE-2021-34527** — spoolss/PAR
+  `RpcAddPrinterDriver[Ex]`, severity graded by whether an off-box UNC driver path is
+  visible in the stub) and **PetitPotam-class LSA anonymous coercion**
+  (`RPC-LSA-ANONYMOUS-COERCION`, **CVE-2022-26925** — a coercion primitive on
+  `\pipe\lsarpc` over an *anonymous* association; the anonymity is the vulnerability, so
+  this is a distinct finding, not one of the deferred coercion codes below).
+- **protocol** — bind-NAK, fragment-length anomalies, legacy DCERPC major version.
+  *(v2:)* the **RPC-runtime bind_ack underflow** (`RPC-RUNTIME-BINDACK-UNDERFLOW`,
+  **CVE-2022-26809**) — a big-endian `BIND_ACK` with a zero secondary-address length, the
+  integer-underflow shape.
+- **winrm** — WS-Man on tcp/5985 cleartext, HTTP **Basic** auth, unencrypted SOAP
+  body (`AllowUnencrypted`, distinguished from message-level SPNEGO/Kerberos
+  encryption), auth downgrade, CredSSP delegation, and Shell-Create. tcp/5986 (TLS) is
+  observed but **never dissected**. *(v2:)* the **HTTP.sys** Accept-Encoding bug
+  (`WINRM-HTTPSYS-ACCEPT-ENCODING`, **CVE-2021-31166 / CVE-2022-21907**) — an empty
+  coding-list element (`gzip,,deflate`), reachable on any path because http.sys parses the
+  header in-kernel before routing.
+
+> **Module boundary.** Authentication **coercion** (PetitPotam / PrinterBug /
+> DFSCoerce / ShadowCoerce) is **owned by [Relay/Coercion Watch](#relaycoercion-watch)**,
+> which matches the same DCE/RPC interface UUIDs. The RPC/NetLogon Watch engine still
+> *recognises* those binds/calls, but its in-app verdict, findings list and Watchtower
+> feed **suppress the two coercion codes** (`RPC-COERCION-INTERFACE-BIND`,
+> `RPC-COERCION-CALL`) so the event is never double-reported; the card shows how many
+> coercion findings were deferred. Cross-module correlation is fused by Watchtower.
+
+The BPF covers epmap (**tcp/135**), SMB named pipes (**445 · 139**) and WS-Man
+(**tcp/5985**), captured at snaplen 1200 so the bind/opnum + NTLMSSP + NetLogon stub
+stay intact; **Scapy** dissects it (the payload is sliced from the raw bytes by the TCP
+data offset, not `bytes(tcp.payload)`, so scapy's epmap dissector can't re-serialise a
+mid-stream segment and zero out `NegotiateFlags`). Optionally pass known **DC IPs/CIDRs**
+so a NetLogon secure channel to a host outside that set is flagged. The verdict is
+`clean` / `posture` / `exposure` / `credential-exposure` / `dcsync` / `zerologon`. The
+hardening it drives: patch DCs and enforce **Secure RPC** to close Zerologon; break
+relay/DCSync with **SMB + LDAP signing**, **channel binding (EPA)** and tiered admin.
+
+**v7** widens the interface surface well beyond Zerologon and the PrintNightmare / WinReg /
+PetitPotam set. It now names **MadLicense** and the full July-2024 **RD Licensing** cluster
+(`CVE-2024-38077` plus the six siblings `-38074 / -38076 / -38071 / -38072 / -38073 / -38099`,
+graded by the authentication **level** rather than anonymity), the hvsocket-only **LSM container**
+interface reached over the network (`CVE-2022-37973 / CVE-2022-37998`), the **RpcGetSessionIds** LSM
+crash (`CVE-2025-26651`, graded by the server's answer), the **Certighost** AD CS "chase"
+(`CVE-2026-54121` — a known CA opening an outbound LSARPC bind to a non-DC) and the **EventLogin**
+MS-EVEN backup-write cluster (`CVE-2025-29969 / CVE-2026-50502`). It adds three **no-CVE** abuse
+surfaces — **ESC11** relay to the AD CS enrollment interfaces (the level the hardening flag changes),
+**MS-DNSP `ServerLevelPluginDll`** (DnsAdmin → SYSTEM) and an **interface inventory** of every bound
+RPC UUID with no rule behind it — plus the WS-Man `/wsman-anon/identify` and Event-Collector
+subscription endpoints. Three further CVEs (`CVE-2021-36936 / CVE-2021-36947 / CVE-2026-50346`) are
+**evaluated and deliberately not claimed** — no observable mechanism, or a local-only vector — so the
+[CVE index](CVE.md) does not count them.
+
+**API:** `GET /api/net/rpc-watch` (query: `interface`, `seconds`, `dcs`).
+
+> **Watchtower feed.** HIGH/CRITICAL RPC/NetLogon/WinRM findings (coercion excluded) are
+> appended as JSON-lines to `/var/log/ragnar/rpc_watch.jsonl`, so the unified alert pane
+> and its single Pushover path fold in the Zerologon / DCSync / WinRM exposures alongside
+> the standalone watchers.
 
 ### LDAP Watch
 A **passive** Active-Directory / LDAP observer — **detection-only, it never
@@ -1414,6 +2646,9 @@ What it flags:
 - **directory-enumeration** — a whole-subtree `(objectClass=*)` from a domain base, or
   a high volume of searches from one source — the **BloodHound / ldapdomaindump**
   signature. *(suspicious)*
+- **filter-nest-dos** *(v4)* — a search filter whose boolean nesting exceeds the depth
+  threshold (12), the **OpenLDAP slapd nested-filter crash (CVE-2020-12243)** — a
+  stack-exhaustion DoS against the directory. *(compromised)*
 - **sensitive-attribute** — a query for password/LAPS/gMSA/ACL material or
   **`servicePrincipalName`** (Kerberoast recon; ties into [SMB Watch](#smb-watch)'s
   Kerberos leg). *(warn, or high over cleartext)*
@@ -1425,6 +2660,15 @@ What it flags:
 - **cldap-reflection** / **cldap-amplification** — a CLDAP query from an off-subnet
   (spoofable) source, or a response several times larger than its query — the DC is a
   usable **UDP reflection/amplification** vector. *(warn / high)*
+- **external-referral** *(new in v3)* — a referral or `SearchResultReference` that
+  steers a client to an LDAP/CLDAP host **outside your own subnets**. This is the
+  **LDAPNightmare** steering primitive: **CVE-2024-49113** (the Windows LDAP / LSASS
+  denial-of-service) and **CVE-2024-49112** (LDAP-client remote code execution) both
+  work by feeding a victim's LDAP client a crafted referral pointing at an
+  attacker-controlled server, so that out-of-subnet referral is caught on the wire.
+  Only **IP-literal** targets outside the local nets fire it — hostnames can't be
+  placed passively and in-forest referrals to your own subnets stay silent, so it
+  does not false-positive on legitimate cross-domain referrals. *(compromised)*
 
 Verdict is **clean → suspicious → compromised**. Capture is a short passive **Scapy**
 sniff (Scapy is imported lazily, so `--selftest` and offline parsing need zero
@@ -1436,10 +2680,225 @@ For **continuous** monitoring there is an opt-in **least-privilege systemd unit*
 `CAP_NET_RAW`** and streams **JSON-lines** findings (one object per line) to
 `/var/log/ragnar/ldapwatch.jsonl` for the web UI + Pushover.
 
+**v5** adds **LongLogon** (`CVE-2026-41089`), on the two legs that are observable. The **request
+leg** is a **CLDAP DC-locator ping** whose `NtVer` routes to the legacy `BuildSamLogonResponse`
+builder — `(NtVer & 0x0C) == 0 && (NtVer & 0x02) != 0`; modern Windows sets V5EX (`0x04`) and lands
+in the bounds-safe `*Ex` builder, so this is path selection, not proof of exploitation (a legacy
+client can legitimately omit V5EX). The **response leg** is a DC whose own forest / domain / host DNS
+names total enough wide chars to overrun that builder's 528-byte (264 wide-char) stack buffer. It keys
+on the routing bits and the DC's **own** names — never on the attacker's length-capped `User` field,
+which cannot overflow — and reports exposure geometry, not patch state (a patched DC takes the identical
+path and refuses the over-long write). Both legs fire on CLDAP and TCP, IPv4 and IPv6.
+
 Hardening it drives: require **LDAPS/StartTLS** and reject simple binds on cleartext,
 **disable anonymous binds**, enforce **LDAP signing + channel binding (EPA)** on DCs,
 and restrict **UDP/389** at the edge. **API:** `GET /api/net/ldap-watch`. **CLI:**
 `ldap-watch`, `ldap-selftest`.
+
+### SSH Watch
+A **passive** SSH observer — **detection-only, it never connects**. This matters:
+almost every published "detector" for regreSSHion is a banner *grab*, which means
+opening a connection to the target — active scanning wearing a passive label. SSH Watch
+reads only the cleartext SSH prologue that already flows on **tcp/22** — the
+identification strings and both **KEXINIT** messages — and reports software versions,
+the negotiated algorithm set, and **HASSH** / HASSH-server fingerprints (the SSH analogue
+of JA3/JA3S, free once KEXINIT is parsed). `ssh_watch.py` is a standalone module imported
+by the toolbox; Scapy is imported lazily, so `--selftest` and offline parsing need zero
+third-party deps.
+
+What it flags:
+
+- **cve_2024_6387_version_in_range** — an OpenSSH banner in the **regreSSHion** affected
+  range (**8.5p1–9.7p1**, or anything before 4.4p1 without the CVE-2006-5051 fix). Capped
+  at **notice / low confidence** posture on purpose: distributions **backport** the fix
+  without changing the version string, so a version in range means *worth checking*, never
+  *vulnerable*. The message says so. *(clean verdict on its own — it is posture, not proof)*
+- **cve_2024_6387_grace_timeout_pattern** — where the real confidence lives. Exploitation
+  needs many connections that each complete the cleartext handshake and are then **held
+  until LoginGraceTime expires** without authenticating. Authentication is encrypted but
+  **connection timing is not**: this counts handshake-completed connections from one source
+  that were held ~`grace_seconds` and carried <16 KiB, so port scans, TCP probes and real
+  sessions don't count. 20 in the window is `warn`, 100 is `high` — labelled
+  `heuristic`. **`grace_seconds` must be set to your servers' `LoginGraceTime`** (a passive
+  observer can't read it), and the window must be long enough to observe a hold. *(suspicious)*
+- **cve_2023_48795_terrapin_exposed** — ChaCha20-Poly1305, or CBC with Encrypt-then-MAC,
+  negotiated **without strict key exchange** — the **Terrapin** prefix-truncation condition.
+  This is the one high-confidence finding: both KEXINITs are cleartext, so the vulnerable
+  state is *read*, not inferred. *(suspicious)*
+- **ssh_protocol_1x** — SSH-1.x offered. *(suspicious)* · **ssh_weak_kex / ssh_weak_hostkey
+  / ssh_weak_cipher / ssh_weak_mac** — 1024-bit MODP + SHA-1 KEX, `ssh-dss` / SHA-1 RSA host
+  keys, `none` / single-DES / RC4 / 64-bit-block ciphers, `none` / MD5 MACs. Tiered per
+  algorithm so a feed doesn't warn on OpenSSH's default `umac-64-etm` first preference.
+  *(notice → suspicious by severity)* When the negotiated cipher is DES or Triple-DES in
+  **CBC** (`3des-cbc` / `des-cbc` / `des-cbc@ssh.com`), `ssh_weak_cipher` additionally carries
+  **`CVE-2016-2183` (SWEET32)** — CVSS 7.5, *disputed* (IBM X-Force scores it 3.7), `exposure`
+  class — since the CVE names SSH explicitly and the negotiated cipher *is* the vulnerable
+  condition, so it rides on this finding rather than a code of its own (as `tls_watch` does for
+  RC4). **There is deliberately no volume tier:** RFC 4344 mandates rekeying after 2^16 blocks
+  (512 KiB) for a 64-bit cipher — far below the 2^32-block birthday bound — and that rekey is
+  invisible to a passive observer, so exposure hinges on whether the peer honours it (unreadable
+  from the wire). `3des-ctr` and `blowfish-cbc` / `cast128-cbc` stay weak-cipher findings **without**
+  the CVE (CTR is a different failure mode; the CVE names only DES/3DES). · **ssh_strict_kex_absent**
+  — strict KEX not offered by both sides, but the negotiated mode isn't vulnerable. *(info)*
+- **ssh_duplicate_host_key** — one host key presented by **two or more addresses**. The
+  server's host key travels in cleartext in the key-exchange reply (before NEWKEYS, the same
+  window this reads); its OpenSSH SHA-256 fingerprint is compared across addresses. Identical
+  key bytes on two hosts is a shipped / hard-coded key (**CVE-2025-38741** Dell Enterprise
+  SONiC, and the same observation covers Ruckus SmartZone CVE-2025-44954, cloned VM images,
+  and any vendor shipping a fixed key) — whoever holds it can impersonate every affected host.
+  It is *not* proof of a defect on its own: an HA pair or a load-balanced VIP front-end shares
+  one key deliberately, so the finding names both addresses and what to confirm, and a known
+  shared key is silenced via `shared_key_allow`. The group-exchange trap (message 31 is
+  `(p, g)`, not a host key, under `diffie-hellman-group-exchange-*`; the real reply is message
+  33) is handled so a shared DH modulus never reads as a duplicate key. *(suspicious)*
+
+Verdict is **clean → suspicious**: every SSH finding is posture, exposure or heuristic —
+none is a confirmed live compromise (regreSSHion can't be confirmed passively), so the scale
+does not reach "compromised". Capture is a short passive tcpdump snapshot dissected with
+Scapy; the filter is port-scoped for IPv4 and plain IPv6 and *(new in v3)* also admits
+**IPv6 behind an extension header** via a narrow `ip6[6]` next-header clause (not a blanket
+`or ip6` that would flood a Pi Zero 2W), since libpcap's `port` primitive can't chase an EH
+chain and the replay path already walks it via Scapy. The parse+detect path is pure Python and
+self-tests without root (`ssh_watch.py --selftest`, 204 checks; fixtures are bytes captured
+from a real OpenSSH server). Hardening
+it drives: upgrade sshd to **9.8p1+**, enable **strict KEX** and drop CBC-EtM / ChaCha where
+Terrapin matters, and remove SSH-1 / weak KEX / host-key / cipher / MAC offers. It also flags
+a **large finite-field DH group** (group16/17/18, ≥4096-bit) as a `cve_2002_20001_dhe_large_group`
+**D(HE)at** exposure (**CVE-2002-20001**) — Logjam-safe but an expensive modexp per handshake;
+group14 (2048, the common default) is deliberately *not* flagged, and the per-source D(HE)at
+flood tier lives in the standalone `sshwatch` daemon. **API:**
+`GET /api/net/ssh-watch` (`seconds`, `grace_seconds`). **CLI:** `ssh-watch`, `ssh-selftest`.
+
+> **Watchtower feed.** Each non-`info` finding is appended as a JSON-lines record to
+> `/var/log/ragnar/ssh_watch.jsonl` (time-window deduplicated per code + server), so
+> [Watchtower](#watchtower) folds it into the unified alert pane and single Pushover path
+> alongside the standalone watcher daemons — automatically whenever Extended Monitoring is on.
+> Pure inventory/posture (`info`) stays off the alert pane. The observer also joins the
+> **Network Integrity Monitor** rotation, so its verdict shows as an `SSH` chip there.
+
+### Telnet Watch
+A **passive** Telnet observer — **detection-only, it never transmits**. Telnet is unusually
+suited to deep passive detection because the protocol is **cleartext end to end**, including
+all option negotiation — so unlike [SSH Watch](#ssh-watch) and [TLS Watch](#tls-watch), which
+see only a prologue before the session encrypts, Telnet Watch sees the **whole session** and
+the exploit payload itself crosses the wire in the open. It monitors **tcp/23** and **2323**
+(Telnet-over-TLS **992** is observed but not dissected) and, since v5, the **r-services**
+on **512 / 513 / 514**. `telnet_watch.py` is the vendored upstream module plus a thin in-app
+adapter that replays the capture through the module's own `run_capture(offline=…)`, so the
+in-app path uses exactly the live dispatcher, engines and BPF. Scapy is imported lazily.
+**Dual-stack:** the capture filter keeps a bare `ip6` term — the only libpcap form that
+admits IPv6 behind extension headers (`(ip6 and tcp port 23)` is a measured no-op) — and a
+software port gate rejects non-Telnet IPv6.
+
+It names these `telnetd` CVEs:
+
+- **TELNET-24061-ARGINJECT** — **CVE-2026-24061** (CVSS **9.8**, **CISA KEV** 2026-01-26).
+  telnetd expands the `USER` environment variable from the client's `NEW-ENVIRON IS`
+  subnegotiation straight into the login command line, so `USER=-f root` runs `login -f
+  root` — `-f` skips authentication and the result is an **unauthenticated root shell**, no
+  memory corruption involved. High confidence: the injected value is on the wire verbatim
+  (`IAC SB NEW-ENVIRON IS VAR USER VALUE -f root IAC SE`). Only the flag **prefix** and the
+  value length are logged — never the full value. *(compromised)*
+- **TELNET-32746-SLC-OVERFLOW** / **-NOSUPPORT-FLOOD** / **-OVERSIZED** / **-VULN-CONFIRMED**
+  / **-LINEMODE-POSTURE** — **CVE-2026-32746** (CVSS **9.8**). telnetd's `add_slc()` appends
+  3 bytes per SLC triplet to a fixed 108-byte BSS buffer without bounds checking; with 4 bytes
+  pre-consumed it holds 34 reply triplets and the 35th overflows. A `LINEMODE SLC` table with
+  more than 34 reply triplets is the **overflow attempt** (counted directly from wire bytes,
+  high confidence — the watchTowr overflow-padding signature corroborates); a server whose SLC
+  reply echoes past the buffer boundary is **confirmed vulnerable** and was hit. A server
+  merely advertising LINEMODE is **posture only**, capped at `notice`/low confidence — the
+  patch is wire-invisible, a patched telnetd negotiates LINEMODE identically. *(overflow /
+  confirmed → compromised; flood / oversized → suspicious; posture → clean)*
+- **TELNET-4862-KEYID-OVERFLOW** — **CVE-2011-4862** (CVSS **9.8**, exploited in the wild
+  December 2011). libtelnet's `encrypt_keyid()` copied the key id from an `ENCRYPT
+  ENC_KEYID` / `DEC_KEYID` subnegotiation into a fixed 64-byte buffer; a key id longer than
+  that is an unauthenticated **root heap overflow** (FreeBSD, Heimdal and MIT telnetd).
+  *(compromised)*
+- **TELNET-39028-EC-EL-PREAUTH** / **-CRASH-LOOP** — **CVE-2022-39028**. A bare `IAC EC` or
+  `IAC EL` before login NULL-dereferences inetutils telnetd — a 2-byte DoS; repeated attempts
+  that each end in a torn-down session are the **crash loop** that makes inetd disable the
+  service. *(suspicious)*
+- The `USER=-f` rule also covers the Solaris `in.telnetd` twin, **CVE-2007-0882** (CVSS v2
+  10.0) — the same argument-injection shape.
+
+**r-services** (rlogin **513**, rsh **514**, rexec **512**) each get their own engine —
+rlogin has no IAC framing, so feeding it to the Telnet parser would be actively wrong:
+
+- **RSVC-RLOGIN-ARGINJECT** — **CVE-1999-0113** (CVSS v2 10.0). A local or remote user field
+  in the rlogin (or rsh) handshake that begins with `-`: `-froot` becomes `login -f root`,
+  the same auth bypass. *(compromised)*
+- **RSVC-FTPDATA-SRCPORT** — **CVE-1999-0185**. An r-services connection whose source port is
+  **20** (ftp-data): it passes the "privileged port means trusted client" check, so an FTP
+  bounce can forge trusted rsh/rlogin sessions. *(compromised)* **RSVC-UNPRIV-SRCPORT** flags
+  a client source port above 1023, which a genuine r-services client never uses.
+- **RSVC-RCP-7282-DOTNAME** / **-7283-UNREQUESTED** / **-7283-TRAVERSAL** — **CVE-2019-7282 /
+  CVE-2019-7283**. A malicious netkit `rcp` *server* sending a `.` or empty file name (which
+  overwrites the target directory's permissions) or a file the client never requested / a
+  path-traversal name — the rcp twin of the OpenSSH scp bug CVE-2019-6111.
+- **RSVC-REXEC-CLEARTEXT-CRED** (rexec sends the password in the clear), **RSVC-TRUST-AUTH**
+  (a `.rhosts` / `hosts.equiv` trust login), **RSVC-RSH-SESSION** and
+  **RSVC-RLOGIN-SESSION** (inventory). rsh's **stderr back-connection** — server to a port the
+  client advertised — is correlated too; the capture admits the privileged port range it
+  lands on, because `tcp port 514` alone sees none of it.
+
+Plus general cleartext exposure: **TELNET-CLEARTEXT-AUTH** — a server `Password:` prompt on a
+session that never reached RFC 2946 `ENCRYPT START` (a lone `WILL ENCRYPT`, which inetutils
+telnetd sends on **every** connection, is *not* protection and must not suppress this) —
+**TELNET-ENV-LEAK**, **TELNET-ENCRYPT-NEGOTIATED**, and **TELNET-SESSION**. The client's
+keystrokes are **never** inspected or logged; only the server-side prompt is used as the
+signal, and the credential content never appears in any finding.
+
+Verdict is **clean → suspicious → compromised**. Capture is a short passive tcpdump snapshot
+dissected with Scapy; the parser/engine is pure Python and self-tests without root
+(`telnet_watch.py --selftest`, **411 checks** across 114 tests since v5; wire bytes are
+fabricated through the production engines, and an AST guard asserts the module contains no
+packet-transmit primitive). Hardening it drives: **disable Telnet** and use SSH; where it must remain, patch
+inetutils (**2.5 `3ubuntu4.1`** is the fixed build) and firewall tcp/23 off the management
+plane. **API:** `GET /api/net/telnet-watch`. **CLI:** `telnet-watch`, `telnet-selftest`.
+**HIGH/CRITICAL** findings (Telnet and r-services) stream to [Watchtower](watchtower.md) as
+`telnet_watch.jsonl`.
+
+> **Watchtower feed.** Each non-`info` finding is appended as a JSON-lines record to
+> `/var/log/ragnar/telnet_watch.jsonl` (time-window deduplicated per code + server), so
+> [Watchtower](#watchtower) folds it into the unified alert pane and single Pushover path
+> alongside the standalone watcher daemons — automatically whenever Extended Monitoring is on.
+> A `compromised` finding (argument injection, confirmed overflow) lands as **critical** there.
+> The observer also joins the **Network Integrity Monitor** rotation, so its verdict shows as
+> a `Telnet` chip there.
+
+### RDP Watch
+A **passive** RDP negotiation-**posture** and abuse observer — **detection-only, it never transmits,
+probes or verifies**. It reads only the cleartext **X.224 Connection Request / Connection Confirm** on
+**tcp/3389** (MS-RDPBCGR 2.2.1.1 / 2.2.1.2) that precedes TLS or CredSSP — everything after is encrypted
+and opaque — and reports how a session was negotiated, who it exposed, and connection-level abuse.
+**No CVE codes:** this is a posture module. BlueKeep sits below the Windows 10 / Server 2016 floor, and
+DejaBlue / BlueGate / the 2025 RDP-client CVEs trigger inside encryption or are unpublished;
+`CVE-2005-1794` (Standard-Security MITM) is carried as a posture **reference** on RDP-001 / RDP-002 only.
+
+Thirteen finding codes: **RDP-001** Standard RDP Security selected by the server (MITM-able, high),
+**RDP-002** `SSL_NOT_ALLOWED_BY_SERVER` — the server speaks Standard Security only (high), **RDP-003**
+the legacy no-`RDP_NEG` path (medium), **RDP-004** NLA requested but not enforced — a client asked for
+HYBRID / HYBRID_EX and the server selected plain SSL (high), **RDP-005** the negotiation inventory
+(requested vs selected protocol + a `secure` verdict), **RDP-006** `SSL_CERT_NOT_ON_SERVER`; **RDP-010**
+client Restricted-Admin mode — a credential-less logon that enables pass-the-hash, common and legitimate,
+so medium — and **RDP-011** the server advertising it; **RDP-020** a cleartext `mstshash` username in the
+cookie — **length only is recorded, the value never leaves the parser**, and a `msts=` routing token is
+never mistaken for a username; the latching behavioural tier **RDP-030** brute force (≥ 10 Connection
+Requests one→one in 60 s), **RDP-031** username spray (≥ 5 distinct cookie usernames, counted by a per-run
+keyed BLAKE2b digest that is never emitted) and **RDP-032** horizontal scan (one source → ≥ 20
+destinations); and **RDP-040** a malformed negotiation. HYBRID / HYBRID_EX selected and Remote Credential
+Guard are the good states and raise no code.
+
+RDP's TLS layer belongs to [TLS Watch](#tls-watch) and **MadLicense** (RD Licensing) to
+[RPC / NetLogon Watch](#rpc--netlogon-watch); neither is duplicated here. The filter keeps a bare `ip6`
+term so IPv6 behind extension headers is captured (a software port gate rejects the rest), and every
+finding carries an `af`. The verdict is `clean` / `posture` / `exposure`. **API:**
+`GET /api/net/rdp-watch` (query: `interface`, `seconds`).
+
+> **Watchtower feed.** HIGH RDP findings are appended as JSON-lines to
+> `/var/log/ragnar/rdp_watch.jsonl` (time-window deduplicated per code + source), so
+> [Watchtower](#watchtower) folds them into the unified alert pane and single Pushover path, and the
+> observer joins the **Network Integrity Monitor** rotation, so its verdict shows as an `RDP` chip there.
 
 ### DTP Watch
 A **passive** VLAN-hopping / switch-spoofing scanner for Cisco's **Dynamic Trunking
@@ -1459,6 +2918,17 @@ classic VLAN hop. DTP should never appear on an access segment; the fix is
 - **trunk-negotiation** — trunk-forming DTP present at all (the port isn't
   `nonegotiate`, so it's exploitable) even from a known switch.
 - **dtp-enabled** — DTP frames present but not negotiating a trunk. Advisory / learn.
+- **trailing-data** — non-zero bytes *after* a frame's declared length (see the
+  shared note below). Shared with CDP/VTP/EIGRP/FHRP/OSPF Watch.
+
+> **Trailing-data / Etherleak (CDP · DTP · VTP · EIGRP · FHRP · OSPF Watch).**
+> Honest Ethernet padding is all zeros, so *non-zero* bytes past a frame's
+> declared length (the 802.3 length field for the Cisco SNAP protocols, the IPv4
+> total-length for the IP ones) mean data smuggled behind a valid advert (covert
+> channel) or a NIC/driver leaking kernel memory into the pad (Etherleak,
+> CVE-2003-0001). These watchers capture with `-xx`, reconstruct the raw frames,
+> and raise a **trailing-data** verdict on any non-zero trailer (a kept 4-byte
+> FCS is excluded). A more severe verdict on the same scan is left in place.
 
 The scan uses `tcpdump -e` (to capture the sender's MAC) with the BPF
 `ether dst 01:00:0c:cc:cc:cc and ether[20:2] = 0x2004`, which isolates DTP from the
@@ -1490,10 +2960,41 @@ CDP Watch looks at the same frames from the attacker's side and flags their abus
 - **cdp-enabled** — CDP is present at all: the scan surfaces **exactly what it leaks**
   here (IOS version, model, management IP, native/voice VLAN) so you can see the
   reconnaissance an attacker on that port gets for free. Advisory / learn.
+- **cdpwn** — an **attack-in-flight exploit shape** for the CDPwn family: the
+  original Armis five plus its **LCDPwn** successor and cross-vendor arm. A
+  byte-level TLV parser runs over the reconstructed frames and flags:
+  oversized **DeviceID** (`CDP-042`, CVE-2020-3110) / **PortID** (`CDP-043`,
+  CVE-2020-3111) / generic string (`CDP-044`), **format-string** metacharacters in
+  a string TLV (`CDP-045`, CVE-2020-3118, printf-accurate `%n` scan), malformed
+  **Power-Request** with absurd level count (`CDP-046`, CVE-2020-3119), an absurd
+  **Addresses** count (`CDP-047`, CVE-2020-3120), per-**address-record**
+  protocol_type/length mismatch (`CDP-053`) and allocation/copy size discrepancy
+  (`CDP-054`, the CVE-2023-41910 lldpd `cdp_decode` out-of-bounds-read class — the
+  shapes the outer TLV-length check cannot see), and TLV length over/underrun
+  (`CDP-040`/`CDP-041`). It also does **version screening** across nine families
+  (`CDP-020…024`, `CDP-027…030`): a platform/version/device-id match — IP Phone, IP Camera,
+  IOS-XR, NX-OS, FXOS/Firepower, **FortiSwitch** (CVE-2021-26111), **lldpd**
+  (CVE-2023-41910), **Cisco ATA 190/191/192** (CVE-2022-20688…20766) and
+  **Unified CM** (CVE-2022-20804); plain IOS/IOS-XE deliberately excluded per
+  Cisco's advisory, and an ATA guarded off the IP-Phone family by a negative
+  lookahead — attaches the CVEs to verify that device against, now spanning **27
+  CDP-plane CVEs**. `TTL=0` withdrawals (`CDP-050`) and the shared trailing-data
+  check (`CDP-052`) round it out.
+- **UDLD** (`UDLD-001…043`) — the same scan also admits **UDLD** (UniDirectional Link
+  Detection, Cisco PID `0x0111` on the shared group MAC). UDLD is **off by default** and
+  both UDLD CVEs *require* it enabled, so a UDLD frame on the wire is itself the exposure
+  (`UDLD-001`). It carries no version banner, so OS-family attribution reuses the **CDP
+  identity of the same source MAC**: an NX-OS / FXOS / UCS neighbour → `UDLD-020`
+  (**CVE-2021-1368**, 8.8 port-channel code execution, + **CVE-2021-34714**, 7.4 reload
+  DoS); an IOS / IOS-XE / IOS-XR neighbour → `UDLD-021` (CVE-2021-34714, which *unlike*
+  CDPwn affects plain IOS/IOS-XE); no CDP sighting → `UDLD-022` (honest "attribute by
+  hand"). Malformed UDLD TLVs raise `UDLD-040`/`041`/`042`/`043` (overrun / underflow /
+  oversized string / trailing data), which escalate the verdict.
 
 The scan uses `tcpdump -e` with the BPF
-`ether dst 01:00:0c:cc:cc:cc and ether[20:2] = 0x2000`, isolating CDP from the other
-protocols on that Cisco group MAC (DTP/VTP/UDLD/PAgP). CDP hellos are ~60s apart, so
+`ether dst 01:00:0c:cc:cc:cc and (ether[20:2] = 0x2000 or ether[20:2] = 0x0111)`, admitting
+CDP and UDLD while leaving the other protocols on that Cisco group MAC (DTP/VTP/PAgP) to
+their own watchers. CDP hellos are ~60s apart, so
 the default window is longer (30s). The first scan **learns** the current CDP speakers
 (the real switches/phones) as the baseline (`data/cdp_watch.json`); "Trust current"
 re-learns. Every result carries a **mitigation advisory**: disable CDP on access/edge
@@ -1512,6 +3013,115 @@ spoof / fake-phone VoIP-hop / cdp-enabled leak / flood / field-parse), and — w
 [Scapy](https://scapy.net) is installed — crafts a real CDP frame into a pcap and
 parses it back through `tcpdump -e`, exercising the capture→parse path end to end.
 **API:** `GET /api/net/cdp-watch`, `POST /api/net/cdp-baseline`.
+
+### LLDP Watch
+A **passive** IEEE 802.1AB (LLDP) security monitor. It is **detection-only** and never sends
+an LLDP frame. LLDP (EtherType `0x88CC`, link-local group MACs `01:80:c2:00:00:0e` / `:03` /
+`:00`) is never forwarded past the first hop, so it sees only the directly attached link. That
+is where the threat sits: one crafted, unauthenticated frame from a host on the same port
+crashes or reloads the neighbour's LLDP parser. This is separate from
+[Switch Discovery](#switch-discovery-lldp--cdpv1v2--edp--fdp), which reads neighbours from `lldpctl`.
+
+**CVE backbone: 30 LLDP parser CVEs across thirteen implementation families.** The one with real reach is **CVE-2026-22627**, an oversized Organizationally Specific / OUI TLV giving unauthenticated adjacent **code execution** on FortiSwitchAX; everything else is a crash, reload or leak.
+
+| Family | CVEs |
+|--------|------|
+| lldpd (also Ruckus APs, whose stack is lldpd-derived) | **CVE-2015-8011** (`lldp_decode` oversized Management Address overflow), **CVE-2015-8012**, **CVE-2020-27827** |
+| Cisco FXOS / NX-OS / IOS / IOS-XE / ACI / UCS | **CVE-2018-0395**, **CVE-2021-34703**, **CVE-2023-20089**, **CVE-2024-20294**, **CVE-2026-20010** |
+| Juniper `l2cpd` | **CVE-2018-0007**, **CVE-2020-1641**, **CVE-2021-0277**, **CVE-2023-36849**, **CVE-2024-21618** |
+| Open vSwitch | **CVE-2020-27827**, **CVE-2022-4337**, **CVE-2022-4338** (Auto Attach TLV, 9.8) |
+| HPE Aruba AOS-CX / Instant (and Siemens SCALANCE W1750D) | **CVE-2020-7121**, **CVE-2021-34618** |
+| Fortinet FortiSwitch `lldpmedd` / FortiSwitchAX | **CVE-2021-26111**, **CVE-2026-22627** (OUI-field overflow, adjacent **RCE**, 8.8) |
+| Cisco SB220 / Business 220 | **CVE-2021-34779**, **CVE-2021-34780** (missing length validation, adjacent code execution, 8.8) |
+| Cisco RV Series routers | **CVE-2021-1309**, **CVE-2021-1251**, **CVE-2021-1308** |
+| TRENDnet TI-PG1284i / TI-series | **CVE-2021-33315** (Port ID underflow), **CVE-2021-33316** (Chassis ID underflow), **CVE-2021-33317** (missing Chassis ID NULL deref) |
+| QNAP QSW-M switches (QSS) | **CVE-2021-28801** |
+| Palo Alto PAN-OS | **CVE-2025-0116** |
+| SonicWall SWS | **CVE-2021-20024** |
+
+Juniper's `l2cpd` also drives STP/RSTP/MSTP, MVRP, ERP and LACP, so an LLDP crash there
+reinitialises spanning tree and flaps aggregation.
+
+There are 40 finding codes (`LLDP-nnn`) in four classes (v3 added the DCBX class). There is
+**no disclosure-posture class**: a neighbour advertising its name and version over LLDP is how
+the protocol works.
+
+- **Class A: structural (21 codes, vendor-agnostic, no baseline).** This is where detection
+  happens. The malformed frame looks the same whichever stack it targets.
+  - `LLDP-040` *critical*: a TLV length past the end of the frame.
+  - `LLDP-041`: an illegal fixed length (End / TTL / System Capabilities), or a stray header octet.
+  - `LLDP-042` / `LLDP-043`: mandatory Chassis ID / Port ID / TTL missing, or out of order.
+  - `LLDP-044`: duplicated singleton TLV.
+  - `LLDP-045` *critical*: malformed Management Address: an oversized or overrunning address
+    string, an IPv4/IPv6 family-vs-length mismatch, a truncated tail, or an oversized OID.
+  - `LLDP-046` / `LLDP-047`: a Chassis / Port ID whose subtype disagrees with its length,
+    including v4/v6 network-address subtypes.
+  - `LLDP-050`: a string TLV over the 255-octet ceiling (the 9-bit length field allows 511).
+  - `LLDP-051`: a wrong-size fixed-length org-specific TLV (802.1 / 802.3 / LLDP-MED), an
+    oversized MED inventory string, or a short org TLV. The OVS Auto Attach CVEs live here.
+  - `LLDP-052`: reserved TLV types 9–126.
+  - `LLDP-053`: non-zero data after End-of-LLDPDU.
+  - `LLDP-054`: no End TLV.
+
+  All-zero Ethernet padding and a trailing 4-octet FCS stay silent.
+- **Class B: screening (15 codes, `LLDP-020`..`034`).** The cleartext System Name /
+  Description is matched against the family table above. `LLDP-031`..`034` add the TRENDnet,
+  QNAP QSS, Cisco SB220 and Cisco RV families. These are **notes, never a
+  vulnerability verdict**: an advertised version string cannot show patch state, because
+  vendors backport fixes without changing it.
+- **Class C: abuse.** `LLDP-048` trips on a frame-rate or distinct-source flood. It is the
+  only signal for the memory-leak CVEs (CVE-2020-27827, CVE-2023-20089, CVE-2021-26111),
+  which have no single-frame shape. `LLDP-049` (forged neighbour) needs a baseline: it is
+  **off** until you click **Trust current**, which trusts the neighbours from the last scan
+  (kept in `data/lldp_watch.json`). **Reset** turns it off again. `LLDP-068`/`LLDP-069` add
+  DCBX-specific abuse (feature churn / a flapping willing-bit).
+- **Class D: DCBX (`LLDP-060`..`069`, v3).** DCBX (Data Center Bridging eXchange) rides inside
+  LLDP as organizationally-specific TLVs and negotiates the lossless fabric — ETS bandwidth,
+  PFC priorities and the application-priority table. **There is no DCBX CVE**; this is
+  protocol-abuse detection on a fabric where a forged negotiation starves or un-protects a
+  priority. It flags a malformed DCBX TLV (`LLDP-060`), an ETS bandwidth that doesn't sum to
+  100% (`LLDP-061`) or an illegal ETS/TSA field (`LLDP-062`), an invalid PFC field
+  (`LLDP-063`), a malformed application table (`LLDP-064`), a duplicate feature TLV
+  (`LLDP-065`), an IEEE-vs-CEE version conflict (`LLDP-066`) and a malformed CEE sub-TLV
+  (`LLDP-067`). It is point-to-point, so one tap sees one neighbour's advertisement.
+
+The capture runs `tcpdump` to a pcap and walks raw frames, with no scapy on this path. It is
+promiscuous because the LLDP group MACs are multicasts the host never joins. It is
+**inbound only**, so this unit's own `lldpd` adverts are not screened. Snaplen is full so
+`LLDP-040` sees every byte. The BPF admits untagged, 802.1Q and QinQ LLDP. Its nested form
+is deliberate: the flat `vlan and vlan` form does not match QinQ in libpcap.
+
+Verdicts: `no-traffic` / `clean` < `observed` (screening notes only; listed, does not page)
+< `exposure` (a low finding) < `suspicious` (a medium finding) < **`attack`** (high/critical:
+a malformed-frame CVE shape, a flood or a forged neighbour; pages in the
+[Network Integrity Monitor](#-network-integrity-monitor)). MEDIUM and above feed
+[Watchtower](watchtower.md). The card collapses repeats into one row per code and source MAC,
+with a count, and lists each neighbour: name, description, port, management address (IPv6
+bracketed), VLAN tags and trust.
+
+**Out of scope:** LLDP-MED voice-VLAN hopping and E911/PoE semantics (VoIP-adjacent and
+baseline-dependent), and SDN topology poisoning (a controller problem). A MED TLV with a
+structural defect still fires Class A. Two CVEs filed against lldpd are not LLDP and are
+deliberately not named here: CVE-2023-41910 (lldpd's **CDP** decoder) and CVE-2021-43612
+(its **SONMP** decoder).
+
+- Endpoint: `GET /api/net/lldp-watch` `{interface, seconds}` ·
+  `GET/POST /api/net/lldp-baseline` `{action: trust|reset}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py lldp-watch [--iface I] [--seconds N] [--pcap FILE]
+  [--json]` (`--pcap` replays a file; the baseline is not used or saved)
+- Self-test: suite `lldp` (50 scenarios). It covers every malformed fixture per code (DCBX
+  included), the benign FP set, screening, flood, the forged-neighbour baseline, dual-stack,
+  and the module's own **2568-check conformance** and **338-check scapy cross-check** tiers,
+  run out-of-process — plus, with `tshark` present, the **130-check DCBX Wireshark-dissector
+  cross-check**.
+- Vendored engine (Solarflere): `python/lldpwatch.py`, `lldpwatch_frames.py`,
+  `lldpwatch_conformance.py`, `lldpwatch_scapy_xcheck.py`, `lldpwatch_dcbx_xcheck.py`. Validated live by replaying
+  malformed and vendor frames with `tcpreplay` over a veth pair in a sealed netns: the
+  structural, flood and screening codes fire through the capture path, the four new
+  `LLDP-031`..`034` families included, and CVE-2026-22627 is caught both structurally (the
+  oversized OUI TLV) and as a FortiSwitchAX screen. `LLDP-025` / `026` need an operator
+  version floor, and `LLDP-049` needs a trusted baseline. Real switch hardware is not yet
+  validated.
 
 ### VTP Watch
 A **passive** bomb / rogue-server scanner for Cisco's **VLAN Trunking Protocol**
@@ -1561,12 +3171,625 @@ Advertisement into a pcap and parses it back through `tcpdump -e`, exercising th
 capture→parse path end to end. **API:** `GET /api/net/vtp-watch`,
 `POST /api/net/vtp-baseline`.
 
+### LACP Watch
+A **passive** LACP / Marker slow-protocol **integrity** monitor — **detection-only**,
+it never sends an LACPDU. Link aggregation (IEEE 802.1AX, ex-802.3ad; EtherType
+`0x8809`, group MAC `01:80:c2:00:00:02`) bonds several physical links into one logical
+port, and — like STP/DTP/VTP — its control frames carry **no authentication, no key,
+no digest and no sequence number**. This is therefore a **state-integrity** module,
+not a CVE detector: it detects aggregation hijacking, member eviction and
+selection-parameter manipulation — consequences of the protocol's design. The one real
+CVE anchor is **CVE-2024-30388** (a specific malformed LACP packet flaps a Junos LAG):
+*(v2)* a malformed LACPDU from an external source followed by a member flap within a
+short window is now correlated into a dedicated **`LACP-MALFORMED-INDUCED-FLAP`** finding
+(the effect, not a byte signature Juniper never published; the flapping member's own
+garbage is excluded as a failing NIC). *(v3)* the module now also parses the neighbouring
+slow-protocol planes on the same wire — **PAGP** (Cisco's pre-standard aggregation), and
+the MAC-Control **PAUSE / PFC** flow-control opcodes — as posture/abuse tiers (no CVE
+exists for them; a flood or a contradictory advertisement is the signal). What it flags
+(**67 codes** across structural / delivery-path / identity / cross-view / state-machine /
+marker / PAGP / PAUSE-PFC / posture groups), reduced to a single card **verdict**:
+
+- **lag-hijack** (critical — the one that should page you) — fires only when **both**
+  classes appear for the same member inside one correlation window: an
+  identity/selection event (port-identity collision, actor-MAC / System-ID change,
+  system- or port-priority *improved*, partner-view mismatch) **and** a disruption event
+  (sync loss/flapping, distributing loss, aggregation cleared, defaulted partner info,
+  receive expired). Changing aggregation parameters is not by itself an attack; changing
+  them *and* taking the member down is.
+- **takeover** — delivery-path and identity tells on their own: a **VLAN-tagged** or
+  **non-group-MAC** LACPDU (a slow-protocol frame that should never leave the link), a
+  system/port-priority improvement, or an actor-MAC / operational-key change.
+- **instability** — sync/timeout flapping, distributing loss, aggregation cleared,
+  malformed / bad-version / trailing-data PDUs, and Marker floods.
+
+**No baseline learning**: the first sighting of a member records state and emits
+inventory only, so deploying mid-flight never alarms on the state of the world at t=0;
+transition detectors are inert until there is a prior observation. Transmission rate is
+derived from the **partner's** Timeout bit (802.1AX 6.4.13), per member; observation
+gaps beyond a member's own detection time are treated as **resyncs**, not events, so a
+lossy SPAN doesn't manufacture phantom transitions (the resync count is exported in
+`stats`). The engine is pure-Python with its **own libpcap reader** (Scapy is not used
+at all). The capture BPF is the slow-protocols EtherType plus single-VLAN-tagged
+LACPDUs (themselves a finding). **API:** `GET /api/net/lacp-watch` (query: `interface`,
+`seconds`).
+
+> **Watchtower feed.** HIGH/CRITICAL LACP findings (delivery-path anomalies, identity
+> manipulation, sync/timeout flapping, LAG hijack) are appended as JSON-lines to
+> `/var/log/ragnar/lacp_watch.jsonl`, so aggregation-integrity alerts fold into the
+> unified pane + single Pushover path.
+
+### OAM Watch
+A **passive** IEEE 802.3ah **Link OAM** (EFM OAM, IEEE 802.3 Clause 57) abuse monitor. It is
+**detection-only** and never sends an OAMPDU: there is no loopback arming, no variable polling
+and no active verification. Link OAM runs on the slow-protocols EtherType `0x8809`, subtype
+`0x03`, to `01:80:C2:00:00:02`. [LACP Watch](#lacp-watch) owns subtypes 1–2 of that same
+EtherType. The channel is cleartext, unauthenticated, link-local and capped by the standard
+at 10 frames/s.
+
+**The headline primitive is Loopback Control.** One forged frame puts the peer into remote
+loopback, which sends its higher-layer egress to DISCARD: an **instant link blackhole** from
+a single unauthenticated packet (`OAM-060`). `OAM-062` confirms it, when the peer's own
+Information TLV reports parser=loopback or multiplexer=discard.
+
+There are **no CVEs.** No Link OAM CVE clears the bar, so every finding is protocol abuse
+seen on the wire, like the IGMP / ICMP work. Nothing here names a CVE. 44 codes in three
+classes (v2 added 6 abuse codes, `OAM-075`..`080`, incl. a divergent-content Event replay
+`OAM-080` distinct from the backwards-sequence `OAM-073`):
+
+- **Posture `OAM-020`..`024`** (notes, never a verdict): the peer advertises remote
+  loopback, variable retrieval, active mode or unidirectional operation, or a
+  non-standard maximum PDU size. These are the capabilities that make the abuse reachable.
+  There is deliberately no "OAM is enabled" finding.
+- **Structural `OAM-040`..`057`**: grammar and bounds violations. They include TLV length
+  overrun / underflow, a wrong fixed Information or Event TLV length, a truncated or
+  oversized OAMPDU, reserved Code / flag bits / TLV types / parser-mux encodings, an illegal
+  loopback command, malformed Variable descriptors and containers, a bad org-specific TLV,
+  duplicate Information TLVs, a Remote TLV without a Local one, and non-zero data after
+  End-of-TLV. A 4-octet probable FCS tail is tolerated.
+- **Abuse `OAM-060`..`074`**: Loopback Control enable / disable, remote-loopback state, and
+  Dying Gasp / Critical Event / Link Fault asserted (`063`–`065`). `OAM-066` is a failure
+  flag asserted and cleared 3× in 300 s while the session stays up: a peer that really lost
+  power stops talking. The rest cover discovery restart (`067`), peer identity change
+  (`068`), capability change mid-session (`069`), more than 10 OAMPDUs/s (`070`), Clause 30
+  Variable Request / cleartext Response (`071` / `072`), Event Notification sequence replay
+  (`073`) and a second OAM speaker on a point-to-point link (`074`).
+
+**Session state is kept per interface across scans** (in memory). That covers peer
+identity, configuration, flags, flap history and event sequence. Without it, a 30 s window
+would never see a 300 s flap or a peer swapped between two scans. **Reset** in the card
+(`POST /api/net/oam-reset`) forgets it after a legitimate peer change. A restart also
+clears it. There is no operator baseline and no learn mode: the engine learns the session
+from the link itself.
+
+**Vantage is narrow.** Link OAM is point-to-point, single-hop and config-gated, so it is
+normally only present on a metro / ISP access handoff link. Everywhere else this card
+correctly reports `no-traffic`. Capture is `tcpdump` (promiscuous, inbound only, BPF
+`ether proto 0x8809 and ether[14] = 3`) to a pcap, then a pure-Python parser, with no scapy
+on this path. Link OAM is untagged L2, so the dual-stack question does not apply.
+
+Verdicts: `no-traffic` / `clean` < `observed` (posture notes only) < `exposure` (a low
+finding) < `suspicious` (a medium finding, or a **single** failure-flag assertion, which is
+often a real power loss) < **`attack`** (any critical, or a high structural / abuse finding
+other than a lone flag). `attack` pages in the
+[Network Integrity Monitor](#-network-integrity-monitor). Structural and abuse findings at
+MEDIUM and above feed [Watchtower](watchtower.md). The card also lists each OAM peer with
+its OUI, advertised capabilities and state (operational / discovery / **remote loopback**).
+
+**Out of scope:** 802.1ag CFM / Y.1731 on EtherType `0x8902` is a different, service-layer
+protocol. [CFM Watch](#cfm-watch) covers it. Cisco Guard's VXLAN NGOAM check covers only CFM inside
+VXLAN.
+
+- Endpoint: `GET /api/net/oam-watch` `{interface, seconds}` · `POST /api/net/oam-reset`
+  `{interface?}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py oam-watch [--iface I] [--seconds N] [--pcap FILE]
+  [--json]` (`--pcap` replays a file through a fresh engine)
+- Self-test: suite `oam` (19 scenarios). It covers the clean-set silence contract, LACP
+  not parsed as OAM, the loopback blackhole, single-flag vs flapping, multi-peer, the
+  rate cap, the MIB leak, event replay, structural overrun, peer swap across two scans,
+  and the module's own **355-check conformance** and Wireshark cross-check
+  tiers, run out-of-process.
+- Vendored engine (Solarflere): `python/oamwatch/` (`parser`, `engine`, `registry`,
+  `config`, `sensor`) and its tests in `python/oamwatch_tests/`. Validated live: all 44
+  codes replayed with `tcpreplay` over a veth pair in a sealed netns fire through
+  `do_oam_watch`'s capture path. Not yet validated against production Link OAM traffic.
+
+### CFM Watch
+A **passive** IEEE 802.1ag **Connectivity Fault Management** / ITU-T **Y.1731** service-OAM
+monitor. It is **detection-only** and never sends an LBM, LTM or CCM: there is no MEP
+probing and no active verification. CFM runs on EtherType `0x8902` inside the service VLAN
+(untagged, 802.1Q and QinQ are all parsed) to the `01:80:C2:00:00:3x` groups. It provides
+maintenance domains at levels 0–7, continuity checks (CCM) between maintenance endpoints
+(MEPs), and the Y.1731 overlay: AIS / LCK / CSF, APS protection switching, loopback,
+linktrace and performance measurement. All of it is cleartext, unauthenticated and has no
+integrity protection. [OAM Watch](#oam-watch) covers the separate 802.3ah Link OAM.
+
+**Why it matters.** A forged **APS** frame moves production traffic onto the protection
+path, or locks protection out so the next real fault goes unprotected. A forged **AIS**
+suppresses the alarm for a fault that is really happening. A forged **CCM** raises a
+cross-connect or unexpected-MEP defect that takes a service down. A **linktrace sweep** maps
+a provider's MIP chain hop by hop.
+
+**107 codes in thirteen classes:**
+
+- **A, structural `CFM-001`..`010`**: First TLV Offset past the end, TLV overrun or
+  truncation, a missing End TLV, inconsistent MAID name lengths, a short opcode body, a
+  reserved opcode, a non-zero version, data after End TLV, and a First TLV Offset that
+  disagrees with the opcode.
+- **B, MD-level hierarchy `020`..`024`**: the level disagrees with the destination group,
+  the level is above the configured **MD ceiling** (`021`, inert unless one is set), the
+  same MAID appears at two levels, or a CCM goes to a non-CFM address.
+- **C, CCM state and forgery `040`..`049`**: a MAID mismatch, a duplicate MEP ID, an
+  unexpected MEP joining, an **established MEP moving to a new MAC**, an interval change, an
+  invalid or sub-100 ms interval, RDI, an anomalous MAID format, or an invalid MEP ID.
+- **D, Y.1731 fault management `060`..`065`**: AIS / LCK / CSF observed, **AIS from a
+  source with no CCM history**, AIS while the server-layer CCMs are healthy, or an invalid
+  period field.
+- **E, APS `080`..`087`**: a **Forced Switch**, a Manual Switch, a **Signal Fail with no
+  corroborating fault** (critical), a new source MAC for an established protection group,
+  protection-switch churn, a reserved request code, or **Lockout of protection** (critical).
+- **F, loopback and linktrace `100`..`106`**: LBM / LTM observed, an **LBM flood**, an
+  **LTM TTL sweep**, MIP identity disclosed in an LTR, an oversized Data TLV, or an anomalous
+  TTL.
+- **G, rate `120`..`122`** and **H, CVE triggers `140`/`141`**. **CVE-2020-1639** (Junos:
+  a crafted Ethernet OAM packet cores cfmd) is `CFM-140`, raised off the Class A bounds
+  violations. **CVE-2025-52961** (Junos Evolved: valid traffic drives cfmd to 100% CPU
+  through a cfmman leak) is `CFM-122` / `CFM-141`. Those are a rate correlation labelled
+  **LOW confidence**: the trigger is valid traffic, so the CVE cannot be told from any
+  other heavy CFM talker. Treat it as a prompt to check the peer's cfmman memory.
+  Two CVEs are named but never detected. CVE-2014-3223 (Huawei Y.1731 DoS) has no code,
+  because its trigger field was never published. CVE-2023-20233 (Cisco IOS XR CFM) is
+  rejected because it falls below the bar.
+- **P, posture `160`..`163`**: inventory of MD levels, MEPs, Y.1731 opcodes and service
+  VLANs. There is deliberately no "CFM is enabled" finding. Service OAM on a carrier handoff
+  is by design.
+- **R, ERPS / G.8032 ring protection `180`..`209`**: R-APS is opcode 40 carried in the same
+  CFM common header, so ring protection rides this parser. These rules are
+  **baseline-dependent** — on the wire a legitimate protection switch and a forged R-APS are
+  identical without the declared topology — so most arm only once you **declare the ring**
+  (`cfm-ring`, below). They cover a **forged RPL owner** / two ring blocks / a ring left open,
+  **off-VLAN R-APS**, R-APS from a node not in the declared set, an R-APS(SF) uncorroborated by
+  CCM loss (the forged ring-fault signal), DNF-flag and flush storms, revision downgrades and
+  G.8032v2 sub-ring interconnect propagation, plus the structural R-APS checks that need no
+  ring. With **no ring declared**, R-APS presence is still reported as `CFM-200` (ERPS active,
+  topology undeclared) and malformed R-APS still fires.
+- **M, Y.1731 measurement & maintenance `210`..`240` (v5)**: malformed or abusive loss/delay
+  measurement (LMM/LMR/DMM/DMR/1DM/SLM/SLR), synthetic-loss (TST) and on-demand maintenance
+  opcodes — a forged measurement skews SLA reporting or masks a real fault.
+- **T, transport & encapsulation `241`..`249` (v5)**: CFM/Y.1731 carried where it should not
+  be — e.g. tunnelled inside **VXLAN** — and encapsulation anomalies that cross a segment
+  boundary CFM is meant to stay within.
+- **L, E-LMI cross-plane `250`..`254` (v5, MEF 16)**: E-LMI (EtherType `0x88EE`) runs the
+  UNI's EVC status plane. Like ERPS, it is **declaration-dependent**: **declare the EVC**
+  (`cfm-evc`, below: `REFERENCE,vlan=VLAN[,name=LABEL]`) and the watcher checks the E-LMI
+  CE-VLAN→EVC status against what CFM reports about the same service (`CFM-251`..`253`); with
+  **no EVC declared**, E-LMI presence is reported as `CFM-254` (undeclared) and the join
+  cannot be checked. The capture BPF now admits `0x88EE` alongside CFM's `0x8902`.
+
+**State is kept per interface across scans** (in memory). That covers MA / MEP tables, APS
+group ownership and the CCM history that disarms `CFM-061`. Each scan reports only the
+findings it added. **Reset** (`POST /api/net/cfm-reset`) forgets the state after a
+legitimate MEP or protection change. Set the card's **MD ceiling** to the highest
+maintenance level that is legitimate at the tap. Without it, cross-domain injection is
+caught only when it also violates the destination group address. To police **ERPS ring
+topology**, **declare the ring** (`POST /api/net/cfm-ring` or the card's ring field):
+`VLAN[,rpl=MAC][,nodes=MAC/MAC][,role=major|sub][,parent=NAME][,name=LABEL]`. Declarations
+persist (`data/cfm_watch.json`) and arm the Class R topology rules; with none declared,
+R-APS is still reported present (`CFM-200`) but topology cannot be judged from one tap.
+
+**Vantage.** CFM normally only appears on a carrier / metro Ethernet service handoff or an
+EVC trunk. Everywhere else the card reports `no-traffic`. Capture is `tcpdump`
+(promiscuous, inbound only) with the BPF `ether proto 0x8902 or (vlan and (ether proto
+0x8902 or (vlan and ether proto 0x8902)))` to a pcap. That pcap is fed to the vendored
+stdlib parser, with no scapy on this path. CFM carries no IP header, so the dual-stack
+question does not apply.
+
+**Verdicts:**
+
+| Verdict | When |
+|---|---|
+| `no-traffic` | No CFM captured. |
+| `clean` | Inventory only, plus INFO notes such as APS No Request. |
+| `observed` | A LOW event: RDI, AIS, CSF, or LBM / LTM seen. |
+| `suspicious` | A MEDIUM finding, or a HIGH that rests on LOW-confidence evidence. |
+| **`attack`** | Any CRITICAL, or any other HIGH. |
+
+`attack` pages in the [Network Integrity Monitor](#-network-integrity-monitor). Everything
+except the posture inventory, at MEDIUM and above, feeds [Watchtower](watchtower.md)
+(`cfm_watch`). The card lists the findings and a MEP table (level, MEP ID, MAID, MAC,
+VLAN, interval).
+
+- Endpoint: `GET /api/net/cfm-watch` `{interface, seconds, md_ceiling?}` ·
+  `POST /api/net/cfm-reset` `{interface?}` · `GET|POST /api/net/cfm-ring` /
+  `GET|POST /api/net/cfm-evc` `{action: list|declare|remove|clear, spec?}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py cfm-watch [--iface I] [--seconds N] [--md-ceiling L]
+  [--pcap FILE] [--json]`. `--pcap` replays a file through a fresh engine.
+  `python3 network_diagnostics.py cfm-ring [list|declare|remove|clear] [SPEC]` manages the
+  ERPS ring declarations; `cfm-evc [...] [SPEC]` manages the E-LMI EVC declarations.
+- Self-test: suite `cfm`. All **26** upstream fixtures must fire **exactly** their manifest
+  code sets through the adapter (the ERPS fixtures with their `--ring` and the E-LMI fixture
+  with its `--evc` declaration), and together they cover all **107** codes. The suite also
+  checks the clean baseline, the CVE tagging, the APS lockout, the MD-ceiling arming, that
+  Link OAM is not parsed as CFM, a MEP moved between two scans (caught only by the persistent
+  engine), per-scan deltas, the **ring-declaration store** (a declared ring arms Class R;
+  undeclared R-APS stays at `CFM-200`) and the **EVC-declaration store** (a declared EVC arms
+  the Class L cross-plane; undeclared E-LMI stays at `CFM-254`). It then runs the module's own
+  **284-check conformance** tier and the Wireshark + scapy dual-dissector cross-check tier,
+  both out of process.
+- Vendored engine (Solarflere): `python/cfmwatch.py`, unmodified. Its fixtures and tiers
+  live in `python/cfmwatch_tests/`. **Validated live:** the fixture corpus was replayed with
+  `tcpreplay` over a veth pair in a sealed netns, including VLAN-tagged frames, and **54/54
+  codes fire** through `do_cfm_watch`'s tcpdump path. Not yet validated against production
+  CFM traffic.
+
+### BFD Watch
+A **passive** Bidirectional Forwarding Detection **failover-manipulation** monitor —
+**detection-only**, it never transmits a BFD packet and never participates in a session.
+BFD (RFC 5880 base; 5881 single-hop; 5883 multihop; 7130 micro-BFD on LAG members) is the
+sub-second trigger for routing convergence: a forged BFD packet does **not** compromise a
+router — it *convinces* one that a healthy path is dead, and OSPF/IS-IS/BGP/static then do
+the damage. So the attack this watches for is **induced reconvergence**, and its critical
+verdict is named accordingly. It watches the four RFC-assigned UDP ports — `3784`
+(single-hop control), `3785` (echo), `4784` (multihop control), `6784` (micro-BFD on LAG).
+Reduced to a single card **verdict**:
+
+- **failover-manipulation** (critical — the one that should page you) — a **spoofed
+  teardown** (`BFD-SPOOFED-TEARDOWN`, a Down/AdminDown correlated with a GTSM violation or
+  source migration), a **forced AdminDown** (`BFD-FORCED-ADMINDOWN`), an **illegal state
+  regression** (`BFD-STATE-REGRESSION`, Up→Init/Down against the RFC 5880 state machine), or
+  *(v3)* an **auth-bypass teardown** (`BFD-AUTH-BYPASS-TEARDOWN` — a Down whose auth
+  type/key-id changed away from the session's established profile, the **CVE-2026-73458**
+  Arista EOS auth-bypass shape, CWE-303) — the packets that make a live path go dead.
+- **exposure** — high-severity posture visible on the wire: unauthenticated sessions
+  (`BFD-NO-AUTH`), echo enabled, a `TTL≠255` **GTSM** violation on a single-hop/LAG session
+  (RFC 5881 requires 255), and **malformed / truncated headers** — the latter the
+  exploitation signal for **CVE-2018-0155** (Cisco Catalyst 4500/4900 BFD-offload `iosd`
+  crash on an incomplete BFD header, CVSS 8.6) and **CVE-2023-20049** (Cisco IOS XR
+  BFD hardware-offload crash on a malformed BFD echo), not just protocol hygiene.
+- **instability** — behavioural: session flap, convergence storm (many sessions down at
+  once), collapsed detection-time, and *(v3)* a **micro-BFD flap storm**
+  (`BFD-MICRO-FLAP-STORM` — sustained flapping on a `6784` micro-BFD/LAG session, the
+  **CVE-2026-33800** Juniper MX PFEMAN/FPC-crash shape).
+- *(v4)* **Seamless BFD (S-BFD, RFC 7880)** on `udp/7784` — the stateless reflector plane
+  used by SR / SR-TE path monitoring. Six codes flag a reflector in an illegal state
+  (`BFD-SBFD-REFLECTOR-ILLEGAL-STATE`), a reflected discriminator that doesn't mirror the
+  request (`BFD-SBFD-REFLECTOR-MIRROR-MISMATCH`), a discriminator colliding across SR
+  domains, a non-zero initiator interval, a source-port violation, and the reflected-loop
+  primitive — the ways a forged or misconfigured reflector blackholes or loops a monitored
+  SR path. (Still no new CVE — these are protocol-abuse conditions.)
+
+It also reads **auth posture** off the wire without holding any key: mid-session
+**downgrade**, one-sided (**asymmetric**) authentication, and stalled-sequence **replay
+windows** on keyed-MD5/SHA1. **No baseline learning**: the first sighting of a session
+records its discriminators and state and emits inventory only, and observation gaps are
+treated as **resyncs**, so deploying mid-flight on a lossy SPAN never manufactures a
+phantom teardown. The engine is pure-Python — the Ethernet/IPv4/IPv6/UDP decode, the BFD
+parser and the pcap reader are all hand-rolled (Scapy is used only by the upstream CLI's
+live mode, which the in-app path does not use). The IPv6 decoder walks the full
+extension-header chain, **including the Authentication Header (AH, protocol 51)** — which
+uses a different length encoding than the RFC 8200 headers (`(len+2)×4` per RFC 2402, not
+`(len+1)×8`); before this fix a BFD frame behind AH — as seen on IPsec/AH-hardened
+segments — was silently dropped, so no findings fired at all. **API:**
+`GET /api/net/bfd-watch` (query: `interface`, `seconds`).
+
+> **Watchtower feed.** HIGH/CRITICAL BFD findings (spoofed teardown, forced AdminDown,
+> state regression, malformed/truncated header, GTSM violation, auth downgrade, session
+> flap) are appended as JSON-lines to `/var/log/ragnar/bfd_watch.jsonl`, so
+> failover-manipulation alerts fold into the unified pane + single Pushover path.
+
+### PTP Watch
+A **passive** IEEE-1588 / PTPv2 / gPTP **timing-plane manipulation** monitor —
+**detection-only**, it has no transmit primitives (the upstream engine's conformance tier
+greps its own source to prove that, rather than trusting the claim). This is the **security**
+monitor; for the simpler "is a grandmaster present on this segment?" inventory check see
+[PTP Timing Detection](#ptp-timing-detection). The precision-time
+plane carries the phase reference for 5G radios, power-grid PMUs, broadcast, finance and
+industrial control, and it is almost never authenticated — a forged Announce or an injected
+`correctionField` does not crash anything, it quietly drags the time base and everything
+slaved to it. All three transports are parsed **unconditionally**: **Annex F** (raw
+Ethernet, EtherType `0x88F7`), **Annex D** (UDP/IPv4, `224.0.1.129` / `224.0.0.107`, ports
+`319` event / `320` general) and **Annex E** (UDP/IPv6, `ff0X::181` / `ff02::6B`). PTP
+advertises no prefixes and correlates with no route family, so dual-stack is packet-layer
+plumbing with **no IPv6-specific finding codes** — the same 66 codes fire regardless of L3.
+
+Two design constraints shape every rule. First, **no rule consults the sensor's wall
+clock** — a sensor monitoring a timing plane under attack may itself be slewed or targeted,
+so every rule is packet-vs-packet or packet-vs-its-own-**in-band claim** (`logSyncInterval`,
+`stepsRemoved`, `clockClass`, `currentUtcOffset`, `sequenceId` are all stated on the wire by
+the sender, which is what makes the high-value rules signature-grade and armed on day one,
+with no baseline learning). Second, the capture **walks the IPv6 extension-header chain
+itself** — including the **Authentication Header (AH, protocol 51)**, which sizes in 4-byte
+units with a different bias (`(len+2)×4`) than the ordinary `(len+1)×8` headers — because a
+plain libpcap `udp port 319` primitive cannot chase that chain and is blind to exactly the
+Annex E frames an attacker would craft behind a Hop-by-Hop or AH header. Reduced to a single
+card **verdict**:
+
+- **time-manipulation** (critical — the one that should page you) — a grandmaster
+  **takeover** or two sources announcing one `grandmasterIdentity` (`PTP-B02`), a
+  `correctionField` beyond physical plausibility (`PTP-A08`) or a non-monotonic origin
+  timestamp (`PTP-A10`) that **injects offset directly**, a mid-session `currentUtcOffset`
+  flip (`PTP-C01`), a management **SET/WRITE** (`PTP-D01`/`D02`), or a unicast-cancel forgery
+  (`PTP-G03`).
+- **exposure** — high-severity: Announce/Sync **flooding** faster than a source's own
+  advertised rate (`PTP-A03`/`A04`), `sequenceId` **regression** (`PTP-A07`), one
+  `sourcePortIdentity` from two MACs (`PTP-B01`).
+- **attack-indicator** — a medium/low self-contradiction or protocol violation that is real
+  but not, on its own, a confirmed takeover.
+- **posture** — no integrity protection on the timing plane (`PTP-E03`), multiple PTP
+  domains, PTPv1 or `minorVersionPTP` **downgrade** (`PTP-E02`).
+- **CVE-attributed *(new in v3)*** — a **Class V** of four codes that take **precedence over
+  the generic malformed code** `PTP-A09` (a packet matching a known CVE gets the CVE, not a
+  shrug): **`PTP-V01`** linuxptp forwarding over-read — declared `messageLength` exceeds the
+  bytes that arrived (**CVE-2021-3570**, critical); **`PTP-V02`** one-step Sync length abuse —
+  a one-step Sync whose surplus is not a well-formed TLV chain (**CVE-2021-3571**); **`PTP-V03`**
+  gPTP peer-delay requester flood — a **third** distinct `Pdelay_Req` requester on a
+  point-to-point 802.1AS link disables the port's sync (**CVE-2024-42861**, stateful);
+  **`PTP-V04`** Arista EOS agent restart — a management/signaling message with a truncated or
+  overrunning TLV (**CVE-2021-28510**).
+- **SyncE / ESMC *(new in v4)*** — a **Class S** of ten codes. SyncE distributes *frequency*
+  at the physical layer, which a tap cannot see, but its control protocol **ESMC** (ITU-T
+  G.8264, slow protocol EtherType `0x8809`, subtype `0x0A`, to `01:80:C2:00:00:02`) is on the
+  wire. Always on: **`PTP-S01`** malformed ESMC PDU, **`S02`** quality level changed without
+  the event flag (high), **`S03`** event flag with no QL change, **`S04`** PDU rate over the
+  G.8264 ceiling (high), **`S05`** more than two ESMC speakers on one link (high), **`S06`**
+  VLAN-tagged ESMC frame, **`S07`** extended-QL TLV contradicting the legacy QL TLV (high),
+  **`S08`** QL flapping (posture). Two ship dark because they need site policy that is not on
+  the wire — **`S09`** primary-grade quality from an undeclared source and **`S10`** an SSM
+  code undefined in the declared G.781 network option (the in-app scan does not arm them).
+  **No ESMC or SyncE CVEs exist** (the author's sweep across IOS XR/XE, Junos, Nokia, linuxptp
+  and synce4l found none), so Class S is protocol-violation and posture detection. LACP shares
+  EtherType `0x8809` (subtype `0x01`) and is never alerted on.
+- **ITU-T telecom profiles *(new in v6)*** — a **Class P** of ten posture codes comparing the
+  traffic with a **declared** profile, picked from the card's **Profile** list (API
+  `profile=g8275.1 | g8275.2 | g8265.1 | 8021as`). They stay **off** until you pick one,
+  because nothing in a PTP frame says which profile a domain is meant to follow:
+
+  | | G.8265.1 | G.8275.1 | G.8275.2 |
+  |---|---|---|---|
+  | Purpose | frequency | full timing support | partial timing support |
+  | Domain range (default) | 4–23 (4) | 24–43 (24) | 44–63 (44) |
+  | Transport | unicast UDP | Ethernet | unicast UDP |
+  | priority1 | not pinned | 128 | 128 |
+
+  **`PTP-P01`** domain outside the profile's range, **`P02`** transport foreign to it (high),
+  **`P03`** multicast Sync/Announce in a unicast profile (high), **`P04`** unicast negotiation
+  in a multicast-only profile, **`P05`** peer-delay in a telecom profile, **`P06`** priority1
+  not pinned to the profile value, **`P08`** a primary-reference clockClass with no
+  traceability asserted (high, a self-contradiction), **`P09`** a destination outside the
+  G.8275.1 address pair, and **`P10`/`P11`** non-zero `correctionField` / `stepsRemoved`
+  under G.8265.1. P07, P12 and P13 were cut upstream for lack of verifiable ground truth
+  (permitted clockClass sets, grant-duration ranges, Interface Rate TLV). The table values
+  were checked against shipping implementations (Juniper, IP Infusion OcNOS, linuxptp), and
+  967 frames of real `ptp4l` G.8275.1 traffic read clean under `g8275.1`.
+
+**gPTP / IEEE 802.1AS** (`majorSdoId 1`, and *(new in v6)* `majorSdoId 2` — the 802.1AS-2020
+**Common Mean Link Delay Service**, a link-level peer-delay service shared across gPTP
+domains) gets eight peer-delay-specific codes on top of the generic set. The peer-delay and
+transport rules (`PTP-H01`, `PTP-H02`, `PTP-H08`, `PTP-V03`) now watch both, so the strongest
+denial-of-timing rules are no longer blind to CMLDS; the Announce / Follow_Up / Signaling
+rules stay instance-only, since CMLDS never carries those messages (the two `clockClass`-derived rules are masked for it, since 802.1AS uses
+248 for non-GM-capable and weighs BMCA differently). The headline is **multiple peer-delay
+responders on one link** (`PTP-H02`): because 802.1AS mandates point-to-point, a single
+injected `Pdelay_Resp` sets `asCapable=FALSE` and stops timing on that port — a complete
+**denial-of-timing** that forges no timestamp at all. Path-trace TLV checks round it out
+(missing TLV, a length that contradicts `stepsRemoved`, a repeated `clockIdentity` loop).
+The engine is pure-Python — the Ethernet/IPv4/IPv6/UDP decode, the PTP parser and the pcap
+reader are all hand-rolled (no Scapy; Scapy has no PTP dissector at any shipping version).
+**API:** `GET /api/net/ptp-watch` (query: `interface`, `seconds`, `profile` — default `auto`, none declared).
+
+> **Deployment note.** A full core SPAN into a USB NIC on a Pi Zero 2W will saturate the
+> adapter — mirror a VLAN or apply an ACL to the mirror session; do not mirror a busy trunk
+> wholesale. The snapshot capture is next-header-qualified (Annex F `0x88F7` + UDP `319/320`
+> + an `ip6[6]` extension-header clause + ESMC — slow protocol `0x8809` subtype `0x0A`, plain
+> or behind one VLAN tag, matched by byte offset so LACP is excluded), never a blanket `ip6`,
+> so the ext-header'd Annex E evasion case reaches userspace without flooding the Pi.
+
+> **Watchtower feed.** HIGH/CRITICAL PTP findings (grandmaster takeover, time injection,
+> management WRITE, unicast-cancel forgery, gPTP peer-delay denial) are appended as
+> JSON-lines to `/var/log/ragnar/ptp_watch.jsonl`, so time-manipulation alerts fold into the
+> unified pane + single Pushover path.
+
+### SMTP Watch
+A **passive** SMTP monitor on **tcp/25, 587 and 465** — **detection-only**, it never
+transmits; the parse path takes raw bytes and the capture is an ordinary tcpdump snapshot
+driven by the in-app adapter. Like [FTP Watch](#ftp-watch) it is a single-implementation
+detector under a protocol name: it is an **Exim** detector and claims **no** coverage of
+Postfix, Sendmail or any other MTA. IMAP and POP3 are out of scope. Two classes, 13 codes
+(`SMTP-nnn`):
+
+- **Class A — attack signatures** (`SMTP-001`…`SMTP-006`), ungated and near-zero
+  false-positive by construction:
+  - **`${...}` string expansion** in a `MAIL FROM` or `RCPT TO` address
+    (**CVE-2019-10149**, CISA KEV, Exim 4.87–4.91). No legitimate address contains those
+    two bytes. The server's reply gives the outcome for free: a **2xx to a tainted
+    recipient** raises `SMTP-003` — *payload queued*. That is the ceiling this module
+    claims, because the expansion runs later, at delivery, and is never observable on the
+    wire.
+  - **Malformed SNI or client-certificate DN** — a backslash or NUL byte in a ClientHello
+    `server_name`, or a TLS 1.2 client-certificate DN ending in a backslash
+    (**CVE-2019-15846**, Exim 4.80–4.92.1, reported ransomware use). The DN rule is TLS 1.2
+    only: in TLS 1.3 the client Certificate message is encrypted.
+  - **Overlong EHLO / HELO** (**CVE-2019-16928**, Exim 4.92–4.92.2) — the `string_vformat`
+    heap overflow. RFC 5321 §4.5.3.1.4 caps a command line at 512 octets including CRLF and a
+    compliant EHLO is far under it, so the rule keys on the **condition** (a non-conformant
+    line length) rather than on a proof-of-concept string.
+  - **AUTH base64 of length 4n+3** (**CVE-2018-6789**, CISA KEV, Exim below 4.90.1) — the
+    `b64decode` over-consume. Legitimate SMTP AUTH always sends padded base64 (a multiple of
+    4), so 4n+0 and 4n+1 do not fire. Both payload positions are covered: inline after
+    `AUTH <mech>` and the continuation line after a `334` prompt.
+- **Class B — banner / version** (`SMTP-010`…`SMTP-014`), capped at **notice severity and
+  low confidence**: distro backports (Debian, Ubuntu, cPanel) keep old version strings in
+  the banner after patching, so a Class B finding means "version in the vulnerable range",
+  never "confirmed vulnerable". The ranges do not nest — CVE-2018-6789 (<4.90.1) sits inside
+  CVE-2019-15846 (≤4.92.1) and CVE-2019-10149 (4.87–4.91) overlaps both, while
+  CVE-2019-16928 (4.92–4.92.2, `SMTP-015`) overlaps only the tail of CVE-2019-15846 — so one banner such
+  as 4.89 legitimately raises `SMTP-011`, `SMTP-012` and `SMTP-013` at once. The comparator
+  parses **every** version component: Exim ships three- and four-part versions (4.90.1,
+  4.90.0.27) and a comparator that truncates to two reads 4.90.1 as 4.90 and false-positives
+  on a patched server.
+
+**Dual-stack** with enforced parity. The capture filter keeps a bare `ip6` term — the only
+form that admits IPv6 behind extension headers — which makes the module's **software port
+gate** the sole rejector of non-SMTP IPv6 traffic, a different code path from IPv4 where the
+kernel BPF drops it. Verdicts: `clean` < `posture` (banner range) < `attack-indicator`
+(expansion attempt, overlong EHLO, malformed SNI/DN, AUTH 4n+3) < `payload-queued` (the server accepted a
+tainted recipient). Only **HIGH/CRITICAL** findings feed [Watchtower](watchtower.md); banner
+ranges stay out of the alert feed. **Documented blind spot:** AUTH offered only after
+STARTTLS is encrypted, so the `SMTP-006` rule covers cleartext AUTH only.
+
+- Endpoint: `GET /api/net/smtp-watch` `{interface, seconds}` · binary: `tcpdump` · needs Scapy
+- CLI: `python3 network_diagnostics.py smtp-watch [--iface I] [--seconds N] [--json]`
+
+### FTP Watch
+A **passive** FTP control-channel monitor — **detection-only**, it never transmits (an AST
+guard in the module rejects any transmit-shaped call in its own source, which is why the
+tcpdump capture lives in the in-app adapter rather than in the module). FTP is cleartext, so
+the entire command dialogue is readable from a tap.
+
+It is deliberately a **ProFTPD detector under a protocol name**: it reports the ProFTPD CVEs
+that are genuinely observable on the wire and claims **no** coverage of vsftpd, Pure-FTPd or
+any other server — those were walked and produced nothing passively detectable. Three
+finding classes, 16 codes (`FTP-nnn`):
+
+- **Class A — mod_copy behaviour** (`FTP-001`…`FTP-008`). `SITE CPFR` / `SITE CPTO` is a
+  **server-side copy that needs no data connection**. Issued before any login it is
+  **CVE-2015-3306** (the classic pre-auth webshell drop); issued by an anonymous or ordinary
+  authenticated session it is **CVE-2019-12815** (mod_copy ignores `<Limit READ/WRITE>`).
+  The server's own replies are the oracle: a **350** to a pre-auth `CPFR` means the server
+  *accepted* it — the vulnerable behaviour observed directly, whatever the banner claims —
+  and a **250/226/200** to `CPTO` means the copy *completed*. Attempt and completion are
+  separate severities, and a **sensitive source path** or a **webroot / executable-extension
+  destination** is raised on its own. `SITE HELP` advertising CPFR/CPTO (`FTP-006`) is
+  exposure: mod_copy is loaded.
+- **Class B — banner / version** (`FTP-010`…`FTP-014`). The `220` banner is parsed for a
+  ProFTPD version and screened against the affected ranges (`CVE-2015-3306` `1.3.4rc1`–
+  `1.3.5a`; `CVE-2019-12815` `1.3.4rc1`–`1.3.6a`, **never fixed on the 1.3.5 branch**;
+  `CVE-2023-51713` everything below `1.3.8a`). Version ordering places a release candidate
+  below its release and a maintenance letter above it (`1.3.5rc3 < 1.3.5 < 1.3.5a`). Every
+  range finding is **capped at low confidence and says so** — distributions backport fixes
+  without changing the version, so this is "verify **this** server", never a vulnerable
+  verdict.
+- **Class C — quoted command verb** (`FTP-020`, `FTP-021`). A control line that *opens* with
+  a double quote is the input shape that drives `make_ftp_cmd` into a one-byte
+  out-of-bounds read (**CVE-2023-51713**). It is **not** version-gated: no FTP verb has that
+  form, so the match is zero-false-positive by construction, and quotes inside *arguments*
+  (`STOR my "file".txt`) never fire. A session torn down with no reply after such a line is
+  flagged separately as crash-consistent.
+
+**Dual-stack** with full parity: the module decodes frames itself (no dissector in the parse
+path), walks IPv6 extension-header chains, reassembles IPv4 and IPv6 fragments and
+reassembles TCP; every finding carries an `af` field and renders IPv6 endpoints in RFC 3986
+brackets. The capture keeps a bare `ip6` term (the only form that admits IPv6 behind
+extension headers) and a clause for IPv4 non-first fragments, at full snaplen so a command
+line or banner is never truncated. Verdicts: `clean` < `posture` (banner range) < `exposure`
+(mod_copy advertised) < `attack-indicator` (pre-auth/anonymous attempt, quoted verb) <
+`modcopy-exploited` (the server accepted or completed a copy). HIGH/CRITICAL findings feed
+[Watchtower](watchtower.md).
+
+- Endpoint: `GET /api/net/ftp-watch` `{interface, seconds, ports}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py ftp-watch [--iface I] [--seconds N] [--ports 21] [--json]`
+
+### SR-MPLS Watch
+A **passive** MPLS / SR-MPLS / SRv6 **label & segment-manipulation** monitor —
+**detection-only**, it has no transmit primitives (the engine's own conformance tier
+walks the AST and greps the source to prove it). MPLS carries **no per-label
+authentication**: a labelled frame is forwarded on the label it carries, so a label or
+SRv6 segment *chosen by whatever sent the frame* — rather than by this network's own
+control plane — is a forwarding-path injection. It parses the full data plane (EtherType
+`0x8847`/`0x8848` through any depth of 802.1Q tags; **SRv6** via the IPv6 Routing-Header
+type 4, RFC 8754, including under an MPLS shim) and the SR control plane from scratch:
+**LDP** (udp/tcp 646, RFC 5036), **RSVP-TE** (ip-proto 46), **BGP-SR** (Prefix-SID
+attribute, RFC 8669; labelled-unicast + VPN SAFIs), **IS-IS-SR** (RFC 8667 sub-TLVs) and
+**OSPFv2-SR** (RFC 7684/8665 opaque LSAs) and *(v3)* **OSPFv3-SR** (RFC 5340 / RFC 8362 extended LSAs / RFC 8666 SR — Prefix-SID / Adj-SID / Router-Information sub-TLVs over IPv6 proto 89). An overrunning OSPFv3 SR sub-TLV fires `SRM-SR-TLV-OVERRUN` (protocol `ospfv3`; the RI path names CVE-2024-31950, and the FRR ospf6d crash CVEs CVE-2025-61101/61103/61106/61107 are reference-only — their receiver `debug`-dump precondition isn't passively observable). *(v4)* It also parses the MPLS/SR **OAM plane** — **LSP Ping** (udp/3503 MPLS Echo Request/Reply, RFC 8029 / RFC 8287 segment FECs), **VCCV** pseudowire control-channel checks, and **in-situ OAM (IOAM)** option abuse — plus loss/delay **measurement** anomalies, bringing the catalogue to **56 codes** (still the same 17 named CVEs — these are wire conditions, not product versions). Reduced to a single card **verdict**:
+
+- **segment-injection** (critical — the one that should page you) — an MPLS-labelled
+  frame (`SRM-MPLS-ON-CE-PORT`) or an **SRH** (`SRM-SRH-ON-CE-PORT`) on an interface
+  declared (or defaulted) as **customer-facing**. The label/segment was chosen by the
+  far end, not by this network — the label-injection / **VRF-hopping** primitive.
+- **label-manipulation** — reserved / **implicit-null** labels forwarded on the wire, a
+  labelled frame forwarded with an **expired TTL** (`SRM-TTL-ZERO-FORWARDED`), a
+  BOS/GAL/ELI placement violation, a label rebind, or *(v2)* an **unvalidated
+  Segment-Routing TLV-length overrun** (`SRM-SR-TLV-OVERRUN` — a BGP Prefix-SID, IS-IS or
+  OSPF SR sub-TLV whose declared length runs past the bytes that arrived). It names the SR
+  control-plane parser CVEs it actually catches: BGP Prefix-SID **CVE-2023-31490 /
+  CVE-2024-31948** and OSPF SR opaque-LSA **CVE-2024-31950 / CVE-2024-31951**. A bundled
+  `CVE_REFERENCES` table additionally records the SR-plane CVEs that are disputed/rejected or
+  owned by the BGP/IS-IS/OSPF watchers, so they are documented without being falsely claimed
+  here. (v2's unrelated IPv6-transport refactor was deliberately not pulled in — separate
+  feature, not a CVE.)
+- **exposure / posture** — excessive label-stack depth, entropy-label anomalies, SRv6
+  **path disclosure** / missing SRH **HMAC**, explicit-null exposed, LDP off-link hellos
+  or mapping-without-withdraw, and adjacency-SID instability.
+
+**Interface `role` is load-bearing** (the vrfwatch precedent): on a **`ce`** tap the
+presence rules are armed at critical; on a **`core`** backbone tap they go quiet and only
+structural rules run; left **`unknown`** it *fails loud toward customer-facing* and emits
+`SRM-ROLE-UNDECLARED` **once** to say so — so leaving it undeclared on a P–P link is noisy
+by design, never silently wrong. The engine is pure-Python (its own parsers); the in-app
+path captures one short snapshot and replays it through the same libpcap reader the BFD
+watcher uses (scapy is never imported). **API:** `GET /api/net/srmpls-watch` (query:
+`interface`, `seconds`, `role` = `ce` | `core` | `unknown`).
+
+> **Watchtower feed.** HIGH/CRITICAL SR-MPLS findings (label/segment injection,
+> reserved-label, TTL-expiry-forwarded, SRv6 path disclosure / missing HMAC, and the
+> LDP/RSVP/BGP-SR/IS-IS-SR/OSPF-SR control-plane tells) are appended as JSON-lines to
+> `/var/log/ragnar/sr_mpls_watch.jsonl`, so they fold into the unified pane + single
+> Pushover path.
+
+### IPsec / IKE Watch
+A **passive** IKEv1/IKEv2 (IPsec key-exchange) **security-posture** detector on UDP **500**
+and **4500** — **detection-only**, it never transmits, never probes, and never touches ESP
+payload. It parses the plaintext IKE handshake and reports what peers are *willing to
+negotiate*. The findings:
+
+- **`SWEET32-VULNERABLE-CIPHER-PROPOSAL`** (high, **CVE-2016-2183**) — a 64-bit block cipher
+  (**3DES / Blowfish**) offered in an IKE proposal. The same SWEET32 the [TLS](#tls-watch)
+  and [SSH](#ssh-watch) watchers name, now on the IKE layer.
+- **`DHEATER-WEAK-DH-GROUP-OFFERED`** (high, **CVE-2022-40735**) — **MODP-768 / MODP-1024**
+  offered: DoS- and downgrade-prone (**D(HE)at**).
+- **`WEAK-DH-GROUP-OFFERED`** (high, **CVE-2015-4000** Logjam) — a DH group below current
+  guidance (MODP < 2048, ECP-192/224, 1024-bit subgroups).
+- **`IKEV1-AGGRESSIVE-MODE-DETECTED`** (medium, **CVE-2002-1623**) — IKEv1 **Aggressive Mode**:
+  identity and the PSK hash are exposed **pre-auth**. Read from the *Exchange Type* field
+  (offset 18, value 4) — NOT a flag bit; a wire-format correction the module documents.
+- **`WEAK-HASH-PSK-AUTHENTICATION` / `WEAK-PRF-IKEV2`** (medium, **CVE-2018-5389**) — MD5/SHA1
+  hash with PSK auth (v1), or a weak PRF (v2) — offline PSK cracking feasible.
+- **`LEGACY-CIPHER-PROPOSAL`** (medium) — DES / 3DES offered.
+- **`DHEATER-DOWNGRADE-DETECTED`** (high, stateful) — a strong DH offer answered with a **weak
+  group selected** by the responder on the same SPI pair: an actual downgrade in progress,
+  keyed on IKE SPIs so it survives NAT and correlates identically over v4/v6.
+- **`IKEV1-AGGRESSIVE-MODE-PSK-HASH-EXTRACTED`** — surfaces the plaintext Aggressive-Mode PSK
+  hash (already in the clear on the wire) in hex for offline analysis.
+- **`ML-KEM-DOWNGRADE-VULNERABLE`** (gated) — an IKE_SA_INIT offering an ML-KEM key exchange
+  with no downgrade-prevention Notify; inert until two IANA assignments are confirmed.
+
+**Dual-stack by construction:** IKE is transport-agnostic, so every proposal, algorithm and
+weakness is byte-identical over IPv4 and IPv6 — the address family is a report label, never a
+branch. The BPF is `udp port 500 or udp port 4500`; replay uses the in-app libpcap reader (no
+scapy). The engine is the vendored `python/ipsecwatch/` package, surfaced in-app.
+- Endpoint: `GET /api/net/ipsec-watch` `{interface, seconds}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py ipsec-watch [--iface I] [--seconds N] [--json]` · `ipsec-selftest`
+
 ### FHRP Watch
 A **passive** hijack scanner for the **First Hop Redundancy Protocols** — **HSRP**
-(Cisco, UDP 1985), **VRRP** (RFC 5798, IP proto 112), **GLBP** (Cisco, UDP 3222)
-and **CARP** (BSD, IP proto 112). **Detection-only** — it never sends an FHRP
-packet or joins an election; it captures one short window of the multicast hellos
-and classifies them against a learned baseline.
+(Cisco, UDP 1985 v4 / **UDP 2029 v6**), **VRRP** (RFC 5798, IP proto 112, **v4 and
+v6**), **GLBP** (Cisco, UDP 3222, **v4 and v6**) and **CARP** (BSD, IP proto 112).
+**Detection-only** — it never sends an FHRP packet or joins an election; it captures
+one short window of the multicast hellos and classifies them against a learned
+baseline.
+
+**Dual-stack (IPv4 + IPv6).** IPv6 FHRP is *more* constrained than IPv4, which
+favours a detector: sources must be **link-local** (fe80::/10), the HSRPv6 virtual
+IP is derivable from the group, and the virtual-MAC blocks differ by family — so the
+v6 tells are close to false-positive-free. All state is **namespaced by address
+family** (`hsrp/1/v4` vs `hsrp/1/v6` are two independent elections with separate
+winners), the same v2/v3 split `ospfwatch` uses — merging them would false-positive
+forever. **HSRPv6 (UDP 2029) and HSRPv2 (UDP 1985 Group-State TLV) are byte-decoded
+by hand** — `tcpdump` only understands classic HSRPv0/v1 and mislabels or ignores
+the TLV format — while VRRPv3/IPv6 and GLBPv6 flow in through the family-agnostic
+BPF. Dual-stack hosts generally prefer IPv6, so the "unused" v6 gateway is often the
+one nobody hardened and nobody is watching; the IPv6 pivot from a takeover is
+NDP/Neighbour-Advertisement spoofing (the v4 pivot is `arp_guard`).
 
 FHRP is how two or more routers share a single **virtual gateway** (one virtual
 IP + MAC that floats to whichever router is *active*), so hosts keep working when a
@@ -1587,6 +3810,11 @@ off-subnet traffic now flows through them (Yersinia, Loki, `scapy`). What it fla
 - **Weak / no auth** — plaintext HSRP auth or VRRP `authtype none/simple`. This is
   the enabler; the fix is MD5/HMAC (HSRP key-chains, VRRP AH) plus filtering FHRP
   multicast off access ports.
+- **IPv6 tells** (surface as **rogue-speaker**, zero-config) — an IPv6 FHRP advert
+  whose **source isn't link-local** (fe80::/10), which a conforming router never
+  does (crafted / off-segment injection); and an advert whose **declared address
+  family disagrees with its transport** (e.g. an HSRPv2 datagram claiming IPv6 while
+  riding IPv4), a malformed/crafted-packet signature real routers never produce.
 
 **GLBP gets its own decoder and two hijack planes.** Neither `tcpdump` nor Scapy
 dissects GLBP, so it is decoded by a **hand-rolled byte parser** (per the Wireshark
@@ -1609,12 +3837,18 @@ so it has two distinct hijacks:
 The first scan **learns** the current groups, their active speakers/priorities, and
 the **GLBP forwarders** (owner, vMAC, weight per group/forwarder) as the trusted
 baseline (`data/fhrp_watch.json`); after a legitimate router/priority/forwarder
-change, click **Trust current** to re-learn. Capture is done to a pcap (BPF
-`(udp and (port 1985 or port 3222)) or (ip proto 112) or (ip6 proto 112)`), replayed
-through `tcpdump -r … -v` for the HSRP/VRRP/CARP parse and byte-decoded with Scapy
-for GLBP; CARP stays best-effort. Put the Pi on the routed VLAN or a SPAN/mirror to
-see the hellos. **API:** `GET /api/net/fhrp-watch`, `POST /api/net/fhrp-baseline`.
-**CLI:** `fhrp-watch`, `fhrp-selftest`.
+change, click **Trust current** to re-learn. Capture is done to a pcap (dual-stack
+BPF `(udp and (port 1985 or port 2029 or port 3222)) or (ip proto 112) or (ip6 proto
+112)`), replayed through `tcpdump -r … -v` for the classic HSRP/VRRP/CARP parse and
+byte-decoded with Scapy for **HSRPv2/HSRPv6 and GLBP**; CARP stays best-effort. Put
+the Pi on the routed VLAN or a SPAN/mirror to see the hellos. **API:**
+`GET /api/net/fhrp-watch`, `POST /api/net/fhrp-baseline`. **CLI:** `fhrp-watch`,
+`fhrp-selftest` (22 offline scenarios incl. HSRPv6 clean/hijack, non-link-local
+source, family mismatch, dual-stack no-merge, and a v6 Group-State-TLV decode).
+
+> **Baseline note:** the dual-stack update namespaces baseline keys by address
+> family (`hsrp/1` → `hsrp/1/v4`), so a baseline learned before it re-learns once on
+> the next scan — expected, harmless, and only on first run after the upgrade.
 
 ### EIGRP Watch
 A **passive** routing-security scanner for Cisco's **EIGRP** — its interior gateway
@@ -1630,22 +3864,32 @@ unlike OSPF (whose LSA internals `tcpdump` leaves opaque), `tcpdump` **fully dec
 EIGRP's route TLVs** — the advertised prefix, next-hop and metrics are visible — so
 this scanner sees route injection directly. What it flags:
 
-- **injection** — a prefix that isn't in the baseline being advertised, or a known
-  prefix now pointing at a **different next-hop** (route / next-hop hijack). This is
-  the money finding — a forged route steering traffic.
+- **injection** — a prefix that isn't in the baseline being advertised (v4 *or* v6),
+  or a known prefix now pointing at a **different next-hop** (route / next-hop
+  hijack). This is the money finding — a forged route steering traffic. A newly
+  injected **default route** (`::/0` or `0.0.0.0/0`) is named as a *candidate-default
+  hijack*, since it attracts all unmatched traffic.
 - **rogue-router** — a new EIGRP speaker (source / AS) not in the baseline
   (adjacency spoofing).
-- **storm** — an EIGRP flood (hello / query storm) by rate.
+- **storm** — an EIGRP flood (hello / query storm) by rate; *(v5)* a sustained
+  **unauthenticated Update-class flood from one neighbour** is additionally named as
+  the **CVE-2026-20222** pattern (Cisco ASA/FTD EIGRP DoS — crafted high-rate updates
+  leak memory until the device reloads).
 - **anomaly** — a **K-value** or **AS-number** mismatch between speakers (a misconfig
-  that blocks peering, or a crafted hello probing the segment).
-- **weak-auth** — EIGRP packets with **no Authentication TLV** (the enabler for
-  every injection attack).
+  that blocks peering, or the crafted-K-value / Goodbye adjacency-reset shape of
+  **CVE-2005-4436**); or an **EIGRPv6 packet not sourced from a link-local `fe80::/10`
+  address** — RFC 7868 §6.1 requires it, so a global/off-link v6 source is spoofed or
+  off-segment (zero-config, deterministic).
+- **weak-auth** — EIGRP packets with **no Authentication TLV** (the weak-authentication
+  class of **CVE-2005-4437**, and the enabler for every injection attack).
 
-The BPF is `ip proto 88 or ip6 proto 88`. IPv4 route TLVs (internal + external, with
-next-hop, origin-router/AS and metrics) are fully decoded; **IPv6 EIGRP** yields the
-speaker, AS, auth state and K-values but not per-prefix detail (this `tcpdump` build
-prints the v6 route TLV as `Unknown TLV (0x0402)`). Put the Pi on the routed VLAN or
-a SPAN/mirror to see EIGRP. The first scan **learns** the current routers and the
+**Dual-stack (RFC 7868).** The BPF is `ip proto 88 or ip6 proto 88`, and **both IPv4
+and IPv6 route TLVs** (internal + external, with the prefix, next-hop, origin-router/AS
+and metrics) are decoded — so v6 route/next-hop injection is caught exactly like v4,
+and the map is keyed by prefix string so it was already family-agnostic. EIGRPv4 and
+EIGRPv6 routinely run different AS numbers on the same wire, which is expected and not
+flagged. Put the Pi on the routed VLAN or a SPAN/mirror to see EIGRP. The first scan
+**learns** the current routers and the
 advertised prefix→next-hop map as the baseline (`data/eigrp_watch.json`); after a
 legitimate topology change, click "Trust current". **API:** `GET /api/net/eigrp-watch`,
 `POST /api/net/eigrp-baseline`. **CLI:** `eigrp-watch`, `eigrp-selftest`.
@@ -1672,9 +3916,10 @@ metrics to blackhole or MITM traffic (the IS-IS analogue of OSPF LSA injection).
 scanner sees injection directly and can name the routers. What it flags:
 
 - **injection** — an LSP from a system-id **not** in the baseline, a **new /
-  re-homed** reachable prefix (an LSP hijack steering traffic), or an **LSP purge**
-  (Remaining Lifetime 0, deleting a router's LSP from every database in the area — a
-  blackhole). The money findings.
+  re-homed** reachable prefix (an LSP hijack steering traffic — v4 *or* v6), or an
+  **LSP purge** (Remaining Lifetime 0, deleting a router's LSP from every database in
+  the area — a blackhole). A newly-injected **default route** (`::/0` or `0.0.0.0/0`)
+  is named as such, since it attracts *all* unmatched traffic. The money findings.
 - **rogue-router** — a new IS-IS speaker (system-id) sending hellos, not in baseline
   (adjacency spoofing).
 - **storm** — an IIH/LSP flood by rate.
@@ -1685,6 +3930,29 @@ scanner sees injection directly and can name the routers. What it flags:
   one system seen both keyed and un-keyed (a spoofed PDU racing the real router's).
 - **weak-auth** — a PDU with **no Authentication TLV** or a **cleartext** password
   (the injection enabler).
+- **exposure** *(v5, posture — amber, doesn't page)* — an IOS XR feature precondition
+  visible on the wire: **multi-instance IS-IS** (RFC 6822 Instance-Identifier TLV #7 →
+  **CVE-2026-20074**) or **SR / Flexible-Algorithm signalling** (Router-Capability TLV
+  #242 SR/SRv6/FAD/Prefix-SID sub-TLVs → **CVE-2024-20406**). These say "this speaker has
+  the feature enabled, so an affected IOS XR build is exposed" — confirm the model/version
+  and patch. CVE-2024-20312 (IOS/IOS XE) is excluded: no passive signature.
+
+**Dual-stack (IPv6 reachability, TLV 236/237, RFC 5308).** IPv6 prefixes carried in
+the IPv6 Reachability TLVs are parsed and run through the same injection/re-home
+logic as v4 (the map is keyed by prefix string, so it was already family-agnostic).
+On top of that, three **zero-config** IPv6 content tells fire independently of the
+baseline — because a malformed or reserved prefix is wrong even if it was present at
+learn time — surfacing as **anomaly**:
+
+- **IPv6 bogon** — reserved / non-routable space in the IGP (link-local `fe80::/10`,
+  multicast `ff00::/8`, documentation `2001:db8::/32`, 6to4 `2002::/16`, Teredo
+  `2001::/32`, IPv4-mapped, `::/8`, discard `100::/64`). ULA (`fc00::/7`) is
+  deliberately *not* flagged — it can be a valid internal aggregate — keeping this
+  false-positive-free for real networks.
+- **IPv6 host-bits** — non-zero bits beyond the prefix length. RFC 5308 requires them
+  zero, so this is a broken encoder or bits smuggled as a covert channel.
+- **IPv6 down-bit** — the Up/Down bit set on a **Level-2** prefix: an L1 prefix
+  re-advertised down into L2 (a redistribution leak and a potential routing loop).
 
 The BPF is the two IS-IS multicast MACs, captured with `tcpdump -e` for the sender.
 The first scan **learns** the current routers (resolved to hostnames via TLV 137),
@@ -1699,19 +3967,127 @@ three-way, hello-padding, narrow-metrics, malformed-PDU), per-code severity +
 dedup, baseline learning and a hardened daemon — see
 [isiswatch](isiswatch.md) (`isiswatch.py`).
 
+### RIP Watch
+A **passive** routing-security scanner for **RIP** (RFC 2453, UDP/520, IPv4) and
+**RIPng** (RFC 2080, UDP/521, IPv6) — the oldest distance-vector IGP and the **4th
+member of Ragnar's in-app IGP family** alongside OSPF, IS-IS and EIGRP. RIP is still
+found on small/legacy segments; it multicasts route updates in the clear (RIPv2
+`224.0.0.9`, RIPng `ff02::9`) and a **better metric always wins**, so any host that
+can reach the segment can steer traffic. **Detection-only** — it never transmits.
+
+The engine (vendored at `python/ripwatch.py`) **learns** a baseline — which sources
+speak RIP, which prefixes they advertise at what metric, and with what auth posture —
+then **arms**; abuse rules fire only once armed, while structural and posture findings
+fire in any phase (the `modbuswatch`/`stpwatch` learn-then-arm shape). 25 finding
+codes across three numeric bands (`001–099` posture, `100+` abuse/structural):
+
+- **injection** — `RIP-102` (a prefix not advertised during the learn phase, or a new
+  advertiser for a known one), `RIP-104` (a **default-route** injection — attracts all
+  unmatched traffic), `RIP-108` (an unsolicited **unicast** Response — targeted
+  injection), `RIP-109` (a **RIPv1 Response where authenticated RIPv2 is the segment
+  norm** — the auth-bypass of **CVE-2006-2224**).
+- **hijack** — `RIP-103`, a **metric-undercut** from a new source (a better metric for
+  a known prefix pulls the route).
+- **rogue** — `RIP-101`, a new RIP speaker that begins emitting Responses after arm.
+- **storm** — `RIP-105`, a metric-16 **mass-poison / withdrawal** (per-message count or
+  sustained rate).
+- **anomaly / structural** — `RIP-120` (an **RTE count/length that overruns the
+  datagram** — the malformed-RIP crash of **CVE-2026-102019** (Junos/Junos Evolved
+  rpd), **CVE-2013-3470** (Cisco IOS XR) and **CVE-2012-4091** (Cisco NX-OS), caught by
+  construction), `RIP-107` (a **full-table request** — table recon, **CVE-2006-2223**),
+  `RIP-106` (a **RIPng off-link** violation — source not link-local / hop-limit ≠ 255 /
+  source-port ≠ 521, RFC 2080), plus `RIP-121`–`RIP-126` (RIPv1 must-be-zero, invalid
+  command, out-of-range metric, >25-RTE ceiling, malformed auth field, version anomaly).
+- **weak-auth** — `RIP-001` (unauthenticated), `RIP-002` (cleartext **simple-password**),
+  `RIP-003` (dated keyed **MD5**, RFC 2082), `RIP-007` (auth **downgrade**), `RIP-008`
+  (auth **asymmetry** between peers), `RIP-009` (deprecated **RIPv1**). `RIP-004`
+  (keyed HMAC-SHA), `RIP-005` (RIPng native, no auth) and `RIP-006` (RIPng under IPsec
+  AH) are benign posture notes.
+
+**Dual-stack by protocol pairing** (prime directive): RIPv1/v2 have no IPv6 form and
+RIPng has no IPv4 form, so the v4 codes cover RIP and the v6 codes cover RIPng; every
+*abuse* rule exists on both planes. The auth-posture codes are RIPv2-only (RIPng has no
+in-band auth — it relies on IPsec AH/ESP) and the off-link code is RIPng-only. The
+capture filter is `(ip and udp port 520) or (udp port 521) or (ip6 and ip6[6] ∈
+{Hop-by-Hop, Routing, Fragment, AH, Dest-Opts})` — the Ragnar-optimized superset kept
+over upstream `ripwatch`'s bare `or ip6` (which would copy the whole v6 stream to
+userspace to drop in Python — needless load on a Pi Zero 2W), the same shape as TLS/
+Modbus Watch; the software UDP/521 gate decides RIPng after a bounded extension-header
+walk. Put the Pi on the **RIP segment/VLAN** — RIP is link-local multicast, a tap off
+the routed core won't see it. The first scan learns the baseline (`data/rip_watch.json`)
+and arms; after a legitimate topology change, click "Trust current". **API:**
+`GET /api/net/rip-watch`, `POST /api/net/rip-baseline`. (RADSec and Modbus/TCP Security
+— RIP's secure-transport cousins over TLS — are [TLS Watch](#tls-watch)'s job; this is
+the RIP protocol itself.) **CVE note:** `CVE-2017-12992` (tcpdump's own RIPng-parser
+over-read) is deliberately **not** detected — it is a flaw in a decoder, nothing on the
+wire a passive RIP vantage can observe; recorded here so the ground is not re-walked.
+
+### PIM / MSDP Watch
+A **passive** scanner for the **multicast routing control plane** — PIM (Protocol
+Independent Multicast) and MSDP. It rides **IP proto 103**, multicast in the clear
+(`224.0.0.13` / `ff02::d`) with no authentication beyond optional IPsec AH (RFC 5796),
+so an on-segment attacker can bend the whole multicast tree. **Detection-only** — it
+never transmits. The engine is vendored at `python/pimwatch.py` (self-contained stdlib;
+scapy only on its own live path, which the adapter does not use — it captures via
+tcpdump→pcap and feeds frames to `PimWatch.handle_frame`). **88 finding codes**
+(37 posture + 51 attack) across the PIM and MSDP planes, and — being a protocol-abuse
+engine rather than a version scanner — **no CVEs**.
+
+**Coverage:** PIM-SM (RFC 7761: Hello, Register, Register-Stop, Join/Prune, Assert),
+PIM-DM (RFC 3973: Graft/Graft-Ack, State Refresh), BiDir-PIM (RFC 5015: DF election),
+PIM-SSM (RFC 4607 range checks), BSR (RFC 5059: Bootstrap, Candidate-RP), RPF-Vector
+(RFC 5496), Anycast-RP (RFC 4610), Embedded-RP (RFC 3956), IPsec-AH posture (RFC 5796),
+Cisco **Auto-RP** (UDP/496 to 224.0.1.39/.40) and **MSDP** (RFC 3618, TCP/639 SA /
+SA-Request / KeepAlive). What it flags:
+
+- **attack** — a forged **Hello** winning the DR election, a rogue **Candidate-RP / BSR**
+  (becoming everyone's RP → multicast MITM / blackhole), a PIM **Register** or an **MSDP
+  SA** injected to pull or poison (S,G) state, **Assert** contention, and Hello /
+  Join-Prune / Graft / SA **floods**. Rate-based attack rules are gated on arming (a
+  static threshold on an unmeasured fabric is a false-positive generator).
+- **posture / structural** — **IPsec-AH protection loss** (a peer that was AH-protected
+  going cleartext, or an SPI change), **SSM-range violations**, **Embedded-RP / Auto-RP**
+  anomalies, bad-checksum / truncated / malformed messages, unexpected TTL/hop-limit on
+  link-local messages, and version anomalies.
+
+**RPF is not on the wire** — it is a router's own decision against its RIB, stated in no
+PIM message. pimwatch covers it with three observable heuristics (a Join/Prune naming an
+upstream that never sent a Hello → `PMW-060`; sustained Assert contention → `PMW-081`; an
+RFC 5496 RPF-Vector pointing outside the learned neighbour/RP set → `PMW-068`) and says
+so in the finding text; a RIB cross-check against the BGP/OSPF watchers is out of scope.
+
+**Dual-stack by protocol pairing:** PIM is IPv4 **and** IPv6 (extension-header chains
+walked); Auto-RP and MSDP have **no IPv6 form**, and their v6 equivalents — Embedded-RP
+and Anycast-RP — are implemented on the PIM side, so the directive is satisfied by the
+protocol family rather than a v6 variant that does not exist. The capture BPF is
+`(ip proto 103) or (ip and udp port 496) or (ip and tcp port 639) or ip6` — the bare
+`ip6` term is load-bearing (a `port`/`proto` primitive cannot walk a v6 extension-header
+chain), with the software gate deciding in Python after the walk. On a short **on-demand
+scan** the engine learns the neighbours/RP set early in the window and arms partway
+through; the standalone daemon uses the full learn window. **API:** `GET /api/net/pim-watch`.
+
 ### OSPF Security Scanner
 A **passive** routing-security scanner for OSPF (the interior routing control
-plane, IP proto 89 / multicast 224.0.0.5–6). **Detection-only** — it never forms
-an adjacency, floods an LSA, or touches the LSDB; it just captures one short
-window and classifies it. OSPF is the classic route-poisoning target: without
+plane, IP proto 89 / multicast 224.0.0.5–6). Covers **OSPFv2 (IPv4)** and
+**OSPFv3 (IPv6, RFC 5340)** — both ride IP proto 89, `proto ospf` captures both,
+and the version-agnostic detectors (Router-ID conflict/spoof, phantom router,
+DR/priority takeover, mixed-version) apply to either stack (the header source is
+IPv6 for v3, so the parser accepts both families — an IPv4-only match would
+silently drop every OSPFv3 packet). **Detection-only** — it never forms an
+adjacency, floods an LSA, or touches the LSDB; it just captures one short window
+and classifies it. OSPF is the classic route-poisoning target: without
 cryptographic auth, any host on the segment can inject LSAs and silently redirect
 traffic. What it flags:
 
 - **Weak / no authentication** — Auth Type 0 (none) or 1 (plaintext). This is the
   enabler for every injection attack and the one thing always visible on the wire;
-  it surfaces a CVE/OSV advisory.
+  it surfaces a CVE/OSV advisory. **OSPFv2 only** — OSPFv3 has no header auth field
+  (it relies on IPsec AH/ESP or the RFC 7166 auth trailer), so it is not faked for v3.
 - **Anomaly** — a new/rogue OSPF router (adjacency spoofing), a **duplicate
-  Router-ID** (conflict/spoof), Hello parameter mismatch, or mixed OSPF versions.
+  Router-ID** (conflict/spoof), Hello parameter mismatch, mixed OSPF versions, or
+  *(v5)* an **OSPFv3 Instance-ID anomaly** — an established speaker changing or adding a
+  non-default Instance ID (read from the tcpdump `Instance N` token) is a rogue
+  parallel-instance / spoofing tell. (OSPFv3 SR-LSA byte-parsing is owned by SR-MPLS Watch.)
 - **Injection** — an LSA whose **Advertising Router** never announced itself (a
   spoofed/injected LSA), a **MaxSequence** (0x7fffffff) or **MaxAge** fight-provoking
   LSA, **fight-back** (one LSA re-originated rapidly = the owner countering an
@@ -1731,8 +4107,15 @@ SPAN/mirror** to observe OSPF.
 on the wire, so a version→CVE lookup isn't possible passively — the scanner
 detects the *exposure conditions* instead (weak auth; opaque/TE LSAs, which are
 the trigger for FRRouting ospfd DoS crashes such as CVE-2024-27913 /
-CVE-2025-61107 / CVE-2025-61105, and equivalent Cisco ASA/FTD OSPF-LSA advisories)
-and points at OSV for the version lookup. It **detects, never exploits**, and is
+CVE-2025-61107 / CVE-2025-61105 and the *(v4)* opaque-parser cluster
+CVE-2025-61099 / CVE-2025-61103 / CVE-2025-61104 / CVE-2025-61106, and equivalent
+Cisco ASA/FTD OSPF-LSA advisories; *(v6)* the OSPFv3/IPv6 malformed-LSA DoS class
+is named alongside — Quagga/FRR ospf6d CVE-2011-3323 / CVE-2018-14880, Cisco
+CVE-2018-0466 / CVE-2013-5565 and Arista CVE-2025-8872, plus the no-auth-enabled
+Cisco IOS LSA-manipulation CVE-2013-0149 on the weak-auth advisory) and points at
+OSV for the version lookup. The
+OSPF Segment-Routing opaque-LSA sub-TLV overruns (CVE-2024-31950 / CVE-2024-31951)
+are byte-level detected by [SR-MPLS Watch](#sr-mpls-watch), not re-named here. It **detects, never exploits**, and is
 harmless to the network.
 
 Small **CLI** (no web app / no root for the self-test):
@@ -1754,11 +4137,23 @@ packet into a pcap and parses it back through `tcpdump` end to end.
 The L3-edge companion to the OSPF scanner — a **passive** BGP routing-security
 scanner (TCP/179). **Detection-only**: it never opens a session or announces /
 withdraws a route. BGP is where traffic gets silently redirected across the
-Internet edge, so where it's visible this is the highest-value watch. It flags:
+Internet edge, so where it's visible this is the highest-value watch.
 
-- **Injection (hijack)** — an announced prefix whose **origin AS changed** vs the
-  learned baseline (prefix/origin hijack), or a **new more-specific** of a
-  baseline prefix (sub-prefix hijack — the most effective real-world BGP attack).
+**Dual-stack (IPv4 + IPv6 / MP-BGP, RFC 4760).** The `tcp port 179` capture is
+family-agnostic, so a session running over **IPv6 transport** is seen (the flow
+parser was IPv4-only before, silently dropping every v6-transported session — the
+same gap the OSPFv3 fix closed), and **IPv6 NLRI carried in `MP_REACH_NLRI` /
+`MP_UNREACH_NLRI`** attributes (rather than the IPv4-only base UPDATE fields) is
+parsed and fed through the same origin-hijack / sub-prefix / bogon / storm logic.
+The bogon table gains the v6 martians that are never a legitimate global-unicast
+origin (`::/8`, `2001:db8::/32` documentation, `fc00::/7` ULA, `fe80::/10`
+link-local, `ff00::/8` multicast, IPv4-mapped, discard-only). It flags:
+
+- **Injection (hijack)** — an announced prefix (v4 or v6) whose **origin AS
+  changed** vs the learned baseline (prefix/origin hijack), or a **new
+  more-specific** of a baseline prefix (sub-prefix hijack — the most effective
+  real-world BGP attack; same-family only, so a v6 more-specific matches a v6
+  covering prefix).
 - **Anomaly** — a new/rogue **peer** (new AS or BGP-ID), a **NOTIFICATION** /
   session reset (teardown/flap), a **bogon/martian** prefix announcement, a
   **reserved/documentation ASN** in a received path, an **AS-path loop**, or a
@@ -1776,8 +4171,17 @@ Internet edge, so where it's visible this is the highest-value watch. It flags:
 The first scan learns the peers and prefix→origin map as the baseline
 (`data/bgp_watch.json`); **Trust current** re-learns after a legitimate change.
 As with OSPF, software-version CVEs aren't on the wire, so exposure conditions are
-flagged (weak auth; malformed-UPDATE crash class — **CVE-2023-38802** /
-**CERT VU#347067**) with an [OSV](https://osv.dev) pointer for the version lookup.
+flagged (weak auth; malformed-UPDATE crash class — **CVE-2023-38802** / **CVE-2024-44070**
+(FRR `bgp_attr_encap`) / Juniper rpd
+**CVE-2024-30395** and the *(v4)* FRR/GoBGP parser corpus: zero-length path-attributes
+**CVE-2023-41358**, MP_UNREACH **CVE-2023-47234**, EOR-bypass **CVE-2023-47235**,
+Prefix-SID **CVE-2024-31948**, FlowSpec **CVE-2026-37457**, MP_REACH **CVE-2026-37458**,
+NHC-TLV **CVE-2026-37459**, OPEN optional-parameter **CVE-2022-40302** / **CVE-2022-43681**,
+GoBGP IPv6-ext-community **CVE-2026-37461** and UPDATE-length underflow **CVE-2026-37462**,
+MikroTik RouterOS labelled-VPN NLRI **CVE-2026-93345** *(v7)*;
+**CERT VU#347067**) with an [OSV](https://osv.dev) pointer. These are byte-level parser
+signatures the passive **text** watcher cannot reconstruct, so they are named as posture;
+run the standalone BGP tap for byte-level detection.
 
 **ASN enrichment:** origin ASNs and peer IPs are enriched with AS **owner names**
 + country via [Team Cymru's IP-to-ASN](https://team-cymru.com/community-services/ip-asn-mapping/)
@@ -1795,10 +4199,13 @@ python3 network_diagnostics.py bgp-watch [--iface eth0] [--seconds 15] [--json]
 python3 network_diagnostics.py bgp-selftest
 ```
 
-`bgp-selftest` drives the parser + classifier with synthetic captures (clean /
-origin-hijack / sub-prefix hijack / session-reset / bogon-prefix / UPDATE parse)
-and, when [Scapy](https://scapy.net) (`scapy.contrib.bgp`) is present, crafts a
-real BGP packet into a pcap and parses it back through `tcpdump`.
+`bgp-selftest` drives the parser + classifier with synthetic captures — v4
+(clean / origin-hijack / sub-prefix hijack / session-reset / bogon-prefix /
+UPDATE parse) **and IPv6 / MP-BGP** (v6 clean over IPv6 transport, v6 origin
+hijack, v6 sub-prefix hijack, v6 bogon, plus `MP_REACH_NLRI` / `MP_UNREACH_NLRI`
+parse checks) — and, when [Scapy](https://scapy.net) (`scapy.contrib.bgp`) is
+present, crafts a real BGP packet into a pcap and parses it back through
+`tcpdump`.
 
 - Endpoint: `GET /api/net/bgp-watch` `{interface, seconds}`,
   `POST /api/net/bgp-baseline` `{action: reset}` · binary: `tcpdump`
@@ -1817,6 +4224,16 @@ per-prefix **churn/flap tracking** (a prefix changing origin/next-hop faster tha
 threshold is marked *flapping*, and the previous AS-path is remembered so a change
 shows as `old → new`) and longest-prefix lookup. Point it at a router
 configured to peer with the Pi's AS (a route-server client / passive peer works well).
+
+**Dual-stack (MP-BGP, RFC 4760).** The OPEN advertises MP-BGP for **IPv4 *and*
+IPv6 unicast**, so a dual-stack peer feeds both families over the one session
+(advertising a receive capability is not originating NLRI — still passive). IPv6
+prefixes arrive in `MP_REACH_NLRI` / `MP_UNREACH_NLRI` attributes (with a v6 or
+RFC 2545 global+link-local next-hop) and land in the **same RIB, churn/flap
+tracking, and longest-prefix correlator** as v4 — a v6 covering prefix churning
+attributes a v6 data-plane symptom exactly like a v4 one. The BGP *session* itself
+runs over whichever transport the `peer_ip` implies (a v6 literal peers over IPv6),
+independent of which AFI it carries.
 
 **Multi-carrier mode** — start **one session per carrier-facing router** (each with
 its own thread + RIB) by passing a `peers` list instead of a single peer. When a
@@ -1850,18 +4267,589 @@ Otherwise it labels the event **route-churn** (flapping), **recent path shift** 
 fresh but stable change), or **stable / data-plane** (no matching control-plane
 change — the asymmetry is below BGP, e.g. a congested or re-routed transit leg).
 
+**Path convergence (v2) — flow-consistent traceroute + convergence scoring.** The
+OWD probe answers *"is the path asymmetric?"*; this answers *"is the path
+**changing** — a BGP (re)convergence?"*. It runs a **flow-consistent (Paris)**
+traceroute per ECMP flow — the flow id is held constant across a TTL sweep, so a
+change **within** a flow is a genuine routing change while differences **across**
+flows are just ECMP and are **not** counted as churn — and fingerprints each flow's
+path on its **AS-path** (resolved via the collector RIB first, then Team Cymru).
+Each run diffs against a per-flow baseline persisted in `data/path_convergence.json`,
+so an AS-path change between successive runs registers; a short latency **floor**
+(a handful of full-TTL probes) adds **loss-burst** and **RTT-step** signals. The
+evidence is scored into a tiered verdict — **watch** (intra-AS wobble) →
+**suspected** (strong evidence) → **active** (loss **and** a real path change now) →
+**confirmed** (a peered collector's RIB corroborates the covering prefix churning).
+It's **detection-only**, but the traceroute is *active probing*, so it runs
+**on-demand only** — never in the passive Network Integrity rotation. Run it twice
+(baseline, then again) so a same-flow change can be seen.
+
 > **Safety:** the collector never originates routing information, and the OWD probe is
 > a handful of small UDP datagrams — neither injects state into the network. Both are
-> long-lived daemons managed with start/stop/status; nothing is persisted to disk.
+> long-lived daemons managed with start/stop/status; nothing is persisted to disk. The
+> path-convergence traceroute needs raw sockets (root / `CAP_NET_RAW`) and [Scapy](https://scapy.net).
+
+> **Watchtower feed.** A suspected/active/confirmed convergence verdict is appended
+> as JSON-lines to `/var/log/ragnar/pathwatch.jsonl` (deduplicated per target +
+> severity), so [Watchtower](watchtower.md) folds BGP convergence / route-hijack
+> corroboration into the unified pane and single Pushover path.
 
 - Endpoints: `GET/POST /api/net/bgp-collector` `{action: start|stop|status|rib,
   local_as, router_id, port, hold, peer_ip, peer_as` (single) or `peers: [{ip, as,
   name}, …]` (multi-carrier), `peer` (name, for per-session stop/rib)`}`,
   `GET/POST /api/net/owd-reflector` `{action: start|stop|status, port}`,
-  `POST /api/net/path-asymmetry` `{target, count, clock_synced}`
+  `POST /api/net/path-asymmetry` `{target, count, clock_synced}`,
+  `POST /api/net/path-convergence` `{target, flows, method, max_ttl, floor_count}`
 - CLI: `python3 path_asymmetry.py reflector [port]` runs a standalone reflector;
-  `bgp_speaker.py` and `path_asymmetry.py` each expose `selftest()`, aggregated into
-  the Detector Self-Test panel (`GET /api/net/routing-selftest`).
+  `bgp_speaker.py` and `path_asymmetry.py` each expose `selftest()` (the latter now
+  covers the convergence engine too), aggregated into the Detector Self-Test panel
+  (`GET /api/net/routing-selftest`).
+
+**Passive BGP-message analysis tiers (Pathwatch v6).** Three vendored, pure-stdlib
+passive tiers ship with the suite (`python/bgp_pathwatch/`), each a byte-level decoder
+over captured BGP messages — **no transmit path, no CVEs** (the posture is behavioural,
+and BGPsec does **no** signature validation, which would not be passive):
+
+- **BGPsec posture / downgrade** (`bgpsec.py`, RFC 8205 — 20 codes): tracks the BGPsec
+  capability in the OPEN and the `BGPsec_PATH` attribute, and flags a **downgrade**
+  (a session that negotiated BGPsec then carries an unsigned AS_PATH), AFI/transport
+  mismatches, and malformed signature blocks.
+- **SR Policy / BGP-LS** (`bgpsrte.py`, RFC 9830 SR Policy SAFI 73 + RFC 9552 BGP-LS
+  AFI 16388 — 23 codes): decodes SR Policy NLRI + Tunnel-Encapsulation segment lists
+  and BGP-LS node/link/prefix NLRI, flagging **injection posture** (an SR Policy or
+  BGP-LS update from a peer that should not originate it) and malformed TLVs.
+- **Passive tap** (`bgptap.py`): a receive-only L3 tap with **dual-stack** parse (IPv6
+  extension-header walk), marker-resync TCP reassembly and BGP message framing — the
+  shared front-end that feeds the parser-CVE (`bgpcve.py`, **15 detectors / 14 codes** as
+  of v7), BGPsec and SR-Policy tiers from a raw capture rather than a live session. **v7**
+  adds **CVE-2026-93345** (MikroTik RouterOS labelled-VPN NLRI, CWE-1284): `PW-BGP-013`
+  fires on a labelled-VPN MP_REACH NLRI (SAFI 128/129) whose prefix-length octet is below
+  the structural minimum for the family — the RouterOS iterator reads past it — and
+  `PW-BGP-014` is the post-trigger confirmation, the correlated session drop that says the
+  plane crashed. (Named as context in the in-app `do_bgp_watch` malformed-attribute
+  advisory; the byte-level detection lives in this standalone tap.)
+
+These are wired into the Detector Self-Test as the **`bgp_tap` (74)**, **`bgpsec` (47)**
+and **`bgp_srte` (65)** suites — 186 offline checks, run in their own interpreter (no
+root, no network). The live capture adapters/routes for these tiers are a planned
+follow-up; today they ship vendored and self-test-validated.
+
+### Vendor CVE Guards
+
+Eight passive, **detection-only** vendor guards — Cisco, Juniper, Arista, Comware, MikroTik,
+Aruba, APC and Liebert (plus the standalone Dell Guard daemon) — watch a network segment and report
+**three classes** of evidence about a tracked set of router/switch CVEs — never
+transmitting, probing, or authenticating:
+
+- **Posture** — a version/platform fingerprint screened against the CVE catalog.
+  Always a *"verify THIS device"* note, never a vulnerable/not-vulnerable verdict:
+  a banner can be stale or spoofed, and a train absent from an advisory is *inferred
+  from silence, not confirmed patched*.
+- **Exposure** — the enabling condition for a CVE is visibly present on the wire
+  (cleartext SNMP, a default community, an HTTP UI or Telnet to infrastructure, a
+  reachable management listener). Actionable **without** knowing the version.
+- **Attack** — an exploitation primitive observed in transit.
+
+Findings roll up to one verdict per scan: **clean** < **observed** (a vendor device
+seen, no CVE-relevant finding) < **posture** < **exposure** < **attack**. `observed`
+and `clean` rank benign in the Network Integrity Monitor; **attack** ranks critical.
+Each guard captures one short passive `tcpdump` window (`-x`, so the L4 payload bytes
+are reconstructed from the hex dump for byte-level checks). There is **no TCP
+reassembly**, so a segmented HTTP/Telnet attack is best-effort — a hit is
+high-confidence, a miss inconclusive — and thresholds are **structural anomaly
+bounds** set well above legitimate traffic, not published vendor constants. Every
+guard exposes a `selftest()` (synthetic records + a Scapy pcap→`tcpdump`→parse
+end-to-end leg) aggregated into the Detector Self-Test panel.
+
+#### Cisco Guard
+Cisco IOS / IOS-XE / NX-OS routers, switches and edge/core devices. Firewalls
+(ASA/Firepower/FTD/FMC) are **screened out of scope** (`CG-009`), not misclassified.
+Capture surface: SNMP (161/162), Telnet (23), HTTP UIs (80/8080/8443), IKEv2
+(500/4500), DHCPv6 (546/547), CAPWAP (5246/5247), LISP (4341/4342). The port clauses match **both IPv4 and IPv6** (libpcap's
+`port` primitive is family-agnostic, so plain v6 was never blind); the only real v6
+gap is a packet **behind an extension header**, where the next-header byte is no
+longer the transport — admitted by a narrow **`ip6[6]` next-header clause** (hop-by-hop
+/ routing / fragment / AH / dest-opts), *not* a blanket `or ip6` that would pull the
+whole v6 stream onto a Pi. This is what lets the DHCPv6 / IKEv2 / IPv6-Routing-Header
+detectors fire on live v6, including the extension-header case. Detects, among others:
+**`CG-101` cleartext SNMP** and
+**`CG-102` default community** (the credential half of the actively-exploited
+**CVE-2025-20352** SNMP overflow); **`CG-201`/`CG-202`** the SNMP **OID-arc-flood /
+oversized-field** overflow shape (BER-parsed); **`CG-103`** HTTP web-UI cleartext;
+**`CG-104`** Telnet to infrastructure and **`CG-270`** an NX-OS Telnet **shell-escape**
+(the in-the-wild **CVE-2024-20399** Velvet-Ant shape); **`CG-220`** a VLAN tag-stack
+anomaly (**CVE-2024-20434** Catalyst-9000 DoS). **IPv6 / IKEv2 attack shapes:**
+**`CG-250`** an **IKEv2 message whose declared length overruns its datagram**
+(**CVE-2024-20307 / CVE-2024-20308**), **`CG-231`** a **malformed DHCPv6 option**
+(overrun / trailing bytes / implausible relay hop-count — the **CVE-2024-20259**
+shape), and **`CG-281`** a deprecated **IPv6 Routing Header type 0** (RFC 5095
+source-routing) walked from the reconstructed extension-header chain. **VXLAN / NGOAM
+(CVE-2021-1587):** **`CG-110`** a VXLAN fabric on the segment (the precondition — NGOAM
+is off by default) and, the attack shape, **`CG-111`/`CG-290`** a **TRILL-OAM / 802.1ag
+CFM frame tunnelled inside VXLAN** (ordinary CFM is hop-by-hop link OAM and is not
+tunnelled, so inside VXLAN it is the NGOAM delivery path), with **`CG-291`** a malformed
+CFM header. The capture admits a `:4789` datagram **only when its inner ethertype is
+`0x8902`** (`ether[62:2]`/`ether[82:2]` for a v4/v6 underlay), so a whole VXLAN tenant
+stream never lands on a Pi — the same resource-aware discipline as the `ip6[6]` clause.
+The **native** (non-IP) `0x8902` EtherType is L2-only and not reconstructable from
+tcpdump's IP-onward hex, so only the VXLAN-encapsulated path (which is the CVE path) is
+detected in-app. **CAPWAP / NBAR (CVE-2025-20315):** **`CG-112`** CAPWAP on the segment
+(WLC control/data UDP 5246/5247 — the precondition, since NBAR/AVC inspecting it is the
+path) and **`CG-292`** a **structurally malformed CAPWAP header** (RFC 5415: non-zero
+version, an undefined header type, an HLEN below the 2-word minimum or overrunning the
+datagram, or reserved bits set — including a datagram too short to hold a header), the
+unauthenticated remote-reload shape on IOS XE. The related **`CG-222`**
+(`ETHERNET_LENGTH_FIELD_LIE`, CVE-2025-20311) is **not** ported in-app: it reads the
+802.3 frame length field, an L2 datum tcpdump's IP-onward hex does not carry. **LISP
+(CVE-2024-20311):** **`CG-107`** LISP on the segment (control UDP/4342, data UDP/4341 —
+the precondition) and the attack shapes **`CG-240`** a **malformed LISP control header**
+(runt, reserved message type, implausible record count) and **`CG-241`** a **source-EID
+AFI that overruns the datagram** (the allocation/copy-size mismatch), parsed from the
+UDP/4342 payload. **Cisco Small Business switch web UI (`CG-113`):** the May 2023 web-UI
+cluster — **four 9.8 RCEs** (CVE-2023-20159/20160/20161/20189), **four 8.6 DoS**
+(CVE-2023-20024/20156/20157/20158) and an info-disclosure (CVE-2023-20162) — screened
+from the SB switch model (SG/CBS 250/350/550X, and the no-fix SB 200/300/500 branch) in
+the HTTP response banner; the **220 Series is excluded** (Cisco states it is not
+affected). **Version posture (`CG-004`/`CG-005`):** the observed IOS-XE / NX-OS train is
+screened against the tracked CVE trains (a NOTE to verify THIS device, never a verdict) —
+IOS-XE now names the **August 2026 advisory wave** (CVE-2026-20267…20273, incl. the 9.8
+RCE CVE-2026-20272) and NX-OS adds **CVE-2025-20111**; a patched train stays quiet, and an
+untracked train is reported as unscreenable (silence is not evidence of patching).
+**TWAMP / IP SLA:** **`CG-114`** the TWAMP/OWAMP control plane reachable (TCP/862 — the
+unauthenticated precondition for **CVE-2025-20154** and **CVE-2021-34720**, both 8.6),
+**`CG-014`** a TWAMP responder's 64-byte Server Greeting, **`CG-115`** that greeting
+advertising **Unauthenticated mode** (usable with no shared secret, Modes bit `0x1`),
+**`CG-294`** a malformed greeting (nonzero MBZ tail), and **`CG-116`** Cisco's IP SLA
+Responder control on UDP/1967 (CVE-2021-34720 — IP SLA and TWAMP share the code path).
+**WLC (`CG-105`):** a Catalyst 9800 / Embedded Wireless Controller identity in the capture →
+verify the Out-of-Band AP-Image-Download feature against **CVE-2025-20188** (10.0,
+hardcoded-JWT arbitrary file upload) — gated on the WLC identity, not a bare 8443 flow.
+**SD-WAN (`CG-106`):** a Catalyst SD-WAN Manager (vManage) API path (`/dataservice/`,
+`vmanage`) in cleartext HTTP → **CVE-2026-20133**.
+**v8 additions:** **`CG-117` model-driven telemetry in cleartext** — the definitive
+marker is the RFC 9113 §3.4 **HTTP/2 connection preface** (`PRI * HTTP/2.0…`), which is
+only ever sent for cleartext HTTP/2 with prior knowledge (over TLS, h2 is ALPN-negotiated
+and no preface is visible), so observing it on a gNMI/gRPC dial-out port (IOS-XE `gnxi
+server` 50052, IOS-XR gRPC 57400, or a mis-set-cleartext 9339, now admitted by the BPF)
+is a statement of fact that operational state is on the wire unencrypted — **no CVE**, the
+payload is never decoded (the YANG→protobuf dictionary is per-device), and TLS telemetry
+stays silent (that is TLS Watch's subject). **`CG-008` secure-boot advisory** — whenever
+an IOS-XE device is identified, the secure-boot bypass (**CVE-2025-20313 / CVE-2025-20314**)
+is surfaced as an advisory-only INFO note, because it is a local/physical vector with no
+wire signature. The **IE Switch Device Manager** web-UI DoS (**CVE-2025-20327**) folds into
+`CG-103`/`CG-260`, the **Catalyst 9000 crafted-frame egress block** (**CVE-2025-20311**)
+into `CG-220`, and the **EOL SB switch default-privileged-account re-enable**
+(**CVE-2018-15439**) into the `CG-113` SMB cluster. Still deferred with reasons: `CG-222`
+(ETHERNET_LENGTH_FIELD_LIE — an 802.3 length datum tcpdump's IP-onward hex can't carry),
+the IS-IS byte codes (covered by [IS-IS Scanner](#is-is-scanner)), and CVE-2024-20271 /
+CVE-2024-20314 (no public packet signature, per the module).
+- Endpoint: `GET /api/net/cisco-guard` `{interface, seconds}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py cisco-guard [--iface I] [--seconds N] [--json]`
+
+#### Juniper Guard
+Juniper J-Web (SRX/EX), Session Smart Router, Junos Space and Junos-Evolved. Fully
+dissects cleartext HTTP to **J-Web** (80/8080) and the Junos-Evolved **On-Box Anomaly
+Detection API** (8160), and reads the TLS ClientHello **SNI** (443/8443). Detects the
+byte-exact **CVE-2023-36844..36847** J-Web attack shapes — **`JNPR-011` PHPRC** and
+**`JNPR-012` LD_PRELOAD** environment-variable injection, **`JNPR-010`**
+unauthenticated file upload, and **`JNPR-014`** the two correlated from one source as
+an **RCE chain** — plus **`JNPR-050`/`JNPR-051`** the **CVE-2026-21902** anomaly-API
+RCE and **`JNPR-030`** Junos-Space stored-XSS (**CVE-2025-59978**) injection attempts.
+**VXLAN overlayd (CVE-2021-0254):** **`JNPR-061`** a **structurally anomalous datagram
+on UDP/4789** toward a VTEP — VNI I-flag clear, dirty reserved bytes (honouring the
+VXLAN-GBP/GPE flag profiles), a truncated/absent inner frame, or an oversized datagram
+— the shape that reaches `overlayd` (root, no size validation on a read of up to
+0x10000 bytes). Dual-stack across the IPv4/IPv6 underlay; on a v6 underlay the finding
+carries a *weak cve-linkage* caveat because the vulnerable releases (≤20.3) predate
+IPv6-underlay support. The OAM TLV grammar is unpublished, so the signature is
+structural/experimental. The three sibling VXLAN codes are deliberately **not** ported
+in-app: **`JNPR-060`** (version posture) has no Junos version banner on this capture —
+passive version extraction is a known dead end for this vendor, so version postures are
+**not** claimed; **`JNPR-062`** (VSTP BPDU on an L2PT UNI) is a non-IP LLC/SNAP frame
+not reconstructable from IP-onward hex (and is lab-deferred even in the standalone); and
+**`JNPR-063`** needs an operator-declared VTEP set the in-app guard has no config for.
+*Juniper Guard v4* adds two VXLAN CVEs — **`CVE-2025-21595`** and **`CVE-2026-33781`** —
+but both are reachable only through those same skipped codes (version posture under
+`JNPR-060`, and the non-IP VSTP BPDU under `JNPR-062`), so there is **no new passively
+observable detection** to port; the one feasible VXLAN attack shape (`JNPR-061`,
+`CVE-2021-0254`) is already in-app. **Dual-stack** — the same attacks are detected over **IPv4 and
+IPv6** with the same codes (the logic keys on port + payload, which are identical
+over either family). libpcap's `port` primitive already matches plain v6, so the
+only real gap is a packet **behind an extension header**, where the next-header byte
+is no longer the transport — admitted by a narrow **`ip6[6]` next-header clause**
+(not a blanket `or ip6`, which would pull the whole v6 stream onto a Pi). The parser
+then walks the extension-header chain from the reconstructed packet bytes to recover
+the true L4 protocol and port, even when tcpdump splits the address line from the port
+line. This dual-stack flow/protocol parse and the `ip6[6]` capture clause are shared
+across the vendor guards (Cisco and Juniper carry it today).
+- Endpoint: `GET /api/net/juniper-guard` `{interface, seconds}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py juniper-guard [--iface I] [--seconds N] [--json]`
+
+#### Arista Guard
+Arista **EOS** switches, routers and edge/core devices. **v4** moves Arista Guard onto
+a **vendored engine** (`python/aristaguard.py`, self-contained stdlib; scapy only on its
+own live path) driven by the in-app `do_arista_guard` adapter, which captures LLDP /
+RADIUS-EAPOL / SSH / management traffic via `tcpdump`→pcap and replays raw frames through
+`AristaEngine.handle_frame` — the same shape as APC / Liebert / RADIUS / RIP / PIM. It is
+**passive by construction**: no socket, subprocess or injector exists in the engine, and
+an AST guard in its self-test rejects any transmit-shaped call. **17 tracked EOS CVEs**
+across **29 finding codes** in three classes — `AG-0xx` **POSTURE** (version/platform
+fingerprint, "verify this device"), `AG-1xx` **EXPOSURE** (the enabling condition for a
+CVE is visibly present), `AG-2xx` **ATTACK** (an exploitation primitive observed on the
+wire). Non-EOS Arista products (CloudVision / VeloCloud / DANZ / Awake) are **screened out
+of scope** (`AG-009`); CloudEOS routes to `AG-003`, never the hardware-EOS screen.
+
+- **Version / platform (LLDP).** `AG-001` EOS version observed, `AG-005` platform
+  observed, `AG-002` a vulnerable EOS version, `AG-003` a vulnerable CloudEOS SFE version
+  (CVE-2023-24545 / CVE-2023-24513), `AG-004` supervisor-redundancy privilege-escalation
+  exposure on a modular chassis (CVE-2023-24509 — `detect=none`, a local escalation that
+  never crosses the wire, reported for manual verification only), `AG-006` a
+  tunnel-decapsulation-affected platform.
+- **BlastRADIUS (CVE-2024-3596), now scoped to Arista hardware.** The full RADIUS engine
+  (`AG-101` cleartext, `AG-102` no Message-Authenticator, `AG-110` an M-A that is absent
+  *or* not first, `AG-201` a Proxy-State collision block summed across the packet,
+  `AG-212` NAS-side Proxy-State injection correlated on the 4-tuple + Identifier and
+  compared by digest, `AG-213` a malformed Reply-Message, `AG-214` an opaque
+  Vendor-Specific attribute) runs **only when a RADIUS endpoint is an Arista device** whose
+  address was learned passively from an LLDP management-address TLV (or named in config).
+  With no Arista device seen the RADIUS rules stay **silent** — the vendor-neutral RADIUS
+  posture now lives in [RADIUS Watch](#radius-watch).
+- **Management / control plane.** `AG-103` gNMI/gNOI listener exposure
+  (CVE-2025-1259/1260), `AG-211` a gNOI **TransferToRemote** credential marker in cleartext
+  accounting (CVE-2025-0936), `AG-108` a CVX session driving the EOS Sysdb crash
+  (CVE-2025-5089), `AG-105` an IPsec dataplane present for the crafted-packet halt
+  (CVE-2025-8873), `AG-109`/`AG-209` an OSPFv3 CPU-exhaustion shape (CVE-2025-8872).
+- **SSH / tunnels / VLAN / 802.1X.** `AG-104`/`AG-210` **regreSSHion** SSH banners
+  (CVE-2024-6387/6409); `AG-106`/`AG-203` the actively-exploited **tunnel-decapsulation**
+  type-confusion (CVE-2026-7473 — carried below the 6.5 CVSS floor by the exploited
+  override); `AG-205`/`AG-206`/`AG-207` VLAN tag CPU-punt and cross-VLAN leaks
+  (CVE-2024-5872 / CVE-2024-9448 / CVE-2024-11185); `AG-107`/`AG-208` an 802.1X multi-auth
+  bypass (CVE-2024-6858).
+
+Six further CVEs are **quarantined** (raised in discussion but not confirmed against an
+Arista advisory, or with no sourceable CVSS); they are recorded in the module so they can
+never be silently promoted into the catalog and are **not** counted as coverage. Thresholds
+are structural anomaly bounds measured against real vendor AV-pairs, **not** published
+exploit constants; attribute values are never retained.
+- Endpoint: `GET /api/net/arista-guard` `{interface, seconds}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py arista-guard [--iface I] [--seconds N] [--json]`
+
+#### Comware Guard
+HPE Comware / Huawei **VRF-hopping** (MPLS label injection). Detects **CVE-2015-5434**
+(HPE Comware 5/7, H3C, HP) and the identical-signature **CVE-2015-8087** (Huawei): an
+attacker on a PE-CE attachment circuit pre-encapsulates their own **MPLS shim header**
+so the PE forwards the frame into another tenant's VRF, crossing the isolation boundary.
+The detection is **structural** — a labelled frame (ethertype `0x8847`/`0x8848`) on a
+customer/access port *should not exist by construction*, the same zero-false-positive
+property as inline DHCP snooping — and keys on the **frame**, not a vendor string, so one
+rule set covers both vendors. **Segment role is load-bearing:** on a `ce` (customer/access)
+port MPLS presence *is* the attack (**`VRF-001`**, CRITICAL); on a `core` port the presence
+rules go quiet but the structural rules stay armed; `unknown` behaves as `ce` — so
+detection still fails loud the instant a label appears — but a *silent* segment with an
+undeclared role stays **clean** rather than self-reporting a bare posture note. **`VRF-011`**
+(role-undeclared posture) is therefore raised only alongside an actual MPLS sighting, not on
+every scan; the selector defaults to `ce`, the intended CE-facing use. Also flags label
+**sweeps** (**`VRF-002`/`VRF-003`** —
+the published PoC brute-forces labels 1000–1500 in 500 frames), reserved labels
+(**`VRF-009`**), malformed/no-BOS stacks (**`VRF-006`**), stack-depth/TTL/trailing anomalies,
+MPLS inside a VLAN tag (**`VRF-014`**), LDP control-plane exposure on the CE side
+(**`VRF-012`**), and passive **Comware/H3C platform adjacency** from LLDP/CDP
+(**`VRF-015`**) correlated with a labelled frame (**`VRF-016`**, CRITICAL). Full frames are
+reconstructed from the `tcpdump -e -xx` hex dump so the label stack is parsed directly;
+validated against the published PoC pcap (506 frames → `VRF-001/002/003/014/015/016/018`).
+- Endpoint: `GET /api/net/comware-guard` `{interface, seconds, role}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py comware-guard [--iface I] [--seconds N] [--role ce|core|unknown] [--json]`
+
+#### MikroTik Switch and Router Guard
+MikroTik **RouterOS** (CCR / CRS) — a multi-CVE passive guard ported from the standalone
+`mikrotikwatch`. Reads the RouterOS management + attack surface off the wire and names the
+exploit signatures for a tracked CVE set: the two **CISA-KEV** bugs — **`MTK-003`** Winbox
+path traversal that reads the credential store (**CVE-2018-14847**) and **`MTK-002`** the
+pre-auth SMB/NetBIOS overflow (**CVE-2018-7445**, validated by the exact NetBIOS
+first-level name encoding, not a threshold) — plus **`MTK-001`** WebFig credentials in the
+clear (CVE-2025-61481), **`MTK-005`** the REST libjson overflow (CVE-2025-10948, PR:L),
+**`MTK-013`/`MTK-008`** SCEP base64/ASN.1 overflows (CVE-2021-41987 / CVE-2026-7668 — the
+base64 `message=` length mod-4 residue is exact), **`MTK-017`** hotspot (CVE-2022-45313),
+**`MTK-006`** jsproxy surface (CVE-2026-67281), **`MTK-014`** FTP request overflow
+(CVE-2020-22845), **`MTK-020`** the autoupgrade `.npk` origin bypass (CVE-2019-3977),
+**`MTK-019`** DNS unrelated-data cache poisoning (CVE-2019-3979, a bailiwick check over the
+response's own CNAME/DNAME/NS chain), and the IPv6-only **`MTK-007`** RDNSS RA overflow
+(CVE-2023-32154) and **`MTK-010`** traceroute-range firewall bypass (CVE-2023-47310). It
+reads the RouterOS version from **MNDP** (UDP 5678) to raise **`MTK-011`** Chimay-Red
+posture (CVE-2017-20149) — version is *dispositive* because RouterOS ships one monolithic
+image with no downstream backporting — and **`MTK-C01`** correlates a gated exploit on a
+device already seen running management in the clear.
+
+**v2 — MikroTrick (`MTK-021`, CVE-2026-67276 + CVE-2026-86060, exploited in the wild since
+2 September 2026).** CVE-2026-67276 lets an attacker who knows a username and the public
+*modulus* of that user's authorized key forge a working key without the private half
+(RouterOS compared type and modulus but not the exponent); CVE-2026-86060 then turns the
+session administrative via a crafted username. **Neither half is passively detectable**:
+both sit in `SSH_MSG_USERAUTH_REQUEST`, after `NEWKEYS`, i.e. encrypted — and CERT Polska's
+indicators are on-device log artifacts. So `MTK-021` is an honest **exposure** finding, one
+code for both CVEs (they share one encrypted exchange): a RouterOS version inside the
+September 2026 fix train (below **6.49.21 / 7.23.4 / 7.24.2 / 7.25beta3**) *and* SSH seen on
+the wire. The version comes from **MNDP** — keyed on the sender and on the IPv4/IPv6
+addresses the device announces — or from the cleartext SSH identification string
+(`SSH-2.0-ROSSSH-7.23.3`); a non-RouterOS SSH server contributes nothing. The finding says
+outright that the attack cannot be seen and that silence is not evidence of safety, and
+tells you what to check on the device (`user -2` log lines, an unexpected `ops` account,
+the Flagged marker). One deliberate difference from the upstream module: a **7.25beta1 /
+beta2** build (which predates the beta3 fix) is treated as affected — upstream's version
+parser reads `7.25beta3` as plain `7.25` and would call every 7.25 pre-release fixed.
+
+**v3 — the October 2026 audit (two new codes).** **`MTK-022`** (CVE-2026-56719 +
+CVE-2026-89028) parses the pre-auth **SMB1 SessionSetupAndX** request and flags a crafted
+`uniPwdLen`: the password-length fields claim more than the frame's own `ByteCount`
+(`CWE-191`, the length-arithmetic under-flow 89028 names) or reach past the bytes the frame
+carries (`CWE-125`, the out-of-bounds read 56719 names). It is **one code for both CVEs** on
+the `MTK-021` precedent — the handler runs *before* credential validation (PR:N) and the tap
+sees the crafted frame but never which way the daemon then broke, so the structural relations
+are reported as flags rather than guessed into one CVE; a malformed SessionSetupAndX that is
+*not* the `uniPwdLen` shape is reported under the generic `MTK-002` instead. The under-flow
+relation is declared-vs-declared and so survives a snaplen-truncated capture; the over-read
+relation, which needs the bytes actually present, is suppressed when the single segment did
+not carry the whole frame (no false positive on a legitimately long request the capture cut
+short). **`MTK-023`** (CVE-2026-84411, CVSS 9.8, unauthenticated root) is the web-management
+**HTTP body-length under-flow** — but a **structural class, not a CVE-exact signature**,
+because MikroTik and CISA (ICSA-26-272-06) withheld the function, path and corruption
+primitive. It reads the **raw** request header block (a negative `Content-Length` is
+otherwise clamped away before any consumer sees it) and flags the bounded set of body-length
+lies `CWE-191` permits — a negative or non-numeric `Content-Length`, one wider than 64 bits
+or absurdly large, conflicting/duplicate values, `Content-Length` together with
+`Transfer-Encoding: chunked`, or a non-hex / runaway chunk size — at **medium confidence by
+construction**, and raises a version-screen **posture** from MNDP alone (every RouterOS 6.x
+and 7.x below 7.24). The delivered-vs-declared case needs a flow-close signal the per-packet
+capture does not carry and is omitted. Two further v3 CVEs are **routed**, not duplicated
+here: the **xt_tls SNI `host_name` over-read** (detector in **TLS Watch**) and the
+**labelled-VPN MP_REACH NLRI** under-flow (detector in **BGP Path Watch**) — each lives in
+the module that already owns the decoder.
+
+**Dual-stack** (bare `port` clauses match v4 and v6; a narrow `ip6[6]` clause admits v6
+behind an extension header). SSH is captured as **SYNs and the banner only**: libpcap's
+`tcp[]` payload accessor is IPv4-only (it compiles but matches no IPv6 packet), so IPv6
+gets an explicit fixed-offset `ip6[]` twin — verified on both families.
+**Signature-based on the per-packet capture model**, so the standalone's codes that need
+state, config or raw L2 are deliberately **not** ported, each with a reason: the www/jsproxy
+**crash** codes (server teardown with no response — flow-close behaviour), the
+Winbox→DNS→downgrade **chain** (`MTK-018` + `MTK-C02`/`C03`, cross-flow/cross-time), the
+VTEP-peer-gated **VXLAN** code (`MTK-009`, needs an operator peer list this guard has no
+config for), the btest control-channel code (`MTK-004`), and `MTK-016` (arbitrary native-L2
+frames, unreachable behind a port-scoped BPF — `tcpdump -x` carries only IP-onward bytes).
+- Endpoint: `GET /api/net/mikrotik-guard` `{interface, seconds}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py mikrotik-guard [--iface I] [--seconds N] [--json]`
+
+#### Aruba Guard
+HPE **Aruba** (ArubaOS) — a passive guard ported from the standalone
+`arubaguard`. Its core surface is **PAPI**, the Aruba AP↔controller control protocol on
+**UDP/8211**, which is **cleartext and unauthenticated** on the wire; the guard names the
+exploit shapes for the **42 PAPI CVEs**. The primary class is deliberately *exposure*, not
+version posture: **eight of the ARUBA-PSA-2023-006 CVEs are permanently unpatched** on
+InstantOS 6.4/6.5/8.6 and ArubaOS 10.3 (HPE could only fix them in newer trains, and the
+only workaround, `cluster-security`, does not exist on ArubaOS 10), so for a large installed
+population **reachability itself is the finding** — **`ARB-001`** fires on any PAPI datagram.
+Attack shapes: **`ARB-101`** oversized datagram and **`ARB-102`** declared-length overrun
+(`packet_size` > bytes present) for the buffer-overflow CVEs; **`ARB-103`** shell
+metacharacters *alongside a command token* (critical) and **`ARB-107`** format-string
+specifiers for the injection CVEs; **`ARB-104`** path traversal (critical —
+CVE-2024-31474/31475 are unauthenticated arbitrary file deletion); **`ARB-105`** a long
+unterminated printable run (stack-overflow shape); **`ARB-106`** a per-source flood (the
+PAPI DoS shape); and **`ARB-109`** service attribution, which fires only when a datagram is
+addressed to a PAPI service the HPE advisories name (CLI service, Soft AP Daemon, AP
+Certificate Management, …) and attaches exactly that service's CVEs. The **PAPI header**
+(magic `0x4972`, Wireshark's dissector layout) is parsed to distinguish **`ARB-004`**
+cleartext framing (a parseable magic is proof — an encrypted / cluster-security payload
+cannot present one) from **`ARB-005`** opaque framing; key *strength* is not observable
+passively, so both report framing only. **`ARB-202`** inventories the PAPI endpoints seen.
+**Dual-stack** — bare `port` matches v4 and v6, and a narrow `ip6[6]` next-header clause
+admits PAPI behind an extension header (**`ARB-008`**).
+- Endpoint: `GET /api/net/aruba-guard` `{interface, seconds}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py aruba-guard [--iface I] [--seconds N] [--json]`
+
+#### APC Guard
+*Card: **Diagnostics** sub-tab (after Cert Watch).* **APC / Schneider Network Management Cards** (NMC1, NMC2, NMC3 — rack PDUs, rack ATS, NMC-equipped
+UPS) against **Ripple20**, the Treck TCP/IP stack bugs. The detection engine is the vendored
+standalone module `python/apcguard.py` (pure Python over raw frames). The in-app scan captures a
+bounded window with `tcpdump` using the module's own filter
+(`udp port 161`, `udp port 53`, ICMP, IP protocols 4 and 41, IPv4 fragments, and all IPv6), then
+replays the capture through the module with packet timestamps as its clock. Sources: Schneider
+FA410359 / SEVD-2020-174-01 V2.3, the JSOF Ripple20 whitepaper, and the McAfee ATR / JSOF
+detection logic. Never transmits.
+
+- **Version gates (posture).** Reads the card's **SNMP sysDescr** and gates on the hardware
+  and application tokens in `PN`/`AN1` (e.g. `apc_hw05_rpdu2g_694.bin`) — not the model number,
+  which does not identify the platform. **`APC-001`** NMC2 AOS ≤ 6.9.4, **`APC-002`** NMC1 ≤ 3.9.2,
+  **`APC-003`** NMC3 ≤ 1.3.3.1. These say *version in range*, never *vulnerable*: sysDescr does not
+  prove patch state. NMC2 6.9.2 / 6.9.4 fixed 14 of the 15 Treck CVEs; CVE-2020-11901 was fixed
+  only in 6.9.6, and the finding says so. **`APC-010`** inventories each card; **`APC-011`**
+  reports a sysDescr it cannot gate (missing or unknown tokens, or a version between last-affected
+  and first-fixed — never assumed safe).
+- **Attack shapes (against a known card).** **`APC-101`** fragmented IPv4-in-IP tunnel datagram
+  and **`APC-102`** inner IPv4 length shorter than the data present (CVE-2020-11896; also
+  CVE-2020-11898 when the inner protocol is 0); **`APC-103`** the card decapsulated a flagged
+  datagram and answered with ICMP protocol-unreachable; **`APC-106`** that reply quotes bytes that
+  were not in the packet — **heap memory disclosed** (CVE-2020-11898; the finding carries counts
+  and offsets, never the leaked bytes); **`APC-105`** IPv6-in-IPv4 to a card (CVE-2020-11902);
+  **`APC-111`** a DNS answer whose CNAME overruns its RDLENGTH and **`APC-112`** an overlong,
+  looping or chained name (CVE-2020-11901).
+- **Tunnel observations.** **`APC-104`** tunnel traffic to a card that meets no CVE condition;
+  **`APC-107`/`APC-108`** the card rejected an IP-in-IP / IPv6-in-IPv4 packet (informational — a
+  statement about that address and path, not immunity); **`APC-109`** another device answered
+  for it; **`APC-110`** a card with a declared MAC answered SNMP from a different MAC.
+- **CVE-2020-11899** (CISA KEV) has no documented wire trigger, so it is carried by the version
+  gates only. **CVE-2020-11897** does not apply to APC products.
+
+In Ragnar the module's findings map to **POSTURE** (version gates, inventory, tunnel
+observations), **EXPOSURE** (`APC-104`, `APC-110`) and **ATTACK** (`APC-101`/`102`/`103`/`105`/
+`106`/`111`/`112`); severities `info`/`notice`/`warn`/`critical` become INFO/LOW/HIGH/CRITICAL.
+
+**Known cards.** Tunnel and DNS attempts are analysed only against cards the engine knows, and a
+20-second window rarely contains an SNMP poll. So cards seen answering SNMP are **remembered
+across scans** (up to 256, in `data/apc_guard.json`), and you can **declare cards** in the card's
+text box — `ADDR` or `ADDR=MAC`, comma-separated, IPv4 or IPv6. Declare a MAC only where the tap
+sees the card's own frames: in a routed topology every frame carries the router's MAC. **Forget
+learned cards** clears the remembered list. IPv4 + IPv6 (the tunnel CVEs are IPv4-outer by
+definition).
+
+- Endpoint: `GET /api/net/apc-guard` `{interface, seconds (5-60), cards?, forget?}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py apc-guard [--iface I] [--seconds N] [--cards 'ADDR[=MAC],…'] [--forget] [--json]`
+- Self-test: `apc-guard-selftest` — the module's own 516-check tier plus the in-app adapter
+  (pcap reader, finding mapping, card memory, declared-card parsing, and a real `tcpdump` replay
+  through the module's filter). `python/apcguard_scapy_xcheck.py` is the module's independent
+  scapy cross-check (114 checks; its live-sniff legs need root).
+
+**Continuous mode (opt-in daemon).** `scripts/apcguard@.service` runs the same engine
+continuously on one tapped interface, keeping the author's measured hardening (`CAP_NET_RAW`
+only, `AF_PACKET`/`AF_NETLINK` only, `MemoryDenyWriteExecute=yes` — verified on this project's
+Raspberry Pi 5 / ARM64, where the author had measured x86_64 only — syscall filter,
+`MemoryMax=160M`). It runs the module self-test before every start and streams findings to
+`/var/log/ragnar/apcguard.jsonl`, which Watchtower tails.
+
+```
+sudo cp scripts/apcguard@.service /etc/systemd/system/
+sudo install -d /etc/ragnar/apcguard
+sudo cp scripts/apcguard.conf.example /etc/ragnar/apcguard/apcguard.conf     # optional
+sudo cp scripts/apcguard-nmc.list.example /etc/ragnar/apcguard/nmc.list      # your cards
+sudo systemctl daemon-reload && sudo systemctl enable --now apcguard@eth1
+```
+
+`scripts/apcguard@eth1.service.d.iface.conf.example` pins the instance to its interface
+(`RestrictNetworkInterfaces=` needs a literal name, not `%I`).
+
+**Blind spots** (from the module): the sysDescr grammar was checked against 13 public captures,
+not your fleet, and application tokens without a public capture are unverified; SNMPv3 with
+privacy hides sysDescr (declare the card); DNS over TCP is not inspected; tunnel nesting beyond
+one level is not unwrapped; a reply is matched only to a request the tap also saw; and the
+module's lab has never run against a real NMC — `APC-103`/`APC-106` are exercised by an emulated
+Treck-style responder.
+
+#### Liebert Guard
+*Card: **Diagnostics** sub-tab, **L7**, right after APC Guard.* The companion to APC Guard for
+the other big power-gear family: **Vertiv / Liebert** power and cooling management cards. The
+detection engine is the vendored standalone module `python/liebert_guard.py` (Python standard
+library only). The in-app scan captures one HTTP port (default 80) with `tcpdump` — plus the
+shared IPv6 extension-header clause, since the module itself filters in-process precisely so an
+extension header cannot hide a frame — and replays the capture through the module. Never
+transmits.
+
+- **`LG-001`** (critical, posture, CVE-2014-9222 **Misfortune Cookie**): a RomPager `Server:`
+  banner below 4.34 — the range of the Liebert MPH rack PDUs (Emerson-era RPC-1000 cards, fixed in
+  firmware 4.D40.1). A banner cannot prove the cookie feature is enabled or that a vendor
+  backport is missing, so this is *version in range*, not *vulnerable*.
+- **`LG-002`** (low) a RomPager banner whose version cannot be parsed; **`LG-003`** (info) RomPager
+  4.34 or later, kept for asset inventory.
+- **`LG-101`** (high, attack, **CVE-2025-41426**): an HTTP request line whose method token is
+  longer than 64 bytes — the request that overflows the stack of **Liebert RDU101**
+  (≤ 1.9.0.0, fixed 1.9.1.2) and **IS-UNITY** (≤ 8.4.1.0, fixed 8.4.3.1) cards. An attempt
+  detector: it fires for any server on the port, patched cards included, and cannot show the
+  target is a Liebert card. Registered method names are under 20 bytes, so it never fires on
+  normal traffic.
+
+It flags RomPager on **any** host (printers and switches ship it too), and only cleartext HTTP is
+visible — the web UI on HTTPS is opaque. IPv4 + IPv6. The source of an `LG-101` finding is the
+client sending it; the source of a banner finding is the card.
+
+**v2 — bounded reassembly.** The module parses every frame on the tap in Python, and v1's
+reassembly could be made cubic by a stream of tiny TCP segments (measured on the Pi 5: 1,524
+one-byte segments cost 12.35 s in v1, 0.08 s in v2). v2 records head-start candidates and the
+lowest request sequence number as segments arrive and counts every assembly step against a
+per-flow **work budget** (`MAX_WORK` 200,000 steps, `MAX_CANDS` 16 candidates); a flow that
+exhausts it is dropped, so cost stays linear in the packets sent. The one trade-off: a response
+head or request line delivered as more than about 630 separate *in-order* one-byte segments is
+not judged (the same data in reverse order still is). Detection, codes and output are unchanged.
+
+- Endpoint: `GET /api/net/liebert-guard` `{interface, seconds (5-60), port (default 80)}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py liebert-guard [--iface I] [--seconds N] [--port P] [--json]`
+- Self-test: `liebert-guard-selftest` — the module's own 198-check tier (plus a live loopback
+  capture per address family when run as root) in its own interpreter, and the in-app adapter
+  (pcap replay, finding mapping, verdicts, port selection, and a real `tcpdump` pass through the
+  capture filter). `python/liebert_guard_conformance.py` (501 checks) and
+  `python/liebert_guard_scapy_selftest.py` (554) are the module's deeper tiers.
+
+**Continuous mode (opt-in daemon).** `scripts/liebert_guard@.service` runs the module on one
+interface and streams findings to `/var/log/ragnar/liebertguard.jsonl`, which Watchtower tails.
+It keeps the author's hardening (`CAP_NET_RAW` only, `AF_PACKET`/`AF_UNIX` only,
+`IPAddressDeny=any`, `MemoryDenyWriteExecute=yes`, syscall filter) but runs as the shared
+`ragnar` user rather than a dynamic one, because a dynamic user would move `/var/log/ragnar`.
+Verified on this project's Raspberry Pi 5 (ARM64).
+
+```
+sudo cp scripts/liebert_guard@.service /etc/systemd/system/
+sudo install -d /etc/ragnar/liebert_guard
+echo 'LG_ARGS="--promisc"' | sudo tee /etc/ragnar/liebert_guard/eth1.env   # optional; -p 8080 for another port
+sudo systemctl daemon-reload && sudo systemctl enable --now liebert_guard@eth1
+```
+
+One instance judges one port; for a second port, copy the unit under another name with its own
+`LG_ARGS`.
+
+> **Watchtower feed.** All eight vendor guards append their findings as JSON-lines to
+> `/var/log/ragnar/<guard>.jsonl` (time-window deduplicated) on every scan, so
+> [Watchtower](#watchtower) tails them into the unified alert pane and single Pushover path
+> alongside the standalone watcher daemons. Cisco, Juniper, Arista and Comware also run in the
+> Extended Monitoring rotation; MikroTik, Aruba, APC and Liebert run when you scan them (and the
+> APC and Liebert daemons write `apcguard.jsonl` and `liebertguard.jsonl`).
+
+#### Dell Guard (standalone daemon)
+Dell **SmartFabric OS10** SSRF-egress sensor for **CVE-2025-22474** (CWE-918, CVSS 6.8,
+`C:H/I:N/A:N`). Unlike the in-app guards above, Dell Guard is **not** an on-demand in-app
+scan — it is an **opt-in standalone daemon** (`python/dellguard.py`, units
+`scripts/dellguard@.service` + `scripts/dellguard-learn@.service`) that feeds
+[Watchtower](#watchtower) via `/var/log/ragnar/dellguard.jsonl`. It lives outside the
+in-app guard model for two structural reasons the bounded `tcpdump` scan cannot meet:
+**(1) attribution is native-L2 LLDP** — it reads the OS10 identity from LLDP (chassis-ID /
+system-description / Management-Address TLV) to prove *this Dell device* originated a
+request; **(2) detection is a *learned baseline*** — a `--learn` run (24 h by default)
+records each device's normal egress, and enforcement flags departures from it. A stateless
+per-capture classifier can hold neither.
+
+CVE-2025-22474 is **PR:H**, so this is a **post-exploitation egress** detector, not a
+vulnerability scanner: a true positive means an already-admin attacker is using the switch
+as an SSRF proxy. The SSRF trigger (HTTPS REST / SSH CLI on the management plane) is
+invisible to a passive tap; the *resulting egress* is not, so detection is **by effect** —
+an outbound request from an attributed OS10 device to a destination absent from its
+baseline. Finding classes: **DG-0xx** posture (OS10 version vs the affected trains
+10.5.4/5/6, 10.6.0), **DG-1xx** exposure (mgmt plane on the segment / cleartext mgmt /
+no Management-Address TLV), **DG-2xx** attack (`DG-201` egress to a cloud
+instance-metadata endpoint — critical, needs no baseline; `DG-202..206` baseline-gated new
+endpoint / protocol / DNS name / fan-out / scope-crossing; `DG-207` egress that could not be
+attributed), and **DG-3xx** operational sensor-state (baseline absent/thin/mismatch). The
+baseline is **never auto-learned** (an auto-updating baseline is attacker-poisonable) and is
+fingerprinted against the attribution config so a baseline built under different attribution
+is refused (`DG-303`) rather than silently applied.
+
+Version **0.1.0-dev**: several thresholds (the sufficiency gate, the 10.5.6 boundary) are
+documented as *starting points, not measured values* — re-derive them against a real
+segment before they drive a patch SLA. Passive/RX-only, kernel-enforced (no `AF_INET`, so
+it can never transmit or open an IP socket). Take a baseline first, then enable the sensor:
+
+```
+sudo cp scripts/dellguard@.service scripts/dellguard-learn@.service /etc/systemd/system/
+sudo install -Dm640 -o ragnar -g ragnar python/dellguard.example.json /etc/ragnar/dellguard.conf
+sudo systemctl start dellguard-learn@eth1.service      # emits nothing; writes the baseline
+sudo systemctl enable --now dellguard@eth1.service     # then enforce
+python3 python/dellguard.py --selftest                 # 256 KAT checks, no root
+```
 
 ### Locate Port
 Physically find **which switch port** the device is plugged into — the software
@@ -2115,7 +5103,10 @@ carries the default route). Returns **vpn / likely / no / unknown**:
   VPN-provider range** (an ASN-derived list synced locally from
   [X4BNet/lists_vpn](https://github.com/X4BNet/lists_vpn) and checked offline).
   This is the signal that catches a VPN running **on the router**, where
-  Ragnar's own NIC looks like an ordinary LAN port.
+  Ragnar's own NIC looks like an ordinary LAN port. **Dual-stack**: both the
+  IPv4 and IPv6 provider lists are fetched (best-effort on the v6 half) and the
+  egress IP is matched in its own family — so a VPN egress over IPv6 is caught
+  too, not silently dropped as it was when only the IPv4 list was parsed.
 - **Tor exit** — the egress is confirmed a Tor exit node via the Tor Project's
   own checker (again catching Tor/VPN upstream on the router).
 - **Provider ASN name** — the egress ISP/ASN name matches a commercial-VPN

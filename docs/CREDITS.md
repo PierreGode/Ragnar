@@ -1,0 +1,385 @@
+# Credits & Attribution
+
+Ragnar is supported by people's work. This file records, in more detail than the
+[README credits table](../README.md#-credits--attribution), the people whose research and
+engineering make Ragnar possible.
+
+## Solarflere — the CVE research behind the passive detection suite
+
+Every CVE that Ragnar's passive watchers and vendor guards can detect was identified,
+researched and curated by **[Solarflere](https://www.instagram.com/solarflere)**, who
+co-authors the [Authority Verification](nettools.md) suite (Diagnostics, Switch &
+L2/L3, Interfaces). Ragnar turns that research into detectors — the vulnerability corpus
+behind them is Solarflere's work.
+
+### By the numbers
+
+- **386 CVEs detected from the wire.** 455 distinct CVE IDs are named across Ragnar's
+  code; 386 of them a passive detector actually identifies. The rest are named, not detected:
+  60 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
+  shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
+  advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
+  cannot reconstruct on the wire — the Ripple20 IPv6 bug CVE-2020-11897, which APC Guard
+  names only to say it does not apply to APC, CFM Watch's two screened-out CFM CVEs, DNS
+  Watch's three Avahi mDNS crafted-packet bugs (CVE-2008-5081 / CVE-2010-2244 / CVE-2011-1002),
+  named only to document the deliberate gap — ~5.0 CVSS v2, under the bar, not in CISA KEV —
+  and **RADIUS Watch's ten triaged/deferred CVEs** — the FreeRADIUS DHCP-decoder set, the
+  EAP-pwd side channels and a logrotate priv-esc, all undetectable from a passive RADIUS vantage,
+  and **RDP Watch's CVE-2005-1794** Standard-RDP-Security MITM, carried as a posture reference
+  on RDP-001/RDP-002 only — RDP Watch is a posture/abuse module with no CVE codes of its own —
+  and **HTTP Watch's five deferred CVEs** — the gRPC accept-loop bug with no wire artifact, two
+  gRPC HPACK / `-bin` bugs below the 6.5 bar, a grpc-js local-API prototype pollution and Netty's
+  `setUri()` library misuse, whose wire effect the generic smuggling rules already catch),
+  3 in card prose as related context, and 6 **active** BLE
+  checks in the BLE Pentest action. Every one is listed, with its detector and status, in the
+  generated **[CVE Index](CVE.md)**.
+- **28 years of coverage** — from **CVE-1999-0113** (the rlogin `-froot` bypass) to
+  **CVE-2026-102019**.
+- **Two CISA KEV entries** join the corpus with SMTP Watch (CVE-2019-10149, CVE-2018-6789),
+  and APC Guard adds the KEV-listed Ripple20 CVE-2020-11899. HTTP Watch adds two more:
+  **MS15-034** (CVE-2015-1635) and **HTTP/2 Rapid Reset** (CVE-2023-44487).
+- **Arista Guard v4** tracks 17 EOS switch/router CVEs across posture / exposure / attack —
+  BlastRADIUS (CVE-2024-3596, now scoped to Arista hardware learned from LLDP), regreSSHion,
+  gNOI authorization bypass (CVE-2025-1260 / CVE-2025-0936), the actively-exploited
+  tunnel-decapsulation CVE-2026-7473, and the VLAN / OSPFv3 / CVX / IPsec dataplane shapes.
+- **RPC / NetLogon Watch v7** adds thirteen Windows RPC CVEs: **MadLicense** and the rest of the
+  July-2024 RD Licensing cluster (CVE-2024-38077 / -38074 / -38076 / -38071 / -38072 / -38073 /
+  -38099), the LSM container-interface pair (CVE-2022-37973 / CVE-2022-37998), the RpcGetSessionIds
+  LSM crash (CVE-2025-26651), the **Certighost** AD CS chase (CVE-2026-54121) and the **EventLogin**
+  MS-EVEN backup-write cluster (CVE-2025-29969 / CVE-2026-50502) — graded off the cleartext RPC
+  security trailer, interface UUID and opnum — alongside the no-CVE ESC11, MS-DNSP
+  ServerLevelPluginDll and interface-inventory surfaces. **LDAP Watch v5** adds **LongLogon**
+  (CVE-2026-41089, the CLDAP netlogon DC-locator ping routed to the legacy BuildSamLogonResponse
+  builder plus the DC's own-DNS-name overflow precondition). The new **RDP Watch** reads the
+  cleartext X.224 Connection Request/Confirm for negotiation posture and connection abuse — no
+  CVE codes (BlueKeep is below the OS floor).
+- **TLS Watch v11** adds two TLS-borne CVEs read off cleartext framing: **CVE-2026-52346** (MikroTik
+  RouterOS `xt_tls` out-of-bounds read from an unvalidated SNI `host_name` length — pure arithmetic
+  on the four RFC 6066 nested lengths, high when the declared length passes the handshake message,
+  warn for an inner-container overrun, on TLS/DTLS/QUIC) and **CVE-2026-47291** (the `http.sys`
+  per-request buffer-reference-array integer overflow, MSRC 9.8 — a run of client application_data
+  records with no server response, the non-full ones the primary signal, reachable over TLS and
+  HTTP/1.x only).
+- **Cert Watch v3** (the passive X.509 triage daemon) adds four CVEs read from the certificate's own
+  bytes: **CurveBall** (`CVE-2020-0601`, CISA KEV — explicit EC parameters matching a standard curve
+  except the base point, read from the original DER because `cryptography` normalizes it away),
+  **`CVE-2022-0778`** (explicit EC parameters declaring a non-prime field — the OpenSSL `BN_mod_sqrt`
+  infinite loop), **ROCA** (`CVE-2017-15361` — the Infineon RSA key-generation fingerprint) and
+  **`CVE-2025-58188`** (a DSA public key that panics Go's `crypto/x509` chain validation). Handshake-level
+  CVEs stay with TLS Watch; these are the certificate-bytes half.
+- Weighted to the current threat wave (all named IDs): **56 CVEs from 2023, 63 from 2024, 49 from 2025, and
+  66 from 2026**, with a nine-strong 2021 cluster from the LLDP SB220 / RV / TRENDnet /
+  QNAP families and a deep 2020–2022 CDP seam (30 / 37 / 29) that the CDP Watch **LCDPwn**
+  expansion widened — the Video Surveillance 7000/8000 set, the Cisco ATA 190 cluster,
+  Unified CM, FortiSwitch and lldpd.
+- Spanning **~40 passive detectors** from L2 to L7 plus the timing- and forwarding-plane
+  watchers (BFD, PTP, SR-MPLS) and the **IPsec/IKE** key-exchange posture detector, **eight
+  in-app vendor CVE guards** (Cisco, Juniper, Arista, Comware, MikroTik, Aruba, APC, Liebert) and **Dell
+  Guard** as a standalone daemon.
+- **Cross-protocol crypto-attack coverage** — the same cryptographic weaknesses are named
+  everywhere they appear: **SWEET32** (CVE-2016-2183) in TLS, SSH and IKE; **D(HE)at**
+  (CVE-2002-20001 / CVE-2022-40735 / CVE-2024-41996) across TLS, SSH and IPsec; and
+  **Logjam / weak-DH** (CVE-2015-4000) in IKE.
+- **DNS / DNSSEC** — a passive DNS-response detector for **KeyTrap** (CVE-2023-50387),
+  **NSEC3** DoS (CVE-2023-50868), **NXNSAttack** (CVE-2020-8616), **MaginotDNS**
+  cache-poisoning (CVE-2021-25220), **DNSBomb** (CVE-2024-33655) and **SAD DNS**
+  (CVE-2020-25705), plus KeyTrap/NSEC3 posture folded into the active DNS Doctor. **DNS
+  Watch v5** adds 20 more, all read from the wire: malformed-record parser bugs —
+  compression-pointer loops (CVE-2026-81642 Unbound, CVE-2026-2291 / CVE-2026-5172 dnsmasq)
+  and malformed DNSKEY rdata (CVE-2025-8677 BIND, CVE-2026-4890 / CVE-2026-4891 dnsmasq);
+  DNSSEC structural integrity — RRSIG label overrun (CVE-2026-11721 / CVE-2026-52688), NSEC
+  chain escape (CVE-2026-13321), NSEC3 apex-hash impersonation (CVE-2026-10723) and
+  NSEC/NSEC3 coexistence (CVE-2026-13204); protocol abuse — SVCB AliasMode fan-out
+  (CVE-2026-81563 / CVE-2026-81736), duplicated EDNS options (CVE-2026-42944), duplicate-RR
+  floods (CVE-2026-75029) and TKEY queries (CVE-2026-76163); an unsigned multi-message zone
+  transfer (CVE-2026-19033); and three CVEs named on existing detections — excessive key-tag
+  matching (CVE-2026-19668), unsolicited-RR acceptance (CVE-2025-40778) and the weak
+  source-port/query-ID PRNG (CVE-2025-40780). **DNS Watch v6** adds an **mDNS tier** on
+  UDP/5353: a Matter/Thread service census (informational — the only plane that names those
+  fabrics on the wire) and the RFC 6762 / CERT **VU#550620** scope family — a hop-limit ≠ 255
+  violation, and off-link mDNS source / open-reflector detection (**CVE-2015-2809** Avahi,
+  **CVE-2017-6520** eCos, **CVE-2015-1892** OS X), armed from the capture interface's own subnets.
+  **DNS Watch v7** adds five more: **SIGRed** (**CVE-2020-1350**, CVSS 10.0, CISA KEV — the
+  oversized SIG/KEY record Windows DNS mis-sizes); a **DDNS** (RFC 2136 dynamic-update) posture
+  tier that catches an unsigned or TSIG-**bypassed** update the zone *accepted* — a completed
+  authentication bypass, not an attempt (**CVE-2017-3143**) — and folds the BIND GSS-TSIG SPNEGO
+  overflows (**CVE-2020-8622** / **CVE-2020-8625** / **CVE-2021-25216**) into the TSIG/TKEY
+  decode; and an **rDNS** posture tier (PTR reverse-lookups for private space leaking to a public
+  resolver, and `ip6.arpa` reverse-tree enumeration) that carries no CVE. **DNS Watch v8** adds
+  three more: the BIND **IXFR SOA-owner-not-apex** assertion that deletes the zone's SOA and
+  terminates named (**CVE-2021-25214**), and the **MS16-077 WPAD** fallback flaw exploited *via
+  NetBIOS name responses* (**CVE-2016-3213** / **CVE-2016-3236**) — detected as the WPAD *query*
+  over NBT-NS, the vulnerable state the host is in (the poisoned *answer* stays smbwatch's). v8
+  also brings five posture tiers that carry no CVE but are real attack surface: unicast DNS-SD
+  service enumeration, **LLMNR** (UDP/TCP 5355), **NBT-NS** (UDP 137), the **encrypted-DNS
+  transport** census (DoT/DoQ on 853, DDR/DNR discovery, DoH-endpoint resolution — with a
+  correlation hook for TLS Watch), and **TSIG/SIG(0)** posture (weak HMAC, excessive fudge).
+  **DNS Watch v9** adds the **SPF/libspf2 parser** tier — SPF records are the one piece of DNS
+  content a mail server *compiles*, and these are the TXT-record shapes that reach libspf2's
+  parser bugs: an uppercase macro letter that routes expansion through the `url_encode` `sprintf`
+  (**CVE-2021-33912**) or its reversing variant (**CVE-2021-33913**), an `exp=` explanation TXT
+  large enough to exhaust the 511-byte compile budget (**CVE-2021-20314**), and a term packing
+  ~127 macro variables to underflow the budget arithmetic (**CVE-2023-42118**). v9 also adds
+  **TCP stream reassembly**, which catches a Ptacek-Newsham **segment-overlap mismatch** (two
+  segments giving different bytes for one sequence range, so a first-wins sensor and a last-wins
+  resolver see different DNS messages) — carries no CVE but is a classic passive-tap evasion.
+  **DNS Watch v10** extends the mDNS census to **Z-Wave**: a Silicon Labs Z/IP Gateway advertising
+  `_z-wave._udp` is wired evidence of a Z-Wave mesh on the IP side (radio-free, like the
+  Matter/Thread census) — informational, carries no CVE. **DNS Watch v11** enriches that census
+  with the fingerprint the Z/IP gateway publishes — device type, home ID, endpoint, product ID and
+  raw security-class hex — while deliberately reading **no on-wire device name** (Z-Wave node names
+  stay inside the encrypted Z/IP tunnel); still informational, still no CVE. **DNS Watch v12** fixes the
+  **MaginotDNS** detector (`DNSD-006`) false positive on ISP reverse zones: out-of-bailiwick records
+  that the response's own anchored delegation glue or CNAME/DNAME chain accounts for become the
+  notice-level `DNSD-170` (no CVE), real injection stays critical, and the CVE field is relabelled
+  as an attack class. No new CVE.
+- **SSDP / UPnP** — a passive SSDP/UPnP protocol detector for **CallStranger** (**CVE-2020-12695**),
+  the lone spec-level GENA flaw: a `SUBSCRIBE` whose `CALLBACK` points off-link turns the device
+  into a reflector / data-exfiltration relay, independent of device age. 25 codes across discovery
+  (SSDP over UDP/1900 + IPv6 FF0X::C), GENA eventing and IGD port-mapping control — reflection /
+  amplifier posture, advert spoofing and WAN-side or third-party IGD pinholes — full IPv4/IPv6
+  parity, no learning period. Vendor / implementation bugs (libupnp, MiniUPnPd, the Windows SSDP
+  service) are deliberately out of scope — that is the vendor gate. **v2** adds a passive
+  **device census / fingerprint** — vendor / model / friendlyName from the `SERVER` token and the
+  UPnP device description where it crossed the wire (never fetched), plus MAC OUI when present. It
+  **carries no CVE** and adds nothing to the counts above — wire-side UPnP/DLNA device ID, alongside
+  the Matter / Thread / Z-Wave census and the LoRaWAN fingerprint.
+- **HTTP / h2c / gRPC** — the new passive **HTTP Watch** reads cleartext HTTP/1.x, h2c and gRPC
+  (28 codes) and adds **eleven** detected CVEs. Request smuggling is one RFC 9112 grammar engine —
+  a Content-Length framer and a Transfer-Encoding framer run side by side, and a desync is reported
+  when they end a message at different offsets *and* the leftover parses as a request line — with
+  the smuggling CVEs riding as screening rows: Netty's HTTP/1.0 Content-Length guard
+  (**CVE-2026-42584**), chunk-size overflow (**CVE-2026-42580**) and quoted chunk extensions
+  (**CVE-2026-42585**), Jetty's "funky chunks" (**CVE-2026-2332**) and http4s Ember's
+  case-sensitive Transfer-Encoding (**CVE-2026-69205**). It names the **HTTP.sys** shapes —
+  **MS15-034** (**CVE-2015-1635**, CISA KEV, a Range end at or beyond 2^63 parsed as an integer
+  rather than string-matched) — and co-detects the Accept-Encoding crash and trailer cases
+  (CVE-2021-31166 / CVE-2022-21907) alongside RPC Watch. On h2c / gRPC: **HTTP/2 Rapid Reset**
+  (**CVE-2023-44487**, CISA KEV, scaled to the server's own `MAX_CONCURRENT_STREAMS`),
+  CONTINUATION and HPACK abuse (**CVE-2023-32731** / **CVE-2023-33953**) and the gRPC
+  te / `:scheme` header abort (**CVE-2023-1428**). It also reads **credentials in the clear**,
+  including the FS S3150-8T2F credential cookie (**CVE-2025-25613**), and every password, token
+  and cookie value is replaced by an 8-hex SHA-256 tag before it reaches a finding.
+- **SNMP / multicast / time-plane** — the in-app **SNMP Watch** now reads raw BER off the
+  wire for **USM HMAC truncation** (CVE-2008-0960), **Cisco SNMP RCE** (CVE-2017-6736..6744,
+  CISA KEV), **snmptrapd overflow** (CVE-2025-68615) and **net-snmp VACM malformed-OID**
+  (CVE-2022-24805/24807/24809/24810); **IGMP/MLD Watch** flags malformed multicast control —
+  fragmented membership (CVE-2019-5608), invalid group-record type (CVE-2025-50681) and
+  query source-count overrun (CVE-2026-53275), both address families; and **NTP Watch** names
+  monlist amplification (CVE-2013-5211), spoofed Kiss-o'-Death (CVE-2015-7704/7705),
+  loopback-source ACL bypass (CVE-2014-9298/9751) and the zero-origin sync block
+  (CVE-2020-11868).
+- **TLS record layer & timing plane** — **TLS Watch** adds **Heartbleed** (CVE-2014-0160,
+  the cleartext heartbeat over-read shape) and the **oversized DH prime** client-DoS
+  (CVE-2018-0732, read from the ServerKeyExchange); **PTP Watch** adds a CVE-attributed
+  class for the timing plane — linuxptp **forwarding over-read** (CVE-2021-3570) and
+  **one-step Sync length abuse** (CVE-2021-3571), the gPTP **peer-delay requester flood**
+  (CVE-2024-42861) and the Arista EOS **invalid-TLV agent restart** (CVE-2021-28510).
+- **Windows attack surface & ARP control plane** — the in-app **SMB / Kerberos Watch** now
+  names **SMBGhost** (CVE-2020-0796 — both the SMB 3.1.1 compression-negotiation exposure
+  and the compression-transform 32-bit-overflow exploit), the **EternalBlue** TRANS2
+  SESSION_SETUP primitive (CVE-2017-0144), **RC4-MD4** Kerberos downgrade injection
+  (CVE-2022-33679 / CVE-2022-33647 — etype -128 offered, granted, or advertised in a
+  KRB-ERROR PA-ETYPE-INFO2) and the **reflective-relay** primitive (CVE-2025-33073 —
+  client == server, or a marshalled CREDENTIAL_TARGET_INFORMATION blob in a name/SPN); the
+  vendored **RPC / NetLogon Watch** adds **PrintNightmare** (CVE-2021-1675 / CVE-2021-34527,
+  spoolss RpcAddPrinterDriver over `\pipe\spoolss`), the **HTTP.sys** Accept-Encoding bug
+  (CVE-2021-31166 / CVE-2022-21907), the **RPC-runtime bind_ack underflow** (CVE-2022-26809),
+  **PetitPotam-class LSA anonymous coercion** (CVE-2022-26925), the **RemoteRegistry
+  NTLM-relay fallback** (CVE-2024-43532) and — in v3 — the **IRemoteWinSpool relay level**
+  (CVE-2021-1678: MS-PAR bound below packet privacy is high posture, and the opnum-62
+  driver install on that session is critical), while **Relay/Coercion Watch** attributes
+  the original **PetitPotam** (CVE-2021-36942) when the coercion stream carries
+  `EfsRpcOpenFileRaw` — the one method the August 2021 patch fixed; and **ARP Watch** gains a passive ARP-frame capture
+  that flags request rate/breadth and gratuitous floods — the shared shape behind the Juniper
+  ARP control-plane DoS family (CVE-2018-0063 / CVE-2019-0033 / CVE-2021-0216 / CVE-2021-0292),
+  attached as related context, not a per-CVE identification.
+- **Forwarding & failover plane** — **BFD Watch** adds an **auth-bypass teardown**
+  (CVE-2026-73458, Arista EOS, CWE-303 — a Down whose auth type/key-id departs from the
+  session's established profile), a **micro-BFD flap storm** (CVE-2026-33800, Juniper MX
+  PFEMAN/FPC crash) and names **CVE-2023-20049** (Cisco IOS XR BFD hardware-offload crash) on
+  its malformed/truncated-header codes alongside CVE-2018-0155; **SR-MPLS Watch** adds an
+  **unvalidated Segment-Routing TLV-length overrun** (`SRM-SR-TLV-OVERRUN`) that names the
+  SR control-plane parser CVEs it actually catches on the wire — BGP Prefix-SID
+  (CVE-2023-31490 / CVE-2024-31948) and OSPF SR opaque-LSA (CVE-2024-31950 / CVE-2024-31951)
+  — with a further `CVE_REFERENCES` table recording the SR-plane CVEs that are disputed or
+  owned by the BGP/IS-IS/OSPF watchers rather than claimed here.
+
+- **LAN / directory / first-hop wave** — **LACP Watch** correlates a malformed LACPDU
+  with a member flap into `LACP-MALFORMED-INDUCED-FLAP` (CVE-2024-30388 class, effect not
+  signature); **LDAP Watch** adds the OpenLDAP nested-filter slapd crash (CVE-2020-12243)
+  as `filter-nest-dos`; **DHCP Guardian** adds a passive DHCP-option scan for **TunnelVision**
+  (CVE-2024-3661, option 121/249 covering the default route — VPN decloaking) and
+  **DynoRoot-class** command injection (CVE-2018-1111, shell metacharacters in a text
+  option); and the in-app **ICMPv6 RA** parser adds the DNSSL-option DoS (CVE-2020-16899
+  Windows / CVE-2020-25583 FreeBSD rtsold) alongside the existing Bad Neighbor
+  (CVE-2020-16898). The two Microsoft DHCP heap-overflow CVEs (CVE-2026-50518 /
+  CVE-2026-56159) are deferred — no published trigger, so no passive signature exists yet.
+
+- **Routing / IGP wave** — **EIGRP Watch** names three CVEs on shapes it already detects:
+  the K-value / Goodbye adjacency-reset (CVE-2005-4436), weak/absent authentication
+  (CVE-2005-4437) and an unauthenticated Update-class flood (CVE-2026-20222, Cisco
+  ASA/FTD). **IS-IS Watch** adds two IOS XR feature-exposure detections read from the wire:
+  multi-instance IS-IS via the Instance-Identifier TLV #7 (CVE-2026-20074) and
+  SR/Flex-Algo signalling via Router-Capability TLV #242 sub-TLVs (CVE-2024-20406);
+  CVE-2024-20312 is excluded (no passive signature). **BGP Path Watch** and **OSPF Watch**
+  name their v4 malformed-attribute / opaque-LSA CVE corpora as posture advisories — FRR /
+  GoBGP / Juniper byte-level parser bugs (BGP: CVE-2022-40302/43681, CVE-2023-41358/47234/
+  47235, CVE-2024-30395, CVE-2026-37457/37458/37459/37461/37462; OSPF: CVE-2025-61099/61103/
+  61104/61106) — because the passive text watchers cannot reconstruct the malformed bytes;
+  the OSPF SR opaque-LSA overruns (CVE-2024-31950/31951) are byte-level detected by SR-MPLS
+  Watch, and the standalone BGP tap does the byte-level BGP detection.
+
+- **SR / MPLS control plane, now OSPFv3** — **SR-MPLS Watch** extends its byte-level SR
+  TLV-overrun detector (`SRM-SR-TLV-OVERRUN`) to **OSPFv3 Segment Routing** (RFC 5340 /
+  RFC 8362 extended LSAs / RFC 8666 SR) alongside MPLS, SRv6 and OSPFv2-SR — so an
+  overrunning OSPFv3 Prefix-SID / Adj-SID / Router-Information sub-TLV is caught on the
+  IPv6 wire (the RI path names CVE-2024-31950; the FRR ospf6d crash CVEs
+  CVE-2025-61101 / -61103 / -61106 / -61107 are recorded in `CVE_REFERENCES` as
+  reference-only, their receiver-side `debug` precondition being unobservable passively).
+  Separately, the in-app **OSPF Watch** adds an OSPFv3 **Instance-ID anomaly** detection
+  (a rogue parallel-instance / spoofing tell, read from the tcpdump `Instance N` token).
+
+- **Cleartext application protocols** — **FTP Watch** reads the FTP control channel for the
+  ProFTPD CVEs that are actually visible there: **mod_copy** `SITE CPFR`/`CPTO` issued before
+  authentication (**CVE-2015-3306**) or by an anonymous/ordinary session
+  (**CVE-2019-12815**) — a server-side copy needing no data connection, with the server's own
+  `350`/`250` replies confirming acceptance and completion — and the **quoted command verb**
+  that drives `make_ftp_cmd` into a one-byte out-of-bounds read (**CVE-2023-51713**),
+  ungated because no legitimate FTP verb opens with a quote. Banner version ranges are
+  capped at low confidence and reported as "verify this server", never as a vulnerable
+  verdict; vsftpd and Pure-FTPd are explicitly out of scope because nothing in them is
+  passively detectable at the bar this suite sets. **SMTP Watch** is the same idea for
+  **Exim**: the `${...}` string expansion in a `MAIL FROM` / `RCPT TO` address
+  (**CVE-2019-10149**, CISA KEV — raised to *payload queued* when the server itself answers
+  2xx to the tainted recipient), a backslash or NUL in a TLS SNI or a TLS 1.2
+  client-certificate DN (**CVE-2019-15846**), an EHLO/HELO line past the RFC 5321 512-octet cap — the
+  `string_vformat` heap overflow (**CVE-2019-16928**), keyed on the non-conformant length
+  rather than a proof-of-concept string — and an AUTH base64 token of length 4n+3, the
+  `b64decode` over-consume (**CVE-2018-6789**, CISA KEV). All three rules are ungated and
+  near-zero false-positive by construction, and Exim's three- and four-component version
+  numbers are compared in full so a patched 4.90.1 is never read as 4.90.
+
+- **Cleartext remote-login plane** — **Telnet Watch v5** extends the telnetd coverage to
+  the **encrypt key-id heap overflow** (CVE-2011-4862, exploited in the wild 2011), the
+  pre-auth **EC/EL NULL-dereference** and its inetd crash loop (CVE-2022-39028) and the
+  Solaris `in.telnetd -f` twin (CVE-2007-0882), and adds the **r-services** on their own
+  engines: the rlogin/rsh **`-froot`** injection (CVE-1999-0113), the **ftp-data
+  source-port trust bounce** (CVE-1999-0185) and netkit **rcp** abuse by a malicious server
+  (CVE-2019-7282 / CVE-2019-7283), plus rexec cleartext credentials and `.rhosts` trust —
+  the same `login -f` auth-bypass shape traced across twenty-seven years of Unix remote login.
+
+- **Actively exploited, honestly scoped** — **MikroTik Guard v2** adds the **MikroTrick**
+  chain (CVE-2026-67276 forged-exponent SSH key + CVE-2026-86060 crafted-username
+  escalation, exploited in the wild since 2 September 2026) as an *exposure* finding: the
+  attack runs inside encrypted SSH authentication and can never be seen on a tap, so the
+  guard flags RouterOS devices inside the fix train (read from MNDP or the cleartext
+  `ROSSSH` banner) that have SSH on the wire — and says plainly that silence is not
+  evidence of safety. **v3** (the October 2026 audit) adds the pre-auth SMB1
+  SessionSetupAndX crafted-`uniPwdLen` pair (CVE-2026-56719 + CVE-2026-89028, one code for
+  both) and the unauthenticated web-management HTTP body-length under-flow
+  (CVE-2026-84411) — the latter a *structural class*, not a CVE-exact signature, because
+  the malformation was withheld by vendor and CISA, so it reports at medium confidence and
+  raises a version-screen posture from MNDP. Two further v3 CVEs are routed to the modules
+  that already own the decoder — the xt_tls SNI over-read to TLS Watch and the
+  labelled-VPN NLRI under-flow to BGP Path Watch — rather than duplicated here.
+- **Ripple20 on the power plane** — **APC Guard** watches APC / Schneider Network
+  Management Cards (rack PDUs, ATS, UPS) for the Treck TCP/IP stack bugs: SNMP sysDescr
+  version gates for NMC1/NMC2/NMC3 against Schneider's per-application table (reported as
+  *version in range*, never *vulnerable*), fragmented and trimmed IP-in-IP tunnels
+  (CVE-2020-11896), an ICMP reply that quotes memory the packet never carried — heap
+  disclosure seen on the wire (CVE-2020-11898), IPv6-in-IPv4 to a card (CVE-2020-11902),
+  and malformed DNS answers (CVE-2020-11901). Its companion **Liebert Guard** covers Vertiv /
+  Liebert power cards: RomPager **Misfortune Cookie** banners (CVE-2014-9222, Liebert MPH rack
+  PDUs) and the oversized-HTTP-method request that overflows Liebert RDU101 / IS-UNITY cards
+  (CVE-2025-41426).
+- **The time plane, both halves** — **NTP Watch v11** adds the ntpd oversize-datagram crash
+  (CVE-2016-9312) and the ntpsec mode-6 `count` overrun (CVE-2019-6444 / CVE-2019-6443), and
+  now watches NTP over IPv6; **PTP Watch v4** extends PTP into **SyncE**'s ESMC control
+  channel, which earlier treated SyncE as invisible to a tap.
+- **The OT / PLC plane** — **Modbus Watch** reads Modbus/TCP, a protocol with no
+  authentication, for what is done to the PLCs: off-baseline writes, FC8 Force Listen Only,
+  unit-ID sweeps and Schneider UMAS. It follows the **ModiPwn** read-then-reconfigure
+  sequence (CVE-2021-22779) and flags the malformed MBAP/PDU framing that triggers the
+  libmodbus out-of-bounds reads (CVE-2019-14462 / CVE-2019-14463) and over-length reply
+  (CVE-2024-10918). The libmodbus findings are honestly labelled as triggers: the packet is
+  seen, but the PLC's code base is not confirmed. **v3 renames it Modbus & LoRaWAN Watch** and
+  adds a **LoRaWAN gateway-backhaul** tier (Semtech GWMP, UDP/1700) — a cleartext gateway census
+  with a device/gateway fingerprint, plus gateway impersonation, downlink injection, DevNonce
+  replay, uplink frame-counter reset and a cleartext location leak. It **carries no CVE** (the
+  LoRaWAN backhaul weaknesses are protocol / spec-level properties, not implementation bugs), so
+  it adds nothing to the counts above — it is wire-side LoRaWAN ID without a radio, alongside the
+  Matter / Thread / Z-Wave census in DNS Doctor.
+- **The discovery plane, multi-vendor** — **LLDP Watch** brings 30 LLDP parser CVEs across
+  thirteen families: lldpd and its Ruckus derivative (CVE-2015-8011 / CVE-2015-8012 /
+  CVE-2020-27827), Cisco FXOS/NX-OS/IOS/ACI (CVE-2018-0395, CVE-2021-34703, CVE-2023-20089,
+  CVE-2024-20294, CVE-2026-20010), Cisco SB220 (CVE-2021-34779 / CVE-2021-34780) and RV
+  routers (CVE-2021-1309 / CVE-2021-1251 / CVE-2021-1308), Juniper l2cpd (CVE-2018-0007,
+  CVE-2020-1641, CVE-2021-0277, CVE-2023-36849, CVE-2024-21618), Open vSwitch (CVE-2022-4337 /
+  CVE-2022-4338), Aruba (CVE-2020-7121, CVE-2021-34618), Fortinet (CVE-2021-26111 and the
+  FortiSwitchAX OUI-overflow RCE **CVE-2026-22627**), TRENDnet (CVE-2021-33315 / 33316 /
+  33317), QNAP QSS (CVE-2021-28801), PAN-OS (CVE-2025-0116) and SonicWall SWS
+  (CVE-2021-20024). It detects the malformed frame structurally, whichever stack it targets.
+  The advertised-version screen is labelled a note, not a verdict. v3 adds a **DCBX** class
+  (Data Center Bridging eXchange, `LLDP-060`..`069`) — 40 codes now — forged ETS bandwidth /
+  PFC / application-priority negotiation on the lossless fabric; there is no DCBX CVE, so it
+  earns its place on protocol abuse, not the corpus.
+- **The Cisco discovery plane** — **CDP Watch** screens 25 CDP-plane CVEs: the Armis **CDPwn**
+  five (CVE-2020-3110 / 3111 / 3118 / 3119 / 3120) widened by the **LCDPwn** successor and its
+  cross-vendor arm — the Video Surveillance 7000/8000 camera set (CVE-2020-3505 / 3506 / 3507 /
+  3543 / 3544, CVE-2021-1131 / 1521 / 1563 / 1564), IP Phone 68xx/78xx/88xx (CVE-2021-1379,
+  CVE-2022-20968), NX-OS/FXOS code execution (CVE-2022-20824), the Cisco ATA 190/191/192
+  cluster (CVE-2022-20688 / 20689 / 20690 / 20691 / 20766), Unified CM (CVE-2022-20804),
+  FortiSwitch (CVE-2021-26111) and lldpd (CVE-2023-41910). A byte-level TLV parser catches the
+  exploit shapes directly — oversized DeviceID/PortID, format-string TLVs, malformed
+  Power-Request and Addresses counts, and the per-address-record protocol_type/length and
+  allocation/copy mismatches behind the lldpd out-of-bounds read — while the advertised-version
+  match is a screening note, not a verdict (plain IOS/IOS-XE excluded, and an ATA guarded off
+  the IP-Phone family by a negative lookahead).
+- **Carrier Ethernet service OAM** — **CFM Watch** watches IEEE 802.1ag CFM / ITU-T Y.1731
+  on EVC trunks. It detects the Junos cfmd crash shape CVE-2020-1639 from CFM bounds
+  violations, and it correlates the CVE-2025-52961 load pattern. That second one is labelled
+  low confidence, because its trigger is valid traffic. Two CVEs are named only and stay
+  context: CVE-2014-3223, the Huawei Y.1731 DoS, never published its trigger field, and
+  CVE-2023-20233, a Cisco IOS XR CFM bug, falls below the bar. Its other 105 codes cover
+  forged APS protection switching (forced switch, lockout, uncorroborated Signal Fail),
+  forged AIS / CCM, moved or duplicate MEPs, linktrace sweeps, a full **ERPS / G.8032
+  ring-protection** class (R-APS opcode 40, armed against an operator-declared ring) and, in
+  v3→v5, **Y.1731 measurement & maintenance** abuse (forged loss/delay, TST), **transport**
+  anomalies (CFM tunnelled where it should not be, e.g. inside VXLAN) and an **E-LMI**
+  cross-plane class (MEF 16, EtherType 0x88EE): the UNI's CE-VLAN→EVC status checked against
+  CFM's continuity picture, armed against an operator-declared EVC. None of them names a CVE.
+- **Beyond the CVE corpus** — not every module needs a CVE to earn its place. **OAM Watch**
+  covers IEEE 802.3ah Link OAM, where no CVE clears the bar. It is still a one-frame link
+  blackhole: a forged Loopback Control frame puts the peer into remote loopback and discards
+  its traffic. It also flags failure-flag forgery that drives protection switches, peer
+  substitution and cleartext MIB reads. These are 38 protocol-abuse and structural codes
+  that name no CVE, and they are not counted above.
+
+_(Counts reflect the detector code as of October 2026 and grow as new modules land.)_
+
+### What makes these detections different
+
+- **100% passive — detection-only.** Ragnar never transmits, probes, scans or authenticates.
+  Every CVE above is caught by observing traffic that is already on the wire. In the
+  standalone daemons this is enforced twice over: an AST guard that rejects any
+  transmit-shaped call in the module itself, and the kernel
+  (`RestrictAddressFamilies` + `IPAddressDeny=any`), so the process cannot open an IP socket
+  even if the code were changed.
+- **Structural anomaly bounds, not exploit signatures.** Thresholds are measured against real
+  traffic rather than copied from a published proof-of-concept, so variants and evasion
+  attempts are still caught — and several detections are zero-false-positive by construction
+  (a labelled MPLS frame on a customer port simply should not exist).
+- **Three honest evidence classes.** Every finding is *posture* (a version/platform
+  fingerprint screened against the catalog — always "verify **this** device," never a
+  vulnerable/not-vulnerable verdict), *exposure* (an enabling condition visible on the wire)
+  or *attack* (an exploitation primitive observed in transit).
+- **Runs on a Raspberry Pi Zero 2 W.** Everything is built to a resource floor that cheap,
+  low-power hardware can sustain.
+- **Privacy by design.** Credential material is never logged — for example, RADIUS
+  Proxy-State is compared by digest and the values are discarded.
+
+Every classifier is validated offline by the 52-suite **Detector Self-Test**, which runs each
+detector against crafted attack captures with no root and no live traffic.
+
+Thank you, Solarflere. 🙏

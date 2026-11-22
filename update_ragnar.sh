@@ -95,6 +95,66 @@ if [ ! -d "$ragnar_PATH/.git" ]; then
     fi
 fi
 
+# ── Docker deployment: update the container, skip the native flow ─────────────
+# If Ragnar runs here as a Docker container (compose service name 'ragnar') and
+# there is NO native systemd service, this box is a container deployment. Update
+# it the Docker way — pull the code, rebuild the image, restart the container —
+# and skip every native step (service stop/start, host pip installs, hardware
+# tweaks). Detection is deliberately strict: a real native install (service
+# present) always falls through to the unchanged flow below, even if a stray
+# 'ragnar' container also exists, so nothing here can break native updates.
+if command -v docker >/dev/null 2>&1 \
+   && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'ragnar' \
+   && ! systemctl is-active --quiet ragnar.service 2>/dev/null \
+   && ! systemctl list-unit-files 2>/dev/null | grep -q '^ragnar\.service'; then
+    echo -e "\n${BLUE}Docker deployment detected — updating the container instead of a native install.${NC}"
+
+    # Same dubious-ownership guard the native path uses (root over a ragnar-owned
+    # checkout), so the pull below does not stop on it.
+    git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$ragnar_PATH" \
+        || git config --global --add safe.directory "$ragnar_PATH"
+    find "$ragnar_PATH/.git" -name '*.lock' -type f -delete 2>/dev/null || true
+
+    DOCKER_BRANCH="$(git -C "$ragnar_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+    echo -e "${BLUE}Pulling latest code (${DOCKER_BRANCH})...${NC}"
+    if ! git -C "$ragnar_PATH" pull --ff-only origin "$DOCKER_BRANCH"; then
+        echo -e "${YELLOW}Fast-forward pull failed — forcing to origin/${DOCKER_BRANCH} (local edits are kept in git's reflog)...${NC}"
+        if ! { git -C "$ragnar_PATH" fetch origin "$DOCKER_BRANCH" \
+               && git -C "$ragnar_PATH" reset --hard "origin/${DOCKER_BRANCH}"; }; then
+            echo -e "${RED}git update failed — aborting Docker update (container left running).${NC}"
+            exit 1
+        fi
+    fi
+
+    # Pick the compose command (v2 plugin preferred, v1 fallback).
+    if docker compose version >/dev/null 2>&1; then
+        DOCKER_COMPOSE="docker compose"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        DOCKER_COMPOSE="docker-compose"
+    else
+        echo -e "${RED}Docker Compose not found. Rebuild manually:${NC} cd $ragnar_PATH && docker compose up -d --build"
+        exit 1
+    fi
+
+    # Preserve the port the container is already bound to (host networking uses
+    # RAGNAR_WEB_PORT), so an update never silently moves the UI off its port.
+    DOCKER_WEB_PORT="$(docker inspect ragnar --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+        | sed -n 's/^RAGNAR_WEB_PORT=//p' | head -1)"
+    DOCKER_WEB_PORT="${DOCKER_WEB_PORT:-8000}"
+
+    echo -e "${BLUE}Rebuilding image and restarting container (RAGNAR_WEB_PORT=${DOCKER_WEB_PORT}) — this can take a few minutes...${NC}"
+    if ( cd "$ragnar_PATH" && RAGNAR_WEB_PORT="$DOCKER_WEB_PORT" $DOCKER_COMPOSE up -d --build ); then
+        DOCKER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+        echo -e "\n${GREEN}Docker deployment updated successfully.${NC}"
+        echo -e "  ${GREEN}Web UI:${NC} http://${DOCKER_IP:-<host-ip>}:${DOCKER_WEB_PORT}"
+        echo -e "  ${BLUE}Logs:${NC}   cd $ragnar_PATH && $DOCKER_COMPOSE logs -f"
+        exit 0
+    else
+        echo -e "\n${RED}Docker rebuild failed. Inspect with:${NC} cd $ragnar_PATH && $DOCKER_COMPOSE logs"
+        exit 1
+    fi
+fi
+
 echo -e "\n${BLUE}Step 1: Stopping ragnar service...${NC}"
 systemctl stop ragnar.service
 
@@ -110,8 +170,93 @@ git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$ragnar_PA
 # interrupted run never leaves a lock that needs a manual service stop.
 find "$ragnar_PATH/.git" -name '*.lock' -type f -delete 2>/dev/null || true
 chown -R ragnar:ragnar "$ragnar_PATH" 2>/dev/null || true
+# Git data damaged by a power cut (an empty HEAD, a half-written config or
+# packed-refs) makes every git command below fail before any repair can run.
+# Fix what plain file operations can fix, and rebuild .git if git still cannot
+# open the repository. Gitignored data is never touched.
+if [ -d "$ragnar_PATH/.git" ] && [ -f "$ragnar_PATH/git_updater.py" ]; then
+    python3 - "$ragnar_PATH" <<'PYEOF' || true
+import sys
+root = sys.argv[1]
+sys.path.insert(0, root)
+import git_updater as g
+warnings = []
+g.tidy_git_files(root, warnings)
+if not g.repo_readable(root):
+    ok, err = g.rebuild_repository(root, warnings)
+    if not ok:
+        print("  could not rebuild the git data: " + str(err))
+for line in warnings:
+    print("  " + line)
+PYEOF
+fi
 # Stash and merge commits need an author identity; root rarely has one.
 GIT_ID=(-c user.name="Ragnar Updater" -c user.email="ragnar-updater@localhost" -c pull.rebase=false)
+
+# A fetch that survives a corrupt tag ref - the failure that currently blocks
+# updates AND branch switches on some boxes. One bad release tag (os-v*) that
+# was force-pushed, partially deleted or had its objects GC'd makes a plain
+# `git fetch` abort with "bad object refs/tags/..." / "did not send all
+# necessary objects". The updater only ever syncs to a branch head, never a
+# tag, so on that signature we drop broken local tag refs and refetch branches
+# only. NOTE: --no-tags alone does NOT rescue a broken *local* tag - git still
+# uses it as a negotiation "have" - so the broken ref must be deleted first.
+resilient_fetch() {
+    local errf; errf="$(mktemp 2>/dev/null || echo "/tmp/ragnar_fetch.$$.err")"
+    if git fetch --prune origin 2>"$errf"; then
+        rm -f "$errf"; return 0
+    fi
+    cat "$errf" >&2 || true
+    if grep -qiE 'could not resolve host|unable to access|timed out|network is unreachable|failed to connect' "$errf"; then
+        rm -f "$errf"; return 1   # offline - nothing to repair
+    fi
+    if ! grep -qiE 'did not send all necessary objects|bad object refs/tags' "$errf"; then
+        rm -f "$errf"
+        repair_git_data; return $?   # other damage: straight to the repair ladder
+    fi
+    rm -f "$errf"
+    echo -e "${YELLOW}Fetch hit a corrupt tag - clearing broken tag refs and retrying without tags...${NC}"
+    local ref
+    while IFS= read -r ref; do
+        [ -z "$ref" ] && continue
+        if ! git rev-parse --verify --quiet "${ref}^{object}" >/dev/null 2>&1; then
+            echo -e "  ${YELLOW}Removing broken tag ref: ${ref}${NC}"
+            git update-ref -d "$ref" 2>/dev/null || true
+        fi
+    done < <(git for-each-ref --format='%(refname)' refs/tags 2>/dev/null)
+    git remote prune origin >/dev/null 2>&1 || true
+    if git fetch --no-tags --prune --force origin '+refs/heads/*:refs/remotes/origin/*'; then
+        echo -e "${GREEN}Fetched branches (a corrupt tag was skipped).${NC}"
+        return 0
+    fi
+    # A corrupt tag inside packed-refs can survive the per-ref cleanup above.
+    echo -e "${YELLOW}Retrying after dropping all local tags...${NC}"
+    git tag -l | xargs -r git tag -d >/dev/null 2>&1 || true
+    if git fetch --no-tags --prune --force origin '+refs/heads/*:refs/remotes/origin/*'; then
+        return 0
+    fi
+    repair_git_data
+}
+
+# Last resort for git data damaged by a power cut (empty or half-written files
+# under .git): the same repair ladder the web updater uses, ending in a rebuild
+# of .git around the files on disk. Gitignored data is never touched.
+repair_git_data() {
+    local root; root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    [ -f "$root/git_updater.py" ] || return 1
+    echo -e "${YELLOW}Fetch still failing - repairing the git data...${NC}"
+    python3 - "$root" <<'PYEOF'
+import sys
+root = sys.argv[1]
+sys.path.insert(0, root)
+import git_updater as g
+warnings = []
+result = g.resilient_fetch(root, warnings, allow_rebuild=True)
+for line in warnings:
+    print("  " + line)
+sys.exit(0 if result.ok else 1)
+PYEOF
+}
 
 echo -e "${BLUE}Step 2: Backing up local changes...${NC}"
 if git diff --quiet && git diff --staged --quiet; then
@@ -134,7 +279,7 @@ for file in "${PRESERVE_FILES[@]}"; do
 done
 
 echo -e "${BLUE}Step 3: Fetching latest updates...${NC}"
-git fetch origin
+resilient_fetch || echo -e "${YELLOW}Initial fetch incomplete - the update step below will retry.${NC}"
 
 echo -e "${BLUE}Step 4: Updating to latest version...${NC}"
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
@@ -154,14 +299,16 @@ if ! git rev-parse --verify --quiet "refs/remotes/origin/$CURRENT_BRANCH" >/dev/
     git checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH" 2>/dev/null || true
     CURRENT_BRANCH="$DEFAULT_BRANCH"
 fi
-if git "${GIT_ID[@]}" pull origin "$CURRENT_BRANCH"; then
+# --no-tags keeps the pull's own fetch from re-tripping on a tag that is corrupt
+# on the remote (resilient_fetch above already cleared any broken local tag).
+if git "${GIT_ID[@]}" pull --no-tags origin "$CURRENT_BRANCH"; then
     echo -e "${GREEN}Update completed successfully!${NC}"
 else
     # Deterministic fallback: local changes are already in the stash and the
     # runtime data is copied aside below, so matching origin exactly is safe
     # and guarantees the update lands even on conflicted/diverged checkouts.
     echo -e "${YELLOW}git pull failed - forcing checkout to match origin/$CURRENT_BRANCH (local changes stay in the stash)...${NC}"
-    if git fetch origin "$CURRENT_BRANCH" && git reset --hard "origin/$CURRENT_BRANCH"; then
+    if resilient_fetch && git reset --hard "origin/$CURRENT_BRANCH"; then
         echo -e "${GREEN}Update completed via forced sync.${NC}"
     else
         echo -e "${RED}Update failed. Attempting to restore backup...${NC}"
@@ -188,6 +335,29 @@ if ! pip3 install --break-system-packages --upgrade -r requirements.txt; then
     done < requirements.txt
 fi
 
+# flask-socketio: Debian/Kali apt ships 5.6.0, which crashes the web terminal's
+# /terminal Socket.IO namespace on Flask 3.1+ ("AttributeError: property
+# 'session' of 'RequestContext' object has no setter"). 5.6.1 fixes it, but the
+# apt package has no dist-info RECORD so the `pip --upgrade -r requirements.txt`
+# above cannot replace it — install 5.6.1 alongside with --ignore-installed
+# (/usr/local precedes /usr/lib on the import path, so it wins).
+if ! python3 -c 'import sys,importlib.metadata as m; v=tuple(int(x) for x in m.version("flask-socketio").split(".")[:3]); sys.exit(0 if v>=(5,6,1) else 1)' 2>/dev/null; then
+    echo -e "  Ensuring flask-socketio >= 5.6.1 (apt ships a build that breaks the web terminal)..."
+    pip3 install --break-system-packages --ignore-installed "flask-socketio>=5.6.1" >/dev/null 2>&1 \
+        || echo -e "  ${YELLOW}!${NC} Could not ensure flask-socketio >= 5.6.1 (web terminal may not work)"
+fi
+
+# openai SDK: the AI Insights / self-hosted-endpoint features need it, but the
+# installer only WARNS if its install fails, so some images shipped without it
+# (symptom: /api/ai/models + /api/ai/discover return HTTP 500). The pull above
+# only reinstalls requirements.txt when that file changed, so heal it here on
+# every update if it is missing. Cheap no-op when already present.
+if ! python3 -c 'import openai' 2>/dev/null; then
+    echo -e "  Ensuring the openai SDK (AI Insights / self-hosted endpoints)..."
+    pip3 install --break-system-packages --ignore-installed "openai>=2.0.0" >/dev/null 2>&1 \
+        || echo -e "  ${YELLOW}!${NC} Could not install openai (AI features will show a clear message until it is)"
+fi
+
 echo -e "${BLUE}Step 5.1: Checking package system health...${NC}"
 # apt refuses every operation while a previous dpkg run is unfinished
 # ("E: dpkg was interrupted, you must manually run 'dpkg --configure -a'").
@@ -207,8 +377,8 @@ fi
 
 echo -e "${BLUE}Step 5.2: Ensuring Bluetooth overlay dependencies...${NC}"
 # The WiFi-analyzer Bluetooth/BLE 2.4 GHz overlay (bt_scanner.py) talks to BlueZ
-# over D-Bus via python3-dbus, and needs bluez/bluetoothctl. The BLE
-# provisioning peripheral (ble_provisioning.py) additionally needs python3-gi
+# over D-Bus via python3-dbus, and needs bluez/bluetoothctl. The Bluetooth
+# peripheral for the mobile app (ble_peripheral.py) additionally needs python3-gi
 # for its GLib main loop. These ship in the installer; ensure them here too so
 # update-only boxes get both. Guarded and idempotent — only apt-installs a
 # package that is actually missing.
@@ -220,13 +390,15 @@ for _btpkg in python3-dbus python3-gi bluez; do
     fi
 done
 # Optional tooling. Each backs one feature that resolves the binary at runtime
-# and disables itself when it is missing (hackrf → the true-RF Waterfall view in
-# sdr_spectrum.py; the rest → the recon/vuln scanners, which server_capabilities
-# already marks 'critical': False). Not every suite ships all of them — ffuf only
-# entered Debian in trixie — so a miss is reported and skipped, never fatal.
+# and disables itself when it is missing (hackrf → the HackRF 2.4/5/6 GHz half of
+# the RF Waterfall in sdr_spectrum.py; the rest → the recon/vuln scanners, which
+# server_capabilities already marks 'critical': False). Not every suite ships all
+# of them — ffuf only entered Debian in trixie — so a miss is reported and
+# skipped, never fatal. (rtl-sdr/rtl-433 for the RTL-SDR sub-GHz half get their
+# own self-healing block below, together with the DVB-T blacklist they need.)
 _missing_optional=()
-for _opt in hackrf:"true-RF Waterfall" nikto:"vuln scanner" sqlmap:"vuln scanner" \
-            whatweb:"vuln scanner" ffuf:"content discovery"; do
+for _opt in hackrf:"RF Waterfall (Wi-Fi bands)" nikto:"vuln scanner" \
+            sqlmap:"vuln scanner" whatweb:"vuln scanner" ffuf:"content discovery"; do
     _pkg="${_opt%%:*}"; _why="${_opt#*:}"
     dpkg -s "$_pkg" >/dev/null 2>&1 && continue
     if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$_pkg" >/dev/null 2>&1; then
@@ -237,6 +409,109 @@ for _opt in hackrf:"true-RF Waterfall" nikto:"vuln scanner" sqlmap:"vuln scanner
 done
 if [ ${#_missing_optional[@]} -gt 0 ]; then
     echo -e "  ${YELLOW}⚠${NC} Not available in this suite: ${_missing_optional[*]} — the features using them stay disabled"
+fi
+
+# RTL-SDR support (RTL-SDR Blog V3/V4, Nooelec NESDR, RTL-SDR.com, generic
+# RTL2832U) for the sub-GHz RF Waterfall + ISM decoder. Two things must be true
+# for a plugged-in dongle to work, so we guarantee BOTH here (self-healing —
+# mirrors install_ragnar.sh so update-only boxes get the full setup in one run):
+#   1) the rtl-sdr + rtl-433 tools are installed;
+#   2) the DVB-T kernel driver is blacklisted + unloaded so it can't grab the
+#      device before rtl_power / rtl_433 / rtl_test can.
+if ! command -v rtl_test >/dev/null 2>&1; then
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rtl-sdr rtl-433 >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} Installed rtl-sdr + rtl-433 (RTL-SDR sub-GHz / ISM)"
+    else
+        echo -e "  ${YELLOW}⚠${NC} Could not install rtl-sdr/rtl-433 — RTL-SDR features stay disabled until they're present"
+    fi
+fi
+# Keep ModemManager off Espressif USB serial/JTAG devices (VID 303a): the ESP-SDR
+# node (RF Waterfall) and ESP32 GPS/wardrive nodes enumerate as a ttyACM "USB
+# JTAG/serial debug unit" that MM mistakes for a cellular modem and probes with
+# AT commands + DTR/RTS toggles — that resets the chip and wedges a running SDR
+# capture. Tag them ID_MM_DEVICE_IGNORE (real LTE modems keep working). Mirrors
+# install_ragnar.sh so update-only boxes get it too.
+_mm_esp=/etc/udev/rules.d/99-ragnar-espsdr.rules
+if ! grep -q "ID_MM_DEVICE_IGNORE" "$_mm_esp" 2>/dev/null; then
+    cat > "$_mm_esp" << 'EOF'
+# Ragnar: ModemManager must not probe Espressif USB serial/JTAG devices
+# (ESP-SDR, ESP32 GPS/wardrive nodes). AT-command probing wedges them.
+SUBSYSTEM=="tty", ACTION=="add", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"
+EOF
+    chmod 644 "$_mm_esp"
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules 2>/dev/null || true
+        udevadm trigger --subsystem-match=tty 2>/dev/null || true
+    fi
+    echo -e "  ${GREEN}✓${NC} ModemManager set to ignore Espressif serial devices (ESP-SDR / ESP32 nodes)"
+fi
+# uhubctl lets the SDR self-healer cut a USB port's 5 V for a few seconds — the
+# software equivalent of replugging a dongle that is stuck on the bus.
+if ! command -v uhubctl >/dev/null 2>&1; then
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends uhubctl >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} Installed uhubctl (SDR self-healing: USB port power-cycle)"
+    else
+        echo -e "  ${YELLOW}⚠${NC} Could not install uhubctl — SDR recovery falls back to a USB controller reset"
+    fi
+fi
+if command -v rtl_test >/dev/null 2>&1 || dpkg -s rtl-sdr >/dev/null 2>&1; then
+    _rtl_bl=/etc/modprobe.d/blacklist-rtl-sdr.conf
+    if ! grep -q "dvb_usb_rtl28xxu" "$_rtl_bl" 2>/dev/null; then
+        cat > "$_rtl_bl" << 'EOF'
+# Ragnar: keep the DVB-T kernel drivers off RTL-SDR dongles so rtl_power /
+# rtl_433 / rtl_test can claim them (RTL-SDR Blog V3/V4, Nooelec NESDR, generic).
+blacklist dvb_usb_rtl28xxu
+blacklist rtl2832
+blacklist rtl2830
+blacklist rtl2838
+EOF
+        chmod 644 "$_rtl_bl"
+        echo -e "  ${GREEN}✓${NC} Blacklisted DVB-T kernel driver so RTL-SDR dongles are usable"
+    fi
+    rmmod dvb_usb_rtl28xxu 2>/dev/null || true
+    command -v rtl_test >/dev/null 2>&1 \
+        && echo -e "  ${GREEN}✓${NC} RTL-SDR tools ready (rtl_test / rtl_power / rtl_433)"
+    # dump1090 powers the ADS-B radar (1090 MHz aircraft). Not in standard apt
+    # repos, so the helper tries apt then builds from source (only runs when it's
+    # actually missing, so it's a one-time cost). Best-effort.
+    if ! command -v dump1090-fa >/dev/null 2>&1 && ! command -v dump1090-mutability >/dev/null 2>&1 && ! command -v dump1090 >/dev/null 2>&1; then
+        if [ -x "$ragnar_PATH/scripts/install_dump1090.sh" ] \
+           && bash "$ragnar_PATH/scripts/install_dump1090.sh" >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${NC} Installed dump1090 (ADS-B radar, 1090 MHz)"
+        fi
+    fi
+    # acarsdec powers the ADS-B ACARS panel (VHF datalink). Build from source.
+    if ! command -v acarsdec >/dev/null 2>&1; then
+        if [ -x "$ragnar_PATH/scripts/install_acarsdec.sh" ] \
+           && bash "$ragnar_PATH/scripts/install_acarsdec.sh" >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${NC} Installed acarsdec (ADS-B ACARS datalink)"
+        fi
+    fi
+    # dumpvdl2 (+ libacars) powers the VDL Mode 2 / ATN panel (CPDLC + ADS-C).
+    if ! command -v dumpvdl2 >/dev/null 2>&1; then
+        if [ -x "$ragnar_PATH/scripts/install_dumpvdl2.sh" ] \
+           && bash "$ragnar_PATH/scripts/install_dumpvdl2.sh" >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${NC} Installed dumpvdl2 + libacars (VDL Mode 2 / ATN datalink)"
+        fi
+    fi
+    # meshtastic Python package for the Mesh Nodes page (USB companion node).
+    if ! python3 -c "import meshtastic" >/dev/null 2>&1; then
+        command -v pip3 >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-pip >/dev/null 2>&1
+        if pip3 install --break-system-packages meshtastic >/dev/null 2>&1 || pip3 install meshtastic >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${NC} Installed meshtastic (Mesh Nodes companion)"
+        fi
+    fi
+    # multimon-ng powers the Pager Decode page (POCSAG/FLEX) — it IS in the repos.
+    if ! command -v multimon-ng >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends multimon-ng >/dev/null 2>&1 \
+            && echo -e "  ${GREEN}✓${NC} Installed multimon-ng (Pager Decode)"
+    fi
+    # ffmpeg lets Local Radio stream MP3 so it plays on iOS/mobile (else WAV, desktop-only).
+    if ! command -v ffmpeg >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg >/dev/null 2>&1 \
+            && echo -e "  ${GREEN}✓${NC} Installed ffmpeg (Local Radio MP3 for phones)"
+    fi
 fi
 
 # Firefox backs the ZAP AJAX-spider browser crawl (advanced_vuln_scanner looks up
@@ -296,6 +571,13 @@ if ! command -v tshark >/dev/null 2>&1; then
     echo "wireshark-common wireshark-common/install-setuid boolean false" | debconf-set-selections 2>/dev/null || true
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark >/dev/null 2>&1 || true
 fi
+# dig (dnsutils) is a hard requirement for DNS Doctor (do_dns_doctor: multi-
+# resolver consensus, NXDOMAIN/bogon probes, DNSSEC negative control, Team-Cymru
+# ASN lookups). It degrades to a "Click Install" prompt in the UI when missing,
+# but DNS Doctor is a core diagnostic, so ensure it on update-only boxes too.
+if ! command -v dig >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends dnsutils >/dev/null 2>&1 || true
+fi
 if command -v tcpdump >/dev/null 2>&1; then
     if [ ! -f /etc/sudoers.d/ragnar-traffic ]; then
         cat > /etc/sudoers.d/ragnar-traffic << 'EOF'
@@ -311,6 +593,52 @@ EOF
     echo -e "  ${GREEN}✓${NC} tcpdump present — Traffic Analysis available"
 else
     echo -e "  ${YELLOW}⚠${NC} tcpdump missing — Traffic Analysis tab stays hidden (apt install tcpdump)"
+fi
+
+echo -e "${BLUE}Step 5.4d: Ensuring GPIO display support on this Pi...${NC}"
+# Raspberry Pi OS ships what the e-Paper / SPI TFT / I2C drivers need; a Kali
+# base (the Ulfberht edition) does not: SPI/I2C are off, spidev / gpiozero /
+# lgpio are missing and the Pi 5 has no gpiochip4 alias, so the screen stayed
+# dark. The installer runs the same script; mirror it here so units that were
+# imaged before the fix get a working screen from an update. A no-op on
+# Raspberry Pi OS and on boards that are not a Pi. Skipped for a headless unit
+# (its service runs headlessRagnar.py), which has no screen to drive.
+_gpio_disp_script="$(dirname "$0")/scripts/pi_gpio_displays.sh"
+if [ ! -f "$_gpio_disp_script" ]; then
+    echo -e "  ${YELLOW}⚠${NC} scripts/pi_gpio_displays.sh missing — skipped"
+elif grep -q 'headlessRagnar\.py' /etc/systemd/system/ragnar.service 2>/dev/null; then
+    echo -e "  ${GREEN}✓${NC} Headless unit — no GPIO display to prepare"
+else
+    _gpio_disp_out="$(bash "$_gpio_disp_script" 2>&1)"
+    echo "$_gpio_disp_out" | grep -v '^REBOOT_REQUIRED$'
+    if echo "$_gpio_disp_out" | grep -q '^REBOOT_REQUIRED$'; then
+        echo -e "  ${YELLOW}⚠${NC} SPI/I2C were just enabled — reboot this unit for the display to come up"
+    fi
+fi
+
+echo -e "${BLUE}Step 5.4c: Ensuring CardputerZero display dependencies...${NC}"
+# The M5Stack CardputerZero (epd_type "st7789v2") normally uses the kernel's LCD
+# framebuffer and keyboard device, which needs the stock launcher out of the way;
+# on a plain kernel it falls back to SPI (spidev) and I2C (smbus2). The installer
+# sets this up when option 7 is chosen; mirror it here so a box that only ever
+# updates still gets a working screen + keyboard. Gated on the persisted display
+# profile and idempotent (an importable module is left alone).
+_disp_cfg="$(dirname "$0")/config/shared_config.json"
+if grep -q '"epd_type"[[:space:]]*:[[:space:]]*"st7789v2"' "$_disp_cfg" 2>/dev/null; then
+    for _mod in spidev smbus2; do
+        python3 -c "import $_mod" 2>/dev/null && continue
+        pip3 install --break-system-packages "$_mod" >/dev/null 2>&1 || true
+    done
+    if python3 -c "import spidev, smbus2" 2>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} CardputerZero display deps present (spidev, smbus2)"
+    else
+        echo -e "  ${YELLOW}⚠${NC} spidev + smbus2 failed to install — needed only on a plain kernel without the LCD/keyboard drivers"
+    fi
+    bash "$(dirname "$0")/scripts/cardputer_takeover.sh" apply
+    # Camera tools + expansion-header checks (see docs/M5StackCardputerZero.md)
+    bash "$(dirname "$0")/scripts/cardputer_hardware.sh" setup
+else
+    echo -e "  ${GREEN}✓${NC} Not a CardputerZero display profile — nothing to do"
 fi
 
 echo -e "${BLUE}Step 5.4b: Tailscale subnet-router IP forwarding...${NC}"
@@ -382,6 +710,37 @@ if [ -f "$SENSING_UNIT" ] && grep -q '^Environment=WDP_GUARD_INTERVAL_US=200000'
     echo -e "${GREEN}Raised sensing fusion guard to 350 ms (was 200 ms).${NC}"
 fi
 
+# ADR-296 (upstream RuView): the sensing-server UDP CSI receiver now defaults to
+# loopback-only and drops LAN senders unless a routable bind is opted into. Our
+# ESP32 nodes send CSI from the LAN, so a unit whose ExecStart predates the flag
+# would silently stop ingesting once the newer binary is deployed. Add
+# `--udp-bind 0.0.0.0 --udp-insecure-lan` in place — but ONLY when the installed
+# binary actually understands the flag, so an older binary is never fed an
+# unknown arg (which would break its startup). Idempotent: skips a unit that
+# already carries --udp-bind (including a hand-tuned --udp-allow variant).
+if [ -f "$SENSING_UNIT" ] \
+   && grep -q '^ExecStart=.*ragnar-sensing-server' "$SENSING_UNIT" \
+   && ! grep -q -- '--udp-bind' "$SENSING_UNIT" \
+   && /usr/local/bin/ragnar-sensing-server --help 2>/dev/null | grep -q -- '--udp-bind'; then
+    sed -i '/^ExecStart=.*ragnar-sensing-server/ s|$| --udp-bind 0.0.0.0 --udp-insecure-lan|' "$SENSING_UNIT"
+    systemctl daemon-reload
+    systemctl try-restart ragnar-sensing.service 2>/dev/null || true
+    echo -e "${GREEN}Added UDP LAN bind to ragnar-sensing.service (ADR-296 CSI fix).${NC}"
+fi
+
+# Headless (web-only) installs must never initialize the EPD: SharedData() inits
+# the display at import time, seizing SPI0 + GPIO and blanking a DPI/HDMI panel
+# on shared-pin boards (HackBerry Pi). The headless entrypoint now sets
+# RAGNAR_HEADLESS=1 itself, but make it explicit in the unit too. Idempotent:
+# only touches units that already run headlessRagnar.py and lack the var.
+RAGNAR_UNIT="/etc/systemd/system/ragnar.service"
+if [ -f "$RAGNAR_UNIT" ] && grep -q 'headlessRagnar\.py' "$RAGNAR_UNIT" \
+        && ! grep -q '^Environment=RAGNAR_HEADLESS=1' "$RAGNAR_UNIT"; then
+    sed -i '/^ExecStart=.*headlessRagnar\.py/i Environment=RAGNAR_HEADLESS=1' "$RAGNAR_UNIT"
+    systemctl daemon-reload
+    echo -e "${GREEN}Set RAGNAR_HEADLESS=1 on ragnar.service (protects DPI/HDMI panel).${NC}"
+fi
+
 echo -e "${BLUE}Step 6.6: Ensuring hardware watchdog (auto-reboot on hard hang)...${NC}"
 # Unattended / inline devices should reboot fast if the Pi wedges rather than
 # black-holing the link. Enable the BCM watchdog and have systemd pet it.
@@ -401,6 +760,101 @@ if [ -f /etc/systemd/system.conf ]; then
     echo -e "  ${GREEN}✓${NC} systemd watchdog set (RuntimeWatchdogSec=15)"
 fi
 
+echo -e "${BLUE}Step 6.62: Unblocking radios (rfkill)...${NC}"
+# A deployed box (or a freshly flashed image) can come up with Wi-Fi/Bluetooth
+# soft-blocked; ragnar.service now unblocks every boot, but heal it here too.
+if command -v rfkill >/dev/null 2>&1; then
+    rfkill unblock all >/dev/null 2>&1 || true
+    echo -e "  ${GREEN}✓${NC} rfkill unblock all"
+fi
+
+echo -e "${BLUE}Step 6.65: Pi 5 USB current limit...${NC}"
+# Pi 5 firmware caps all USB ports together at 600 mA unless a 5 V/5 A PD
+# supply is detected; a Wi-Fi adapter + SDR/GPS exceeds it and drops off USB.
+# Raise to 1.6 A unless the operator already set it (=0 is respected) or
+# opted out with RAGNAR_USB_MAX_CURRENT=0. Applies on the next reboot.
+if [ -n "$BOOT_CFG" ] && grep -qaE 'Raspberry Pi 5|Raspberry Pi 500' /proc/device-tree/model 2>/dev/null; then
+    if grep -qE '^[[:space:]]*usb_max_current_enable[[:space:]]*=' "$BOOT_CFG"; then
+        echo -e "  ${GREEN}✓${NC} usb_max_current_enable already set; leaving it"
+    elif [ "${RAGNAR_USB_MAX_CURRENT:-1}" != "0" ]; then
+        cp "$BOOT_CFG" "${BOOT_CFG}.ragnar-$(date +%Y%m%d-%H%M%S)"
+        printf '\n[all]\n# Ragnar: Pi 5 USB current limit (600 mA default, 1.6 A when =1)\nusb_max_current_enable=1\n' >> "$BOOT_CFG"
+        echo -e "  ${GREEN}✓${NC} Raised Pi 5 USB current limit to 1.6 A (reboot to apply)"
+    fi
+fi
+
+echo -e "${BLUE}Step 6.66: USB HID keyboard gadget (Rubber Ducky)...${NC}"
+# OPT-IN only: enable with RAGNAR_HID_GADGET=1, or once the marker file
+# /etc/ragnar/hid_gadget.enabled exists (written by a prior opt-in or the web
+# UI). Default OFF leaves the plain ECM gadget — and boards like the Cardputer
+# — untouched. When enabled it: (1) adds the dwc2 peripheral controller so a UDC
+# exists, (2) drops the legacy g_ether that otherwise claims the UDC and de-dupes
+# the cmdline, (3) adds the hid.usb0 function to the gadget script. Boot-config
+# changes apply on the next reboot; usb0 networking is not disturbed live.
+GADGET_SH=/usr/local/bin/usb-gadget.sh
+if [ "${RAGNAR_HID_GADGET:-0}" = "1" ] || [ -f /etc/ragnar/hid_gadget.enabled ]; then
+    mkdir -p /etc/ragnar && touch /etc/ragnar/hid_gadget.enabled
+    if [ -f /boot/firmware/config.txt ] && ! grep -qE '^[[:space:]]*dtoverlay=dwc2' /boot/firmware/config.txt; then
+        cp /boot/firmware/config.txt "/boot/firmware/config.txt.ragnar-$(date +%Y%m%d-%H%M%S)"
+        printf '\n[all]\n# Ragnar: dwc2 USB peripheral controller for HID gadget\ndtoverlay=dwc2,dr_mode=peripheral\n' >> /boot/firmware/config.txt
+        echo -e "  ${GREEN}✓${NC} Added dwc2 peripheral overlay (reboot to apply)"
+    fi
+    if [ -f /boot/firmware/cmdline.txt ] && grep -q 'g_ether' /boot/firmware/cmdline.txt; then
+        cp /boot/firmware/cmdline.txt "/boot/firmware/cmdline.txt.ragnar-$(date +%Y%m%d-%H%M%S)"
+        python3 - /boot/firmware/cmdline.txt <<'PYEOF'
+import sys, re
+p = sys.argv[1]; s = open(p).read().strip()
+s = s.replace('modules-load=dwc2,g_ether', '').strip()
+s = re.sub(r'\s+', ' ', s)
+if 'modules-load=dwc2' not in s:
+    s = s.replace('rootwait', 'rootwait modules-load=dwc2', 1)
+open(p, 'w').write(s + '\n')
+PYEOF
+        echo -e "  ${GREEN}✓${NC} Removed legacy g_ether from cmdline (reboot to apply)"
+    fi
+    echo "blacklist g_ether" > /etc/modprobe.d/ragnar-no-g_ether.conf
+    if [ -f "$GADGET_SH" ] && ! grep -q 'hid.usb0' "$GADGET_SH"; then
+        cp "$GADGET_SH" "${GADGET_SH}.ragnar-$(date +%Y%m%d-%H%M%S)"
+        if python3 - "$GADGET_SH" <<'PYEOF'
+import sys
+path = sys.argv[1]
+block = r'''
+# HID keyboard function (Rubber Ducky) — only when opted in.
+if [ -f /etc/ragnar/hid_gadget.enabled ]; then
+    if [ ! -d functions/hid.usb0 ]; then
+        mkdir -p functions/hid.usb0
+        echo 1 > functions/hid.usb0/protocol
+        echo 1 > functions/hid.usb0/subclass
+        echo 8 > functions/hid.usb0/report_length
+        printf '\x05\x01\x09\x06\xa1\x01\x05\x07\x19\xe0\x29\xe7\x15\x00\x25\x01\x75\x01\x95\x08\x81\x02\x95\x01\x75\x08\x81\x03\x95\x05\x75\x01\x05\x08\x19\x01\x29\x05\x91\x02\x95\x01\x75\x03\x91\x03\x95\x06\x75\x08\x15\x00\x25\x65\x05\x07\x19\x00\x29\x65\x81\x00\xc0' > functions/hid.usb0/report_desc
+    fi
+    if [ -L configs/c.1/hid.usb0 ]; then
+        rm configs/c.1/hid.usb0
+    fi
+    ln -s functions/hid.usb0 configs/c.1/
+fi
+'''
+anchor = 'ln -s functions/ecm.usb0 configs/c.1/\n'
+s = open(path).read()
+if 'hid.usb0' in s:
+    sys.exit(0)
+if anchor not in s:
+    sys.exit(3)
+open(path, 'w').write(s.replace(anchor, anchor + block, 1))
+sys.exit(0)
+PYEOF
+        then
+            echo -e "  ${GREEN}✓${NC} Added HID keyboard function to USB gadget (reboot to expose /dev/hidg0)"
+        else
+            echo -e "  ${YELLOW}!${NC} Could not patch $GADGET_SH automatically; reinstall to enable the HID gadget"
+        fi
+    elif [ -f "$GADGET_SH" ]; then
+        echo -e "  ${GREEN}✓${NC} HID gadget function already present"
+    fi
+else
+    echo -e "  ${GREEN}·${NC} HID keyboard gadget not enabled (opt in with RAGNAR_HID_GADGET=1)"
+fi
+
 echo -e "${BLUE}Step 6.7: Refreshing kiosk wrapper (if installed)...${NC}"
 # Existing kiosk installs keep a COPY of the wrapper at /usr/local/bin; the
 # active copy only updates when kiosk is re-installed. Refresh it here so the
@@ -409,6 +863,15 @@ KIOSK_WRAPPER_SRC="$ragnar_PATH/scripts/ragnar_kiosk_run.sh"
 if [ -f /usr/local/bin/ragnar-kiosk-run ] && [ -f "$KIOSK_WRAPPER_SRC" ]; then
     install -m 0755 "$KIOSK_WRAPPER_SRC" /usr/local/bin/ragnar-kiosk-run
     echo -e "  ${GREEN}✓${NC} Kiosk wrapper refreshed from repo"
+    # The kiosk needs a window manager (openbox) for chromium --kiosk to go
+    # full-screen. A distro that ships X but not openbox (Kali) left it missing,
+    # so the kiosk filled only part of the screen. Ensure it on existing
+    # service-mode kiosks so update-only boxes get the fix too. Idempotent.
+    if [ -f /etc/systemd/system/ragnar-kiosk.service ] && ! command -v openbox >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openbox >/dev/null 2>&1 \
+            && echo -e "  ${GREEN}✓${NC} Installed openbox (kiosk window manager — fixes half-screen)" \
+            || echo -e "  ${YELLOW}⚠${NC} Could not install openbox (kiosk may not fill the screen)"
+    fi
     # Seed the on-screen keyboard so touchscreen typing works on existing kiosk
     # installs too (not just fresh installs). Best-effort, guarded, idempotent:
     # squeekboard for the Wayland/autostart path, matchbox-keyboard for the X
@@ -422,6 +885,18 @@ if [ -f /usr/local/bin/ragnar-kiosk-run ] && [ -f "$KIOSK_WRAPPER_SRC" ]; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$OSK_PKG" >/dev/null 2>&1 \
             && echo -e "  ${GREEN}✓${NC} On-screen keyboard installed ($OSK_PKG)" \
             || echo -e "  ${YELLOW}⚠${NC} Could not install on-screen keyboard ($OSK_PKG)"
+    fi
+    # Seed the kiosk escape-hatch deps (touch ✕ button + Ctrl+Alt+Q hotkey) so
+    # existing kiosk installs gain an exit path too — vital on handhelds like the
+    # Hackberry Pi CM5 whose keyboard has no easy Ctrl. Best-effort, idempotent;
+    # the wrapper only shows the ✕/hotkey when a touchscreen is detected.
+    HATCH_PKGS=()
+    python3 -c 'import tkinter' >/dev/null 2>&1 || HATCH_PKGS+=(python3-tk)
+    command -v xbindkeys >/dev/null 2>&1 || HATCH_PKGS+=(xbindkeys)
+    if [ "${#HATCH_PKGS[@]}" -gt 0 ]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${HATCH_PKGS[@]}" >/dev/null 2>&1 \
+            && echo -e "  ${GREEN}✓${NC} Kiosk escape-hatch deps installed (${HATCH_PKGS[*]})" \
+            || echo -e "  ${YELLOW}⚠${NC} Could not install kiosk escape-hatch deps (${HATCH_PKGS[*]})"
     fi
     # Cap the kiosk restart loop on existing service-mode installs (drop-in, so
     # we don't rewrite the generated unit). Idempotent.
@@ -438,6 +913,33 @@ DROPIN
         systemctl daemon-reload 2>/dev/null || true
         echo -e "  ${GREEN}✓${NC} Kiosk restart-loop cap applied (drop-in)"
     fi
+    # Heal existing service-mode kiosks on update: re-run the (idempotent)
+    # installer so the Pi 5 / Xorg display fixes — vc4 PrimaryGPU xorg.conf, VT
+    # activation (chvt in the unit), video/render/input/tty groups, Chromium
+    # (not firefox), and /home ownership — reach boxes that just `git pull` +
+    # update, not only fresh or web-UI installs. Best-effort: a kiosk hiccup must
+    # never fail the whole update. Only the service (Pi OS Lite) path needs this;
+    # desktop/autostart installs re-provision harmlessly in autostart mode.
+    KIOSK_INSTALL_SRC="$ragnar_PATH/scripts/install_kiosk.sh"
+    if [ -f /etc/systemd/system/ragnar-kiosk.service ] && [ -f "$KIOSK_INSTALL_SRC" ]; then
+        if bash "$KIOSK_INSTALL_SRC" >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${NC} Kiosk re-provisioned with latest display fixes"
+        else
+            echo -e "  ${YELLOW}⚠${NC} Kiosk re-provision needs attention (run: sudo bash scripts/install_kiosk.sh)"
+        fi
+    fi
+fi
+
+# Console safety net (runs whether or not a kiosk is installed). A past kiosk
+# uninstall — or a Ragnar OS image built to boot straight into the kiosk — could
+# leave getty@tty1 masked/disabled, so turning the kiosk off left the box on a
+# black screen with no CLI and no login console after reboot. Unmask + enable is
+# a no-op on a normal box (tty1's getty is enabled by default) and brings the
+# login console back on the next boot where it had gone missing. We don't restart
+# or chvt here, to avoid disturbing an operator's live console during an update.
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl unmask getty@tty1.service >/dev/null 2>&1 || true
+    systemctl enable getty@tty1.service >/dev/null 2>&1 || true
 fi
 
 echo -e "${BLUE}Step 6.5: Validating actions.json configuration...${NC}"
@@ -575,6 +1077,41 @@ elif [ "$_MESH_WANTED" = true ]; then
     echo -e "  ${YELLOW}⚠${NC} Mesh is enabled but scripts/setup_mesh.sh is missing"
 else
     echo -e "  ${GREEN}✓${NC} Mesh not enabled on this unit — nothing to do"
+fi
+
+echo -e "${BLUE}Step 6.97: Cellular uplink fallback hooks...${NC}"
+# A USB-tethered hotspot/phone must stay a BACKUP uplink: pin its route metric
+# above Wi-Fi/Ethernet (NetworkManager conf.d + dhcpcd hook). Idempotent.
+if [ -f "$(dirname "$0")/cellular_uplink.py" ]; then
+    if python3 "$(dirname "$0")/cellular_uplink.py" install >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} Cellular fallback hooks in place"
+    else
+        echo -e "  ${YELLOW}⚠${NC} Cellular fallback hook install failed (the service retries at start)"
+    fi
+fi
+
+echo -e "${BLUE}Step 6.98: Letting NetworkManager own wlan0...${NC}"
+# The legacy wlan stack (dhcpcd, standalone wpa_supplicant.service, hostapd,
+# dnsmasq) fights NetworkManager for wlan0 when left enabled — on a fresh image
+# it leaves the interface down after the AP portal's hand-off to client mode.
+# Disable them so only NM drives the radio; hostapd/dnsmasq are started on
+# demand by Ragnar's WiFi manager for AP mode. Idempotent and a no-op where NM
+# has already won. Mirrors install_ragnar.sh.
+if systemctl list-unit-files NetworkManager.service >/dev/null 2>&1; then
+    _changed=false
+    for _unit in dhcpcd wpa_supplicant hostapd dnsmasq; do
+        if systemctl is-enabled "$_unit" >/dev/null 2>&1; then
+            systemctl stop "$_unit" 2>/dev/null || true
+            systemctl disable "$_unit" 2>/dev/null || true
+            _changed=true
+        fi
+    done
+    systemctl unmask hostapd 2>/dev/null || true
+    if [ "$_changed" = true ]; then
+        echo -e "  ${GREEN}✓${NC} Disabled legacy wlan services — NetworkManager now owns wlan0"
+    else
+        echo -e "  ${GREEN}✓${NC} NetworkManager already owns wlan0 — nothing to do"
+    fi
 fi
 
 echo -e "${BLUE}Step 7: Starting ragnar service...${NC}"

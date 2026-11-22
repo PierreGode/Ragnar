@@ -1,0 +1,5363 @@
+# Ragnar Releases
+
+## Releases
+
+### 2026-11-20
+
+#### docs: Testing Tiers glossary, how each detection module is tested for accuracy
+*branch `docs/module-testing-glossary`*
+
+- **New page [testing-tiers.md](testing-tiers.md).** A glossary of the tiers every detection module passes: module self-test with golden bytes, conformance harness, cross-check against independent oracles (Scapy, real TLS/SSH stacks, FRR, tshark, counterfactual models), README and systemd unit verifiers, sealed-namespace lab and pcap replay, and the bite harness that injects regressions to prove each tier catches them. Also covers the drift and guard checks run inside the tiers and the lab techniques.
+- **Where each tier lives.** A closing section says which tiers ship with the vendored modules (self-tests, some conformance/xcheck files under `python/`) and which stay with the module's build.
+- **Linked from** the [docs index](README.md), the root [README](../README.md) (Authority Verification) and the [Detector Self-Test](nettools.md#detector-self-test) section. One new [knowledgebase.md](knowledgebase.md) entry so the chat assistant can answer "how are the modules tested?".
+- **Docs only.** No code change.
+
+#### fix(wardriving): Huginn data lost on slow hosts — read/parse split, batched writes; ESP-SDR probe stops hijacking Huginns
+
+*branch `fix/huginn-serial-throughput`*
+
+- **A walk with a Pi Zero 2 W + Huginn caught 80 Wi-Fi networks where a standalone C5 caught 331.** Measured on the same T-Dongle-C5: the dongle scans fine (52/52 channels every ~3.5 s) but its USB-serial link **drops whatever the host doesn't read in time**, and Ragnar parsed and committed every line before reading the next — on a Pi Zero swapping to its SD card that was ~1 line/s against the ~16–20 the Huginn prints. A 5 lines/s reader lost ~88 % of Wi-Fi sightings; the walk lost ~95 %.
+- **Serial read is now split from parse + store** (`_SerialLinePipeline`): the serial thread only reads lines into a queue (with the GPS fix of that moment); a worker parses them every 0.5 s in **one transaction** (`WardrivingSession.batch()`). Used by both the Huginn and the Piglet / Core / Coordinator loops. The Wi-Fi scan loop now commits once per scan instead of once per network.
+- **Every write connection now runs `synchronous=NORMAL`**: the PRAGMA is per-connection, so setting it once in `_init_db` never reached the per-row connections, which committed with `FULL` (an fsync per sighting).
+- Companion status gains `serial_backlog` and `serial_dropped`.
+- **Verified:** replaying 3,589 recorded Huginn lines through old and new code stores identical rows (15 networks, 39 BLE, same counts/RSSI). On the real dongle with a slow host simulated (100 ms/commit, 5 ms/statement) for 90 s: old 8.5 lines/s read, **61** Wi-Fi sightings; new 15.9 lines/s (the Huginn's full rate), **215** sightings, 0 dropped, 246 commits instead of 717. Wardrive tests 27 passed; full suite 2060 passed (the 2 failures — `test_env_manager`, `test_zap_target_resolve` — fail identically on `main`).
+- **ESP-SDR detection no longer hijacks a Huginn.** `esp_sdr.detect()` (polled by the RF Waterfall page) opened every Espressif port with **no write timeout**: on a plugged-in Huginn a status request sat in `serial.write` forever (py-spy), holding the port; and since opening an ESP32-C5's USB port resets the chip, an idle Huginn was reset twice every 8–15 s — until it stopped reading input. Now it skips ports held by other components (`serial_claims`), bounds every write to 1 s, recognises Huginn/Piglet output, and leaves a non-ESP-SDR port alone (10 min seen / 5 min silent) until it re-enumerates. Live: 1st poll 6.3 s, later polls **0.00 s with no port opened**; a wardrive-held port is never listed. `esp_sdr` selftest 29/29 (+6).
+- Firmware side (HuginnESP, separate PR): BLE coalesced to one line per device per phase — 80 → 26.6 lines per cycle, Huginn output 19.9 → 8.7 lines/s.
+- **Docs:** [wardriving.md › Serial throughput](wardriving.md#serial-throughput-why-a-slow-host-loses-data), [rf-waterfall.md › ESP-SDR panel](rf-waterfall.md#esp-sdr-panel-esp32-on-chip-fft).
+
+#### fix(sdr): HackRF waterfall was dark and laggy — own colour window, playout servo, 20 rows/s
+
+*branch `fix/hackrf-waterfall-colour-window`*
+
+- **The HackRF panel on `/rf-waterfall` streamed (LIVE, peaks and the Signals list all updating) but the waterfall stayed black.** Every panel shared one default colour window, Ref +5 dB / Range 35 (−30 … +5), which suits the RTL-SDR's dBFS levels. `hackrf_sweep` reports far lower: measured at the default LNA 24 / VGA 20, the noise floor sits at about −68 dB, the 90th percentile at −51 and only 1 % of samples rise above −30, so ~99 % of the waterfall mapped to black and the spectrum trace was clipped off the bottom.
+- **The HackRF panel now starts at Ref −10 dB / Range 60 (−70 … −10)**, which brackets its noise floor and its Wi-Fi/Bluetooth peaks — the same per-radio override the CC1101 panel already uses. RTL-SDR, ESP-SDR and CC1101 defaults are unchanged. A display range you saved yourself still wins; **Fit to signal** (or **A**) re-fits it.
+- **Every live panel drew rows 2.6 s after capture instead of the intended ~0.6 s**, so the waterfall and spectrum trace felt laggy. The playout projects the live edge from the newest row's timestamp; each poll re-anchors it, and because a row's age on arrival varies, the edge dips back a little on some polls. The playhead was clamped down to every dip and never moved back up, so it ratcheted onto its 2 s floor (0.6 + 2.0 = 2.6 s — measured exactly that, with 23 rows waiting in the queue). The playhead is now servoed onto the target by nudging its pace at most ±12% both ways, and re-anchored after the big history paint on load. Measured in a browser against the live HackRF: **0.7 s steady** (5 rows queued), 59 fps, 1.3 ms per row; an 800 ms main-thread stall heals back to 0.68 s in ~7 s. Applies to the RTL-SDR, ESP-SDR and CC1101 panels too — they share the playout loop.
+- **HackRF rows raised from 10/s to 20/s, and now truly 20.** The backend timed each row from the moment of the previous one, so every row waited for one more whole sweep: a nominal 10/s delivered 9.2/s, and 20/s would have delivered only 15/s (3 sweeps of ~16.6 ms fall just short of 50 ms). Rows now sit on a fixed 50 ms grid (`_dwell_tick`, pure + 5 new selftest checks, 38/38) and are stamped with their grid time, so the page scrolls evenly. Measured on the live HackRF: every gap exactly 50.0 ms, 20.00 rows/s; the page shows 20 rows/s at 0.6 s latency, 59.7 fps. Wide spans whose sweep takes longer than 50 ms still give one row per sweep.
+- **The page now re-syncs when the capture restarts underneath it** (another tab or browser started it, or Ragnar restarted). The backend's counter restarts at 0 and the page kept asking for rows newer than its old counter, so it froze until the counter caught up — about as long as the page had been open. Tested by renumbering the counter mid-stream in a browser: fixed page 120 rows in the next 6 s, old behaviour 12 then frozen.
+- The dashboard's in-console Waterfall view keeps its 200 ms poll (~4 rows per poll now); its comment is corrected.
+- **Docs:** [rf-waterfall.md › Display range](rf-waterfall.md#display-range) (per-radio defaults table; the old "Auto is the default" text was stale), the *Steady flow*, *HackRF row rate* and *Re-sync after a restart* notes, [rf-waterfall-guide.md](rf-waterfall-guide.md), [rf-api.md](rf-api.md) (`seq` restart + HackRF row grid).
+
+### 2026-11-19
+
+#### feat(cardputer): the `0` key turns the display off and on
+
+*branch `feat/cardputer-display-off`*
+
+- **A manual display blank on the CardputerZero.** Press **`0`** to turn the LCD off; press it again to bring it back. It is a manual toggle with **no auto-off timer** — the screen stays off until you press `0` again. Ragnar keeps running behind the dark screen (a wardrive, a scan or a camera recording carries on), so this saves battery and keeps the unit discreet without stopping anything. Works from every screen, the camera view included.
+- **How it works:** the backlight is switched through the ST7789V3 driver — brightness `0` plus a framebuffer blank on the kernel-framebuffer path, or the M5IOE1 expander's backlight PWM on the native-SPI path. While the screen is off the display loop idles instead of redrawing; the web dashboard's live preview holds its last frame until the screen comes back.
+- The footer hint and the on-screen key echo name the key (`0:Off` / `Display off` / `Display on`). See [M5StackCardputerZero.md](M5StackCardputerZero.md).
+
+### 2026-11-18
+
+#### docs(net): refresh the OSI visibility matrix — RDAP added at L7
+
+*branch `feature/rdap-visibility-matrix`*
+
+- **Visibility matrix refreshed** (2160×5184): the **L7** band's active-tools row now carries **RDAP** next to **WHOIS** (`DNS Doctor · Captive Portal Check · WHOIS · RDAP · speed test · public-IP / ASN · IP Attribution · DHCP snoop`), matching the new RDAP card. Only L7 changed — L2–L6 and L1 are byte-identical in the new master.
+- `web/images/osi/matrix_full.jpg` + the docs copy (`docs/ragnar_osi_visibility_matrix.jpg`) replaced, all seven per-layer bands (`matrix_l1…l7.jpg`) re-cut from it at the unchanged band edges, and the **16 matrix cache-bust URLs** bumped to `?v=20261118-rdap-matrix`.
+- **Docs:** [nettools.md › Module visibility matrix](nettools.md#module-visibility-matrix).
+
+#### feat(netdiag): RDAP lookup — the structured successor to WHOIS (WHOIS kept)
+
+*branch `feature/rdap-service`*
+
+- **New L7 Diagnostics card, RDAP**, next to the existing Whois card (Whois is kept, not replaced). RDAP (RFC 9082/9083) is the registries' JSON API that is replacing the free-text WHOIS protocol. The card looks up a **domain, IP, CIDR prefix or ASN**, picks the authoritative server from the IANA bootstrap (RFC 9224, cached 24 h under `data/rdap_cache/`), and returns normalized fields — registrar (+ IANA ID), dates, status, nameservers, DNSSEC, owning network / AS range and the **abuse contact**. It follows the registry → registrar referral for domains and pulls the **origin AS** for ARIN IP space.
+- **WHOIS fallback built in:** for the TLDs that still have no RDAP service, it falls back to WHOIS over TCP/43 automatically and parses the reply into the same fields, so one lookup covers both. Every record is tagged `protocol: rdap` or `protocol: whois`; the full report (and raw WHOIS text when used) is under *Full report*. Unlike the Whois card it needs no `whois` binary.
+- Engine vendored at `python/rdap_lookup.py` (Python stdlib only; 189/189 hermetic self-test, `python/selftest_rdap_lookup.py`). Adapter `do_rdap` + `POST /api/net/rdap`; cache pinned to `data/rdap_cache/` (gitignored). Live-verified against ARIN / Verisign / DENIC. `tests/test_rdap_lookup.py` runs the self-test and an offline adapter check.
+- **Docs:** [nettools.md](nettools.md#rdap)
+
+#### feat(netdiag): HTTP Watch — passive cleartext HTTP/1.x, h2c and gRPC observer
+
+*branch `feature/http-watch`*
+
+- **New L7 card, HTTP Watch (28 codes, detection-only).** It reads cleartext HTTP/1.x, h2c and gRPC off the wire and transmits nothing. It runs a Content-Length framer and a Transfer-Encoding framer side by side and flags **request smuggling / desync** when they end a message at different offsets and the leftover parses as a request line (`HTTP-009`, critical, with the smuggled request line in the evidence), plus the malformed TE / CL / chunk grammar that smuggling rides on. It names the **HTTP.sys** shapes (MS15-034 Range overflow, the Accept-Encoding crash, trailers toward an http.sys host), flags **credentials in the clear** with every password, token and cookie value replaced by an 8-hex SHA-256 tag, flags slow-read abuse, and on **h2c / gRPC** flags HTTP/2 Rapid Reset, CONTINUATION and HPACK abuse and the gRPC header abort. Dual-stack, including IPv6 behind extension headers; flows are classified by their first bytes, so h2c on port 80 is read as h2c.
+- **CVE index 439 → 455 named, 375 → 386 detected.** Eleven new detected CVEs (CVE-2015-1635 MS15-034 and CVE-2023-44487 Rapid Reset, both CISA KEV; CVE-2023-1428, CVE-2023-32731, CVE-2023-33953, CVE-2025-25613, CVE-2026-2332, CVE-2026-42580, CVE-2026-42584, CVE-2026-42585, CVE-2026-69205); CVE-2021-31166 / CVE-2022-21907 are now co-detected with RPC Watch; five considered-and-rejected CVEs are listed as context. `gen_cve_list.py` now reads a `DEFERRED_CVES` block in any listed module (not only RADIUS Watch's) and supports per-file context-only mentions, and CVE-2022-21907's label is corrected to the trailer-support bug.
+- Engine vendored as `python/httpwatch.py` + `httpwatch_selftest.py` (440/440). The in-app adapter `do_http_watch` adds `GET /api/net/http-watch` (`interface`, `seconds`, `ports`), joins the **Network Integrity** rotation, and streams HIGH / CRITICAL findings to **Watchtower** (`http_watch.jsonl`). Detector Self-Test gains an `http` suite (15 scenarios, including a Scapy pcap leg with an IPv6 Hop-by-Hop header). Results collapse to labelled cards on phones.
+- The TLS Watch links on the RADIUS and HTTP cards now open the TLS Watch card.
+- **Docs:** [nettools.md](nettools.md#http-watch), [CVE index](CVE.md), [CREDITS.md](CREDITS.md), [README (root)](../README.md)
+
+### 2026-11-17
+
+#### feat(wardriving): the Bluetooth device list is paginated and sortable
+
+*branch `feat/wardrive-bt-recent-slice`*
+
+- **`/api/wardriving/bluetooth` now accepts `limit`, `offset`, `sort` (including `last_seen`) and `order`, and reports the true `total`** — the same shape as the networks endpoint. The live app map can pull just the most-recently-seen slice over a thin Bluetooth link instead of the whole table; there are often more Bluetooth devices than Wi-Fi networks, so the full list was the heaviest payload on the link and the slowest to arrive. With no parameters the endpoint returns every device, exactly as before, so older app versions are unaffected.
+
+#### fix(bluetooth): the box no longer asks the phone to pair
+
+*branch `fix/ble-no-pairing`*
+
+- **iPhone kept showing "RagnarPwn wants to pair with your iPhone" over and over** while connected. The app's Bluetooth link is secured entirely at the app layer (link code + SPAKE2 + ChaCha20) and no GATT characteristic requires encryption, so BLE pairing/bonding is never used — but the adapter was left `Pairable`, so iOS offered to bond on first access and re-prompted (the box also drops phone bonds on start, which kept the loop going). The adapter is now set `Pairable = False` in `ble_peripheral.py` alongside the existing `Discoverable = False`; everything still works over the open GATT link, with no pairing prompt. (Applied live with `bluetoothctl pairable off` and persisted in code.)
+
+### 2026-11-16
+
+#### feat(wardriving): proxy WDGWars coverage cells for the app's map overlay
+
+*branch `feat/wardrift-wdgwars-cells`*
+
+- Adds `GET /api/wardriving/wdgwars/cells` — the player's WDGWars coverage grid (0.02° cells, each with the AP count logged there), proxied from `wdgwars.pl/api/me/cells`. The app's map now carries two branded overlay buttons: the Wardrift logo toggles the conquered-territory hexes and keeps/towers, and the WDGWars logo toggles this coverage grid (WDGWars is a scoreboard game with no faction territory, so the overlay is your footprint rather than contested ground). Same read-only, browser-via-box pattern and 409-on-missing-key as the other WDGWars read proxy.
+
+#### feat(wardriving): read proxies for the app's Wardrift and WDGWars game tabs
+
+*branch `feat/wardrift-wdgwars-read-proxies`*
+
+- **The Ragnar Mobile app now shows the Wardrift and WDGWars games beside the drive** — a conquered-territory overlay on the map and per-service stats tabs. The native app reads the games directly; a desktop browser build cannot (CORS), so it reads through the box, which already holds the Wardrift session and the WDGWars key. These routes proxy the reads: `GET /api/wardriving/wardrift/territory` (H3 hexes each faction holds, in a `west/south/east/north` bbox), `/outposts` (the towers and keeps in a bbox — kind, defence, owner, position, for the map's keep/tower markers), `/factions`, `/guild` (the player's guild, or null), and `/wdgwars/me` (WDGWars stats).
+- The existing `/api/wardriving/wardrift/dashboard` now shares a helper (`_wardrift_authed_get`) and, like the new routes, answers **409** (not 401) when the Wardrift/WDGWars session is missing or expired — the box's own 401 means "log in to Ragnar", and the two must not be confused. The web dashboard card already keyed off `!ok` + `expired`, so it is unaffected. All reads are read-only; no route changes game state.
+
+#### fix(bluetooth): the app connects on Python 3.14 boxes (Kali/Ulfberht)
+
+*branch `fix/ble-link-py314-pool`*
+
+- **The app connected but every attempt timed out on a Kali/Ulfberht box.** The link hands each answer to a `ThreadPoolExecutor`. On Python 3.14 (the Kali image; the Debian image is on 3.13) that pool refuses new work on a long-lived process with `RuntimeError: cannot schedule new futures after interpreter shutdown`, even while the web app is still serving. The phone connected, subscribed and its hello was received and decoded, but the worker that builds the reply never ran, so no notification was ever sent and the app timed out. The dev box (Debian/3.13) was unaffected, which is why it worked only there.
+- **Fix:** when the pool refuses the work, the answer is sent on a short-lived thread instead (`_dispatch` in `ble_link.py`). Diagnosed on a Pi 5 running Kali (Python 3.14.8) with a radio capture and in-process logging: the phone's `StartNotify` + hello arrived, the frame reassembled, and the only failure was `self._pool.submit` raising. Regression test added (`test_answers_still_go_out_when_the_thread_pool_refuses`).
+
+
+#### fix(bluetooth): the card says why the switch did not take
+*branch `fix/ble-card-during-update`*
+
+- **"Failed to update." right after updating.** An update puts the new page on disk at once and restarts Ragnar when dependencies and network tools are installed, which took 17 minutes on the unit this was seen on. Until then the page was asking the previous Ragnar, which has no Bluetooth switch. The card now reads the update status and says "Ragnar is finishing an update (step) and restarts when it is done". With no update running and an older Ragnar still loaded it points to Restart Service; any other failure shows the reason the unit gave.
+- Checked on a unit mid-update: the switch answered 404/405 until the post-update run reached its restart, then worked.
+
+#### fix(bluetooth): switching the link off and on no longer ends Ragnar
+*branch `fix/ble-single-peripheral`*
+
+- **Off, then on, ended the Ragnar service.** The link's private D-Bus connection is closed when the link stops, and libdbus ends the process (`_exit(1)`) when a private connection closes. systemd restarted Ragnar, and each time the Bluetooth service kept the dead process's advertisement. A unit that had been toggled a few times advertised several copies of the link (4 on a Pi Zero 2 W whose controller supports 3) and the app could not hold a connection to it. The connection is now told not to end the process.
+- **One peripheral at a time.** Starting, stopping and the switch run under one lock. A start that is still registering with BlueZ (a Pi Zero 2 W needs longer than the wait) is waited for rather than started again, and a stop that arrives during registration is honoured once registration finishes.
+- A unit that was toggled before this update still has the stale advertisements until it reboots.
+- Tested on the dev unit: 15 overlapping on/off requests, all answered, service not restarted, advertisement count 1 when on and 0 when off.
+
+#### fix(bluetooth): answers reach the app — smaller frames on the link
+*branch `fix/ble-link-frame-size`*
+
+- **The app connected, then every request timed out.** The link cut its answers into frames that filled the connection's packet size (514 bytes at MTU 517). With a phone that accepts several notifications in one packet (every recent Android), BlueZ adds a length field per value; a frame that large was never sent, and no later answer was either. Frames are now 12 bytes under the MTU (505 at MTU 517, `answer_frame_size` in `ble_link.py`).
+- Tested on the dev unit with an Android tablet and a radio capture: before, no answer after the first large one; after, 55 notifications in 90 s, full-size ones included.
+
+#### fix(bluetooth): the app connects — old pairings removed, faster advertising
+*branch `fix/ble-link-connect`*
+
+- **"This Ragnar is too old" on a phone that was paired before.** A phone still paired with the unit from the Bluetooth access-point releases works from its saved copy of the unit's services, which has no link in it, so the app never reached the link. When the link starts, the unit removes its pairings with phones, tablets and computers (`drop_phone_pairings` in `ble_peripheral.py`). Pairings with other devices stay. The Android app removes its half of the pairing and connects again.
+- **"Connection timed out".** The unit advertised every 1.28 s (the kernel default), and a phone could spend its whole connect timeout waiting to catch one advertisement. The link now sets 100–150 ms (`set_fast_advertising`).
+- Tested on the dev unit with a radio capture: advertising interval 100–150 ms, the tablet's pairing removed, an LE controller's pairing kept.
+
+#### fix(wardriving): Bluetooth devices get their measured signal strength
+*branch `fix/wardrive-bt-rssi`*
+
+- **Real RSSI.** A drive recorded every Bluetooth device at −80 dBm (−85 for the BLE-only pass): the scan read `bluetoothctl devices`, which prints no signal strength. The scan now runs a BlueZ discovery over D-Bus and stores the RSSI BlueZ measured for each device.
+- **Only what is in range.** `bluetoothctl devices` also returned BlueZ's remembered devices from earlier. The D-Bus scan keeps the devices heard during that scan, so the per-scan count and the session total reflect the drive.
+- **Type.** Devices are recorded as `Classic` or `BLE`.
+- A unit without `python3-dbus` keeps the earlier text scan.
+- Tested on the dev unit (Pi 5, built-in controller, with the mobile app's Bluetooth link running on the same controller): 14 devices, −47 to −74 dBm.
+
+### 2026-11-15
+
+#### feat(bluetooth): the mobile app talks to the unit over Bluetooth
+*branch `feat/bluetooth-link`*
+
+- **Bluetooth is the connection.** The [Ragnar Mobile](https://github.com/PierreGode/Ragnarmobile) app finds the nearest unit and talks to it over Bluetooth (BLE): dashboard numbers, wardriving status and start/stop, Phone GPS, alerts, device inventory, toggles and other actions. The phone and the unit only have to be within radio range. Docs: [bluetooth.md](bluetooth.md).
+- **How it works.** The app's ordinary requests travel over BLE and are answered by the same routes as over HTTP (`ble_link.py`). Answers are compressed: the test unit's 33 kB device list crosses as 2.7 kB.
+- **Live streams and the web UI run over the mesh or Wi-Fi.** Over Bluetooth a stream, or an answer above 128 kB compressed, is declined and the app says so.
+- **Link code.** The unit shows an 8-digit code under Settings → Bluetooth; the app asks for it once per unit. Wrong guesses lock the link. The unit's login applies after the code.
+- **Encrypted.** Every connection runs a key exchange from the link code (SPAKE2, libsodium) with proof in both directions, then seals every request and answer with ChaCha20-Poly1305. New keys on every reconnect; recorded requests cannot be replayed. New requirement: `pynacl`.
+- **One set of upload accounts.** The app and the unit share the WiGLE / WDGWars / Wardrift accounts: the app copies them both ways in the background each time it connects. New endpoint `GET/POST /api/wardriving/upload-accounts`.
+- **Wardriving with the phone as GPS** now works with the phone and the unit simply in the same car.
+- **Settings → Bluetooth is one card with one switch:** *Use the app over Bluetooth*, the advertised name, the link code and who is connected. A unit with several Bluetooth controllers also gets an adapter picker.
+- **Replaces the IP handover.** Bluetooth used to hand the app the unit's IP address for a Wi-Fi connection. That is gone, along with the network-status and hotspot characteristics and "auto-stop after provisioning". **Update the mobile app together with the unit:** an older app finds the unit but cannot connect over Bluetooth.
+- **Removed: Bluetooth access point (PAN)** — the card, `bt_pan.py`, every `/api/bt/pan/*` route, the paired-devices list and the `bluez-tools` / `bridge-utils` packages. A unit that had it on cleans up by itself the first time it starts after the update.
+- **New:** `ble_link.py`; config `ble_link_code`; `GET /api/ble/status` gains `link`; `POST /api/ble/toggle` takes `new_link_code`. A development simulator, `POST /api/ble/link/sim`, runs when `ble_link_sim` is set.
+- Tested on the dev unit (Pi 5): the link driven through the real GATT characteristics over D-Bus, and the whole app run through the simulator. **A phone test over the air is still to do** — real speed, and the link next to the unit's own Bluetooth scanning during a drive.
+
+#### feat(wardriving): use the phone's GPS — no receiver needed
+*branch `feat/phone-gps`*
+
+- **Phone GPS.** A unit with no GPS receiver can take its position from the phone in the same car. In the [Ragnar Mobile](https://github.com/PierreGode/Ragnarmobile) app, turn on **Wardrive → Live → Phone GPS**: during a drive the app sends the phone's location about once a second and the unit pins everything it finds to it. Docs: [wardriving.md](wardriving.md#phone-gps-ragnar-mobile-app).
+- **A receiver on the unit still wins** when it has a fix of its own; the phone takes over when it does not.
+- **New endpoint** `POST /api/wardriving/gps/phone` (`lat`, `lon`, optional `alt`, `speed_kmh`, `course`, `accuracy`, `ts`). The unit accepts fixes between drives too, so the GPS card shows the fix before Start.
+- `/api/wardriving/gps` reports `source: phone` and a new `accuracy_m` field (metres). The phone's fix time sets the clock under the same rules as GPS time from a receiver.
+- `/api/wardriving/gps` used to answer "GPS not initialized" between drives even with a standby reader open; it now reports that reader.
+- Needs the matching Ragnar Mobile release, which also adds a live map, a searchable network list and uploads to WiGLE / WDGWars / Wardrift from the phone.
+- Tested on the dev unit with posted fixes. Not yet driven with a phone.
+
+#### docs(os): the images come with a ready account (ragnar / ragnar)
+*branch `docs/os-image-default-login`*
+
+- **No keyboard needed on first boot.** The standard and CardputerZero images used to stop on the first boot and ask, on the console, for a user name to replace `pi`. From the next image release the account is made at build time: user `ragnar`, password `ragnar`, with `sudo`. Change the password with `passwd`. A username and password set in Raspberry Pi Imager still replace it.
+- Images released before this (standard up to 1.11.0, CardputerZero 1.0.0) are unchanged: set the account in Raspberry Pi Imager when flashing them.
+- Docs: [ragnar-os.md](ragnar-os.md#flashing-it), [M5StackCardputerZero.md](M5StackCardputerZero.md). The change itself is in the build repository; nothing in this repo's code changes.
+
+#### feat(os): a Ragnar OS image for the M5Stack CardputerZero
+*branch `feat/cardputer-os-image`*
+
+- **A third image**, `RagnarOS-CardputerZero-arm64.img.xz`, next to the standard and Ulfberht ones: flash it and the CardputerZero's screen, keyboard, battery gauge, camera and boot screen work from the first power-on, with no installer to run. Docs: [ragnar-os.md](ragnar-os.md#the-cardputerzero-image).
+- **What the image has that a plain install decides on the device:** SPI, I2C, the camera overlay and the UART are switched on in `config.txt`; the serial login console is off (it shares the UART with the LoRa Cap's GNSS receiver); `meshtasticd` is installed but off. On first boot, a fitted LoRa + GNSS Cap is set up as a Meshtastic node without internet.
+- **Lean:** no Nuclei / Nikto / SQLMap / ZAP / AirSnitch on a 512 MB board.
+- **In this repo:** `scripts/cardputer_hardware.sh image` (the image-build mode, used by `install_ragnar.sh --image-build` with `RAGNAR_PROFILE=cardputer`), `cardputer_lora_meshtastic.sh package` (daemon only, not configured), a first-boot step, and the **Release OS images** workflow gains `cardputer` and `all` (tags `os-cardputer-v*`, first version 1.0.0). The build recipe and the download page are in the build repository.
+- An image build no longer tries to draw the install screen on the build machine's own display.
+- **Fix: CardputerZero setup did nothing on plain Raspberry Pi OS.** Since the Meshtastic auto-install change, `scripts/cardputer_hardware.sh` stopped with `SELF_REPO: unbound variable` on a unit running plain Raspberry Pi OS (not M5Stack's image). Install and update therefore skipped the camera overlay check, the boot screen and the Meshtastic set-up on those units. Fixed; the next update runs them.
+- The image has not been booted on a CardputerZero yet.
+
+### 2026-11-14
+
+#### feat(cardputer): fn + Backspace (Del) switches the Grove port's 5 V on and off
+*branch `feat/cardputer-grove-key`*
+
+- **fn + Backspace**, the key's **del** legend, turns the Grove port's 5 V pin off and on again, from any screen (the camera screen too). The corner of the screen says *Del: Grove 5V off* / *on* for two seconds.
+- The choice is saved (`cardputer_grove_power`), so it is also the state after a restart. The default stays on.
+- Plain **Backspace** still flips the screen. Using it alone for Grove would have taken that away, and its other jobs on the wardriving and diagnostic screens.
+- Works with both keyboard paths: the kernel driver reports the key as Delete; without that driver Ragnar tracks fn itself.
+- Not tried on a unit (nobody at the keyboard); tested with a simulated keyboard and power switch.
+
+#### feat(cardputer): boot screen and an "Installing Ragnar" screen on the LCD
+*branch `feat/boot-install-splash`*
+
+- **Boot screen.** The CardputerZero's LCD used to stay blank during boot, then turn white for the minute Ragnar needs to start. It now shows the Ragnar name, the viking (or shieldmaiden) and *Starting up* a few seconds into boot (`ragnar-splash.service`), then *Starting Ragnar* while the service starts, until the first real screen. This also covers restarts after an update.
+- **Install screen.** `install_ragnar.sh` puts *Installing Ragnar* on the LCD from the first minute, with the current step and a progress bar, and *Ragnar is installed* at the end. It detects the board before the menu is answered, switches SPI and I2C on without a reboot, and fetches the few files it needs if the installer was downloaded on its own.
+- **How.** `ragnar_splash.py` draws straight to the panel through the display driver and needs nothing else from Ragnar. It only draws on a CardputerZero and never while Ragnar is running.
+- Switch the boot screen off with `sudo scripts/cardputer_hardware.sh boot-screen-off` (updates leave it off), back on with `boot-screen`. `RAGNAR_NO_SPLASH=1` stops the driver painting it at start.
+- M5Stack's own image gets its boot picture from a kernel screen driver; plain Raspberry Pi OS has none for this panel, so the picture appears once Python can run, a few seconds into boot, not from power-on.
+- **Not run on a unit.** Tested with a simulated panel, systemd tree and installer run; the pictures were rendered to image files. The field unit was running Ragnar, and drawing over it would have disturbed its screen.
+
+#### fix(cardputer): install and update set up Meshtastic on the LoRa Cap by themselves
+*branch `fix/cardputer-meshtasticd-autoinstall`*
+
+- **What was already installed:** the `meshtastic` Python client (Mesh Nodes) and `paho-mqtt` (the MQTT source, from `requirements.txt`) are installed by both `install_ragnar.sh` and the updater.
+- **What was missing:** the `meshtasticd` service that makes the LoRa Cap a node was only installed by pressing **Set up Meshtastic**. The installer and the updater (also from the web UI) now do it when the LoRa + GNSS Cap is fitted: add Meshtastic's package repository, install `meshtasticd`, write the Cap's radio settings and start it. Nothing is installed with another Cap or none.
+- It needs internet at that moment; if it fails, the **Set up Meshtastic** button still works.
+- `scripts/cardputer_lora_meshtastic.sh remove` is remembered: an update does not put it back until you set it up again yourself.
+- The region is still not set for you (it decides the legal frequencies): `meshtastic --host 127.0.0.1 --set lora.region EU_868`.
+- Not run on a unit; tested against a simulated system.
+
+#### feat(files): a Camera folder in the Files tab; fix: GPS for the Meshtastic node, steady camera detection
+*branch `feat/camera-files-folder`*
+
+- **Where they go.** Photos and videos are saved on the unit in `data/camera/`. That folder is now **Files → Camera**, next to Uploads and Backups: preview, play, download, rename, move, delete, send over the mesh, or put in the Vault like any other file.
+- **Link from the Camera panel.** Under the buttons, *Files → Camera* opens the folder directly.
+- A video that is still recording cannot be deleted from the Files tab.
+- Good to know: the **Photos** and **Videos** lists in the Camera panel show files with Ragnar's own names (`ragnar_YYYYMMDD_HHMMSS`). A file renamed or moved to a subfolder stays in **Files → Camera** but leaves those lists.
+- **Meshtastic node had no GPS (LoRa + GNSS Cap).** The GNSS and Ragnar share one serial port, and two readers on one port corrupt both, so the Meshtastic daemon cannot read it itself. Ragnar now hands its GPS fix to the node on the unit, the way the Meshtastic phone apps do: while the **Node** link is on in Mesh Nodes, the node gets the position every two minutes (sooner when moving) and uses it as its own. Between wardriving sessions Ragnar keeps a standby GPS reader open for this; a session takes the port back before it opens the GPS. The page shows *GPS from Ragnar* or *waiting for GPS fix*. Setting: `meshtastic_share_gps` (on by default). Note that a Meshtastic node with a position broadcasts it to the mesh.
+- **Camera panel came and went.** Ragnar asked the system for its camera list again every minute. On this board that takes seconds, and when the unit was busy (a recording, an update) it timed out, so the camera counted as "not detected" until the next try. A camera that was found now stays found; a list that times out goes by the sensor the kernel has; and the check no longer waits behind a photo being taken.
+- **Not checked on a unit:** the GPS hand-over and the detection change were tested with simulated hardware only. The unit was in use (recording) while this was written, so nothing was run on it. That the node adopts a position sent this way was confirmed in the Meshtastic firmware source.
+
+#### feat(camera): flip, video recording, and a camera screen on the CardputerZero
+*branch `feat/cardputer-camera-screen`*
+
+- **Picture was upside down.** The CardputerZero's sensor is mounted upside down, so the picture is now turned 180° there by default. A **Flip** button in the Camera panel changes it on any board; the choice is saved (`camera_rotation`: `0`, `180`, `auto`) and applies to the live view, photos and videos.
+- **Video recording.** **Record video** in the Camera panel, with a timer, and a **Videos** list to play, download and delete. A video is the live view written to disk (640×480, about 8 to 10 frames a second, no sound), so the live view keeps running while it records. It is converted to an MP4 in the background when `ffmpeg` is installed, which plays in the page and on a phone; otherwise it stays an AVI to download. A recording stops by itself after 10 minutes or when the disk is nearly full.
+- **Camera on the device screen.** Press **P** on the CardputerZero: the screen shows the live picture. **OK** takes a photo; **Z** / **C** switch to video, where **OK** starts and stops a recording (red frame and timer while recording). **Esc** or **P** leaves, which also ends a recording.
+- **Smoother live view.** Frames were handed on in bursts of about three, so the web live view moved at 2 to 3 updates a second. They are now passed on as they arrive.
+- **Faster screen updates on the CardputerZero.** Converting a frame for the LCD took a Python loop over every pixel; it is now done inside the image library (about 12 ms a frame on the unit), which the camera view needs and every other screen benefits from.
+- **Checked on a real unit** (branch code run from a temporary folder): with the 180° turn the picture is the right way up; a recording captured every frame at about 8 frames a second while a viewer also received every frame; the MP4 conversion worked (7.5 s for a 4 s clip); a photo took 1.8 s.
+- **Not checked on the unit:** the camera screen on the LCD and its keys (nobody at the keyboard). They were tested with a simulated camera and keyboard, and the screen was rendered to an image.
+
+#### fix(cardputer): findings from a real unit — Meshtastic start, camera setup on plain Raspberry Pi OS, Grove power
+*branch `fix/cardputer-unit-findings`*
+
+Diagnosed on a CardputerZero with the LoRa + GNSS Cap, running plain Raspberry Pi OS (not M5Stack's image).
+
+- **Meshtastic never started.** The step that powers the Cap before the daemon starts ran as the service's own user, which cannot read Ragnar's folder (`Permission denied`), so `meshtasticd` failed on every start and the Mesh Nodes page fell back to asking for a USB node. That step now runs as root. Existing installs are repaired at the next update. On the unit, the daemon with Ragnar's radio settings reported `sx1262 init success`.
+- **Mesh Nodes names the real problem.** With the LoRa Cap fitted and no daemon running, the page now says the Cap is not set up or its service is not running, instead of "plug a node in via USB".
+- **Camera setup did nothing on plain Raspberry Pi OS.** The setup script recognised a CardputerZero only by things M5Stack's image provides, so it exited with "not a CardputerZero" and never enabled the camera. It now also goes by Ragnar's display setting. It also runs after an update from the web UI, not only from `update_ragnar.sh`. The camera needs one reboot after the overlay is added.
+- **Grove port 5 V on by default.** The Grove connector's 5 V pin is switched and off at power-on; Ragnar now turns it on at start (setting `cardputer_grove_power`), and the hardware panel shows its state.
+- **Checked on the unit with this branch's code** (run from a temporary folder, nothing installed): the setup script now recognises the unit; the Grove 5 V switch turns on and reads back on while Cap power stays on; `meshtasticd` with Ragnar's settings initialises the SX1262 and Ragnar's Meshtastic client connects to it over TCP (region unset, so nothing was transmitted); GPS is connected on `/dev/serial0` (no fix indoors); the fuel gauge reads over I2C; the screen renders with the battery indicator.
+- **Camera hardware confirmed, driver not yet.** With the camera's power line (GPIO40, which the kernel only drives once the `imx219` overlay is loaded) switched on by hand, the sensor answered on the camera I2C bus (GPIO44/45) with model ID `0x0219`, an IMX219, exactly where the stock `dtoverlay=imx219` looks for it. Loading the overlay itself needs root and a reboot, so a picture has not been taken yet.
+- **Not checked on the unit:** key presses (nobody at the keyboard), and the CC1101 Cap (the LoRa Cap was fitted).
+
+#### fix(cardputer): Cap field report — CC1101 waterfall, GPS port, Meshtastic on the LoRa Cap, camera
+*branch `fix/cardputer-caps-field-report`*
+
+- **CC1101 waterfall was black.** The sweep ran and the readouts were right, but the colour scale started at the level used for the SDR sources, far above anything this radio reports, so every row drew black. The CC1101 panel now starts with a scale that fits it (-40 to -110 dBm).
+- **GPS port taken by the serial console.** With the LoRa + GNSS Cap fitted, Ragnar now stops the serial login prompt on the UART (GPS works straight away, no reboot) and removes `console=serial0` from `cmdline.txt` for the next boot, keeping `cmdline.txt.ragnar-bak`. Also a **Free the port for GPS** button in the hardware panel, `scripts/cardputer_hardware.sh gnss` / `gnss-undo`, and the setting `cardputer_free_gnss_uart`. Only the login prompt counts as a conflict now: a kernel console alone does not stop the port being read.
+- **Meshtastic did not find the LoRa radio.** Two causes. The radio settings Ragnar wrote named chip-select as a GPIO, which the daemon cannot claim because the kernel owns it; they now match Meshtastic's own CardputerZero preset. And `meshtasticd` was never installed, because it is not in the system's package sources: the setup script now adds Meshtastic's repository. New **Set up Meshtastic** button and a Meshtastic status row in the hardware panel. The guide explains how this works without a Meshtastic board (the firmware runs on the CardputerZero itself).
+- **Camera not detected.** The built-in camera is not auto-detected on this board; it needs `dtoverlay=imx219` in `config.txt`, as on M5Stack's image. Install and update now add it (backup kept, one reboot). The hardware panel's Camera row says why a camera is missing and offers **Set up the camera**.
+- Not confirmed on a unit: these follow the user's report, M5Stack's published configuration and Meshtastic's preset, and were checked against simulated hardware.
+
+#### docs(cardputer): how-to guide for Caps, the GPIO header and the camera
+*branch `docs/cardputer-caps-guide`*
+
+- New [docs/CardputerZero-Caps.md](CardputerZero-Caps.md): where each module is in the web UI, and worked examples for GNSS wardriving, LoRa as a Meshtastic node, the CC1101 sub-GHz sweep, the camera, and wiring your own hardware to the 14-pin header (LED, switch, I²C device, serial device). Includes what each status line means and a troubleshooting table. Linked from the docs index and the CardputerZero page.
+
+#### fix(update): damaged git data can no longer leave a box unable to update
+*branch `fix/update-self-repair`*
+
+- **The report.** Boxes showed **Needs attention**: "A tag in this clone or on the remote is corrupt…", with an Update button that could not be clicked. The remote's tags are fine. The damage is local: a power cut during a write leaves empty or half-written files under `.git`, and the earlier fix only handled one shape of it (a tag pointing at a missing object). An empty tag file, a bad branch or remote-branch file, a bad stash ref, a corrupt index, an empty object or a truncated pack all hit the same dead end.
+- **Reproduced.** 19 kinds of damage were planted in a test checkout: 15 left the box unable to update.
+- **The fix: a repair ladder** in `git_updater.py`. (1) plain-file fixes for an unreadable `HEAD`, `config`, `packed-refs`, empty refs and empty objects; (2) every broken ref is dropped, not only tags, and a corrupt index is rebuilt; (3) missing objects are refetched; (4) as a last resort `.git` is rebuilt around the files on disk. The background check runs 1 to 3. Step 4 runs only inside an update the user started, only when git itself reports damaged data, and puts the old `.git` back if it cannot reach github.com.
+- **The button.** **Repair and Update** is now offered for every failure except "git does not run" and "disk full". A dead button is what turned a repairable box into a stuck one.
+- **No false "Up to date".** A box whose own branch or history is unreadable used to compare as 0 commits behind. It now reports an update waiting.
+- **Shell updater.** `update_ragnar.sh` and `scripts/update_ragnar.sh` run the same ladder, before their first git command and when a fetch fails.
+- **Wrong file owners.** A user's report traced one case to an empty object file, a remote-branch pointer still naming it, and files in `.git` owned by root. The first two are steps 1 and 2 above. The third had a cause inside Ragnar: the service runs as root over a checkout owned by `ragnar`, so every background check left root-owned files, and git's automatic clean-up kept writing more after the fetch returned. Ragnar now gives `.git` back to its owner after every fetch and before any repair, and runs that clean-up in the foreground.
+- **Data safety.** Settings, databases and collected data are gitignored and untouched by every step; the tests check that for each kind of damage. A rebuild resets Ragnar's own tracked program files to upstream, so a local edit to those is lost in that one case.
+- **Verified for real, not only in unit tests:** actual clones of this repository were damaged and run against github.com. Two were updated (empty tag file + bad remote ref + zeroed index; and the whole object store deleted): both landed on `main` with private data intact. A third replayed the user's report exactly (the same object emptied, the same branch pointer, files chowned to root) with the updater running as root: the background check alone repaired it, left no root-owned file behind, did not move the code, and a plain `git fetch` as the owner worked again. 70 new tests cover the same on small repositories, for the web and the shell updater.
+
+#### fix(cardputer): Caps are not hot-swappable, so identify the Cap once per start
+*branch `fix/cardputer-cap-no-hotplug`*
+
+- M5Stack's guide says hot-plugging a Cap "is not supported and may cause abnormal operation. Power off before installing or removing a Cap." Ragnar re-probed the header's I²C and SPI buses every minute while the System tab was open, as if a Cap could appear at any time.
+- The Cap is now identified once when Ragnar starts and that answer is kept. A Cap that was found is never probed again. The panel's button (now **Refresh**) updates GNSS, camera and pin state, and only looks for a Cap again when none was found at start.
+- The CC1101 sweep uses the same stored answer instead of probing SPI itself.
+- The panel and the docs now carry the warning. Removed a troubleshooting tip about the LOCK label, which is the stock launcher's screen lock and unrelated to Ragnar.
+
+#### fix(cardputer): arrow keys, OK and Esc on units without M5Stack's keyboard driver
+*branch `fix/cardputer-keymap-i2c`*
+
+- **The cause.** On a kernel without M5Stack's keypad driver, Ragnar reads the keyboard chip directly, and that path still used guessed key positions from before the hardware was documented. So ctrl, Esc, Space, shift and fn acted as the arrows and OK, Enter was "next page", and the real arrow keys showed "not mapped". The earlier fixes only touched the kernel-driver path, which is why nothing changed.
+- **The fix.** The direct path now uses the board's real key matrix (schematic sheet 07 with the key positions from M5Stack's device tree). Both paths give every key the same job.
+- **Key roles, as requested.** `F` `X` `Z` `C` are the joystick (up, down, left, right). **OK** (Enter) is the joystick press: on the Ragnar screens it opens the diagnostic screens, inside them it runs the highlighted function. **Esc** goes back one step: closes a result, leaves diagnostics, leaves the wardriving screens, or returns to the main screen. Page autoscroll moved from Enter to `A`.
+- **Key echo** now shows the name printed on the key (`Z: left`, `Q (code 11): no action`). "No action" on most keys is normal.
+- **Cap power on the same units.** Without M5Stack's drivers there is no `ext_5v_out` control, so the expansion header stayed unpowered. Ragnar now switches the rail through the board's I/O expander there. Only on a unit configured as a CardputerZero: the expander's I²C address is also used by common sensors on other boards.
+- Not run on a CardputerZero. The matrix comes from M5Stack's own keymap; if a key shows the wrong name in the echo, the code beside it can be remapped in `config/cardputer_keymap.json`.
+
+#### feat(cardputer): expansion header, Cap modules (GNSS, LoRa/Meshtastic, CC1101 sweep) and camera
+*branch `feat/cardputer-caps-camera`*
+
+- **Expansion header.** Ragnar switches the header's 5 V rail on at start (a Cap and the header's SPI/I²C/UART lines are dead without it) and leaves it on. New **System → CardputerZero hardware** panel: which Cap is fitted, its radios, GNSS state, camera, and the live function and level of all 14 pins. `sudo python3 cardputer_caps.py` prints the same.
+- **GNSS (LoRa Cap).** Works with no setup: GPS auto-detection finds the receiver on `/dev/ttyS0`.
+- **GPS baud fix, all boards.** Auto-detection probed ports at several baud rates but the reader then always opened the port at the configured rate (9600), so a receiver found at 115200 was read as noise. The reader now opens the port at the rate NMEA was heard at; a board UART given by name is probed once.
+- **LoRa as a Meshtastic node.** `sudo scripts/cardputer_lora_meshtastic.sh install` configures `meshtasticd` for the Cap's SX1262 and powers the Cap before the daemon starts. Ragnar's Meshtastic pages now use a daemon on this machine (127.0.0.1:4403) when no USB node is present.
+- **Sub-GHz sweep.** New **Sub-GHz (CC1101)** panel on the RF Waterfall page: a receive-only signal-strength sweep of 315 / 433 / 868 / 915 MHz on the Cap CC1101.
+- **Camera.** New **System → Camera** panel on any board with a camera: live view (one shared stream, stops when nobody watches) and photos saved to `data/camera/`.
+- **Not done: NFC.** The Cap's ST25R3916 reader has no driver yet. `sudo scripts/cardputer_hardware.sh nfc` enables its chip-select overlay.
+- The Waveshare UPS HAT probe is skipped on a CardputerZero: the LoRa Cap has a chip on the same I²C address (0x43).
+- Written from M5Stack's schematic and their own Cap apps; tested against simulated hardware (a register-level CC1101 model, fake camera tools, fake serial ports) and by loading the new panels in headless Chromium. Not run on a CardputerZero.
+
+#### feat(cardputer): phone-style battery icon, key echo, reads every keyboard
+*branch `fix/cardputer-keys-battery-icon`*
+
+- **Battery icon.** A battery icon with the percentage now sits in the top-right corner of every CardputerZero screen: it fills with the charge, turns amber below 30 % and red below 15 %, and shows a bolt while charging. It replaces the plain `76%+` text in the main screen's header.
+- **Arrow keys still not paging for a user.** Ragnar's key codes were checked against M5Stack's device tree for the board and match (`F` 33, `X` 45, `Z` 44, `C` 46, and 103/108/105/106 with fn), so the cause is not the mapping and is not yet known. This release makes it visible and removes one possible cause:
+  - **Key echo.** For two seconds after a press, the bottom-left corner names the key and its action (`F: up`, `key 16: not mapped`). Nothing shown means the press never reached Ragnar. `cardputer_key_echo: false` turns it off.
+  - **Every keyboard is read.** The reader used to open one device node; it now reads the built-in keypad and any other device that reports letter keys (a USB keyboard works too), and looks for late arrivals every 5 s.
+  - **Key test.** `sudo python3 cardputer_input.py` prints each key's code and action. Every press is also logged, and errors in the key handler are logged as warnings instead of being hidden at debug level.
+- Not run on a CardputerZero; rendered at 320×170 and tested against simulated hardware.
+
+#### feat(cardputer): colour screen with the Viking and shieldmaiden, battery percentage, arrow-key hints, right way up
+*branch `feat/cardputer-zero-field-fixes`*
+
+Fixes from the first CardputerZero units in users' hands.
+
+- **Upside-down screen.** The panel is mounted upside down relative to the picture its driver shows. The first start on a CardputerZero now turns the screen 180° once. A unit already turned by hand is left alone, and a later choice is kept. **Backspace** now flips between the two landscape positions (it used to step through four rotations, two of them sideways) and saves the choice.
+- **PiSugar question.** Installer option 7 no longer asks about a PiSugar; the board has its own battery.
+- **Battery percentage.** New `sysfs_battery.py` reads the built-in BQ27220 fuel gauge from `/sys/class/power_supply`, or directly over I²C (`0x55`) on a kernel without the driver. It feeds the same battery slot as PiSugar and the UPS HAT: screen header and the System tab's Battery card. `python3 sysfs_battery.py` prints one reading. Any board whose kernel exposes a battery there is picked up too.
+- **Colour, with both avatars.** The main screen has a new 320×170 layout: the character at double size in full colour on the right (Viking, or the shieldmaiden with `mesh_viking_gender: female`), header, stats, status and speech on the left. The stat pages, net-diag cards and wardriving screens use the dark colour theme. `lcd_color: false` and `wardriving_lcd_color: false` switch back to black-on-white.
+- **Arrow keys.** `F` `X` `Z` `C` already paged through the screens, but every footer still showed the 2.7" HAT's `K1`-`K4` hints, so nothing said which keys to press. Footers now name the keyboard keys (`F/X/Z/C:Page  OK:Auto  Space:NetDiag  Bksp:Flip`). While wardriving, the arrows now page through the six wardriving screens; before, they changed a page counter that the full-width stats page ignored. The keyboard is also found under other driver names and I²C controller paths.
+- **Fix for every colour panel.** The Discovered page raised an error and stayed blank on a colour canvas (the 1.44" colour LCD HAT included): its rows were measured on a 1-bit scratch canvas using RGB inks.
+- Tested against simulated hardware (`tests/test_cardputer_zero.py`, new `tests/test_sysfs_battery.py`) and by rendering the real screens at 320×170. Not run on a CardputerZero: the project has none.
+
+### 2026-11-13
+
+#### fix(scan): no more `arp-scan command not found` errors every scan cycle on boxes without arp-scan
+*branch `fix/pager-arp-scan-missing`*
+
+- **The problem.** On the WiFi Pineapple Pager (and any box without `arp-scan`) the scanner tried to run it twice per cycle and logged an ERROR each time, filling the log and the Pager's Activity screen with red lines. Scanning itself still worked, because MAC addresses also come from the kernel neighbour table.
+- **The fix.** The scanner now checks for `arp-scan` first. If it is missing it says so once, as a warning, and goes straight to the neighbour table. It also only prefixes `sudo` when not already root and `sudo` exists (OpenWrt has none).
+- **Installer.** `scripts/install_pineapple_pager.sh` now tries `opkg install arp-scan` on the Pager as an optional step (adds vendor names to hosts); it never fails the install if the package or internet is unavailable.
+- Covered by two new tests in `tests/test_host_liveness.py`. Not run on a Pager: the device was offline when this was written, so the optional `opkg` step is untested on hardware.
+
+### 2026-11-12
+
+#### feat(pager): host detail page, new-find alerts, rank title, WiFi tab in the running view
+*branch `fix/pineapple-pager-install`*
+
+- **Host detail.** The Hosts screen now has a selection bar; **GREEN** opens a page for that host with MAC, vendor, every open port, its vulnerabilities and any credentials found on it. UP/DOWN steps to the next host, GREEN or RED closes.
+- **New-find alerts.** When the host, credential or vulnerability counter goes up, a banner shows on whatever screen is open and the Pager buzzes (vibration for a new host; chime plus vibration for credentials or a vulnerable host). **Buzz On New Finds** on the System settings screen turns the buzz off.
+- **Rank title.** The dashboard shows a Norse rank next to the level (Thrall, Karl, Hersir, Jarl, Konungr, Berserkr, Einherjar, Jotunn, Ragnar).
+- **WiFi tab.** A new screen that opens WiFi Spectrum with GREEN while Ragnar keeps running; RED returns to it.
+- Checked on a Pager with Ragnar running: all tabs display correctly. The new-find buzzer has not been observed firing.
+
+#### feat(pager): Radar, Activity and Device screens, Viking art on the dashboard, pause menu fits the screen
+*branch `fix/pineapple-pager-install`*
+
+- **Pause menu fix.** The RED-button menu was laid out for a portrait screen, so on the 480x222 landscape LCD the option buttons stacked down past the bottom edge (the second was cut in half, the third was off-screen). It is now a landscape layout: brightness bar on top, the options as a row of buttons underneath, wrapping to a second row when launchers are installed.
+- **Radar screen.** Hosts drawn as blips around Ragnar (bearing = last IP octet, closer to the centre = more open ports; red = vulnerable, cyan = open ports, green = alive, grey = down) with a sweep line and a "most exposed" list.
+- **Activity screen.** A scrollable feed of the latest orchestrator and scanner log lines, colour-coded by level.
+- **Device screen.** Battery, CPU load, memory, uptime, free storage, scan interface and level progress.
+- **Dashboard.** Shows the animated Viking status art for the action currently running.
+- Checked on a Pager with Ragnar running.
+
+#### feat(pager): WiFi Spectrum — native tri-band WiFi spectrum, waterfall & passive network discovery
+*branch `fix/pineapple-pager-install`*
+
+- **What it is.** A new native Pineapple Pager app (menu: **WiFi Spectrum**) that turns the Pager's own tri-band WiFi radio into a spectrum/recon instrument — no external SDR. It retunes `wlan1mon` across every 2.4 / 5 / **6 GHz** channel, captures 802.11 frames via a raw `AF_PACKET` socket, reads radiotap RSSI, and passively parses beacons/probe-responses for SSID, BSSID, channel and encryption. Nothing is transmitted.
+- **Three views** (cycle with GREEN): a per-pixel scrolling inferno **Waterfall** (full 480 px width, interpolated between channels, newest line on top, about three new lines a second, band boundaries marked in ALL mode); a scrollable **Networks** list (SSID / band / channel / signal / open-locked, strongest first); and a **Survey** dashboard (total / open / secured counts, per-band bars, strongest networks, clearest-2.4-GHz-channel recommendation).
+- **Pager flourishes.** A radar-sweep splash, and the 4 d-pad RGB LEDs run a physical radar sweep tinted by the strongest band and pulsing with signal strength. On exit the inventory is written to `data/spectrum_networks.csv`. The menu entry sits directly under **Start Ragnar** and reloads the app each time it is opened.
+- **Tuned for the hardware.** Measured on the Pager, every libpagerctl draw call costs ~1.2 ms regardless of area and TrueType text ~10 ms, so a display built from many rectangles is slow (a screen-filling waterfall of cells took 320-630 ms per repaint and looked blocky). The waterfall is therefore kept as an in-memory BMP image, scrolled with one slice move and drawn with a single `draw_image_file()` call: ~150 ms per update at full pixel resolution. Per-frame text uses the bitmap font.
+
+### 2026-11-11
+
+#### fix(pager): Pineapple Pager installer deployed an empty payload and 404'd on Python
+*branch `fix/pineapple-pager-install`*
+
+- **The core bug.** The maintained installer lives at `scripts/install_pineapple_pager.sh`, and that is how `install_ragnar.sh` (option 3) and the docs invoke it. But it set `RAGNAR_DIR="$(dirname "$0")"` — i.e. the `scripts/` directory — so every source path (`$RAGNAR_DIR/pager/...`, `$RAGNAR_DIR/shared.py`, `$RAGNAR_DIR/actions`, `$RAGNAR_DIR/web`) resolved under `scripts/`, where none of them exist. Every file was silently skipped, an almost-empty payload was copied to the Pager, and the script still printed **"successfully deployed."** Ragnar then would not start on the device. Now the repo root is found by walking up from the script (works whether it is run from `scripts/` or the repo root), and a completeness guard **aborts** instead of deploying a payload that is missing `payload.sh`, `pager_menu.py`, `shared.py`, `actions/`, `web/`, etc.
+- **Python install 404'd.** The Python3 `.ipk` set was pinned to `3.11.14-r1`, a version the OpenWrt `mipsel_24kc` feed has since dropped (now `3.11.18-r1`) — every download returned 404, so the Pager was left without Python. The installer no longer pins a version: it first lets the Pager's own `opkg` resolve the current packages online, and if the Pager has no internet it reads the current `Filename:` for each package from the feed's `Packages.gz` index on the host and streams the `.ipk` set over. `python-nmap` now prefers the copy bundled in `pager_lib/` and installs into the Pager's actual `python3.x` site dir. All of the installer's own on-device `python3` checks now use the same `/mmc/usr/bin` + `/mmc/usr/lib` paths that `payload.sh` exports — `opkg -d mmc` installs Python under `/mmc`, which is not on the default `PATH`, so the old bare `python3` checks reported a freshly-installed interpreter as "missing" and the installer bailed out just before its final steps. Verified end-to-end on a real Pager (firmware OpenWrt, MIPS).
+- **Transfer no longer relies on `scp`.** Modern OpenSSH `scp` speaks SFTP, which the Pager's dropbear-style SSH server may not provide; payload, packages and the nmap module now go over a single `tar | ssh 'tar -x'` stream (faster for thousands of small files, and it needs no SFTP subsystem).
+- **Connection UX.** A pre-flight TCP check on port 22 separates "Pager not plugged in / wrong IP" from "auth failed" and suggests the detected `172.16.<N>.1` when the pinned default is wrong; SSH connection multiplexing means a password user is prompted **once** instead of ~20 times.
+- **One source of truth.** The stale, identical copy at the repo root is now a thin forwarder that execs `scripts/install_pineapple_pager.sh`, so the two copies can no longer drift (this drift is why the fixes had to land in the `scripts/` copy).
+
+#### fix(net): DNS Watch v12, MaginotDNS detector no longer alarms on normal reverse-DNS referrals
+*branch `feature/dns-poison-v12`*
+
+- **The problem.** The MaginotDNS detector (`DNSD-006`, critical) fired on ordinary reverse-DNS traffic. Reverse zones are delegated out to customers, so a response for `2.0.192.in-addr.arpa` legitimately carries glue for `ns1.customer.example` or a CNAME chain into the customer's domain. Both are outside the queried zone and both were reported as cache poisoning.
+- **The fix.** Every out-of-bailiwick record is now sorted from the single packet. Glue whose NS record is properly anchored, and records on the response's own CNAME/DNAME chain, become the new notice-level **`DNSD-170`** (`OUT_OF_BAILIWICK_ACCOUNTED`, no CVE). Everything else stays `DNSD-006`, critical.
+- **Not an amnesty.** A forged NS record cannot excuse its own glue: `victim.example NS ns.attacker.example` plus glue still reports both records as `DNSD-006`. The chain walk stops at 16 hops or on a loop and excuses nothing past that point.
+- **Nothing is hidden.** Accounted records are still listed, once per responder, zone and owner, with the reason (`glue` or `chain`).
+- **CVE label.** `DNSD-006` now shows `attack class: CVE-2021-25220, CVE-2025-40778`. The detector reads record structure and cannot know a server's version, so the CVEs name the attack shape, not a vulnerable build. The Watchtower feed still carries the two CVE IDs as before.
+- **Scope.** Drop-in refresh of the vendored `python/dns_doctor_passive` (4 files: `detect.py`, `engine.py`, `findings.py`, `selftest.py`). No new CVE, no new port, no new setting. The CVE index is unchanged.
+- **Docs:** [nettools.md](nettools.md) (DNS Watch, MaginotDNS), [CREDITS.md](CREDITS.md), DNS Watch card text.
+- **CVE index generator.** `scripts/gen_cve_list.py` no longer scans `tests/` or the usage example in `distro_cve.py`. The pytest suites name CVE IDs as sample data (some made up, like `CVE-1999-0001`), and a regeneration would have listed 19 of them as detected. With the fix the index regenerates byte-identical to the published one (439 IDs, 375 detected).
+- **Validation:** DNS Watch self-test 134 → 144 scenarios, all passing (10 new: the reverse-referral false positive, CNAME chain, foreign-NS and unreferenced-glue near-misses, case-insensitive match, hop cap, loop, dedupe; IPv4 and IPv6). The module's mutation test was run on a copy: three injected regressions (split removed, anchoring removed two ways) were each caught. A scapy-built pcap through the real adapter path gave `DNSD-170` for the referral and `DNSD-006` for the forged NS on both IP versions. A live capture of a `.com` referral for `example.com` reported its out-of-zone glue as `DNSD-170`.
+
+#### fix(wifi): clear error instead of losing Wi-Fi when the adapter cannot do AP mode
+*branch `fix/ap-mode-unsupported-adapter`* · closes [#1048](https://github.com/PierreGode/Ragnar/issues/1048)
+
+- **The problem.** With a Wi-Fi adapter whose driver has no Access Point mode (many USB dongles), pressing **Start AP Mode** disconnected Wi-Fi first and then failed to start the hotspot, with nothing on screen saying why. The unit just dropped off the network.
+- **Checked before anything is touched.** Ragnar now asks the driver (`iw`) whether the AP interface supports AP mode. If it does not, the hotspot is not attempted and the Wi-Fi connection stays up.
+- **An error message that says what is wrong.** Connect → Access Point Mode shows it under the button: *The Wi-Fi adapter on wlan0 (driver …) does not support Access Point mode…*, with what to use instead. If another adapter on the box can do it, the message names it. The notice is shown as soon as the Connect tab loads, and the "this will disconnect Wi-Fi" prompt is skipped. The older `wifi_config.html` page shows the same text.
+- **API.** `/api/wifi/ap/enable`, `/api/wifi/ap/start` and `/api/wifi/disconnect` return the reason as `error`; `/api/wifi/status` gains `ap_supported`, `ap_interface` and `ap_error`.
+- **Honest result from the button.** `/api/wifi/ap/enable` used to answer success whenever the connection loop was running, even if `hostapd` never came up. It now reports failure, with `hostapd`'s last line of output when that is the cause.
+- **Same guard elsewhere.** The automatic AP fallback and the wardriving AP (KEY1) use the same check; the wardriving AP hands the radio back to scanning instead of dropping the uplink.
+- **Unchanged** for adapters that support AP mode, and when the driver cannot be asked (no `iw`): Ragnar tries as before.
+- **Docs:** [RagnarAP.md](RagnarAP.md#wi-fi-adapters-that-cannot-be-an-access-point), [knowledgebase.md](knowledgebase.md) (+1 entry)
+- **Validation:** new `tests/test_ap_mode_capability.py` (19 tests: `iw` parsing incl. near-misses like `AP/VLAN` and `start_ap`, refusal without any radio/NetworkManager command, the web button no longer disconnecting, the alternative-adapter hint, the wardriving AP, unchanged behaviour for capable/unknown adapters, and the three endpoints through the Flask test client); 8 of them fail with the check removed. The real `iw` path was run on the dev box's built-in radio (reports AP-capable). The notice was rendered in headless Chromium at desktop and 390 px phone width: no script errors, no overflow. **No AP-incapable adapter was available, so the refusal was exercised with a simulated driver dump, not real hardware.**
+
+#### feat(display): battery percentage from a Waveshare UPS HAT (C)
+*branch `feat/waveshare-ups-hat-c`* · closes [#1049](https://github.com/PierreGode/Ragnar/issues/1049)
+
+- **Battery % on screen for the Waveshare UPS HAT (C).** The Pi Zero pogo-pin UPS is now detected at start and its percentage shown in the top-right of the display header (e-Paper, LCD HAT and TFT layouts) and on the **System** tab Battery card, in the slot that only a PiSugar could fill before. `75%+` means external power is connected.
+- **Nothing to install.** Ragnar reads the HAT's INA219 itself over I2C (`0x43`) with a plain ioctl: no `pisugar-server`, no extra service, no new Python package. I2C is already enabled by the installer.
+- **Same number as Waveshare's tool.** The percentage is the formula from their demo script (3.0 V = 0 %, 4.2 V = 100 %), averaged over 30 seconds so a scan starting does not make it jump. External power is read from the direction of the battery current, so a full battery on the charger still reads as plugged in.
+- **Read-only and guarded.** Ragnar never writes to the chip, and only accepts an address whose voltage looks like a Li-ion pack, so another I2C device on the same address, or a HAT with no battery fitted, shows nothing instead of a bogus 0 %. After six failed reads in a row the reading is dropped, and it comes back when the HAT answers again.
+- **Also recognised:** the two-cell UPS HAT / UPS HAT (B) at `0x42` (same chip, formula scaled to two cells; not tested on hardware). A PiSugar takes priority when both are present.
+- **Switch:** Config → Display → **Waveshare UPS HAT Battery** (`ups_hat_monitor`, on by default). `sudo python3 ups_hat.py` prints one reading from a shell.
+- **Not included:** automatic shutdown at low battery.
+- **Docs:** new [ups-hat.md](ups-hat.md); README, [INSTALL.md](INSTALL.md), [hardware-gen2.md](hardware-gen2.md), [knowledgebase.md](knowledgebase.md) (+1 entry)
+- **Validation:** new `tests/test_ups_hat.py` (35 tests: register decoding against the demo's arithmetic, detection at both addresses, rejection of implausible voltages, no writes, charge state from the shunt sign, smoothing, dead-bus drop and recovery, PiSugar priority, the header on the colour and 1-bit LCD layouts, and `/api/system/status` through the Flask test client). Address, register scaling, formula and current sign were taken from Waveshare's wiki and `UPS_HAT_C.7z` demo, and checked against the UPS HAT (C) schematic (INA219 strapped to `0x43`, 0.01 Ω shunt between charger and cell, bus voltage measured on the battery side). The raw I2C reader was exercised against real I2C devices on the dev box; **no UPS HAT (C) was available, so the end-to-end reading on real hardware is unverified.**
+
+#### feat(vuln): Debian/Ubuntu revision-aware CVE check to cut banner-scan false positives
+*branch `feat/debian-revision-aware-cve`* · closes [#1051](https://github.com/PierreGode/Ragnar/issues/1051)
+
+- **The problem.** The Nmap `vulners` scan matches the upstream version (`openssh 9.2p1`) and lists every CVE ever filed against it. Debian and Ubuntu backport fixes without changing that version, so a fully patched Debian 12 host on `OpenSSH 9.2p1-2+deb12u10` showed about 120 findings, nearly all fixed long ago, with the one open CVE ranked below them.
+- **The fix (opt-in).** Config → General → **Distro-aware CVE Check** (`distro_cve_enrichment`, off by default). Ragnar reads the distro patch level from the service banner and checks each CVE against the Debian security tracker or the Ubuntu CVE tracker before showing it.
+- **Tagged, never dropped.** `distro-fixed`, `distro-not-affected` and `exploit-ref` (exploit references that name no CVE) are hidden from the default view; `distro-deferred`, `distro-open` and `unverified` stay visible. A host that is behind on updates gets `distro-open` with the fixed version named. Hidden findings are still stored and expand under **Show N suppressed** in Threat Intel, each with the tracker's reason and a link.
+- **Re-ranked.** Hidden findings no longer count towards a host's totals, risk level, the dashboard/on-device vulnerability count or mesh fleet findings. Within a host, CISA KEV entries come first, then tracker-confirmed open findings, then severity. A CISA KEV CVE is never hidden.
+- **Small footprint.** The 85 MB Debian snapshot (15 MB on the wire) is scanned through `mmap` and trimmed to the ~30 service packages Ragnar can fingerprint: a 0.3 MB cache and about 3 MB of heap, where a plain JSON load of the snapshot peaks near 360 MB (measured), too much for a Pi Zero 2 W. Refreshed every 24 h with `If-Modified-Since`; scans work offline from the cache, and an unreachable tracker backs off for 30 minutes instead of stalling every host. Ubuntu is one cached request per CVE. Only CVE ids are sent.
+- **Details that mattered on real hosts.** The package version is rebuilt from the tracker, not the banner: trixie's `sshd` announces `10.0p2` while the package is `1:10.0p1-7+deb13u4`, and banners never carry the epoch. Ubuntu revisions (`3ubuntu0.10`) do not name their release, so it is inferred from the tracker's fixed versions and left `unverified` when ambiguous. Exploit ids that embed a CVE (`..._CVE_2026_123158_...`) are checked as that CVE. The `banner` NSE script is added to the scan as a second source for the patch level.
+- **Not covered:** RHEL / Amazon Linux markers are recognised but have no tracker lookup yet; Debian releases the tracker has dropped stay `unverified`; services whose banner only says `(Debian)` (Apache, nginx) cannot be checked.
+- **Docs:** [scanning-and-attacks.md](scanning-and-attacks.md#distro-aware-cve-check-debian--ubuntu), [knowledgebase.md](knowledgebase.md) (+1 entry), README
+- **Validation:** new `tests/test_distro_cve.py` (49 tests, offline: banner parsing, dpkg version ordering, snapshot extraction, the issue's deb12u10 scenario, outdated host, Ubuntu release inference, offline/stale-cache/backoff, suppression and ranking, scanner wiring, and the grouped API through the Flask test client with the feature on and off). Checked live against both trackers: the issue's six CVEs classify as reported (4 fixed, 1 not affected, 1 deferred), and a real scan of a Debian 13 host went from 53 findings to 23 visible. Threat Intel rendered in headless Chromium at desktop and 390 px phone width: no script errors, no horizontal overflow, tracker text HTML-escaped.
+
+#### feat(display): colour the Network Diagnostic screens on the 1.44" LCD HAT
+*branch `feat/netdiag-lcd-colour`*
+
+- **Network Diagnostic mode now renders in colour on the LCD HAT.** The last 1-bit screen on the colour panel catches up: the diagnostic cards (LINK, IP, SWITCH, DHCP, WIFI, SIGNAL, SPECTRUM, IFACE, BT, ZIGBEE), the card-selection menu and the one-shot test results all use the same dark theme as the rest of the LCD — gold title, grey labels, light values. Every other panel keeps its 1-bit black-on-white look.
+- **Wi-Fi signal bars are green**, matching the web GUI's signal meters. The SIGNAL card's per-network bars and the WIFI card's live bar fill green on the colour LCD and stay solid black ink on any 1-bit panel.
+- **Card menu highlight.** The selected card gets a gold bar with dark text on the colour LCD (the classic black bar with white text on 1-bit), and the outer border is dropped on the narrow LCD like the other screens, where the ST7735S edge offset makes an edge-hugging line look ragged.
+- **How.** The diagnostic frame now renders on the RGB dark-theme canvas when `_lcd_color_panel()` is true, and the remaining hardcoded ink values route through the same `_wd_c` helper the rest of the LCD uses — so nothing changes on e-paper or any other panel. The `lcd_color: false` switch still restores black-on-white.
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md#colour)
+- **Validation:** `tests/test_lcd_color.py` grows to 23 tests (+3: green signal bars, the gold-highlighted card menu with no outer border, a colour diagnostic card — each with its 1-bit counterpart). Rendered offline at native 128×128 and eyeballed.
+
+### 2026-11-10
+
+#### [#1056](https://github.com/PierreGode/Ragnar/pull/1056) — feat(display): blonde vikings and a full-colour 1.44" LCD HAT
+*branch `feat/blonde-vikings-lcd-colour`*
+
+- **The default viking is blonde.** The web portrait has a blonde beard; the on-device frames had a brown one. All 90 animation frames and the static mascot are recoloured, beard only: `scripts/recolor_male_blonde.py` treats a pixel as beard when it matches the plain idle frame, so shields, laptops, bottles, pets, swords and hoods keep their colours. On 1-bit panels the beard simply dithers lighter.
+- **The 1.44" ST7735S LCD HAT renders in full colour.** The main screen, the five info pages (Network, Vuln, Discovered, Advanced, Traffic) and the wardriving screens all use a dark theme: gold title, each stat icon or label in its own colour, light values, and the viking drawn in **full colour** — the blonde male, or the shieldmaiden on a female unit. Colour routes through one helper (`_wd_c`), so every other panel keeps its 1-bit black-on-white look unchanged. Network Diagnostic mode stays 1-bit for now.
+- **Colour characters.** The default viking's frames are colour bitmaps on a white backdrop, which is cut away on first use (only white connected to the border, so eye highlights stay, and the pale rim is faded so he does not glow on black). The shieldmaiden gets a full-colour twin of each of her 18 frames in `woman/color/`, rendered from the original illustrations by `scripts/gen_female_frames.py`.
+- **Panel fixes found on real hardware.** This LCD swaps red and blue regardless of the MADCTL colour-order bit (a blonde viking came out blue), so the channels are swapped in the pixel packing instead (`RB_SWAP`, default on). Its 128×128 visible area sits a few pixels into the controller's 132×162 RAM, so the window offset is tuned (default col 3, row 3) to stop the far edges showing unwritten RAM as a colour band. The outer border frame is dropped on the LCD, where an edge-hugging line looked ragged against that offset (kept on the wider e-paper). All three are overridable: `RAGNAR_ST7735S_RB_SWAP`, `RAGNAR_ST7735S_COL_OFFSET` / `RAGNAR_ST7735S_ROW_OFFSET`, `RAGNAR_ST7735S_MADCTL`.
+- **Switches.** `lcd_color: false` restores the black-on-white main screen and `wardriving_lcd_color: false` the wardriving screens. Only the `st7735s` panel changes.
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md#colour), [mesh.md](mesh.md#the-shieldmaiden-shows-on-the-panel-not-just-the-web), [knowledgebase.md](knowledgebase.md) (+1 entry)
+- **Validation:** new `tests/test_lcd_color.py` (20 tests: backdrop cut-out, no pale halo, a colour twin per female frame, cache safety, colour main screen + five info pages for both characters, both switches, other panels stay 1-bit). Verified on a physical 1.44" LCD HAT (ST7735S on a Pi 5): colour correct, edges clean, all pages legible.
+
+#### [#1055](https://github.com/PierreGode/Ragnar/pull/1055) — feat(display): shieldmaiden character on the e-paper and screens for female units
+*branch `feat/female-viking-display`*
+
+- **The on-device viking is now a woman on female units.** A mesh unit named after a woman (or with `mesh_viking_gender = female`) already showed the female portrait in the web header, but its own display kept animating the default bearded viking. It now animates shieldmaiden frames from `resources/images/status/woman/`: eight portraits shared by every status, plus ten idle-only expression variants (eyes closed in a smile, a blink, a wink), so an idle unit cycles through 18 frames.
+- **The art.** The frames are head-and-shoulders portraits, 78×78 and 1-bit like the default frames, rendered from the detailed colour illustrations by the new `scripts/gen_female_frames.py`: it crops each one to the face, brightens it so hair and skin go white, dithers, and keeps the ink outlines solid black. Shrinking the whole-body illustrations to 78 px gave noise, and a first attempt at hand-simplified line art read as a stick figure; both were dropped. The idle variants are drawn onto the calm portraits by the same script, and only the eyes differ from the base frame, so nothing else flickers when the frame changes. The portrait crops are committed in `woman/src/` so the look can be re-tuned without the 17 MB of originals.
+- **Screens covered:** the e-paper main screen, the compact LCD/TFT layouts, the 1.44" wardriving pages (including the gold viking page on the colour theme) and the round GC9A01, which tints her with the configured mascot colour.
+- **Gender rule.** An explicit `mesh_viking_gender` wins, on or off the mesh; otherwise the Viking name decides, and only while the mesh is on. A change takes effect on the next animation frame with no restart. Male and non-mesh units are unchanged, and a unit with no female art falls back to the default frames.
+- **Not covered:** the WiFi Pineapple Pager port draws no character animation, so nothing changes there. The small per-action status icons are not character art and stay as they are.
+- **Ulfberht: GPIO displays were dead on a Raspberry Pi 5.** Found while checking the above on a 2.7" e-Paper: the Kali base has SPI and I2C off with no `raspi-config` to enable them, no `spidev` / `gpiozero` / `smbus2`, no `lgpio` (the only `gpiozero` backend that works on a Pi 5, and unpackaged on Kali), and no `/dev/gpiochip4`, which `gpiozero` opens on a Pi 5. The service log showed `No module named 'spidev'`, then `can not open gpiochip`.
+- **Fix:** new `scripts/pi_gpio_displays.sh` handles all of it idempotently: enables SPI/I2C in `config.txt` (with a backup) and loads `i2c-dev` at boot, installs the modules from distro packages with a pip fallback, builds the pinned `lg` v0.2.2 from source when `lgpio` has no package or wheel (with the flags GCC 15 and SWIG 4.5 need), and adds a udev alias for the Pi 5 header. `install_ragnar.sh` runs it in the display-driver step, including `--image-build`, and `update_ragnar.sh` runs it as Step 5.4d so already-imaged units are repaired by an update plus one reboot. It is a no-op on Raspberry Pi OS and on non-Pi hosts. The next Ulfberht image has to be rebuilt to carry it.
+- **Docs:** [mesh.md](mesh.md#the-shieldmaiden-shows-on-the-panel-not-just-the-web), [ragnar-os-ulfberht.md](ragnar-os-ulfberht.md#gpio-displays-e-paper-tft-oled), [knowledgebase.md](knowledgebase.md) (+1 entry)
+- **Validation (displays):** on an Ulfberht Pi 5 with a 2.7" e-Paper, every manual fix was undone (packages removed, `liblgpio` deleted, udev rule removed, `config.txt` restored) and the script run from that state: 1 min 43 s, all steps `[ok]`; after one reboot the panel initialised and a second run changed nothing. New `tests/test_pi_gpio_displays.py` (12 tests) covers the `config.txt` editing, the udev rule and the boot-time module file. Not run: a full `install_ragnar.sh --image-build` in the image pipeline, a full `update_ragnar.sh` pass, and any board other than a Pi 5.
+- **Validation (shieldmaiden):** new `tests/test_female_frames.py` (18 tests: frame loading, gender resolution, per-status selection, runtime gender change, fallback). Each screen's paste path was rendered offline at native size with the female frames, and the unit's own screen capture on the 2.7" e-Paper shows her at full frame height.
+
+#### [#1051](https://github.com/PierreGode/Ragnar/pull/1051) — fix(network): live Online/Offline status for Discovered Hosts + lighter status loop
+*branch `fix/host-presence-realtime`*
+
+- **Every host read Online.** The Network tab's Status column came from the stored `hosts.status`, and nothing ever recorded a *failed* probe there, so a host seen once stayed "alive" indefinitely. In a 20-minute measurement on the dev box the table showed 54 of 54 hosts Online throughout, while 21 of them never answered a single probe. Rows that were not Online read "Unknown"; there was no Offline state at all.
+- **New `host_presence.py` monitor.** One raw socket ARP-probes every known LAN host (unicast to its last known MAC) every 2 seconds while a dashboard is open and every 10 seconds otherwise. A host that misses a reply is also pinged and ARPed by broadcast before it is written off. A silent host turns **Offline within about 10 seconds**; a returning one turns Online at once from the ARP it broadcasts on joining, or within 4 seconds from the re-probe. No subprocesses, no disk writes, at most 1024 hosts.
+- **Why unicast ARP.** Measured side by side on Wi-Fi: unicast ARP was answered by about 30 hosts per cycle at close to 100%, the broadcast ARP the 60-second sweep relies on by about 11, ICMP echo by about 23.
+- **Network tab.** Status shows Online / Offline / Unknown and is pushed over the WebSocket (`host_presence`), patching only the cells that changed instead of rebuilding the table. The host count adds how many are online. The banner describes the live check, and falls back to the old text when the monitor cannot run. Translated for de / es / fr.
+- **Dashboard Targets card was never right.** It read "54 targets, 54 total, 0 offline, 0 new, 0 lost" whatever was on the network. Active came from the same stored status, so it always equalled the total; New and Lost held only the difference between two consecutive 15 second syncs, so they were back at 0 before anyone could read them, and the per-network stats path hardcoded both to 0. One rule (`_live_target_counts`) now feeds every path that fills the card (`/api/dashboard/stats`, `/api/dashboard/quick`, `/api/status`, the status broadcast and the e-paper count): Targets is hosts Online right now, Offline is the rest, **New** is first seen in the last 24 hours, **Lost** is went Offline in the last 24 hours after having answered. Push notifications for new and lost devices are unchanged. The status payloads the dashboard falls back to now carry the whole card, not only the target count, and a host with no verdict yet is settled at the fast pace even when no dashboard is open, so the card is right about 2 seconds after start.
+- **API.** New `GET /api/network/presence`. `/api/network/stable` now reports `status` `up` / `down` from the live verdict, plus `presence_live` and `online_count`. New config key `host_presence_enabled` (default on). The hosts database and the Max Failed Pings rule behind the Dashboard target counts are unchanged.
+- **Lighter on small boards.** With a dashboard open, about half of Ragnar's Python CPU went to the 2-second status broadcast: it scanned Ethernet interfaces four times per tick (`nmcli`, `ip link`, and a `cat` plus `ip addr` per interface) and re-read Wi-Fi state through about six more `nmcli` calls. The Ethernet scan is now shared for 3 seconds and reads carrier from sysfs, and Wi-Fi status is shared for 6 seconds. `/api/dashboard/stats?network=` no longer builds a new `DatabaseManager` (a full schema pass) on every poll. Also removed: a per-render debug dump of host objects to the browser console and a full `/api/config` fetch on every hosts refresh.
+- **Docs:** [scanning-and-attacks.md](scanning-and-attacks.md#discovered-hosts-live-online--offline-status), [asset-inventory.md](asset-inventory.md), [knowledgebase.md](knowledgebase.md) (+4 entries), [spec.md](spec.md)
+- **Validation:** new `tests/test_host_presence.py` (41 tests, fake clock and sockets) and `tests/test_target_counts.py` (15 tests); 17 reintroduced bugs are each caught by the relevant test. An independent ARP + ICMP sweep taken right after a monitor snapshot answered for exactly the 29 hosts the monitor called Online and none it called Offline. On the dev box the card's four endpoints and the hosts table agree (30 Online of 54, 24 Offline, 1 New confirmed against its `first_seen`). Against a real veth link: Offline in 6 to 8 s, Online in 1 to 2 s, instant on gratuitous ARP, and an ARP-silent but pingable host stayed Online. Live on the dev box for 20 minutes with 53 tracked hosts: 31 to 32 Online throughout, 7 status changes in total, of which 3 were brief false Offline spells (0.25 s, 7 s, 3 s) on two sleeping Wi-Fi clients. Profiled with py-spy on the Pi 5: status-broadcast samples fell from 273 to 41 per 120 s, total Python CPU from 4.8% to 2.8% of a core, and the monitor itself costs about 0.1%. Not measured on a Pi Zero 2 W. Hosts table rendered in Chromium at 390 px and 1280 px with no page overflow. Full suite: 2 failures, both also failing on `main` (`test_env_manager`, `test_zap_target_resolve`).
+
+### 2026-11-08
+
+#### [#1050](https://github.com/PierreGode/Ragnar/pull/1050) — fix(i18n): keep "Watch" module names as "Watch", not "Monitor"
+*branch `fix/i18n-watch-consistency`*
+
+- **Inconsistent translation of "Watch".** Switching the UI language turned some diagnostic-module names from `<X> Watch` into the local word for *Monitor*, while others kept *Watch*. In German, **DNS Watch** showed as "DNS-Monitor" and **ARP Watch** as "ARP-Monitor", but **FTP Watch** / **EIGRP Watch** stayed "Watch"; Spanish and French had the same split (*Monitor/Vigilancia*, *Moniteur/Surveillance*). The packs had machine-translated "Watch" in 17 of the 129 `<X> Watch` strings and left the other 112 alone.
+- **Fix:** restored **"Watch"** as the trailing product-name token in all 17 strings across `de`/`es`/`fr`, matching the existing majority, so the whole family reads `<X> Watch`. Translated descriptive text (e.g. the `(KeyTrap / NSEC3 / cache-poisoning)` parenthetical) is kept. Covers ARP, Aircraft, BFD, BGP Path, BLE (incl. the `🛡 BLE Watch` dashboard headers), CDP, CFM, Cert, DNS, DTP and IPsec / IKE Watch. The English **verb** "watch" ("Watch the switch/console/panel") is deliberately left translated.
+- **Descriptor words localized, "Watch" kept:** for the three names whose descriptor is an English word, the descriptor is translated while "Watch" stays — **Aircraft Watch** → Flugzeug-Watch / Aeronaves Watch / Aéronefs Watch; **BGP Path Watch** → BGP-Pfad-Watch / Rutas BGP Watch / Chemins BGP Watch (the `BGP` acronym is kept); **Cert Watch** → Zertifikats-Watch / Certificados Watch / Certificats Watch. The inline "Cert Watch" mention in the detector self-test tooltip is localized to match.
+- **Validation:** `tests/test_i18n.py` 33 passed (valid JSON, placeholders intact, no edge whitespace, packs cover identical keys). Diff is exactly 17 lines per pack (51 total); verified no other `<X> Watch` value drops "Watch" except the 4 intended verb-sense strings.
+
+### 2026-11-04
+
+#### [#1046](https://github.com/PierreGode/Ragnar/pull/1046) — fix(system): OS Packages explains held-back packages instead of looking stuck
+*branch `fix/os-updates-held-back`*
+
+- **The card looked stuck on `rpd-common` 1.18 → 1.35.** After the first real Upgrade All on the dev box (328 upgraded, 30 new, about 9.5 min, clean), `apt list --upgradable` still listed `rpd-common`. The card offered **Upgrade All (1)**, and each run finished "ok, nothing to install". apt holds it back because 1.35 depends on `pcmanfm-pi`, which `Breaks/Replaces: pcmanfm`, and Upgrade All never removes a package.
+- **Held-back analysis after every check and upgrade.** The runner simulates the upgrade (`apt-get -s`, no lock, no changes) and, for each kept-back package, what installing it would do. Each one gets a reason: needs a removal (with what it removes and adds), solver-only, `apt-mark hold`, Ubuntu phased rollout, or unresolvable (with the apt error). Held-back packages get their own **Held back** block on the card, a tag in the list, and are excluded from the **Upgrade All (N)** count. With only held-back packages left, the badge reads *N held back* and Upgrade All is disabled; the server refuses it too.
+- **Upgrade anyway** (removal or solver cases only) shows exactly what goes and what comes. The run re-plans first and changes nothing (`removal_changed`) if apt wants to remove anything not approved (`{"packages": [...], "allow_remove": [...]}`).
+- **Closed a gap:** targeted upgrades (Update Tailscale only) used `install --only-upgrade` with `-y`, which would have removed packages if apt needed to. Every run now passes `--no-remove` unless removals were approved. A targeted upgrade that needs one fails with `needs_removal` and changes nothing.
+- **Run before:** the previous run's log is kept (`data/logs/os_update.prev.log`, `GET …/log?previous=1`), so a follow-up run no longer overwrites the record of a big upgrade.
+- **Docs:** [updates.md](updates.md#held-back-packages), [knowledgebase.md](knowledgebase.md) (+2 entries)
+- **Validation:** `tests/test_os_updates.py` 30 → 44 tests; 11 more reintroduced bugs (no `--no-remove`, approving any removal, ignoring the candidate version, upgrade-all with only held-back, no log rotation, …) are each caught. The analysis was run against the real box and found `rpd-common` → removes `pcmanfm`, adds `pcmanfm-pi`, `qt6gtk2`, `brightnessctl`, `brightness-udev`. apt 3.0.3 was confirmed to refuse that upgrade under `--no-remove` (exit 100) and accept Upgrade All and Tailscale. Routes checked with auth on; card rendered at 390 px and 1280 px with no overflow; DOM parent chains match `main`.
+
+#### [#1045](https://github.com/PierreGode/Ragnar/pull/1045) — feat(system): OS package updates (apt) from the web UI, with a Tailscale shortcut
+*branch `feature/os-package-updates`*
+
+- **New Config → System → OS Packages card.** Ragnar's **Update System** only moves Ragnar's code, and `update_ragnar.sh` installs Tailscale but never upgrades it, so until now the kernel, security fixes and Tailscale releases needed an SSH session. The dev box had 330 pending packages, 64 of them security fixes. The card shows what apt can upgrade (security fixes tagged and listed first), when the lists were last refreshed, and **Check for Updates** / **Upgrade All** / **Update Tailscale only**.
+- **Tailscale banner on the Ragnar Mesh tab** with the installed and available version and an **Update Tailscale** button (`apt-get install --only-upgrade tailscale`).
+- **New `os_updates.py` engine.** Runs in a transient `ragnar-os-update` systemd unit, so a `tailscaled`, Wi-Fi or service restart caused by the upgrade cannot kill dpkg part-way. Uses `upgrade --with-new-pkgs`, never `full-upgrade`, so nothing is ever removed. Downloads before installing, checks free space against apt's own estimate before dpkg starts, runs fully non-interactive while keeping local config files, starts each upgrade with `dpkg --configure -a`, and runs `apt-get clean` afterwards. Failures come back as a code plus a hint (`offline`, `repo_key`, `locked`, `disk_full`, `dpkg_error`, `interrupted`). A run that died, even across a reboot, shows as interrupted instead of busy forever. Recommends a reboot when a newer kernel is waiting or core libraries changed.
+- **Endpoints** (session-gated): `GET /api/system/os-updates`, `POST …/check`, `POST …/upgrade` (named packages must be on the upgradable list), `GET …/log`. Unsupported in Docker and on non-apt systems, with a message saying why.
+- **Docs:** [updates.md](updates.md#operating-system-packages-apt), [mesh.md](mesh.md#keeping-tailscale-up-to-date) (corrected: it said updates keep Tailscale "current"), [knowledgebase.md](knowledgebase.md) (+3 entries), [README (root)](../README.md)
+- **Validation:** new `tests/test_os_updates.py` (30 tests) drives the real runner against fake `apt-get` / `dpkg` binaries; 10 reintroduced bugs (full-upgrade, no disk check, no download phase, PID reuse after reboot, …) are each caught by the relevant test. Routes checked with auth on (401 without a session). The card was rendered at 390 px and 1280 px with no horizontal overflow, and the DOM parent chains match `main`. The real launch path ran on the dev box (transient unit, `apt-get update`, `dpkg --configure -a`, download) and was stopped before dpkg installed anything.
+
+### 2026-11-03
+
+#### [#1044](https://github.com/PierreGode/Ragnar/pull/1044) — fix(pwnagotchi): fail loud when no monitor-mode adapter is present (#1023)
+*Merged 2026-11-03 · branch `fix/pwnagotchi-fail-loud-missing-adapter` · 1 file, +30 / −2*
+
+- On a board with only `wlan0` (e.g. a Pi Zero 2 W with no USB adapter), interface selection silently defaulted to a phantom `wlan1`, so bettercap looped on `-iface mon0` and Pwnagotchi hung on "Reading last session logs". The bettercap launcher now preflights the station interface and exits with a clear message, and the installer warns at interface-detect time (non-fatal, so the adapter can be plugged in later).
+
+### 2026-11-02
+
+#### [#1043](https://github.com/PierreGode/Ragnar/pull/1043) — feat: revive dashboard AI chat assistant + M5Stack CardputerZero support
+*branch `feature/revive-ai-chat-and-cardputer`*
+
+- **Two well-developed features rescued from stale branches** (~1,180–1,370 commits behind `main`), squash-merged onto current `main` with the conflicts resolved by hand. The diff against `main` is additive; no existing code was removed.
+- **🤖 Dashboard AI chat assistant** — a floating assistant (shown only when AI is enabled) that answers from `docs/` and can take actions via an **allowlisted** set of existing endpoints (scans, Watchtower, incidents, Wi-Fi control, deep scan). New `ai_chat.py` engine, `ai_service.chat_messages()` (parallel to the existing `_ask_*` path), `/api/ai/chat` route + `_CHAT_TOOL_ROUTES` self-call dispatcher, floating chat panel in the UI, and `docs/AI_INTEGRATION.md`. All 12 dispatched endpoints exist in `main`. **Show chat assistant** under Config → Integrations hides the button and stops chat requests; AI Insights are unaffected. It is on by default.
+  - **Every action needs a click.** The assistant proposes an action and shows **Run** / **Cancel**; nothing runs until Run (`/api/ai/chat/confirm`, server-held pending, single-use, 5-minute TTL). Read tools (device list, vulnerabilities, Watchtower…) still run on their own to answer a question.
+  - **Hardened from ~60 rounds of live testing against a self-hosted model.** Tool results now carry the true network-wide totals and per-host/service/port counts (a filtered lookup no longer implies the whole network), results are marked present-tense (no claims about history), and untrusted text from the network (hostnames, alert titles) can't act as an instruction. The vulnerability scan was firing on the wrong endpoint and reporting success; fixed.
+  - **Safety:** the assistant never emits the kill-switch command or token (it's stripped from everything the model reads), points to **Config → System → Data Management** for clearing scan data, and won't suggest deleting anything the user didn't name.
+- **📖 Knowledge base (`docs/knowledgebase.md`)** — 173 short, verified answers to common questions, read first by the assistant so a small local model gives tight, correct answers and calls fewer tools. Each entry names its source and carries a hidden proof phrase; `tests/test_knowledgebase.py` fails if a doc or the UI stops saying it, so answers can't go stale. A reworded question that keyword search misses ("where can I watch planes?" → ADS-B) is matched to an entry by one short, token-capped model call under an 8-second guard that falls back to keyword search if the endpoint is slow. Corrected several docs the assistant was quoting (`Settings →` paths that are really **Config →**, the wardriving **Start** button, the display **EPD Type** location).
+- **🖥 M5Stack CardputerZero support** — a Pi CM0 with a built-in 1.9" ST7789V3 LCD (320×170) and a 46-key keyboard, installed as a normal Pi pinned to that panel via installer **option 7** (Docker stays 6) or `RAGNAR_PROFILE=cardputer`. Checking the stale branch against M5Stack's published docs changed the design:
+  - **LCD** — uses the kernel framebuffer, found by driver name, with native-endian RGB565. The SPI fallback's swapped DC/CS pins are corrected and it now needs the board's M5IOE1 expander to answer, because SPI has no read-back and would otherwise "find" this panel on any Pi.
+  - **Keyboard** — reads the kernel input device with Linux key codes, since the stock kernel owns the TCA8418 and direct I²C cannot reach it. Direct I²C remains the fallback on a plain kernel.
+  - **Stock launcher** — new `scripts/cardputer_takeover.sh apply|revert|status` hands the LCD and keyboard from APPLaunch to Ragnar. It makes no changes on other boards, and runs from the installer, updater, `installhead.sh` and Config → Display.
+  - **Rotation and config safety** — screen rotation 90/270 now rotates instead of squashing the image, and a failed LCD start no longer lets auto-detect overwrite the saved panel with an e-paper driver.
+  - Added to the portal's driver validation, the captive-portal dropdown, `installhead.sh` and the docs index. `docs/M5StackCardputerZero.md` and `docs/INSTALL.md` are rewritten to match.
+- **Fixed in this PR before merge:**
+  - Keeping both the Device Console card and the chat panel had left one `</div>` short, which nested all 18 other tabs inside the Dashboard tab. The DOM now matches `main`.
+  - Chat tools returned 401 for logged-in users on password-protected units, because the in-process test client dropped the forwarded session cookie. They now run with the caller's session, and a forged cookie is still refused.
+- **Validation:** the full test suite matches `main`, with the same 2 existing failures and no new ones. New `tests/test_cardputer_zero.py` covers the driver, keyboard, takeover and installer against simulated hardware, and each bug above was reintroduced to confirm a test catches it. Every display page was rendered through the real `Display` class at 320×170. **Not run on a physical CardputerZero.**
+
+#### [#1042](https://github.com/PierreGode/Ragnar/pull/1042) — feat(net): BLE Watch overlay on the Signal Intelligence spectrum
+*branch `feature/ble-watch-spectrum-overlay`*
+
+- **[BLE Watch](blewatch.md) now rides the [Signal Intelligence](wifi-analyzer.md) spectrum** as a **🛡 BLE Watch** overlay toggle, beside the 📶 Bluetooth and 🐝 Zigbee overlays — in **both** the in-page toolbar and the full-screen console. When enabled it runs a short BLE **link-layer** sniff and plots the advertisers it hears onto the 2.4 GHz band, flagging any clone / spoof / advertising-flood advertiser red right on the spectrum.
+  - Distinct from the 📶 Bluetooth overlay (a BlueZ discovery estimate off the Pi's own radio): this uses the external **nRF / Bluefruit LE sniffer** to hear the actual advertising PDUs on channels **37/38/39 (2402/2426/2480 MHz)**, so it sees devices a scan never discovers and reads their security posture. Both overlays can be on at once.
+  - **Device-gated** — the toggle stays greyed until a sniffer is on USB (`/api/net/ble-watch/status`, which reads USB names only and **writes nothing** to any serial port, so the gate poll never disturbs a device). The short overlay sniff passes `quick=1`, so its findings are **not** exported to Watchtower — the Diagnostics → BLE Watch card is still the monitored path.
+  - **Draws** a per-advertising-channel bar (height by activity, red ⚠ when a flagged advertiser sits on it), a device roster (address, address type, channels, clone/spoof/flood status, RSSI — click to highlight), and a per-Wi-Fi-channel BLE pressure estimate (ch 1/6/11).
+- **Backend:** `blewatch.py` gains per-advertiser RSSI/channel bookkeeping (pure roster, feeds no detector), `BleWatch.overlay()` (band shaping) and `sniffer_status()` (light gate); `do_ble_watch()` returns an `overlay` block with each device flagged from the run's alerts. **Frontend:** toggle + panel + full-screen chip + side roster + spectrum draw mirroring the BT/Zigbee overlays; JS cache-bust bumped.
+- **Validation:** self-test **40 → 44** (overlay shaping, data-channel exclusion, gate shape); a **live nRF52840 capture** (532 packets / 8 s, 63 advertisers, real RSSI, correct channels, floods flagged); UI render + canvas draw exercised headless against the served JS. Engine/codes unchanged; **no new CVEs**. `docs/wifi-analyzer.md`, `docs/blewatch.md`, `README.md` updated.
+
+### 2026-11-01
+
+#### [#1039](https://github.com/PierreGode/Ragnar/pull/1039) — feat(net): live module search in the Diagnostics tab
+*branch `feature/diagnostics-module-search`*
+
+- **The [Diagnostics](nettools.md) sub-tab (~70 module cards across eight OSI-layer panels) gets a search box above the layer buttons** that live-filters every card across **all** layers as you type — no more clicking layer by layer to find a module.
+  - **Word-boundary matching** over each card's title + description (prefix allowed): `ble` finds **BLE Watch** but not "ta*ble*", while `router` still matches **RouterOS**; `/`, `-`, `.` are separators so `mac`, `cve` and `1472` (from `CVE-2020-1472`) all hit. Multiple words are AND-ed.
+  - **Cross-layer results** appear at once, each under its layer label (e.g. *L2 · Data Link*), with a running match count and a *no matches* hint. The **Clear** button, *Esc*, or tapping any layer button restores the normal single-layer view.
+- Pure client-side (`web/index_modern.html` input/CSS + `web/scripts/ragnar_modern.js`); no backend change. Non-matching cards hide via a dedicated `.diag-search-hidden` marker (never the real `.hidden`), so a card's own state is never clobbered. Mobile-friendly; JS cache-bust bumped. Verified headless in Chromium against production-style markup.
+
+#### [#1038](https://github.com/PierreGode/Ragnar/pull/1038) — fix(ble): de-duplicate BLE Watch findings + stop clone false positives on churning beacons
+*branch `fix/blewatch-dedupe-findings-churn`*
+
+- **Follow-up to [#1037](https://github.com/PierreGode/Ragnar/pull/1037).** On a live nRF52840 the [BLE Watch](blewatch.md) findings list was still long and dominated by **the same device repeated many times**, plus clone/impersonation alerts on ordinary sensor beacons. Two causes, two fixes:
+  - **Output de-dupe** — a passive scan sees each advertiser on every PDU, so the same `(address, code)` finding was emitted dozens of times (and a device flapping between two identities emitted both `A→B` and `B→A`). `_ble_dedupe_findings()` now collapses to **one row per `(src, code)`** in first-seen order, with a `(seen N times)` count and the most recent detail. Same collapse feeds the Watchtower `ble_watch.jsonl` export.
+  - **Identity-based clone detection** — `BLE-001`/`BLE-002` compared raw payload bytes, so a **sensor beacon streaming changing telemetry** (same name/services) read as *“conflicting payloads / two radios”*, and a device that carries its name in only some frame types read as a name clone when the name blinked in and out. They now compare **identity** (name + service UUIDs) via `_ident_conflict()`, which treats an *absent* field as “not advertised here”, never a conflict. `BLE-002` wording → *“conflicting identities”*.
+- **Validation:** self-test **38 → 40** (new sensor-telemetry-churn + present/absent-name negative controls; `BLE-002` case now uses genuinely conflicting names). Dedup checked against the reported scan: **14 raw findings → 9 rows**. No new config keys, no JS change (the count rides in `detail.text`). `docs/blewatch.md` documents both.
+
+#### [#1037](https://github.com/PierreGode/Ragnar/pull/1037) — fix(ble): stop nRF52 sniffer false-positive advertising floods
+*branch `fix/blewatch-nrf52-false-positives`*
+
+- **[BLE Watch](blewatch.md) (`blewatch`) no longer reads an ordinary busy room as an attack on an nRF52840 sniffer.** The flood/churn detectors (`BLE-004`/`BLE-006`/`BLE-007`/`BLE-013`) were first tuned against the **lossy single-channel nRF51** Bluefruit sniffer; a modern **nRF52840** hears the whole air — every advertising event on all three primary channels (37/38/39) with no loss — so the same thresholds over-counted (the reported false positives).
+  - **Channel-copy collapse** — the three 37/38/39 copies of one advertising event share AdvA + payload and arrive within a few ms, so they now count as **one logical event** before the flood counters (new `channel_dedup_window_s`, default 12 ms). Main driver: a healthy beacon was counted 3× and tripped `BLE-006`/`BLE-007`.
+  - **Rescaled per-event thresholds** for a full-coverage radio: `adv_flood_count` 60→150, `advertiser_flood_count` 25→60, `rpa_count` 40→80 — above what a crowded room of phones/wearables/tags emits, while BLE-spam tooling (dozens of fresh MACs/s) and a single hammered/cloned advertiser still trip. All overridable in `data/ble_watch.json`.
+- **Validation (shipped defaults):** a 7 110-frame busy-room simulation (30 RPA advertisers ×3 channels, plus Apple proximity popups) stays **silent**, while a 150-fresh-MAC BLE-spam flood still raises `BLE-013` and a ~30 ms single-AdvA flood still raises `BLE-006`. Self-test **36 → 38** (added dedup-suppression + genuine-flood checks). `python/blewatch.example.json` + [`docs/blewatch.md`](blewatch.md) updated. Engine/codes otherwise unchanged; **no new CVEs**.
+
+#### [#1036](https://github.com/PierreGode/Ragnar/pull/1036) — docs: correct PR link on the active-Cert-Watch release entry
+*branch `fix/releases-pr-number-1035`*
+
+- Fixed the changelog heading below: the active Cert Watch cert-bytes CVEs + RPC/LDAP/TLS card-refresh work was logged against `#1034`, but it actually merged as **PR #1035** (`#1034` is an unrelated open PR). Corrected the link so the entry points at the right PR. Docs-only.
+
+#### [#1035](https://github.com/PierreGode/Ragnar/pull/1035) — feat(net): active Cert Watch cert-bytes CVEs + RPC/LDAP/TLS card refresh
+*branch `feature/cert-active-cves-card-refresh`*
+
+- **Active [Cert Watch](#cert-watch) (`do_cert_watch`) now runs the four cert-content CVE detectors** the passive `certwatch` daemon gained in v3 — **CurveBall** (`CVE-2020-0601`), the non-prime EC field (`CVE-2022-0778`), **ROCA** (`CVE-2017-15361`) and a DSA-in-chain (`CVE-2025-58188`) — read straight from the presented leaf's DER in `_tls_cve_findings` (reusing certwatch's own tested functions, not a second copy). New `cert-cve` verdict (worst-first) + card prose + `_CERT_VERDICT_STYLE` entry. `_cert_selftest` 10 → 16. **CVE index unchanged at 439/375** (these 4 were already detected via the passive daemon; the active grader is now a second detector for the same CVEs, both attributed to Cert Watch).
+- **Card-prose drift fixed.** The **RPC / NetLogon** card was stuck at v3 (only Zerologon/WinSpool) — now names the v7 additions (MadLicense/RD Licensing, LSM container, RpcGetSessionIds, Certighost, EventLogin). The **LDAP** card was at v3 (LDAPNightmare only) — now adds v4 filter-nest (`CVE-2020-12243`) and v5 **LongLogon** (`CVE-2026-41089`). The **TLS** card gained the v7 Heartbleed (`CVE-2014-0160`) + oversized-DH (`CVE-2018-0732`) names it had omitted. Audited every detector card: the remaining gaps are intentional subset-highlighting (vendor guards that detect 40+ CVEs, generic cards that render findings dynamically), not drift. `ragnar_modern.js` cache-bust → `20261031-cert-active-cves-cards`.
+
+### 2026-10-31
+
+#### [#1033](https://github.com/PierreGode/Ragnar/pull/1033) — feat(net): Cert Watch v3 (4 cert-bytes CVEs + SIEM forwarder) + SMB/Kerberos Watch v5
+*branch `feature/cert-v3-smb-kerb-v5`*
+
+- **[Cert Watch](certwatch.md) v3** (the passive X.509 triage daemon, `python/certwatch.py`) adds **four CVE detectors read from the certificate's own bytes**: **CurveBall** (`CVE-2020-0601`, CISA KEV — explicit EC parameters matching a standard curve except the base point, read from the original DER because the `cryptography` lib normalizes it away), **`CVE-2022-0778`** (explicit EC parameters declaring a non-prime field — the OpenSSL `BN_mod_sqrt` infinite-loop DoS), **ROCA** (`CVE-2017-15361` — the Infineon RSA key-generation fingerprint) and **`CVE-2025-58188`** (a DSA public key that panics Go's `crypto/x509` chain validation). New finding codes `CURVEBALL_SUSPECT` / `EC_INVALID_FIELD` / `EC_EXPLICIT_PARAMS` / `ROCA_KEY` / `DSA_IN_CHAIN` / `KEY_UNPARSEABLE`. Also ships **`ragnar_syslog.py`** — the suite-wide CEF/LEEF/RFC5424/RFC3164 SIEM forwarder (previously deferred) with its own egress-allowlisted `certwatch-forward.service`. Self-test **71/71**, forwarder **65/65**. Handshake-level CVEs stay with TLS Watch; these are the certificate-bytes half.
+- **SMB & Kerberos Watch v5** — the in-app watcher (`do_smb_watch` / `_smb_analyze` / `_krb_analyze`) is **already at v5 detection parity**, so no in-app code change and no new CVEs (identical 5-CVE set): all five CVEs (V1-V6 — SMBGhost exposure/exploit, reflective relay, RC4-MD4 offer/grant/injection, EternalBlue primitive), the full Kerberos set (K1-K7 incl. AS-REP-roast and KDC-error recon), NTLM relay tells (N2 workstation mismatch, N3 Responder challenge; N1 lives in Relay Watch), SMBv1 posture (S1; S2/S3 signing in Relay Watch), name-poisoning (a deliberately broader "nothing legitimate answers LLMNR/NBT-NS, so any answerer is a finding" model that covers R1-R4's attack space) and the spoof-conflict A/AAAA-only / DNS-SD-exclusion false-positive fixes. The v5 standalone's C1/C2 correlation is done in-app by the Incident Correlation Engine + Watchtower (the deliberate cross-module split).
+- **CVE index** regenerated (`scripts/gen_cve_list.py`): **435 → 439 named**, **371 → 375 detected** (+4, all Cert Watch). CREDITS.md + README.md counts synced (2025 count 47 → 48).
+
+#### [#1032](https://github.com/PierreGode/Ragnar/pull/1032) — feat(net): TLS Watch v11 — SNI host_name over-read + http.sys record-flood
+*branch `feature/tls-watch-v11`*
+
+- **[TLS Watch](nettools.md#tls-watch) v11** adds two TLS-borne CVEs, both read off cleartext framing in the in-app `tls_watch.py` (add-to-existing, no new verdict token):
+  - **`CVE-2026-52346`** (MikroTik RouterOS `xt_tls` SNI `host_name` out-of-bounds read) — `cve_2026_52346_sni_overread`: pure arithmetic on the four RFC 6066 nested lengths, **high** when the declared length passes the captured handshake message, **warn** for an inner-container overrun. The scan runs *independent of* `parse_client_hello` (which raises on exactly these over-claims) at all three ClientHello sites (TCP / QUIC / DTLS) and scopes out the benign `no_sni` notice when an over-read is present. `precondition_unobserved` (the device needs a `tls-host` rule); TLS Watch owns the wire evidence, MikroTik Guard the version bounds.
+  - **`CVE-2026-47291`** (http.sys per-request buffer-reference-array integer overflow, MSRC 9.8) — `cve_2026_47291_record_flood`: a run of client `application_data` records with **no server response**, the **non-full** ones (below the negotiated ciphertext max) the primary signal; latching tiers at 1,000 / 4,096 / 65,536 + a size-agnostic `padded_or_bulk` catch-all. Reachable over TLS + HTTP/1.x only (h2/h3 excluded from the cleartext ALPN); `precondition_unobserved` + `confidence: heuristic`. **Snapshot scope:** fires on the clean no-server-response flood a bounded capture catches; the interleaved keep-alive/multi-request case is deferred to the streaming daemon.
+- **CVE index** regenerated: **433 → 435 named**, **369 → 371 detected** (both new CVEs → TLS Watch, both 2026). CREDITS.md + README.md counts synced.
+- Self-test `tls_watch.selftest()` **135 → 158** (23 new: the SNI-over-read bounds + `no_sni` scope-out + end-to-end, and the record-flood arming / tiers / bulk-silent / server-response-defers). Card prose updated (static HTML — findings render generically, no JS/cache-bust).
+
+#### [#1031](https://github.com/PierreGode/Ragnar/pull/1031) — feat(net): RDP Watch (new · L5) + RPC/NetLogon Watch v7 + LDAP Watch v5 (LongLogon)
+*branch `feature/rdp-rpc-v7-ldap-v5`*
+
+- **New [RDP Watch](nettools.md#rdp-watch)** (L5 Session, next to SSH/Telnet) — a passive RDP negotiation-**posture** + abuse observer. Reads only the cleartext **X.224 Connection Request / Confirm** on tcp/3389 that precedes TLS or CredSSP; **no CVE codes** (BlueKeep is below the OS floor; `CVE-2005-1794` Standard-Security MITM is a posture *reference* only). 13 codes RDP-001..040: Standard RDP Security selected, TLS refused, legacy path, NLA requested-but-not-enforced, Restricted-Admin, a cleartext `mstshash` username (length only — never the value; a `msts=` routing token is never a username), and the latching brute-force / username-spray (per-run keyed digest, never emitted) / horizontal-scan tier. Vendored `rdpwatch.py` + `do_rdp_watch` + `GET /api/net/rdp-watch`; L5 card, mobile-friendly; dual-stack (bare `ip6` term, every finding carries `af`). Watchtower feed `rdp_watch.jsonl` + Net-Integrity `RDP` chip.
+- **[RPC / NetLogon Watch](nettools.md#rpc--netlogon-watch) v7** (re-vendored engine, 41 → 52 finding codes). **+13 detected CVEs:** **MadLicense** + the July-2024 **RD Licensing** cluster (`CVE-2024-38077 / -38074 / -38076 / -38071 / -38072 / -38073 / -38099`), the **LSM container** interface (`CVE-2022-37973 / CVE-2022-37998`), **RpcGetSessionIds** LSM crash (`CVE-2025-26651`), **Certighost** AD CS chase (`CVE-2026-54121`) and the **EventLogin** MS-EVEN backup-write cluster (`CVE-2025-29969 / CVE-2026-50502`). **+3 no-CVE** surfaces (ESC11 enrollment-relay level, MS-DNSP `ServerLevelPluginDll`, interface inventory) + WS-Man anon-identify / WEC endpoints. Three CVEs (`CVE-2021-36936 / CVE-2021-36947 / CVE-2026-50346`) are **evaluated and deliberately not claimed** and are kept out of the CVE index.
+- **[LDAP Watch](nettools.md#ldap-watch) v5** — **LongLogon** (`CVE-2026-41089`): the CLDAP DC-locator ping whose `NtVer` routes to the legacy `BuildSamLogonResponse` builder (request leg), and a DC whose own forest/domain/host DNS names overrun its 528-byte stack buffer (response leg). Keyed on the routing bits + the DC's own names, never the length-capped attacker `User` field; both legs on CLDAP and TCP, v4/v6.
+- **CVE index** regenerated (`scripts/gen_cve_list.py`): **418 → 433 named**, **355 → 369 detected** (+14 detected: 13 RPC + 1 LDAP; +1 context: RDP's `CVE-2005-1794`). CREDITS.md + README.md counts synced.
+- **Visibility matrix** refreshed (RDP added at L5): `docs/ragnar_osi_visibility_matrix.jpg` + the L5 crop.
+- Self-tests: RPC `rpc` suite 35 → 50 scenarios, new RDP `rdp` suite (16), LDAP `ldap` 25 → 31 — all green; `do_routing_selftest` gains the `rdp` key. `ragnar_modern.js` cache-bust → `20261031-rdp-rpc-v7-ldap-v5`.
+
+### 2026-10-30
+
+#### [#1030](https://github.com/PierreGode/Ragnar/pull/1030) — feat(ulfberht): arsenal extras — on-demand recon/OSINT + WPA-Enterprise install
+*branch `feature/ulfberht-arsenal-extras`*
+
+- **Grows the Ulfberht arsenal into a real internal-assessment + dropbox kit.** Companion to RagnarOS #11, which **bakes** the AD/internal (impacket, evil-winrm, certipy, kerbrute, bloodhound.py, ldapdomaindump, windapsearch) and pivoting (ligolo-ng, chisel, sshuttle, proxychains4) tools into the image. This PR makes those tools show up in the **Arsenal**, and adds an on-demand installer for the lighter sets we deliberately don't bake (to keep the image lean).
+- **Arsenal detection** (`ragnar_edition.py`): `_TOOL_CATALOG` now covers the AD, pivoting, recon/OSINT (subfinder, httpx, dnsx, katana, dnsrecon, dnsenum, theHarvester, searchsploit) and Wi-Fi-extra (mdk4, eaphammer, hostapd-wpe) tools, with new `ad`/`pivot` categories. `detect()` gained a `refresh` arg and `/api/edition?refresh=1` rebuilds the cache, so the Arsenal updates the instant an install finishes.
+- **On-demand installer** (`scripts/install_ulfberht_extras.sh`): installs the recon/OSINT + WPA-Enterprise sets from Kali's repos. **Kali/Ulfberht-gated** (refuses elsewhere), root-required, per-tool and non-fatal; prints live progress and a `VALIDATION` block. Candidate-package fallbacks cover the awkward names (`httpx-toolkit`/`httpx`, `theharvester`, `exploitdb`).
+- **API** (`webapp_modern.py`): `/api/ulfberht/extras` (per-tool status), `/api/ulfberht/extras/install` (background start), `/api/ulfberht/extras/install-log` (polled progress + live presence) — all edition-gated, mirroring the mesh/sensing install pattern.
+- **UI**: a new **🧰 Arsenal extras** card in the Engagements tab — installed/missing chips per tool, an **Install missing** button, a live progress log, a validation summary and an authorized-use banner; refreshes the Pentest-tab Arsenal when done. Mobile-friendly. Nothing offensive is installable off the Ulfberht edition — the script self-gates and every endpoint is edition-gated.
+- Docs: [Ragnar OS Ulfberht](ragnar-os-ulfberht.md) documents the baked arsenal + the on-demand extras.
+
+### 2026-10-29
+
+#### [#1029](https://github.com/PierreGode/Ragnar/pull/1029) — feat(ulfberht): install the wireless Wi-Fi audit arsenal (wifite & co)
+*branch `feature/ulfberht-wireless-arsenal`*
+
+- **"Doesn't the Kali image include wifite?" — it was supposed to, but nothing in this repo installed it.** The Ulfberht edition advertises and *uses* the wireless arsenal: the **Wireless WPA/WPS Audit** playbook (`ulfberht_engine.py`) runs `wifite`, `ragnar_edition.py` detects the whole wireless set, and the docs list "aircrack-ng/wifite". Yet `install_advanced_tools.sh` only installed the traffic set (tcpdump/tshark…) and the vuln set (sqlmap/whatweb/hydra/nikto/nuclei) — the entire wireless cracking set was absent, so on a slim image (or any `git clone` onto Kali) the playbook invoked a `wifite` that did not exist.
+- **New "Wireless Audit Tools" step** in `scripts/install_advanced_tools.sh` installs `aircrack-ng` (→ airodump-ng/aireplay-ng/airmon-ng), `wifite`, `reaver`, `bully`, `hcxdumptool`, `hcxtools` and `kismet`. It is **gated to the Kali base / genuine Ulfberht image** (edition marker, `RAGNAR_EDITION=ulfberht`, or os-release `ID=kali`/`ID_LIKE` contains kali) — these are Kali-provided packages, absent or stale on plain Debian/Ubuntu, and offensive Wi-Fi tooling has no place on the silent-defensive standard image, so it is skipped there with a clear note. The install summary verifies the key wireless binaries (hcxtools via `hcxpcapngtool`). Gating confirmed safe under the script's `set -e`.
+- Docs: [Adv Scan](adv-scan.md) "What gets installed" now lists the wireless audit tools (Ulfberht/Kali only). The private `PierreGode/RagnarOS` image-build manifest remains the other place to guarantee the arsenal is baked into the shipped `.img`.
+
+#### [#1028](https://github.com/PierreGode/Ragnar/pull/1028) — fix(net): keep a stable uplink IP on the Red-Team edition (stop MAC-driven DHCP churn)
+*branch `fix/kali-mac-randomization-stable-ip`*
+
+- **Root cause of the "Ragnar keeps switching its IP on wired and wireless since I went Red Team" report:** the management uplink used NetworkManager's default `cloned-mac-address=preserve`, which means *use whatever MAC is on the interface at activation*. On the offensive (Ulfberht) edition the tooling legitimately changes interface MACs — monitor mode, `macchanger`, `airmon-ng`, Nexmon on the onboard radio — so `preserve` carried a changed MAC into the managed connection; the router then saw a new device and handed out a **new DHCP lease**. With no Ethernet setting either (NM's built-in default is also `preserve`), it hit both links. The standard edition ships none of that MAC-mangling tooling, so the box "never had that issue before." RuSense/`ruview` nodes pinned to the old IP then had to be re-flashed.
+- **Pin the uplink to the hardware MAC and key the lease on it.** `/etc/NetworkManager/conf.d/99-ragnar-wifi.conf` now sets `wifi.cloned-mac-address=permanent` **and** `ethernet.cloned-mac-address=permanent` (always associate with the burned-in MAC, whatever the attack tooling did to the live interface) plus `ipv4.dhcp-client-id=mac` (lease keyed on the hardware MAC, so a recreated profile's new UUID can't change the client-id and pull a fresh lease). A per-connection `cloned-mac-address` still overrides the default when an engagement deliberately needs a spoofed uplink.
+- **Install *and* update both apply it.** `install_ragnar.sh` writes the drop-in; `scripts/provision_network_tools.sh` (run by both `update_ragnar.sh` and the in-app Update button) now re-asserts the identical content idempotently and reloads NetworkManager — so existing boxes self-heal on their next update, and the update never tears down the live connection mid-run.
+- Docs: new [Uplink IP stability](uplink-stability.md) guide (symptom → cause → fix → the DHCP-reservation permanent cure). Test: `tests/test_nm_uplink_stable_mac.py` asserts both scripts carry the stable-MAC/DHCP settings, that the two copies stay byte-identical, and that `preserve` can never come back.
+
+#### [#1027](https://github.com/PierreGode/Ragnar/pull/1027) — fix(update): survive a corrupt tag ref that blocks fetch/update/branch-switch
+*branch `fix/update-resilient-fetch`*
+
+- **Root cause of the "can't update / can't switch branches" reports:** a release tag that was force-pushed, partially deleted or had its objects GC'd (e.g. `os-v1.8.0`) leaves a tag ref pointing at an unreadable object. From then on a plain `git fetch` aborts with `bad object refs/tags/...` / `did not send all necessary objects` — and because both `git pull` and a branch checkout fetch first, this blocks **every** update *and* every branch switch, not just the tag.
+- **Self-healing fetch everywhere.** The updater only ever syncs to a branch head, never a tag, so on that signature it now **drops broken tag refs and refetches branches only**. Verified that `--no-tags` *alone* does not rescue a broken **local** tag (git still uses it during negotiation), so the broken ref is deleted first.
+  - `git_updater.py` (web / in-app): new `prune_broken_tags()` + `resilient_fetch()`, a `broken_tag` error code + hint, wired into `check()` and `_fetch_with_retry()`.
+  - `update_ragnar.sh` + `scripts/update_ragnar.sh`: a `resilient_fetch()` bash helper (prune broken tags → branch-only `--no-tags` refetch → all-tags-drop last resort); pull uses `--no-tags`; the forced-sync fallback reuses it.
+  - `install_ragnar.sh`: `git clone` retries with `--no-tags` before the tarball fallback, so a corrupt **remote** tag no longer forces a `.git`-less (un-updatable) install.
+- A healthy remote still syncs tags normally — the recovery only triggers on the broken-tag signature.
+- **Tests:** `tests/test_git_updater.py` +4 cases against real git repos (classification, `prune_broken_tags`, `resilient_fetch` recovery, and `update()` landing with a broken tag present) — **41 passed**. **Docs:** [updates.md › A corrupt tag blocks every update](updates.md#a-corrupt-tag-blocks-every-update).
+
+### 2026-10-28
+
+#### [#1026](https://github.com/PierreGode/Ragnar/pull/1026) — feat(net): IP Range Scan — host-discovery sweep on the Hosts tab
+*branch `feature/hosts-ip-range-scan`*
+
+- **Networking → Hosts** gains an **IP Range Scan** card — the Angry IP Scanner / Advanced IP Scanner pattern. Enter a **CIDR** (`192.168.1.0/24`) or a **start-end** range (`192.168.1.1-192.168.1.254`, or short `192.168.1.1-254`) and get the live hosts listed. Discovery only: a single `nmap -sn` ping/ARP sweep, **no port scan**, bounded server-side to **1024 addresses**.
+- **Per live host:** IP, DNS hostname, **NetBIOS** name (optional — tick *NetBIOS lookup* for a UDP/137 `nbstat` probe), MAC address, MAC **vendor** (OUI), status and **response time**. MAC/vendor resolve on the **local segment** only (ARP does not cross a router) and need root — Ragnar uses passwordless `sudo -n nmap` with an unprivileged fallback (hostnames + response time, no MAC).
+- **Per-host “Scan ports”** reuses the existing deep scan (`/api/scan/deep`, top 3000 ports) with live console output; **Export CSV** downloads the results. Live hosts with a MAC are folded into the hosts DB, so they also appear in the persistent **Discovered Hosts** table.
+- **Backend:** `NetworkScanner.discover_range()` + XML-parsing helpers in `actions/scanning.py`; new `POST /api/scan/range`. **Frontend:** the card + JS in `index_modern.html` / `ragnar_modern.js`, mobile-friendly (stacking controls, scrollable results table); JS cache-bust bumped.
+- **Tests:** `tests/test_range_discovery.py` — 14 cases (range-expansion guard rails, discovery + nbstat XML parsing), all green. **Docs:** [scanning-and-attacks.md › IP range scan](scanning-and-attacks.md#ip-range-scan-host-discovery) + README.
+
+#### [#1025](https://github.com/PierreGode/Ragnar/pull/1025) — feat(net): MAC Watch v5 — Wi-Fi HaLow (802.11ah) radio-presence census
+*branch `feature/mac-watch-v5`*
+
+- **MAC Watch** (`do_mac_watch`, L2) gains a **capture-free Wi-Fi HaLow (802.11ah) radio-presence census**, folded into every scan. HaLow has no backhaul of its own — it is native 802.11 bridged or routed onto Ethernet — so the only wire signal is *radio identity*, and MAC Watch reads it off the neighbour-table / NDP data it already collects. This is the on-the-wire, **radio-free** device-ID sibling of the Thread / Matter / Z-Wave census in DNS Doctor and the LoRaWAN fingerprint in Modbus & LoRaWAN Watch.
+- **Five codes, all INFO except a LOW posture note — no CVEs** (MAC Watch carries none): **HALOW-01** a Morse Micro OUI `0C:BF:74` radio on-segment; **HALOW-02** the same radio recovered from an **EUI-64 IPv6 identifier** (`0ebf:74ff:fe…`) that survives routing; **HALOW-03** a radio paired to its host NIC by shared suffix (the MM6108 blank-OTP fallback MAC); **HALOW-04** a corroborated derived VIF (never fires alone); **HALOW-05** a radio not in the HaLow allowlist (`halow_allow`, empty by default — nothing trusted implicitly).
+- **Presence census of bridged clients only:** a router/NAT-mode radio is invisible and its absence is never inferred. Morse is deliberately *not* added to the vendor-OUI seed, so a legitimate derived VIF is never mis-reported as a disguised vendor OUI. The verdict ladder is unchanged — the census is visibility, not an alarm.
+- **Diagnostics UI:** the MAC Watch card renders a **HaLow radios** table (Radio · Seen via · Paired host · IP(s) · Allowed) with per-radio legs (`v4-L2` / `v6-L2` / `v6-routed`), plus summary chips; `ragnar_modern.js` cache-bust bumped.
+- **Self-test:** the `mac` suite adds **8 HaLow scenarios** (each code, the allowlist suppression, the uncorroborated-VIF guard and a no-radio false-positive guard) — 25 → **33 scenarios**, all green; aggregate `do_routing_selftest` stays **60 suites**. CVE index unchanged (**418 named / 355 detected**).
+- **Docs:** [nettools.md › MAC Watch](nettools.md#mac-watch) (HaLow census subsection).
+
+### 2026-10-27
+
+#### [#1022](https://github.com/PierreGode/Ragnar/pull/1022) — feat(net): SSDP / UPnP Watch v2 — passive device census / fingerprint
+*branch `feature/ssdp-upnp-watch-v2`*
+
+- **SSDP / UPnP Watch** (`do_ssdp_watch`) gains a **passive device census / fingerprint** (engine `0.1→0.2`): alongside the findings, the scan now returns a `devices` inventory — one record per UPnP/DLNA device seen advertising (`NOTIFY`) or answering, with **vendor / model / friendlyName** from the `SERVER` token and the UPnP **device description** XML where it crossed the wire (**never fetched**), plus the **MAC OUI** vendor when a MAC is recoverable. This is wire-side UPnP/DLNA device ID — the same treatment as the Matter / Thread / Z-Wave census in DNS Doctor and the LoRaWAN fingerprint in Modbus & LoRaWAN Watch.
+- **Nothing invented, nothing fetched:** an M-SEARCH *query* is a control point, not a device, so it is not inventoried; no OUI registry file is bundled, so an OUI vendor is reported raw (unresolved) rather than guessed; names come only from what's on the wire. The engine's `_wanted()` filter now also admits HTTP responses and description-XML continuations so a description spanning TCP segments is reassembled — the **BPF is unchanged** (`(udp port 1900) or tcp`), and the AST no-transmit guard still holds.
+- **No new codes, no new CVE — still 25 codes and CVE-2020-12695 (CallStranger).** CVE index unchanged (**418 named / 355 detected**); CREDITS.md / README counts untouched.
+- **Diagnostics UI:** the SSDP/UPnP Watch card (L7) now renders a **Device census** table (Name / Type / Vendor / Address / MAC / Services; a ✓desc marks a device whose description was seen). `ragnar_modern.js` cache-bust bumped.
+- **Self-test:** the `ssdp` suite now runs the vendored engine's **136-check** suite (was 89) plus new census scenarios (an advert is inventoried with its SERVER-token vendor; an M-SEARCH is not; the adapter exposes the `devices` key) — all green; aggregate `do_routing_selftest` stays **60 suites**.
+- **Docs:** [nettools.md › SSDP / UPnP Watch](nettools.md#ssdp--upnp-watch) (v2 census paragraph).
+
+### 2026-10-25
+
+#### [#1021](https://github.com/PierreGode/Ragnar/pull/1021) — fix(auth): recover from a hardware-fingerprint change without reinstalling (#1002)
+*branch `fix/hardware-rebind-recovery`*
+
+- Fixes [#1002](https://github.com/PierreGode/Ragnar/issues/1002): a user running Ragnar in a **Proxmox LXC** was locked out with *"Hardware mismatch detected"* after a **host kernel update**. Root cause: when no `/etc/machine-id` or CPU serial is available (common in containers), the hardware fingerprint fell back to `hostname + platform.platform()` — and `platform.platform()` **embeds the kernel release**, which in a container is the host's and changes on a host kernel update, silently changing the fingerprint.
+- **Fingerprint fallback is now kernel-independent:** if no machine-id / CPU serial is present, it uses a random ID **persisted once** to `data/hwid` instead of the platform/kernel string. Installs that have a real machine-id or Pi CPU serial are **unchanged** (identical fingerprint — no mass lockout).
+- **Recovery codes now rebind across a hardware change:** `recover()` no longer hard-fails on a hardware mismatch. A valid recovery code decrypts the key with the *stored* fingerprint and **rebinds** to the current hardware (new Pi, migrated VM, container kernel update) — **no data loss, no reinstall**. Because the other codes were tied to the old fingerprint, a **fresh set is issued and shown on the login page** to save. Normal password login stays strictly hardware-bound (anti-theft intact) — only a recovery code can rebind.
+- **Login UI:** the "Hardware mismatch" banner now links straight to the recovery flow and explains the common causes; the recovery screen shows the new recovery codes after a rebind and waits for you to save them before continuing (mobile-friendly).
+- Verified end-to-end against the real `AuthManager` (13 assertions): mismatch blocks password login; a recovery code rebinds and recovers the **same** data key; new-hardware login then works; old codes invalidated, new codes work; the persisted fallback ID is stable and kernel-independent.
+- **Docs:** [SECURITY.md](SECURITY.md) corrected (fingerprint no longer claims MAC address) and documents the rebind flow + container caveat.
+
+#### [#1020](https://github.com/PierreGode/Ragnar/pull/1020) — fix(ci): token validation now really verifies Contents: write
+*branch `ci/release-token-write-probe`*
+
+- A real release got past validation and then **403'd on tag creation** (`Resource not accessible by personal access token` on `POST .../git/refs`). The validation step had reported "Contents: write ✓" because it read `permissions.push` from `GET /repos` — but that field reflects the **account's role** on the repo, not what a **fine-grained PAT** was actually granted, so a read-only PAT owned by the repo owner showed `push:true` (a false positive).
+- **Fix:** the write check now **attempts an actual write** — it creates a git **blob** in the build repo (`POST .../git/blobs`), which requires Contents: write but produces only a dangling object (no tag/commit/ref/event/notification; git GCs it). A read-only token gets the same 403 up front, in dry runs too, with an actionable message ("edit the fine-grained PAT ▸ Contents ▸ Read and write"). The unreliable `permissions.push`/`admin` parse was removed.
+- The **Create release tags** step also now turns a write 403 into the same actionable message instead of a bare `gh:` error.
+- Verified under `bash -e` with a stubbed API: a read/write token passes, a **read-only token now fails validation** (previously passed), and no-Actions / expired tokens still fail with their specific errors.
+- **Docs:** [Releasing OS images](releasing-os-images.md) notes the harmless write probe. No behaviour change for a correctly-scoped token.
+
+#### [#1019](https://github.com/PierreGode/Ragnar/pull/1019) — ci: Release plan on top of the run summary, token validation below
+*branch `ci/release-summary-order`*
+
+- Reordered the **Release OS images** job summary so the **Release plan** (the versions it would cut) is **on top**, with the **Token validation — RAGNAROS_DISPATCH_TOKEN** table in a clearly separated section (a `---` rule) **below** it. Achieved by running **Compute versions before the token-validation step** — the job summary always renders in step order. Compute versions is read-only (uses the built-in token, creates nothing), and the real gate is still before tag creation, so validation still blocks a bad token from ever creating a tag.
+- Renamed the summary row **`Reaches PierreGode/RagnarOS` → `Reaches Build`** (no longer prints the private repo path in the table).
+- Verified: step order is now Compute → Validate → Create tags → Follow builds; all steps pass `bash -n`; the validation script re-run under `bash -e` still passes for a good token and fails with its specific error for a read-only/expired/no-Actions token; the rendered summary shows the `---` divider and `Reaches Build`.
+- **Docs:** [Releasing OS images](releasing-os-images.md) flow diagram + dry-run tip updated to the new order. No behaviour change on a real release.
+
+#### [#1018](https://github.com/PierreGode/Ragnar/pull/1018) — fix(ci): token-validation step aborted under the runner's `bash -e`
+*branch `ci/release-token-validate-fix`*
+
+- The token-validation step added in #1017 **failed every run with a bare `exit 1` and no output**. Root cause: GitHub runs step shells as `bash -e {0}`, and `set -uo pipefail` does **not** undo that inherited `-e`. The step reads response headers with `grep`, and an **absent** header (notably `x-oauth-scopes`, which a *fine-grained* PAT — the recommended kind — never sends) makes the `scopes="$(…)"` assignment non-zero, so `-e` aborted the whole step before it could check anything.
+- **Fix:** the two steps that intentionally continue past non-zero exits (*Validate cross-repo token* and *Follow builds and verify*) now explicitly `set +e`, and `hdr()` ends in `|| true` so a missing header is just an empty string. The two steps that *should* fail hard (*Compute versions*, *Create release tags*) keep `set -euo pipefail` unchanged.
+- Verified by running the validation step's script under `bash -e` against simulated responses: a valid fine-grained PAT and a classic `repo`-scope PAT both pass; a read-only token, an expired token, and a token lacking Actions:read each fail with their specific error — no more silent abort.
+- No behaviour change on a real release; CI-only bug fix.
+
+#### [#1017](https://github.com/PierreGode/Ragnar/pull/1017) — ci: validate the cross-repo release token (expiry + permissions)
+*branch `ci/release-token-validate`*
+
+- The **Release OS images** pipeline's first step is now a real **token health check** of `RAGNAROS_DISPATCH_TOKEN` instead of a bare reachability probe. It runs on **every run, dry runs included**, so ticking `dry_run` is now a fast way to confirm the PAT is good *before* committing to a ~3-hour release.
+- It verifies, with clear fail-fast errors and a summary table (owner, kind, reachability, each permission, expiry): the token is **present**, is **not expired** (reads the `github-authentication-token-expiration` header — expired is fatal, ≤ 7 days left warns), can **reach** `PierreGode/RagnarOS`, holds **Contents: write** (needed to create the release tags — checked via the repo's computed `permissions.push`/`admin`), and holds **Actions: read** (needed to follow the builds — checked by listing the private repo's workflows). Classic-PAT scopes are surfaced too.
+- No change to what the pipeline *does* on a real release — only earlier, clearer failure when the token is stale or under-scoped.
+- **Docs:** [Releasing OS images](releasing-os-images.md) updated (dry-run tip + setup note).
+
+#### [#1016](https://github.com/PierreGode/Ragnar/pull/1016) — ci: one-click release pipeline for both OS images
+*branch `ci/release-os-images`*
+
+- Adds **`.github/workflows/release-os-images.yml`** — a manually-triggered (`workflow_dispatch`) pipeline so Pierre or a collaborator (e.g. `solarflere`) can cut a fresh release of **both** OS images from the Actions tab, with no direct access to the private build repo needed.
+- It computes the next version per edition (bumps the highest existing `os-v*` / `os-ulfberht-v*` release — minor by default — or takes an explicit version), **creates the matching tag(s) in the private `PierreGode/RagnarOS` repo** (which is what fires the existing build → ragnar.life → release flow on the self-hosted Pi runner), then **follows each build to completion**, verifies the Release + the ragnar.life manifest, and re-marks the **standard** edition as *Latest*. Inputs: `which` (both/standard/ulfberht), `bump` (minor/patch/major), `std_version` / `ulf_version` overrides, `dry_run`.
+- **One-time setup:** the pipeline needs a repo secret **`RAGNAROS_DISPATCH_TOKEN`** (a PAT that can reach RagnarOS — Contents: write + Actions: read); it fails fast with instructions if missing. The Pi's `ragnar-os-builder` runner must be online for the builds to run.
+- **Docs:** [Releasing OS images](releasing-os-images.md) + README link. No application code or runtime behaviour changes.
+
+#### [#1015](https://github.com/PierreGode/Ragnar/pull/1015) — feat(net): Modbus Watch → Modbus & LoRaWAN Watch (v3) + LoRaWAN backhaul tier + matrix refresh
+*branch `feature/modbus-lorawan-watch-v3`*
+
+- **Modbus Watch is renamed Modbus & LoRaWAN Watch** and gains a **LoRaWAN gateway-backhaul tier** — the Semtech **GWMP packet-forwarder** protocol (UDP/1700) between a LoRa gateway and its network server. GWMP has no authentication or encryption, so an 8-byte gateway EUI is the only identity and every uplink / downlink PHYPayload crosses in the clear. This is the **wire side only** (no radio): Ragnar now decodes and IDs **LoRaWAN** on wired / WiFi without an RF front-end, alongside the Matter / Thread / Z-Wave census in DNS Doctor.
+- **Two separate scans / buttons, as requested:** **Scan Modbus** keeps the learn-then-arm baseline + arming timer (Arm now / Re-learn), and **Scan LoRaWAN** has **no arming timer and no baseline** — the server identity is the destination of the gateway's own `PULL_DATA`, so there is no learning window, and LoRa traffic never touches the Modbus baseline.
+- **7 new LoRaWAN codes (MBW-100..106), no CVE** (protocol / spec-level properties): `MBW-100` gateway census carrying a **fingerprint by reference** (gateway + DevEUI vendor via a bundled 35k-entry IEEE OUI snapshot, JoinEUI, DevAddr→NetID→operator, regional band, per-DevAddr datarate / cadence / FPort / ADR — **no device names on the wire**), `MBW-101` recoverable cleartext PHYPayloads, `MBW-102` gateway impersonation (one EUI from two sources), `MBW-103` downlink injection (`PULL_RESP` from a non-server address), `MBW-104` JoinRequest DevNonce replay, `MBW-105` uplink frame-counter reset, `MBW-106` cleartext gateway location.
+- **Registry 12 → 19 codes** (6 high / 7 medium / 3 low / 3 info). New vendored modules `lora.py` (hand-rolled GWMP + PHYPayload decoder — no LoRa library linked in), `fingerprint.py` and the bundled `oui_snapshot.dat`; `parser.py` unchanged. New route `GET /api/net/lorawan-watch`; LoRaWAN verdicts `clean` / `backhaul` / `suspicious` / `lora-abuse`.
+- **CVE index unchanged — 418 named / 355 detected** (LoRaWAN maps to no CVE; the 4 Modbus CVEs are unchanged). CREDITS.md coverage note added; README counts untouched.
+- **Self-test:** the `modbus` suite now covers both tiers — 46 scenarios (Modbus offline + LoRaWAN census / cleartext / fingerprint / DevNonce / FCnt-reset + rollover FP guard / impersonation / rogue-downlink / location) plus Scapy pcap end-to-end for Modbus (v4 / v6 / v6+EH) **and** LoRaWAN (v4 / v6), all green; aggregate `do_routing_selftest` stays **60 suites**.
+- **Visibility matrix refreshed** (2160×5184): the **L7** band now shows the renamed **Modbus & LoRaWAN Watch** card (502/802 · LoRa 1700 · 19 codes) and DNS Doctor's **Z-Wave** addition; only L7 changed (L6–L1 byte-identical). `matrix_full.jpg` + the docs copy replaced, L7 re-cut, 16 matrix cache-bust URLs bumped; `ragnar_modern.js` cache-bust bumped.
+- **Docs:** [nettools.md › Modbus & LoRaWAN Watch](nettools.md#modbus--lorawan-watch) (LoRaWAN tier + fingerprint table).
+### 2026-10-24
+
+#### feat(web): Files tab becomes a full file manager + fixes iPhone upload
+*branch `feature/files-tab-manager`*
+
+- The **Files** tab is reworked into a general file manager in response to it being *"badly structured… hard to move files between folders, no possibility to create text files or change file format, and uploading from iPhone does not work."* Four concrete changes:
+  - **iPhone/iPad uploads now work.** Every file picker created an `<input type=file>` and clicked it **while it was detached from the DOM** — which iOS Safari garbage-collects before the `change` event fires, so the upload silently did nothing. A new shared `pickFiles()` helper keeps the input in the document (visually hidden) until the user has chosen or cancelled, and all five pickers (Files upload, Vault upload, Mesh Share, remote-share send, unit transfer) now route through it. The two static `<input>`-driven uploaders (console-script / rubber-ducky) were already DOM-resident and unaffected.
+  - **Create text files, pick the format.** A **New file** action (`POST /api/files/create`) creates a file with whatever name/extension you type (`notes.txt`, `hosts.csv`, `run.sh`, …) and opens it straight in the inline editor. Duplicate names and writes to the synthetic roots are rejected.
+  - **Move / rename / create anywhere.** `move`, `rename` and `mkdir` previously only accepted the Uploads/Backups trees; they now resolve through `_resolve_readable_path`, so files and folders can be moved and renamed **across every browsable tree** — Uploads, Backups, the script libraries and the per-network loot/scan/log folders. The move picker browses all folders and offers **Move here** in any real folder. Renaming can change a file's extension (e.g. `capture.bin` → `capture.pcap`). Per-row **Move**/**Rename** and the **New file / New folder / Upload here** toolbar now appear in every real folder, and the button row wraps for phone width.
+  - **Bounds unchanged.** Both ends of every operation still pass through the existing per-root traversal guards, so nothing can escape Ragnar's data tree; the virtual root `/` and the loot *category* roots (which only list networks) remain non-writable targets.
+- **Verification:** headless app-level smoke test (mkdir → create → list → cross-folder move → rename-with-new-extension → duplicate/loot-root/`/` rejections → cleanup) **9/9**. `webapp_modern.py` and `ragnar_modern.js` syntax-checked.
+- **Docs:** new [Files](files.md) page; README "File manager & in-browser editor" bullet and `docs/README.md` index updated. JS cache-bust bumped to `?v=20261024-files-manager`.
+
+#### [#1013](https://github.com/PierreGode/Ragnar/pull/1013) — feat(net): DNS Watch v11 — Z-Wave Z/IP announcement fingerprint
+*branch `feature/dns-poison-v11`*
+
+- Builds on v10's Z-Wave census (`DNSD-079`): the finding now carries a **fingerprint parsed from the Z/IP announcement** — device type, the Z-Wave **home ID** (the leading 32 bits of the `[hex]` instance token), the multichannel **endpoint**, **product ID** and the raw **security-class hex**. It identifies the node by *product and network position*, not by label.
+- **Privacy-correct by design — no device name on the wire.** Unlike Matter's `dn` key, the Z/IP announcement carries no human-chosen name; the friendly name set in the hub lives inside the encrypted Z/IP tunnel (DTLS 41230), which a passive tap cannot read. The parser reads no `device_name`, and the undefined `info` TXT key is deliberately **not** decoded (same discipline as Thread's `sb`/`omr` — a guessed field is worse than none). Security-class hex is reported verbatim; **S0/S2 is not decoded**.
+- Pure drop-in refresh of the vendored `python/dns_doctor_passive/` engine — only `findings.py` (the `DNSD-079` description), `mdns.py` (`ZWAVE_TXT` key map + `split_zwave_instance()` + fingerprint wiring) and `selftest.py` changed; `engine.py` / `state.py` (Config) / `parse.py` / `detect.py` byte-identical, so **no BPF, config or frame-loop change** and no adapter rewiring (the header comment + `do_dns_watch` docstring note v11).
+- **CVE index unchanged — 418 named / 355 detected** (still no CVE); CREDITS.md / README.md counts untouched (coverage bullet extended).
+- **Self-test:** the `dns_passive` suite adds a dual-stack Z-Wave fingerprint scenario (home ID / product ID / endpoint / security-class parsed, device name absent, `info` not leaked) — **133 → 134** checks; aggregate `do_routing_selftest` stays **60 suites**, all green.
+- **Docs:** [nettools.md › DNS Watch](nettools.md#dns-watch) mDNS tier updated (DNSD-079 fingerprint).
+
+#### [#1012](https://github.com/PierreGode/Ragnar/pull/1012) — feat(net): DNS Watch v10 — Z-Wave Z/IP Gateway mDNS presence census
+*branch `feature/dns-poison-v10`*
+
+- **DNS Watch** (`do_dns_watch`) gains a Z-Wave entry in its mDNS census — `DNSD-079` **`MDNS_ZWAVE_ZIP_PRESENT`**: a Silicon Labs **Z/IP Gateway** advertising `_z-wave._udp` (IANA UDP 4123, DTLS 41230) on the LAN. Like the Matter / Thread census codes it reports **presence**, not a vulnerability — wired evidence of a Z-Wave mesh behind the gateway, visible on the IP side **without any 800–900 MHz radio**. Notice severity, census-suppressed (once per instance), **no CVE**.
+- Pure drop-in refresh of the vendored `python/dns_doctor_passive/` engine — only `findings.py` (the `DNSD-079` registry entry + `CENSUS_CODES`), `mdns.py` (the `_z-wave._udp` service mapping) and `selftest.py` changed; `engine.py` / `state.py` (Config) / `parse.py` / `detect.py` are byte-identical, so **no BPF, config or frame-loop change** and no adapter rewiring (the header comment + `do_dns_watch` docstring note v10).
+- **CVE index unchanged — 418 named / 355 detected** (DNSD-079 carries no CVE); CREDITS.md / README.md counts untouched (coverage bullet extended for the Z-Wave census).
+- **Self-test:** the vendored `dns_passive` suite gains the Z-Wave census scenario (IPv4/IPv6 parity, once-per-instance suppression, bare-presence fingerprint) — **132 → 133** checks; aggregate `do_routing_selftest` stays **60 suites**, all green.
+- **Docs:** [nettools.md › DNS Watch](nettools.md#dns-watch) mDNS tier updated (DNSD-078 / DNSD-079).
+
+#### [#1011](https://github.com/PierreGode/Ragnar/pull/1011) — feat(net): SSDP / UPnP Watch — passive CallStranger + discovery/GENA/IGD scanner
+*branch `feature/ssdp-upnp-watch`*
+
+- New **L7 passive watcher**: **SSDP / UPnP Watch** (`do_ssdp_watch`, `GET /api/net/ssdp-watch`) — a detection-only scanner for the UPnP Device Architecture **discovery** plane (SSDP, HTTPU over UDP/1900 + IPv6 `FF0X::C`), **GENA** eventing (TCP `SUBSCRIBE`/`UNSUBSCRIBE`) and **IGD** port-mapping control (TCP SOAP). It opens a receive socket and nothing else — never probes, never M-SEARCHes.
+- **CVE-2020-12695 (CallStranger)** — the one qualifying *protocol* CVE, a spec-level GENA flaw: a `SUBSCRIBE` whose `CALLBACK` points off-link turns the device into a reflector / data-exfiltration relay, independent of device age. Carried by `SSDP-001..003`. Vendor / implementation bugs (libupnp, MiniUPnPd, the Windows SSDP service) are out of scope by design.
+- **25 codes** across tier A (discovery — off-link M-SEARCH reflection, unicast `ssdp:all` sweeps, amplifier / response-storm, TTL / IPv6-scope escape, advert spoof, byebye floods, malformed), tier B (GENA — CallStranger plus odd-scheme / sensitive-port callbacks and unbounded `TIMEOUT`) and tier C (IGD — third-party `AddPortMapping` pinhole, WAN-side control, admin-port mapping, foreign delete, unbounded lease). **Dual-stack** with proven IPv4/IPv6 parity; **CGNAT 100.64/10 is treated as off-link**; no learning period. Engine vendored at `python/ssdpwatch.py` (+ `ssdpwatch_selftest.py`).
+- **Diagnostics UI:** new SSDP/UPnP Watch card in the **L7 Application** panel (Passive · network services); the verdict reuses the shared `attack` / `anomaly` / `clean` styling (no new paging token). `ragnar_modern.js` cache-bust bumped.
+- **CVE index +1 named / +1 detected → 418 named / 355 detected** (SSDP/UPnP Watch = 1). CREDITS.md / README.md counts synced.
+- **Self-test:** new `ssdp` suite — the vendored engine's 89-check suite plus focused CallStranger / clean-traffic / dual-stack / IGD scenarios and a Scapy pcap end-to-end leg. Aggregate `do_routing_selftest` **59 → 60 suites**, all green.
+- **Visibility matrix:** refreshed graphic (2160×5184) adds the SSDP/UPnP Watch card to the **L7** band — `matrix_full.jpg` + the docs copy replaced and all 7 bands re-cut (only L7 changed), with the 16 matrix cache-bust URLs bumped.
+- **Docs:** [nettools.md › SSDP / UPnP Watch](nettools.md#ssdp--upnp-watch).
+
+#### [#1010](https://github.com/PierreGode/Ragnar/pull/1010) — chore(pages): retire the /os download mirror
+*branch `chore/remove-os-web-mirror`*
+
+- The Ragnar OS download page is maintained in **PierreGode/RagnarOS** (`site/`) and deployed to **ragnar.life**. Mirroring the same page here as a GitHub Pages `/os` subpage meant two copies to keep in sync.
+- Removes `web/os/index.html` and the `build-rusense-flasher.yml` step that staged it at `site/os/`, plus its `web/os/**` path trigger. The download page now lives **only** in the RagnarOS repo and is served **only** from ragnar.life.
+- After merge, once the flasher Pages workflow next runs, `…/os/` is no longer published. The flasher/firmware Pages site and all runtime behaviour are unchanged.
+
+#### [#1009](https://github.com/PierreGode/Ragnar/pull/1009) — docs(net): refresh OSI visibility matrix graphic (DNS Watch coverage)
+*branch `feature/osi-matrix-refresh`*
+
+- Refreshes the **OSI module visibility matrix** graphic to match the current module set — most visibly the **L7 DNS Watch** row, which now advertises its added coverage: the **SPF / libspf2** parser tier, **reverse-DNS (rDNS)** and **dynamic-DNS (DDNS)** posture, and **Thread / Matter** presence inferred over mDNS (all radio-free, from the wired/Wi-Fi tap).
+- Drops in the new `web/images/osi/matrix_full.jpg` (2160×5034) and the docs copy `docs/ragnar_osi_visibility_matrix.jpg` (re-encoded), and **re-cuts all 7 per-layer bands** (`matrix_l1..l7.jpg`) — band edges shift each revision, so they were re-detected from the row-brightness gap profile and verified clipping-free against a contact sheet.
+- Bumps the `?v=` cache-bust on all **16** matrix image URLs in `web/index_modern.html` so the refreshed graphic loads for existing clients. No code or behaviour change — graphic/docs only; the DNS Watch detectors themselves shipped across #1003 / #1004 / #1008.
+- **Docs:** [nettools.md › Module visibility matrix](nettools.md#module-visibility-matrix).
+
+### 2026-10-23
+
+#### [#1007](https://github.com/PierreGode/Ragnar/pull/1007) — feat(net): DNS Watch v9 — SPF/libspf2 parser tier + TCP stream reassembly
+*branch `feature/dns-poison-v9`*
+
+- **DNS Watch v9** refreshes the vendored `python/dns_doctor_passive/` engine with two new modules (`spf.py`, `tcpreasm.py`) and four new **detected** CVEs, plus a TCP-evasion detector:
+  - **SPF / libspf2 parser tier (`DNSD-150..153`)** — SPF records are the one piece of DNS content a mail server *compiles*, so an SPF TXT record whose shape reaches a known libspf2 parser bug is the finding (every threshold read from libspf2's own source). `DNSD-150` an **uppercase** macro letter routing expansion through the `url_encode` `sprintf("%%%02x", …)` sign-extension (`CVE-2021-33912`); `DNSD-151` the same with the `r` reversal transformer (`CVE-2021-33913`); `DNSD-152` a TXT named by an earlier `exp=` modifier carrying a literal large enough to exhaust the 511-byte compile budget — reported only on the correlated target, never a large TXT alone (`CVE-2021-20314`); `DNSD-153` a term packing ~127 macro variables so the budget subtraction underflows a `size_t` (`CVE-2023-42118`). The record supplies the syntax and the mail transaction supplies the attacker byte a DNS tap never sees, so these are exposure shapes, not confirmed exploitation.
+  - **TCP stream reassembly + `DNSD-160`** — the TCP path now reassembles DNS streams (bounded: 4 MB total / 128 KB per stream / 256 streams), de-truncating large and zone-transfer messages, and flags a **segment-overlap mismatch**: two TCP segments covering one sequence range with **different** bytes. Reassembly keeps the first copy and reports the attempt — a first-wins sensor and a last-wins resolver would otherwise parse different DNS messages out of one stream (the classic Ptacek-Newsham 1998 passive-tap insertion/evasion; benign causes are a rewriting middlebox or a broken stack). No CVE.
+- **Adapter:** no change beyond the version note — reassembly and the SPF tier are internal to the engine's `handle_frame`, so the in-app capture still just feeds frames; the BPF is unchanged (SPF is TXT over port 53, already captured), and the capture already uses a 65535-byte snaplen so segments are never truncated.
+- **CVE index +4 named / +4 detected → 417 named / 354 detected** (DNS Watch 40 → 44); all four attribute to DNS Watch, none deduped elsewhere. CREDITS.md / README.md counts synced.
+- **Self-test:** the vendored `dns_passive` suite grows **91 → 132** scenarios. Aggregate `do_routing_selftest` **59 suites**, all green. No new verdict token → card prose only, no JS/cache-bust.
+- **Docs:** [nettools.md › DNS Watch](nettools.md#dns-watch).
+
+### 2026-10-22
+
+#### [#1006](https://github.com/PierreGode/Ragnar/pull/1006) — feat(site): /os Ulfberht card red + Huginn flasher link on the Forge page
+*branch `fix/os-mirror-red`*
+
+- **/os download page** now matches the ragnar.life landing page: the offensive **Ulfberht** edition card uses a **blood-red** accent instead of gold, so it reads distinct from the standard defensive edition at a glance.
+- Adds a `--red` palette and mirrors the `.card.gold` rules as `.card.red` (top accent rule, version pill, download button with white text for contrast, SHA accent); the Ulfberht `<article>` carries `class="card red"`.
+- Standard card stays steel/blue; the Forge banner keeps its gold. Pure CSS/markup — no behaviour change. Lands on the GitHub Pages mirror (`pierregode.github.io/Ragnar/os/`).
+- **Forge flasher** (`rusense_flasher/index.html`) gains a **Huginn Wardrive Node** section linking out to the Huginn web flasher (`pierregode.github.io/HuginnESP/`), mirroring the existing CYD cross-link so the ESP32 flashers are discoverable from one place. Serves on both the Pages flasher and `ragnar.life/forge/`.
+
+#### [#1004](https://github.com/PierreGode/Ragnar/pull/1004) — feat(net): DNS Watch v8 — LLMNR / NBT-NS / encrypted-DNS / DNS-SD / TSIG posture + BIND IXFR
+*branch `feature/dns-poison-v8`*
+
+- **DNS Watch v8** refreshes the vendored `python/dns_doctor_passive/` engine with three new modules (`llmnr.py`, `nbns.py`, `encrypted.py`), captures four more protocols (**5355 LLMNR**, **137 NBT-NS**, **853 DoT/DoQ**, alongside 5353 mDNS), and adds three new **detected** CVEs plus five posture tiers:
+  - **BIND IXFR** `DNSD-062` — an IXFR stream carrying an SOA record whose owner name is **not the zone apex**, which makes the receiving BIND delete the zone's own SOA and terminate on the next refresh (**`CVE-2021-25214`**). IXFR legitimately carries many SOA records, so the owner name is the discriminator, never the count.
+  - **NBT-NS WPAD** `DNSD-121` — a WPAD name query over NBT-NS, the precondition for the **MS16-077** fallback flaw exploited *via NetBIOS name responses* (**`CVE-2016-3213`** / **`CVE-2016-3236`**).
+  - **Posture tiers (no CVE):** unicast **DNS-SD** service enumeration / PTR fan-out (`DNSD-100/101`); **LLMNR** in use / wrong-multicast-group / WPAD query (`DNSD-110..112`); **NBT-NS** in use / NBSTAT enumeration (`DNSD-120/122`); **encrypted-DNS transport** census — DoT (`DNSD-130`), DoQ (`DNSD-131`, confirmed by a QUIC long header), DDR/DNR discovery (`DNSD-132`), DoH-endpoint resolution with a TLS-Watch correlation record (`DNSD-133`); and **TSIG/SIG(0)** posture — weak HMAC, excessive fudge, SIG(0) in use (`DNSD-140..142`).
+- **The name-resolution boundary with SMB Watch is explicit:** this tier owns the *posture* (the vulnerable **query** — `DNSD-112`/`DNSD-121` fire on WPAD queries only), while the **poisoned answer** (Responder/Inveigh) stays with [SMB Watch](nettools.md#smb-watch). The NBNS WPAD name uses first-level NetBIOS encoding, so the detector matches the encoded form, not the literal string `WPAD`.
+- **Adapter:** capture filter now `(udp or tcp) and (port 53 or 5353 or 5355 or 137 or 853)` (matches the engine). The in-app watcher arms the encrypted-DNS own-resolver flag (`DNSD-130/131`) and the rDNS leak check with the **private-address table** (DoT/DoQ or a private PTR to a *public* resolver is the bypass/leak; to a private resolver it stays silent). All v8 tiers are enabled by default.
+- **CVE index +3 named / +3 detected → 413 named / 350 detected** (DNS Watch 37 → 40); all three attribute to DNS Watch, none deduped elsewhere. CREDITS.md / README.md counts synced.
+- **Self-test:** the vendored `dns_passive` suite grows **54 → 91** scenarios. Aggregate `do_routing_selftest` **59 suites**, all green. No new verdict token → card prose only, no JS/cache-bust.
+- **Docs:** [nettools.md › DNS Watch](nettools.md#dns-watch).
+
+#### [#1002](https://github.com/PierreGode/Ragnar/pull/1002) — feat(net): DNS Watch v7 — SIGRed + DDNS (RFC 2136) + rDNS tiers
+*branch `feature/dns-poison-v7`*
+
+- **DNS Watch v7** refreshes the vendored `python/dns_doctor_passive/` engine with three new modules (`ddns.py`, `netscope.py`, `rdns.py`) and five new CVEs, all **detected** and config-free:
+  - **SIGRed (`CVE-2020-1350`, CVSS 10.0, CISA KEV)** — `DNSD-044`, a SIG/KEY record whose rdata length overflows the 16-bit size Windows DNS allocates.
+  - **DDNS tier (RFC 2136 opcode-5 dynamic update)** — a writer is not a resolver, so an UPDATE forks to its own rule set (the unicast detectors never run on it). `DNSD-080` an unsigned UPDATE answered **NOERROR** (the zone accepts unauthenticated writes — a UDP source-IP ACL is itself the finding); `DNSD-081` an UPDATE answered NOERROR while its TSIG reports BADSIG/BADKEY/BADTIME or carries an empty/truncated MAC — a **completed** authentication bypass, not an attempt (**`CVE-2017-3143`**); `DNSD-082` an UPDATE from outside an operator-supplied updater allowlist (silent without that config, deliberately not learned). The BIND GSS-TSIG SPNEGO overflows **`CVE-2020-8622`** (`DNSD-054` TSIG response assertion) and **`CVE-2020-8625` / `CVE-2021-25216`** (folded into `DNSD-053`, the TKEY/SPNEGO decode) ride the same TSIG rdata path.
+  - **rDNS tier (reverse DNS, no CVE)** — `DNSD-090` a reverse lookup for private (RFC 1918 / CGNAT / link-local / ULA) space addressed to a resolver **outside private space** — internal topology leaking to the public DNS; `DNSD-091` one source issuing many `ip6.arpa` queries sharing a long leading nibble prefix in one window — IPv6 reverse-tree enumeration.
+- **Adapter:** the engine now shares `netscope.py` for all prefix parsing. The in-app watcher arms `DNSD-090` with the **private-address table itself** (a private PTR to a public resolver fires; an on-net resolver stays silent — no multi-subnet false positive), keeps the mDNS scope detectors armed from the capture interface's subnets, and leaves the DDNS updater allowlist (`DNSD-082`) unset (who may write a zone is an operator trust decision). No BPF change — DDNS and rDNS are on port 53, already captured.
+- **CVE index +5 named / +5 detected → 410 named / 347 detected** (DNS Watch 32 → 37); all five attribute to DNS Watch, none deduped elsewhere. CREDITS.md / README.md counts synced. The DDNS/rDNS posture codes without a CVE carry none.
+- **Self-test:** the vendored `dns_passive` suite grows **38 → 54** scenarios (SIGRed oversize/boundary, DDNS opcode isolation both directions, unsigned/TSIG-bypass/allowlisted updates, rDNS private-leak vs on-net silence, ip6.arpa walk vs bulk reverse). Aggregate `do_routing_selftest` **59 suites**, all green. No new verdict token → card prose only, no JS/cache-bust.
+- **Docs:** [nettools.md › DNS Watch](nettools.md#dns-watch).
+
+### 2026-10-21
+
+#### [#1001](https://github.com/PierreGode/Ragnar/pull/1001) — feat(pages): Ragnar OS download subpage at /os
+*branch `feature/os-download-page`*
+
+- New **download page** for the Ragnar OS images, served as a GitHub Pages **subpage at [`/os/`](https://pierregode.github.io/Ragnar/os/)** alongside the RuSense flasher (which stays untouched at the Pages root). It mirrors the primary download site at **https://ragnar.life/** (one.com-hosted, resumable HTTP 206 downloads). The images themselves stay on `ragnar.life` — the page's buttons link to `https://ragnar.life/images/RagnarOS-arm64.img.xz` / `…Ulfberht….img.xz` (absolute URLs), so nothing large lands on Pages (1 GB cap) and the page is byte-identical on both hosts.
+- `web/os/index.html` is a self-contained dark Norse-themed page (both editions, copyable SHA-256, flash steps, mobile-first). `build-rusense-flasher.yml` gains a `web/os/**` path trigger and one step that copies the page into the existing single Pages artifact at `site/os/` before upload — a second Pages workflow would clobber the first, so it folds into the one that already deploys Pages.
+
+#### [#1000](https://github.com/PierreGode/Ragnar/pull/1000) — fix(kiosk): openbox on Kali + update self-heal + default-on first boot + hot-plug display re-detect
+*branch `fix/kiosk-chromium-window-size`*
+
+- On the Kali/Ulfberht image the on-screen kiosk filled only part of the display — chromium `--kiosk` sat at its default ~945×1060 window with the rest of the screen black. Cause: **openbox (the window manager chromium needs to go full-screen) wasn't installed.** `install_kiosk.sh` only added openbox bundled with the "no X detected" stack, and Kali already ships Xorg/xinit (`HAS_X=1`) so that branch — and openbox with it — was skipped. Raspberry Pi OS Lite has no X, hits the branch, and gets openbox — hence "works in Raspbian, not Kali".
+- Fix: `install_kiosk.sh` now ensures **openbox** on its own, independent of the X-stack check. The wrapper also falls back to `matchbox-window-manager` and logs a loud warning if no WM is present (so this never fails silently again). *Verified live on Kali arm64 (`.150`): installing openbox took the chromium window from 945×1060 → full 1920×1080.*
+- **Update-only boxes get the fix too:** `update_ragnar.sh` (Step 6.7) and the in-app/web updater (`scripts/post_update.sh`) now ensure openbox on an existing kiosk (and refresh the wrapper), so a box that just updates — without re-flashing — is healed.
+- **Kiosk on by default on first boot (both images).** A freshly-flashed board with **more than 2 GiB RAM** now brings the HDMI kiosk up automatically in **landscape** (0°): `ragnar-firstboot.sh` enables it (RAM-gated; a 2 GiB board reports MemTotal < 2 GiB so only 4 GB+ boards qualify; skipped when an SPI/GPIO display driver was chosen), and `install_ragnar.sh --image-build` **bakes the kiosk packages** (openbox + Xorg + Chromium) so first-boot enable needs no network. Takes effect on the next image build of both the standard and Ulfberht images.
+- **The kiosk now lights up a monitor plugged in after boot.** With the kiosk enabled but **no display attached at start**, its own service Xorg (no desktop / display-manager) configured the output once — with nothing connected there was nothing to modeset — and a monitor plugged in *later* stayed dark until the kiosk was toggled off/on (a bare X does not light a hot-plugged output on its own). The wrapper now runs a lightweight **DRM-connector watcher** that re-applies the output setup (single output, preferred mode, rotation) when a monitor appears — or whenever an output is connected but nothing is driving it, which also recovers a fractionally-late Xorg re-probe. No udev rule, no root; the poll ends with the X server. *Verified live on Kali arm64 (`.150`): forcing the output dark recovered it to full 1920×1080 with the dashboard full-screen in ~8 s.* This also backs the new >2 GiB first-boot default, where a board may come up headless and get a screen plugged in afterwards. Ships via the same wrapper refresh, so update-only boxes get it too.
+*branch `feature/dns-poison-v6`*
+
+- **DNS Watch v6** refreshes the vendored `python/dns_doctor_passive/` engine with a new **mDNS tier** on UDP/5353 (new `mdns.py`; `do_dns_watch`'s capture filter gains `udp port 5353`). mDNS and unicast DNS share a wire format but not a rule set, so the mDNS detectors run **only** on 5353 and the unicast ones **only** on 53 (every `.local` name is out of bailiwick, so cross-running them would false-fire).
+  - **Matter/Thread census (`DNSD-070..073`)** — informational, once per instance, never an alarm: a Matter operational node (`_matter._tcp`), a commissionable device in its pairing window (`_matterc._udp`), a commissioner (`_matterd._udp`), and a Thread border router (`_meshcop._udp`). This is the only plane that names those fabrics on the IP side, so Ragnar otherwise has no visibility they exist.
+  - **RFC 6762 / CERT VU#550620 scope (`DNSD-074..076`)** — `DNSD-074` an mDNS packet with IP TTL / hop-limit ≠ 255 (crossed a router or not link-local; config-free), `DNSD-075` an off-link mDNS source, and `DNSD-076` an mDNS responder answering an off-link **unicast** destination — an open reflector (DDoS amplification + service-inventory leak). `DNSD-075/076` are armed from the **capture interface's own subnets** (derived in the adapter) and stay silent without them, by design.
+- **CVE index +6 named / +3 detected → 405 named / 342 detected.** Detected: `CVE-2015-2809` (Avahi), `CVE-2017-6520` (eCos), `CVE-2015-1892` (OS X) on `DNSD-075/076`. The three remote Avahi crafted-packet bugs (`CVE-2008-5081` / `CVE-2010-2244` / `CVE-2011-1002`) are added as **context only** (named in-engine to document the deliberate gap — ~5.0 CVSS v2, under the bar, not in CISA KEV) via `gen_cve_list`'s `CONTEXT_CVES`. DNS Watch is now 32 CVEs. CREDITS.md / README.md counts synced. The census codes carry no CVE. mDNS name *poisoning* (LLMNR/NBT-NS/mDNS spoofing) stays with SMB Watch — this tier never judges it.
+- **Self-test:** the vendored `dns_passive` suite grows **29 → 38** scenarios (census once-per-instance, commissionable/commissioner, Matter census both stacks, Thread border router, TTL-violation both stacks, off-link unicast reflector, on-link QU reply is legitimate, and mDNS never trips a unicast DNS code). Aggregate `do_routing_selftest` **59 suites**, all green. No new verdict token, so no JS/cache-bust change (card prose only).
+- **Docs:** [nettools.md › DNS Watch](nettools.md#dns-watch).
+
+### 2026-10-19
+
+#### [#998](https://github.com/PierreGode/Ragnar/pull/998) — fix(ulfberht): posture TLS + ANSI fixes, and first-class wireless engagements
+*branch `fix/posture-tls-and-ansi`*
+
+- **No more false "Unencrypted web service (HTTP)" on HTTPS ports.** The posture pass flagged any service nmap named `http`, even an HTTPS one (nmap reports it as `http` with `tunnel="ssl"`), so a TLS site on 443 showed up as cleartext. The nmap parse now captures the `tunnel` attribute and the posture skips the finding when the service is TLS-wrapped (`tunnel="ssl"` / service `https`/`ssl/http`). A genuinely plaintext HTTP service on any port (incl. a misconfigured 443) is still flagged.
+- **Clean tool output in reports.** `command`-step output is now stripped of ANSI/VT100 escape sequences before it becomes a finding, so coloured tools (wifite, aircrack-ng, …) read as plain text instead of raw `\x1b[32m…` garbage.
+- **Wireless engagements are now first-class.** Wi-Fi tools don't take an IP scope — a playbook flagged `"wireless": true` runs with **no nmap/posture** and uses a **monitor interface** (`{iface}`) + optional **BSSID**/**channel** (`{bssid}`/`{channel}`) instead. The run form shows interface/BSSID/channel fields for a wireless playbook; a new **Wireless WPA/WPS Audit** built-in ships; the Arsenal builds a wireless playbook when the selection is all Wi-Fi tools; and "Generate with AI" is told to emit `"wireless": true` (no nmap) for Wi-Fi goals. Wireless tools no longer get pointed at an IP.
+
+#### [#997](https://github.com/PierreGode/Ragnar/pull/997) — feat(ulfberht): live run log in the Engagements run panel
+*branch `feature/ulfberht-run-live-log`*
+
+- The engagement run panel now shows the **live run log** — the timestamped lines the engine emits (`nmap: scanning …`, phase transitions, per-step output) stream in under the phase row as the run progresses, as plain text (no box). It stays pinned to the newest line unless you scroll up to read back, and reopening a past run shows its full saved log. Data was already returned by `GET /api/ulfberht/run/<id>` (`log`); the panel just renders it now.
+
+#### [#996](https://github.com/PierreGode/Ragnar/pull/996) — feat(ulfberht): "Generate with AI" actually generates the playbook (on-device)
+*branch `feature/ulfberht-ai-generate`*
+
+- **"Generate with AI" now calls the AI and returns the finished playbook — not a prompt to copy.** Describe the engagement → Ragnar sends the schema + action catalog + tool allowlist + argv/no-shell rules + your tools + instruction to the AI configured in **Settings → AI** (OpenAI cloud **or** a self-hosted/Ollama endpoint on the LAN/mesh), gets a playbook back, **validates it the same way an uploaded playbook is** (tolerant of code fences / stray prose; a non-allowlisted tool or malformed step is rejected), and shows it ready to **Save to Engagements**. No copy-paste step.
+- Engine `parse_ai_playbook()` extracts + validates the JSON from the model's raw reply; `AIService.complete()` is the one-shot call; `POST /api/ulfberht/playbooks {ai_generate:true,…}` → `{spec}` (or `{no_ai, prompt}` / `{raw, error}`).
+- **Offline fallback kept:** with no AI endpoint configured, the button hands you the same prompt to paste into your own AI (and a small "copy a prompt for an external AI" link does it on demand), so an airgapped box still works.
+
+#### [#995](https://github.com/PierreGode/Ragnar/pull/995) — fix(kiosk): rotation resets to landscape + single-output (no more half-screen)
+*branch `fix/kiosk-rotation-and-span`*
+
+- **Rotation can get back to landscape.** `ragnar_kiosk_run.sh` only applied `xrandr`/`wlr-randr` for 90/180/270 and **skipped 0°/normal** — so after rotating, selecting landscape (0°) no-op'd and the screen stayed portrait (symptom: "everything is portrait, only portrait-left/right change anything"). Rotation is now applied **unconditionally, including normal**, in both the session (autostart) and own-Xorg (service) paths, so 0° actually resets to landscape.
+- **No more half-screen.** Nothing collapsed a two-output span, so X spanned both HDMI panels and Chromium `--kiosk` filled the union — the page showed on only one panel ("left half, rest black"). The kiosk now **turns off any non-primary connected output and sets the primary to its preferred mode** before launching, so it drives a single screen. No-op on a normal single-display board.
+- Ships via the installer and the CLI updater's kiosk re-provision (both redeploy the wrapper); re-run `sudo bash scripts/install_kiosk.sh` on an already-deployed box to pick it up.
+
+#### [#994](https://github.com/PierreGode/Ragnar/pull/994) — Ulfberht Arsenal AI + user-reported fixes (Wi-Fi, terminal, uploads, Pi Connect)
+*branch `fix/consolidated-batch`*
+
+A single consolidated PR (supersedes the earlier #991/#992/#993, closed to avoid cross-PR conflicts).
+
+- **Arsenal "Build playbook" is now tailored to the selected tools** (not generic): `_TOOL_STEP_TEMPLATES` covers every selectable tool with a real step (cracking → hash file + wordlist + longer timeout, wireless → monitor-mode interface, capture/MITM/framework → non-interactive argv like `msfconsole -r <rc>`), and the generated description is category-aware and flags steps that need operator input.
+- **Arsenal "Generate with AI" (bring your own AI, offline):** describe the engagement → Ragnar builds a complete copy-paste prompt (schema + action catalog + tool allowlist + argv/no-shell rules + selected tools + instruction + a worked example) for your own AI; paste the JSON reply into the editor to validate & save. No AI/key on the device. `POST /api/ulfberht/playbooks {ai_prompt:true,…}` → `{prompt}`.
+- **Wi-Fi: a failed connect from the dashboard no longer reboots the box.** The AP→client onboarding reboot (single-radio recovery) was firing for any failed join; it's now gated to the captive-portal/AP flow (`was_in_ap_mode or is_ap_client_request()`). Otherwise the profile is saved and a clear error is returned to retry.
+- **Web terminal self-heal on web updates:** `scripts/post_update.sh` now ensures `flask-socketio >= 5.6.1` (the apt 5.6.0 crashes the `/terminal` Socket.IO namespace on Flask 3.1+). Fresh-install and the CLI updater already forced it; the web updater didn't, so web-updated / freshly-imaged boxes (Kali, WSL) kept the broken build.
+- **Files: "⬆ Upload here" button for the `engagement_playbooks` folder** (backend already accepted uploads there; only the button was missing).
+- **Raspberry Pi Connect auto-install** (`scripts/install_pi_connect.sh`, hooked into the installer and `provision_network_tools.sh`): Ragnar's Mesh tab integrates Pi Connect but the binary was absent on the Kali/Ulfberht base. The Pi apt repo can't be used on Kali (its SHA1-signed key is rejected by modern apt), so the script installs the verified `rpi-connect-lite` `.deb` directly over HTTPS (deps already present) — no foreign repo. ARM-only, idempotent. Validated live on Kali arm64 (`rpi-connect 2.13.0`).
+
+#### [#990](https://github.com/PierreGode/Ragnar/pull/990) — fix(ai): AI endpoint panel no longer 500s when the openai SDK is missing
+*branch `fix/ai-openai-optional`*
+
+- The **Self-Hosted / Custom Endpoint** panel (Settings → AI) returned **HTTP 500** from **Connect** (`/api/ai/models`) and **Scan Network** (`/api/ai/discover`) on images where the `openai` Python package wasn't installed — the installer only *warns* if its pip step fails, so some images shipped without it.
+- **Graceful degradation:** `ai_service` now imports even when the `openai` SDK is absent (lazy import) so its non-LLM helpers and the endpoint routes keep working; `AIService` reports a clear "openai not installed — run the updater" message instead of crashing. `/api/ai/discover` no longer imports outside its `try` (it needs only `normalize_base_url`, so it works SDK-free — it even scans the tailnet/subnet for Ollama). `/api/ai/models` falls back to a plain-HTTP `GET {base_url}/models` when the SDK is missing, so **Connect still works for local/Ollama endpoints** with no SDK; otherwise it returns a clean error, never a 500.
+- **Self-heal:** `update_ragnar.sh` and `scripts/post_update.sh` now (re)install `openai>=2.0.0` on any update if it's missing (cheap no-op when present), mirroring the flask-socketio guard — so already-deployed boxes fix themselves on the next update.
+
+### 2026-10-18
+
+#### [#987](https://github.com/PierreGode/Ragnar/pull/987) — feat(ulfberht): persisted engagement history + pro HTML/PDF report with remediation
+*branch `feature/ulfberht-report-history`*
+
+- **Engagement history now persists.** Every finished run is written to `data/engagements/<id>.json` (atomic write), so the Engagements tab keeps its history across a service restart. A new collapsible **"Recent engagements"** panel lists past runs (playbook · scope · time · status); click one to reopen its findings and report. `list_runs()`/`get_run()` merge in-memory and on-disk runs; the run-status API no longer ships the heavy report blobs (fetched separately).
+- **Pro HTML report (print → PDF) with remediation.** Alongside the Markdown report, each engagement now renders a self-contained, styled, printable **HTML report**: executive summary with an overall **risk rating** badge, KPI tiles (live hosts / high+critical / medium / low / info), targets, a hosts-&-services table, and per-finding cards with a severity badge and a **green remediation box** (one-line fix per risk class — Telnet/FTP/SMB/RDP/SNMP/MySQL/…), plus the NIST SP 800-115 phase table. `GET /api/ulfberht/report/<id>?format=html` (add `&download=1` to save `.html`); the run panel gained **Open report (print / PDF)** + **Download .html** next to the Markdown ones. Remediation is also appended to the Markdown report.
+- Runtime state (`data/engagements/`, `data/engagement_playbooks/`) is git-ignored.
+
+#### [#986](https://github.com/PierreGode/Ragnar/pull/986) — feat(ulfberht): Engagements scope accepts a targets file
+*branch `feature/ulfberht-scope-file`*
+
+- The Engagements run form took a single IP/CIDR/host; you can now also **load a targets file** (one IP/CIDR/host per line; blank lines and `#` comments ignored) and the engagement runs against all of them.
+- Engine: `start_run` takes a `targets` list; scope is a validated target **list** internally (`run['targets']`) with a per-target regex (no spaces/shell metacharacters) + a 4096 cap. nmap discovery scans all targets, `{scope}` expands to all of them, the report lists them when >1. `POST /api/ulfberht/run` accepts `{targets:[…]}`. UI: a "load a targets file" picker that parses the file in the browser. Single-scope behavior unchanged.
+
+#### [#985](https://github.com/PierreGode/Ragnar/pull/985) — feat(ulfberht): Arsenal "Build playbook" opens an editor before saving
+*branch `feature/ulfberht-arsenal-editor`*
+
+- Follow-up to #984. **Build playbook** no longer generates-and-saves in one shot — it now **generates the playbook and opens it in an inline JSON editor** so you can tweak the steps/args first; it's only saved (→ appears in the Engagements tab) when you click **Save**.
+- `POST /api/ulfberht/playbooks` with `{name, tools, preview:true}` returns the generated spec **without saving**; Save POSTs the edited JSON back through the normal validated save path. Engine split: `build_playbook_spec()` (build, no save) vs `build_playbook_from_tools()` (build + save).
+
+#### [#984](https://github.com/PierreGode/Ragnar/pull/984) — feat(ulfberht): Arsenal builds Engagements playbooks from selected tools
+*branch `feature/ulfberht-arsenal-builder`*
+
+- The Pentest-tab **Arsenal** was a static list of the detected offensive tools; it's now a **playbook builder**. Click tools to select them, name it, hit **Build playbook**, and a valid, methodology-ordered Engagements playbook is generated from the selection and saved to the `engagement_playbooks` folder (appears in the Engagements tab; editable in Files).
+- Server-side generation in `ulfberht_engine`: each tool maps to a sensible starting step (curated templates for the common ones — nmap/nuclei/nikto/sqlmap/wpscan/enum4linux-ng/netexec/… — or a safe `{scope}` placeholder otherwise); always prepends an **nmap discovery** sweep so `{host}`/`{web_urls}`/`{ports}` resolve, adds a **posture** pass and a **report**, orders steps into NIST phases, and flags active tools `active`. `POST /api/ulfberht/playbooks` now accepts `{name, tools:[…]}`.
+- UI: selectable chips (red when picked) + a build bar (name / Build / Clear / status); the System-tab tool list stays passive.
+
+#### [#983](https://github.com/PierreGode/Ragnar/pull/983) — fix(ulfberht): kiosk + pwnagotchi install on the Kali base
+*branch `fix/kiosk-pwn-apt-confold`*
+
+- Both the on-screen **kiosk** and **pwnagotchi** failed to install on the Kali-based Ulfberht image, for two Kali-specific reasons (verified live on the device).
+- **First apt stalled on a conffile prompt.** A chroot-built image ships `systemd`/`dbus` unpacked-but-not-configured (no running init in the chroot), so the first real apt on the device — the kiosk or pwnagotchi installer — stopped at `system.conf (Y/I/N/O/D/Z)?` and aborted. `ragnar-firstboot.sh` now configures the chroot-deferred packages on first boot with `--force-confdef --force-confold` (the root fix); `install_kiosk.sh` gained the same repair before its apt (it had none); `install_pwnagotchi.sh`'s `ensure_dpkg_healthy` now forces the conffiles too.
+- **pwnagotchi: `lgpio` won't build on Python 3.14.** Kali rolling is on py3.14; `rpi-lgpio` pulls `lgpio`, whose only PyPI release uses removed Python-2 C API and fails to compile, and in the shared pip batch that aborted the whole call so `python-prctl` never installed (→ the `No module named 'prctl'` crash loop). Fix: install `rpi-lgpio` in its own best-effort `--no-deps` call, skipping the un-buildable `lgpio` — a headless pwnagotchi never uses GPIO at runtime. Result on the device: kiosk installs; `pwnagotchi.service` active, web UI `:8080` → 200, no crash.
+
+#### [#982](https://github.com/PierreGode/Ragnar/pull/982) — feat(ulfberht): Engagements UX — active phase authorized by the edition, collapsible playbook library
+*branch `feature/ulfberht-engagements-ux`*
+
+- **Active phase is authorized by the Ulfberht EDITION, not the global auto-attacks toggle.** The active/assessment phase now runs on the per-run opt-in **+ the edition lock** (the engine is marker-locked to the official image) and is **no longer tied to `enable_attacks`** — an operator can keep auto-attacks off and still run a scoped active engagement. `/api/ulfberht/run` drops the `enable_attacks` coupling; the **"Enable active assessment" checkbox now defaults to checked**; the label and Format-help text no longer say "requires attacks enabled".
+- **Collapsible playbook library** — default collapsed, showing only the header + **Upload .json** + **Format help** buttons; click the header (chevron) to expand the playbook cards. Keeps the Engagements tab tidy as the library grows.
+- **Cache-buster → v3** so the Format help (which lists the live tool catalog — the full ~41-tool offensive set from #981) refreshes on a normal reload.
+
+#### [#981](https://github.com/PierreGode/Ragnar/pull/981) — feat(ulfberht): playbook `command` action covers the full installed offensive toolset
+*branch `feature/ulfberht-playbook-arsenal`*
+
+- Engagement playbooks' **`command`** action can now invoke **any of the installed offensive tools** (the ~25 Arsenal tools: `sqlmap`, `hydra`, `netexec`, `hashcat`, `john`, `aircrack-ng`/`wifite`/`reaver`, `responder`, `ettercap`, `msfconsole`, `tcpdump`/`tshark`, … on top of the existing nmap/nuclei/nikto/wpscan/enum4linux-ng/busters), not just the short curated list. The allowlist is now the recon set + every offensive tool, **plus every tool the edition actually detects on the image** (merged from `ragnar_edition`), so it covers the full Arsenal and stays in sync as tools are added.
+- It remains a **safety** allowlist, not a feature list: steps run **argv-only (never a shell)**, args containing shell metacharacters are rejected, and arbitrary non-tool binaries (`rm`, `dd`, `bash`, a reverse shell) stay **blocked** — the engine runs as root, so that guardrail matters. Offensive tools are all `active` (gated by `enable_attacks`).
+- New optional per-step **`timeout`** (10–3600 s, default 900) for long-running tools. Docs note which tools fit the scope-targeted step model vs which need external inputs (cracking/Wi-Fi) or non-interactive args (`msfconsole -q -x …`). Docs: [docs/ulfberht-workflows.md](ulfberht-workflows.md).
+
+#### [#980](https://github.com/PierreGode/Ragnar/pull/980) — feat(ulfberht): data-driven Engagements v2 — uploadable playbooks, advanced actions + terminal fix
+*branch `feature/ulfberht-engagements-v2`*
+
+- **Engagements engine is now data-driven.** A playbook is an ordered list of **steps**, each running a catalog **action** (`nmap` / `posture` / `nuclei` / `command` / `report`) with validated params — instead of one hardcoded Python workflow. Four **built-in playbooks** ship: *Scoped Network Assessment*, *Web Application Assessment*, *Full-Port Host & Service Audit*, *SMB / Active Directory Recon*.
+- **Operators can author and upload their own `.json` playbooks** from the Engagements tab. They sync to a new **`engagement_playbooks`** folder in the **Files tab** (editable/deletable there — same pattern as Device Console `console_scripts` and Rubber Ducky payloads) and are **validated on load**: an invalid playbook is listed with the reason and cannot run.
+- **New `command` action** runs an **allowlisted** tool (nmap, masscan, dig, whois, whatweb, nbtscan, snmpwalk, nuclei, nikto, enum4linux-ng, sslscan, wpscan, gobuster/ffuf/feroxbuster…) with **validated argv — no shell, no metacharacters**. Active tools and any `"active": true` step stay **double-gated by `enable_attacks`**, like the assessment phase. Scope-confined placeholders: `{scope}` `{host}` `{hosts}` `{ports}` `{web_urls}`.
+- **Engagements UI**: a Playbook library (built-in + custom, source badges, step/phase chips, step counts), **Upload .json**, delete custom, selected-playbook step preview, and a format-help panel; findings now render `critical`/`info` severities. Engine + UI stay **marker-gated** to the official Ulfberht image.
+- **Web Terminal fix (root cause + hardening).** On a Kali/Debian base the terminal's `/terminal` Socket.IO namespace silently failed — a **blank, unresponsive pane** — because the apt `python3-flask-socketio` is **5.6.0**, which crashes on Flask 3.1+ when the connect handler touches the session (`AttributeError: property 'session' of 'RequestContext' object has no setter`); the dashboard's default namespace survived because it never reads the session. `install_ragnar.sh` and `update_ragnar.sh` now **ensure flask-socketio ≥ 5.6.1** (the apt build has no dist-info RECORD, so it's installed alongside with `--ignore-installed`, which wins on the import path); `requirements.txt` bumped to match. Separately, `initTerminal()` is hardened so the pane can **never sit silently blank** again: `fit()` is retried until the pane is laid out (the xterm-in-hidden-container 0-column bug), connect/disconnect/error states are surfaced, and a connect watchdog reports a stuck namespace. New endpoints: `POST`/`DELETE /api/ulfberht/playbooks` + an action catalog in the list payload. Docs: [docs/ulfberht-workflows.md](ulfberht-workflows.md).
+
+#### fix(sdr): make the ESP-SDR pilot-tone trim robust on a busy 2.4 GHz band
+*branch `fix/esp-pilot-tone-baseline`*
+
+- Follow-up hardening of the HackRF pilot-tone crystal trim. On a congested band the first cut could **lock onto ambient Wi-Fi instead of the pilot and apply a wrong-sign trim** (e.g. +50 kHz where −50 was correct — worse than uncalibrated), because the default pilot sat at **2437 MHz = Wi-Fi ch6 centre** and a single max-hold caught passing Wi-Fi/BLE bursts. Now the calibration (1) measures the ESP **twice — tone off then on — and differences them**, cancelling the ESP's fixed internal spurs and any static ambient; (2) uses a **frame average** per measurement, not max-hold, so the continuous CW pilot stays up while bursty Wi-Fi/BLE averages down; and (3) defaults the pilot to **2480 MHz** (above ch1/6/11, clear of the ESP's spurs). Result on hardware: a correct one-step lock to ≈ −52 kHz / −21 ppm, repeatable within a few kHz, no sign flips. Also re-probe the HackRF once if `hackrf_info` glitches right after a transmit. `rf_mhz` / `tx_vga` remain overridable; default TX-VGA raised to 40. `esp_sdr --selftest` 23/23 (new baseline-difference check proving a raw max-hold would mis-lock an ambient hump while the differenced measurement isolates the pilot), `sdr_spectrum --selftest` 33/33.
+
+#### feat(sdr): ESP-SDR crystal trim via a HackRF pilot tone
+*branch `feature/esp-hackrf-pilot-tone-cal`*
+
+- The ESP-SDR's **vs HackRF** frequency trim now works by having the HackRF **briefly transmit a low-power CW pilot tone** (2437.0 MHz by default) that the TCXO-less ESP locks its crystal onto. Keying on one strong, known carrier makes it **immune to the ESP's internal spurs** — which defeated the old passive band-shape cross-correlation (it measured ≈0 correlation on real hardware and never produced a trim). On the bench it converges to a **sub-ppm residual (a few kHz) in one step** at ~34 dB tone SNR. The UI confirms before transmitting and shows the detected SNR; keep the two radios a few cm apart. New `sdr_spectrum.transmit_tone` / `tx_tone_stop` (loops a seamless cs8 IQ buffer through `hackrf_transfer -t … -R`, PA off, modest TX-VGA) and `esp_sdr.calibrate_vs_tone`; route `POST /api/net/esp/trim {"tone":1[,"rf_mhz":M,"tx_vga":G]}` (legacy passive `{"hackrf":1}` kept as a fallback). Fixed the FOFS correction **sign** for this firmware (`+FOFS` raises the LO → trim is `fofs + offset`; the old sign diverged). `sdr_spectrum --selftest` 33/33, `esp_sdr --selftest` green (new pure tone-IQ + tone-offset checks). Validated end-to-end on a HackRF One + ESP32-S3. Docs: [RF Waterfall → Frequency trim](rf-waterfall.md).
+
+#### [#978](https://github.com/PierreGode/Ragnar/pull/978) — feat(net): MikroTik Switch & Router Guard v3 — SMB1 SessionSetupAndX + web-mgmt body-length (Oct 2026 audit)
+*branch `feature/mikrotik-guard-v3`*
+
+- **MikroTik Guard v3** ports the two new codes from the standalone `mikrotikwatch` October 2026 audit into the in-app guard (`_mikrotik_analyze`), both detection-only on the per-packet capture model:
+  - **`MTK-022` (CVE-2026-56719 + CVE-2026-89028)** — the pre-auth **SMB1 SessionSetupAndX** crafted `uniPwdLen`. One code for both CVEs: the password-length fields claim more than the frame's own `ByteCount` (`CWE-191` length-arithmetic under-flow, 89028) or reach past the bytes the frame carries (`CWE-125` out-of-bounds read, 56719). The handler runs *before* credential validation (PR:N), and the tap sees the crafted frame but never which way the daemon's handler then broke, so the structural relations are reported as flags and a malformation that is **not** the `uniPwdLen` shape is filed under the generic `MTK-002`. The under-flow relation is declared-vs-declared (it survives a snaplen-truncated segment); the over-read relation is suppressed when the single segment did not carry the whole frame — no false positive on a legitimately long request the capture cut short.
+  - **`MTK-023` (CVE-2026-84411, CVSS 9.8, unauthenticated root)** — the web-management **HTTP body-length under-flow**, reported as a **structural class, not a CVE-exact signature**, because MikroTik and CISA (ICSA-26-272-06) withheld the function, path and corruption primitive. It reads the **raw** request header block (a negative `Content-Length` is otherwise clamped away before any consumer sees it) and flags the bounded set of body-length lies `CWE-191` permits — negative / non-numeric / over-64-bit / absurd / conflicting `Content-Length`, `Content-Length` with `Transfer-Encoding: chunked`, or a non-hex / runaway chunk size — at **medium confidence by construction**, and raises a version-screen **posture** from MNDP alone (every RouterOS 6.x and 7.x below 7.24). The delivered-vs-declared case needs a flow-close signal the per-packet model does not carry and is omitted.
+- **Two further v3 CVEs are routed, not duplicated here:** the **xt_tls SNI `host_name` over-read** (CVE-2026-52346 → **TLS Watch**) and the **labelled-VPN MP_REACH NLRI** under-flow (CVE-2026-93345 → **BGP Path Watch**), each handled where the decoder already lives. `MTK-C02` / `MTK-C03` remain deferred (cross-flow / cross-time correlations; `MTK-C02` also needs the unported `MTK-018`).
+- **CVE index +3 named / +3 detected → 399 named / 339 detected.** CVE-2026-56719, CVE-2026-89028 and CVE-2026-84411 all attribute to **MikroTik Guard** (all 2026, so the 2026 tally is 52 → 55); context (51) unchanged. CREDITS.md / README.md counts synced.
+- **Self-test:** the `mikrotik_guard` suite grows **27 → 46** scenarios — MTK-022 well-formed / minimal-crafted / under-flow-only / not-`uniPwdLen`→`MTK-002` / WordCount-12 gate / snaplen-truncation-no-FP, and MTK-023 six malformation cases + a well-formed FP guard + the MNDP version posture + a patched-version negative + registry wiring. Aggregate `do_routing_selftest` **59 suites**, all green.
+- **Visibility matrix refresh.** The *Module visibility matrix* reference graphic (OSI layer × vantage tier) is updated to the current module set — the full image (`web/images/osi/matrix_full.jpg`), all seven per-layer bands (`matrix_l1…l7.jpg`) re-sliced from it, and the docs copy (`docs/ragnar_osi_visibility_matrix.jpg`); image cache-bust bumped to `?v=20261018-mikrotik-v3`.
+- **Docs:** [nettools.md › MikroTik Guard](nettools.md#mikrotik-switch-and-router-guard), [nettools.md › Module visibility matrix](nettools.md#module-visibility-matrix).
+- *Note: PR number is a prediction. This branch and `feature/tls-watch-v9` both branch off `main`; whichever merges second will need a trivial reconcile on `docs/releases.md` and the CVE-count lines in `README.md` / `docs/CREDITS.md`.*
+
+### 2026-10-17
+
+#### [#977](https://github.com/PierreGode/Ragnar/pull/977) — feat(net): BGP Pathwatch v7 — CVE-2026-93345 labelled-VPN NLRI (passive tap)
+*branch `feature/bgp-pathwatch-v7`*
+
+- **BGP Pathwatch v7** updates the vendored passive-tap tier (`python/bgp_pathwatch/`) with **CVE-2026-93345** — a MikroTik RouterOS labelled-VPN NLRI out-of-bounds read (CWE-1284). `PW-BGP-013` fires on a labelled-VPN `MP_REACH_NLRI` (SAFI 128/129, VPNv4/VPNv6) whose prefix-length octet is below the structural minimum for the family — the RouterOS NLRI iterator reads past it — and `PW-BGP-014` is the post-trigger confirmation, the correlated BGP session drop that says the plane crashed. The parser-CVE tier is now **15 detectors / 14 codes** (was 14 / 12).
+- Consistent with the v6 scope (vendored tiers + offline self-tests; live capture adapters/routes remain a planned follow-up): only `bgpcve.py`, `bgptap.py` and `taptest.py` changed — the `bgp.py` / `bgpsec.py` / `bgpsrte.py` / `iptrie.py` modules and the `bgpsectest.py` / `srtetest.py` suites are byte-identical to v6.
+- **CVE index +1 context → 396 named / 336 detected.** CVE-2026-93345 is named as **context** in the in-app `do_bgp_watch` malformed-attribute advisory; `python/bgp_pathwatch/` stays excluded from `gen_cve_list` (so the tier's test corpus can't inflate the count), and the byte-level detection lives in the offline tap. CREDITS.md / README.md synced.
+- **Self-test:** the `bgp_tap` suite grows **57 → 74** scenarios (the CVE-2026-93345 trigger / boundary / PW-BGP-014 correlation / dual-stack / no-false-positive cases); `bgpsec` (47) and `bgp_srte` (65) unchanged — **186 offline tier checks**. Aggregate `do_routing_selftest` **59 suites**, all green.
+- **Docs:** [nettools.md › BGP Pathwatch tiers](nettools.md).
+
+#### [#975](https://github.com/PierreGode/Ragnar/pull/975) — fix(boot): unblock radios at every boot (rfkill) — both images
+*branch `fix/rfkill-boot-unblock`*
+
+- A freshly flashed image could come up with Wi-Fi/Bluetooth **soft-blocked by rfkill** (the install-time unblock doesn't carry through a chroot image build, and the udev rule didn't reliably catch the built-in radios at cold boot). Now `ragnar.service` runs `ExecStartPre=-/bin/sh -c 'rfkill unblock all …'` **every boot**, so radios are unblocked before Ragnar starts — on **both** the standard and Ulfberht images (both bake `ragnar.service`).
+- `scripts/ragnar-firstboot.sh` also unblocks on first boot (belt-and-braces; previously only mentioned in a comment), and `update_ragnar.sh` Step 6.62 unblocks so already-deployed boxes heal on update. The existing `99-ragnar-rfkill.rules` udev rule (hot-plugged dongles) is unchanged.
+
+#### [#974](https://github.com/PierreGode/Ragnar/pull/974) — feat(ulfberht): Engagements workflow engine + Arsenal (coordinated security workflows)
+*branch `feature/ulfberht-engagements`*
+
+- **New: the Ulfberht Engagements engine** — the professional/educational differentiator. `ulfberht_engine.py` runs **playbooks** that chain **discovery → diagnostics → assessment → reporting** over one scope into one **NIST SP 800-115-aligned** report, instead of a drawer of tools. Flagship playbook **Scoped Network Assessment**: `nmap` host/service sweep (XML-parsed) → passive posture analysis (cleartext/legacy/exposed services mapped to CWE / MITRE ATT&CK) → optional active validation (`nuclei` on web services) → report (in-tab + downloadable Markdown).
+- **Image-only (marker-gated).** Engine, the new **⚔️ Engagements** tab, and the **Arsenal** panel (detected offensive tools, on the Pentest tab) only appear when the `/etc/ragnar-edition` marker is present — i.e. the official Ulfberht image. Standard image / stock Kali see nothing; the API returns `enabled:false` / `403`.
+- **Safety:** scope entered once and enforced across phases; discovery + diagnostics are passive and always allowed; the **assessment** phase is double-gated (operator opt-in **and** the server `enable_attacks` flag) or it's skipped and the report says so. Runs in a background thread with per-tool timeouts.
+- **API:** `/api/ulfberht/playbooks`, `POST /api/ulfberht/run`, `/api/ulfberht/run/<id>`, `/api/ulfberht/report/<id>` (all marker-gated). **UI:** Engagements tab (playbook + scope + live phase/finding stream + report view/download), mobile-friendly; `ragnar_modern.js` cache-bust → `?v=20261017-ulfberht-engage`. **Docs:** new [Ulfberht Engagements](ulfberht-workflows.md), linked from [Ragnar OS Ulfberht](ragnar-os-ulfberht.md).
+
+#### [#973](https://github.com/PierreGode/Ragnar/pull/973) — fix(os): gate Ulfberht capabilities on the official image marker, not the Kali base
+*branch `fix/ulfberht-image-marker-gate`*
+
+- **Corrects the edition gate.** The extended Ulfberht capabilities must belong to the **official Ragnar OS Ulfberht image only** — not to any Kali box. `ragnar_edition.py` now keys off a **build-time marker** (`/etc/ragnar-edition`, written exclusively by the RagnarOS `ulfberht/` image build, never by `install_ragnar.sh`) instead of `ID=kali`. So a user who merely `git clone`s Ragnar onto their own Kali install gets **standard** behaviour — being Kali-based is deliberately no longer sufficient.
+- `GET /api/edition` now returns `is_ulfberht` (with `is_security_distro` kept as an alias meaning "is the official edition image"); the System-tab card only appears when the marker is present. The `install_ragnar.sh` `kali` package-manager recognition from #972 stays (it's just apt detection, not a capability gate). **Docs** updated to describe marker-gating. Image build writes the marker (RagnarOS repo).
+*branch `feature/ragnar-os-ulfberht`*
+
+- **New image edition: Ragnar OS Ulfberht** — the Ragnar appliance built on a **Kali Linux Raspberry Pi arm64 base** instead of Raspberry Pi OS Lite, for authorized security testing. Deliberately **not** branded "Kali" (trademark); credited as derived from Kali in the docs. Build pipeline lives in the private `PierreGode/RagnarOS` repo under `ulfberht/` and publishes to the public Releases on an `os-ulfberht-v*` tag; the standard pi-gen image is untouched. See [Ragnar OS Ulfberht](ragnar-os-ulfberht.md).
+- **Why Kali:** its RPi kernel ships **Nexmon** (`brcmfmac-nexmon-dkms` + `firmware-nexmon`) so the Pi's **onboard** Wi-Fi does monitor mode + frame injection with no USB adapter (chipset-dependent; Pi 5 restored in Kali 2025.3), plus the full offensive toolset in-repo. Same arm64 Pi coverage as the standard image (Pi 5 / 4 / 3 / Zero 2 W / CM4-5); ARMv6 boards (Pi 1 / original Zero) are out, as Kali dropped ARMel.
+- **"Hidden switch" — edition auto-detect.** New `ragnar_edition.py` (pure stdlib, never raises) reads `/etc/os-release` and reports the base/edition at `GET /api/edition`. On a standard Raspberry Pi OS build it returns `edition=standard` and **nothing in the UI changes**. On the Kali (Ulfberht) base the **System** tab reveals an edition card: the Ulfberht badge, Nexmon onboard-Wi-Fi status, and the offensive tools detected on `PATH` as reference chips. Purely additive and gated — a standard box never sees it.
+- **Installer:** `install_ragnar.sh` now recognizes `ID=kali` as Debian-family (shares the apt branch); it already fell through to apt, so this is a clean, explicit addition. `update_ragnar.sh` is already pure-apt, so deployed boxes heal unchanged.
+- **UI:** System-tab edition card (mobile-friendly, hidden by default); `ragnar_modern.js` cache-bust → `?v=20261017-ulfberht`. **Docs:** new [Ragnar OS Ulfberht](ragnar-os-ulfberht.md), linked from README.
+
+#### [#971](https://github.com/PierreGode/Ragnar/pull/971) — feat(net): Arista Switch & Router Guard v4 — vendored EOS CVE engine (17 CVEs, 29 codes)
+*branch `feature/arista-guard-v4`*
+
+- **Arista Guard v4** moves the in-app EOS switch/router guard onto a **vendored engine** (`python/aristaguard.py`, self-contained stdlib; scapy only on its own live path) driven by the existing `do_arista_guard` adapter — it captures LLDP / RADIUS-EAPOL / SSH / gNMI-gNOI / CVX / VXLAN / IPsec via `tcpdump`→pcap and replays raw Ethernet frames through `AristaEngine.handle_frame`, the same vendored-engine shape as APC / Liebert / RADIUS / RIP / PIM. Replaces the hand-written v3 classifier; the route (`GET /api/net/arista-guard`), the L7 card and the shared guard rendering are unchanged.
+- **17 tracked EOS CVEs across 29 finding codes** in three classes — `AG-0xx` POSTURE (version/platform screen, "verify this device"), `AG-1xx` EXPOSURE (enabling condition visible), `AG-2xx` ATTACK (exploitation primitive on the wire). New over v3: CloudEOS SFE (CVE-2023-24545 / CVE-2023-24513), supervisor-redundancy privesc exposure (CVE-2023-24509, `detect=none`), the **actively-exploited** tunnel-decapsulation type-confusion (CVE-2026-7473, carried below the 6.5 CVSS floor by the exploited override), untagged-traffic-policy bypass (CVE-2024-9448), cross-VLAN L2 leak (CVE-2024-11185), OSPFv3 CPU exhaustion (CVE-2025-8872), 802.1X multi-auth bypass (CVE-2024-6858), IPsec dataplane halt (CVE-2025-8873) and OpenSSH CVE-2024-6409.
+- **BlastRADIUS (CVE-2024-3596) now scoped to Arista hardware.** The `AG-101/102/110/201/212/213/214` RADIUS engine is retained but fires only when a RADIUS endpoint is an Arista device learned passively from an LLDP management-address TLV — completing the migration flagged when [RADIUS Watch](nettools.md#radius-watch) took over the vendor-neutral coverage, so the two detectors no longer double-fire on non-Arista RADIUS traffic.
+- **Passive by construction:** no socket, subprocess or injector in the engine, enforced by an AST guard in its own self-test (and, for standalone use, systemd `RestrictAddressFamilies` / `IPAddressDeny` sandboxing). Six further CVEs are **quarantined** in-module (unconfirmed advisory / no sourceable CVSS) so they can never be silently promoted, and are excluded from the CVE index via `IGNORED_CVES`.
+- **CVE index +12 named / +13 detected → 395 named, 336 detected** (CVE-1999-0113 → CVE-2026-102019); `gen_cve_list` gains the three `python/aristaguard*.py` owners; CREDITS.md / README.md counts synced.
+- **Self-test:** `arista_guard` now runs the vendored engine's own **682-check** offline suite (catalog / version screening / parsers / posture / RADIUS / tunnel / VLAN / dot1x / OSPFv3 / BlastRADIUS fixes / IPv6 extension headers / passive-invariant AST guard) plus the in-app adapter (finding mapping, catalog, empty-capture, a Scapy LLDP→`AG-001` pcap end-to-end leg). Aggregate `do_routing_selftest` **59 suites**, all green.
+- **Docs:** [nettools.md › Arista Guard](nettools.md#arista-guard).
+
+#### [#970](https://github.com/PierreGode/Ragnar/pull/970) — feat(net): RIP Watch — passive RIP/RIPng routing-security scanner (4th IGP)
+*branch `feature/rip-watch`*
+
+- **New passive watcher: RIP / RIPng** — the 4th in-app IGP alongside OSPF, IS-IS and EIGRP. Covers **RIP** (RFC 2453, UDP/520, IPv4) and **RIPng** (RFC 2080, UDP/521, IPv6); detection-only, never transmits. The engine is vendored verbatim at `python/ripwatch.py` (self-contained stdlib; scapy only on its own live path, which the adapter does not use — it captures via tcpdump→pcap like the other in-app watchers and feeds raw frames to `Ripwatch.feed_frame`). New in-app adapter `do_rip_watch` / `do_rip_baseline` in `network_diagnostics.py` with a persisted learn-then-arm baseline (`data/rip_watch.json`).
+- **25 finding codes** across three numeric bands: posture `RIP-001..009` (unauthenticated / cleartext simple-password / dated keyed-MD5 / downgrade / asymmetry / RIPv1 / RIPng-native / RIPng-under-IPsec), abuse `RIP-101..109` (rogue-responder, route injection, metric-undercut hijack, default-route injection, metric-16 poison storm, RIPng off-link, full-table recon, unicast-targeted injection, RIPv1-auth-bypass), structural `RIP-120..126` (malformed-overrun, must-be-zero, invalid command, out-of-range metric, >25-RTE, malformed auth, version anomaly). Verdicts reuse the IGP-sibling vocabulary (`injection` / `rogue` / `hijack` / `storm` / `anomaly` / `weak-auth` / `clean` / `learning`), so no new token needed registering in the webapp/JS verdict sets.
+- **+5 CVEs** (all riding the structural/abuse engine, `stpwatch`/`modbuswatch` shape — no per-CVE signatures): **CVE-2026-102019** (Junos/Junos Evolved rpd), **CVE-2013-3470** (Cisco IOS XR) and **CVE-2012-4091** (Cisco NX-OS) are malformed-RIP crashes caught by **RIP-120** (an RTE count/length that overruns the datagram); **CVE-2006-2223** (Quagga ripd table leak via Request) → **RIP-107**; **CVE-2006-2224** (Quagga ripd RIPv1-Response auth-bypass) → **RIP-109**. **CVE-2017-12992** (tcpdump's own RIPng-parser over-read) is deliberately **not** detected — a decoder flaw, nothing on the wire — and recorded as such.
+- **Dual-stack by protocol pairing:** v4 codes cover RIP, v6 codes cover RIPng; every abuse rule exists on both planes. Auth-posture codes are RIPv2-only (RIPng has no in-band auth) and the off-link code is RIPng-only. Capture filter `(ip and udp port 520) or (udp port 521) or (ip6 and ip6[6] ∈ EH-set)` — the Ragnar-optimized superset kept over upstream's bare `or ip6` (Pi-friendly), same shape as TLS/Modbus Watch; the software UDP/521 gate decides RIPng after a bounded extension-header walk. (The RADSec / Modbus-Security TLS transports are TLS Watch's job; this is the RIP protocol itself.)
+- **UI:** new RIP Watch card in the L3 Network tab (scan + "Trust current"), verdict banner, findings table with CVE attribution, sources/prefixes lists; L3 layer-button count 15 → 16; `ragnar_modern.js` cache-bust bumped. **Self-test:** new `rip` suite, **20 scenarios** (parser round-trip, posture, injection/hijack/default/storm/recon, structural malformed-overrun + CVE map, RIPng native/off-link, dual-stack parity, clean-no-abuse, the learn-then-arm adapter cycle + JSON-safe baseline, and a Scapy pcap end-to-end leg). Aggregate `do_routing_selftest` **59 suites**, all green.
+- **Live-validated** in a sealed netns: real RIPv2 Responses replayed with `tcpreplay` over UDP/520 in two bursts — the first learns + arms the baseline, the second injects a new prefix from a learned source → **RIP-102** off the real `_rip_capture` tcpdump path, verdict `injection`.
+- **Docs:** [nettools.md › RIP Watch](nettools.md#rip-watch).
+
+#### [#969](https://github.com/PierreGode/Ragnar/pull/969) — feat(net): PIM/MSDP Watch (new) + IGMP Watch v5 (package) + OSI visibility matrix refresh
+*branch `feature/pim-msdp-igmp-v5`*
+
+- **New passive watcher: PIM / MSDP** — the multicast routing control plane. Covers PIM-SM (RFC 7761), PIM-DM (RFC 3973), BiDir (RFC 5015), SSM (RFC 4607), RP discovery via BSR (RFC 5059) / Cisco Auto-RP (UDP/496) / Embedded-RP (RFC 3956) / Anycast-RP (RFC 4610), and inter-domain MSDP (RFC 3618, TCP/639). Rides IP proto 103, multicast in the clear (`224.0.0.13` / `ff02::d`) with no auth beyond optional IPsec AH. Flags **attack** (forged Hello DR-hijack, rogue Candidate-RP/BSR, PIM Register & MSDP SA injection, Assert contention, Join/Prune/SA floods) and **posture/structural** (IPsec-AH protection loss, SSM-range violations, Embedded-RP/Auto-RP anomalies, bad-checksum/truncated/malformed messages). **88 codes** (37 posture + 51 attack), **no CVEs** (protocol-abuse engine, not a version scanner). RPF (a router-internal RIB decision) is covered by three observable heuristics (`PMW-060`/`PMW-081`/`PMW-068`), never guessed at. Engine vendored verbatim at `python/pimwatch.py` (self-contained stdlib; scapy only on its own live path) + `python/pimwatch_fixtures.py` / `python/pimwatch_selftest.py`; new `do_pim_watch` adapter in `network_diagnostics.py` via a `python/`-on-`sys.path` guard, using the engine's in-capture learn-then-arm (no persisted baseline). Verdicts map attack→`attack`, warn/critical posture→`anomaly` (existing tokens). **Dual-stack by protocol pairing:** PIM is v4+v6 (extension-header chains walked); Auto-RP + MSDP are IPv4-only (their v6 equivalents are Embedded-RP and Anycast-RP, on the PIM side). Route `GET /api/net/pim-watch`; UI card in the L3 tab (count 14→15); new `pim` self-test suite (8 scenarios incl. the vendored engine's own 179-check suite + a Scapy pcap e2e leg). Live-validated in a sealed netns (bad-checksum PIM replay → `PMW-003` off the real tcpdump path).
+- **IGMP Watch v5** — the standalone `igmpwatch/` package (invoked `python3 -m igmpwatch`; sibling to the in-app `do_igmp_watch`) updated to v5: restructured pipeline (new `main.py` / `models.py` / `alerting.py`, `alert.py` removed), expanded flood/anomaly/recon/policy/posture detector matrix, and the same three IGMP/MLD CVEs the in-app watcher already detects (`CVE-2019-5608` / `CVE-2025-50681` / `CVE-2026-53275` → `IGMPW-003/001/002`). **No CVE-index change** — `gen_cve_list` gains an `igmpwatch/` → *IGMP / MLD Watch* owner so the package's CVE strings dedupe to the existing owner rather than double-count. Self-test **123/123** (a scapy-version compatibility fix in the harness: v3 report/query builders now carry the `IGMPv3()` base layer that supplies the type byte on current scapy, where a bare `IGMPv3mr(...)` serialized type `0x00`). Docs refreshed at [docs/igmpwatch.md](igmpwatch.md).
+- **OSI visibility matrix refreshed** — `web/images/osi/matrix_full.jpg` replaced with the current module set (now including RADIUS at L7 and RIP + PIM/MSDP at L3), and the seven per-layer band crops (`matrix_l1…l7.jpg`) regenerated from it; matrix cache-bust bumped across all 16 references.
+- Aggregate `do_routing_selftest` **58 suites**, all green.
+
+### 2026-10-16
+
+#### [#968](https://github.com/PierreGode/Ragnar/pull/968) — feat(net): RADIUS Watch — passive RADIUS/EAP scanner (BlastRADIUS + FreeRADIUS CVEs)
+*branch `feature/radius-watch`*
+
+- **New passive watcher: RADIUS / EAP** — the dedicated, vendor-neutral RADIUS protocol detector (RFC 2865; auth UDP 1812/1645, acct 1813/1646, CoA 3799). It **takes over the Blast-RADIUS (`CVE-2024-3596`) engine** that previously lived un-gated and suite-wide in Arista Guard's `rule_radius` (the 7 migrated codes keep their digits: `AG-101→RDW-101` … `AG-214→RDW-214`) and adds RADIUS/EAP auth posture plus the FreeRADIUS CVEs with a deterministic wire shape. **Direction is decided by the RADIUS code, not the port** — fixing the `1812→1812` proxy blind spot where aristaguard read every response as a request (and missed injected Proxy-State). Detection-only, **no baseline** (each capture is self-contained); attribute values never enter a finding (digests/lengths/booleans only). Engine vendored verbatim at `python/radiuswatch.py` (self-contained stdlib + pure-Python EC math — no new dependency), driven by a new `do_radius_watch` adapter in `network_diagnostics.py` via a `python/`-on-`sys.path` import guard.
+- **19 codes:** 8 exposure (`RDW-101/102/110` cleartext / no-Message-Authenticator / unauthenticated-response, `RDW-120/121/122` PAP / CHAP / weak-EAP, `RDW-124` CoA-without-M-A, `RDW-125` RadSec-pair-cleartext) scoped by `known_infra`; 11 attack (`RDW-201` forgery / `RDW-212` Proxy-State injection / `RDW-213` malformed Reply-Message / `RDW-214` opaque VSA exfil, and the FreeRADIUS shapes `RDW-215`–`RDW-221`) never scoped. `RDW-123`/`RDW-202` retired, never reused. Verdicts map ATTACK→`attack` (critical) and EXPOSURE→`weak-auth`, both existing tokens.
+- **+8 CVEs detected** (the FreeRADIUS wire shapes; `CVE-2024-3596` already counted via Arista Guard): WiMAX VSA overflow `CVE-2017-10979`/`-10984`, zero-length concat `CVE-2017-10985`, EAP-pwd Dragonblood `CVE-2019-11234`/`-11235`, EAP-SIM unknown-attr `CVE-2022-41860`, Ascend abinary overflow `CVE-2022-41861`, short Ascend secret `CVE-2017-10978`. **+10 CVEs context** — the triaged/deferred set (`DEFERRED_CVES`): the six FreeRADIUS DHCP-decoder CVEs (`CVE-2017-10980/81/82/83/86/87`, UDP 67 not the RADIUS wire), three EAP-pwd side channels (`CVE-2019-17185`/`-13456`, `CVE-2022-41859`) and a logrotate priv-esc (`CVE-2019-10143`). `gen_cve_list` gains `python/radiuswatch.py` as an owner and a `DEFERRED_CVES`-span rule so the deferred set counts as context, never detected.
+- **RadSec boundary:** TLS/DTLS on 2083 and RADIUS/1.1 ALPN stay TLS Watch's job; RADIUS Watch records only RadSec *presence* and flags a pair that also speaks cleartext (`RDW-125`). Capture BPF admits the RADIUS/CoA/RadSec ports + IPv6 behind an extension header + VLAN.
+- **UI:** new RADIUS Watch card in the L7 Application tab (next to SNMP), verdict banner + findings table with CVE attribution; L7 layer-button count 29 → 30; `ragnar_modern.js` cache-bust bumped. **Self-test:** new `radius` suite (10 scenarios — no-M-A, PAP, Blast-RADIUS forgery, malformed Reply-Message, code-not-port direction, clean, catalog/deferred split, the vendored module's own 605-check suite, and a Scapy pcap e2e leg). Aggregate `do_routing_selftest` **57 suites**, all green.
+- **Live-validated** in a sealed netns: a Blast-RADIUS `Proxy-State` collision-block frame replayed with `tcpreplay` is caught as `RDW-201` off the real `do_radius_watch` tcpdump capture path, verdict `attack`.
+- **Migration note:** Arista Guard still also detects `CVE-2024-3596` until its `rule_radius` is retired in a follow-up (the module's documented next step); Arista Guard keeps its EOS-specific CVEs. **Docs:** [nettools.md › RADIUS Watch](nettools.md#radius-watch).
+
+#### [#963](https://github.com/PierreGode/Ragnar/pull/963) — feat(net): TLS Watch v8 — DTLS/RadSec decode + RadSec/Modbus-Security service labels
+*branch `feature/tls-watch-v8`*
+
+- **DTLS handshake decode (new in v8).** The in-app passive observer now decodes DTLS on the DTLS port (**UDP/2083**, RadSec over DTLS, RFC 7360): `DTLSPlaintext` records are walked (a declared length overrunning the datagram is rejected, never trusted), handshake fragments are reassembled per `message_seq` (out-of-order, overlapping and whole-flight retransmits tolerated — each message yielded once), the `HelloVerifyRequest` cookie is stripped, and the ClientHello / ServerHello / Certificate run through the **same** parser as TLS. JA4 gets proto **`d`**; cipher/version checks and (for **DTLS 1.2**, whose certificate is cleartext) the `cert_*` findings apply unchanged. DTLS's **inverted** version numbering (`0xfefd`=DTLS 1.2, `0xfefc`=DTLS 1.3, lower is newer) is mapped to each version's TLS equivalent before any ordering/legacy comparison, so DTLS 1.0 is no longer waved through a raw `< TLS 1.2` test. The record-layer **volume** detectors (alert flood, Heartbleed, short record, SWEET32 and D(HE)at accounting) stay TLS-over-TCP only, as upstream — datagram transport has its own retransmission/replay model their accounting does not transfer to unexamined.
+- **Service-port labels (new in v8).** A flow whose server-side port is a known secure-transport port now carries a `service` tag — **`radsec`** (TCP/2083 RFC 6614, UDP/2083 RFC 7360) or **`modbus-security`** (TCP/802, "mbaps") — surfaced as a badge in the session table and added to the capture set. TLS 1.2+ / mutual-TLS is mandated on both, so a legacy version there raises the existing `*_legacy_version` findings; cleartext Modbus posture stays Modbus Watch's job (MBW-041/042), not duplicated. **No new CVEs** — the 11 named TLS/QUIC CVEs and the CVE index are unchanged.
+- **Capture:** `TLS_TCP_PORTS` gains 2083 + 802; the UDP capture set gains 2083 for DTLS, kept **even with `--no-quic`** (which only drops QUIC). The IPv6 extension-header admission clause (v5) is unchanged.
+- **UI:** the TLS Watch session table shows the DTLS handshake count, colours the `dtls` proto, renders DTLS version names, and shows the `radsec` / `modbus-security` service badge (mobile-safe; `ragnar_modern.js` cache-bust bumped).
+- **Self-test:** `tls_watch.selftest()` → **135 checks** (DTLS service labels + version-equiv ordering + record/fragment reassembly + cookie strip, and a full DTLS/RadSec datagram round-trip through `parse_pcap` asserting proto `dtls`, JA4 `d…`, `service=radsec` and a cleartext DTLS 1.2 certificate). Aggregate `do_routing_selftest` 56 suites, all green.
+- **Live-validated** in a sealed netns: a real DTLS 1.2 RadSec handshake replayed with `tcpreplay` over UDP/2083 is decoded by the real `do_tls_watch` tcpdump capture path — proto `dtls`, `ja4=dd2d…`, `service=radsec`, SNI + cleartext certificate recovered.
+- **Security (CodeQL CWE-78, `py/command-line-injection`):** the WiFi threat-sweep endpoint (`/api/network/threat-sweep`) now derives its scan interface from the system's live interface list rather than from the request string. The caller-supplied `interface` value is only ever *compared* against that trusted list, never assigned to the name handed to `subprocess` — so the `iface` command argument can no longer carry request taint. The prior allowlist-membership + regex guard was already sound in practice, but the request-tainted value still reached the `nmcli`/`iw` argument in CodeQL's model; selecting the matched name from the trusted list severs the flow at the source. Behaviour is unchanged (same interface accepted).
+- **Docs:** [nettools.md › TLS Watch](nettools.md#tls-watch) (DTLS/RadSec + service-label sections).
+
+#### [#962](https://github.com/PierreGode/Ragnar/pull/962) — feat(net): Modbus Watch v2 — MBW-042 cleartext-without-secure-peer posture + dual-stack re-vendor
+*branch `feature/modbus-watch-v2`*
+
+- **Re-vendored the Solarflere `modbuswatch` package to v2** (`python/modbuswatch/` — `findings.py` +67, `sensor.py` +14, `modbuswatch.py`; `parser.py` / `state.py` byte-identical, kept). Bare sibling imports converted to the package's try/except relative-then-bare form (so `findings`/`state` never collide with `dns_doctor_passive`'s same-named modules). **No new CVEs** — the 4 named IDs (CVE-2019-14462/14463, CVE-2024-10918 under MBW-030; CVE-2021-22779 ModiPwn under MBW-011) and the CVE index are unchanged.
+- **New code `MBW-042 CLEARTEXT_NO_SECURE_PEER` (info/exposure):** the cleartext-posture floor — after the learning window, any plaintext `502` to a slave for which **no** `802`/TLS session has ever been seen fires **once per (family, slave)**, the "this PLC has no secure-Modbus option in use" inventory. Orthogonal to the abuse/framing codes (a legitimate learned master still exposes the slave); an `802` session seen during learning suppresses it, and a slave later seen on `802` is reported as `MBW-041` instead, never re-reported as `042`. Registry now **12 codes** (3 high / 4 medium / 3 low / **2 info**).
+- **Self-test:** `modbus` suite updated to **33 scenarios** — the registry assert bumped to 12/info-2, three new MBW-042 cadence cases (fires once per slave; suppressed once the slave is seen on 802), and the focused abuse/framing/enum + e2e assertions now strip the orthogonal cleartext-posture codes (MBW-040/041/042) so they test the abuse detector in isolation. The capture BPF is unchanged (the Ragnar-optimized `tcp port 502/802 or ip6-with-extension-header` form, kept over v2's broader `or ip6`). Aggregate `do_routing_selftest` 56 suites, all green.
+- **Live-validated** in a sealed netns: cleartext Modbus/TCP reads replayed with `tcpreplay` in two bursts spanning the learn window fire **MBW-042** through the real `do_modbus_watch` tcpdump capture path, verdict `exposure`.
+- **Docs:** [nettools.md › Modbus Watch](nettools.md#modbus--lorawan-watch) (MBW-042 row + cadence).
+
+### 2026-10-14
+
+#### [#961](https://github.com/PierreGode/Ragnar/pull/961) — fix(net): L2 Data Link layer button count 16 → 18
+*branch `fix/net-l2-layer-count`*
+
+- **L2 Data Link tab button** in the Network view now reads **18** (was 16), matching the current L2 module inventory. UI label only — `web/index_modern.html` layer-bar `#net-layer-btn-l2` count span.
+
+#### [#960](https://github.com/PierreGode/Ragnar/pull/960) — feat(net): Cisco Guard v8 — MDT cleartext telemetry, secure-boot + IE-switch + SMB-default-account + egress-block CVEs (+5)
+*branch `feature/cisco-guard-v8`*
+
+- **Ported the feasible v8 additions into the in-app `do_cisco_guard`.** CVE index **355 → 360 named, 305 → 310 detected** (+5); Cisco Guard now names 38 CVEs. Self-test **43 → 49 scenarios**.
+- **`CG-117 MDT_TELEMETRY_CLEARTEXT` (new, no CVE):** model-driven telemetry (gNMI/gRPC dial-out) running unencrypted. The **definitive** marker is the RFC 9113 §3.4 HTTP/2 connection preface (`PRI * HTTP/2.0…`) — only ever sent for cleartext HTTP/2 with prior knowledge, so it is a statement of fact, not a heuristic; TLS telemetry stays silent (TLS Watch's subject) and the payload is never decoded. BPF now admits the gNMI/gRPC ports 50052 / 57400 / 9339.
+- **`CG-008 SECURE_BOOT_ADVISORY_ONLY` (new):** an identified IOS-XE device surfaces the secure-boot bypass (**CVE-2025-20313 / CVE-2025-20314**) as advisory-only INFO — a local/physical vector with no wire signature. The **IE Switch Device Manager** web-UI DoS (**CVE-2025-20327**) folds into `CG-103`/`CG-260`, the **Catalyst 9000 crafted-frame egress block** (**CVE-2025-20311**) into `CG-220`, and the **EOL SB switch default-privileged-account re-enable** (**CVE-2018-15439**, 9.8) into the `CG-113` SMB cluster.
+- **Deferred, with reasons:** `CG-222` (802.3 length datum not in tcpdump's IP-onward hex), the IS-IS byte codes (covered by IS-IS Scanner), the SNMP/DHCP byte codes (covered by SNMP Watch / DHCP Guardian + the existing `CG-201/202`), and CVE-2024-20271 / CVE-2024-20314 (no public packet signature, per the module).
+- **Fixed a pre-existing #959 CVE-index miscount:** `gen_cve_list` scans **all git-tracked** `.py`/`.js`/`.html`, so once the vendored `python/bgp_pathwatch/` tiers became tracked, their test corpus's parser-CVE strings (CVE-2023-38802 / CVE-2024-44070 / CVE-2024-30395 / …) were counted as live-detected, silently flipping ~13 BGP/SR-MPLS CVEs context→detected (the committed index had stayed at the pre-tracking 305/41 because #959's regen ran before `git add`). `tracked_files()` now excludes `python/bgp_pathwatch/` (self-test-only, no live adapter), restoring those CVEs to their intended **context** classification. Net index after the fix + the v8 CVEs: **360 / 310 / 41** (context unchanged).
+- **Self-test:** 6 new v8 scenarios (CG-117 cleartext + TLS-silent negative, CG-008 secure-boot, the three CVE-fold checks). **Live-validated** in a sealed netns: a cleartext HTTP/2 preface on gNMI port 50052 replayed with `tcpreplay` fires `CG-117` through the real `tcpdump` capture path, verdict `exposure`. `gen_cve_list` owns the new IDs under Cisco Guard and labels them.
+- **Docs:** [nettools.md › Cisco Guard](nettools.md#cisco-guard) (v8 additions), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md).
+
+#### [#959](https://github.com/PierreGode/Ragnar/pull/959) — feat(net): BGP Pathwatch v6 passive-analysis tiers — BGPsec / SR-Policy-BGP-LS / tap (169 self-test checks)
+*branch `feature/bgp-pathwatch-v6`*
+
+- **Vendored the three new passive BGP-message analysis tiers from Pathwatch v6** into `python/bgp_pathwatch/` (isolated subdir — the tiers use bare sibling imports `bgp`/`bgpcve`/… that would otherwise collide in `python/`): the shared v6 collector/codec (`bgp.py` + `iptrie.py`), the parser-CVE walker (`bgpcve.py`, 14 detectors / 12 codes), **BGPsec posture + downgrade** (`bgpsec.py`, RFC 8205 — 20 codes), **SR Policy + BGP-LS** (`bgpsrte.py`, RFC 9830 SAFI 73 + RFC 9552 — 23 codes) and the dual-stack **passive tap** (`bgptap.py`, IPv6 extension-header walk + marker-resync TCP reassembly). All pure-stdlib, receive-only, **no CVEs** (behavioural posture; BGPsec does no signature validation — that would not be passive).
+- **Wired their offline suites into the aggregate Detector Self-Test** as three new suites — **`bgp_tap` (57)**, **`bgpsec` (47)**, **`bgp_srte` (65)** = **169 checks** — run in their own interpreter (chdir'd into the vendored dir so the tests' bare imports + source-scan passivity checks resolve). `do_routing_selftest` is now **56 suites, all green**.
+- **No CVE-index change** — the tiers carry no CVEs, and `gen_cve_list` scans an explicit file list that excludes the vendored dir; CVE.md regenerates **identical** at **355 named / 305 detected**.
+- **Scope:** this is the "new tiers + validate" integration — the tiers ship vendored and self-test-validated; the existing receive-only collector (`bgp_speaker.py`) + OWD / path-asymmetry integration is untouched (no API-breaking rewrite). **Live capture adapters / routes / UI for the new tiers are a planned follow-up.**
+- **Docs:** [nettools.md › BGP Collector & Path Asymmetry](nettools.md#bgp-collector--path-asymmetry-control-plane--data-plane) (new "Passive BGP-message analysis tiers (Pathwatch v6)" subsection), Detector Self-Test list.
+
+#### [#958](https://github.com/PierreGode/Ragnar/pull/958) — feat(net): STP/BPDU Watch v2 (31 checks, per-MSTI) + new MRP Watch (MVRP/MMRP/GVRP/GMRP) + visibility matrix
+*branch `feature/stp-v2-mrp-watch`*
+
+- **STP/BPDU Watch v2 — full byte-level security decoder.** Replaced the presence-only tcpdump-text watcher with the vendored pure-python engine `python/stpwatch.py`: it decodes 802.1D / RSTP / MSTP (CIST + the MST config-ID **and every 16-octet MSTI record**) and Cisco PVST+/RPVST+ from a **raw pcap**, running **31 checks (STP-001..031)** across six families — root integrity, port policy (BPDU on a declared edge port), rate/DoS, field sanity, topology/MST digest-region, and the **per-MSTI takeover tier** (an attacker inside a legit, correctly-digested region forging a superior regional root / sub-floor priority / zero path cost inside one instance's record). `do_stp_watch` now captures raw frames → `parse_frame` → `Analyzer.process`, maps the findings to a `root-hijack / rogue-bridge / bpdu-flood / topology-change / anomaly` verdict, and learns a v2 baseline (roots, bridges, MST regions, per-MSTI roots) in `data/stp_watch.json`. The old text parser + its regexes were removed. **No CVEs** — BPDUs are unauthenticated by design.
+- **New MRP Watch** — a passive monitor for the standards-based dynamic-registration protocols (the VTP siblings): 802.1ak **MVRP** (`0x88F5`) and **MMRP** (`0x88F6`) plus legacy 802.1D **GVRP/GMRP** (LLC-framed). Vendored engine `python/mrpwatch.py`, **21 codes (MRP-001..125)**, **no CVEs**. The capture admits **both** EtherTypes **plus the GARP application block** (a filter on `0x88F5` alone silently drops all MMRP). Flags a **LeaveAll flood** (`MRP-101/103/105/107` HIGH — the standards sibling of the VTP bomb), a **registration burst for never-before-seen VLANs/groups** (`102/104/106/108` — a VLAN-hopping setup signal), and structural/malformed PDUs (`120..125`). New `do_mrp_watch`, `GET /api/net/mrp-watch` (`?known_vlans=` escalates severity, never gates), card + `runMrpWatch`. *(Not* IEC 62439-2 ring-redundancy MRP — this is the VLAN/multicast registration plane.*)*
+- **Self-tests:** both suites green. STP grows to **153 scenarios** (the engine's own 151-check tier run out-of-process + a 2-case in-app superior-root leg); MRP adds **69** (the engine's own 65-check tier + a 4-case in-app leg incl. a capture→pcap→engine round-trip). The aggregate `do_routing_selftest` is now **53 suites, all green** (MRP added). **Live-validated** in sealed netns for both: a yersinia-style superior-root BPDU fires `STP-002` → `root-hijack`, and MVRP+MMRP LeaveAll frames fire `MRP-001/002/101` → `attack`, each off the wire through the real `tcpdump` capture path.
+- **UI:** STP card rewritten to show the v2 `findings` list (severity-tagged STP-0xx) + a segments table, with an `anomaly` verdict style; new MRP card. Mobile-verified at 390 px. Cache-bust `?v=20261014-stp-v2-mrp`.
+- **Visibility matrix:** new master (`docs/ragnar_osi_visibility_matrix.jpg`) with the **STP/BPDU** and **MRP Watch** tiles in L2; `matrix_full` and the L7…L1 web crops re-cut from the new master (band boundaries re-detected), image cache-bust bumped.
+- **Docs:** [nettools.md › STP/BPDU Watch](nettools.md#stpbpdu-watch), [nettools.md › MRP Watch](nettools.md#mrp-watch).
+
+#### [#957](https://github.com/PierreGode/Ragnar/pull/957) — feat(wardriving): live Aircraft (ADS-B) count + auto-start with wardriving
+*branch `feature/adsb-live-card`*
+
+- **A live Aircraft card** now sits in the Wardriving tab's status row next to WiFi / Bluetooth / Cell / Thread-Zigbee. Its number is the **unique aircraft heard this UTC day** and climbs as the ADS-B radar sees new ones; the sub-line shows how many are **overhead now**, or **radar off** when dump1090 isn't running (ADS-B needs an RTL-SDR, which runs alongside the WiFi wardrive on its own radio).
+- Fed by a new cheap `adsb.live_status()` (running / live / today) added to `/api/wardriving/status` — no `lsusb` or type enrichment, safe on the ~2 s status poll.
+- **Auto-start ADS-B with wardriving** (opt-in, *Start the ADS-B radar when a wardrive begins* in the Aircraft card). New engine `SESSION_STARTED_HOOKS` (mirrors the finished hooks) fire from every start path (web/CYD/boot); the webapp frees the RTL-SDR from the sub-GHz tools, starts the radar, and auto-stops it when the drive ends — but only a radar it started, never one the operator started by hand, and it never grabs a radar that's already running.
+- Complements the ADS-B → Wardrift upload card from [#956](https://github.com/PierreGode/Ragnar/pull/956); same per-UTC-day unique-aircraft log, shown live instead of only at upload.
+- **Fix:** the Signal Intelligence nav buttons (ADS-B Radar, Pager, VOR, RF Waterfall) no longer vanish while a radio is in use. They gated on the RTL being *openable* (`rtl/status` `available`), which flips false the moment dump1090 opens the dongle — so starting the ADS-B radar hid the very button that opens it. They now gate on the RTL being physically **present** (`device_present`); the target pages still handle the live device state.
+
+#### [#956](https://github.com/PierreGode/Ragnar/pull/956) — feat(adsb): upload aircraft to Wardrift (Aircraft Watch)
+*branch `feature/adsb-wardrift-upload`*
+
+- **ADS-B now feeds Wardrift's Aircraft Watch** (detect 10 different aircraft in a UTC day), wired up like the wardrive upload. The live radar only shows what is overhead now, so `adsb.py` additionally logs every **unique ICAO** heard per UTC day to `data/adsb/day_YYYYMMDD.jsonl` (one row per aircraft, plus one enrichment row when a callsign is first decoded), pruned after 21 days.
+- **Same account, same endpoint.** The radar page's new **Wardrift Aircraft Watch** card uploads the day as an **SBS/BaseStation** log (`# timezone=UTC` header, one `MSG` row per aircraft — type 3/1/8 by the fields present) to the same signed-in `/v1/wardrive/logs` the wardrive route uses. Wardrift auto-detects the format, credits eligible aircraft (ICAO + observation time; **no receiver GPS needed**) and makes **no** ground route. Each ICAO counts once per account per UTC day, so the day's growing log re-sends safely.
+- **Manual or auto.** ↑ *Upload today*, or an *Auto-upload while receiving* toggle that re-sends the day every `adsb_wardrift_interval_min` min (default 30) while the radar runs and only when the unique count grew. Wardrift's async verdict is followed to *succeeded/failed*, and auto-uploads send a **Pushover** summary (`pushover_notify_adsb_upload`, on by default).
+- **New endpoints:** `GET/POST /api/adsb/wardrift`, `POST /api/adsb/wardrift/upload`, `GET /api/adsb/export?day=YYYYMMDD`. Reuses the existing Wardrift sign-in (no new secret). Tests: `tests/test_adsb_export.py` (dedup, field back-fill, SBS shape/round-trip through `parse_sbs`, mid-day restart reseed). ALPR threat influence from the same release is left for later. **Unverified against a live Wardrift ADS-B upload** (the dev box's session token is expired).
+
+#### [#955](https://github.com/PierreGode/Ragnar/pull/955) — fix(test): LACP Watch T75 scapy-free check inspects its own source, not sys.modules
+*branch `fix/lacp-t75-scapy-selfcheck`*
+
+- **Test-harness fix only — the module was always scapy-free.** LACP Watch's Tier-1 `T75` check asserted `"scapy" not in sys.modules` to guarantee `lacpwatch.py` stays pure-python (live capture uses `AF_PACKET` directly). In a **shared interpreter** — Ragnar's aggregate `do_routing_selftest`, where another suite (MAC/DHCP/ARP/…) legitimately imports scapy into the process first — that global check tripped and reported a false **FAIL**, even though `lacpwatch` itself never imports scapy (it passes 150/150 in a fresh process).
+- **Fix:** `T75` now verifies the guarantee from the **module's own source** (`re.search` for a top-of-line `import scapy` / `from scapy` in `__file__`), with a `sys.modules` fallback if the source can't be read. The regex is anchored to the start of a line, so it never matches the check's own text.
+- **Validated:** `lacpwatch` self-test is **150/150** both in a fresh process and with scapy pre-loaded (the aggregate condition). With this plus [#954](https://github.com/PierreGode/Ragnar/pull/954), the full `do_routing_selftest` is now **52/52 suites green** (was 50/52 — the two non-green lines were both self-test-harness artifacts, not detector defects). No detector, CVE-index or docs change.
+
+#### [#954](https://github.com/PierreGode/Ragnar/pull/954) — fix(test): Liebert Guard live-loopback self-test skips cleanly without CAP_NET_RAW
+*branch `fix/liebert-live-selftest-cap-net-raw`*
+
+- **Test-harness fix only — the detector was always healthy.** Liebert Guard's Tier-4 live-loopback leg (`test_liebert_guard.py`) opens its `AF_PACKET` sniff socket inside a child thread. Without `CAP_NET_RAW` that raises `PermissionError` **in the thread**, where the leg's own `PermissionError`/`OSError` skip-handler (which only wraps the main thread) can't see it — so the capture returned `[]` and was scored as a bogus **FAIL** (`live loopback v4/v6 -> exactly one LG-001 (got [])`) instead of a **SKIP**. This surfaced only when the suite ran as a non-root user; under the `ragnar` service (root, with `CAP_NET_RAW`) the leg ran and passed.
+- **Fix:** probe the `AF_PACKET` socket in the **main** thread at the top of `live_case()`, so a capability-less environment is classified **SKIPPED** (the author's documented intent — "the documented total must not depend on the kernel"), while a capable environment still runs the real capture and asserts exactly one `LG-001`.
+- **Validated:** as a non-root user → `198 passed, 0 failed | live tier: v4/v6 SKIPPED (no CAP_NET_RAW)`; as root → `198 passed, 0 failed | live tier: v4/v6 ran and passed`. In-app `_liebert_selftest` now `success=True`. No detector, CVE-index or docs change.
+
+#### [#953](https://github.com/PierreGode/Ragnar/pull/953) — docs(releases): correct the CDP Watch v5 / Cisco Guard v7 changelog PR reference
+*branch `fix/releases-pr-952-number`*
+
+- **Doc-only.** The CDP Watch v5 and Cisco Guard v7 entries were labelled **#951** (a prediction made before the PR was opened); they actually merged as **[#952](https://github.com/PierreGode/Ragnar/pull/952)**. Corrected both references to #952. No code or CVE-index change.
+
+#### [#952](https://github.com/PierreGode/Ragnar/pull/952) — feat(net): Cisco Guard v7 — TWAMP / IP SLA, WLC OOB AP-image (CVE-2025-20188 10.0), SD-WAN (+4 CVEs)
+*branch `feature/cdp-v5-cisco-v7`*
+
+- **Ported the feasible v7 additions into the in-app `do_cisco_guard`.** CVE index **351 → 355 named, 301 → 305 detected** (+4); Cisco Guard now names 33 CVEs. BPF adds `tcp port 862 or udp port 862 or udp port 1967`.
+- **TWAMP / IP SLA:** `CG-114` TWAMP/OWAMP control plane reachable on TCP/862 — the unauthenticated precondition for **CVE-2025-20154** (server OOB array-access reload) and **CVE-2021-34720** (IP SLA/TWAMP socket memory exhaustion), both 8.6; `CG-014` a 64-byte Server Greeting; `CG-115` that greeting offering **Unauthenticated mode** (Modes bit 0x1, usable with no shared secret); `CG-294` a malformed greeting (nonzero MBZ tail); `CG-116` Cisco IP SLA Responder control on UDP/1967 (CVE-2021-34720 — IP SLA and TWAMP share the code path).
+- **WLC (`CG-105`, CVE-2025-20188, 10.0):** a Catalyst 9800 / Embedded Wireless Controller identity → verify the Out-of-Band AP-Image-Download feature (hardcoded-JWT arbitrary file upload). **Gated on the WLC identity, not a bare 8443 flow**, so it doesn't fire on every HTTPS session in the broad guard capture.
+- **SD-WAN (`CG-106`, CVE-2026-20133):** a Catalyst SD-WAN Manager (vManage) API path (`/dataservice/`, `vmanage`) in cleartext HTTP.
+- **Deferred, with reasons:** `CG-295` (stateful Accept-Session resource-limit — needs TCP flow state the in-app model doesn't keep), `CG-293` (SMB default-account cleartext — needs request/response correlation), CVE-2024-20314 / CVE-2024-20271 (no passive packet signature, per the module), and the L2-byte codes still deferred from v6.
+- **Self-test:** the `cisco` suite grows to **43 scenarios** (TWAMP exposed/unauth/malformed, IP SLA, WLC with CVE-2025-20188, SD-WAN). **Live-validated** in a sealed netns: crafted TWAMP greeting + IP SLA + vManage HTTP replayed with `tcpreplay` fire `CG-114`/`CG-115`/`CG-116`/`CG-106` through the real `tcpdump` capture path.
+- **Docs:** [nettools.md › Cisco Guard](nettools.md#cisco-guard), [CREDITS.md](CREDITS.md), card text. `gen_cve_list` owns the `_twamp` helpers under Cisco Guard and labels the four new IDs.
+
+#### [#952](https://github.com/PierreGode/Ragnar/pull/952) — feat(net): CDP Watch v5 — UDLD detection (CVE-2021-1368 port-channel RCE, CVE-2021-34714 reload DoS)
+*branch `feature/cdp-v5-cisco-v7`*
+
+- **Ported the v5 (v1.2.0) UDLD family into the in-app `do_cdp_watch`.** UDLD (UniDirectional Link Detection) rides the same Cisco group MAC as CDP (PID `0x0111`), so the capture BPF now admits both (`ether[20:2] = 0x2000 or 0x0111`). CVE index **349 → 351 named, 299 → 301 detected** (+2); CDP Watch now names 27 CVEs.
+- **UDLD is off by default and both CVEs require it enabled**, so a UDLD frame on the wire is itself the exposure (`UDLD-001`). UDLD carries no version banner, so OS-family attribution reuses the **CDP identity of the same source MAC**: NX-OS/FXOS/UCS → `UDLD-020` (**CVE-2021-1368**, 8.8 port-channel RCE + **CVE-2021-34714**, 7.4 reload DoS); IOS/IOS-XE/IOS-XR → `UDLD-021` (CVE-2021-34714, which *unlike* CDPwn affects plain IOS/IOS-XE); no CDP sighting → `UDLD-022` (honest "attribute by hand"). Malformed UDLD TLVs raise `UDLD-040`/`041`/`042`/`043` (overrun / underflow / oversized / trailing) and escalate the verdict.
+- **Not ported:** CVE-2020-3217 (onePK) — the module itself names it only as a contrast (state invisible on the wire); no packet signature.
+- **Self-test:** the `cdp` suite grows with 10 UDLD scenarios (presence, each malformed shape, NX-OS/IOS screening with CVE attribution, the unattributed case, verdict escalation). **Live-validated** in a sealed netns: a CDP NX-OS banner + UDLD frames replayed with `tcpreplay` fire `UDLD-001`/`UDLD-020` (with CVE-2021-1368) / `UDLD-041` through the real `tcpdump` capture path.
+- **Docs:** [nettools.md › CDP Watch](nettools.md#cdp-watch) (UDLD section, BPF), [CREDITS.md](CREDITS.md), card text. `gen_cve_list` owns the `_udld` helpers under CDP Watch and labels the two CVEs.
+
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): MAC Watch v4 — passive MACsec / 802.1X-EAPOL / MKA L2-security plane
+*branch `feature/lldp-watch-v3` (shared)*
+
+- **Added the one genuinely new v4 capability to the in-app `do_mac_watch`: a passive sniff of the link-security control plane.** The existing watcher is neighbour-table + `arp-scan` based, so it already covers 11 of the v4 drop's 14 detectors (disguised-vendor OUI, iface identity-change, FHRP gateway-pin, duplicate-MAC clone, randomization inventory, device tracking, EUI-64 mismatch, FHRP awareness). The three it structurally could **not** see — MACsec, 802.1X/EAPOL and MKA — ride dedicated EtherTypes that never reach the ARP/NDP caches, so this release adds an **opt-in** short `tcpdump` capture (`l2sec=1`, no frames emitted) that parses the 802.1AE SecTAG and EAPOL headers directly off the wire. (The RF-only v4 detectors — `dot11_seq_discontinuity`, `rssi_bimodal` — need 802.11 monitor mode and stay out of scope for the wired watcher; `syslog_forensic` is standalone-store only.)
+- **8 new posture codes**, folded into the existing clean/randomization/fhrp/suspicious/spoofed verdict: **MACSEC-010** PN regression inside a secure association (replay), **MACSEC-011** SCI system-identifier ≠ transmitting source MAC (spoofed secure channel), **MACSEC-012** confidentiality downgrade (`TCI.E` cleared on a once-encrypted SA), **MACSEC-013** MACsec channel inventory, **EAPOL-010** EAPOL-Logoff burst (802.1X port-deauth DoS), **EAPOL-011** EAPOL-Start flood, **EAPOL-012** 802.1X-in-use inventory, **MKA-010** MKA participant inventory. A HIGH L2-security finding escalates the verdict to **spoofed**.
+- **MAC Watch carries no CVEs** — these are passive posture signals, not CVE probes; the CVE index is unchanged (no `gen_cve_list` / CVE.md regen).
+- **Self-test:** the `mac` suite grows to **25 scenarios** (7 new L2-security legs driving the pure MACsec/EAPOL/MKA parse+detect path: PN-replay, SCI-spoof, downgrade, clean-monotone, logoff-DoS, start-flood, MKA-inventory — all green). **Live-validated** end-to-end in a sealed network namespace: crafted MACsec + EAPOL frames replayed over a veth pair, captured by the real `do_mac_watch(l2sec=True)` on the far end — all 6 expected codes came back off the wire and the verdict escalated to `spoofed`.
+- **UI:** MAC Watch card gains an **L2 security** opt-in checkbox and an `L2-sec high` summary chip; findings render split into an abuse section (red, with code tags) and an in-use inventory section (sky-blue). Mobile-friendly (verified at 390 px). Cache-bust `?v=20261014-mac-v4-l2sec`.
+- **Docs:** [nettools.md › MAC Watch](nettools.md).
+
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): BGP Path Watch v5 — FRR bgp_attr_encap CVE-2024-44070 posture (+1 named CVE)
+*branch `feature/lldp-watch-v3` (shared)*
+
+- **Ported the one real new CVE from the v5 `pathwatch` drop into the in-app `do_bgp_watch` posture advisories.** The in-app BGP watcher is tcpdump-**text** based, so (like the rest of the malformed-UPDATE class) this is named as **exposure posture / context**, not byte-detected. CVE index **348 → 349 named** (+1 **context**: detected stays **299**, context 40→41).
+- **CVE-2024-44070** (FRRouting `bgp_attr_encap` — a corrupted Tunnel-Encapsulation attribute, the same sub-TLV class as CVE-2023-38802 / CVE-2024-30395) folded into the `malformed_attr` advisory. **CVE-2026-48685 was deliberately not added** — the upstream drop itself rejects it (FastNetMon extended-length attribute read, not a router BGP-daemon crash).
+- **Self-test:** the `bgp` suite (12 scenarios) still passes. `gen_cve_list` owns the ID under BGP Path Watch and labels it.
+- **Docs:** [nettools.md › BGP Path Watch](nettools.md), [CREDITS.md](CREDITS.md).
+
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): OSPF Watch v6 — OSPFv3 malformed-LSA DoS posture (+6 named CVEs)
+*branch `feature/lldp-watch-v3` (shared)*
+
+- **Ported the v6 OSPFv3/IPv6 DoS CVE set into the in-app `do_ospf_watch` posture advisories.** The in-app OSPF watcher is tcpdump-**text** based (it can't reconstruct the malformed LSA bytes), so these are named as **exposure posture / context**, not byte-detected — the honest framing the existing opaque-LSA advisory already uses. CVE index **342 → 348 named** (+6 **context**: detected stays **299**, context 34→40).
+- **New names:** the OSPFv3 malformed-LSA DoS class — Quagga/FRR ospf6d **CVE-2011-3323** (invalid IPv6 prefix length) / **CVE-2018-14880** (OSPFv3 parser over-read), Cisco **CVE-2018-0466** / **CVE-2013-5565**, Arista EOS **CVE-2025-8872** — folded into the opaque/malformed-LSA advisory, and the no-auth-enabled Cisco IOS LSA-manipulation **CVE-2013-0149** onto the weak-auth advisory. (CVE-2003-0001 Etherleak is already owned by Trailing-data/Etherleak, so not re-named; the SR opaque-LSA overruns CVE-2024-31950/31951 remain byte-detected by SR-MPLS Watch.)
+- **Self-test:** the `ospf` suite (13 scenarios) still passes. `gen_cve_list` owns the new IDs under OSPF Watch and labels them.
+- **Docs:** [nettools.md › OSPF Security Scanner](nettools.md#ospf-security-scanner), [CREDITS.md](CREDITS.md).
+
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): BFD Watch v4 — Seamless BFD (S-BFD, RFC 7880) reflector plane (+6 codes)
+*branch `feature/lldp-watch-v3` (shared)*
+
+- **Re-vendored the Solarflere `bfdwatch` engine to v4** (root `bfdwatch.py`, 2615→3333 lines, 31→**37 codes**; **no new CVEs** — the 5 named CVEs and the index are unchanged at **342 named / 299 detected**). Same pattern as LACP / SR-MPLS: the upstream drop ships only the engine + `main`; the Ragnar integration layer (`do_bfd_watch`, `selftest`, `_bfd_capture_pcap`, `_bfd_verdict`, Watchtower feed) was spliced back on, and v4's CLI `__main__` dropped. The v4 engine API (`BFDWatch`, `self_test`) is unchanged, so the layer and its scenarios port cleanly.
+- **v4 adds Seamless BFD (S-BFD, RFC 7880)** on udp/7784 — the stateless reflector plane used by SR / SR-TE path monitoring: a reflector in an illegal state (`BFD-SBFD-REFLECTOR-ILLEGAL-STATE`), a reflected discriminator that doesn't mirror the request (`BFD-SBFD-REFLECTOR-MIRROR-MISMATCH`), a cross-domain discriminator collision, a non-zero initiator interval, a source-port violation, and the reflected-loop primitive.
+- **Self-test:** the `bfd` suite (9 scenarios incl. the engine's own Tier-1 reachability run) passes on the v4 engine. **Live-validated** in a sealed netns: a truncated and a malformed BFD control packet replayed with `tcpreplay` fire `BFD-TRUNCATED-HEADER` / `BFD-MALFORMED-HEADER` through the real `do_bfd_watch` tcpdump path.
+- **Docs:** [nettools.md › BFD Watch](nettools.md#bfd-watch) (S-BFD, 37 codes).
+
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): SR-MPLS Watch v4 — LSP Ping / VCCV / IOAM OAM plane (+10 codes)
+*branch `feature/lldp-watch-v3` (shared)*
+
+- **Re-vendored the Solarflere `sr_mplswatch` engine to v4** (root `sr_mplswatch.py`, 3991→5558 lines, 46→**56 codes**; **no new CVEs** — these are wire conditions, so the 17 named CVEs and the index are unchanged at **342 named / 299 detected**). Like LACP, the upstream drop ships only the engine + `main`; the Ragnar integration layer (`do_sr_mpls_watch`, `selftest`, `_srm_capture_pcap`, `_srm_verdict`, Watchtower feed — a self-contained block with its own aliased imports) was spliced back on. The v4 engine API (`Config`, `Emitter`, `SRMPLSEngine`) is unchanged, so the layer and its 12 adapter scenarios port cleanly.
+- **v4 adds the MPLS/SR OAM plane:** **LSP Ping** (udp/3503 MPLS Echo Request/Reply, RFC 8029 / RFC 8287 segment FECs), **VCCV** pseudowire control-channel checks, **in-situ OAM (IOAM)** option abuse, and loss/delay **measurement** anomalies — alongside the existing data-plane (MPLS / SRv6) and SR control-plane (LDP / RSVP-TE / BGP-SR / IS-IS-SR / OSPFv2+v3-SR) detection.
+- **Self-test:** the `srmpls` suite (12 adapter scenarios) passes on the v4 engine. **Live-validated** in a sealed netns: an MPLS label stack arriving on a declared **CE** port fires `SRM-MPLS-ON-CE-PORT` (critical) through the real `do_sr_mpls_watch` tcpdump path, verdict `segment-injection`.
+- **Docs:** [nettools.md › SR-MPLS Watch](nettools.md#sr-mpls-watch) (LSP Ping / VCCV / IOAM, 56 codes).
+
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): OAM Watch v2 — +6 abuse codes (Event-replay refinement)
+*branch `feature/lldp-watch-v3` (shared)*
+
+- **Re-vendored the Solarflere `oamwatch` package to v2 (v0.2.0)** (`python/oamwatch/` + `python/oamwatch_tests/`; **38→44 codes, no new CVEs** — zero Link OAM CVEs clear the bar, so the index is unchanged at **342 named / 299 detected**). The 6 new codes (`OAM-075`..`080`) all land in the abuse group.
+- **Event-Notification replay refined:** a byte-identical retransmission of the same sequence number is now recognised as **conformant** (silent); `OAM-073` fires only when the sequence goes **backwards**, and a same-sequence-but-**divergent-content** Event is the new `OAM-080`.
+- **Self-test:** the `oam` suite (19 scenarios) updated for the refined OAM-073 behavior; registry assert 38→44 (5 posture / 18 structural / 21 abuse), and the module's own **355-check conformance** tier runs out of process. **Live-validated** in a sealed netns: a backwards Event sequence fires `OAM-073` through the real `do_oam_watch` tcpdump path, verdict `attack`.
+- **Docs:** [nettools.md › OAM Watch](nettools.md#oam-watch) (44 codes, OAM-075..080).
+
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): LACP Watch v3 — +28 codes (PAGP, PAUSE/PFC flow-control planes)
+*branch `feature/lldp-watch-v3` (shared)*
+
+- **Re-vendored the Solarflere `lacpwatch` engine to v3** (root `lacpwatch.py`, 1958→3827 lines, 39→**67 codes**; **no new CVEs** — the one anchor stays CVE-2024-30388, so the index is unchanged at **342 named / 299 detected**). The upstream drop ships the engine with `main`/`run_self_test`; the Ragnar integration layer (`do_lacp_watch`, `selftest`, `_capture_pcap`, Watchtower `_emit_watchtower`, the `_verdict_for` card reduction) was spliced back on — the v3 `LacpWatch` API (`on_frame`, `findings`, `stats`, `halves`, `lag_posture_seen`) is compatible, and `selftest()` now adapts the module's own Tier-1 suite.
+- **v3 parses the neighbouring slow-protocol planes on the same wire**: **PAGP** (Cisco's pre-standard aggregation) and the MAC-Control **PAUSE / PFC** flow-control opcodes — as posture/abuse tiers (no CVE exists for them; a flood or a contradictory advertisement is the signal), alongside the existing LACP/Marker integrity codes.
+- **Self-test:** the `lacp` suite runs the module's **150-check** Tier-1 (pure-Python, no sockets). **Live-validated** in a sealed netns: a VLAN-tagged + wrong-destination LACPDU replayed with `tcpreplay` fire `LACP-VLAN-TAGGED` / `LACP-NON-SLOW-DESTINATION` through the real `do_lacp_watch` tcpdump path, verdict `takeover`.
+- **Docs:** [nettools.md › LACP Watch](nettools.md#lacp-watch) (67 codes, PAGP / PAUSE-PFC planes).
+
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): CFM Watch v5 — Y.1731 measurement/transport + E-LMI cross-plane (+17 codes)
+*branch `feature/lldp-watch-v3` (shared with LLDP v3 et al.)*
+
+- **Re-vendored the Solarflere `cfmwatch` engine to v5 (v1.1.0)** (`python/cfmwatch.py` 148→192 KB) with its updated tests and fixtures (6 new: `elmi`, `elmi_undeclared`, `measurement`, `maintenance`, `opcodes`, `vxlan`). The in-app `do_cfm_watch` adapter is generic over `engine.findings`, so the new codes flow through. **No new CVEs** → CVE index unchanged at **342 named / 299 detected**.
+- **107 finding codes now (was 90), across thirteen classes** — three new: **M** (Y.1731 measurement & maintenance — forged loss/delay, TST, on-demand opcodes), **T** (transport/encapsulation — CFM tunnelled where it should not be, e.g. VXLAN), and **L** (E-LMI cross-plane, MEF 16).
+- **E-LMI (`CFM-250`..`254`)** runs the UNI's EVC status plane on **EtherType 0x88EE** — the capture BPF now admits it alongside CFM's 0x8902, and the frame count uses `frames_cfm` (which counts CFM + E-LMI, not junk). Like ERPS rings, it is declaration-dependent: a new **`do_cfm_evc`** action (declare/list/remove/clear), `GET|POST /api/net/cfm-evc`, a `cfm-evc` CLI and a card EVC-declaration control arm the cross-plane rules (`CFM-251`..`253`) against an operator-declared EVC; with none declared, E-LMI presence is reported as `CFM-254`.
+- **Self-test:** the `cfm` suite grows to **24 scenarios** (all 26 fixtures to their manifest codes, covering all 107; the EVC-declaration store path), then runs the module's own **284-check conformance** and the Wireshark + scapy cross-check out of process.
+- **Live-validated** in a sealed netns: the E-LMI fixture replayed with `tcpreplay` fires `CFM-251`/`252`/`253` through the real `tcpdump` capture path with an EVC declared (0x88EE admitted), verdict `attack`.
+- **Docs:** [nettools.md › CFM Watch](nettools.md#cfm-watch) (classes M/T/L, EVC declaration, 107 codes), [CREDITS.md](CREDITS.md), card EVC control.
+
+#### [#950](https://github.com/PierreGode/Ragnar/pull/950) — feat(net): LLDP Watch v3 — DCBX class (+10 codes, Data Center Bridging abuse)
+*branch `feature/lldp-watch-v3`*
+
+- **Re-vendored the Solarflere `lldpwatch` engine to v3** (`python/lldpwatch.py` 77→98 KB, `lldpwatch_frames.py`, `lldpwatch_conformance.py`; the scapy cross-check is byte-identical and unchanged) and added the new **`lldpwatch_dcbx_xcheck.py`** tier. The in-app `do_lldp_watch` adapter is generic over the engine, so the new codes flow through unchanged.
+- **40 finding codes now (was 30), in four classes** — new **Class D: DCBX** (Data Center Bridging eXchange, `LLDP-060`..`069`): DCBX rides inside LLDP as org-specific TLVs and negotiates the lossless fabric (ETS bandwidth, PFC priorities, application-priority table). It flags malformed DCBX TLVs, an ETS bandwidth that doesn't sum to 100%, illegal ETS/TSA or PFC fields, a malformed app table, duplicate features, an IEEE-vs-CEE version conflict, a malformed CEE sub-TLV, and DCBX-specific abuse (feature churn / flapping willing-bit). The split is +8 structural, +2 abuse. **There is no DCBX CVE**, so the CVE index is unchanged at **342 named / 299 detected**.
+- **Self-test:** the `lldp` suite grows to **50 scenarios** (the DCBX codes are auto-covered by the generic malformed-fixture loop), and runs the module's own **2568-check conformance** and **338-check scapy cross-check** out of process, plus — with `tshark` present — the **130-check DCBX Wireshark-dissector cross-check**. The benign FP-set is now spaced 1 s/frame so its 13 distinct sources don't trip the 12-distinct-source flood threshold.
+- **Live-validated** in a sealed netns: malformed DCBX frames replayed with `tcpreplay` fire `LLDP-060`/`062`/`063`/`067` through the real `tcpdump` capture path, verdict `attack`.
+- **Docs:** [nettools.md › LLDP Watch](nettools.md#lldp-watch) (DCBX class, 40 codes, tiers), [CREDITS.md](CREDITS.md).
+
+### 2026-10-13
+
+#### fix(kiosk): turning the kiosk off returns to the CLI instead of a black screen
+*branch `fix/kiosk-restore-console`*
+
+- **Disabling the on-screen kiosk no longer leaves a black screen with no way back to the console.** The kiosk runs Xorg on **tty7** and makes that the active VT; stopping it left the display on the now-dead tty7 (black), and the uninstaller removed the tty1 autologin without guaranteeing a login console was left there. On a Ragnar OS image that ships `getty@tty1` masked (so only the kiosk draws the screen), even a reboot came up black.
+- **The kiosk unit now `chvt 1`s back to the console whenever it stops** (`ExecStopPost`), so the escape hatch (Ctrl+Alt+Q / on-screen ✕), a crash, or a disable all drop back to tty1 rather than a blank VT.
+- **The uninstaller restores the console**: it `unmask`s / `enable`s / `restart`s `getty@tty1` and switches to it, so "Kiosk off" in the UI returns straight to the RagnarOS CLI. All steps are no-ops on a box that was already fine.
+- **A plain update heals it too**: the existing service re-provision picks up the new `ExecStopPost`, and `update_ragnar.sh` now also `unmask`/`enable`s `getty@tty1` (ungated, idempotent) so a box whose image masked the console login gets it back on the next boot. Manual recovery for an already-black box: `sudo systemctl unmask getty@tty1 && sudo systemctl enable --now getty@tty1 && sudo chvt 1`.
+- **Turning the kiosk off no longer uninstalls it.** "Off" used to run the full uninstaller (delete the unit, wrapper, tty1 autologin and sudoers) — heavy churn, and that teardown was what blanked the console. Now service-mode "off" just **stops + disables** the unit (and `chvt 1`s back to the console), leaving everything on disk, so turning it back **on** is an instant `enable --now` with no apt and no file regeneration. Autostart/desktop mode still drops only its per-user `.desktop` entry. A true removal (and apt purge) stays available via `scripts/uninstall_kiosk.sh [--purge]`. The Settings UI follows suit ("Turning kiosk off…" / "Kiosk turned off.", and off-success is the service going *inactive* rather than the unit disappearing).
+- **Docs:** [kiosk.md › Troubleshooting](kiosk.md#troubleshooting). *(Fixes verified by code / `bash -n` / `node --check` and a live `/api/kiosk/status` smoke test; the reported Pi 5 was offline for a full on-hardware retest — the recovery command above is the manual path until it's reachable.)*
+
+#### fix(perf): remove the 1-second CPU-sample stall that made clicks feel laggy
+*branch `fix/status-cpu-nonblocking`*
+
+- **The UI no longer hangs ~1–2 s when you click around.** `GET /api/system/status` — which the dashboard fetches on load and navigation — called `psutil.cpu_percent(interval=1)`, and that **sleeps the request thread for a full second** to measure CPU over that window. Every click that hit it paid the full second; `resource_monitor.get_system_status()` was worse (an `interval=0.5` sample **plus** an `is_system_healthy()` call that sampled another full second), so mesh/health paths could stall ~1.5 s.
+- **Fix: one shared, non-blocking CPU sampler.** New `resource_monitor.cpu_percent_nonblocking()` uses psutil's compute-since-last-call mode (`interval=None`, returns instantly), caches the value and re-samples at most once per second, so every caller gets a live rolling average without ever sleeping. `get_cpu_usage()`, `get_system_status()`, `is_system_healthy()` and the `/api/system/status` endpoint all route through it.
+- **Measured on a Pi 5 dev box:** `/api/system/status` **1.06 s → 0.063 s** (~17×); `resource_monitor.get_system_status()` **~1.5 s → ~1.3 ms**. CPU reading verified live (0 % idle → ~20 % under load). No API shape change — same JSON, same fields.
+
+#### feat(sdr): Signal Analyzer — whole-capture Spectrum Survey
+*branch `feature/signal-analyzer-sdr-survey`*
+
+- New **Spectrum Survey** workspace at the top of the **Signal Analyzer** (Signal Intelligence → Signal Analyzer). One STFT over the **entire recording** gives a **frequency × time occupancy heatmap**, a **max-hold / mean / %-occupied spectrum**, and a **measured carrier inventory** — one row per distinct carrier (repeated bursts of the same frequency are consolidated), each with centre + offset, occupied bandwidth, peak & mean level, SNR, **duty cycle**, **burst count**, and first/last time. Columns sort; a row click zooms the spectrogram to that carrier. Expert knobs: **min SNR** and **FFT size** (256–4096). **Export CSV** and **Annotate all** (writes every carrier into the SigMF file). Runs automatically on capture load. Backend `sigmf_analyzer.survey()` + route `GET /api/net/rtl/analyze/survey`; levels are the tool's consistent relative dB. `sigmf_analyzer --selftest` 145/145 (8 new survey checks). Validated on 31 on-box captures. Docs: [RF Waterfall → Signal Analyzer](rf-waterfall.md#signal-analyzer-on-box-sigmf-analysis).
+
+### 2026-10-12
+
+#### [#945](https://github.com/PierreGode/Ragnar/pull/945) — feat(net): Cisco Guard v6 — LISP, Small Business switch web UI, 2026 version wave (+14 CVEs)
+*branch `feature/cisco-guard-v6`*
+
+- **Ported the feasible v6 (LCDPwn-era) additions into the in-app `do_cisco_guard`** (tcpdump-text/hex model; byte-level L2 codes stay deferred). CVE index **328 → 342 named, 285 → 299 detected** (+14). Cisco Guard now names 29 CVEs.
+- **LISP (CVE-2024-20311):** `CG-107` LISP on the segment (control UDP/4342, data UDP/4341) and the attack shapes `CG-240` malformed LISP control header (runt / reserved type / implausible record count) and `CG-241` a source-EID AFI that overruns the datagram. Added `udp port 4341 or udp port 4342` to the capture BPF.
+- **Cisco Small Business switch web UI (`CG-113`):** the May 2023 cluster — four 9.8 RCEs (CVE-2023-20159/20160/20161/20189), four 8.6 DoS (CVE-2023-20024/20156/20157/20158) and info-disclosure (CVE-2023-20162) — screened from the SG/CBS switch model in the HTTP response banner. The **220 Series is excluded** (Cisco states it is not affected); the no-fix SB 200/300/500 branch is matched too.
+- **Version posture now uses the tracked CVE trains (`CG-004`/`CG-005`).** IOS-XE names the **August 2026 advisory wave** (CVE-2026-20267…20273, incl. the 9.8 RCE CVE-2026-20272) and NX-OS adds **CVE-2025-20111**; a patched train stays quiet and an untracked train is reported unscreenable (silence ≠ patched) — a NOTE to verify THIS device, never a verdict.
+- **Deferred, with reasons** (not reconstructable from tcpdump's IP-onward hex): the IS-IS malformed-TLV codes (`CG-210`–`212`, L2 LLC), `CG-221`/`CG-222` (VLAN/802.3-length L2 bytes; `CG-222` was already skipped in v5), and CVE-2024-20271 (crafted-IPv4 reload — no packet signature).
+- **Self-test:** the `cisco` suite grows to **35 scenarios** (CG-113 + the 220-not-vulnerable gate, CG-240/241 LISP, the 2026 wave naming, a patched-train-clean check). **Live-validated** in a sealed netns: crafted SG350 HTTP banner + malformed LISP frames replayed with `tcpreplay` fire `CG-113`/`CG-240`/`CG-241` through the real `tcpdump` capture path, verdict `attack`.
+- **Docs:** [nettools.md › Cisco Guard](nettools.md#cisco-guard) (LISP, SMB web UI, version trains), [CREDITS.md](CREDITS.md), card text. `gen_cve_list` owns the LISP helpers (`_lisp`) under Cisco Guard and labels the new IDs.
+
+#### [#944](https://github.com/PierreGode/Ragnar/pull/944) — feat(net): CFM Watch v4 — ERPS / G.8032 ring protection (+36 codes, Class R) + ring declaration
+*branch `feature/cfm-watch-v4`*
+
+- **Re-vendored the Solarflere `cfmwatch` engine to v4** (`python/cfmwatch.py`, 1940 → 3205 lines) with its updated tests and fixtures (`python/cfmwatch_tests/`; eleven new `raps_*` / `elps` / `subring` pcaps). The in-app `do_cfm_watch` adapter is generic over `engine.findings`, so the new codes flow through unchanged.
+- **90 finding codes now (was 54), across ten classes** — new **Class R: ERPS / G.8032 ring protection** (R-APS, opcode 40, same CFM common header). **No new CVEs** (still CVE-2020-1639 / CVE-2025-52961 detected, CVE-2014-3223 / CVE-2023-20233 context), so the CVE index is unchanged at **328 named / 285 detected**.
+- **ERPS ring declaration.** The ring-topology rules are baseline-dependent (a legitimate protection switch and a forged R-APS are identical on the wire without the declared topology), so CFM Watch gains a persisted ring store (`data/cfm_watch.json`) and a `do_cfm_ring` action (declare / list / remove / clear). A declared ring arms the Class R rules — forged RPL owner (`CFM-192`), two blocks, ring-open, off-VLAN / undeclared-node R-APS (`CFM-195/196`), uncorroborated forged R-APS(SF), flush storms, revision downgrade, sub-ring interconnect propagation. With none declared, R-APS presence is still reported (`CFM-200`) and structural R-APS still fires. New API `GET|POST /api/net/cfm-ring`, CLI `cfm-ring`, and a ring-declaration control on the CFM card.
+- **Self-test:** the `cfm` suite now drives all **20** upstream fixtures (ERPS fixtures with their `--ring` declarations) exactly to their manifest codes, covering all **90** codes, plus the ring-declaration store path, then runs the module's own **173-check conformance** and the Wireshark + scapy dual-dissector cross-check out of process.
+- **Validated live:** the forged-RPL fixture replayed with `tcpreplay` over a sealed-netns veth fires `CFM-192`/`CFM-195` through the real `tcpdump` capture path with a declared ring, verdict `attack`.
+- **Docs:** [nettools.md › CFM Watch](nettools.md#cfm-watch) (Class R, ring declaration, 90 codes, 173-check conformance), [CREDITS.md](CREDITS.md). The L2 visibility-matrix tile still shows the old CFM count — the matrix is a baked image and no updated source was supplied with this drop.
+
+#### [#943](https://github.com/PierreGode/Ragnar/pull/943) — fix(kiosk): on-screen kiosk works on Ragnar OS (Pi 5 / Lite bare-Xorg)
+*branch `feature/kiosk-pi5-xorg`*
+
+- **The on-screen kiosk now comes up on the Ragnar OS image.** It already worked on a full Pi OS desktop (the kiosk runs inside the existing Wayland/labwc session) but crash-looped on the Lite image, where it starts its own Xorg — a stack of Pi 5 + trixie issues that `install_kiosk.sh` now fixes.
+- **vc4 forced as the primary GPU.** A Pi 5 exposes two DRM devices (vc4 = KMS/HDMI/DSI, has the outputs; v3d = render only). Xorg sometimes made v3d primary → `modeset(G0)` and *"no screens found"*, and could co-load the legacy `fbdev` driver, which collides with modesetting and aborts the server (`FBIOPUTCMAP` on `vc4drmfb` / `dixRegisterPrivateKey`). The installer writes `/etc/X11/xorg.conf.d/99-ragnar-kiosk.conf` with an `OutputClass` pinning **vc4 + modesetting** as PrimaryGPU (an `OutputClass` keeps Xorg's working platform probe; an explicit `Device` forces the old probe that fails here).
+- **VT activation.** The tty1 autologin held the active console while the kiosk started Xorg on tty7, so logind handed it a **paused** DRM fd and KMS never came up. The unit now `chvt`s to its VT before X starts.
+- **Chromium specifically.** The kiosk wrapper drives the browser with Chromium-only flags, so a box that only had `firefox-esr` launched it, got bad flags and exited — ending the X session. The installer now installs/selects **Chromium** (`chromium` on Debian 13/trixie, `chromium-browser` on older Raspberry Pi OS) and no longer treats Firefox as a usable kiosk browser.
+- **Home ownership.** The image could leave `/home/ragnar` root-owned, so Chromium/openbox/X couldn't create `.Xauthority`, caches or a browser profile and the session died on every start. `install_kiosk.sh` and `ragnar-firstboot.sh` now ensure the kiosk user owns its home.
+- **Reaches existing boxes on update.** `update_ragnar.sh` re-runs the idempotent installer for already-installed service-mode kiosks, so a plain `git pull` + update heals them — not only fresh or web-UI installs.
+- **Validated live** on a Pi 5 Ragnar OS device: kiosk service `active`, `NRestarts 0`, with Xorg + openbox + Chromium rendering the dashboard on HDMI.
+- **Docs:** [kiosk.md › Troubleshooting](kiosk.md#troubleshooting).
+
+### 2026-10-11
+
+#### [#942](https://github.com/PierreGode/Ragnar/pull/942) — feat(net): CDP Watch v4 — LCDPwn expansion (+20 CVEs, cross-vendor screening, address-record attack shapes)
+*branch `feature/cdp-watch-v4`*
+
+- **Ported the Solarflere `cdpwatch` v4 (LCDPwn) additions into the in-app `do_cdp_watch`.** CDP is already an in-app watcher (byte-level TLV parser over the `tcpdump -xx` capture path), so no standalone module was vendored — the new detection logic was folded into the existing `_cdp_cdpwn_scan` / `_cdp_parse_frame`.
+- **CDP-plane CVE coverage 5 → 25.** Version-screening grew from five families to **nine** (`CDP-020`..`024`, `CDP-027`..`030`; the config-driven `CDP-025`/`026` version-floor hints aren't part of the passive in-app watcher): the original Armis CDPwn set widened by the **LCDPwn** successor — the Video Surveillance 7000/8000 camera cluster, IP Phone 68xx/78xx/88xx — and its cross-vendor arm: **FortiSwitch** (`CDP-027`, CVE-2021-26111), **lldpd** (`CDP-028`, CVE-2023-41910, the 9.8 `cdp_decode` OOB read), **Cisco ATA 190/191/192** (`CDP-029`, CVE-2022-20688…20766) and **Unified CM** (`CDP-030`, CVE-2022-20804). An ATA is guarded off the IP-Phone family by a negative lookahead; plain IOS/IOS-XE stays excluded per Cisco's advisory.
+- **Two new byte-level attack shapes** the outer-TLV length check cannot see: per-address-record **protocol_type/length mismatch** (`CDP-053`) and **allocation/copy size discrepancy** (`CDP-054`) — the parsing class behind the lldpd OOB read. Both escalate the verdict to `cdpwn`.
+- **CVE index 309 → 328 named, 266 → 285 detected** (+19 each; CVE-2021-26111 was already named by LLDP-048). `gen_cve_list.py` labels the new IDs (CDPwn / LCDPwn / vendor). CREDITS and README synced; a CDP Watch coverage bullet added.
+- **Self-test:** the `cdp` suite grows to **29 scenarios** — the four new screening families, the two address-record shapes, an ATA-not-IP-Phone false-positive guard and a well-formed-record silence check — all passing, plus the scapy capture→parse end-to-end leg. Detector Self-Test unchanged.
+- **Validated live:** crafted FortiSwitch/lldpd screening frames and a malformed Addresses record replayed with `tcpreplay` over a sealed-netns veth fire through the real `tcpdump` capture path — `CDP-027`/`028`/`053`/`054` all detected, verdict `cdpwn`. Real Cisco hardware is not yet validated.
+- **Docs:** [nettools.md › CDP Watch](nettools.md#cdp-watch) (cdpwn/screening description, 11 families, 25 CVEs), [CREDITS.md](CREDITS.md). The L2 visibility-matrix tile is unchanged (still an image; no updated source supplied with this drop).
+
+#### [#941](https://github.com/PierreGode/Ragnar/pull/941) — feat(net): LLDP Watch v2 — +10 CVEs (FortiSwitchAX RCE, Cisco SB220/RV, TRENDnet, QNAP)
+*branch `feature/lldp-watch-v2`*
+
+- **Re-vendored the Solarflere `lldpwatch` engine to v2** (`python/lldpwatch.py`, `lldpwatch_frames.py`, `lldpwatch_conformance.py`; the scapy cross-check is byte-identical and unchanged). The in-app `do_lldp_watch` adapter is unchanged — the engine API (`Config`, `Engine.handle_frame`) is stable.
+- **30 finding codes now (was 26)** and **30 LLDP parser CVEs across thirteen families (was 20 / eight).** Four new screening codes `LLDP-031`..`034` add the **TRENDnet**, **QNAP QSS**, **Cisco SB220/B220** and **Cisco RV** families. The new structural reach is **CVE-2026-22627**, the FortiSwitchAX oversized-OUI TLV overflow — unauthenticated adjacent **RCE** (8.8) — caught both structurally and as a FortiSwitchAX screen. Other new CVEs: CVE-2021-34779/34780, CVE-2021-1309/1251/1308, CVE-2021-33315/33316/33317, CVE-2021-28801.
+- **CVE index 299 → 309 named, 256 → 266 detected.** `gen_cve_list.py` ignores the four SB220 4.3 siblings (CVE-2021-34775..34778) that the module's conformance asserts are *not* screened. CREDITS and README synced; the LLDP bullet lists the new families and the 2021 cluster.
+- **Self-test:** the `lldp` suite grows to **41 scenarios** (the four new screening builders are covered by the existing generic loops), and runs the module's **2117-check conformance** and **285-check scapy cross-check** out of process. Detector Self-Test stays at 52 suites.
+- **Validated live:** malformed, flood and vendor frames replayed with `tcpreplay` over a sealed-netns veth fire through the real tcpdump path, the four new `LLDP-031`..`034` families included, and CVE-2026-22627 is detected. Real switch hardware is not yet validated.
+- **Docs:** [nettools.md › LLDP Watch](nettools.md#lldp-watch) (families table, code count, screening range, validation), [CREDITS.md](CREDITS.md). The L2 visibility-matrix tile still reads "26 codes · 20 CVEs" — the image was not re-cut (no updated source supplied).
+
+### 2026-10-10
+
+#### [#940](https://github.com/PierreGode/Ragnar/pull/940) — fix(ui): L2 layer button count 14 → 16 (OAM + CFM Watch)
+*branch `fix/l2-layer-count`*
+
+- The **L2 Data Link** button in Network → Diagnostics still read **14**. OAM Watch (#938) and CFM Watch (#938) both added a card to that layer without bumping the count. The badge now reads **16**, matching the L2 cards on the layer. No other layer counts changed.
+
+#### [#939](https://github.com/PierreGode/Ragnar/pull/939) — Ragnar OS: move the image build pipeline to a private repo
+*branch `feature/ragnar-os`*
+
+- **Why:** to keep the official branded *Ragnar OS* image hard to clone and rebrand. The pi-gen recipe is now maintained in a **separate private repository** (`PierreGode/RagnarOS`) instead of in this public app repo.
+- **Removed from this repo:** the `os-image/` tree (`build.sh`, `config`, `stage-ragnar/`, `os-list.json`, `ragnar.conf.example`) and `.github/workflows/build-os-image.yml`. The private pipeline clones this public repo at build time and runs its installer, so nothing about the app is hidden.
+- **The app stays fully open.** `install_ragnar.sh` still installs Ragnar on any Raspberry Pi, and the `--image-build` / `--unattended` installer modes the pipeline relies on remain here and documented (`install_ragnar.sh --help`).
+- **Downloads stay public.** On an `os-v*` tag the private pipeline publishes `RagnarOS-*.img.xz` + `.sha256` as a **Release on this repo**, so end users still download from the usual [Releases](https://github.com/PierreGode/Ragnar/releases) page. (This needs a `RAGNAR_RELEASE_TOKEN` secret, a fine-grained PAT with Contents:write on this repo, configured in the private repo.)
+- **Docs:** [ragnar-os.md](ragnar-os.md) — the "Building the image yourself" section is now "Where the image comes from", and the dead `os-image/` path references are removed. End-user flashing/first-boot/`ragnar.conf` instructions are unchanged.
+
+#### [#938](https://github.com/PierreGode/Ragnar/pull/938) — feat(net): OAM Watch + CFM Watch — passive carrier-Ethernet OAM monitors (802.3ah Link OAM, 802.1ag CFM / Y.1731)
+*branch `feature/oam-watch`*
+
+- **New in-app watcher** (Diagnostics → L2, next to LACP Watch): the vendored Solarflere `oamwatch` package (`python/oamwatch/`, tests in `python/oamwatch_tests/`) behind `do_oam_watch`. Passive and detection-only. tcpdump captures to a pcap (promiscuous, inbound only, slow-protocols `0x8809` subtype 3) and a pure-Python parser reads it.
+- **38 codes, no CVEs** (none exist for Link OAM). Highlights: **Loopback Control enable** (one forged frame blackholes the link, OAM-060), confirmed remote-loopback state, **flapping** Dying Gasp / Critical Event / Link Fault, discovery restart, peer substitution, capability escalation, cleartext Clause 30 MIB reads, event replay, a second speaker on a point-to-point link, the 10 PDU/s cap, and 18 structural OAMPDU checks. Posture capability bits are notes.
+- **Session state persists per interface across scans**, so a 300 s flap or a peer swapped between scans is caught. **Reset** (`POST /api/net/oam-reset`) forgets it after a legitimate change.
+- **Verdicts** use existing tokens: `no-traffic`/`clean` < `observed` < `exposure` < `suspicious` < `attack`. A single failure flag is only `suspicious`, since it is often a real power loss. Wired into the Net Integrity rotation (`oam`), Watchtower (`oam_watch`, MEDIUM and above), routes, and the CLI `oam-watch [--pcap]`.
+- **Self-test:** new `oam` suite with 19 scenarios, plus the module's 297-check conformance and 163-check Wireshark cross-check run out of process. **Validated live:** all 38 codes fire through the real capture path, replayed with tcpreplay over a sealed-netns veth.
+- CVE index unchanged at 295 / 254. `gen_cve_list.py` registers the OAM owners/prefixes and ignores the "not this protocol" mention CVE-2019-14810 in the cross-check comments.
+- **Docs:** [nettools.md › OAM Watch](nettools.md#oam-watch), [watchtower.md](watchtower.md), [CREDITS.md](CREDITS.md) (new non-CVE coverage bullet).
+- **CFM Watch, a second new in-app watcher** (Diagnostics → L2, next to OAM Watch). It wraps the vendored Solarflere `cfmwatch` module (`python/cfmwatch.py`, unmodified; fixtures and tiers in `python/cfmwatch_tests/`) behind `do_cfm_watch`. It is a passive IEEE 802.1ag CFM / ITU-T Y.1731 service-OAM monitor. tcpdump captures EtherType `0x8902`, untagged, 802.1Q or QinQ, promiscuous and inbound only, to a pcap.
+  - **54 codes.** Highlights: forged **APS** (Forced Switch, **Lockout of protection**, uncorroborated **Signal Fail**, group takeover, churn), forged AIS / LCK, CCM forgery (MAID mismatch, duplicate or **moved MEP**, unexpected MEP), MD-level hierarchy violations, an optional MD ceiling, LBM floods, linktrace TTL sweeps, MIP disclosure, and 10 structural checks.
+  - **CVEs:** CVE-2020-1639 (Junos cfmd crash shape, CFM-140) and CVE-2025-52961 (Junos Evolved cfmd load pattern, CFM-122/141, low confidence) are detected. CVE-2014-3223 and CVE-2023-20233 are named as context only. The CVE index moves to **299 named / 256 detected**, and CREDITS and README are synced.
+  - **Engine state persists per interface across scans**, and each scan reports its own delta. **Reset** is `POST /api/net/cfm-reset`.
+  - **Verdicts:** `no-traffic` < `clean` (inventory only) < `observed` (RDI / AIS / LBM events) < `suspicious` < `attack`.
+  - **Wiring:** Net Integrity rotation `cfm`, Watchtower `cfm_watch` (MEDIUM and above), routes, and CLI `cfm-watch [--md-ceiling] [--pcap]`. `gen_cve_list.py` registers the CFM owners, with the `_CFMW` prefix ahead of Cisco Guard's `_CFM`.
+  - **Self-test:** new `cfm` suite with 18 scenarios. All 9 fixtures match their manifests exactly through the adapter, and the module's 54-check conformance and 2155-comparison Wireshark + scapy cross-check run out of process. The Detector Self-Test is now **52 suites**.
+  - **Validated live:** 54/54 codes fire through the real tcpdump path, replayed with tcpreplay over a sealed-netns veth, VLAN-tagged frames included.
+  - **Docs:** [nettools.md › CFM Watch](nettools.md#cfm-watch), [watchtower.md](watchtower.md), [CREDITS.md](CREDITS.md).
+- **Visibility matrix** updated with the OAM Watch and CFM Watch tiles in L2.
+
+
+#### [#935](https://github.com/PierreGode/Ragnar/pull/935) — Ragnar OS: preinstall Tailscale + AirSnitch, and fix kiosk on Lite
+*branch `feature/ragnar-os`*
+
+- **Preinstall Tailscale + AirSnitch in the image.** The image stage (`os-image/stage-ragnar/.../01-run-chroot.sh`) now bakes two tools the installer otherwise leaves on-demand, right after `install_ragnar.sh --image-build`:
+  - **Tailscale client** via `scripts/setup_mesh.sh install` — binary only, never joins during imaging (`tailscaled` is enabled; the start is a chroot no-op, so it comes up on first real boot). The web UI Mesh tab or a `/boot/firmware/ragnar-mesh.conf` can now join with no download.
+  - **AirSnitch** via `AirSnitchRunner(...).install()` — clones `vanhoefm/airsnitch` into `tools/airsnitch` and builds its hostapd, so the Pentest tab's AirSnitch works offline on a fresh flash.
+  - Both steps are **non-fatal** — a clone/build hiccup logs a warning and the image still builds (the tool stays a one-click retry on-device). `tools/` is chowned to `ragnar`.
+- **Fix kiosk crash-looping on Ragnar OS** (`ragnar-kiosk.service` active but Chromium/X never start, NRestarts climbing). Root cause: a non-root Xorg must open the GPU, the VT and input devices itself, but the Lite service user (`ragnar`) was only in `spi gpio i2c sudo netdev` — never **video/render/input/tty** — so Xorg died with *"no screens found"* and crash-looped. A desktop Pi OS `pi` user has these by default; a Lite image does not.
+  - `install_kiosk.sh` now adds the kiosk user to `video,render,input,tty` (only the groups that exist, since `usermod` is all-or-nothing), and if the kiosk is already enabled it `reset-failed` + restarts so the membership takes effect without a reboot.
+  - `kiosk_doctor.sh` now reports the kiosk user's groups and flags any missing graphics/input group — so this is self-diagnosing next time.
+- **Raspberry Pi Connect sign-in from the web UI.** The Mesh tab's Pi Connect card now takes an **auth key** (generated at connect.raspberrypi.com) and signs in non-interactively via `rpi-connect signin -auth-key` (rpi-connect 2.12+) — no browser device-flow, no terminal. The backend enables `loginctl enable-linger` + the per-user service for the right login user first, so it works on a headless box; the key is never stored or logged. New `mesh_manager.pi_connect_signin()`/`pi_connect_signout()` + routes `/api/mesh/pi-connect/{signin,signout}`. (Replaces the old "sign in from a terminal" instructions — the earlier "can't be automated" note predated the `-auth-key` flag.)
+- **Kiosk + Tailscale HTTPS publishing can now run together.** They used to be mutually exclusive: `tailscale serve` proxies every tailnet request from `127.0.0.1`, and the kiosk bypass trusted *any* loopback request — so the pair would have exposed the full UI, unauthenticated, to the tailnet, and publishing was refused with kiosk on. The bypass is now scoped to a **per-box secret token** the local kiosk holds (`data/kiosk_token`, injected into the kiosk URL → set as a cookie); a tailnet visitor via `serve` reaches loopback too but can't hold the token, so they still must log in. `install_kiosk.sh` generates the token, the wrapper passes it, and the publish endpoint no longer blocks on `kiosk_enabled`.
+- Docs: [Ragnar OS image](ragnar-os.md), [Kiosk Mode — Troubleshooting](kiosk.md), [Mesh](mesh.md).
+
+### 2026-10-09
+
+#### [#933](https://github.com/PierreGode/Ragnar/pull/933) — feat(ble): BLE Watch "Trust current" + "Clear list" controls
+*branch `feature/blewatch-list-controls`*
+
+- **Two new buttons on the BLE Watch panel** (Diagnostics → L2). **Trust current** adds the advertisers seen in the last scan to a persisted trusted-device list; **Clear list** empties it and clears the on-screen results.
+- Unlike the reset-then-relearn model of the other watchers, BLE is device-gated (each learn needs a sniffer capture), so the list is **additive**: `do_ble_watch` now returns every advertiser seen (`seen`: addr → name/services/rpa_class) and the web control persists exactly those into `data/ble_watch.json` in the `trusted_devices` shape the engine expects (name anchors the clone baseline; the addr suppresses GATT-masquerade flags).
+- **Rotating private addresses are skipped.** Phones/watches use resolvable or non-resolvable private addresses that reshuffle every ~15 min, so "Trust current" only persists **stable** addresses (`public`/random-`static`) and reports how many rotating ones it skipped — otherwise re-scanning + re-trusting grew the list without bound (every scan saw fresh random MACs).
+- `do_ble_watch` loads `data/ble_watch.json` by default, so trusted devices immediately stop being flagged as clones/masquerades. New engine accessor `BleWatch.seen_devices()`; new route `/api/net/ble-watch/baseline` (GET/POST `trust`|`clear`).
+- Docs: [blewatch](blewatch.md).
+
+#### [#932](https://github.com/PierreGode/Ragnar/pull/932) — feat(net): LLDP Watch — passive 802.1AB parser-CVE monitor + visibility matrix
+*branch `feature/lldp-watch`*
+
+- **New in-app watcher** (Diagnostics → L2, next to CDP Watch): vendored Solarflere `lldpwatch` engine (`python/lldpwatch*.py`) behind `do_lldp_watch`. Passive and detection-only: tcpdump captures to a pcap (promiscuous, inbound only, 802.1Q/QinQ-aware nested BPF) and a pure-Python TLV walk processes it.
+- **26 finding codes, 20 new CVEs.** Class A (13 structural codes, vendor-agnostic) catches the malformed-frame shapes behind lldpd CVE-2015-8011/8012/2020-27827, Cisco CVE-2018-0395/2021-34703/2023-20089/2024-20294/2026-20010, Juniper l2cpd CVE-2018-0007/2020-1641/2021-0277/2023-36849/2024-21618, OVS CVE-2022-4337/4338, Aruba CVE-2020-7121/2021-34618, FortiSwitch CVE-2021-26111, PAN-OS CVE-2025-0116 and SonicWall CVE-2021-20024. This includes the dual-stack (IPv4 + IPv6) Management Address checks. Class B (11 codes) screens advertised software; these are notes, not verdicts. Class C covers LLDP flood, plus forged neighbour once you click **Trust current**.
+- **Verdicts:** `no-traffic`/`clean` < `observed` < `exposure` < `suspicious` < `attack`. All are existing tokens, so no new paging sets were needed. Wired into the Net Integrity rotation (`lldp`), Watchtower (`lldp_watch` source, MEDIUM and above), routes `/api/net/lldp-watch` + `/api/net/lldp-baseline`, and the CLI `lldp-watch [--pcap]`.
+- **Self-test:** new `lldp` suite with 37 scenarios. It also runs the module's 1767-check conformance and 262-check scapy cross-check out of process. Validated live: the conformance attack pcap replayed with `tcpreplay` over a sealed-netns veth fired 23 codes.
+- **CVE index:** 275 → 295 named, 234 → 254 detected (`docs/CVE.md` regenerated). CREDITS and README updated.
+- **Visibility matrix:** new master image with the **LLDP Watch** tile in L2. `matrix_full` and the L7…L1 crops were re-cut (band edges unchanged), and the image cache-bust is now `?v=20261009-lldp`.
+- **Docs:** [nettools.md › LLDP Watch](nettools.md#lldp-watch), [watchtower.md](watchtower.md), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md).
+
+### 2026-10-08
+
+#### [#931](https://github.com/PierreGode/Ragnar/pull/931) — feat(os): Ragnar OS — a prebuilt Raspberry Pi image
+*branch `feature/ragnar-os`*
+
+- **New:** flash-and-go image. Raspberry Pi OS (64-bit) Lite with Ragnar preinstalled, enabled, and headless-by-default — one arm64 image for Pi Zero 2 W, 3, 4, 5 and CM4/CM5. Built with pi-gen; everything lives under `os-image/` (`build.sh`, `config`, `stage-ragnar/`, `os-list.json`, `ragnar.conf.example`).
+- **Installer:** `install_ragnar.sh` gains `--unattended` (answer every prompt from `RAGNAR_*` env vars) and `--image-build` (unattended + build-safe: enable units only, never start a service, touch a live kernel, or reboot — for use in a chroot). New env knobs: `RAGNAR_PROFILE`, `RAGNAR_DISPLAY`, `RAGNAR_INSTALL_ALL_DISPLAYS`, `RAGNAR_INSTALL_ADVANCED`, `RAGNAR_INSTALL_PISUGAR`, `RAGNAR_REBOOT`, `RAGNAR_FORCE_PI`. Interactive behaviour is unchanged.
+- **Per-device first boot:** `scripts/ragnar-firstboot.sh` + `ragnar-firstboot.service` run once before `ragnar.service` — unique SSH host keys + TLS cert, optional `/boot/firmware/ragnar.conf` (hostname, display), optional mesh join — then self-disable.
+- **CI:** `.github/workflows/build-os-image.yml` builds the image on an `os-v*` tag (and attaches `RagnarOS-*.img.xz` + `.sha256` to the Release), on every push to the `feature/ragnar-os` branch (artifact only), or on demand via **Run workflow**. Only a tag publishes a release; the baked Ragnar ref auto-follows whatever ref the run is on. Validated end-to-end with a native arm64 build on a Pi 5 (image intact, installer's `--image-build` guards all fired).
+- **Pick your display during setup:** the Wi-Fi onboarding portal (the "Ragnar" AP page) now has an **Attached display** dropdown — choose your screen while entering Wi-Fi and, once connected, the panel shows the device's IP (no more hunting the network for it). A new `scripts/set_display_mode.sh` is the single source of truth that switches `ragnar.service` between the headless (`headlessRagnar.py`) and display (`Ragnar.py`) entrypoints; `ragnar-firstboot.sh` (via `ragnar.conf`), the portal, and the web UI's Config → Display all use it, so selecting a screen anywhere actually lights it up instead of dead-ending. Headless stays the default everywhere. The web UI's Display dropdown gains a **Headless** option so you can switch *back* too (both directions), and `/api/config` reports the live mode so the dropdown reflects reality. This is also the path for a box brought up on **Ethernet** that skips the portal entirely: reach it at `http://ragnar.local:8000` (avahi/mDNS is baked in) → Config → Display.
+- **Batteries included:** the image now bakes the advanced scanners (Nuclei, Nikto, SQLMap, OWASP ZAP) in by default so everything Ragnar can do works offline on first boot; a board without the RAM to run them still boots (the runtime RAM gate idles them). Build with `RAGNAR_INSTALL_ADVANCED=no ./os-image/build.sh` for a smaller image that installs them on demand from the web UI.
+- **First-boot Wi-Fi fix:** on a fresh image the legacy wlan stack (`dhcpcd`, standalone `wpa_supplicant.service`, `hostapd`, `dnsmasq`) is enabled by its Debian package defaults and fights NetworkManager for `wlan0` — the AP portal came up but joining a network left the interface down (`wlan0 down`). The installer (and `update_ragnar.sh`, idempotently) now disables those units so NetworkManager owns `wlan0`; `hostapd`/`dnsmasq` stay unmasked and are started on demand for AP mode.
+- **Docs:** [Ragnar OS image](ragnar-os.md), [README (root)](../README.md), [docs index](README.md).
+
+#### fix(serial): the CYD bridge no longer holds sniffer / Meshtastic ports when no CYD is connected
+*branch `fix/cyd-serial-hog`*
+
+- **Field report:** with the CYD USB-serial bridge enabled but no CYD plugged in, the Bluefruit LE Sniffer (gen 1) and a Meshtastic node showed as "held by cyd". Scanning only worked after releasing the port. Cause: the bridge opens every free CP210x/CH340 to listen for a CYD, and it published that port as a **hard** claim the moment it opened it. A configured port was also trusted outright and written to, whatever was on it.
+- The claim is now **soft** (`cyd-probe`) until a CYD frame arrives. The new `serial_claims.take()` reserves a port and waits for soft holders. The bridge hands the port back within ~0.1 s and leaves it alone for 60 s. BLE Watch takes each port for its probe and capture. The Meshtastic picker and connect treat a soft hold as free. Only a port a CYD has answered on is held hard (`cyd`).
+- **Configured ports are identified too:** nothing is written until a CYD answers. A silent port is released and retried every 60 s, and a port in use elsewhere isn't opened. The CYD status gains `identified`.
+- New `tests/test_cyd_soft_claim.py`: hand-back, silent configured port, a real CYD keeping its port, and `take()` vs hard holders. The 163 related tests pass. Docs: [CYD hybrid node](cyd-hybrid-node.md), [blewatch](blewatch.md).
+
+#### fix(ble): name an nRF52840 dongle that isn't running nRF Sniffer, and say how to flash it
+*branch `fix/blewatch-nrf52-connectivity`*
+
+- **Field report:** a USB-A nRF52840 dongle came back as "No BLE sniffer detected … `usb-Nordic_Semiconductor_nRF52_Connectivity` (1915:c00a) did not answer as an nRF Sniffer". The hardware is fine, but the dongle runs Nordic's **Connectivity** firmware (the image nRF Connect for Desktop installs), not nRF Sniffer.
+- blewatch now recognises Nordic USB IDs **1915:c00a** (Connectivity) and **1915:521f** (Open DFU bootloader) from sysfs, without opening the port. The card says which one it found and how to fix it: press RESET → bootloader (red LED pulses, 1915:521f) → flash `sniffer_nrf52840dongle_nrf52840_4.1.1.hex` with nRF Connect Programmer, or over the SWD pads on a clone without that bootloader. A port with that firmware typed into the device field stops with the same reason. Ragnar flashes nothing itself.
+- Self-test 34 → **36/36**. Docs: [blewatch — nRF52 dongle](blewatch.md#nrf52840-dongle-shows-up-as-nrf52-connectivity).
+
+### 2026-10-07
+
+#### fix(ble): live capture works out of the box: bundled nRF Sniffer extcap + correct Nordic parsing
+*branch `fix/blewatch-live-capture`*
+
+- **"nRF Sniffer extcap helper not found" is gone:** Nordic's **nRF Sniffer for Bluetooth LE 4.1.1** extcap (MIT) is now bundled in `python/nrf_sniffer/`. Its deps (`pyserial`, `psutil`) are already in Ragnar's requirements, so there is nothing to install. 4.1.1 drives both the Bluefruit LE Sniffer's **V2** firmware (nRF51, 460 800 baud) and nRF52 builds. Nordic's V2-era extcap is Python 2 only.
+- **Four bugs that would have broken a real sniffer, found by checking against Nordic's protocol spec and source:**
+  - the sniffer probe rejected **protocol v2/v3** replies; from v2 on, bytes 0–1 are a 16-bit payload length, so the Bluefruit V2 firmware went unrecognised
+  - the **DLT-272** parser read the wrong offsets; it now follows the documented board + UART header + BLE header layout, including LE Coded
+  - the helper was handed a `/dev/serial/by-id/…` path, which its `split('-')` can't parse; blewatch now passes `PORT-VERSION` on the real tty, and the bundled copy uses `rsplit` as Adafruit's guide advises
+  - the helper was **re-discovering the baud rate** itself; the probe's rate is now passed in
+- A failed capture now reports why (exit reason, plus Nordic's log path) instead of silently returning nothing. An unplugged port is caught up front.
+- **A port typed into the device field is now checked too.** Previously a manually chosen port skipped detection and went straight to capture. That is how a field report with a Bluefruit LE **Friend** on `/dev/ttyUSB0` ended in "extcap helper not found" instead of "this is a Friend, not a sniffer". The device field, `-i` and `$RAGNAR_BLE_SNIFFER` now get the same firmware check.
+- Self-test 27 → **34/34**: v2/v3 ping replies, DLT-272 v2/v3 records, a **cross-check against Nordic's own `SnifferAPI.Packet` decoder** for v1–v3, a DLT-272 pcap replay, and the extcap command line. The full live path (probe → bundled extcap → pcap → findings) was also run against an emulated v3 sniffer on a pty: 312 frames parsed, findings raised. Not yet run against a physical sniffer. Docs: [blewatch — live capture](blewatch.md#live-capture-bundled-nordic-extcap).
+
+#### fix(ble): find the Bluefruit LE Sniffer by firmware, and name a Bluefruit LE Friend
+*branch `fix/blewatch-sniffer-detect`*
+
+- **Autodetect never found a real Adafruit Bluefruit LE Sniffer (#2269).** It matched USB names (`*Sniffer*`, `*Adafruit*`, …), but the board enumerates only as a plain **Silicon Labs CP210x** bridge. blewatch now asks each CP210x / Nordic / SEGGER port what firmware it runs: a SLIP **PING** in the Nordic nRF Sniffer UART protocol (1M, then 460 800 baud, which covers nRF51 and nRF52), then `ATI` at 9600.
+- A **Bluefruit LE Friend** (same nRF51822 board, AT-command firmware) is now named as such instead of "no sniffer", with the fix: flash nRF Sniffer over SWD; switch and DFU-button positions can't change it. The BLE Watch card lists every USB serial port and what answered on it. `blewatch --list-devices` prints the same table (`--no-probe` = names only).
+- The probe skips ports other Ragnar components hold (`serial_claims`), and live capture now claims its port. Extcap lookup adds the Pi's `aarch64`/`armhf` Wireshark paths and resolves the extcap's own interface name.
+- Self-test 19 → **27/27** (SLIP codec, PING_RESP/version, Friend `ATI`, an ESP32 boot log as a negative control, firmware-not-name selection). The probe was also checked against emulated sniffer, Friend and silent devices on ptys. Not yet validated on a flashed sniffer. Docs: [blewatch — which board, and how to plug it in](blewatch.md#which-board-and-how-to-plug-it-in).
+
+#### [#926](https://github.com/PierreGode/Ragnar/pull/926) — feat(net): Modbus Watch — passive Modbus/TCP posture monitor
+*branch `feature/modbus-watch`*
+
+- New in-app watcher **Modbus Watch** (Network → Diagnostics → **L7** → Passive · network services; L7 count 28 → 29), from Solarflere's `modbuswatch` engine vendored as the package `python/modbuswatch/` (relative imports, so its `findings` / `state` modules cannot collide with DNS Watch's)
+- 11 codes `MBW-001`…`MBW-041`. Learn-then-arm master baseline per PLC and unit ID, kept in `data/modbus_watch.json` with **Arm now** / **Re-learn**. Findings: off-baseline writes and function codes, FC8 **Force Listen Only** / restart, UMAS + the **ModiPwn** sequence, Read-Device-ID bursts, unit-ID sweeps, malformed MBAP/PDU framing, Modbus outside a declared OT subnet, plain 502 to an 802/TLS host. Dual-stack, including IPv6 behind extension headers
+- New verdict `plc-abuse` pages in the Network Integrity Monitor (`learning` counts as clean); HIGH/MEDIUM findings feed **Watchtower** (`modbus_watch`); added to the background rotation, `GET /api/net/modbus-watch`, `GET/POST /api/net/modbus-baseline` and CLI `modbus-watch` (with `--pcap` replay)
+- **4 new CVEs** (index 271 → **275** named / 230 → **234** detected): CVE-2021-22779 (ModiPwn), and CVE-2019-14462 / CVE-2019-14463 / CVE-2024-10918 (libmodbus framing, flagged as a trigger only)
+- Detector Self-Test: new `modbus` suite 30/30, including Scapy pcap replays over IPv4, IPv6 and IPv6 with an extension header. Upstream verifier 32/32. Checked on live sockets in a sealed network namespace: the learning scan stays clean, the attack scan reads `plc-abuse` on both families, and the learned master stays quiet
+- Updated **module visibility matrix** with the Modbus Watch tile (L7, on-path unicast tier C): `docs/ragnar_osi_visibility_matrix.jpg` and the per-layer web crops in `web/images/osi/` re-cut (band edges unchanged), image cache-bust bumped
+- **Docs:** [nettools.md](nettools.md) "Modbus Watch", [watchtower.md](watchtower.md), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md)
+
+#### [#925](https://github.com/PierreGode/Ragnar/pull/925) — feat(sdr): RF Waterfall always visible in Signal Intelligence
+*branch `feature/rf-waterfall-always-visible`*
+
+- The **RF Waterfall page** button in Signal Intelligence → RF tools used to hide until a HackRF or RTL-SDR was detected (and `/rf-waterfall` 404'd without one). The page now collapses the panel of any radio that isn't connected, so the button is **always shown** and the route is **always served**. The button tooltip lists the live radios and now counts the **ESP-SDR** too (it was missing). The demo toggle now only controls the synthetic feed. ADS-B / Pager / VOR keep their RTL-SDR gating.
+
+#### [#924](https://github.com/PierreGode/Ragnar/pull/924) — feat(net): PTP Watch v6 — ITU-T telecom profiles + CMLDS
+*branch `feature/ptp-watch-v5`*
+
+- Re-vendored **ptpwatch v6** with the Ragnar adapter re-appended; registry 56 → **66** codes
+- New **Class P** (`PTP-P01`…`P11`, no P07): conformance against a declared ITU-T profile — **G.8275.1**, **G.8275.2**, **G.8265.1** (domain range, transport, multicast vs unicast, peer-delay, priority1, clockClass traceability, G.8275.1 destinations, G.8265.1 correctionField / stepsRemoved). Off until a profile is picked: new **Profile** list on the PTP Watch card and `profile=` on `GET /api/net/ptp-watch` (unknown values rejected)
+- gPTP peer-delay rules (`PTP-H01/H02/H08/V03`) now also watch **CMLDS** (`majorSdoId 2`, 802.1AS-2020)
+- Same findings as upstream v6 on all six of the author's captures, with and without a profile; author tiers on the Pi 5: scenarios 139/139, conformance 1115/1115, self-verify 94/94, ESMC cross-check 0 mismatches; in-app PTP self-test 14 → 19, all 48 Detector Self-Test suites green from the web path
+- No new CVEs (index unchanged at 271 / 230); the PTP card's stale "42 finding codes" now reads 66
+- **Docs:** [nettools.md](nettools.md) "PTP Watch"
+
+#### [#923](https://github.com/PierreGode/Ragnar/pull/923) — fix(sdr): RF Waterfall went all-black after the ESP gain controls
+*branch `fix/rf-waterfall-esp-gain-hwui`*
+
+- The ESP-SDR real **Gain** / **FFT-bins** controls gave the ESP panel its own `espTrim` branch in `buildHardware`/`buildResolution` (creating `.eagc`/`.egain`/`.ebins`), but `_hwUI` was never given a matching branch — it still ran the HackRF path and did `querySelector('.hlna').value = …` on an element the ESP panel no longer has. That **threw inside the ESP scope's constructor**, aborting start-up before the polling loop and `window.RFWF` were set up, so **all three waterfalls (RTL / HackRF / ESP) went black with no readings**. Added the missing `espTrim` branch to `_hwUI` so the ESP panel refreshes its own gain UI instead of touching HackRF-only elements. Gain and FFT-bins controls work; the page runs again.
+
+#### [#922](https://github.com/PierreGode/Ragnar/pull/922) — fix(ble): BLE Watch card missing from L2 after #921
+*branch `fix/blewatch-card-l2`*
+
+- The BLE Watch card shipped in #921 still sat in the **L7** panel: the commit moving it to **L2** landed on another branch and missed the merge. It now lives at **Network → Diagnostics → L2 Data Link → Passive · Bluetooth LE**, the L2 description mentions it and the L2 layer badge counts it (13 → 14).
+
+### 2026-10-06
+
+#### [#921](https://github.com/PierreGode/Ragnar/pull/921) — feat(ble): BLE Watch — passive Bluetooth Low Energy attack monitor
+*branch `feature/blewatch-ble-sniffer`*
+
+- New passive, **detection-only** BLE monitor (`python/blewatch.py`), the Bluetooth counterpart to the Wi-Fi WIDS / ND spoofing watchers. The RX is done by an **external nRF Sniffer over USB — both generations supported: nRF51** (Adafruit [Bluefruit LE Sniffer](https://www.adafruit.com/product/2269)) **and nRF52** (nRF52840 Dongle/DK); Ragnar only parses the captured BLE Link-Layer PDUs with a hand-rolled raw-byte parser (no dissector), and the PDU is identical across both so parser and findings are shared. 16 stable `BLE-0xx` findings across two layers:
+  - **Advertising:** device/beacon **clones** (`BLE-001`), **two radios sharing one address** (`BLE-002`), **public-address reuse across names** (`BLE-003`), **RPA rotation storms** (`BLE-004`), **beacon spoof** (`BLE-005`), per-AdvA + advertiser **floods** (`BLE-006/007`), **BLE-spam tooling** signatures — Flipper / "Sour Apple" / Fast-Pair / Swift-Pair (`BLE-013`), vendor-shape mismatch (`BLE-015`), **GATT service masquerade** (`BLE-016`), malformed PDUs (`BLE-014`)
+  - **Connection** (when the sniffer follows a link): **CONNECT_IND hijack** (`BLE-008`) and **race / MITM** (`BLE-009`), **LL_VERSION_IND swap** (`BLE-010`), **Just-Works pairing downgrade** (`BLE-011`), **forced re-pair storm** (`BLE-012`)
+- **Both paths:** a standalone binary (`--self-test` · `--replay` pcap · `--list-devices` · opt-in least-privilege `scripts/blewatch.service`) and an in-app **BLE Watch** card (Network → Diagnostics → **L2** → Passive · Bluetooth LE). Device-gated — with no sniffer attached it says so plainly instead of pretending to listen. HIGH/CRITICAL findings reach Watchtower; the detector self-test joins **validate detectors**. Route `/api/net/ble-watch`, CLI `ble-watch`.
+- Reads classic pcap DLT **256** (`BLUETOOTH_LE_LL_WITH_PHDR`) and **251** (`BLUETOOTH_LE_LL`) fully; Nordic **272** best-effort (**unvalidated on hardware** — no sniffer on the dev box). `blewatch --self-test` **19/19**. Docs: [docs/blewatch.md](blewatch.md).
+
+#### [#920](https://github.com/PierreGode/Ragnar/pull/920) — feat(net): NTP Watch v11 + PTP Watch v4 (SyncE / ESMC)
+*branch `feature/ntp-v11-ptp-v4`*
+
+- **NTP Watch v11** (in-app `_ntp_analyze`): new critical verdict **`crash-exploit`** for an **oversize NTP datagram** (> 1500 bytes, CVE-2016-9312 — the v6 deferral, now read from tcpdump's true length) and a **mode-6 `count` overrun** past the 468-octet spec maximum or the datagram (CVE-2019-6444 / CVE-2019-6443, ntpsec)
+- **Dual-stack**: the NTP parser was IPv4-only and silently skipped every IPv6 packet; IPv6 is now parsed, NTP behind an IPv6 extension header is captured (shared EH clause), and a `::1` / `::ffff:127.x` source is caught by the loopback ACL-bypass rule (CVE-2014-9298 / 9751)
+- **False-positive fix**: Autokey EF parsing now runs only on modes 1–5 (as upstream) — a normal full-size `ntpq` response was raising a false critical `autokey-exploit`; Autokey length checks use the true wire length, not the 512-byte snaplen
+- **PTP Watch v4**: re-vendored engine + the Ragnar adapter; new **Class S** (SyncE / ESMC, G.8264, `PTP-S01`…`S10`, no CVEs exist), registry 46 → 56; capture filter admits ESMC (plain or VLAN-tagged, LACP excluded). Same findings as upstream on all six of the author's captures
+- Self-tests: NTP 40 → 55, PTP 12 → 14; all 47 Detector Self-Test suites green from the web path. Author tiers on the Pi 5: PTP scenarios 106/106, conformance 910/910, self-verify 79/79, ESMC cross-check 0 mismatches
+- CVE index 271 named / 230 detected; the index generator now skips a placeholder ID (CVE-2024-99999) used only in ptpwatch's own mutation-test fixtures
+- **Docs:** [nettools.md](nettools.md) "NTP Watch" + "PTP Watch", [CVE.md](CVE.md), [CREDITS.md](CREDITS.md), [README (root)](../README.md)
+
+### 2026-10-05
+
+#### [#919](https://github.com/PierreGode/Ragnar/pull/919) — fix(sdr): real Gain + FFT-bins controls for the ESP panel (were HackRF no-ops)
+*branch `feature/esp-sdr-waterfall`*
+
+- The ESP panel was built on the HackRF template, so its **Hardware** section showed HackRF **LNA/VGA/amp/antenna** sliders and its **Resolution** section a `hackrf_sweep` **RBW** dropdown — all **dead** (the ESP backend ignored `lna/vga/amp/antenna/bin_hz`). Replaced with the ESP's real controls:
+  - **Gain**: Auto (hardware AGC, default) or a manual gain index (0..max from the firmware's `LIMITS?`), sent as `GAIN HARDWARE` / `GAIN MANUAL <i>`. Verified on hardware: index 10 → ~−66 dBFS, 82 → ~−16 dBFS
+  - **FFT bins**: 256 / 512 / 1024 / 2048 (RBW = sample rate ÷ bins); the capture span still follows the band/zoom
+- Both apply live via the fast retune. Backend `esp_sdr.start(gain=…, fft_bins=…)`, exposed in `/status` (`gain`, `gain_hardware`, `gain_limits`, `fft_bins`); the ESP panel no longer sends HackRF params. `esp_sdr.selftest` 18/18
+
+#### [#919](https://github.com/PierreGode/Ragnar/pull/919) — feat(sdr): ESP-SDR frequency trim (FOFS) + Wi-Fi auto-calibration
+*branch `feature/esp-sdr-waterfall`*
+
+- The ESP32 has no TCXO, so its LO drifts a few ppm with temperature. New **Frequency trim** control (ESP panel → Settings) corrects it at the LO via the firmware's `FOFS <kHz>` command — verified on real hardware to shift the spectrum **1:1 in kHz** (+FOFS → +kHz). Set an offset by hand (shows the ppm equivalent), or **Auto-trim (Wi-Fi)**
+- **Auto-trim** runs a high-res 2.4 GHz sweep and nulls the drift against the **2.4 GHz Wi-Fi channel centres** (ch 1/6/11). It is self-validating — it only applies a correction when **two channels agree within 40 kHz** and the result is inside the crystal's physical range (~±100 kHz); in a congested 2.4 GHz environment it **declines rather than mis-calibrate** and points you at manual trim or a HackRF cross-reference. Measured edges are sub-bin interpolated; the trim persists across restarts (`data/esp_sdr_fofs.json`, git-ignored)
+- **vs HackRF** cross-reference — the most accurate trim: both radios sweep the same narrow ~40 MHz window (around Wi-Fi ch 6) and the ESP spectrum is **cross-correlated against the HackRF's** (resolution-matched, sub-bin peak). Both see the same ambient RF, so overlapping-channel contamination cancels — it works where the ambient-Wi-Fi lock can't. Applies only on a strong correlation (≥0.5). Validated synthetically (recovers a known shift; accurate on a narrow window where the full band is too coarse)
+- New backend `esp_sdr.set_fofs` / `auto_trim` / `calibrate_vs_reference` / `trim_state`, route `/api/net/esp/trim` (GET state · POST `{khz:N}` manual · `{auto:1}` Wi-Fi · `{hackrf:1}` HackRF cross-ref); FOFS is sent on every capture start and is part of the start signature so a trim change re-applies live. `esp_sdr.selftest` 18/18 (adds Wi-Fi-offset + cross-correlation checks)
+
+#### [#919](https://github.com/PierreGode/Ragnar/pull/919) — feat(sdr): ESP-SDR as a third live RF Waterfall panel
+*branch `feature/esp-sdr-waterfall`*
+
+- The **RF Waterfall** page (`/rf-waterfall`) now stacks a third live panel: an **[ESP-SDR](https://espargos.net/espsdr/) node** — any ESP32 flashed with the ESP-SDR firmware — streaming **on-chip FFT power spectra** over its native USB serial link, no dedicated SDR hardware needed. On an **ESP32-S3** it covers the 2.4 GHz ISM band (~2.2–2.7 GHz usable): Wi-Fi, Bluetooth, microwave ovens, drones, jammers
+- New backend `esp_sdr.py` speaks the firmware's `SPEC` protocol (newline commands + binary `SPC1` frames), decodes each frame to **dBFS** the way ESP-WebSDR does (`code/mult − 84.3`, with the fftshift + I/Q-axis-flip bin order), max-holds to a steady ~50 rows/s (near the browser's refresh ceiling — the ESP computes FFTs on a fixed window at hundreds/s, so unlike the sweeping HackRF/RTL it scrolls fast) and hands the web layer the **same frame contract** (`power[]` + `band_mhz` + `floor_dbm`) the HackRF/RTL panels use. Receive-only
+- New routes `/api/net/esp/{status,start,stop,frames,selftest}` mirror the HackRF endpoints; the page gate (`_any_sdr_present`) serves the page when only an ESP node is attached
+- Unlike the sweeping HackRF, the ESP captures one fixed FFT **window** (centre = band, span = sample rate 16/40/80 MHz); a narrower zoom drops to a lower sample rate for finer resolution (down to ~31 kHz/bin). Presets `2.3G · 2.4G · 2.45G · 2.6G`
+- The node is **auto-discovered** on any Espressif serial port (env override `RAGNAR_ESP_SDR_PORT`), and coexists with other ESP32s on the bus (e.g. a GPS node) — it only claims a port that answers the ESP-SDR handshake. A capture left streaming by a crashed/killed client is **self-healed** on the next probe (a `RELEASE` doubles as the `SPEC` stop byte, and the half-closed CDC read is tolerated)
+- Removed the manual **Scroll rate** control (Slow/Normal/Fast) from the page. Every waterfall now simply **follows the rate its data arrives**: live rows are genlocked to their producer timestamp (unchanged), and the slow-sweep hold-fill now scrolls at the panel's own *measured* rate (`s._nom`) instead of a fixed pick — a fast engine scrolls fast, a ~1/s `rtl_power` sweep scrolls at ~1/s. Applies to all panels (RTL/HackRF/ESP)
+- **Auto collapse / expand** of the three panels: an idle panel collapses to a slim header row and an active (live/synthetic) one expands, automatically. A chevron button in each panel header overrides it, and the manual choice holds until that panel's state next changes. The **SDR check** panel (Wi-Fi Analyzer) now also reports the ESP-SDR line alongside RTL-SDR and HackRF
+- Hardened ESP-SDR self-recovery: `flush()` the SPEC stop byte ahead of the backlog during lease sync, so a device left streaming by a killed client (even after a long capture) is reclaimed on the next probe in well under a second
+- **Root-cause fix for the real instability:** ModemManager was probing the ESP32's `ttyACM` "USB JTAG/serial debug unit" with AT commands + DTR/RTS toggles (it looks like a cellular modem), which reset the chip and wedged captures at random. Install/update now drop a udev rule (`99-ragnar-espsdr.rules`) tagging all Espressif devices (VID `303a` — ESP-SDR *and* the ESP32 GPS/wardrive nodes) `ID_MM_DEVICE_IGNORE`, so MM leaves them alone; real LTE modems for the cellular-uplink feature are unaffected. The device now stays rock-solid across detection polls
+- A **⚡ Flash ESP32** button in the ESP panel header links to the ESP-SDR browser flasher (`espargos.net/espsdr/app/flash.html`, Web Serial) — visible even when the panel is collapsed, so a blank/undetected board can be flashed in a click
+- Verified on real hardware (ESP32-S3 on `/dev/ttyACM1`): `esp_sdr.selftest` 11/11, live 2.4 GHz capture showing real on-air energy, zoom tuning to 16 MS/s, clean stop/detect, and self-recovery after a `SIGKILL` mid-stream
+
+#### [#918](https://github.com/PierreGode/Ragnar/pull/918) — feat(mesh): PCAP view as a collapsible box inline on each capture row
+*branch `feature/mesh-pcap-view-collapsible`*
+
+- The on-screen PCAP **View** is now a **collapsible box on the capture's own row** (▸ View / ▾ Hide / ✕ Close) instead of a single panel at the bottom of the list. The packets expand **in place**, so nothing scrolls away or navigates off-page — much better on a phone
+- Open panels **survive the background mesh refresh**: each expanded capture's decoded packets are cached client-side (`_meshCaptureOpen`), so a periodic re-render keeps them open instead of collapsing them. Switching to another node clears the set
+- **Named per Ragnar unit**: the view header reads *Packets · <Viking name>* and a downloaded capture saves as `<Viking-name>_<id>.pcap` (falling back to label / Tailscale short name), instead of a raw node id — resolved server-side from the unit's reported identity
+- Verified: the list renders with one row expanded inline at phone (400px) width — summary header (with the unit name), protocol chips, top sources and the scrollable packet list all sit between the rows, no page overflow; app imports with the naming helper present
+
+#### [#917](https://github.com/PierreGode/Ragnar/pull/917) — feat(mesh): view PCAP capture contents on screen (not only download)
+*branch `feature/mesh-pcap-view`*
+
+- Each finished capture on the node page now has a **View** button next to **Download**. View decodes the `.pcap` and shows its **packets on screen**: a summary header (packets shown / of total, byte size, a per-protocol tally as colour chips, and the top source addresses) over a scrollable monospace **packet list** — so you can see what was captured without opening Wireshark
+- The hub reads the file with `tcpdump -nr` over the tailnet (self or peer) and returns a bounded packet list (default 300, max 2000 lines) plus the summary; new `pcap_capture.view()` + rough protocol classifier
+- New routes: worker `GET /api/mesh/capture/view/<id>` (peer-readable) and operator `GET /api/mesh/peer-capture/view` (session-only, relays to the chosen unit)
+- Verified: `pcap_capture.selftest()` 14/14 (adds protocol-classifier + source-regex checks); live loopback `view()` (decoded 10 of 30 packets, protocol tally, top source, truncation flag); app imports with both view routes registered; view panel rendered against real Tailwind at desktop and phone (400px) widths
+
+#### [#916](https://github.com/PierreGode/Ragnar/pull/916) — feat(mesh): downloadable trace route / ping / diagnose results
+*branch `feature/mesh-probe-download`*
+
+- Each **Trace route**, **Ping** and **Diagnose** result on a unit's node page now has a **⬇ Download** link alongside the on-page display — it saves the result as a plain-text report (parsed summary plus, for trace/ping, the raw `traceroute`/`ping` output). Built client-side from the result already in the browser (Blob + `<a download>`), so there is no re-run and no server round-trip; filenames are `trace_<target>_<ts>.txt` / `ping_…` / `diagnose_…`
+- No backend change — the probe/diagnose endpoints already return everything the report needs
+- Verified: report builders against mock trace/ping/diagnose payloads (hop table, loss/RTT, category/hint/error); results render with the Download link at desktop width
+
+#### [#915](https://github.com/PierreGode/Ragnar/pull/915) — feat(mesh): live PCAP capture on the Ragnar fleet node page
+*branch `feature/mesh-pcap-capture`*
+
+- New **Packet Capture** feature on a unit's node page, next to Traffic Analyzer / Integrity / Threats / Watchtower: start a **bounded** `tcpdump`-to-`.pcap` on any reachable unit (self or peer), pick interface / duration / packet cap / optional **BPF filter**, watch live progress (packets · bytes · elapsed), and **Download** the finished `.pcap` — the real frames for Wireshark, which the Traffic Analyzer (text stats only) never writes
+- New `pcap_capture.py` capture engine — strictly bounded (defaults 5 min / 100 MB / one capture at a time, oldest pruned), validates interface + BPF (no option/shell injection), runs `tcpdump` directly as root or via `sudo -n` otherwise. Selftest 10/10; live loopback capture verified (bounded stop, valid pcap, packet count)
+- Mesh plumbing mirrors scan delegation: **worker** routes on each unit (`POST /api/mesh/capture/start`, `cancel/<id>`; peer-readable `GET …/status/<id>`, `/list`, `/download/<id>`) with the two writes added to the exact-path **peer-write allowlist**; **operator** routes (`/api/mesh/peer-capture/*`, session-only) relay to the chosen unit and, for a peer, **stream the `.pcap` back over the tailnet** (WireGuard) straight to the browser. Trust boundary is the mesh tag, same as control/scans. A `capture` block was added to the mesh `features` payload so the node page shows interfaces + recent captures per unit
+- Docs: [mesh.md](mesh.md) *Live packet capture (PCAP)* section + security-model allowlist; README mesh line
+- Verified: `pcap_capture.selftest()` 10/10; live loopback capture (20-packet cap → valid pcap read back by tcpdump); capture card rendered against the real pruned Tailwind at desktop and phone (400px) widths (controls/rows wrap, no overflow)
+
+### 2026-10-04
+
+#### [#914](https://github.com/PierreGode/Ragnar/pull/914) — feat(mesh): node filters + actions (trace the jumps) on both the Ragnar fleet and Meshtastic node lists
+*branch `feature/mesh-node-filters-actions`*
+
+**Ragnar Mesh (Tailscale fleet) — Mesh Nodes card:**
+- **Filter/sort toolbar** above the list (appears once there is more than one peer): search by name / unit number (`3`, `03`, `unit 03`) / site label / hostname / tailnet IP; filter by status (*All / Online / Needs attention / Unreachable / Not polled*); sort by name, unit number, worst **severity**, open **alerts**, or **CPU**. A *Showing X of Y* counter plus **Reset**. All client-side over the already-polled roster — **no round-trip**, instant even on a Pi Zero; your own unit is never filtered out
+- **"Needs attention"** reuses the exact Mesh Health test (unreachable, offline, node-key warning/expiry, undervoltage, or a high/critical finding), so the filter and the summary agree
+- **Node-page Actions bar** — probes a peer *from the unit you are looking at*: a **Tailnet path** line (direct WireGuard vs. relayed via DERP + region, from already-polled data, no probe), **Trace route** (`traceroute` drawn as a hop list — "the jumps" — with a hop-count badge), **Ping** (loss + min/avg/max RTT), plus the existing **Diagnose** and a **Copy IP**. An unreachable node gets Trace + Ping next to **Diagnose** on its banner, to show where the path dies
+- New `POST /api/mesh/probe` (`{ip, kind: "trace"|"ping"}`), session-gated like `/api/mesh/diagnose` and **not** peer-callable. The target is pinned server-side to the known mesh roster (self or a tagged peer), so the route is a fleet tool, not an arbitrary-target traceroute box
+
+**Meshtastic — Mesh Nodes page (`/mesh-nodes`):**
+- **Filter/sort toolbar** over the node table: search (name / id / hardware / role), a role picker built from the roles present, an activity/attribute filter (Active &lt;15m, Heard &lt;2h, Has GPS, Direct 0-hop, Multi-hop), and sort by heard / name / SNR / hops / battery. Self first; *Showing X of Y* in the caption
+- **Per-node actions** (click a row): **Trace route**, **Message** (prefills the send box with the node id), **Focus on map**, **Copy ID**
+- **Trace route (see the jumps)** — Meshtastic's own traceroute: draws the LoRa path `you → relay (SNR) → … → target (SNR)` with per-link SNR and a hop count. The library call blocks, so it runs on a background thread and the reply is captured off the receive bus; needs a connected USB node (MQTT can't trace) and can take 10–40 s (airtime + firmware rate-limit). New `POST /api/net/mesh/traceroute` + `GET /api/net/mesh/traceroute/result?id=`
+
+- Docs: [mesh.md](mesh.md) (fleet filters + path/trace/ping) and [sdr-subghz.md](sdr-subghz.md) (Meshtastic filters + traceroute, API rows); README mesh lines
+- Verified: `traceroute`/`ping` parsers against live loopback output; Meshtastic traceroute-reply parser via `meshtastic_node.selftest()` (32/32, incl. hop-chain order, /4 SNR scaling, name resolution); filter/sort/search + all renderers against mock payloads; offline chromium render of both cards at desktop and phone (400px) widths
+
+#### [#913](https://github.com/PierreGode/Ragnar/pull/913) — docs: wardrive firmware comparison on the ESP32-C5
+*branch `docs/wardrive-comparison`*
+
+- New [wardrivecomparison.md](wardrivecomparison.md): Huginn vs Piglet measured on the same Seeed XIAO ESP32-C5 (Huginn → Piglet → Huginn, 10 min each, Pi 5 `wlan0` as drift tracker). Huginn sweeps in ~5.3 s vs 9.7 s (1.8× more detections/min, plus BLE); Piglet hears slightly more per sweep; Huginn's scan-timing calibration; open issue with one channel-5 AP after `show_hidden`
+- Linked from the [docs index](README.md)
+
+#### [#912](https://github.com/PierreGode/Ragnar/pull/912) — fix(rf-waterfall): keep the scroll flowing on a slow sweep instead of freezing
+*branch `fix/rf-waterfall-smooth-scroll`*
+
+- **Symptom:** the RF Waterfall froze for ~1 s every couple of seconds, then jumped to catch up, instead of scrolling as a smooth constant flow
+- **Root cause:** live rows are genlocked to their producer timestamp behind a ~0.6 s buffer. The real-time IQ engine feeds 16 rows/s so the buffer stays full and the scroll is smooth — but wide sub-GHz bands fall back to the `rtl_power` sweep, which emits only ~1 row per completed sweep (`-i 1`). That gap is longer than the 0.6 s buffer, so the playhead starves between sweeps: freeze, then a jump when the next frame lands (same for any wide/slow producer, e.g. a wide HackRF span)
+- **Fix:** when the queue drains between frames, hold the last line and scroll it at the chosen **Scroll rate** (Slow/Normal/Fast = 5/12/24 rows/s) until real data resumes — the way SDR++/gqrx scroll on a slow sweep. New spectrum still arrives at the engine's true rate and **Rows/s** still reports it; the hold only keeps the picture moving
+- Held rows are recorded in history with their own wall-clock time, so the time grid, repaint, scroll-back and CSV export stay 1:1 with the pixels on screen; measurement, detection and the noise-print recorder see only real rows. A fast engine never starves, so the hold never engages there (IQ path unchanged); a genuine multi-second stall stops the hold and lets the panel raise its waiting veil
+- Verified by pacing simulation: `rtl_power` ~1/s now scrolls at a constant 12/s with ≤67 ms hitches (was ~1 s freezes); IQ 16/s is unchanged (zero hold rows). Not yet confirmed on live hardware (the DVB-T driver was holding the dongle on the dev box)
+- Also changed the **default colour window** to a fixed **Ref level −50 dB, Range 15** (top −50, bottom −65) instead of auto-range; a per-browser setting saved in Settings → Display range still wins
+- **Docs:** [rf-waterfall.md](rf-waterfall.md) "Sub-GHz engine" — rewrote the steady-flow note, added "No freeze on a slow sweep"
+
+#### [#911](https://github.com/PierreGode/Ragnar/pull/911) — feat(net): Liebert Guard v2 — bounded reassembly
+*branch `feature/liebert-guard-v2`*
+
+- Vendored **liebert_guard v2**: reassembly is now incremental with a per-flow work budget (`MAX_WORK` 200,000 steps, `MAX_CANDS` 16), so a stream of tiny TCP segments can no longer make one frame expensive — on the Pi 5, 1,524 one-byte segments went from **12.35 s to 0.08 s**
+- Same codes (LG-001/002/003/101), CVEs and output; new limit: a head or request line split into more than ~630 in-order one-byte segments is not judged
+- Conformance tier updated (493 → 501). All author tiers pass on the Pi 5 (ARM64): module 198 incl. live loopback, conformance 501, scapy 554, perf 29, unit verifier 74; Detector Self-Test 206/206, all 47 suites green from the web path
+- **Docs:** [nettools.md](nettools.md) "Liebert Guard"
+
+#### [#910](https://github.com/PierreGode/Ragnar/pull/910) — fix(gc9a01): stop the round TFT showing only static
+*branch `fix/gc9a01-spi-speed`*
+
+- **Root cause:** the GC9A01 1.28" round display driver hardcoded SPI at the panel's 40 MHz maximum. Over Dupont/jumper wiring that clock corrupts the init-sequence command bytes, so the controller is never configured and the panel shows only its power-on noise ("snow"/static)
+- Default SPI clock lowered to a safe **20 MHz**, matching the conservative approach of the ILI9486 driver
+- Added environment overrides mirroring the 3.5" TFT driver: `RAGNAR_GC9A01_SPI_HZ`, `RAGNAR_GC9A01_MADCTL`, `RAGNAR_GC9A01_INVERT`, and `RAGNAR_GC9A01_RST_PIN` / `_DC_PIN` / `_BL_PIN` (`-1` disables backlight control). Users can drop the clock further (`10000000`) if still noisy
+- Display inversion (`INVON`) and MADCTL are now env-tunable instead of hardcoded; backlight pin respects `-1`
+- New "1.28" GC9A01 round TFT" section in [Display Controls](DISPLAY_CONTROLS.md) with wiring and a static/snow troubleshooting table
+
+#### [#909](https://github.com/PierreGode/Ragnar/pull/909) — feat(mesh): pick the Meshtastic MQTT region
+*branch `feature/meshtastic-mqtt-region`*
+
+- **Region picker** next to the MQTT Topic box on Mesh Nodes and Mesh Map: All regions (`msh/+/2/#`), or one region root (`msh/EU_868/#`, `msh/US/#`, ANZ, CN, JP, …) including country and city sub-topics; *Custom topic* for a hand-typed filter. Choice is remembered per browser
+- Changing the topic while MQTT is on reconnects at once, and the backend drops the old region's nodes/messages (`MeshMqtt.connect`)
+- Region list served by `detect()` (`mqtt_defaults.regions`); `mqtt_region_topic()` + 4 self-tests (26/26)
+- **Region badge on every MQTT message** (e.g. `EU_868/SE`, `US`, `ANZ`), read off the topic by `mqtt_topic_region()`; hover shows the full topic; map popups show **Region** for MQTT stations. +2 self-tests (28/28)
+- **Docs:** [sdr-subghz.md](sdr-subghz.md) "Choosing a region" / "Where a message came from"
+
+### 2026-10-03
+
+#### [#908](https://github.com/PierreGode/Ragnar/pull/908) — fix(wardriving): Piglet sync — newest drive first, give up on stuck files, sync on plug-in
+*branch `feature/piglet-sync-newest-plugin`*
+
+- **Newest first:** with Piglet v2.61 `LIST` carries each file's last-write time; Ragnar fetches the newest drive first (unknown times next, previously failed files last). On a full card the first field sync imported months-old drives before the new ones
+- **Stuck files:** SD read errors (`@PG ERR read-error`, v2.61) stop that file at once; 2 no-progress resumes abandon it; a failed file waits 6 h before a retry and is skipped after 3 failed syncs (`unreadable`); a vanished port stops the sync instead of failing every remaining file
+- **Sync on plug-in:** new `PlugWatcher` syncs a Piglet when it's plugged in even with wardriving stopped (Espressif native-USB devices only, once per plug-in, respects serial claims; defers to the wardriving listener while it runs). Button and watcher share one guarded `_piglet_sync_on_port()`
+- **Docs:** [wardriving.md](wardriving.md) "USB sync of solo drives"
+
+#### [#907](https://github.com/PierreGode/Ragnar/pull/907) — feat(net): Liebert Guard + updated visibility matrix
+*branch `feature/liebert-guard`*
+
+- **Liebert Guard**, the companion to APC Guard for Vertiv / Liebert power cards: vendored stdlib-only `python/liebert_guard.py` replayed in-app from a bounded `tcpdump` capture of the card's HTTP port. **LG-001** RomPager banner below 4.34 (**Misfortune Cookie**, CVE-2014-9222 — Liebert MPH / RPC-1000), **LG-002/003** unparseable / patched banner, **LG-101** HTTP method over 64 bytes (CVE-2025-41426 — Liebert RDU101 / IS-UNITY overflow)
+- Card in **Diagnostics → L7** right after APC Guard (port picker); `GET /api/net/liebert-guard`, CLI `liebert-guard` / `liebert-guard-selftest`; Detector Self-Test row **206/206** (module tier in its own interpreter, incl. live loopback capture)
+- Opt-in hardened `scripts/liebert_guard@.service` → `/var/log/ragnar/liebertguard.jsonl`, tested on the Pi 5; runs as `ragnar` (a dynamic user would move `/var/log/ragnar`)
+- Watchtower: Liebert sources, `note` as headline, attempt source = client / banner source = card
+- New **module visibility matrix** (52 detectors) in the docs and the web UI reference cards; CVE index 268 named / 227 detected
+- **Docs:** [nettools.md](nettools.md) "Liebert Guard", [watchtower.md](watchtower.md), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [README (root)](../README.md)
+
+#### [#906](https://github.com/PierreGode/Ragnar/pull/906) — feat(wardriving): import Piglet solo drives over USB
+*branch `feature/piglet-serial-sync`*
+
+- A drive done with Piglet on its own only lived on its SD card. Piglet firmware **v2.60** (SerialSync) answers `@PIGLET HELLO/LIST/GET` on its USB port, and new [`piglet_sync.py`](../piglet_sync.py) pulls every finished CSV and imports each one as its own session (`session_<first seen>_piglet`)
+- Runs automatically when a Piglet connects while wardriving (`wardriving_piglet_sync`, default on) and on demand via **Import from Piglet (USB)** on the Import card (`POST/GET /api/wardriving/piglet/sync`). With wardriving stopped it opens the free ESP32 port itself under a `piglet-sync` serial claim
+- Per-chunk CRC32 + resume-at-offset (up to 8 resumes per file); Piglet mutes IDF logging while serving so Wi-Fi log lines can't corrupt data lines. About 140 KiB/s on an ESP32-C5
+- Skips the file Piglet is writing (the live stream covers it) and files with no GPS positions; remembers imports per Piglet MAC + file name (`data/wardriving/piglet_imports.json`), so a file Piglet later moves to `/uploaded` is not imported twice
+- **CSV import now keeps real times:** rows use their `FirstSeen` instead of the import time, a GPS track is rebuilt from positioned rows, `0,0` is stored as "no position", pre-clock `1970` rows take the file's nearest valid time; also fixes a `TypeError` on cell rows (`upsert_cell_tower` missing args). Applies to the manual **Import CSV** too
+- **Docs:** [wardriving.md](wardriving.md) "USB sync of solo drives", [README.md](../README.md)
+
+### 2026-10-02
+
+#### [#905](https://github.com/PierreGode/Ragnar/pull/905) — feat(ducky): drive the Rubber Ducky HID across the mesh
+*branch `feat/ducky-mesh` · 6 file(s)*
+
+- A Ragnar plugged into a host PC via USB-OTG can't use wired Ethernet at the same time, so it rides Wi-Fi — and now a **second Ragnar on the mesh can run Ducky payloads on its HID**, the same way the Device Console is driven across the mesh
+- **Run on** picker added to the Rubber Ducky card (this unit + mesh peers, each showing HID/allowed state); selecting a peer tags every script/device/preview/execute/install call with `X-Ragnar-Target` so this unit's secret-gated gateway relays it (`duckyState` + `rdFetch` in ragnar_modern.js)
+- **Allow mesh units to run payloads on this unit** checkbox (off by default), persisted in `data/rubber_ducky.json` (`mesh_allowed()` / `set_mesh_allowed()` in `python/rubber_ducky.py`). `_ducky_mesh_write_guard()` refuses a *relayed* execute / gadget enable-disable / save / install unless the target unit ticked it — so the two gates are independent: the **mesh secret** authorises transport, the **checkbox** is the target's per-unit opt-in
+- New endpoints: `GET /api/rubber-ducky/units`, `GET/POST /api/rubber-ducky/mesh-allow`, and the peer-discovery `GET /api/mesh/rubber-ducky/status`
+- **Docs:** [rubber-ducky.md](rubber-ducky.md) "Driving another unit over the mesh"
+
+#### [#904](https://github.com/PierreGode/Ragnar/pull/904) — feat(scripts): install ducky + console scripts from the external RagnarScripts library
+*branch `feat/ragnarscripts-install-library` · 12 file(s)*
+
+- Ragnar now reads a second, **user-cloned** script source — [RagnarScripts](https://github.com/PierreGode/RagnarScripts) — alongside the built-in demos, which stay exactly where they are. Discovery order: `$RAGNAR_SCRIPTS_DIR` → a `RagnarScripts/` folder beside the repo → `~/RagnarScripts` → `/home/pi` or `/home/ragnar`
+- **Auto-sync** (`ragnar_scripts.py`): best-effort `git clone` (when missing) / `git pull` (when present) on web-server start and when the **Dashboard**/**Pentest** tabs open, so pushed scripts appear without a manual pull. Anonymous HTTPS (public repo, no creds), throttled ~30 s, backgrounded, `safe.directory=*` for cross-user checkouts, never fatal. New endpoint `POST /api/ragnar-scripts/sync`; the two `_ragnar_scripts_repo()` helpers now delegate to this module
+- **Rubber Ducky card:** RagnarScripts `.ducky`/`.txt` payloads (repo's `rubber-ducky/` folder) are folded directly into the existing **Payload Library** list, mixed with the bundled `resources/ducky_payloads/` payloads and tagged **RagnarScripts** vs **bundled**, with per-row Install/Reinstall (`list_ragnar_scripts()` / `install_ragnar_script()` in `python/rubber_ducky.py`)
+- **Device Console card:** new expandable **Install console scripts** section lists `.json` sequences from the repo's `console-scripts/` folder (name/vendor/command-count), installs into this unit's `data/console_scripts/` and refreshes the Run-script picker (`list_library()` / `install_library_script()` in `serial_console.py`)
+- APIs: `GET/POST /api/rubber-ducky/ragnar-scripts[/install]`, `GET/POST /api/serial-console/library[/install]`. Installs are name/id-validated (traversal rejected) and JSON-validated for console scripts
+- The **local folders stay fully editable** — Upload here / Files-tab / inline editor all still work; installing never deletes a user's own scripts (same-name install overwrites, shown as *Reinstall*)
+- Bumped the `ragnar_modern.js` cache-bust (`?v=20261002-ragnarscripts`)
+- **RagnarScripts repo** seeded with the folder structure and a few harmless test scripts (3 ducky payloads, 3 console scripts) + READMEs
+- **Docs:** new [ragnarscripts.md](ragnarscripts.md); updated [rubber-ducky.md](rubber-ducky.md), [serial-console.md](serial-console.md), [README.md](../README.md), [docs index](README.md)
+
+#### [#903](https://github.com/PierreGode/Ragnar/pull/903) — fix(files): upload scripts into console_scripts & rubber-ducky + console-card Upload button
+*branch `fix/files-upload-console-ducky` · 7 file(s)*
+
+- **Bug:** the Files tab only showed the **⬆ Upload here** toolbar inside `/uploads` and `/backups`, so there was no way to add a script from the **console_scripts** or **rubber-ducky** folders — the upload always fell back to `/uploads`. The backend also rejected `/console_scripts` as an upload target
+- Added an `isUploadablePath()` superset (writable trees **plus** the two script libraries) so the folder toolbar's **Upload here** button now appears in `console_scripts` and `rubber-ducky`, and `uploadFile()` targets the folder actually being browsed. The general-purpose **+ New folder** button stays limited to Uploads/Backups (the libraries are flat)
+- Backend: `_resolve_upload_target()` now accepts `/console_scripts` (mapped to `data/console_scripts/`); `/rubber-ducky` was already allowed. Uploaded `.json` scripts are picked up by `serial_console.list_scripts()` immediately
+- **Feature:** added an **Upload** button next to the **Run Script** picker on the Dashboard **Device Console** card (mirrors the Rubber Ducky card) — pick a `.json` console script, it's added to the local unit's library and auto-selected (`scUploadScript()`)
+- Bumped the `ragnar_modern.js` cache-bust (`?v=20261002-folder-upload`)
+- **Docs:** [serial-console.md](serial-console.md), [rubber-ducky.md](rubber-ducky.md), [README.md](../README.md), [releases.md](releases.md)
+#### [#901](https://github.com/PierreGode/Ragnar/pull/901) — fix(pwnagotchi): stage the bettercap service layer on install (#896)
+*branch `fix/pwnagotchi-bettercap-service-896` · 4 file(s)*
+
+- **Root cause ([#896](https://github.com/PierreGode/Ragnar/issues/896)):** on a from-scratch node, *Switch to Pwnagotchi* hung forever on `waiting for bettercap API to be available ...`. Pwnagotchi drives a local **bettercap** over its REST API (`127.0.0.1:8081`), but `install_pwnagotchi.sh` only *patched* `bettercap.service` **if it already existed** — it never created it. bettercap/pwngrid ship upstream only as pi-gen build-stage templates, so the whole service layer was simply absent and nothing served the API
+- `install_pwnagotchi.sh` now **stages** `/etc/systemd/system/bettercap.service` + `/usr/bin/bettercap-launcher`, templated to the configured monitor interface (`config.toml` `mon_iface` = `mon0`) instead of the upstream-hardcoded **`wlan0mon`**. The launcher runs `monstart` to create `mon0`, then execs bettercap with the `pwnagotchi-auto` caplet (REST + WebSocket on `:8081`). The obsolete `ragnar-websocket.conf` ExecStart drop-in is removed (the caplet now owns the WebSocket setting; the drop-in would have bypassed the launcher). `pwngrid-peer.service` is intentionally **not** staged — Ragnar runs a pwngrid no-op shim with grid/advertise disabled
+- **Health check (Finding 3):** `/api/pwnagotchi/status` now checks the bettercap binary, `bettercap.service`, `bettercap-launcher`, and the `monstart`/`monstop` helpers, so a swap-blocking gap reports **Needs Repair** instead of a false `healthy: true`. The dashboard **Repair** button re-runs the installer to stage the missing layer
+- **Swap resilience (Finding "both modes down"):** the Ragnar→Pwnagotchi `systemd-run` sequence now gates only the first start on Ragnar stopping, then starts bettercap/pwnagotchi/swap-button **best-effort** (`|| true`) — a single failing start can no longer short-circuit the `&&` chain and leave Ragnar stopped with nothing up
+- **Docs:** [PWNAGOTCHI.md](PWNAGOTCHI.md) (Installation Check rows, swap sequence, new troubleshooting entry), [releases.md](releases.md)
+
+#### [#900](https://github.com/PierreGode/Ragnar/pull/900) — docs(pentest): Rubber Ducky card shows supported boards + GPIO-powering note
+*branch `fix/ducky-board-power-info` · 2 file(s)*
+
+- Added a collapsible **Supported boards & powering** panel to the Rubber Ducky Script Executor card: a board-compatibility table (Zero 2 W ✅ / 3A+ ✅ / Pi 4 ✅ / Pi 5 ⚠️ / 3B ❌) and the key caveat that on **Pi 4 / Pi 5** the single USB-C port is both power and the OTG/data port
+- Documents the fix: **power the Pi from the 5V GPIO pins** (pin 2/4 + pin 6 GND) and keep USB-C plugged into the target, so the data link doesn't have to also power the Pi ("steal" the port) — the Pi-4-style workaround; includes the unfused-rail safety caveat
+- Mirrored the same guidance into [rubber-ducky.md](rubber-ducky.md) (board table + new "Powering via the GPIO pins" section)
+- **Docs:** [rubber-ducky.md](rubber-ducky.md), [releases.md](releases.md)
+
+#### [#899](https://github.com/PierreGode/Ragnar/pull/899) — fix(ui): clipboard "Copy" buttons work over plain HTTP
+*branch `fix/revshell-copy-http` · 3 file(s)*
+
+- **Root cause:** `navigator.clipboard` is exposed by browsers only in a secure context (HTTPS/localhost). On a plain-HTTP LAN/Tailscale Ragnar (`http://192.168.x`/`100.x`) it is `undefined`, so copy handlers calling it directly either threw a synchronous `TypeError` (uncaught by their `.catch()`) or silently no-op'd
+- Hardened the shared `copyToClipboard()` helper: non-flashing `execCommand('copy')` fallback, returns a success boolean, honest "Copy failed" toast, and an optional `{ silent }` mode for callers that render their own feedback
+- Routed **four** copy buttons through it:
+  - Pentest → **Reverse Shell** one-liners (`revshellCopy`)
+  - Scan → captured-credential **password** copy (`copyCredToClipboard`)
+  - Account → **2FA recovery codes** copy (`copyRecoveryCodes`) — previously a lock-out risk when set up over HTTP
+  - WiFi map → **BSSID** copy (`wifiFsCopy`)
+- Bumped the `ragnar_modern.js` cache-bust (`?v=20261002-clipboard-http`) so returning browsers load the fix
+- **Docs:** [releases.md](releases.md)
+
+### 2026-10-01
+
+#### [#895](https://github.com/PierreGode/Ragnar/pull/895) — feat(pentest): Rubber Ducky script executor (USB HID keystroke injection)
+*branch `work/2026-10-01` · 13 file(s)*
+
+- New Pentest-tab card: pick a script, pick the `/dev/hidg0` keyboard-gadget target, preview the actions, and run — gated by Pentest Mode only (no dependency on the global `enable_attacks` flag, matching the other manual tools)
+- `python/rubber_ducky.py`: parses official `.ducky` syntax and plain-text scripts, Shift-aware typing, streams HID reports to the gadget node (opens once; handles `GUI r`-style modifier combos)
+- **Opt-in** HID gadget setup in installer/updater (`RAGNAR_HID_GADGET=1` + `/etc/ragnar/hid_gadget.enabled` marker): adds the `dwc2,dr_mode=peripheral` overlay, drops the conflicting legacy `g_ether`, and adds `hid.usb0` — default off so the Cardputer/plain-ECM boxes are untouched; also fixes the non-idempotent `cmdline.txt` edit
+- On-demand **Enable/Disable** gadget control in the card (`scripts/hid_gadget.sh` + `/api/rubber-ducky/gadget/*`): brings `/dev/hidg0` up/down live, preserving `usb0` networking
+- `files/rubber-ducky/` surfaced as its own folder in the Files tab for uploads, with a bundled safe demo (`demo_hello.ducky`) for end-to-end validation; `.ducky` files are editable text in the Files tab
+- Ducky card gains a **Refresh/Upload** for scripts, a **payload library** (`resources/ducky_payloads/`: Win/Linux/macOS recon, Wi-Fi-profile dump, reverse-shell template) with one-click Install, and an **inline editor**; `.ducky` parser now handles multi-modifier combos (`CTRL ALT t`)
+- New **Reverse Shell** card: generates connect-back one-liners (Bash/nc/Python/PowerShell/Perl/PHP) + a built-in catch listener (`python/revshell.py`)
+- **Docs:** [rubber-ducky.md](rubber-ducky.md), [reverse-shell.md](reverse-shell.md), [scanning-and-attacks.md](scanning-and-attacks.md), [docs index](README.md), [releases.md](releases.md)
+
+#### [#879](https://github.com/PierreGode/Ragnar/pull/879) — fix(display): don't error when an interface (e.g. usb0) is absent
+*Merged 2026-10-01 · branch `fix/usb0-missing-interface` · 2 file(s), +15 / −12*
+
+- `is_interface_connected()` returns `False` quietly when `/sys/class/net/<iface>` is missing; stops the per-poll `Cannot find device "usb0"` error on non-USB-gadget boxes (Wi-Fi / HAT / dongle, Pi Zero 2 W, VMs)
+- `is_usb_connected()` now reuses it (one code path); unchanged behaviour when `usb0` exists
+- **Docs:** [releases.md](releases.md)
+
+#### [#893](https://github.com/PierreGode/Ragnar/pull/893) — docs: per-PR release log (docs/releases.md)
+*Merged 2026-10-01 · branch `docs/releases-log` · 3 file(s)*
+
+- New `docs/releases.md`: one entry per PR merged to `main`, newest on top, with summary and doc links
+- Backfilled the last 600 merged PRs (#209–#892) from the merge history
+- Linked from the root README and the docs index
+- **Docs:** [releases.md](releases.md), [README (root)](../README.md), [docs index](README.md)
+
+### 2026-09-30
+
+#### [#892](https://github.com/PierreGode/Ragnar/pull/892) — fix(apc-guard): run the module self-test tier in its own interpreter
+*Merged 2026-09-30 · branch `fix/apc-selftest-thread` · 1 file(s), +10 / −11*
+
+#### [#891](https://github.com/PierreGode/Ragnar/pull/891) — fix(ui): move APC Guard card to the Diagnostics sub-tab
+*Merged 2026-09-30 · branch `fix/apc-guard-diagnostics` · 18 file(s), +1350 / −1141*
+
+- feat(ui): sort Network > Diagnostics by OSI layer
+- feat(ui): visibility matrix as a reference guide in Diagnostics
+- **Docs:** [README (root)](../README.md), [docs index](README.md), [certwatch.md](certwatch.md), [nettools.md](nettools.md)
+
+#### [#890](https://github.com/PierreGode/Ragnar/pull/890) — feat(net): APC Guard — passive APC/Schneider NMC Ripple20 guard
+*Merged 2026-09-30 · branch `feature/apc-guard` · 17 file(s), +3773 / −43*
+
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+#### [#889](https://github.com/PierreGode/Ragnar/pull/889) — feat(gps): set the clock from GPS offline and repair sessions on clock steps
+*Merged 2026-09-30 · branch `feature/gps-clock-set` · 9 file(s), +304 / −6*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#888](https://github.com/PierreGode/Ragnar/pull/888) — fix(wardriving): stop reopening a session from overwriting its start time
+*Merged 2026-09-30 · branch `fix/wardriving-session-start-time` · 2 file(s), +78 / −3*
+
+### 2026-09-29
+
+#### [#887](https://github.com/PierreGode/Ragnar/pull/887) — docs(cellular): heartbeat states, test procedure, IFACE order and push details
+*Merged 2026-09-29 · branch `feature/cellular-heartbeat-failover` · 9 file(s), +125 / −35*
+
+- docs(device-console): complete the guide; fix script id handling
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md), [docs index](README.md), [cellular-uplink.md](cellular-uplink.md), [nettools.md](nettools.md), [push-notifications.md](push-notifications.md), [serial-console.md](serial-console.md)
+
+#### [#886](https://github.com/PierreGode/Ragnar/pull/886) — feat(network): heartbeat failover + failback hysteresis for cellular uplink
+*Merged 2026-09-29 · branch `feature/cellular-heartbeat-failover` · 8 file(s), +505 / −35*
+
+- **Docs:** [README (root)](../README.md), [docs index](README.md), [cellular-uplink.md](cellular-uplink.md)
+
+#### [#885](https://github.com/PierreGode/Ragnar/pull/885) — feat(gps): inject saved almanac/ephemeris on offline boots too
+*Merged 2026-09-29 · branch `fix/gps-assist-offline-orbits` · 3 file(s), +58 / −27*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#884](https://github.com/PierreGode/Ragnar/pull/884) — fix(gps): orbit-data saves run from first fix and merge per satellite
+*Merged 2026-09-29 · branch `fix/gps-aid-save-schedule-merge` · 4 file(s), +103 / −52*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#883](https://github.com/PierreGode/Ragnar/pull/883) — fix(wifi): reconnect key falls back to saved NetworkManager profiles
+*Merged 2026-09-29 · branch `fix/key2-reconnect-nm-profiles` · 3 file(s), +295 / −10*
+
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md)
+
+#### [#882](https://github.com/PierreGode/Ragnar/pull/882) — fix(gps): save orbit data 15 s after a fix, not 60 s
+*Merged 2026-09-29 · branch `fix/gps-assist-early-save` · 3 file(s), +28 / −7*
+
+- fix(gps): save orbit data 5 s after a fix, then at 1 min, then every 5 min
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#881](https://github.com/PierreGode/Ragnar/pull/881) — feat(gps): assisted start — pre-load position, NTP time and saved orbit data
+*Merged 2026-09-29 · branch `feature/gps-assist-preload` · 11 file(s), +733 / −6*
+
+- docs(gps): assist store lives in data/, next to last_gps.json
+- **Docs:** [README (root)](../README.md), [wardriving.md](wardriving.md)
+
+### 2026-09-28
+
+#### [#880](https://github.com/PierreGode/Ragnar/pull/880) — feat(ui): group Settings into sub-tabs
+*Merged 2026-09-28 · branch `feature/settings-subtabs` · 3 file(s), +69 / −3*
+
+- **Docs:** [spec.md](spec.md)
+
+#### [#878](https://github.com/PierreGode/Ragnar/pull/878) — feat(network): cellular uplink fallback via USB-tethered hotspot
+*Merged 2026-09-28 · branch `feature/cellular-uplink-fallback` · 19 file(s), +952 / −15*
+
+- **Docs:** [README (root)](../README.md), [docs index](README.md), [cell.md](cell.md), [cellular-uplink.md](cellular-uplink.md), [nettools.md](nettools.md), [push-notifications.md](push-notifications.md)
+
+#### [#877](https://github.com/PierreGode/Ragnar/pull/877) — feat(system): cooling fan status and control in the System tab
+*Merged 2026-09-28 · branch `feature/pi-fan-status` · 9 file(s), +1052 / −4*
+
+- **Docs:** [README (root)](../README.md), [docs index](README.md), [fan.md](fan.md), [power.md](power.md)
+
+#### [#876](https://github.com/PierreGode/Ragnar/pull/876) — fix(wardriving): parse iw's decimal channel frequencies
+*Merged 2026-09-28 · branch `fix/iw-decimal-freqs` · 2 file(s), +38 / −2*
+
+#### [#875](https://github.com/PierreGode/Ragnar/pull/875) — Delete .github/codeql/codeql-config.yml
+*Merged 2026-09-28 · branch `PierreGode-patch-5` · 1 file(s), +0 / −81*
+
+#### [#874](https://github.com/PierreGode/Ragnar/pull/874) — perf(actions): lazy-import pandas in connectors to cut startup RAM
+*Merged 2026-09-28 · branch `perf/lazy-pandas-imports` · 8 file(s), +55 / −74*
+
+#### [#846](https://github.com/PierreGode/Ragnar/pull/846) — fix(system-tab): make the System tab work on phones
+*Merged 2026-09-28 · branch `system-tab-mobile` · 2 file(s), +52 / −29*
+
+#### [#873](https://github.com/PierreGode/Ragnar/pull/873) — fix(serial-console): script picker no longer resets on every poll tick
+*Merged 2026-09-28 · branch `fix/console-script-select` · 2 file(s), +12 / −3*
+
+#### [#872](https://github.com/PierreGode/Ragnar/pull/872) — fix(files): dark editor textarea (pruned Tailwind has no bg-black/80)
+*Merged 2026-09-28 · branch `fix/files-editor-dark` · 2 file(s), +2 / −2*
+
+#### [#871](https://github.com/PierreGode/Ragnar/pull/871) — fix(console-scripts): seed defaults at runtime, never overwrite user edits
+*Merged 2026-09-28 · branch `fix/console-scripts-seed` · 7 file(s), +88 / −150*
+
+#### [#870](https://github.com/PierreGode/Ragnar/pull/870) — feat(files): in-browser text file editor with save
+*Merged 2026-09-28 · branch `feature/files-editor` · 5 file(s), +134 / −7*
+
+- **Docs:** [README (root)](../README.md), [serial-console.md](serial-console.md)
+
+#### [#869](https://github.com/PierreGode/Ragnar/pull/869) — feat(serial-console): add console scripts — run pre-made command sequences
+*Merged 2026-09-28 · branch `feature/console-scripts` · 11 file(s), +388 / −4*
+
+- **Docs:** [README (root)](../README.md), [serial-console.md](serial-console.md)
+
+#### [#868](https://github.com/PierreGode/Ragnar/pull/868) — refactor(serial-console): simplify mesh write — no separate checkbox
+*Merged 2026-09-28 · branch `fix/console-mesh-write-simplify` · 5 file(s), +25 / −68*
+
+- **Docs:** [serial-console.md](serial-console.md)
+
+#### [#867](https://github.com/PierreGode/Ragnar/pull/867) — fix(cyd): stop orphaned rtl_sdr subprocess from blocking CYD waterfall
+*Merged 2026-09-28 · branch `fix/cyd-display` · 4 file(s), +32 / −11*
+
+- **Docs:** [cyd-firmware.md](cyd-firmware.md), [rf-waterfall.md](rf-waterfall.md)
+
+### 2026-09-27
+
+#### [#865](https://github.com/PierreGode/Ragnar/pull/865) — fix(wardrift): interpolate export times along the GPS track
+*Merged 2026-09-27 · branch `fix/wardrift-trail-jumps` · 5 file(s), +60 / −11*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#866](https://github.com/PierreGode/Ragnar/pull/866) — Implement gated write functionality in serial_console.py
+*Merged 2026-09-27 · branch `Consoleupdate` · 6 file(s), +413 / −97*
+
+- fix(serial-console): wire up write-gate UI, routes and strip broken prose
+- fix(serial-console): allow_write state consistent across all endpoints
+- feat(serial-console): mesh write — send commands to a remote Ragnar's console
+- **Docs:** [README (root)](../README.md), [serial-console.md](serial-console.md)
+
+#### [#864](https://github.com/PierreGode/Ragnar/pull/864) — feat(install): installhead.sh — add/switch a screen on a headless install
+*Merged 2026-09-27 · branch `feature/installhead` · 4 file(s), +320 / −1*
+
+- **Docs:** [README (root)](../README.md), [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md), [INSTALL.md](INSTALL.md)
+
+#### [#863](https://github.com/PierreGode/Ragnar/pull/863) — feat(mikrotik-guard): v2 — MikroTrick SSH exposure (MTK-021)
+*Merged 2026-09-27 · branch `feature/mikrotik-guard-v2` · 7 file(s), +197 / −16*
+
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [nettools.md](nettools.md)
+
+### 2026-09-26
+
+#### [#862](https://github.com/PierreGode/Ragnar/pull/862) — fix(rf-waterfall): SDR-spike hatch only on the trace, not over the waterfall
+*Merged 2026-09-26 · branch `adjust` · 2 file(s), +3 / −4*
+
+- **Docs:** [rf-waterfall.md](rf-waterfall.md)
+
+#### [#861](https://github.com/PierreGode/Ragnar/pull/861) — fix
+*Merged 2026-09-26 · branch `adjust` · 11 file(s), +1010 / −92*
+
+- water
+- feat(sdr): self-healing RTL-SDR USB recovery
+- feat(rf-waterfall): 3D view peaks 30% taller
+- Revert "feat(rf-waterfall): 3D view peaks 30% taller"
+- feat(rf-waterfall): 3D panel 30% taller on screen
+- feat(rf-waterfall): "Hide the SDR centre spike" setting
+- …and 1 more commit(s)
+- **Docs:** [README (root)](../README.md), [rf-api.md](rf-api.md), [rf-waterfall.md](rf-waterfall.md), [sdr-subghz.md](sdr-subghz.md)
+
+#### [#860](https://github.com/PierreGode/Ragnar/pull/860) — feat(notifications): rename Pushover Notifications to Push Notifications, add Slack
+*Merged 2026-09-26 · branch `feature/push-notifications-slack` · 11 file(s), +268 / −38*
+
+- **Docs:** [README (root)](../README.md), [docs index](README.md), [push-notifications.md](push-notifications.md), [rusense.md](rusense.md)
+
+#### [#859](https://github.com/PierreGode/Ragnar/pull/859) — feat(rf-waterfall): Zigbee Suzi (sub-GHz Zigbee 4.0) presets in the Mesh dropdown
+*Merged 2026-09-26 · branch `feature/rf-zigbee-suzi-presets` · 5 file(s), +75 / −23*
+
+- **Docs:** [README (root)](../README.md), [rf-waterfall.md](rf-waterfall.md), [sdr-subghz.md](sdr-subghz.md)
+
+#### [#856](https://github.com/PierreGode/Ragnar/pull/856) — fix(analyzer): stop the Signal Analyzer running Ragnar out of memory; explain every control
+*Merged 2026-09-26 · branch `fix/rf-analyzer-crashes` · 4 file(s), +369 / −47*
+
+- **Docs:** [rf-waterfall.md](rf-waterfall.md)
+
+#### [#855](https://github.com/PierreGode/Ragnar/pull/855) — feat(serial-console): per-unit 'Share with mesh' view-only console sharing
+*Merged 2026-09-26 · branch `feature/serial-console-mesh-share` · 6 file(s), +162 / −23*
+
+- **Docs:** [mesh.md](mesh.md), [serial-console.md](serial-console.md)
+
+#### [#852](https://github.com/PierreGode/Ragnar/pull/852) — feat(rf-waterfall): Wi-Fi HaLow (802.11ah) presets in the Mesh dropdown
+*Merged 2026-09-26 · branch `feature/rf-halow-presets` · 5 file(s), +142 / −13*
+
+- **Docs:** [README (root)](../README.md), [rf-waterfall.md](rf-waterfall.md), [sdr-subghz.md](sdr-subghz.md)
+
+#### [#851](https://github.com/PierreGode/Ragnar/pull/851) — feat(wardriving): pause orchestrator active scans while driving
+*Merged 2026-09-26 · branch `wardrive-pause-scans` · 6 file(s), +193 / −8*
+
+- feat(wardriving): also pause the nmap scanner when triggered manually
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#850](https://github.com/PierreGode/Ragnar/pull/850) — feat(serial-console): read-only device console on the dashboard, mesh-wide
+*Merged 2026-09-26 · branch `feature/serial-console` · 11 file(s), +1208 / −6*
+
+- fix(cyd): identify-before-write on auto-detected ports; console coexistence
+- **Docs:** [README (root)](../README.md), [mesh.md](mesh.md), [serial-console.md](serial-console.md)
+
+#### [#847](https://github.com/PierreGode/Ragnar/pull/847) — feat(rpc-watch): v3 — IRemoteWinSpool relay level + PetitPotam attribution
+*Merged 2026-09-26 · branch `feature/rpc-watch-v3` · 25 file(s), +208 / −20*
+
+- chore: commit the exec bit on 16 top-level modules + the TFT kiosk script
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [nettools.md](nettools.md)
+
+#### [#849](https://github.com/PierreGode/Ragnar/pull/849) — Update nettools.md
+*Merged 2026-09-26 · branch `PierreGode-patch-4` · 1 file(s), +1 / −8*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#848](https://github.com/PierreGode/Ragnar/pull/848) — feat(telnet-watch): v5 — r-services, CVE-2011-4862, CVE-2022-39028
+*Merged 2026-09-26 · branch `feature/telnet-watch-v5` · 11 file(s), +2509 / −144*
+
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+### 2026-09-25
+
+#### [#845](https://github.com/PierreGode/Ragnar/pull/845) — feat(power-test): watch a USB GPS through the power test
+*Merged 2026-09-25 · branch `power-test-gps` · 6 file(s), +235 / −26*
+
+- **Docs:** [power.md](power.md)
+
+#### [#844](https://github.com/PierreGode/Ragnar/pull/844) — feat(power): Pi 5 USB current limit fix, power test and cleaner System tab
+*Merged 2026-09-25 · branch `pi5-usb-power` · 11 file(s), +1231 / −445*
+
+- **Docs:** [README (root)](../README.md), [docs index](README.md), [power.md](power.md)
+
+#### [#843](https://github.com/PierreGode/Ragnar/pull/843) — Update nettools.md
+*Merged 2026-09-25 · branch `PierreGode-patch-3` · 1 file(s), +1 / −3*
+
+- **Docs:** [nettools.md](nettools.md)
+
+### 2026-09-24
+
+#### [#842](https://github.com/PierreGode/Ragnar/pull/842) — feat(smtp-watch): add CVE-2019-16928 overlong EHLO detection
+*Merged 2026-09-24 · branch `feature/smtp-watch-update` · 8 file(s), +87 / −15*
+
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+#### [#841](https://github.com/PierreGode/Ragnar/pull/841) — feat(smtp-watch): passive Exim CVE detector on the SMTP conversation
+*Merged 2026-09-24 · branch `feature/smtp-watch` · 12 file(s), +1346 / −15*
+
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+#### [#840](https://github.com/PierreGode/Ragnar/pull/840) — feat(ftp-watch): passive ProFTPD CVE detector on the FTP control channel
+*Merged 2026-09-24 · branch `feature/ftp-watch` · 12 file(s), +1700 / −14*
+
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+#### [#839](https://github.com/PierreGode/Ragnar/pull/839) — feat(wardriving): Pushover summary after each auto-uploaded drive
+*Merged 2026-09-24 · branch `feature/wardrive-upload-pushover` · 6 file(s), +182 / −11*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#838](https://github.com/PierreGode/Ragnar/pull/838) — feat(wardriving): upload sessions to Wardrift
+*Merged 2026-09-24 · branch `feature/wardrift-upload` · 16 file(s), +2533 / −231*
+
+- fix(cyd): stop the CYD serial bridge from claiming the USB GPS
+- feat(wardriving): Wardrift logo on the upload card
+- feat(wardrift): report a Meshtastic node to Wardrift (USB or WiFi)
+- fix(wardrift): explain and stop retrying rejected mesh reports
+- fix(wardrift): reject masked/garbled API keys on save
+- wardriving: GPS backfill setting tweaks
+- …and 7 more commit(s)
+- **Docs:** [README (root)](../README.md), [cyd-hybrid-node.md](cyd-hybrid-node.md), [sdr-subghz.md](sdr-subghz.md), [wardriving.md](wardriving.md)
+
+#### [#837](https://github.com/PierreGode/Ragnar/pull/837) — docs: RTL8812AU monitor-mode driver setup & troubleshooting
+*Merged 2026-09-24 · branch `docs/rtl8812au-driver-troubleshooting` · 2 file(s), +149 / −1*
+
+- **Docs:** [PWNAGOTCHI.md](PWNAGOTCHI.md), [wifi-rtl8812au.md](wifi-rtl8812au.md)
+
+### 2026-09-23
+
+#### [#836](https://github.com/PierreGode/Ragnar/pull/836) — feat(rf-waterfall): detectors, front-end overload warning, image verification
+*Merged 2026-09-23 · branch `feature/rf-instrument-grade` · 11 file(s), +3288 / −94*
+
+- feat(rf-waterfall): armed trigger with pre-trigger IQ capture
+- feat(rf-waterfall): band-power and noise markers, ACPR, spurs, harmonics, reference trace
+- feat(analyzer): FM deviation and AM modulation depth
+- feat(rf): geotagged captures and field-strength measurements
+- feat(rf-waterfall): memory channels, instrument setups, measurement report, API reference
+- feat(analyzer): CTCSS and DCS squelch-tag decoding
+- …and 11 more commit(s)
+- **Docs:** [README (root)](../README.md), [rf-api.md](rf-api.md), [rf-waterfall-guide.md](rf-waterfall-guide.md), [rf-waterfall.md](rf-waterfall.md)
+
+### 2026-09-22
+
+#### [#835](https://github.com/PierreGode/Ragnar/pull/835) — feat(rf-waterfall): display range, row history, settings drawer
+*Merged 2026-09-22 · branch `fix/rf-waterfall-retune-storm` · 10 file(s), +3259 / −356*
+
+- feat(rf-waterfall): hover readout, time axis, history scroll-back, colour bar
+- feat(rf-waterfall): wheel zoom, drag pan, pinch, precise ruler
+- feat(rf-waterfall): markers M1-M4 with delta, peak search, next peak, centre
+- feat(sdr): resolution + hardware settings; fix dead columns on narrow zoom; radio SSB/CW/squelch
+- feat(rf-waterfall): Resolution + Hardware settings UI, RBW readout
+- feat(rf-waterfall): radio USB/LSB/CW, squelch slider, audio recording
+- …and 10 more commit(s)
+- **Docs:** [README (root)](../README.md), [rf-waterfall-guide.md](rf-waterfall-guide.md), [rf-waterfall.md](rf-waterfall.md), [sdr-subghz.md](sdr-subghz.md)
+
+#### [#834](https://github.com/PierreGode/Ragnar/pull/834) — feat(rf-waterfall): noise print, record the background and subtract it
+*Merged 2026-09-22 · branch `feature/rf-waterfall-noise-print` · 2 file(s), +132 / −5*
+
+- **Docs:** [rf-waterfall.md](rf-waterfall.md)
+
+#### [#833](https://github.com/PierreGode/Ragnar/pull/833) — fix(rf-waterfall): steady live scroll, no speed-up/slow-down surges
+*Merged 2026-09-22 · branch `fix/rf-waterfall-steady-flow` · 2 file(s), +44 / −18*
+
+- **Docs:** [rf-waterfall.md](rf-waterfall.md)
+
+#### [#832](https://github.com/PierreGode/Ragnar/pull/832) — style(rf-waterfall): double waterfall height on desktop (210 -> 420 px)
+*Merged 2026-09-22 · branch `fix/rf-waterfall-desktop-height` · 1 file(s), +2 / −2*
+
+#### [#831](https://github.com/PierreGode/Ragnar/pull/831) — fix(smb-watch): stop mDNS DNS-SD PTRs raising spoof-conflict
+*Merged 2026-09-22 · branch `fix/smb-mdns-spoof-conflict-fp` · 3 file(s), +143 / −25*
+
+- fix(smb-watch): close the evasions the DNS-SD fix opened
+- **Docs:** [nettools.md](nettools.md)
+
+### 2026-09-21
+
+#### [#830](https://github.com/PierreGode/Ragnar/pull/830) — fixes
+*Merged 2026-09-21 · branch `data` · 3 file(s), +164 / −21*
+
+#### [#829](https://github.com/PierreGode/Ragnar/pull/829) — docs: add unified CVE index (docs/CVE.md) + generator
+*Merged 2026-09-21 · branch `docs/unified-cve-list` · 4 file(s), +669 / −9*
+
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md)
+
+#### [#828](https://github.com/PierreGode/Ragnar/pull/828) — feat(dns-watch): port DNS Poison Checker v5 passive detectors
+*Merged 2026-09-21 · branch `feature/dns-poison-v5` · 11 file(s), +847 / −37*
+
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [nettools.md](nettools.md)
+
+#### [#827](https://github.com/PierreGode/Ragnar/pull/827) — fix(network): stop dual-homed boxes degrading every host each scan (#818)
+*Merged 2026-09-21 · branch `fix/818-dual-homed-degraded-flap` · 6 file(s), +488 / −29*
+
+- fix(wifi): identify the network by SSID, not the NM profile name (#818)
+- **Docs:** [asset-inventory.md](asset-inventory.md)
+
+#### [#826](https://github.com/PierreGode/Ragnar/pull/826) — docs(ui): name D(HE)at in the TLS and SSH Watch cards
+*Merged 2026-09-21 · branch `feature/tls-ssh-dheat-card-wording` · 1 file(s), +2 / −2*
+
+#### [#825](https://github.com/PierreGode/Ragnar/pull/825) — docs(ui): note OSPFv3-SR in the SR-MPLS Watch card
+*Merged 2026-09-21 · branch `feature/srmpls-card-ospfv3sr-wording` · 1 file(s), +3 / −3*
+
+#### [#824](https://github.com/PierreGode/Ragnar/pull/824) — feat(watchers): SR-MPLS Watch v3 (OSPFv3-SR) + OSPF Watch v5 (OSPFv3 instance anomaly)
+*Merged 2026-09-21 · branch `feature/srmpls-v3-ospfv3sr` · 4 file(s), +558 / −20*
+
+- Update nettools.md
+- **Docs:** [CREDITS.md](CREDITS.md), [nettools.md](nettools.md)
+
+### 2026-09-20
+
+#### [#823](https://github.com/PierreGode/Ragnar/pull/823) — Update nettools.md
+*Merged 2026-09-20 · branch `PierreGode-patch-2` · 1 file(s), +2 / −1*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#822](https://github.com/PierreGode/Ragnar/pull/822) — fix(config): only restart the service for settings that actually need it
+*Merged 2026-09-20 · branch `fix/restart-only-when-needed` · 7 file(s), +277 / −15*
+
+- **Docs:** [bluetooth.md](bluetooth.md), [spec.md](spec.md)
+
+#### [#821](https://github.com/PierreGode/Ragnar/pull/821) — fix(network): stop every target flapping Offline/Degraded between scans
+*Merged 2026-09-20 · branch `fix/host-liveness-flapping` · 5 file(s), +399 / −17*
+
+- **Docs:** [README (root)](../README.md), [asset-inventory.md](asset-inventory.md)
+
+#### [#820](https://github.com/PierreGode/Ragnar/pull/820) — feat(watchers): BGP v4 + OSPF v4 + EIGRP v5 + IS-IS v5 CVE coverage
+*Merged 2026-09-20 · branch `feature/bgp4-ospf4-eigrp5-isis5` · 6 file(s), +205 / −36*
+
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [nettools.md](nettools.md)
+
+#### [#819](https://github.com/PierreGode/Ragnar/pull/819) — feat(watchers): LACP v2 + LDAP v4 + DHCP Guardian v3 + IPv6 RA Guard v2
+*Merged 2026-09-20 · branch `feature/lacp2-dhcp3-raguard2-ldap4` · 6 file(s), +457 / −28*
+
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [nettools.md](nettools.md)
+
+#### [#817](https://github.com/PierreGode/Ragnar/pull/817) — feat(watchers): SR-MPLS Watch v2 (SR-TLV overrun) + BFD Watch v3 (auth-bypass / micro-flap)
+*Merged 2026-09-20 · branch `feature/srmpls-v2-bfd-v3` · 6 file(s), +643 / −47*
+
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [nettools.md](nettools.md)
+
+### 2026-09-19
+
+#### [#816](https://github.com/PierreGode/Ragnar/pull/816) — feat(watchers): ARP v4 frame capture + SMB/Kerberos v3 CVEs + RPC/NetLogon v2
+*Merged 2026-09-19 · branch `feature/arp-v4-smb-kerb-v3-rpc-v2` · 8 file(s), +1074 / −45*
+
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [nettools.md](nettools.md)
+
+#### [#815](https://github.com/PierreGode/Ragnar/pull/815) — feat(mesh): hub gateway — relay app requests to fleet peers over Tailscale
+*Merged 2026-09-19 · branch `feat/mesh-gateway` · 2 file(s), +123 / −1*
+
+- docs(mesh): document the hub gateway (relay app requests to fleet peers)
+- fix(mesh): import requests in the gateway (NameError crashed every relay)
+- **Docs:** [mesh.md](mesh.md)
+
+#### [#814](https://github.com/PierreGode/Ragnar/pull/814) — fix(ble): private D-Bus bus so provisioning works inside the webapp
+*Merged 2026-09-19 · branch `feat/ble-ip-handover` · 3 file(s), +67 / −13*
+
+- feat(ble): expose 'Bluetooth handover' — app finds box + reads LAN IP over BLE
+- **Docs:** [bluetooth-pan.md](bluetooth-pan.md)
+
+#### [#813](https://github.com/PierreGode/Ragnar/pull/813) — fix(cyd): stop Watchtower new-AP warnings from the ESP32 CYD sensor
+*Merged 2026-09-19 · branch `vik` · 1 file(s), +3 / −1*
+
+#### [#812](https://github.com/PierreGode/Ragnar/pull/812) — feat(tls-watch): Heartbleed + oversized-DH-prime passive detection (TLS Watch v7)
+*Merged 2026-09-19 · branch `feature/tls-v7-ptp-v3` · 5 file(s), +350 / −15*
+
+- feat(ptp-watch): Class V CVE-attributed signatures (PTP Watch v3)
+- docs(credits): +6 CVEs (TLS v7 Heartbleed/oversized-DH, PTP v3 Class V) -> ~165
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [nettools.md](nettools.md)
+
+#### [#811](https://github.com/PierreGode/Ragnar/pull/811) — feat(watch): passive SNMP/IGMP/NTP CVE detection (SNMP v4, IGMP v4, NTP v6)
+*Merged 2026-09-19 · branch `feature/snmp-igmp-ntp-v4` · 7 file(s), +1016 / −55*
+
+- chore(web): cache-bust ragnar_modern.js for the SNMP 'exploit' verdict style
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [nettools.md](nettools.md)
+
+#### [#810](https://github.com/PierreGode/Ragnar/pull/810) — feat(bt-pan): 'Clear all Bluetooth pairings' button
+*Merged 2026-09-19 · branch `feat/bt-pan-client-mode` · 5 file(s), +302 / −4*
+
+- feat(bt-pan): box-as-client mode (connect to phone's BT tethering)
+- **Docs:** [bluetooth-pan.md](bluetooth-pan.md)
+
+### 2026-09-18
+
+#### [#809](https://github.com/PierreGode/Ragnar/pull/809) — fix(bt-pan): self-heal discoverability + class on the poll loop
+*Merged 2026-09-18 · branch `fix/bt-pan-keepalive-discoverable` · 2 file(s), +19 / −2*
+
+- **Docs:** [bluetooth-pan.md](bluetooth-pan.md)
+
+#### [#808](https://github.com/PierreGode/Ragnar/pull/808) — feat(bt-pan): list + forget paired Bluetooth devices in the Config card
+*Merged 2026-09-18 · branch `feat/bt-pan-device-list` · 5 file(s), +141 / −0*
+
+- **Docs:** [bluetooth-pan.md](bluetooth-pan.md)
+
+#### [#807](https://github.com/PierreGode/Ragnar/pull/807) — fix(bt-pan): advertise a network Class-of-Device so phones offer tethering
+*Merged 2026-09-18 · branch `fix/bt-pan-network-class` · 2 file(s), +27 / −0*
+
+- **Docs:** [bluetooth-pan.md](bluetooth-pan.md)
+
+### 2026-09-17
+
+#### [#801](https://github.com/PierreGode/Ragnar/pull/801) — fix(advscan): serialize ZAP scans, delete from all network DBs, stop ghost resurrection
+*Merged 2026-09-17 · branch `fix/advscan-ghost-scans` · 3 file(s), +274 / −18*
+
+- fix(advscan): serialize ZAP scans, delete scans from all network DBs, stop ghost resurrection
+
+#### [#806](https://github.com/PierreGode/Ragnar/pull/806) — feat(icmp-watch): CVE-2020-16898 "Bad Neighbor" (ICMPv6 RA RDNSS overflow)
+*Merged 2026-09-17 · branch `feature/icmp-watch-v4` · 5 file(s), +191 / −6*
+
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [nettools.md](nettools.md)
+
+#### [#805](https://github.com/PierreGode/Ragnar/pull/805) — feat(dns): DNS Doctor v4 — passive DNS-response watcher + DNSSEC-CVE posture
+*Merged 2026-09-17 · branch `feature/dns-doctor-v4` · 16 file(s), +2461 / −9*
+
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+#### [#804](https://github.com/PierreGode/Ragnar/pull/804) — feat(bt-pan): on-demand dependency install for the Bluetooth access point
+*Merged 2026-09-17 · branch `feat/bt-pan-install-deps` · 5 file(s), +325 / −16*
+
+- fix(bt-pan): box now shows up as 'Ragnar' and is actually discoverable
+- fix(bt-pan): trust paired devices so the PAN actually connects (Android)
+- **Docs:** [bluetooth-pan.md](bluetooth-pan.md)
+
+#### [#803](https://github.com/PierreGode/Ragnar/pull/803) — feat(cyd): Settings toggles for Invert colors + Flip 180 (persisted)
+*Merged 2026-09-17 · branch `vik` · 8 file(s), +399 / −66*
+
+- feat(cyd): compact 4x6 font — ~25% smaller UI text everywhere
+- revert(cyd): drop compact 4x6 font — restore readable built-in font
+- feat(cyd): compact HOME menu — size-1 tile labels + tighter tiles
+- fix(cyd): restore HOME tile size + size-2 labels
+- feat(cyd): small proportional font for HOME tile labels only
+- feat(cyd): action progress — spinner, elapsed clock, countdown + progress bar
+- …and 2 more commit(s)
+- **Docs:** [cyd-hybrid-node.md](cyd-hybrid-node.md)
+
+#### [#802](https://github.com/PierreGode/Ragnar/pull/802) — feat(bt-pan): Bluetooth PAN (NAP) as a direct link for the mobile app
+*Merged 2026-09-17 · branch `feat/bluetooth-pan` · 5 file(s), +505 / −0*
+
+- **Docs:** [bluetooth-pan.md](bluetooth-pan.md)
+
+#### [#800](https://github.com/PierreGode/Ragnar/pull/800) — feat(dheat): D(HE)at (CVE-2002-20001) across TLS + SSH + a new IPsec/IKE watcher
+*Merged 2026-09-17 · branch `feature/dheater-cross-protocol` · 16 file(s), +1985 / −20*
+
+- fix(ipsec): wire IPsec Watch into Watchtower + background rotation + docs
+- docs(credits): update CVE corpus count for the D(HE)at / IPsec wave
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+### 2026-09-16
+
+#### [#799](https://github.com/PierreGode/Ragnar/pull/799) — feat(ssh-watch): SWEET32 (CVE-2016-2183) attribution for DES/3DES-CBC
+*Merged 2026-09-16 · branch `feature/ssh-watch-v4-sweet32` · 3 file(s), +119 / −10*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#798](https://github.com/PierreGode/Ragnar/pull/798) — test(relay-watch): add IPv6 self-test parity for Relay/Coercion Watch
+*Merged 2026-09-16 · branch `feature/relay-watch-ipv6-parity` · 2 file(s), +54 / −4*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#797](https://github.com/PierreGode/Ragnar/pull/797) — Update CREDITS.md
+*Merged 2026-09-16 · branch `PierreGode-patch-1` · 0 file(s), +0 / −0*
+
+#### [#796](https://github.com/PierreGode/Ragnar/pull/796) — Update CREDITS.md
+*Merged 2026-09-16 · branch `PierreGode-patch-1-1` · 1 file(s), +2 / −4*
+
+- **Docs:** [CREDITS.md](CREDITS.md)
+
+#### [#787](https://github.com/PierreGode/Ragnar/pull/787) — Display fix so that when on pi5's webui, ragnar's display updates correctly
+*Merged 2026-09-16 · branch `fix/display-null-epd-guard` · 1 file(s), +28 / −0*
+
+- fix(display): don't crash-loop when an EPD panel's helper is None
+
+#### [#795](https://github.com/PierreGode/Ragnar/pull/795) — docs: add docs/CREDITS.md crediting Solarflere for the CVE research
+*Merged 2026-09-16 · branch `docs/consolidate-md-into-docs` · 10 file(s), +65 / −71*
+
+- docs: move remaining loose .md files under docs/
+- docs: merge the two Home Assistant docs into one
+- **Docs:** [README (root)](../README.md), [CREDITS.md](CREDITS.md), [docs index](README.md), [cyd-firmware.md](cyd-firmware.md), [cyd-hybrid-node.md](cyd-hybrid-node.md), [lab.md](lab.md), [legacywatch.md](legacywatch.md), [wpswatch.md](wpswatch.md)
+
+#### [#794](https://github.com/PierreGode/Ragnar/pull/794) — tune(cyd): raise deauth-flood alert threshold 8 -> 15 frames
+*Merged 2026-09-16 · branch `vik` · 2 file(s), +7 / −3*
+
+- feat(cyd): CYD WiFi-Defense button runs a DEEP WIDS scan
+
+### 2026-09-15
+
+#### [#793](https://github.com/PierreGode/Ragnar/pull/793) — fix(cyd): revive 2.4GHz sniff + centred wardrive layout + snappier mesh/wifi streams
+*Merged 2026-09-15 · branch `vik` · 6 file(s), +50 / −33*
+
+- **Docs:** [cyd-hybrid-node.md](cyd-hybrid-node.md)
+
+#### [#792](https://github.com/PierreGode/Ragnar/pull/792) — feat(arista-guard): port aristaguard v3 BlastRADIUS engine in-app
+*Merged 2026-09-15 · branch `feature/arista-guard-v3-blastradius` · 3 file(s), +264 / −35*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#791](https://github.com/PierreGode/Ragnar/pull/791) — Add files via upload
+*Merged 2026-09-15 · branch `vik` · 8 file(s), +51725 / −24001*
+
+- feat(cyd): new full-screen 240x320 boot animation
+- feat(cyd): boot animation plays at natural 15s, loops until Ragnar is up
+- **Docs:** [cyd-hybrid-node.md](cyd-hybrid-node.md)
+
+#### [#790](https://github.com/PierreGode/Ragnar/pull/790) — fix(cyd): keep the serial link responsive over the GPIO UART
+*Merged 2026-09-15 · branch `vik` · 5 file(s), +58 / −12*
+
+#### [#789](https://github.com/PierreGode/Ragnar/pull/789) — feat(cyd): rich live Wardrive page (nets/BLE/cell/zigbee/companions/GPS)
+*Merged 2026-09-15 · branch `vik` · 7 file(s), +166 / −36*
+
+- fix(cyd): stop wardriving from grabbing the CYD serial port
+- feat(cyd): grey out wardrive Start/Stop while the action is in flight
+- **Docs:** [cyd-hybrid-node.md](cyd-hybrid-node.md)
+
+#### [#788](https://github.com/PierreGode/Ragnar/pull/788) — feat(cyd): Wardrive is its own page with live status
+*Merged 2026-09-15 · branch `vik` · 5 file(s), +86 / −23*
+
+- **Docs:** [cyd-hybrid-node.md](cyd-hybrid-node.md)
+
+### 2026-09-14
+
+#### [#786](https://github.com/PierreGode/Ragnar/pull/786) — feat(cyd): action result subpage — no more fire-and-forget taps
+*Merged 2026-09-14 · branch `vik` · 6 file(s), +223 / −66*
+
+- fix(cyd): stop the every-cycle reboot — reclaim ~53KB DRAM for WiFi
+- fix(cyd): Traffic 'TOTAL PKTS' value green (was gray)
+- feat(cyd): waterfall matches web inferno + adds spectrum strip & freq axis
+- fix(cyd): brighter waterfall — gamma lift on the quantised row
+- fix(cyd): brighter waterfall — raise black level + stronger gamma
+- **Docs:** [cyd-hybrid-node.md](cyd-hybrid-node.md)
+
+#### [#785](https://github.com/PierreGode/Ragnar/pull/785) — feat(selftest): surface Dell/MikroTik/Aruba + BFD/PTP/SR-MPLS/LACP/RPC in the Detector Self-Test
+*Merged 2026-09-14 · branch `feature/detector-selftest-coverage` · 4 file(s), +64 / −5*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#784](https://github.com/PierreGode/Ragnar/pull/784) — Add files via upload
+*Merged 2026-09-14 · branch `vik` · 8 file(s), +24168 / −74*
+
+- feat(cyd): 5s glitch boot animation splash
+- fix(cyd): header brand renders 'Ragnar' with a big R
+- docs(cyd): refresh for the cabled console — de-emphasise WiFi, drop 'Bjorn'
+- **Docs:** [cyd-hybrid-node.md](cyd-hybrid-node.md)
+
+#### [#783](https://github.com/PierreGode/Ragnar/pull/783) — docs(aruba-guard): trim skip prose, drop non-PAPI CVEs, drop InstantOS from titles
+*Merged 2026-09-14 · branch `feature/aruba-guard-text-cleanup` · 4 file(s), +12 / −25*
+
+- Update nettools.md
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#782](https://github.com/PierreGode/Ragnar/pull/782) — feat(cyd): honest bridge counters + fixed waterfall gain
+*Merged 2026-09-14 · branch `feature/cyd-console-menu` · 2 file(s), +18 / −9*
+
+#### [#781](https://github.com/PierreGode/Ragnar/pull/781) — feat(cyd): network actions, alerts view, expanded status fields
+*Merged 2026-09-14 · branch `feature/cyd-console-menu` · 10 file(s), +1411 / −185*
+
+- feat(cyd): touch-test / orientation validator screen
+- fix(cyd): correct touch Y axis — validated on real hardware
+- fix(cyd): bigger, easier back-button target
+- fix(cyd): stop the every-2s graphics twitch (redraw only on change)
+- feat(cyd): compact NET tile, short unit name, dense network grid
+- fix(cyd): waterfall works with RTL-SDR; drop name from Dashboard
+- …and 9 more commit(s)
+- **Docs:** [cyd-hybrid-node.md](cyd-hybrid-node.md)
+
+#### [#780](https://github.com/PierreGode/Ragnar/pull/780) — feat(cyd): dense data-driven launcher + Network & Settings screens
+*Merged 2026-09-14 · branch `feature/cyd-console-menu` · 3 file(s), +149 / −40*
+
+#### [#779](https://github.com/PierreGode/Ragnar/pull/779) — fix(cyd): touch axis orientation (was mirrored vs display)
+*Merged 2026-09-14 · branch `fix/cyd-ui-responsive` · 5 file(s), +25 / −3*
+
+- chore(cyd-flasher): drop the boar glyph from the flasher header
+
+#### [#778](https://github.com/PierreGode/Ragnar/pull/778) — feat(aruba-guard): passive HPE Aruba PAPI CVE guard
+*Merged 2026-09-14 · branch `feature/aruba-guard` · 5 file(s), +593 / −5*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#777](https://github.com/PierreGode/Ragnar/pull/777) — fix(cyd): responsive console — no twitch, steady LED, live touch
+*Merged 2026-09-14 · branch `fix/cyd-ui-responsive` · 4 file(s), +90 / −67*
+
+- **Docs:** [cyd-hybrid-node.md](cyd-hybrid-node.md)
+
+### 2026-09-13
+
+#### [#776](https://github.com/PierreGode/Ragnar/pull/776) — fix(rf-waterfall): smooth, even fall instead of stepping
+*Merged 2026-09-13 · branch `fix/rtl-waterfall-smooth` · 2 file(s), +121 / −43*
+
+#### [#775](https://github.com/PierreGode/Ragnar/pull/775) — feat(cyd): selectable serial port (GPIO/P1 UART, not just USB)
+*Merged 2026-09-13 · branch `feature/cyd-hybrid-node` · 12 file(s), +913 / −111*
+
+- feat(cyd): 2.4 GHz WiFi-Defense sensor -> Watchtower
+- feat(cyd): app-launcher console + SigInt radar + streamed RF waterfall
+- **Docs:** [cyd-hybrid-node.md](cyd-hybrid-node.md)
+
+#### [#774](https://github.com/PierreGode/Ragnar/pull/774) — feat(cyd): ESP32-2432S028R hybrid companion node (firmware + ingest)
+*Merged 2026-09-13 · branch `feature/cyd-hybrid-node` · 19 file(s), +2204 / −14*
+
+- feat(cyd): live action dispatch + operator UI (Mesh → CYD Nodes)
+- feat(cyd): status nets_24/nets_5 from cached iw scan dump
+- feat(cyd): captive-portal provisioning + browser flasher (bins)
+- feat(cyd): USB-serial transport — one cabled unit (no WiFi)
+- ci(cyd): publish the CYD flasher on GitHub Pages
+- **Docs:** [docs index](README.md), [cyd-hybrid-node.md](cyd-hybrid-node.md)
+
+#### [#773](https://github.com/PierreGode/Ragnar/pull/773) — feat(ui): informational Dell Guard card (standalone daemon, no scan)
+*Merged 2026-09-13 · branch `feature/dell-guard-info-card` · 3 file(s), +218 / −1*
+
+- feat(dell-guard): enable/disable switch on the card (drives systemd)
+- fix(dell-guard): --no-block systemctl so the switch doesn't time out
+
+#### [#772](https://github.com/PierreGode/Ragnar/pull/772) — feat(mikrotik-guard): passive RouterOS (CCR/CRS) CVE guard
+*Merged 2026-09-13 · branch `feature/mikrotik-guard` · 5 file(s), +752 / −5*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#770](https://github.com/PierreGode/Ragnar/pull/770) — Wdgwars Wardrive Upload Feature
+*Merged 2026-09-13 · branch `feature/wdgwars-wardrive-upload` · 4 file(s), +409 / −0*
+
+- wardriving: add WiGLE/WDGWars session upload endpoint
+- wardriving UI: branded WDGWars/WiGLE upload card + per-session buttons
+- wardriving UI: WDGWars card standalone; WiGLE creds move under Import WiGLE CSV
+- wardriving: auto-upload finished wardrives (queued, offline-safe)
+- wardriving: exclude WDGWars/WiGLE keys from config export
+- wardriving: add WDGWars logo asset + render it as a badge
+
+#### [#771](https://github.com/PierreGode/Ragnar/pull/771) — feat(dellguard): vendor Dell SmartFabric OS10 SSRF-egress sensor (CVE-2025-22474)
+*Merged 2026-09-13 · branch `feature/dell-guard` · 9 file(s), +3875 / −2*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#767](https://github.com/PierreGode/Ragnar/pull/767) — tft kiosk: debounce mode detection to survive boot-time flapping
+*Merged 2026-09-13 · branch `fix/tft35-kiosk-debounce` · 1 file(s), +19 / −7*
+
+#### [#769](https://github.com/PierreGode/Ragnar/pull/769) — feat(tls-watch,ssh-watch): IPv6 extension-header capture (TLS v5 / SSH v3)
+*Merged 2026-09-13 · branch `feature/watch-batch-tls-ssl-ntp-juniper` · 4 file(s), +86 / −11*
+
+- **Docs:** [nettools.md](nettools.md)
+
+### 2026-09-12
+
+#### [#768](https://github.com/PierreGode/Ragnar/pull/768) — feat(ntp-watch): crypto-NAK auth-bypass + zero-origin injection (v4)
+*Merged 2026-09-12 · branch `feature/ntp-watch-v4` · 4 file(s), +154 / −11*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#766](https://github.com/PierreGode/Ragnar/pull/766) — Make the SPI TFT kiosk mode-aware (Ragnar + Pwnagotchi)
+*Merged 2026-09-12 · branch `feature/tft35-mode-aware-kiosk` · 4 file(s), +208 / −21*
+
+- **Docs:** [PWNAGOTCHI.md](PWNAGOTCHI.md)
+
+#### [#760](https://github.com/PierreGode/Ragnar/pull/760) — feat(rf-analyzer): multi-signal survey — find + track every carrier (Segment 10)
+*Merged 2026-09-12 · branch `feature/analyzer-multisignal` · 5 file(s), +224 / −6*
+
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md), [rf-waterfall.md](rf-waterfall.md)
+
+#### [#765](https://github.com/PierreGode/Ragnar/pull/765) — Fix Pwnagotchi mode: make live capture, counting, and wpa-sec upload work
+*Merged 2026-09-12 · branch `fix/pwnagotchi-pwn-mode` · 2 file(s), +120 / −0*
+
+#### [#764](https://github.com/PierreGode/Ragnar/pull/764) — feat(tls-watch): RC4 + record-layer CVEs (v4)
+*Merged 2026-09-12 · branch `feature/tls-watch-v4` · 3 file(s), +329 / −21*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#763](https://github.com/PierreGode/Ragnar/pull/763) — feat(rf-analyzer): PWM/PPM pulse symbol decoder (Segment 12)
+*Merged 2026-09-12 · branch `feature/analyzer-pulse` · 4 file(s), +240 / −10*
+
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md)
+
+#### [#762](https://github.com/PierreGode/Ragnar/pull/762) — feat(rf-analyzer): device fingerprint + bit workbench (Segment 11)
+*Merged 2026-09-12 · branch `feature/analyzer-fingerprint` · 4 file(s), +589 / −21*
+
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md)
+
+### 2026-09-11
+
+#### [#761](https://github.com/PierreGode/Ragnar/pull/761) — feat(ssh-watch): duplicate host key detection (v2, CVE-2025-38741 family)
+*Merged 2026-09-11 · branch `feature/ssh-watch-v2` · 3 file(s), +332 / −12*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#759](https://github.com/PierreGode/Ragnar/pull/759) — feat(cisco-guard): CAPWAP malformed-header detection (v5, CVE-2025-20315)
+*Merged 2026-09-11 · branch `feature/cisco-guard-v5` · 3 file(s), +97 / −4*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#758](https://github.com/PierreGode/Ragnar/pull/758) — feat(rf-analyzer): upload/import recordings (Flipper .sub, raw IQ, SigMF)
+*Merged 2026-09-11 · branch `feature/analyzer-upload` · 5 file(s), +382 / −3*
+
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md), [rf-waterfall.md](rf-waterfall.md)
+
+#### [#757](https://github.com/PierreGode/Ragnar/pull/757) — feat(rf-waterfall): optional 3D terrain waterfall view (2D | 3D toggle)
+*Merged 2026-09-11 · branch `feature/waterfall-3d` · 2 file(s), +99 / −6*
+
+- fix(rf-waterfall): smooth the 3D surface (rounded crests, finer, anti-aliased)
+- **Docs:** [rf-waterfall.md](rf-waterfall.md)
+
+#### [#756](https://github.com/PierreGode/Ragnar/pull/756) — feat(rf-analyzer): PSK constellation demod (Segment 9)
+*Merged 2026-09-11 · branch `feature/analyzer-constellation` · 5 file(s), +267 / −9*
+
+- style(rf-analyzer): lay Cyclostationary + LoRa + Constellation side by side
+- style(rf-analyzer): swap the Constellation demod and Filter card slots
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md), [rf-waterfall.md](rf-waterfall.md)
+
+#### [#755](https://github.com/PierreGode/Ragnar/pull/755) — refactor(signal-intel): tidy the toolbar into two logical rows
+*Merged 2026-09-11 · branch `feature/signal-intel-toolbar-tidy` · 3 file(s), +26 / −11*
+
+- fix(signal-intel): analyzer back-link, dead wifi-status id, button spacing
+- style(signal-intel): more horizontal spacing between toolbar controls
+- fix(signal-intel): use gap classes that exist in the compiled Tailwind
+- style(signal-intel): tighten toolbar spacing to gap-4 (24px -> 16px)
+
+#### [#754](https://github.com/PierreGode/Ragnar/pull/754) — feat(rf-analyzer): shareable deep-links + keyboard shortcuts (Segment 8)
+*Merged 2026-09-11 · branch `feature/analyzer-ux` · 5 file(s), +106 / −15*
+
+- feat(signal-intel): add a Signal Analyzer button to the SI tool row
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md), [rf-waterfall.md](rf-waterfall.md)
+
+#### [#753](https://github.com/PierreGode/Ragnar/pull/753) — feat(rf-analyzer): cyclostationary symbol-rate detector (Segment 7)
+*Merged 2026-09-11 · branch `feature/analyzer-cyclo` · 4 file(s), +192 / −3*
+
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md)
+
+#### [#752](https://github.com/PierreGode/Ragnar/pull/752) — feat(rf-analyzer): LoRa de-chirp view (Segment 7)
+*Merged 2026-09-11 · branch `feature/analyzer-lora` · 4 file(s), +244 / −31*
+
+- feat(rf-analyzer): move Modulation card under Time envelope; upgrade the symbol tool
+- fix(rf-analyzer): LoRa de-chirp card — inset the BW/SF controls and plot from the edge
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md)
+
+#### [#751](https://github.com/PierreGode/Ragnar/pull/751) — feat(rf-analyzer): Segment 7 (start) — band-pass / notch filter with before/after spectrum
+*Merged 2026-09-11 · branch `feature/analyzer-dsp` · 4 file(s), +125 / −5*
+
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md)
+
+#### [#750](https://github.com/PierreGode/Ragnar/pull/750) — feat(rf-analyzer): symbol-period cursor on the derived plots (inspectrum parity)
+*Merged 2026-09-11 · branch `feature/analyzer-symcursor` · 2 file(s), +82 / −12*
+
+- feat(rf-analyzer): stack the derived plots (inspectrum multi-plot model)
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md)
+
+#### [#749](https://github.com/PierreGode/Ragnar/pull/749) — feat(rf-analyzer): I/Q sample plot (inspectrum's "Add sample plot")
+*Merged 2026-09-11 · branch `feature/analyzer-sampleplot` · 3 file(s), +26 / −5*
+
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md)
+
+#### [#748](https://github.com/PierreGode/Ragnar/pull/748) — feat(rf-analyzer): Segment 6 — SigMF annotations (label signals, round-trip to the file)
+*Merged 2026-09-11 · branch `feature/analyzer-annotations` · 4 file(s), +216 / −9*
+
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md)
+
+#### [#747](https://github.com/PierreGode/Ragnar/pull/747) — feat(rf-analyzer): candidate frame lengths + per-candidate CRC scan
+*Merged 2026-09-11 · branch `feature/analyzer-frame-candidates` · 4 file(s), +188 / −44*
+
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md)
+
+#### [#746](https://github.com/PierreGode/Ragnar/pull/746) — feat(rf-analyzer): AI assistant can take actions (agentic — drives the analyzer)
+*Merged 2026-09-11 · branch `feature/analyzer-ai-actions` · 5 file(s), +190 / −5*
+
+- **Docs:** [rf-waterfall.md](rf-waterfall.md)
+
+#### [#745](https://github.com/PierreGode/Ragnar/pull/745) — feat(rf-analyzer): AI RF-analyst assistant on the Signal Analyzer page
+*Merged 2026-09-11 · branch `feature/analyzer-ai` · 4 file(s), +157 / −1*
+
+- **Docs:** [rf-waterfall.md](rf-waterfall.md)
+
+#### [#744](https://github.com/PierreGode/Ragnar/pull/744) — feat(rf-analyzer): loading spinner while the spectrogram computes
+*Merged 2026-09-11 · branch `fix/analyzer-spinner` · 1 file(s), +14 / −1*
+
+#### [#743](https://github.com/PierreGode/Ragnar/pull/743) — feat(rf-analyzer): Segment 4 — protocol framework (line coding, frame alignment, CRC scan)
+*Merged 2026-09-11 · branch `feature/analyzer-protocol` · 4 file(s), +296 / −6*
+
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md)
+
+#### [#742](https://github.com/PierreGode/Ragnar/pull/742) — feat(rf-analyzer): Segment 3 — modulation analysis (classify + constellation + instantaneous)
+*Merged 2026-09-11 · branch `feature/analyzer-modclass` · 4 file(s), +237 / −9*
+
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md)
+
+#### [#741](https://github.com/PierreGode/Ragnar/pull/741) — feat(rf-analyzer): Segment 2 — measurement (cursors/Δ, box power, zoom history, max-hold) + follow-ups
+*Merged 2026-09-11 · branch `feature/analyzer-measure` · 4 file(s), +157 / −48*
+
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md)
+
+#### [#740](https://github.com/PierreGode/Ragnar/pull/740) — feat(rf-analyzer): Segment 1 — decode-from-capture (rtl_433) + bit views; add roadmap
+*Merged 2026-09-11 · branch `feature/analyzer-decode` · 5 file(s), +310 / −35*
+
+- fix(rf-analyzer): robust burst detection — gap-merge + duty (handles held & pulse-train signals)
+- **Docs:** [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md), [rf-waterfall.md](rf-waterfall.md)
+
+#### [#739](https://github.com/PierreGode/Ragnar/pull/739) — feat(rf-analyzer): on-box SigMF IQ analyzer page + "Open in Analyzer" button
+*Merged 2026-09-11 · branch `feature/sigmf-analyzer` · 8 file(s), +1050 / −1*
+
+- feat(rf-waterfall): Sessions dropdown — open any recorded SigMF capture in the Analyzer
+- feat(rf-waterfall): ⓘ info popup on IQ capture — size/memory guidance
+- feat(rf-waterfall): rename + delete for SigMF sessions
+- **Docs:** [rf-waterfall-guide.md](rf-waterfall-guide.md), [rf-waterfall.md](rf-waterfall.md)
+
+#### [#738](https://github.com/PierreGode/Ragnar/pull/738) — fix(radio): stream Local Radio as MP3 so it plays on iOS / mobile
+*Merged 2026-09-11 · branch `fix/radio-ios-mp3` · 5 file(s), +90 / −15*
+
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+#### [#737](https://github.com/PierreGode/Ragnar/pull/737) — docs: add RF Waterfall capability guide
+*Merged 2026-09-11 · branch `docs/rf-waterfall-guide` · 2 file(s), +131 / −1*
+
+- **Docs:** [docs index](README.md), [rf-waterfall-guide.md](rf-waterfall-guide.md)
+
+### 2026-09-10
+
+#### [#736](https://github.com/PierreGode/Ragnar/pull/736) — feat(rf-waterfall): measurement layer — markers, SNR/noise, trace math, CFAR signal list
+*Merged 2026-09-10 · branch `feature/rf-waterfall-palettes` · 6 file(s), +1143 / −63*
+
+- feat(rf-waterfall): SigMF raw-IQ capture (GNU Radio / inspectrum / URH interop)
+- feat(rf-waterfall): persistence (digital-phosphor) display + click-to-decode
+- feat(rf-waterfall): spectrum baseline + anomaly detection -> Watchtower
+- feat(rf-waterfall): reference-carrier frequency (PPM) calibration
+- fix(rf-waterfall): make the page phone-friendly
+- fix(rf-waterfall): sweep-restart race crashed Calibrate ('NoneType' has no stdout)
+- **Docs:** [rf-waterfall.md](rf-waterfall.md)
+
+#### [#735](https://github.com/PierreGode/Ragnar/pull/735) — feat(rf-waterfall): selectable waterfall colour palettes (Aurora default)
+*Merged 2026-09-10 · branch `feature/rf-waterfall-palettes` · 2 file(s), +67 / −9*
+
+- **Docs:** [rf-waterfall.md](rf-waterfall.md)
+
+#### [#734](https://github.com/PierreGode/Ragnar/pull/734) — feat(rtl-sdr): real-time IQ FFT waterfall for the sub-GHz SIGINT view
+*Merged 2026-09-10 · branch `feature/rtl-iq-waterfall` · 4 file(s), +357 / −13*
+
+- **Docs:** [rf-waterfall.md](rf-waterfall.md), [sdr-subghz.md](sdr-subghz.md)
+
+#### [#733](https://github.com/PierreGode/Ragnar/pull/733) — feat(guards): VXLAN/NGOAM detection in the in-app Cisco & Juniper CVE guards
+*Merged 2026-09-10 · branch `feature/guards-vxlan` · 3 file(s), +244 / −8*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#732](https://github.com/PierreGode/Ragnar/pull/732) — dashboard: rename Console to Activity Log and drop the double timestamp
+*Merged 2026-09-10 · branch `fix/dashboard-logs-panel` · 2 file(s), +205 / −127*
+
+- dashboard: one unified, filterable Activity Log (stop the mode-jumping)
+- dashboard: double the Activity Log panel height (16rem -> 32rem)
+
+### 2026-09-09
+
+#### [#730](https://github.com/PierreGode/Ragnar/pull/730) — db: actually collapse duplicate real-MAC host rows (stop 400+ log warnings)
+*Merged 2026-09-09 · branch `fix/db-dedup-multiple-real-macs` · 2 file(s), +36 / −38*
+
+- env_manager: quiet the per-construction path logs (INFO -> DEBUG)
+
+#### [#729](https://github.com/PierreGode/Ragnar/pull/729) — WiFi Defense: persist scan-option checkboxes across a browser refresh
+*Merged 2026-09-09 · branch `fix/wifidef-persist-checkboxes` · 2 file(s), +38 / −1*
+
+#### [#728](https://github.com/PierreGode/Ragnar/pull/728) — WiFi Defense: only flag genuine findings on the Signal Intelligence pivot
+*Merged 2026-09-09 · branch `fix/wifidef-benign-ap-selection` · 4 file(s), +83 / −39*
+
+- Signal Intelligence: prefer a managed survey radio (wlan1 > wlan0 > monitor)
+- **Docs:** [wifi-analyzer.md](wifi-analyzer.md), [wifi-defense.md](wifi-defense.md)
+
+#### [#727](https://github.com/PierreGode/Ragnar/pull/727) — Fix epd2in13b_V4 (tri-color) e-Paper display not working (#585)
+*Merged 2026-09-09 · branch `fix/epd2in13b-v4-driver` · 1 file(s), +13 / −4*
+
+#### [#726](https://github.com/PierreGode/Ragnar/pull/726) — Asset Inventory: permanently ignore warnings from a device
+*Merged 2026-09-09 · branch `feature/asset-inventory-ignore-warnings` · 6 file(s), +114 / −21*
+
+- **Docs:** [README (root)](../README.md), [asset-inventory.md](asset-inventory.md)
+
+#### [#725](https://github.com/PierreGode/Ragnar/pull/725) — wifi analyzer: timeshare the radio to survey the Alfa while monitor is on
+*Merged 2026-09-09 · branch `fix/survey-timeshare-monitor` · 1 file(s), +68 / −9*
+
+#### [#724](https://github.com/PierreGode/Ragnar/pull/724) — wifidef: revert fragile survey auto-toggle; make duplicate_ssid informational
+*Merged 2026-09-09 · branch `fix/wifidef-survey-and-flag-noise` · 4 file(s), +18 / −59*
+
+### 2026-09-08
+
+#### [#723](https://github.com/PierreGode/Ragnar/pull/723) — wifi analyzer: honor the selected radio when it's in monitor mode
+*Merged 2026-09-08 · branch `fix/dedupe-rogue-ap-swarm` · 1 file(s), +54 / −19*
+
+#### [#722](https://github.com/PierreGode/Ragnar/pull/722) — scorers: stop a duplicate-SSID swarm faking a HaleHound/PineAP verdict
+*Merged 2026-09-08 · branch `fix/dedupe-rogue-ap-swarm` · 3 file(s), +108 / −32*
+
+#### [#721](https://github.com/PierreGode/Ragnar/pull/721) — wifi analyzer: auto-survey on the free radio when the target is in monitor
+*Merged 2026-09-08 · branch `feat/wifidef-info-threat` · 1 file(s), +21 / −1*
+
+#### [#720](https://github.com/PierreGode/Ragnar/pull/720) — wifi_defense: add an "info" threat level below "warning"
+*Merged 2026-09-08 · branch `feat/wifidef-info-threat` · 5 file(s), +80 / −12*
+
+- web: fix inline WiFi Defense cards never showing (hidden class vs attribute)
+- fix: stop PineAP false-positive incidents on randomized/invalid BSSIDs
+
+#### [#719](https://github.com/PierreGode/Ragnar/pull/719) — wifi_defense: deep scan opt-in + capture only EAPOL, not all data
+*Merged 2026-09-08 · branch `fix/wpa3-downgrade-false-positives` · 3 file(s), +12 / −7*
+
+#### [#718](https://github.com/PierreGode/Ragnar/pull/718) — wifi_defense: stop WPA3 downgrade false positives
+*Merged 2026-09-08 · branch `fix/wpa3-downgrade-false-positives` · 2 file(s), +66 / −51*
+
+#### [#717](https://github.com/PierreGode/Ragnar/pull/717) — wifi_defense: detect WPA3-strip downgrade in the panel scan
+*Merged 2026-09-08 · branch `feature/wifidef-full-wifiwatch` · 6 file(s), +333 / −23*
+
+- wifi_defense: fold wifiwatch's client/handshake detectors into a deep scan
+
+### 2026-09-07
+
+#### [#715](https://github.com/PierreGode/Ragnar/pull/715) — web: bump JS cache-buster + show PineAP card on tab open
+*Merged 2026-09-07 · branch `fix/pineap-card-cachebuster` · 2 file(s), +9 / −1*
+
+#### [#714](https://github.com/PierreGode/Ragnar/pull/714) — Add PineAP / Wi-Fi Pineapple detection (pineap_watch)
+*Merged 2026-09-07 · branch `feature/pineap-detection` · 9 file(s), +1264 / −3*
+
+- tests: fix stale halehound BLE-flood threshold (8 -> 20)
+- pineap: add opt-in active probe-response test (the one that transmits)
+- docs: mention Wi-Fi Pineapple / PineAP in WiFi Defense description
+- web: add PineAP panel + active-probe button to WiFi Defense tab
+- **Docs:** [README (root)](../README.md)
+
+#### [#713](https://github.com/PierreGode/Ragnar/pull/713) — docs: slim the README to summaries + links, add a docs index and 3 missing guides
+*Merged 2026-09-07 · branch `docs/readme-slim-and-index` · 5 file(s), +348 / −249*
+
+- Update README.md
+- Fix link in README for scanning and actions
+- Revise multi-source threat intelligence description
+- **Docs:** [README (root)](../README.md), [docs index](README.md), [adv-scan.md](adv-scan.md), [pager.md](pager.md), [scanning-and-attacks.md](scanning-and-attacks.md)
+
+#### [#712](https://github.com/PierreGode/Ragnar/pull/712) — Replace image in nettools.md
+*Merged 2026-09-07 · branch `PierreGode-patch-1` · 1 file(s), +2 / −1*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#711](https://github.com/PierreGode/Ragnar/pull/711) — docs(ptp): document PTP Watch in Watchtower feed list + cross-link the two PTP cards
+*Merged 2026-09-07 · branch `docs/ptp-watch-watchtower-crossref` · 2 file(s), +14 / −2*
+
+- **Docs:** [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+#### [#710](https://github.com/PierreGode/Ragnar/pull/710) — Replace visibility matrix image with new image
+*Merged 2026-09-07 · branch `PierreGode-matrix` · 1 file(s), +2 / −1*
+
+- **Docs:** [nettools.md](nettools.md)
+
+### 2026-09-06
+
+#### [#709](https://github.com/PierreGode/Ragnar/pull/709) — fix(ptp): unique element IDs for PTP Watch card (was colliding with PTP presence card)
+*Merged 2026-09-06 · branch `fix/ptp-watch-dup-element-id` · 2 file(s), +8 / −8*
+
+#### [#708](https://github.com/PierreGode/Ragnar/pull/708) — feat(ptp): passive PTP/gPTP timing-plane watcher (IEEE-1588 v2, 42 codes)
+*Merged 2026-09-06 · branch `feature/ptp-watch-v2` · 6 file(s), +2894 / −2*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#707](https://github.com/PierreGode/Ragnar/pull/707) — fix(bfd,guards): handle IPv6 Authentication Header (AH, proto 51) in ext-header walks
+*Merged 2026-09-06 · branch `fix/bfd-v2-ah-and-guard-extheaders` · 3 file(s), +68 / −21*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#706](https://github.com/PierreGode/Ragnar/pull/706) — fix(cisco,juniper): dual-stack guard capture via next-header-qualified ip6[6] BPF
+*Merged 2026-09-06 · branch `fix/cisco-guard-dhcpv6-ipv6-capture` · 2 file(s), +89 / −17*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#705](https://github.com/PierreGode/Ragnar/pull/705) — feat(juniper): dual-stack Juniper guard + shared IPv6 guard-parse infra
+*Merged 2026-09-06 · branch `feature/juniper-guard-v2-ipv6` · 3 file(s), +116 / −13*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#704](https://github.com/PierreGode/Ragnar/pull/704) — feat(vpn,snmp,mac,cisco): dual-stack VPN egress, SNMP-over-IPv6, MAC EUI-64 identity, Cisco IKEv2/DHCPv6/RH0 CVEs
+*Merged 2026-09-06 · branch `feature/vpn-snmp-mac-cisco-v2` · 4 file(s), +353 / −48*
+
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md)
+
+### 2026-09-05
+
+#### [#703](https://github.com/PierreGode/Ragnar/pull/703) — feat(ntp,eigrp): NTP on-path forgery + version/stratum sanity; EIGRP IPv6 route TLVs (RFC 7868)
+*Merged 2026-09-05 · branch `feature/ntp-v3-eigrp-v4-watch` · 4 file(s), +201 / −21*
+
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md)
+
+#### [#702](https://github.com/PierreGode/Ragnar/pull/702) — feat(isis): IPv6 reachability content checks for IS-IS Watch (RFC 5308 TLV 236/237)
+*Merged 2026-09-05 · branch `feature/isis-watch-v4-ipv6` · 4 file(s), +185 / −13*
+
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md)
+
+#### [#701](https://github.com/PierreGode/Ragnar/pull/701) — feat(fhrp): IPv6 dual-stack for FHRP Watch (HSRPv6/VRRPv3/GLBPv6)
+*Merged 2026-09-05 · branch `feature/fhrp-watch-v4-dualstack` · 4 file(s), +303 / −41*
+
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md)
+
+#### [#700](https://github.com/PierreGode/Ragnar/pull/700) — feat(bgp): MP-BGP IPv6 dual-stack for passive BGP Path Watch + receive-only collector
+*Merged 2026-09-05 · branch `feature/bgp-pathwatch-v3-dualstack` · 5 file(s), +275 / −45*
+
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md)
+
+#### [#699](https://github.com/PierreGode/Ragnar/pull/699) — fix(net): auto-select interface for LACP/RPC/BFD/SR-MPLS watch cards
+*Merged 2026-09-05 · branch `fix/watch-card-auto-iface` · 1 file(s), +4 / −0*
+
+#### [#698](https://github.com/PierreGode/Ragnar/pull/698) — ICMP Watch v3: add ICMPv6 Redirect (type 137) dual-stack detection
+*Merged 2026-09-05 · branch `feature/ipv6-dualstack-v3-watch` · 6 file(s), +1099 / −103*
+
+- DNS Doctor v3: dual-stack cross-family hijack detection (AAAA)
+- OSPF Watch v3: parse OSPFv3 (IPv6) so its packets reach the detectors
+- DHCP Doctor v2: add zero-config DNS6_LINKLOCAL mitm6 tell to IPv6 First-Hop Watch
+- docs(README): note IPv6 dual-stack coverage for ICMP/OSPF/DNS/DHCPv6 watchers
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md)
+
+#### [#697](https://github.com/PierreGode/Ragnar/pull/697) — BFD Watch: passive failover-manipulation detector (forged teardown / CVE-2018-0155)
+*Merged 2026-09-05 · branch `feature/bfd-srmpls-arpv3-igmpv3-watch` · 10 file(s), +6193 / −49*
+
+- SR-MPLS Watch: passive MPLS/SR-MPLS/SRv6 label & segment-injection detector
+- IGMP Watch v3: add MLD (IPv6 multicast) to the in-app watcher
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+### 2026-09-04
+
+#### [#696](https://github.com/PierreGode/Ragnar/pull/696) — LACP Watch + RPC/NetLogon Watch: two new passive in-app watchers
+*Merged 2026-09-04 · branch `feature/lacp-rpc-netlogon-watch` · 10 file(s), +5273 / −5*
+
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+### 2026-09-03
+
+#### [#695](https://github.com/PierreGode/Ragnar/pull/695) — SMB & Kerberos Watch v2
+*Merged 2026-09-03 · branch `feature/smb-kerberos-watch-v2` · 6 file(s), +388 / −18*
+
+- SMB & Kerberos Watch v2: KDC-error recon (K7), NTLM relay tells (N2/N3), RC4-offer refinement (K2), Watchtower feed
+- **Docs:** [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+### 2026-09-02
+
+#### [#694](https://github.com/PierreGode/Ragnar/pull/694) — fix(display): dedicated landscape layout for 2.13" e-paper lying down (90°/270°)
+*Merged 2026-09-02 · branch `fix/epaper-2in13-horizontal-122` · 0 file(s), +0 / −0*
+
+- fix(display): fill the 2.13" landscape lower zone (mood + big speech + framed sprite)
+
+#### [#692](https://github.com/PierreGode/Ragnar/pull/692) — fix(display): dedicated landscape layout for 2.13" e-paper lying down (90°/270°)
+*Merged 2026-09-02 · branch `fix/epaper-2in13-horizontal-122` · 2 file(s), +207 / −0*
+
+- fix(display): fill the 2.13" landscape lower zone (mood + big speech + framed sprite)
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md)
+
+#### [#691](https://github.com/PierreGode/Ragnar/pull/691) — docs(homeassistant): add captive-portal → LED-strip-red automation example
+*Merged 2026-09-02 · branch `docs/ha-hue-captive-portal-example` · 1 file(s), +194 / −5*
+
+- docs(homeassistant): fix HA automation triggers — event ENTITY needs a state trigger
+- docs(homeassistant): captive-portal → red LED worked example + state-trigger fix
+- **Docs:** [homeassistant.md](homeassistant.md)
+
+#### [#690](https://github.com/PierreGode/Ragnar/pull/690) — ICMP Watch v2 (redirect/ARP-poison) + BGP Path Watch v2 (convergence) in-app
+*Merged 2026-09-02 · branch `feature/bgp-icmp-watch-v2` · 9 file(s), +2508 / −46*
+
+- Update image in Authority Verification suite
+- **Docs:** [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+#### [#689](https://github.com/PierreGode/Ragnar/pull/689) — Detect HaleHound-CYD attack multitool (Wi-Fi + LAN + BLE fusion)
+*Merged 2026-09-02 · branch `feature/halehound-detection` · 16 file(s), +3254 / −30*
+
+- HaleHound card: use compiled fuchsia classes (pink was purged)
+- HaleHound: drop "Cheap Yellow Display" wording
+- HaleHound: move correlation card to the bottom of the WiFi Defense tab
+- HaleHound: reframe as general ESP32 attack-tool detector (Marauder/Bruce)
+- HaleHound card: drop dog emoji, add HaleHound wordmark logo in heading
+- HaleHound card: plain heading, use logo inline for HaleHound-CYD in description
+- …and 21 more commit(s)
+- **Docs:** [asset-inventory.md](asset-inventory.md), [incident-correlation.md](incident-correlation.md), [wifi-defense.md](wifi-defense.md)
+
+### 2026-08-31
+
+#### [#688](https://github.com/PierreGode/Ragnar/pull/688) — pager: add 929.9375 + 931.0625 MHz US FLEX channels to preset dropdown
+*Merged 2026-08-31 · branch `feature/pager-preset-929937` · 1 file(s), +2 / −0*
+
+### 2026-08-30
+
+#### [#687](https://github.com/PierreGode/Ragnar/pull/687) — pager: add POCSAG baud / FLEX demod selector + invert + cleaner FM demod
+*Merged 2026-08-30 · branch `feature/pager-baud-demod-selector` · 4 file(s), +124 / −16*
+
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+#### [#686](https://github.com/PierreGode/Ragnar/pull/686) — acars: fix silent panel — use acarsdec -o 4 (msg JSON), not -o 5 (route JSON)
+*Merged 2026-08-30 · branch `feature/vdl2-atn-decode` · 1 file(s), +7 / −3*
+
+#### [#685](https://github.com/PierreGode/Ragnar/pull/685) — install_dumpvdl2: add required libglib2.0-dev + apt lock timeout
+*Merged 2026-08-30 · branch `feature/vdl2-atn-decode` · 1 file(s), +10 / −5*
+
+#### [#684](https://github.com/PierreGode/Ragnar/pull/684) — install_dumpvdl2: surface real build errors + auto -j1 fallback for low-RAM Pis
+*Merged 2026-08-30 · branch `feature/vdl2-atn-decode` · 2 file(s), +74 / −27*
+
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+#### [#683](https://github.com/PierreGode/Ragnar/pull/683) — VDL Mode 2 / ATN decoding on the ADS-B radar (dumpvdl2 + libacars)
+*Merged 2026-08-30 · branch `feature/vdl2-atn-decode` · 7 file(s), +884 / −11*
+
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+#### [#682](https://github.com/PierreGode/Ragnar/pull/682) — Add Flipper One (RK3576 ARM64 Linux) feasibility & porting notes
+*Merged 2026-08-30 · branch `feature/flipper-one-support` · 2 file(s), +121 / −0*
+
+- **Docs:** [README (root)](../README.md), [flipper-one.md](flipper-one.md)
+
+#### [#681](https://github.com/PierreGode/Ragnar/pull/681) — ADS-B: click a contact for a world-map flight route (FlightAware-style)
+*Merged 2026-08-30 · branch `feature/adsb-flight-routes` · 4 file(s), +1010 / −40*
+
+- ADS-B route map: use Leaflet + Esri tiles like the Mesh Map
+- ADS-B: real live position + aircraft type + IP-geo location fallback
+- ADS-B: fix empty radar diagnosis + stop demo feed fighting a live SDR
+- ADS-B: use the box GPS as the primary receiver location (then browser, then IP)
+- ADS-B: internet fallback when SDR is deaf + flag stale filed routes
+- ADS-B: fix empty radar when SDR runs but is deaf (regression vs main)
+- …and 4 more commit(s)
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+### 2026-08-28
+
+#### [#680](https://github.com/PierreGode/Ragnar/pull/680) — Add SPI TFT kiosk installer for MPI3501 / ILI9486 3.5" display
+*Merged 2026-08-28 · branch `screen35` · 3 file(s), +354 / −0*
+
+### 2026-08-27
+
+#### [#679](https://github.com/PierreGode/Ragnar/pull/679) — Replace image in nettools documentation
+*Merged 2026-08-27 · branch `PierreGode-patch-5` · 1 file(s), +2 / −1*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#678](https://github.com/PierreGode/Ragnar/pull/678) — Signal Intelligence tools: open in the same tab, not a new one
+*Merged 2026-08-27 · branch `feature/si-back-link` · 1 file(s), +6 / −6*
+
+#### [#677](https://github.com/PierreGode/Ragnar/pull/677) — Signal Intelligence tools: '← Ragnar' returns to the Signal Intelligence tab
+*Merged 2026-08-27 · branch `feature/si-back-link` · 6 file(s), +6 / −6*
+
+#### [#676](https://github.com/PierreGode/Ragnar/pull/676) — Mesh Nodes: node map 20% narrower
+*Merged 2026-08-27 · branch `feature/mesh-map` · 1 file(s), +19 / −7*
+
+- Mesh Nodes: narrow the Node map CARD so the Nodes table gets width (no scroll)
+- Mesh Nodes: table scroll box fills the card height (was a short 360px box)
+- Mesh Nodes messages: Follow checkbox, timestamps, highlight the latest
+
+#### [#675](https://github.com/PierreGode/Ragnar/pull/675) — Mesh: full-screen Leaflet map (/mesh-map) + Full map view button
+*Merged 2026-08-27 · branch `feature/mesh-map` · 6 file(s), +583 / −29*
+
+- Mesh map: drop CARTO (needs API key) for key-free tile providers
+- Mesh map: 🌍 World view — public worldwide mesh nodes
+- Mesh map: decode encrypted MQTT (real node data) + viewport-prioritised loading
+- Mesh map: World is a proper toggle — second click hides the public nodes
+- Mesh MQTT: fix 'no nodes' + 'super slow' (harden decoder + throttle firehose)
+- Mesh MQTT: fix disconnect deadlock ('MQTT won't stop')
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+#### [#674](https://github.com/PierreGode/Ragnar/pull/674) — Mesh Nodes: serve /mesh-nodes unconditionally (fix 'Not Found' with no hardware)
+*Merged 2026-08-27 · branch `feature/mesh-page-always` · 1 file(s), +5 / −20*
+
+#### [#673](https://github.com/PierreGode/Ragnar/pull/673) — Signal Intelligence: fix invisible VOR button + always show Mesh Nodes
+*Merged 2026-08-27 · branch `feature/si-button-fixes` · 2 file(s), +7 / −8*
+
+#### [#672](https://github.com/PierreGode/Ragnar/pull/672) — Meshtastic: MQTT Internet source + transmit (the full mesh suite)
+*Merged 2026-08-27 · branch `feature/meshtastic-mqtt` · 5 file(s), +453 / −53*
+
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+### 2026-08-26
+
+#### [#671](https://github.com/PierreGode/Ragnar/pull/671) — APRS: ham packet RX + messaging (off-air SDR + APRS-IS worldwide)
+*Merged 2026-08-26 · branch `feature/aprs-messaging` · 8 file(s), +1341 / −8*
+
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+#### [#670](https://github.com/PierreGode/Ragnar/pull/670) — Add RoomScan: touchscreen floor-plan tracer for Coverage Heatmap
+*Merged 2026-08-26 · branch `feature/roomscan-s3-lcd` · 13 file(s), +1674 / −13*
+
+- Coverage Heatmap: transcode TIFF/BMP floorplans to PNG on upload
+- Coverage Heatmap: move + resize the uploaded floorplan image
+- **Docs:** [README (root)](../README.md), [roomscan.md](roomscan.md)
+
+#### [#669](https://github.com/PierreGode/Ragnar/pull/669) — Pager: add Motorola QCII two-tone decode; new VOR radial decoder
+*Merged 2026-08-26 · branch `feature/qcii-vor` · 12 file(s), +1480 / −421*
+
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+#### [#668](https://github.com/PierreGode/Ragnar/pull/668) — Asset Inventory: stop false-positive vendor-change "spoof" alerts
+*Merged 2026-08-26 · branch `fix/asset-vendor-change-false-positive` · 2 file(s), +47 / −8*
+
+- **Docs:** [asset-inventory.md](asset-inventory.md)
+
+### 2026-08-25
+
+#### [#667](https://github.com/PierreGode/Ragnar/pull/667) — Add Docker installation (headless web UI)
+*Merged 2026-08-25 · branch `feature/docker-install` · 12 file(s), +758 / −22*
+
+- Docker: install git + sudo, document in-container update behavior
+- Fix orchestrator never starting without NetworkManager (containers)
+- Installer: add Docker container as a menu option
+- Updater: rebuild Docker deployment instead of native flow when detected
+- CI: publish multi-arch Docker image to GHCR on release/tag
+- Docker: sharpen positioning + optional hardware-passthrough overlay
+- **Docs:** [README (root)](../README.md), [DOCKER.md](DOCKER.md)
+
+#### [#666](https://github.com/PierreGode/Ragnar/pull/666) — Add Asset Inventory + SIEM/outbound forwarding
+*Merged 2026-08-25 · branch `feature/asset-inventory-siem` · 10 file(s), +2608 / −2*
+
+- Move Assets from top-level tab to Network sub-tab (after AP Archive)
+- Asset Inventory: gateway classification, broadcast filter, vendor cleanup
+- Assets tab: mobile-friendly layout
+- **Docs:** [README (root)](../README.md), [asset-inventory.md](asset-inventory.md), [siem.md](siem.md)
+
+### 2026-08-24
+
+#### [#665](https://github.com/PierreGode/Ragnar/pull/665) — RF Waterfall: Mesh/LoRa overlay dropdown on HackRF too (full panel parity)
+*Merged 2026-08-24 · branch `feature/rtl-sdr-support-fullscreen` · 3 file(s), +85 / −22*
+
+- RF Waterfall: fix HackRF narrow-span floor streaks (code-review follow-up)
+- **Docs:** [rf-waterfall.md](rf-waterfall.md)
+
+#### [#664](https://github.com/PierreGode/Ragnar/pull/664) — RF Waterfall: manual free-tune on both panels + all sub-GHz presets on HackRF
+*Merged 2026-08-24 · branch `feature/rtl-sdr-support-fullscreen` · 3 file(s), +130 / −14*
+
+- RF Waterfall: show all presets in the RTL demo panel too (band-aware synth)
+- **Docs:** [rf-waterfall.md](rf-waterfall.md)
+
+#### [#663](https://github.com/PierreGode/Ragnar/pull/663) — RF Waterfall: add AM (medium-wave) + Shortwave HF band scopes
+*Merged 2026-08-24 · branch `feature/rtl-sdr-support-fullscreen` · 2 file(s), +12 / −3*
+
+#### [#662](https://github.com/PierreGode/Ragnar/pull/662) — RF Waterfall: FM/Airband band scopes + click-a-peak-to-tune the radio
+*Merged 2026-08-24 · branch `feature/rtl-sdr-support-fullscreen` · 2 file(s), +22 / −1*
+
+#### [#661](https://github.com/PierreGode/Ragnar/pull/661) — Signal Intelligence: Dome is the default view, moved before Bar
+*Merged 2026-08-24 · branch `feature/rtl-sdr-support-fullscreen` · 2 file(s), +6 / −6*
+
+#### [#654](https://github.com/PierreGode/Ragnar/pull/654) — Fix Pwangotchi Captures Paneel showing 0 handshakes
+*Merged 2026-08-24 · branch `main` · 1 file(s), +2 / −2*
+
+#### [#660](https://github.com/PierreGode/Ragnar/pull/660) — Feature/rtl sdr radio presets
+*Merged 2026-08-24 · branch `feature/rtl-sdr-support-fullscreen` · 2 file(s), +43 / −10*
+
+- ADS-B: show ICAO airline designator alongside IATA in the Airline column
+- RF Waterfall radio: custom presets — save/remember your own stations
+
+#### [#659](https://github.com/PierreGode/Ragnar/pull/659) — Rename WiFi Analyzer / WiFi Spectrum Analyzer -> Signal Intelligence
+*Merged 2026-08-24 · branch `feature/rtl-sdr-support-fullscreen` · 3 file(s), +17 / −17*
+
+#### [#658](https://github.com/PierreGode/Ragnar/pull/658) — Feature/rtl sdr
+*Merged 2026-08-24 · branch `feature/rtl-sdr-support-fullscreen` · 7 file(s), +494 / −29*
+
+- ADS-B: correct IATA wording — it's an ICAO->IATA cross-reference, not derived
+- ADS-B Radar: click a contact to highlight it on the radar
+- Mesh Nodes: click a node to highlight + zoom to it on the map
+- RF Waterfall: Local Radio (FM/AM) with live audio you can listen to
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+#### [#657](https://github.com/PierreGode/Ragnar/pull/657) — ADS-B: force max gain, recognise R860 (NESDR SMArt v5), on-radar no-RX hint
+*Merged 2026-08-24 · branch `feature/rtl-sdr-support-fullscreen` · 3 file(s), +34 / −3*
+
+#### [#656](https://github.com/PierreGode/Ragnar/pull/656) — SDR pages: full-width on desktop, mobile unchanged
+*Merged 2026-08-24 · branch `feature/rtl-sdr-support-fullscreen` · 4 file(s), +9 / −7*
+
+- ADS-B Radar: shrink radar ~20%, give Contacts the freed width
+
+### 2026-08-23
+
+#### [#655](https://github.com/PierreGode/Ragnar/pull/655) — ADS-B ACARS panel + IATA-next-to-ICAO + pager full-text; airline DB x1.5
+*Merged 2026-08-23 · branch `feature/rtl-sdr-support-fullscreen` · 11 file(s), +714 / −20*
+
+- ADS-B: reception diagnostics + robust dump1090 launch (no-hits triage)
+- Show Mesh Nodes button when any SDR present (collaborator couldn't see it)
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+#### [#653](https://github.com/PierreGode/Ragnar/pull/653) — ADS-B: build dump1090 from source ('can't find the package' fix)
+*Merged 2026-08-23 · branch `feature/rtl-sdr-support-fullscreen` · 14 file(s), +806 / −55*
+
+- Pager Decode: POCSAG/FLEX via rtl_fm | multimon-ng
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+#### [#652](https://github.com/PierreGode/Ragnar/pull/652) — Fix blank ADS-B Radar / Mesh Nodes pages (404 before the install button)
+*Merged 2026-08-23 · branch `feature/rtl-sdr-support-fullscreen` · 1 file(s), +25 / −15*
+
+#### [#651](https://github.com/PierreGode/Ragnar/pull/651) — Feature/rtl sdr
+*Merged 2026-08-23 · branch `feature/rtl-sdr-support-fullscreen` · 14 file(s), +2524 / −13*
+
+- RF Waterfall: 315/40/27 MHz bands, PPM+gain tuning, PNG snapshot
+- ADS-B Radar: live aircraft (1090 MHz) on a PPI radar screen
+- SDR: session record/replay + ADS-B ICAO/IATA/tail-registration
+- Mesh Nodes: real Meshtastic enumeration via a USB companion node
+- Fix ADS-B Radar button colour (bg-teal purged from tailwind.css)
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+#### [#650](https://github.com/PierreGode/Ragnar/pull/650) — Mesh overlay: Meshtastic / MeshCore / LoRaWAN spectrum view (energy-only)
+*Merged 2026-08-23 · branch `feature/rtl-sdr-support-fullscreen` · 4 file(s), +190 / −34*
+
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+#### [#649](https://github.com/PierreGode/Ragnar/pull/649) — Feature/rtl sdr
+*Merged 2026-08-23 · branch `feature/rtl-sdr-support-fullscreen` · 3 file(s), +161 / −17*
+
+- Z-Wave Spectrum: region-aware sub-GHz energy view (nobody scans this)
+- RF Waterfall: switch heat colormap to eye-kinder 'Aurora' (drop yellow)
+
+#### [#648](https://github.com/PierreGode/Ragnar/pull/648) — RTL-SDR: fix 433 band never loading (single-crop sweep finalization)
+*Merged 2026-08-23 · branch `feature/rtl-sdr-support-fullscreen` · 1 file(s), +17 / −3*
+
+#### [#647](https://github.com/PierreGode/Ragnar/pull/647) — SDR check: one-click Install button to fix tools-missing / DVB-held
+*Merged 2026-08-23 · branch `feature/rtl-sdr-support-fullscreen` · 5 file(s), +133 / −2*
+
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+#### [#646](https://github.com/PierreGode/Ragnar/pull/646) — RTL-SDR: guarantee rtl-sdr/rtl-433 install in installer + updater
+*Merged 2026-08-23 · branch `feature/rtl-sdr-support-fullscreen` · 2 file(s), +36 / −18*
+
+#### [#645](https://github.com/PierreGode/Ragnar/pull/645) — RTL-SDR: lsusb VID:PID detection fallback + better 'not detected' diagnostics
+*Merged 2026-08-23 · branch `feature/rtl-sdr-support-fullscreen` · 5 file(s), +294 / −6*
+
+- SDR check: inline diagnostic button in the Wi-Fi Spectrum Analyzer
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+#### [#644](https://github.com/PierreGode/Ragnar/pull/644) — RF Waterfall: per-panel full-screen buttons + broad RTL-SDR dongle support
+*Merged 2026-08-23 · branch `feature/rtl-sdr-support-fullscreen` · 8 file(s), +212 / −12*
+
+- Make ups.py and ups_api.py executable (755)
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+#### [#643](https://github.com/PierreGode/Ragnar/pull/643) — Sub-GHz SDR tab: doc + front-end (RTL-SDR ISM/waterfall)
+*Merged 2026-08-23 · branch `feature/subghz-sdr-tab` · 3 file(s), +361 / −0*
+
+- **Docs:** [sdr-subghz.md](sdr-subghz.md)
+
+#### [#642](https://github.com/PierreGode/Ragnar/pull/642) — RF Waterfall: pro upgrades — decode, occupancy+log, zoom, click-to-tune
+*Merged 2026-08-23 · branch `fix/rf-waterfall-scroll-and-back` · 4 file(s), +443 / −310*
+
+#### [#641](https://github.com/PierreGode/Ragnar/pull/641) — RF Waterfall: stop scroll from resetting the waterfall + add Return to Ragnar
+*Merged 2026-08-23 · branch `fix/rf-waterfall-scroll-and-back` · 1 file(s), +15 / −4*
+
+#### [#640](https://github.com/PierreGode/Ragnar/pull/640) — Feature/sdr waterfall
+*Merged 2026-08-23 · branch `feature/sdr-waterfall-demo` · 10 file(s), +1507 / −6*
+
+- Add hidden synthetic RF Waterfall demo (opt-in, no SDR required)
+- RF Waterfall page: promote to real feature with live HackRF + RTL-SDR
+- Install rtl-sdr + rtl-433 for the RF Waterfall sub-GHz (RTL-SDR) path
+- **Docs:** [rf-waterfall.md](rf-waterfall.md)
+
+#### [#639](https://github.com/PierreGode/Ragnar/pull/639) — RuSense flasher: add fixed CSI channel field to Provision WiFi
+*Merged 2026-08-23 · branch `feature/rusense-flasher-channel` · 3 file(s), +22 / −4*
+
+### 2026-08-22
+
+#### [#638](https://github.com/PierreGode/Ragnar/pull/638) — Move observatory layer controls to compact top-right icon buttons on mobile
+*Merged 2026-08-22 · branch `observatory-mobile-chips` · 4 file(s), +28 / −16*
+
+- Lift the observatory no-fix note above the scrubber and fade it to 15% opacity
+- Tune observatory overlay opacities: note 80%, slider 60%, layer buttons 70% transparent
+- **Docs:** [diagnostics.md](diagnostics.md)
+
+#### [#637](https://github.com/PierreGode/Ragnar/pull/637) — up
+*Merged 2026-08-22 · branch `3gss` · 3 file(s), +16 / −6*
+
+#### [#636](https://github.com/PierreGode/Ragnar/pull/636) — Feed SSH Watch and Telnet Watch into Watchtower + Network Integrity Monitor
+*Merged 2026-08-22 · branch `feature/ssh-telnet-monitor-watchtower` · 7 file(s), +149 / −3*
+
+- **Docs:** [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+#### [#635](https://github.com/PierreGode/Ragnar/pull/635) — Make the GNSS observatory mobile/touch friendly
+*Merged 2026-08-22 · branch `observatory-mobile` · 4 file(s), +101 / −12*
+
+- **Docs:** [diagnostics.md](diagnostics.md)
+
+#### [#634](https://github.com/PierreGode/Ragnar/pull/634) — Add SSH Watch and Telnet Watch passive observers
+*Merged 2026-08-22 · branch `feature/ssh-telnet-watch` · 9 file(s), +3983 / −4*
+
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md)
+
+#### [#633](https://github.com/PierreGode/Ragnar/pull/633) — sgs
+*Merged 2026-08-22 · branch `3gss` · 15 file(s), +2276 / −40*
+
+- 3gss
+- hs
+- https
+- threee
+- cont
+- plan
+- …and 14 more commit(s)
+
+#### [#632](https://github.com/PierreGode/Ragnar/pull/632) — Starview: satellites follow the time scrubber + one consistent sat set
+*Merged 2026-08-22 · branch `patchingnss` · 4 file(s), +174 / −25*
+
+- **Docs:** [diagnostics.md](diagnostics.md)
+
+### 2026-08-21
+
+#### [#631](https://github.com/PierreGode/Ragnar/pull/631) — Comware Guard: stop the default role from self-flagging every scan
+*Merged 2026-08-21 · branch `feature/comware-role-default` · 3 file(s), +25 / −12*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#630](https://github.com/PierreGode/Ragnar/pull/630) — Fix typo in RuSense section header
+*Merged 2026-08-21 · branch `PierreGode-patch-4` · 1 file(s), +1 / −1*
+
+- **Docs:** [README (root)](../README.md)
+
+#### [#629](https://github.com/PierreGode/Ragnar/pull/629) — Ragnar Starview: turn the easter egg into a GNSS observatory
+*Merged 2026-08-21 · branch `feature/starview-observatory` · 7 file(s), +632 / −25*
+
+- **Docs:** [README (root)](../README.md), [diagnostics.md](diagnostics.md)
+
+#### [#628](https://github.com/PierreGode/Ragnar/pull/628) — TLS Watch v3: name SWEET32 / CVE-2016-2183 on the wire
+*Merged 2026-08-21 · branch `feature/tls-watch-v3` · 3 file(s), +132 / −3*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#627](https://github.com/PierreGode/Ragnar/pull/627) — Add Clear button to the Watchtower card
+*Merged 2026-08-21 · branch `feature/watchtower-clear-button` · 5 file(s), +55 / −2*
+
+- Mirror the Watchtower Clear button on the Dashboard summary card
+- Clear the correlated incidents too, not just the raw alerts
+
+### 2026-08-20
+
+#### [#626](https://github.com/PierreGode/Ragnar/pull/626) — LDAP Watch v3: detect LDAPNightmare external-referral vector (CVE-2024-49112/49113)
+*Merged 2026-08-20 · branch `feature/ldap-watch-v3-referral` · 4 file(s), +152 / −6*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#625](https://github.com/PierreGode/Ragnar/pull/625) — Gate vendor switch/router guards to LAN-only in the Net-Integrity auto rotation
+*Merged 2026-08-20 · branch `fix/vendor-guards-lan-only` · 4 file(s), +40 / −12*
+
+- **Docs:** [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+#### [#624](https://github.com/PierreGode/Ragnar/pull/624) — fix
+*Merged 2026-08-20 · branch `smallpatch` · 6 file(s), +1046 / −48*
+
+- ff
+- rt
+- gs
+- gss
+- inf
+- ju
+- …and 3 more commit(s)
+
+### 2026-08-19
+
+#### [#623](https://github.com/PierreGode/Ragnar/pull/623) — RuSense: persistent Calibrated badge + quality % on node rows
+*Merged 2026-08-19 · branch `feature/rusense-nodecal-quality` · 5 file(s), +67 / −16*
+
+- **Docs:** [rusense.md](rusense.md)
+
+#### [#622](https://github.com/PierreGode/Ragnar/pull/622) — RuSense: bump loader.js cache-bust tag in ragnar_modern.js
+*Merged 2026-08-19 · branch `fix/rusense-nodecal-cachebust` · 5 file(s), +8 / −8*
+
+- RuSense: node calibration recording lasts 15s (was 6s)
+- **Docs:** [rusense.md](rusense.md)
+
+#### [#621](https://github.com/PierreGode/Ragnar/pull/621) — RuSense: per-node proximity calibration button in Nodes tab
+*Merged 2026-08-19 · branch `feature/rusense-node-proximity-calibration` · 4 file(s), +281 / −9*
+
+- **Docs:** [rusense.md](rusense.md)
+
+#### [#620](https://github.com/PierreGode/Ragnar/pull/620) — security: triage & remediate CodeQL code-scanning alerts
+*Merged 2026-08-19 · branch `fix/codeql-advanced-setup` · 7 file(s), +107 / −25*
+
+#### [#619](https://github.com/PierreGode/Ragnar/pull/619) — ci: add advanced CodeQL workflow (python + js, build-mode none)
+*Merged 2026-08-19 · branch `fix/codeql-advanced-setup` · 1 file(s), +61 / −0*
+
+#### [#618](https://github.com/PierreGode/Ragnar/pull/618) — comware guard: passive HPE Comware / Huawei VRF-hopping monitor + Watchtower feed
+*Merged 2026-08-19 · branch `feature/hpe-comware-guard` · 7 file(s), +726 / −11*
+
+- ntp watch card: name the detected Autokey CVEs explicitly
+- **Docs:** [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+#### [#617](https://github.com/PierreGode/Ragnar/pull/617) — observatory: refine the activity blob (smoothing, single blob, fingerprinting)
+*Merged 2026-08-19 · branch `feature/observatory-blob-refine` · 7 file(s), +254 / −5*
+
+- observatory: expand fingerprint calibration to a 9-point floor grid
+- observatory: persist fingerprints server-side (shared across browsers)
+- **Docs:** [rusense.md](rusense.md)
+
+#### [#616](https://github.com/PierreGode/Ragnar/pull/616) — rusense: coarse multi-node Observatory localization (blob follows activity)
+*Merged 2026-08-19 · branch `feature/rusense-activity-localization` · 3 file(s), +45 / −1*
+
+- **Docs:** [rusense.md](rusense.md)
+
+#### [#615](https://github.com/PierreGode/Ragnar/pull/615) — rusense: add Restart button to the Sensing backend card
+*Merged 2026-08-19 · branch `feature/sensing-restart-button` · 4 file(s), +57 / −1*
+
+- **Docs:** [rusense.md](rusense.md)
+
+#### [#614](https://github.com/PierreGode/Ragnar/pull/614) — rusense: refresh sensing-server to upstream RuView + fix LAN UDP bind
+*Merged 2026-08-19 · branch `feature/rusense-upstream-refresh` · 5 file(s), +49 / −3*
+
+- **Docs:** [rusense.md](rusense.md)
+
+#### [#613](https://github.com/PierreGode/Ragnar/pull/613) — ntp watch: Autokey extension-field detection (CVE-2014-9295 crypto_recv RCE)
+*Merged 2026-08-19 · branch `feature/vendor-guards-arista-juniper-cisco` · 5 file(s), +1626 / −25*
+
+- vendor guards: passive Cisco / Juniper / Arista router+switch CVE monitors
+- vendor guards: rename Cisco card to 'Cisco Switch and Router Guard'
+- **Docs:** [nettools.md](nettools.md)
+
+### 2026-08-18
+
+#### [#612](https://github.com/PierreGode/Ragnar/pull/612) — Feature/cyberdeck cm5 kiosk DezusAZ update
+*Merged 2026-08-18 · branch `feature/cyberdeck-cm5-kiosk` · 12 file(s), +361 / −6*
+
+- Kiosk: escape hatch + small-screen scaling for handheld decks (Hackberry Pi CM5)
+- Kiosk: handheld (CM5) toggle + display-scale field in Settings → On-screen Display
+- **Docs:** [README (root)](../README.md), [kiosk.md](kiosk.md)
+
+#### [#610](https://github.com/PierreGode/Ragnar/pull/610) — docs: add Hackberry Pi CM5 community port to Supported Platforms
+*Merged 2026-08-18 · branch `docs/hackberry-cm5-port` · 1 file(s), +10 / −0*
+
+- **Docs:** [README (root)](../README.md)
+
+#### [#609](https://github.com/PierreGode/Ragnar/pull/609) — Fix HackRF waterfall dying after a few seconds (USB re-probe during sweep)
+*Merged 2026-08-18 · branch `fix/sdr-waterfall-smooth` · 1 file(s), +61 / −5*
+
+#### [#608](https://github.com/PierreGode/Ragnar/pull/608) — Sharpen SDR waterfall: 512 columns, 600 rows, finer sweep bins
+*Merged 2026-08-18 · branch `fix/sdr-waterfall-smooth` · 4 file(s), +14 / −7*
+
+- **Docs:** [wifi-analyzer.md](wifi-analyzer.md)
+
+#### [#607](https://github.com/PierreGode/Ragnar/pull/607) — Smooth SDR waterfall: dwell-integrate hackrf_sweep into a steady frame rate
+*Merged 2026-08-18 · branch `fix/sdr-waterfall-smooth` · 4 file(s), +66 / −8*
+
+- **Docs:** [wifi-analyzer.md](wifi-analyzer.md)
+
+#### [#606](https://github.com/PierreGode/Ragnar/pull/606) — Fix headless install blanking DPI/HDMI panels (HackBerry Pi)
+*Merged 2026-08-18 · branch `fix/headless-epd-guard` · 5 file(s), +54 / −2*
+
+- **Docs:** [INSTALL.md](INSTALL.md)
+
+#### [#605](https://github.com/PierreGode/Ragnar/pull/605) — Update install_ragnar.sh
+*Merged 2026-08-18 · branch `PierreGode-patch-3` · 1 file(s), +1 / −1*
+
+#### [#604](https://github.com/PierreGode/Ragnar/pull/604) — Update README.md
+*Merged 2026-08-18 · branch `PierreGode-patch-2` · 1 file(s), +2 / −1*
+
+- **Docs:** [README (root)](../README.md)
+
+#### [#603](https://github.com/PierreGode/Ragnar/pull/603) — mac watch: HSRP/VRRP/GLBP virtual-MAC awareness + VIP-hijack detection
+*Merged 2026-08-18 · branch `feature/mac-watch-fhrp-awareness` · 5 file(s), +188 / −24*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#602](https://github.com/PierreGode/Ragnar/pull/602) — install: skip Pi-only display/GPIO steps on non-Pi headless hosts
+*Merged 2026-08-18 · branch `fix/headless-ubuntu-display-drivers` · 2 file(s), +61 / −8*
+
+- **Docs:** [INSTALL.md](INSTALL.md)
+
+### 2026-08-17
+
+#### [#601](https://github.com/PierreGode/Ragnar/pull/601) — net integrity monitor: cover MAC Watch + rank CDPwn critical (Pushover)
+*Merged 2026-08-17 · branch `fix/integrity-monitor-mac-cdpwn` · 4 file(s), +14 / −8*
+
+- watchtower: complete the source list on both cards + docs
+- web: refresh Network Integrity Monitor card to match actual coverage
+- **Docs:** [watchtower.md](watchtower.md)
+
+#### [#600](https://github.com/PierreGode/Ragnar/pull/600) — detector self-test: add MAC Watch + DHCP Guardian (both with Scapy e2e)
+*Merged 2026-08-17 · branch `fix/selftest-mac-dhcp` · 3 file(s), +190 / −9*
+
+#### [#597](https://github.com/PierreGode/Ragnar/pull/597) — Fix battetry green filling icon
+*Merged 2026-08-17 · branch `main` · 4 file(s), +293 / −219*
+
+- moving UPS 1.2 lite to system tab
+- **Docs:** [UPS_INTEGRATION.md](UPS_INTEGRATION.md)
+
+#### [#599](https://github.com/PierreGode/Ragnar/pull/599) — Networking updates
+*Merged 2026-08-17 · branch `thefixes` · 13 file(s), +1365 / −54*
+
+- isiswatch: bound TLV walk by IS-IS PDU Length (Ethernet-padding false positive)
+- netdiag watchers: add trailing-data / Etherleak detector (CDP/DTP/VTP/EIGRP/FHRP/OSPF)
+- docs: document PDU-length bounding + trailing-data/Etherleak detection
+- cdpwatch: add CDPwn byte-level exploit-shape + CVE-screening detectors
+- web: surface CDPwn on the CDP Watch card
+- arp_guard: FHRP (HSRP/VRRP) virtual-MAC awareness + fhrpwatch cross-pivot
+- …and 9 more commit(s)
+- **Docs:** [arp_guard.md](arp_guard.md), [isiswatch.md](isiswatch.md), [nettools.md](nettools.md)
+
+### 2026-08-16
+
+#### [#598](https://github.com/PierreGode/Ragnar/pull/598) — Observatory: vendor Three.js so it loads under the hardening CSP
+*Merged 2026-08-16 · branch `feature/observatory-demo-flag` · 6 file(s), +120 / −13*
+
+- Observatory: flag demo data + label placeholder node 'demo' until a real node connects
+- Observatory: pin DEMO flag to top-left on phones so it no longer overlaps the scenario dropdown
+- Observatory: fix dead fullscreen button + mobile hardening
+- Observatory: stack auto-cycle under the DEMO flag; it rises when a node connects
+- **Docs:** [rusense.md](rusense.md)
+
+### 2026-08-15
+
+#### [#596](https://github.com/PierreGode/Ragnar/pull/596) — Move UPS Power card from Config tab to System tab below Power
+*Merged 2026-08-15 · branch `ups-move-to-system` · 1 file(s), +30 / −33*
+
+#### [#595](https://github.com/PierreGode/Ragnar/pull/595) — Add ups lite clone(MJ) 1.2 and other that use diffrient adress
+*Merged 2026-08-15 · branch `main` · 6 file(s), +611 / −0*
+
+- Added UPS lite 1.2 clone
+- Create ups-api.service
+- **Docs:** [UPS_INTEGRATION.md](UPS_INTEGRATION.md)
+
+### 2026-08-14
+
+#### [#593](https://github.com/PierreGode/Ragnar/pull/593) — Observatory: vendor Three.js so it loads under the hardening CSP
+*Merged 2026-08-14 · branch `security/zap-hardening-headers` · 14 file(s), +55617 / −11*
+
+- **Docs:** [SECURITY.md](SECURITY.md)
+
+#### [#592](https://github.com/PierreGode/Ragnar/pull/592) — Mesh/share: confirm dialog dismisses on Confirm, not just Cancel
+*Merged 2026-08-14 · branch `feature/mesh-secret` · 2 file(s), +9 / −3*
+
+#### [#591](https://github.com/PierreGode/Ragnar/pull/591) — Mesh: add opt-in per-mesh secret as a second factor over the tag
+*Merged 2026-08-14 · branch `feature/mesh-secret` · 7 file(s), +455 / −27*
+
+- Mesh secret: default the Join form to Generate a new secret
+- Mesh secret: add a Show mesh secret reveal for when the one-time display was missed
+- Mesh secret: keep the generated key on screen, move armed note to the page bottom
+- Mesh secret: download the generated key once, never show it in the UI
+- Mesh secret: modal + auto-download together, refresh gated on Done
+- Mesh/share: fix Copy on plain-HTTP Ragnars (non-secure context)
+- **Docs:** [mesh.md](mesh.md)
+
+### 2026-08-13
+
+#### [#590](https://github.com/PierreGode/Ragnar/pull/590) — Mesh: share-only guest role (tag:ragnar-share)
+*Merged 2026-08-13 · branch `feature/mesh-share-guest` · 10 file(s), +1573 / −79*
+
+- Mesh Share: token-based remote shares (Ragnar<->Ragnar across tailnets)
+- Mesh Share: one-click 'Join a tailnet (share-only)' from the web UI
+- Mesh Share: share-only Join can switch tailnets (logout-first)
+- docs: add detailed Mesh Share & File Transfer guide (docs/mesh-share.md)
+- Mesh Share: share-only guest reads as 'share-only', not a mistagged mesh node
+- Mesh Share: a share-only guest no longer sees the host mesh
+- …and 9 more commit(s)
+- **Docs:** [README (root)](../README.md), [mesh-share.md](mesh-share.md), [mesh.md](mesh.md)
+
+#### [#589](https://github.com/PierreGode/Ragnar/pull/589) — Inbox Save: make the Vault option reflect the Vault's lock state
+*Merged 2026-08-13 · branch `fix/inbox-vault-option` · 2 file(s), +25 / −3*
+
+- Inbox: stop the 2s poll from wiping the destination dropdown
+
+#### [#588](https://github.com/PierreGode/Ragnar/pull/588) — Fix: confirm dialog invisible when triggered from another tab
+*Merged 2026-08-13 · branch `feature/files-nav-flag` · 2 file(s), +8 / −2*
+
+### 2026-08-12
+
+#### [#587](https://github.com/PierreGode/Ragnar/pull/587) — Flag the Files nav tab when a file is sent to this unit
+*Merged 2026-08-12 · branch `feature/files-nav-flag` · 2 file(s), +70 / −2*
+
+- Files nav flag: also cover shared-to-mesh + the mobile Files entry
+
+#### [#586](https://github.com/PierreGode/Ragnar/pull/586) — Update nettools.md
+*Merged 2026-08-12 · branch `PierreGode-patch-1` · 1 file(s), +2 / −1*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#584](https://github.com/PierreGode/Ragnar/pull/584) — Mesh transfer: stronger validation of transferred files
+*Merged 2026-08-12 · branch `filshare` · 9 file(s), +706 / −17*
+
+- File Management: move files/folders between folders
+- Add Mesh Share — a folder published to the whole mesh
+- Add a Mesh Share shortcut to the Files-tab Directories list
+- **Docs:** [mesh.md](mesh.md), [vault.md](vault.md)
+
+#### [#583](https://github.com/PierreGode/Ragnar/pull/583) — Fix mesh transfer failing with 'Invalid chunk header'
+*Merged 2026-08-12 · branch `fix/mesh-transfer-chunked` · 2 file(s), +40 / −16*
+
+#### [#582](https://github.com/PierreGode/Ragnar/pull/582) — Mesh file transfer: send files between Ragnar units over Tailscale
+*Merged 2026-08-12 · branch `feature/mesh-file-transfer` · 7 file(s), +966 / −4*
+
+- Mesh File Transfer: send a file already on this unit (Ragnar→Ragnar)
+- Mesh transfer: show the failure reason inline + clearer send errors
+- Mesh transfer picker: show the Vault when unlocked
+- Fix: uploaded/deleted/cleared files not showing until manual refresh
+- **Docs:** [mesh.md](mesh.md)
+
+#### [#581](https://github.com/PierreGode/Ragnar/pull/581) — Rename Safe→Vault, add file/folder rename, Back/Up nav, MB/GB size input
+*Merged 2026-08-12 · branch `feature/vault-rename-nav-rename` · 6 file(s), +352 / −129*
+
+- Vault size: bring back the slider, show GB once past 999 MB
+- **Docs:** [README (root)](../README.md), [vault.md](vault.md)
+
+#### [#580](https://github.com/PierreGode/Ragnar/pull/580) — Add encrypted Safe vault to Files tab
+*Merged 2026-08-12 · branch `feature/files-safe-vault` · 8 file(s), +1718 / −93*
+
+- Make File Management tab mobile-friendly
+- Add full-screen viewer for image previews
+- Show unlocked Safe as a folder in Directories + Lock/Unlock button
+- Fix: image full-screen viewer could not be closed on mobile
+- Fix: image preview modal overflowed on phones, hiding the close button
+- Add subfolders + upload-into-folder for Uploads and the Safe
+- …and 5 more commit(s)
+- **Docs:** [README (root)](../README.md)
+
+### 2026-08-11
+
+#### [#579](https://github.com/PierreGode/Ragnar/pull/579) — Fix AI endpoint scan crashing on Pi Zero (interpreter shutdown) (#462)
+*Merged 2026-08-11 · branch `fix/ai-discover-threadpool-pizero` · 1 file(s), +70 / −16*
+
+- Use safe thread pool for mesh update-all fan-out (#462)
+
+#### [#578](https://github.com/PierreGode/Ragnar/pull/578) — Support self-hosted / OpenAI-compatible AI endpoints (#462)
+*Merged 2026-08-11 · branch `feature/selfhosted-ai-462` · 7 file(s), +725 / −26*
+
+- Add Connect + model dropdown for self-hosted AI endpoints (#462)
+- Normalize self-hosted AI base URLs + port hint (#462)
+- Adapt AI label to active model + cloud fallback on endpoint loss (#462)
+- Add Scan Network: auto-discover Ollama on tailnet + local subnet (#462)
+- Fix Scan Network button/badges stripped by Tailwind purge (#462)
+- **Docs:** [README (root)](../README.md), [AI_INTEGRATION.md](AI_INTEGRATION.md)
+
+#### [#577](https://github.com/PierreGode/Ragnar/pull/577) — Add per-host scan ignore-list button on the Network tab (#459)
+*Merged 2026-08-11 · branch `feature/web-ignore-list-459` · 5 file(s), +181 / −13*
+
+- Harden ignore-list client against non-JSON responses (#459)
+- **Docs:** [README (root)](../README.md), [spec.md](spec.md)
+
+#### [#576](https://github.com/PierreGode/Ragnar/pull/576) — Harden web server: security headers, no wildcard CORS, vendor CDN libs
+*Merged 2026-08-11 · branch `security/zap-hardening-headers` · 15 file(s), +861 / −13*
+
+- **Docs:** [SECURITY.md](SECURITY.md)
+
+#### [#575](https://github.com/PierreGode/Ragnar/pull/575) — Update INSTALL.md
+*Merged 2026-08-11 · branch `Solarflere-patch-2` · 1 file(s), +1 / −1*
+
+- **Docs:** [INSTALL.md](INSTALL.md)
+
+#### [#574](https://github.com/PierreGode/Ragnar/pull/574) — Update README.md
+*Merged 2026-08-11 · branch `Solarflere-patch-1` · 1 file(s), +3 / −3*
+
+- **Docs:** [README (root)](../README.md)
+
+### 2026-08-10
+
+#### [#573](https://github.com/PierreGode/Ragnar/pull/573) — UI: collapse main nav to hamburger by window size, wrap items to a second row
+*Merged 2026-08-10 · branch `menu-responsive-wrap` · 2 file(s), +30 / −53*
+
+- Fix: restore closing </script> tag dropped in nav-wrap cache-buster bump
+- UI: move connection status dot under brand name, drop the text label
+- UI: keep wrapping nav out of the brand-name area (logo shrink-0, nav flex-1/min-w-0)
+
+#### [#572](https://github.com/PierreGode/Ragnar/pull/572) — Mesh: expand the Viking name pool with historic names
+*Merged 2026-08-10 · branch `mesh-name-unnumbered-units` · 2 file(s), +106 / −14*
+
+- Mesh: keep auto-derived names on the frozen legacy pool (no renames)
+- **Docs:** [mesh.md](mesh.md)
+
+#### [#571](https://github.com/PierreGode/Ragnar/pull/571) — Mesh: dice-roll a Viking name + gender choice for custom names
+*Merged 2026-08-10 · branch `mesh-name-unnumbered-units` · 3 file(s), +206 / −10*
+
+#### [#570](https://github.com/PierreGode/Ragnar/pull/570) — Mesh: name which reachable units have no unit number
+*Merged 2026-08-10 · branch `mesh-name-unnumbered-units` · 4 file(s), +117 / −5*
+
+- Mesh: let a joined unit set its number/identity after onboarding
+
+### 2026-08-09
+
+#### [#569](https://github.com/PierreGode/Ragnar/pull/569) — Power panel: reconcile under-voltage vs healthy estimated headroom
+*Merged 2026-08-09 · branch `power-warning-dashboard` · 3 file(s), +17 / −2*
+
+- **Docs:** [power.md](power.md)
+
+#### [#568](https://github.com/PierreGode/Ragnar/pull/568) — Mark power_budget.py and mesh_scan.py executable (top-level .py = 755)
+*Merged 2026-08-09 · branch `power-warning-dashboard` · 2 file(s), +0 / −0*
+
+#### [#567](https://github.com/PierreGode/Ragnar/pull/567) — Dashboard power badge: surface real under-voltage on the main dashboard
+*Merged 2026-08-09 · branch `power-warning-dashboard` · 7 file(s), +711 / −8*
+
+- Power badge: add always-on Power card + detail panel to the System tab
+- **Docs:** [README (root)](../README.md), [diagnostics.md](diagnostics.md), [power.md](power.md)
+
+#### [#566](https://github.com/PierreGode/Ragnar/pull/566) — AI insights: never wedge on "Analyzing…" — always resolve to data or retry
+*Merged 2026-08-09 · branch `fix-ai-insights-background-compute` · 4 file(s), +75 / −36*
+
+- AI insights: run analyses sequentially in the background (tiny-board safe)
+
+#### [#565](https://github.com/PierreGode/Ragnar/pull/565) — Dashboard AI insights: compute in background so slow boards never block
+*Merged 2026-08-09 · branch `fix-ai-insights-background-compute` · 4 file(s), +148 / −66*
+
+- **Docs:** [AI_INTEGRATION.md](AI_INTEGRATION.md)
+
+#### [#564](https://github.com/PierreGode/Ragnar/pull/564) — Dashboard AI insights: survive shared-key rate limits + per-call timeout
+*Merged 2026-08-09 · branch `fix-ai-insights-shared-key-resilience` · 4 file(s), +68 / −19*
+
+- **Docs:** [AI_INTEGRATION.md](AI_INTEGRATION.md)
+
+#### [#563](https://github.com/PierreGode/Ragnar/pull/563) — Dashboard AI insights: parallelize calls + stop silent hang
+*Merged 2026-08-09 · branch `fix-dashboard-ai-insights-latency` · 4 file(s), +62 / −21*
+
+- **Docs:** [AI_INTEGRATION.md](AI_INTEGRATION.md)
+
+#### [#562](https://github.com/PierreGode/Ragnar/pull/562) — WiFi Analyzer: fix Report button ignoring Bluetooth/Zigbee + AI
+*Merged 2026-08-09 · branch `fix-wifi-report-bt-ai-shadow` · 2 file(s), +88 / −12*
+
+- Bump ragnar_modern.js cache-bust for WiFi report BT/AI fix
+
+#### [#561](https://github.com/PierreGode/Ragnar/pull/561) — Adv Scan: ZAP auto-resolves a live web port for bare-host targets
+*Merged 2026-08-09 · branch `zap-target-port-autoresolve` · 3 file(s), +188 / −1*
+
+- **Docs:** [README (root)](../README.md)
+
+#### [#560](https://github.com/PierreGode/Ragnar/pull/560) — WiFi Analyzer: fold BT/Zigbee 2.4 GHz overlays into AI + spectrum report
+*Merged 2026-08-09 · branch `ai-bt-zigbee-coexistence` · 9 file(s), +590 / −27*
+
+- WiFi Defense: unified AI read across all 3 modules + report inclusion
+- **Docs:** [AI_INTEGRATION.md](AI_INTEGRATION.md), [wifi-analyzer.md](wifi-analyzer.md), [wifi-defense.md](wifi-defense.md)
+
+#### [#559](https://github.com/PierreGode/Ragnar/pull/559) — Adv Scan: explain the default port in connect-failure error
+*Merged 2026-08-09 · branch `zap-delegate-tunnel` · 8 file(s), +220 / −10*
+
+- Recon: add web-port discovery + operator-selectable ports for ZAP handoff
+- **Docs:** [README (root)](../README.md), [superpowers/specs/2026-05-27-web-recon-subsystem-design.md](superpowers/specs/2026-05-27-web-recon-subsystem-design.md)
+
+#### [#558](https://github.com/PierreGode/Ragnar/pull/558) — Adv Scan: show scan egress (tunnel vs LAN) — confirms ZAP tunnels too
+*Merged 2026-08-09 · branch `zap-delegate-tunnel` · 2 file(s), +47 / −12*
+
+- Adv Scan: clear error for invalid dotted-quad targets (712.20.10.1)
+- Adv Scan: accept uppercase URL schemes (HTTP:// / Http://)
+- Adv Scan: auto-add http scheme for bare IPs; drop ZAP's default :80 from host
+
+#### [#557](https://github.com/PierreGode/Ragnar/pull/557) — Adv Scan: show scan egress (tunnel vs LAN) — confirms ZAP tunnels too
+*Merged 2026-08-09 · branch `zap-delegate-tunnel` · 4 file(s), +57 / −5*
+
+### 2026-08-05
+
+#### [#555](https://github.com/PierreGode/Ragnar/pull/555) — config: export/import settings for fleet deployment
+*Merged 2026-08-05 · branch `config-export-import` · 5 file(s), +294 / −6*
+
+- config: fix export download on iOS Safari
+- **Docs:** [README (root)](../README.md), [mesh.md](mesh.md)
+
+#### [#554](https://github.com/PierreGode/Ragnar/pull/554) — mesh: add Update mesh card to fan the git update across the fleet
+*Merged 2026-08-05 · branch `mesh-fleet-update` · 4 file(s), +359 / −4*
+
+- mesh: show available-unit and pending-update counts on Update mesh card
+- **Docs:** [mesh.md](mesh.md)
+
+#### [#553](https://github.com/PierreGode/Ragnar/pull/553) — install: add Firefox as a required package (ZAP AJAX spider)
+*Merged 2026-08-05 · branch `install-require-firefox` · 2 file(s), +21 / −0*
+
+#### [#552](https://github.com/PierreGode/Ragnar/pull/552) — advtools: install nikto via git fallback when apt lacks it (Debian non-free)
+*Merged 2026-08-05 · branch `advtools-nikto-debian-fallback` · 3 file(s), +145 / −2*
+
+- **Docs:** [INSTALL.md](INSTALL.md)
+
+### 2026-08-04
+
+#### [#550](https://github.com/PierreGode/Ragnar/pull/550) — Mesh: enable IP forwarding when advertising subnet routes
+*Merged 2026-08-04 · branch `advscan-unhide-zap-gate` · 3 file(s), +73 / −3*
+
+#### [#549](https://github.com/PierreGode/Ragnar/pull/549) — RuSense flasher: fix u.FL antenna checkbox overflow on mobile
+*Merged 2026-08-04 · branch `advscan-unhide-zap-gate` · 1 file(s), +10 / −3*
+
+#### [#548](https://github.com/PierreGode/Ragnar/pull/548) — Displays: show the mesh Viking name in the header (abbreviated + fit)
+*Merged 2026-08-04 · branch `advscan-unhide-zap-gate` · 5 file(s), +106 / −14*
+
+- espnow bridge: select XIAO ESP32-C6 external u.FL antenna
+- RuSense flasher: external u.FL antenna checkbox (XIAO ESP32-C6)
+- RuSense flasher: add legal/ethical monitoring notice
+
+#### [#547](https://github.com/PierreGode/Ragnar/pull/547) — Adv Scan: show tab on any board, gate only OWASP ZAP on 8GB RAM
+*Merged 2026-08-04 · branch `advscan-unhide-zap-gate` · 21 file(s), +1962 / −143*
+
+- Adv Scan: fix whole-form grey-out, add on-demand nuclei install
+- Adv Scan: make the nuclei Install a real, always-visible button
+- Adv Scan: show nuclei template download progress after install
+- Recon engine: run on any board, drop the server-mode gate
+- Adv Scan: relabel recon handoff "to scan" (not ZAP-specific)
+- Nuclei: auto-download templates when installed but missing
+- …and 18 more commit(s)
+- **Docs:** [README (root)](../README.md), [PWNAGOTCHI.md](PWNAGOTCHI.md), [grade.md](grade.md)
+
+### 2026-08-03
+
+#### [#546](https://github.com/PierreGode/Ragnar/pull/546) — homeassistant: organise device card via entity categories
+*Merged 2026-08-03 · branch `ha-card-organization` · 2 file(s), +51 / −4*
+
+- homeassistant: revert diagnostic entity categories so all entities stay visible
+- **Docs:** [homeassistant.md](homeassistant.md)
+
+#### [#545](https://github.com/PierreGode/Ragnar/pull/545) — homeassistant: add connectivity + mesh-fleet-health entities
+*Merged 2026-08-03 · branch `ha-phase2-defense-connectivity` · 9 file(s), +179 / −7*
+
+- **Docs:** [README (root)](../README.md), [homeassistant.md](homeassistant.md)
+
+#### [#544](https://github.com/PierreGode/Ragnar/pull/544) — homeassistant: add HACS custom integration for RuSense + security alerts
+*Merged 2026-08-03 · branch `homeassistant-integration` · 17 file(s), +1097 / −0*
+
+- homeassistant: import DeviceInfo from device_registry (fixes setup crash)
+- docs: add Home Assistant integration guide (docs/homeassistant.md)
+- **Docs:** [README (root)](../README.md), [homeassistant.md](homeassistant.md)
+
+#### [#543](https://github.com/PierreGode/Ragnar/pull/543) — pwnagotchi: install undeclared prctl dep so the service stops exit-code looping
+*Merged 2026-08-03 · branch `pwn-reinstall-service-fix` · 3 file(s), +31 / −11*
+
+- **Docs:** [PWNAGOTCHI.md](PWNAGOTCHI.md)
+
+#### [#542](https://github.com/PierreGode/Ragnar/pull/542) — pwnagotchi: verify runtime before claiming reinstall success
+*Merged 2026-08-03 · branch `pwn-reinstall-service-fix` · 3 file(s), +120 / −2*
+
+- **Docs:** [PWNAGOTCHI.md](PWNAGOTCHI.md)
+
+### 2026-08-02
+
+#### [#541](https://github.com/PierreGode/Ragnar/pull/541) — PCAP monitor capture: channel-hop by default for a real survey
+*Merged 2026-08-02 · branch `pcap-monitor-channel-hop` · 4 file(s), +53 / −13*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#540](https://github.com/PierreGode/Ragnar/pull/540) — PCAP capture: show 'Analyzing…' after the window + grey out monitor when unsupported
+*Merged 2026-08-02 · branch `pcap-capture-ui-polish` · 2 file(s), +40 / −1*
+
+#### [#539](https://github.com/PierreGode/Ragnar/pull/539) — PCAP capture: add Wi-Fi monitor-mode (802.11) capture
+*Merged 2026-08-02 · branch `pcap-monitor-mode` · 4 file(s), +100 / −22*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#538](https://github.com/PierreGode/Ragnar/pull/538) — PCAP capture: explain 0-packet Wi-Fi captures accurately
+*Merged 2026-08-02 · branch `pcap-zero-packet-wifi-note` · 1 file(s), +40 / −3*
+
+#### [#537](https://github.com/PierreGode/Ragnar/pull/537) — PCAP: fix 500 on capture — expert loop clobbered the summary dict
+*Merged 2026-08-02 · branch `pcap-summary-clobber-fix` · 1 file(s), +3 / −3*
+
+#### [#536](https://github.com/PierreGode/Ragnar/pull/536) — PCAP AI: calibrate severity to volume; drop normal TCP teardown noise
+*Merged 2026-08-02 · branch `pcap-ai-calibration` · 2 file(s), +35 / −13*
+
+#### [#535](https://github.com/PierreGode/Ragnar/pull/535) — PCAP capture: robust Auto interface (LAN > USB LAN > wlan1 > wlan0)
+*Merged 2026-08-02 · branch `pcap-auto-iface-fallback` · 2 file(s), +60 / −8*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#534](https://github.com/PierreGode/Ragnar/pull/534) — PCAP Analyzer: capture interface picker now matches the L2/L3 selectors
+*Merged 2026-08-02 · branch `pcap-iface-static` · 4 file(s), +40 / −18*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#533](https://github.com/PierreGode/Ragnar/pull/533) — PCAP AI: instruct model to use only valid Wireshark filter syntax
+*Merged 2026-08-02 · branch `pcap-ai-valid-filters` · 1 file(s), +5 / −1*
+
+#### [#532](https://github.com/PierreGode/Ragnar/pull/532) — PCAP Analyzer: match capture interface selector to ARP scan styling
+*Merged 2026-08-02 · branch `pcap-iface-selector` · 2 file(s), +3 / −3*
+
+#### [#531](https://github.com/PierreGode/Ragnar/pull/531) — PCAP Analyzer: include AI analysis in the PDF report
+*Merged 2026-08-02 · branch `pcap-pdf-ai-summary` · 3 file(s), +36 / −4*
+
+- PCAP Analyzer: rename PDF 'AI analysis' section to 'Analysis'
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#530](https://github.com/PierreGode/Ragnar/pull/530) — PCAP Analyzer: add Export as PDF report
+*Merged 2026-08-02 · branch `pcap-export-pdf` · 3 file(s), +100 / −3*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#529](https://github.com/PierreGode/Ragnar/pull/529) — PCAP Analyzer: move card up to sit below ARP Scan
+*Merged 2026-08-02 · branch `pcap-reorder-below-arp` · 1 file(s), +16 / −16*
+
+#### [#528](https://github.com/PierreGode/Ragnar/pull/528) — PCAP Analyzer: browse stored captures + capture live traffic
+*Merged 2026-08-02 · branch `pcap-capture-and-browse` · 5 file(s), +394 / −46*
+
+- PCAP Analyzer: make the stored-pcap list mobile-friendly
+- PCAP Analyzer: make Protocol hierarchy mobile-friendly
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#527](https://github.com/PierreGode/Ragnar/pull/527) — pcap ai: generalize root-cause analysis beyond Wi-Fi client-drops
+*Merged 2026-08-02 · branch `pcap-ai-analysis` · 2 file(s), +47 / −19*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#526](https://github.com/PierreGode/Ragnar/pull/526) — sdr: fix Waterfall not activating — probe HackRF once, handle probe timeout
+*Merged 2026-08-02 · branch `sdr-hackrf-not-activating` · 1 file(s), +20 / −5*
+
+### 2026-08-01
+
+#### [#525](https://github.com/PierreGode/Ragnar/pull/525) — lcd144: netsignal card — strongest SSID on top, shorter signal bar
+*Merged 2026-08-01 · branch `lcd144-netsignal-tweaks` · 1 file(s), +9 / −1*
+
+#### [#524](https://github.com/PierreGode/Ragnar/pull/524) — rusense: fix #503 node time-sync — report Pi arrival-time alignment
+*Merged 2026-08-01 · branch `fix-503-node-sync` · 6 file(s), +75 / −11*
+
+- **Docs:** [rusense.md](rusense.md)
+
+### 2026-07-31
+
+#### [#523](https://github.com/PierreGode/Ragnar/pull/523) — wardriving: add printable Wi-Fi survey report export (HTML→PDF)
+*Merged 2026-07-31 · branch `feature-report-export` · 10 file(s), +867 / −6*
+
+- reports: add printable WIDS + spectrum reports; share one report engine
+- **Docs:** [README (root)](../README.md), [wardriving.md](wardriving.md), [wifi-analyzer.md](wifi-analyzer.md), [wifi-defense.md](wifi-defense.md)
+
+#### [#522](https://github.com/PierreGode/Ragnar/pull/522) — wardriving: switch display to wardriving mode on manual start (starting state)
+*Merged 2026-07-31 · branch `fix-wardriving-display-mode` · 3 file(s), +67 / −8*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#521](https://github.com/PierreGode/Ragnar/pull/521) — pwnagotchi: harden clean reinstall (keep config, ignore-installed pydrive2)
+*Merged 2026-07-31 · branch `pwn-install-healthcheck` · 4 file(s), +32 / −13*
+
+- **Docs:** [PWNAGOTCHI.md](PWNAGOTCHI.md)
+
+#### [#520](https://github.com/PierreGode/Ragnar/pull/520) — pwnagotchi: self-heal a status stuck at 'installing' when the install is healthy
+*Merged 2026-07-31 · branch `pwn-install-healthcheck` · 5 file(s), +118 / −13*
+
+- pwnagotchi: add always-available Reinstall (clean) button
+- **Docs:** [PWNAGOTCHI.md](PWNAGOTCHI.md)
+
+#### [#519](https://github.com/PierreGode/Ragnar/pull/519) — pwnagotchi: require stable portal readiness before offering the swap link
+*Merged 2026-07-31 · branch `pwn-install-healthcheck` · 5 file(s), +249 / −22*
+
+- pwnagotchi: add ragnar_return web plugin to redirect the browser back to :8000
+- **Docs:** [PWNAGOTCHI.md](PWNAGOTCHI.md)
+
+#### [#518](https://github.com/PierreGode/Ragnar/pull/518) — pwnagotchi: validate install components + Repair button; disable pwn self-updater
+*Merged 2026-07-31 · branch `pwn-install-healthcheck` · 5 file(s), +260 / −6*
+
+- **Docs:** [PWNAGOTCHI.md](PWNAGOTCHI.md)
+
+### 2026-07-30
+
+#### [#517](https://github.com/PierreGode/Ragnar/pull/517) — wifi-defense: harden legacy PHY/airtime accuracy + add WPS posture detection
+*Merged 2026-07-30 · branch `investigate/legacy-wps-watch` · 29 file(s), +3791 / −99*
+
+- legacywatch: standalone passive 802.11 legacy/cipher/airtime detector
+- wpswatch: standalone passive WPS/WSC posture + EAP-WSC attack detector
+- legacywatch/wpswatch: Watchtower wiring, systemd units, conformance + hwsim lab
+- wifi-defense: make Airtime & link-quality tables mobile-friendly
+- wifi-defense: per-panel wlan* interface selector for Airtime + Isolation
+- wifi-defense: fix per-panel iface dropdown hiding USB/PCI wireless adapters
+- …and 2 more commit(s)
+- **Docs:** [README (root)](../README.md), [AI_INTEGRATION.md](AI_INTEGRATION.md), [RELEASE_NOTES.md](RELEASE_NOTES.md), [legacywatch.md](legacywatch.md), [spec.md](spec.md), [wifi-defense.md](wifi-defense.md), [wpswatch.md](wpswatch.md)
+
+#### [#516](https://github.com/PierreGode/Ragnar/pull/516) — wifi-defense: pinpoint 2.4 GHz airtime starvation (legacy 802.11b client tax)
+*Merged 2026-07-30 · branch `investigate/airtime-starvation-detection` · 5 file(s), +570 / −16*
+
+- wifi-defense: add per-AP encryption + 802.11 generation to airtime panel
+- wifi-defense: name the legacy client — fuse radio PHY with host inventory
+- wifi-defense: add SSID column + SSID filter to per-client airtime table
+- wifi-defense: bump backend _BUILD to match UI (20260729-airtime-ssid-filter)
+- **Docs:** [wifi-defense.md](wifi-defense.md)
+
+### 2026-07-29
+
+#### [#515](https://github.com/PierreGode/Ragnar/pull/515) — display: add 3.5" SPI TFT (ILI9486/ILI9488) driver support
+*Merged 2026-07-29 · branch `investigate/display-tft-epaper` · 7 file(s), +442 / −30*
+
+- **Docs:** [README (root)](../README.md), [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md)
+
+#### [#514](https://github.com/PierreGode/Ragnar/pull/514) — Remove Ragnar mobile app section from README
+*Merged 2026-07-29 · branch `PierreGode-patch-6` · 1 file(s), +0 / −7*
+
+- **Docs:** [README (root)](../README.md)
+
+#### [#513](https://github.com/PierreGode/Ragnar/pull/513) — Update image in nettools documentation
+*Merged 2026-07-29 · branch `PierreGode-matrix` · 1 file(s), +2 / −1*
+
+- **Docs:** [nettools.md](nettools.md)
+
+### 2026-07-28
+
+#### [#512](https://github.com/PierreGode/Ragnar/pull/512) — web: hide the Bluetooth Provisioning settings section
+*Merged 2026-07-28 · branch `chore/hide-ble-provisioning` · 1 file(s), +6 / −2*
+
+#### [#511](https://github.com/PierreGode/Ragnar/pull/511) — docs: mobile app connects over the mesh, not Bluetooth
+*Merged 2026-07-28 · branch `feat/ragnarmobile-tailscale` · 3 file(s), +53 / −10*
+
+- docs: mobile app discovers the mesh via /api/mesh/status, no token
+- **Docs:** [README (root)](../README.md), [bluetooth.md](bluetooth.md), [mesh.md](mesh.md)
+
+### 2026-07-27
+
+#### [#510](https://github.com/PierreGode/Ragnar/pull/510) — Fix Discord badge link in README
+*Merged 2026-07-27 · branch `PierreGode-patch-5` · 1 file(s), +1 / −1*
+
+- **Docs:** [README (root)](../README.md)
+
+#### [#509](https://github.com/PierreGode/Ragnar/pull/509) — Discord
+*Merged 2026-07-27 · branch `PierreGode-patch-4` · 1 file(s), +1 / −0*
+
+- Update README.md
+- **Docs:** [README (root)](../README.md)
+
+#### [#508](https://github.com/PierreGode/Ragnar/pull/508) — Add Ragnar Mesh: a controller-free unit mesh over Tailscale
+*Merged 2026-07-27 · branch `feat/tailscale-fleet` · 14 file(s), +6025 / −13*
+
+- Fix mesh serve hanging when tailnet HTTPS certs are disabled
+- Make HTTP the default mesh publish path, HTTPS opt-in
+- Add a self-service "Install Tailscale" button to the Mesh tab
+- Diagnose "on the tailnet but not in the mesh" in the Mesh tab
+- Fix false "Ragnar not answering"; one-click enable data sharing
+- Add a Diagnose probe that names why a mesh peer is degraded
+- …and 26 more commit(s)
+- **Docs:** [README (root)](../README.md), [mesh.md](mesh.md)
+
+### 2026-07-26
+
+#### [#507](https://github.com/PierreGode/Ragnar/pull/507) — Only record a listening port a host actually served from
+*Merged 2026-07-26 · branch `fix-passive-listening-ports` · 5 file(s), +459 / −29*
+
+- **Docs:** [traffic-analysis.md](traffic-analysis.md)
+
+#### [#506](https://github.com/PierreGode/Ragnar/pull/506) — Make Traffic Analysis available on every board, not just servers
+*Merged 2026-07-26 · branch `traffic-analysis-everywhere` · 11 file(s), +641 / −60*
+
+- **Docs:** [README (root)](../README.md), [grade.md](grade.md), [traffic-analysis.md](traffic-analysis.md)
+
+#### [#505](https://github.com/PierreGode/Ragnar/pull/505) — Make the on-screen kiosk a Ragnar Pi server feature
+*Merged 2026-07-26 · branch `kiosk-server-only` · 9 file(s), +358 / −24*
+
+- **Docs:** [README (root)](../README.md), [kiosk.md](kiosk.md)
+
+#### [#504](https://github.com/PierreGode/Ragnar/pull/504) — ip_intel: attribute a hostile IP — country, ASN, network owner, abuse contact
+*Merged 2026-07-26 · branch `isp` · 8 file(s), +844 / −1*
+
+- fix(ui): restore Whois to its grid position
+- Update ip_intel.py
+- Add 'allocated' field and update confidence scoring
+- Fix allocation assignment in ip_intel.py
+- Update ragnar_modern.js
+- Update index_modern.html
+- …and 5 more commit(s)
+- **Docs:** [ip-intel.md](ip-intel.md), [nettools.md](nettools.md)
+
+#### [#501](https://github.com/PierreGode/Ragnar/pull/501) — Kiosk: find the Xorg log, and tell a live kiosk from a dead one
+*Merged 2026-07-26 · branch `fix/kiosk-mode` · 3 file(s), +72 / −14*
+
+- **Docs:** [kiosk.md](kiosk.md)
+
+#### [#500](https://github.com/PierreGode/Ragnar/pull/500) — Give the kiosk somewhere real to look when it shows nothing
+*Merged 2026-07-26 · branch `fix/kiosk-mode` · 7 file(s), +467 / −93*
+
+- Make the kiosk toggle do what running the installer by hand does
+- Kiosk service mode: stop passing Xorg a flag it refuses
+- **Docs:** [kiosk.md](kiosk.md)
+
+#### [#499](https://github.com/PierreGode/Ragnar/pull/499) — Stop the update card sticking on "Finishing update: network tools..."
+*Merged 2026-07-26 · branch `fix/update-robustness` · 4 file(s), +106 / −7*
+
+- **Docs:** [updates.md](updates.md)
+
+#### [#498](https://github.com/PierreGode/Ragnar/pull/498) — Stop fresh installs from reporting "Needs attention"
+*Merged 2026-07-26 · branch `fix/update-robustness` · 6 file(s), +204 / −27*
+
+- **Docs:** [INSTALL.md](INSTALL.md), [updates.md](updates.md)
+
+#### [#497](https://github.com/PierreGode/Ragnar/pull/497) — Update year in license statement to 2025
+*Merged 2026-07-26 · branch `PierreGode-patch-3` · 1 file(s), +1 / −1*
+
+- **Docs:** [INSTALL.md](INSTALL.md)
+
+#### [#496](https://github.com/PierreGode/Ragnar/pull/496) — Fix license year in README.md
+*Merged 2026-07-26 · branch `PierreGode-patch-2` · 1 file(s), +1 / −1*
+
+- **Docs:** [README (root)](../README.md)
+
+#### [#495](https://github.com/PierreGode/Ragnar/pull/495) — Make the in-app update rock solid instead of "error"
+*Merged 2026-07-26 · branch `fix/update-robustness` · 10 file(s), +2283 / −889*
+
+- Remove empty line in README.md
+- **Docs:** [README (root)](../README.md), [INSTALL.md](INSTALL.md), [updates.md](updates.md)
+
+### 2026-07-25
+
+#### [#494](https://github.com/PierreGode/Ragnar/pull/494) — WiFi analyzer: make the spectrum readable at full size
+*Merged 2026-07-25 · branch `fullspectrum` · 4 file(s), +961 / −85*
+
+- **Docs:** [README (root)](../README.md), [wifi-analyzer.md](wifi-analyzer.md)
+
+#### [#493](https://github.com/PierreGode/Ragnar/pull/493) — BT overlay: scan the controller we chose, not a cold-start stand-in
+*Merged 2026-07-25 · branch `fix/ble-adv-register-failed` · 3 file(s), +90 / −5*
+
+- **Docs:** [wifi-analyzer.md](wifi-analyzer.md)
+
+#### [#492](https://github.com/PierreGode/Ragnar/pull/492) — BLE provisioning: confirm Invalid Parameters is the controller, not us
+*Merged 2026-07-25 · branch `fix/ble-adv-register-failed` · 3 file(s), +116 / −4*
+
+- **Docs:** [bluetooth.md](bluetooth.md)
+
+#### [#491](https://github.com/PierreGode/Ragnar/pull/491) — BLE provisioning: name the real reason a controller refuses to advertise
+*Merged 2026-07-25 · branch `fix/ble-adv-register-failed` · 3 file(s), +528 / −31*
+
+- BLE provisioning: detect the raw-HCI scan BlueZ can't see
+- **Docs:** [bluetooth.md](bluetooth.md)
+
+#### [#490](https://github.com/PierreGode/Ragnar/pull/490) — BLE provisioning: survive a controller that refuses the advertisement
+*Merged 2026-07-25 · branch `fix/ble-adv-register-failed` · 5 file(s), +452 / −23*
+
+- **Docs:** [bluetooth.md](bluetooth.md)
+
+#### [#489](https://github.com/PierreGode/Ragnar/pull/489) — Serve the dashboard, not the captive portal, on a 192.168.4.0/24 LAN
+*Merged 2026-07-25 · branch `fix/wifi-portal-blocks-dashboard` · 5 file(s), +501 / −33*
+
+- AP fallback: honour diagnostic mode, and fix the reconnect cadence
+- AP recovery: gate on connected clients, not on a 3-minute clock
+- Keep the setup AP up instead of flapping it every 3 minutes
+- Split AP and client across radios when a Wi-Fi dongle is present
+- Document AP mode in docs/RagnarAP.md
+- **Docs:** [README (root)](../README.md), [INSTALL.md](INSTALL.md), [RagnarAP.md](RagnarAP.md)
+
+#### [#488](https://github.com/PierreGode/Ragnar/pull/488) — Kiosk: add a doctor, and stop crash-looping against a running X server
+*Merged 2026-07-25 · branch `fix/kiosk-doctor` · 4 file(s), +276 / −1*
+
+- **Docs:** [kiosk.md](kiosk.md)
+
+#### [#487](https://github.com/PierreGode/Ragnar/pull/487) — BLE provisioning: fix the leak behind RegisterApplication AlreadyExists
+*Merged 2026-07-25 · branch `fix/ble-already-exists` · 3 file(s), +92 / −4*
+
+- **Docs:** [bluetooth.md](bluetooth.md)
+
+#### [#486](https://github.com/PierreGode/Ragnar/pull/486) — Kiosk: stop calling a slow install a failure, and report the real error
+*Merged 2026-07-25 · branch `fix/kiosk-install-progress` · 4 file(s), +106 / −3*
+
+- **Docs:** [kiosk.md](kiosk.md)
+
+#### [#485](https://github.com/PierreGode/Ragnar/pull/485) — Install display support for every screen, not just the one selected
+*Merged 2026-07-25 · branch `fix/installer-repairs-tarball-install` · 8 file(s), +399 / −90*
+
+- Offer every supported screen in the installer menus
+- Fix the two package failures a fresh install actually reports
+- Repair an interrupted dpkg state instead of failing on it
+- BLE provisioning: stop reporting a slow start as a permanent 'Enabling...'
+- **Docs:** [INSTALL.md](INSTALL.md), [bluetooth.md](bluetooth.md)
+
+#### [#484](https://github.com/PierreGode/Ragnar/pull/484) — Installer: repair a tarball install instead of skipping it
+*Merged 2026-07-25 · branch `fix/installer-repairs-tarball-install` · 2 file(s), +38 / −3*
+
+- **Docs:** [INSTALL.md](INSTALL.md)
+
+#### [#483](https://github.com/PierreGode/Ragnar/pull/483) — Installer: don't fail a fresh install over optional security tools
+*Merged 2026-07-25 · branch `fix/install-package-resilience` · 4 file(s), +212 / −25*
+
+- Installer: stop a broken git from wrecking the install layout
+- **Docs:** [INSTALL.md](INSTALL.md), [bluetooth.md](bluetooth.md)
+
+### 2026-07-24
+
+#### [#482](https://github.com/PierreGode/Ragnar/pull/482) — BLE provisioning: add a 'doctor' command to diagnose why it won't advertise
+*Merged 2026-07-24 · branch `feat/ble-provisioning-doctor` · 1 file(s), +70 / −0*
+
+#### [#481](https://github.com/PierreGode/Ragnar/pull/481) — BLE provisioning: surface an under-voltage warning
+*Merged 2026-07-24 · branch `feat/license-provenance` · 3 file(s), +29 / −0*
+
+#### [#480](https://github.com/PierreGode/Ragnar/pull/480) — Ble
+*Merged 2026-07-24 · branch `feat/license-provenance` · 1 file(s), +21 / −10*
+
+- BLE provisioning: actionable error when python3-gi is missing
+- BLE provisioning: stop exposing the hostname over Classic Bluetooth
+
+#### [#479](https://github.com/PierreGode/Ragnar/pull/479) — Mob
+*Merged 2026-07-24 · branch `feat/license-provenance` · 3 file(s), +165 / −2*
+
+- License restrictions, embedded authorship, and origin verification
+
+#### [#477](https://github.com/PierreGode/Ragnar/pull/477) — BLE provisioning: web-config toggle + adapter picker, prefer built-in radio
+*Merged 2026-07-24 · branch `feat/ble-provisioning-config` · 5 file(s), +342 / −17*
+
+- BLE provisioning: auto-stop after provisioning to free the adapter
+- **Docs:** [bluetooth.md](bluetooth.md)
+
+#### [#476](https://github.com/PierreGode/Ragnar/pull/476) — README: mention the mobile app and BLE provisioning
+*Merged 2026-07-24 · branch `feat/ble-provisioning` · 1 file(s), +7 / −0*
+
+- **Docs:** [README (root)](../README.md)
+
+#### [#475](https://github.com/PierreGode/Ragnar/pull/475) — Add BLE provisioning peripheral for the mobile app
+*Merged 2026-07-24 · branch `feat/ble-provisioning` · 5 file(s), +912 / −4*
+
+- **Docs:** [bluetooth.md](bluetooth.md)
+
+#### [#473](https://github.com/PierreGode/Ragnar/pull/473) — Net-diag LCD: add BT and ZIGBEE scan cards to the 1.44" HAT
+*Merged 2026-07-24 · branch `netdiag-bt-zigbee-cards` · 5 file(s), +214 / −19*
+
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md), [nettools.md](nettools.md)
+
+### 2026-07-23
+
+#### [#472](https://github.com/PierreGode/Ragnar/pull/472) — Wardriving LCD: add GPS SKY VIEW as a paged screen on the 1.44" HAT
+*Merged 2026-07-23 · branch `wardrive-lcd-skyview` · 5 file(s), +95 / −12*
+
+- **Docs:** [README (root)](../README.md), [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md)
+
+#### [#471](https://github.com/PierreGode/Ragnar/pull/471) — Wardriving and On-Screen Network Diagnostic mode are mutually exclusive
+*Merged 2026-07-23 · branch `wardrive-netdiag-exclusive` · 4 file(s), +64 / −0*
+
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md), [wardriving.md](wardriving.md)
+
+#### [#470](https://github.com/PierreGode/Ragnar/pull/470) — WiFi Analyzer: auto-refresh also re-runs BT + Zigbee overlays
+*Merged 2026-07-23 · branch `bluespectrum` · 2 file(s), +13 / −3*
+
+#### [#468](https://github.com/PierreGode/Ragnar/pull/468) — WiFi Analyzer: Zigbee/802.15.4 overlay via on-demand HuginnESP sniff
+*Merged 2026-07-23 · branch `bluespectrum` · 7 file(s), +846 / −3*
+
+- **Docs:** [README (root)](../README.md), [wifi-analyzer.md](wifi-analyzer.md)
+
+#### [#467](https://github.com/PierreGode/Ragnar/pull/467) — WiFi Analyzer: Bluetooth/BLE 2.4 GHz interference overlay
+*Merged 2026-07-23 · branch `bluespectrum` · 9 file(s), +1929 / −8*
+
+- WiFi Analyzer: make Bluetooth device rows selectable on the spectrum
+- WiFi Analyzer: true-RF Waterfall view via HackRF SDR
+- WiFi Analyzer: clearer disabled Waterfall button on mobile
+- **Docs:** [README (root)](../README.md), [wifi-analyzer.md](wifi-analyzer.md)
+
+### 2026-07-22
+
+#### [#466](https://github.com/PierreGode/Ragnar/pull/466) — Wardriving: per-Huginn role switch (WiFi+BLE vs Zigbee/Thread-only)
+*Merged 2026-07-22 · branch `wardrive-companion-role-switch` · 5 file(s), +139 / −19*
+
+- Wardriving UI: role-aware companion stats (2.4/5/BLE vs Zigbee)
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#465](https://github.com/PierreGode/Ragnar/pull/465) — Wardriving: classify Thread vs Zigbee (proto) and rename the card
+*Merged 2026-07-22 · branch `wardrive-thread-zigbee-proto` · 5 file(s), +52 / −22*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#464](https://github.com/PierreGode/Ragnar/pull/464) — Wardriving: show companion mode as 'wardrive', not stuck 'ble-all'
+*Merged 2026-07-22 · branch `wardrive-companion-mode-label` · 1 file(s), +13 / −2*
+
+#### [#463](https://github.com/PierreGode/Ragnar/pull/463) — Wardriving: opt-in to include Zigbee in WiGLE CSV export
+*Merged 2026-07-22 · branch `wardrive-web-zigbee-counts` · 5 file(s), +48 / −5*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#461](https://github.com/PierreGode/Ragnar/pull/461) — Wardriving web: surface Zigbee/802.15.4 counts on both pages
+*Merged 2026-07-22 · branch `wardrive-web-zigbee-counts` · 4 file(s), +75 / −3*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#460](https://github.com/PierreGode/Ragnar/pull/460) — Wardriving: count and store Zigbee/802.15.4 devices from Huginn
+*Merged 2026-07-22 · branch `claude/huginn-zigbee-support-y7ntke` · 4 file(s), +230 / −5*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+### 2026-07-21
+
+#### [#458](https://github.com/PierreGode/Ragnar/pull/458) — Diagnostics: explain 'tracking N satellites but no fix'
+*Merged 2026-07-21 · branch `gps-nofix-hint` · 2 file(s), +31 / −0*
+
+- **Docs:** [diagnostics.md](diagnostics.md)
+
+#### [#457](https://github.com/PierreGode/Ragnar/pull/457) — Wardriving: hot-plug WiFi adapters mid-session, no restart needed
+*Merged 2026-07-21 · branch `wardriving-hotplug-iface` · 2 file(s), +83 / −4*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#456](https://github.com/PierreGode/Ragnar/pull/456) — Wardriving phone-AP: run on the built-in radio, not the Alfa
+*Merged 2026-07-21 · branch `wardriving-ap-alfa` · 2 file(s), +57 / −3*
+
+#### [#455](https://github.com/PierreGode/Ragnar/pull/455) — GPS sky view: make the fullscreen view actually live (1 Hz, uncached)
+*Merged 2026-07-21 · branch `gps-sky-view` · 6 file(s), +51 / −11*
+
+- **Docs:** [diagnostics.md](diagnostics.md)
+
+#### [#454](https://github.com/PierreGode/Ragnar/pull/454) — GPS sky view: fullscreen planetarium with real starfield
+*Merged 2026-07-21 · branch `gps-sky-view` · 9 file(s), +566 / −14*
+
+- GPS sky view: persist last-known position, use it before a fix
+- GPS sky view: populate constellations + sky view on the gpsd path
+- GPS: stop DOP-only gpsd SKY reports from zeroing satellite counts
+- **Docs:** [README (root)](../README.md), [diagnostics.md](diagnostics.md)
+
+#### [#453](https://github.com/PierreGode/Ragnar/pull/453) — docs: add Diagnostics panel guide, move cell.md into docs/
+*Merged 2026-07-21 · branch `gps-sky-view` · 4 file(s), +166 / −1*
+
+- **Docs:** [README (root)](../README.md), [cell.md](cell.md), [diagnostics.md](diagnostics.md), [wardriving.md](wardriving.md)
+
+#### [#452](https://github.com/PierreGode/Ragnar/pull/452) — Wardriving GPS sky view: per-satellite azimuth/elevation polar plot
+*Merged 2026-07-21 · branch `gps-sky-view` · 6 file(s), +202 / −11*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#451](https://github.com/PierreGode/Ragnar/pull/451) — Add cell.md: ModemManager-supported cellular modems for wardriving cell capture
+*Merged 2026-07-21 · branch `docs-cell-modems` · 1 file(s), +70 / −0*
+
+### 2026-07-20
+
+#### [#450](https://github.com/PierreGode/Ragnar/pull/450) — rusense flasher CI: pin ESP32 core 3.3.0 + -fpermissive for the coordinator build
+*Merged 2026-07-20 · branch `rusense-flasher-coordinator-egg` · 1 file(s), +18 / −4*
+
+#### [#449](https://github.com/PierreGode/Ragnar/pull/449) — Remove extra newline before License section
+*Merged 2026-07-20 · branch `PierreGode-patch-1` · 1 file(s), +0 / −1*
+
+- **Docs:** [README (root)](../README.md)
+
+#### [#448](https://github.com/PierreGode/Ragnar/pull/448) — rusense flasher: hidden Piglet Coordinator forge behind the Skál rune
+*Merged 2026-07-20 · branch `rusense-flasher-coordinator-egg` · 5 file(s), +245 / −5*
+
+#### [#447](https://github.com/PierreGode/Ragnar/pull/447) — wardriving diagnostics: detect stalled feeds, fix USB attribution and Pi-5-only row
+*Merged 2026-07-20 · branch `wardriving-diag-stale` · 5 file(s), +104 / −24*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#446](https://github.com/PierreGode/Ragnar/pull/446) — wardriving diagnostics: radios + power + richer GPS, and fix a raw timestamp
+*Merged 2026-07-20 · branch `wardriving-diag-power` · 7 file(s), +754 / −12*
+
+- wardriving diagnostics: bump the ragnar_modern.js cache-buster
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#445](https://github.com/PierreGode/Ragnar/pull/445) — wardriving: diagnostics panel on the main dashboard tab too
+*Merged 2026-07-20 · branch `wardriving-web-diagnostics` · 4 file(s), +241 / −3*
+
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md), [wardriving.md](wardriving.md)
+
+#### [#444](https://github.com/PierreGode/Ragnar/pull/444) — wardriving AP: restart-service button + stop hijacking the phone's internet
+*Merged 2026-07-20 · branch `wardriving-ap-network` · 4 file(s), +332 / −23*
+
+- wardriving AP page: collapsible diagnostics panel
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md)
+
+#### [#443](https://github.com/PierreGode/Ragnar/pull/443) — wardriving: LCD HAT wardriving layer — joystick screen carousel + key map
+*Merged 2026-07-20 · branch `wardriving-lcd-pages` · 5 file(s), +443 / −51*
+
+- **Docs:** [README (root)](../README.md), [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md)
+
+#### [#442](https://github.com/PierreGode/Ragnar/pull/442) — wardriving: Exit Wardriving button on the phone AP page
+*Merged 2026-07-20 · branch `wardriving-exit-button` · 3 file(s), +105 / −2*
+
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md)
+
+#### [#441](https://github.com/PierreGode/Ragnar/pull/441) — wifi analyzer: detect Wi-Fi 7 from raw EHT extension IEs (iw scan -u)
+*Merged 2026-07-20 · branch `wifi7-eht-detection` · 3 file(s), +90 / −17*
+
+- **Docs:** [README (root)](../README.md), [wifi-analyzer.md](wifi-analyzer.md)
+
+#### [#440](https://github.com/PierreGode/Ragnar/pull/440) — wardriving: show GPS speed on the 1.44" ST7735S compact page
+*Merged 2026-07-20 · branch `wardriving-st7735s-speed` · 2 file(s), +13 / −3*
+
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md)
+
+#### [#439](https://github.com/PierreGode/Ragnar/pull/439) — wardriving: add mph/kph speed unit switch in Config
+*Merged 2026-07-20 · branch `gps-ubx-recovery-pacing` · 5 file(s), +101 / −6*
+
+- wardriving: promote speed unit to a dedicated card toggle
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#438](https://github.com/PierreGode/Ragnar/pull/438) — gps: make the UBX auto-recovery survive real u-blox 7 clones
+*Merged 2026-07-20 · branch `gps-ubx-recovery-pacing` · 3 file(s), +220 / −6*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+### 2026-07-19
+
+#### [#437](https://github.com/PierreGode/Ragnar/pull/437) — wardriving: auto-fit band counts on ST7735S compact page
+*Merged 2026-07-19 · branch `wardriving-st7735s-autofit` · 2 file(s), +24 / −3*
+
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md)
+
+#### [#436](https://github.com/PierreGode/Ragnar/pull/436) — wardriving: compact header-less layout for 1.44" ST7735S LCD
+*Merged 2026-07-19 · branch `wardriving-st7735s-compact` · 2 file(s), +114 / −0*
+
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md)
+
+#### [#435](https://github.com/PierreGode/Ragnar/pull/435) — nettools: Switch Discovery gets the interface dropdown
+*Merged 2026-07-19 · branch `Wifi` · 4 file(s), +69 / −15*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#434](https://github.com/PierreGode/Ragnar/pull/434) — wardriving: split companion network counts into 2.4 GHz and 5 GHz
+*Merged 2026-07-19 · branch `Wifi` · 5 file(s), +58 / −5*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#433](https://github.com/PierreGode/Ragnar/pull/433) — chmod +x incident_engine.py and watchtower.py (top-level .py must be executable)
+*Merged 2026-07-19 · branch `Wifi` · 21 file(s), +1166 / −58*
+
+- netdiag: egress tests get interface priority (eth > USB eth > wlan1 > wlan0) + joystick IFACE card
+- airsnitch: auto-detect victim/attacker radios from spare adapters
+- wardriving: show 6 GHz count in the web More card
+- wardriving: union nmcli+sysfs for adapter detection so a third radio is seen
+- wardriving: protect the uplink radio from NM claim + warn on under-voltage
+- install/update: enable persistent journald so crashes leave evidence
+- …and 5 more commit(s)
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md), [airsnitch.md](airsnitch.md), [nettools.md](nettools.md), [wardriving.md](wardriving.md)
+
+#### [#432](https://github.com/PierreGode/Ragnar/pull/432) — nettools: Locate Port and L2 Link Health get the interface dropdown
+*Merged 2026-07-19 · branch `Wifi` · 4 file(s), +69 / −20*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#431](https://github.com/PierreGode/Ragnar/pull/431) — nettools: ARP Scan card gets interface dropdown like the other L2/L3 cards
+*Merged 2026-07-19 · branch `Wifi` · 4 file(s), +44 / −19*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#430](https://github.com/PierreGode/Ragnar/pull/430) — wifi-analyzer: filter AP list by Wi-Fi generation (7/6E/6/5/4/legacy)
+*Merged 2026-07-19 · branch `Wifi` · 3 file(s), +22 / −7*
+
+- **Docs:** [wifi-analyzer.md](wifi-analyzer.md)
+
+#### [#429](https://github.com/PierreGode/Ragnar/pull/429) — wifi-analyzer: cover Wi-Fi 7 (802.11be/EHT) labeling and 320 MHz width in selftest
+*Merged 2026-07-19 · branch `Wifi` · 2 file(s), +40 / −6*
+
+- **Docs:** [wifi-analyzer.md](wifi-analyzer.md)
+
+### 2026-07-18
+
+#### [#428](https://github.com/PierreGode/Ragnar/pull/428) — webapp: no-store cache headers for index/HTML/manifest so rebrand isn't pinned by stale browser/PWA cache
+*Merged 2026-07-18 · branch `note` · 1 file(s), +17 / −4*
+
+#### [#427](https://github.com/PierreGode/Ragnar/pull/427) — docs: cross-reference wifiwatch's WPA handshake/PNL layer from WiFi Defense docs and README
+*Merged 2026-07-18 · branch `docs/wifiwatch-crossref` · 2 file(s), +8 / −2*
+
+- **Docs:** [README (root)](../README.md), [wifi-defense.md](wifi-defense.md)
+
+#### [#426](https://github.com/PierreGode/Ragnar/pull/426) — wifi defense: SSID column in airtime table; all three tables pivot to analyzer
+*Merged 2026-07-18 · branch `feat/wids-analyzer-pivot` · 4 file(s), +38 / −20*
+
+- **Docs:** [wifi-defense.md](wifi-defense.md)
+
+#### [#425](https://github.com/PierreGode/Ragnar/pull/425) — wifi defense → analyzer pivot: click a flagged BSSID to highlight it in the spectrum
+*Merged 2026-07-18 · branch `feat/wids-analyzer-pivot` · 5 file(s), +116 / −11*
+
+- **Docs:** [README (root)](../README.md), [wifi-analyzer.md](wifi-analyzer.md), [wifi-defense.md](wifi-defense.md)
+
+### 2026-07-17
+
+#### [#424](https://github.com/PierreGode/Ragnar/pull/424) — incident engine: cross-signal correlation into attack-chain incidents
+*Merged 2026-07-17 · branch `feat/incident-correlation-engine` · 8 file(s), +792 / −1*
+
+- **Docs:** [incident-correlation.md](incident-correlation.md), [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+#### [#423](https://github.com/PierreGode/Ragnar/pull/423) — wifiwatch: WPA handshake/PMKID harvest, WPA3 downgrade, PNL leak
+*Merged 2026-07-17 · branch `feat/wifiwatch-handshake-pnl` · 3 file(s), +432 / −25*
+
+- **Docs:** [wifiwatch.md](wifiwatch.md)
+
+#### [#422](https://github.com/PierreGode/Ragnar/pull/422) — fix(speedtest): pin the device (SO_BINDTODEVICE), not the source address
+*Merged 2026-07-17 · branch `fix/speedtest-multihomed-bind` · 3 file(s), +210 / −51*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#421](https://github.com/PierreGode/Ragnar/pull/421) — fix(speedtest): don't bind egress to an interface with no route to the internet
+*Merged 2026-07-17 · branch `fix/speedtest-egress-route` · 2 file(s), +71 / −10*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#420](https://github.com/PierreGode/Ragnar/pull/420) — watchtower: unified alert pane for the standalone passive watchers
+*Merged 2026-07-17 · branch `feat/watchtower-unified-alerts` · 10 file(s), +1179 / −16*
+
+- watchtower: dashboard card + on by default
+- watchtower: fix Open pane navigation + move card above Last Sync
+- speedtest: interface selector, wired-first by default
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md), [watchtower.md](watchtower.md)
+
+#### [#419](https://github.com/PierreGode/Ragnar/pull/419) — ndpwatch: standalone passive IPv6 Neighbor Discovery attack monitor
+*Merged 2026-07-17 · branch `ndp` · 9 file(s), +1342 / −0*
+
+- ndpwatch validation lab: ndpwatch-lab.sh + ndp_inject.py + conftest_packets.py
+- **Docs:** [ndpwatch.md](ndpwatch.md), [nettools.md](nettools.md)
+
+#### [#418](https://github.com/PierreGode/Ragnar/pull/418) — web update: make one click reliable — serialize git ops, spare live locks, verify on dropped connection
+*Merged 2026-07-17 · branch `web-update-oneclick` · 7 file(s), +237 / −118*
+
+- repo hygiene: stop the tree from going permanently dirty after every update
+
+### 2026-07-16
+
+#### [#416](https://github.com/PierreGode/Ragnar/pull/416) — installer: fix stall after iputils-ping — debconf prompt in iperf3 blocked apt
+*Merged 2026-07-16 · branch `installer-noninteractive-apt` · 1 file(s), +4 / −2*
+
+#### [#415](https://github.com/PierreGode/Ragnar/pull/415) — OSPF Watch: fix LSA seq/age parsing on real tcpdump (MaxSeq/MaxAge/fight-back were dead)
+*Merged 2026-07-16 · branch `ospf-lsa-parse-fix` · 11 file(s), +1013 / −73*
+
+- BGP: per-peer multi-carrier collector — name which ISP a convergence event hit
+- arp_guard: standalone layered live ARP-poisoning detector
+- ARP Poisoning: add interface selection (scope to one segment)
+- **Docs:** [arp_guard.md](arp_guard.md), [nettools.md](nettools.md)
+
+#### [#414](https://github.com/PierreGode/Ragnar/pull/414) — Network Integrity Monitor: persist alert memory so findings don't re-page
+*Merged 2026-07-16 · branch `hardening` · 58 file(s), +7411 / −262*
+
+- EIGRP FRR namespace lab: validate eigrp-watch against real FRR + injected attacks
+- certwatch: passive standalone TLS certificate triage
+- IS-IS Watch: detect LSP purge, overload bit, seq-number attack, mixed-auth
+- isiswatch: standalone passive IS-IS security scanner (binary TLV parser)
+- IGMP Watch: detect spoofed querier, bad TTL, bogus groups, join/leave flap, leave flood
+- igmpwatch: standalone passive IGMP-snooping security monitor (package)
+- …and 7 more commit(s)
+- **Docs:** [README (root)](../README.md), [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md), [certwatch.md](certwatch.md), [eigrp_lab.md](eigrp_lab.md), [igmpwatch.md](igmpwatch.md), [isiswatch.md](isiswatch.md), [nettools.md](nettools.md), [snmpwatch.md](snmpwatch.md) (+2 more)
+
+### 2026-07-15
+
+#### [#411](https://github.com/PierreGode/Ragnar/pull/411) — Provision WiFi: normalize + validate the Server IP field
+*Merged 2026-07-15 · branch `provision-ip-validation` · 2 file(s), +26 / −2*
+
+#### [#410](https://github.com/PierreGode/Ragnar/pull/410) — Skald's Ear: survive device resets — auto-reconnect + boot-loop detection
+*Merged 2026-07-15 · branch `skalds-ear-reconnect` · 2 file(s), +76 / −28*
+
+#### [#409](https://github.com/PierreGode/Ragnar/pull/409) — RuSense flasher: Seeed XIAO ESP32S3 + XIAO ESP32S3 Plus support, S3 board dropdown
+*Merged 2026-07-15 · branch `xiao-flasher` · 11 file(s), +151 / −46*
+
+- **Docs:** [README (root)](../README.md), [rusense.md](rusense.md)
+
+#### [#408](https://github.com/PierreGode/Ragnar/pull/408) — Network Integrity Monitor: capture on a link-up wired port by default
+*Merged 2026-07-15 · branch `eth` · 7 file(s), +203 / −86*
+
+- Network Integrity Monitor: don't repeat Pushover alerts for the same finding
+- Update image in nettools documentation
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md)
+
+#### [#406](https://github.com/PierreGode/Ragnar/pull/406) — Fix manual network scan detection over Ethernet
+*Merged 2026-07-15 · branch `fix/manual-scan-ethernet-detection` · 1 file(s), +12 / −0*
+
+#### [#407](https://github.com/PierreGode/Ragnar/pull/407) — LDAP Watch: passive Active Directory / LDAP security watch
+*Merged 2026-07-15 · branch `ldapwatch` · 9 file(s), +1972 / −54*
+
+- FHRP Watch: add GLBP byte decoder + AVG/AVF two-plane hijack detection
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md)
+
+### 2026-07-14
+
+#### [#405](https://github.com/PierreGode/Ragnar/pull/405) — SMB Watch: add passive Kerberos downgrade/roasting watch (Part 3)
+*Merged 2026-07-14 · branch `smbw` · 5 file(s), +607 / −30*
+
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md)
+
+#### [#404](https://github.com/PierreGode/Ragnar/pull/404) — Added small readme fixes
+*Merged 2026-07-14 · branch `SolarFlere` · 2 file(s), +6 / −4*
+
+- Update README.md
+- Update hardware-gen2.md
+- **Docs:** [README (root)](../README.md), [hardware-gen2.md](hardware-gen2.md)
+
+#### [#402](https://github.com/PierreGode/Ragnar/pull/402) — Create CODEOWNERS
+*Merged 2026-07-14 · branch `SolarFlere` · 1 file(s), +2 / −0*
+
+#### [#401](https://github.com/PierreGode/Ragnar/pull/401) — docs: add Ragnar Gen 2 minimal hardware requirements
+*Merged 2026-07-14 · branch `Heatmap` · 2 file(s), +80 / −0*
+
+- docs: credit Solarflere collaboration on Gen 2 hardware
+- **Docs:** [README (root)](../README.md), [hardware-gen2.md](hardware-gen2.md)
+
+#### [#400](https://github.com/PierreGode/Ragnar/pull/400) — fix(display): LCD spectrum scans the widest-band adapter (Alfa), not just onboard
+*Merged 2026-07-14 · branch `Heatmap` · 4 file(s), +79 / −19*
+
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md), [nettools.md](nettools.md), [wifi-analyzer.md](wifi-analyzer.md)
+
+#### [#399](https://github.com/PierreGode/Ragnar/pull/399) — feat(display): WiFi Spectrum Analyzer SPECTRUM card on the 1.44" LCD HAT
+*Merged 2026-07-14 · branch `Heatmap` · 6 file(s), +155 / −28*
+
+- fix(display): drop the 'NET CARDS' title from the KEY2 card menu
+- Update nettools.md
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md), [nettools.md](nettools.md), [wifi-analyzer.md](wifi-analyzer.md)
+
+#### [#398](https://github.com/PierreGode/Ragnar/pull/398) — feat(locate-port): add traffic-burst method (ACTIVITY LED) alongside link flap
+*Merged 2026-07-14 · branch `Heatmap` · 4 file(s), +129 / −40*
+
+- **Docs:** [nettools.md](nettools.md)
+
+### 2026-07-13
+
+#### [#397](https://github.com/PierreGode/Ragnar/pull/397) — feat(net-identity): per-interface scope for gateway + nameservers + domains
+*Merged 2026-07-13 · branch `Heatmap` · 4 file(s), +153 / −38*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#396](https://github.com/PierreGode/Ragnar/pull/396) — feat(wifi-defense): passive AP/mesh client-isolation observer
+*Merged 2026-07-13 · branch `Heatmap` · 6 file(s), +523 / −12*
+
+- fix(wifi-defense): live countdown + progress bar on all capture buttons
+- **Docs:** [README (root)](../README.md), [wifi-defense.md](wifi-defense.md)
+
+#### [#395](https://github.com/PierreGode/Ragnar/pull/395) — feat(wifi-analyzer): true-to-scale heatmap — square plan, metre rulers, floor size, zoom/pan
+*Merged 2026-07-13 · branch `Heatmap` · 5 file(s), +525 / −141*
+
+- fix
+- paint
+- fixes
+- better
+- ui fix
+- **Docs:** [README (root)](../README.md), [wifi-analyzer.md](wifi-analyzer.md)
+
+#### [#394](https://github.com/PierreGode/Ragnar/pull/394) — fix(wifi-defense): reliable monitor re-enable + stop continuous on disable
+*Merged 2026-07-13 · branch `screen` · 10 file(s), +834 / −21*
+
+- tools(wifi-defense): add wifidef_doctor.sh monitor-mode diagnostic
+- fix(wifi-defense): free the radio (base iface down) so monitor can capture
+- fix(wifi-defense): stop NM/wpa_supplicant resetting the adapter on re-enable
+- fix(wifi-defense): never treat the monitor vif (ragmon0) as a base adapter
+- fix(wifi-defense): stop other features deleting ragmon0; flag stale service
+- feat(wifi-defense): dedicated boot-time monitor mode (switch-mode, regdomain, 6 GHz)
+- …and 1 more commit(s)
+- **Docs:** [wifi-defense.md](wifi-defense.md)
+
+### 2026-07-12
+
+#### [#393](https://github.com/PierreGode/Ragnar/pull/393) — fix(wifi-defense): auto-rebuild ragmon0 when it dies mid-capture (ENODEV)
+*Merged 2026-07-12 · branch `screen` · 2 file(s), +74 / −24*
+
+- **Docs:** [wifi-defense.md](wifi-defense.md)
+
+#### [#392](https://github.com/PierreGode/Ragnar/pull/392) — This pull request introduces major new features and enhancements to the WiFi Analyzer and Defense tools, focusing on active survey capabilities (throughput/latency tests), mesh/ESS coverage mapping, predictive/design coverage planning, and improved diagnostics. It also adds supporting UI controls, API endpoints, and documentation, along with minor dependency updates.
+*Merged 2026-07-12 · branch `screen` · 9 file(s), +1716 / −64*
+
+- feat(wifi-analyzer): active survey — throughput + latency per heatmap point
+- feat(wifi-analyzer): predictive coverage + wall drawing (design mode)
+- feat(wifi-defense): passive airtime / retry / PHY-rate / roaming diagnostics
+- feat(wifi-analyzer): printable survey report (save as PDF)
+- fix(wifi-analyzer): widen the iperf3 server input so the label is not cut off
+- feat(wifi-analyzer): mesh survey — per-node coverage + serving-node / hand-off maps
+- …and 6 more commit(s)
+- **Docs:** [wifi-analyzer.md](wifi-analyzer.md), [wifi-defense.md](wifi-defense.md)
+
+#### [#391](https://github.com/PierreGode/Ragnar/pull/391) — feat(wifi-defense): 802.11 frame monitor / WIDS backend
+*Merged 2026-07-12 · branch `screen` · 12 file(s), +2821 / −114*
+
+- feat(wifi-defense): WiFi Defense top-level tab (WIDS UI)
+- docs(wifi-defense): guide, README bullet, declare scapy dependency
+- feat(wifi-analyzer): enterprise AP enrichment + SNR + measured TX-power radius
+- feat(wifi-analyzer): AP grouping (ESS + physical radios) + width advice
+- feat(wifi-analyzer): enterprise AP table — badges, filter/sort, networks, CSV
+- feat(wifi-analyzer): persistent AP history — new/gone/weakened change alerts + RSSI sparklines
+- …and 13 more commit(s)
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md), [wifi-analyzer.md](wifi-analyzer.md), [wifi-defense.md](wifi-defense.md)
+
+#### [#390](https://github.com/PierreGode/Ragnar/pull/390) — feat(lcd-hat): WiFi + Signal net-diag pages; reverse joystick axes
+*Merged 2026-07-12 · branch `screen` · 6 file(s), +357 / −81*
+
+- Add files via upload
+- feat(lcd-hat): card-based net-diag navigation per joystick diagram
+- docs(lcd-hat): document the card-based net-diag navigation
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md), [nettools.md](nettools.md)
+
+### 2026-07-11
+
+#### [#389](https://github.com/PierreGode/Ragnar/pull/389) — feat(wifi-analyzer): passive tri-band spectrum analyzer backend
+*Merged 2026-07-11 · branch `screen` · 9 file(s), +1655 / −2*
+
+- feat(wifi-analyzer): WiFi Analyzer sub-tab with Bar + Dome spectrum
+- feat(wifi-analyzer): coverage heatmap, docs, and iw dependency
+- fix(wifi-analyzer): show every wireless dongle in the interface list
+- **Docs:** [README (root)](../README.md), [wifi-analyzer.md](wifi-analyzer.md)
+
+#### [#387](https://github.com/PierreGode/Ragnar/pull/387) — Replace image in nettools.md
+*Merged 2026-07-11 · branch `PierreGode-patch-1` · 1 file(s), +2 / −1*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#386](https://github.com/PierreGode/Ragnar/pull/386) — Update nettools.md
+*Merged 2026-07-11 · branch `screen` · 1 file(s), +2 / −1*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#385](https://github.com/PierreGode/Ragnar/pull/385) — This pull request expands the passive network security monitoring and detection capabilities by adding support for three new protocols—NDP (IPv6 Neighbor Discovery Protocol), CDP (Cisco Discovery Protocol), and VTP (VLAN Trunking Protocol)—across the documentation, API, and web UI. These additions close important detection gaps for IPv6 neighbor spoofing and Cisco-specific attacks, and provide new self-tests and mitigation guidance. The summary below highlights the most important changes.
+*Merged 2026-07-11 · branch `screen` · 6 file(s), +2008 / −113*
+
+- feat(ndp-watch): passive IPv6 Neighbor Discovery spoofing detector
+- feat(cdp-watch): passive Cisco Discovery Protocol flood/spoof/leak scanner
+- feat(vtp-watch): passive VTP bomb / rogue-server scanner
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md)
+
+#### [#384](https://github.com/PierreGode/Ragnar/pull/384) — Restore API tools description in nettools.md
+*Merged 2026-07-11 · branch `screen` · 1 file(s), +6 / −8*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#383](https://github.com/PierreGode/Ragnar/pull/383) — refactor: rename active TLS Watch -> Cert Watch, freeing "TLS Watch" for a passive observer
+*Merged 2026-07-11 · branch `screen` · 11 file(s), +1625 / −78*
+
+- feat(tls-watch): M1 passive ClientHello parser + JA3/JA4 client fingerprints
+- feat(tls-watch): M2 ServerHello + JA3S + TLS1.2 cert findings
+- feat(tls-watch): M3 passive QUIC Initial recovery (RFC 9001/9369)
+- feat(tls-watch): M4a/b live capture, verdict, JA4S (license-gated)
+- feat(tls-watch): M4c wire passive TLS Watch into network_diagnostics
+- feat(tls-watch): M4d/e web card, monitor rotation, docs
+- …and 1 more commit(s)
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md)
+
+#### [#382](https://github.com/PierreGode/Ragnar/pull/382) — fix(arp-scan): resolve duplicate arp-results id so scan results render
+*Merged 2026-07-11 · branch `screen` · 3 file(s), +7 / −3*
+
+- Add image and update tool index section in nettools.md
+- **Docs:** [nettools.md](nettools.md)
+
+### 2026-07-10
+
+#### [#381](https://github.com/PierreGode/Ragnar/pull/381) — lcd fix
+*Merged 2026-07-10 · branch `screen` · 1 file(s), +59 / −10*
+
+#### [#380](https://github.com/PierreGode/Ragnar/pull/380) — nettools: add IPv6 First-Hop Watch (rogue RA / DHCPv6 / mitm6 scanner)
+*Merged 2026-07-10 · branch `lcdhat` · 7 file(s), +10155 / −1001*
+
+- nettools: add NTP Watch — passive rogue-NTP / clock-injection scanner
+- nettools: add ICMP Watch — passive ICMP-redirect / L3-injection scanner
+- nettools: add SNMP Watch — passive v1/v2c cleartext-exposure scanner
+- nettools: add TLS Watch — active cert/TLS hygiene checker + passive discovery
+- docs: trim README Network Tools bullet, keep detail in docs/nettools.md
+- ui: move TLS Watch card to the Diagnostics tab (was Switch & L2/L3)
+- …and 12 more commit(s)
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md)
+
+### 2026-07-09
+
+#### [#379](https://github.com/PierreGode/Ragnar/pull/379) — lcdhat: joystick press toggles page autoscroll; KEY3 hold restarts
+*Merged 2026-07-09 · branch `lcdhat` · 3 file(s), +78 / −20*
+
+- **Docs:** [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md), [nettools.md](nettools.md)
+
+#### [#378](https://github.com/PierreGode/Ragnar/pull/378) — docs: consolidate all markdown under docs/ and de-clutter the repo root
+*Merged 2026-07-09 · branch `lcdhat` · 13 file(s), +96 / −2005*
+
+- **Docs:** [README (root)](../README.md), [RELEASE_NOTES.md](RELEASE_NOTES.md), [espreadme.md](espreadme.md), [grade.md](grade.md)
+
+#### [#377](https://github.com/PierreGode/Ragnar/pull/377) — lcdhat: KEY1 toggles On-Screen Network Diagnostic Mode + rename
+*Merged 2026-07-09 · branch `lcdhat` · 6 file(s), +83 / −38*
+
+- **Docs:** [README (root)](../README.md), [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md), [nettools.md](nettools.md)
+
+#### [#376](https://github.com/PierreGode/Ragnar/pull/376) — display: add Waveshare 1.44" ST7735S LCD HAT (128x128) with keys + joystick
+*Merged 2026-07-09 · branch `lcdhat` · 15 file(s), +4719 / −22*
+
+- nettools: add IGMP Watch — passive IGMP-snooping security scanner (Switch & L2)
+- nettools: add OSPF Security Scanner — passive routing-security scanner (Switch & L2)
+- nettools: add BGP Path Watch + rename tab to Switch & L2/L3
+- nettools: one-click Scapy install + Detector Self-Test panel (Switch & L2/L3)
+- nettools: BGP Path Watch ASN enrichment via Team Cymru (soft-fail, per Solarflere)
+- nettools: add receive-only BGP collector + path-asymmetry (OWD) with control-plane↔data-plane correlator
+- …and 7 more commit(s)
+- **Docs:** [README (root)](../README.md), [DISPLAY_CONTROLS.md](DISPLAY_CONTROLS.md), [INSTALL.md](INSTALL.md), [nettools.md](nettools.md)
+
+### 2026-07-08
+
+#### [#374](https://github.com/PierreGode/Ragnar/pull/374) — Dhcp doctor
+*Merged 2026-07-08 · branch `DHCPDoctor` · 15 file(s), +1511 / −57*
+
+- Diagnostics: add DHCP Guardian (rogue-DHCP + starvation, DHCP snooping)
+- install/update: enable the Pi hardware watchdog (auto-reboot on hard hang)
+- Fix: Network Integrity "Check now" hung on the slow DHCP scan
+- Move DHCP Guardian card from Diagnostics to Switch & L2
+- Switch & L2: add inline-bridge DHCP Snooping (2-NIC, trusted/untrusted)
+- UI: unify toggle switches to match the Wardriving switch style
+- …and 4 more commit(s)
+- **Docs:** [README (root)](../README.md), [kiosk.md](kiosk.md), [nettools.md](nettools.md)
+
+#### [#373](https://github.com/PierreGode/Ragnar/pull/373) — docs(readme): list the newer Network Tools in the feature summary
+*Merged 2026-07-08 · branch `MACwatch` · 1 file(s), +1 / −1*
+
+- **Docs:** [README (root)](../README.md)
+
+#### [#372](https://github.com/PierreGode/Ragnar/pull/372) — Ma cwatch
+*Merged 2026-07-08 · branch `MACwatch` · 1 file(s), +56 / −2*
+
+- docs(nettools): document MAC Watch (spoof + randomization + tracking)
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#371](https://github.com/PierreGode/Ragnar/pull/371) — Diagnostics: add CSV export to MAC Watch
+*Merged 2026-07-08 · branch `MACwatch` · 2 file(s), +19 / −2*
+
+#### [#370](https://github.com/PierreGode/Ragnar/pull/370) — Ma cwatch
+*Merged 2026-07-08 · branch `MACwatch` · 4 file(s), +620 / −1*
+
+- Diagnostics: add MAC Watch card — detection-only spoof + randomization + tracking
+- Diagnostics: add interface selector to MAC Watch (scan WiFi or LAN)
+- Diagnostics: list every MAC observed in MAC Watch results
+
+### 2026-07-07
+
+#### [#369](https://github.com/PierreGode/Ragnar/pull/369) — docs(nettools): document DNS poisoning + ARP poisoning + integrity monitor, e-Paper key pad, VPN egress check
+*Merged 2026-07-07 · branch `Keys` · 1 file(s), +142 / −12*
+
+- **Docs:** [nettools.md](nettools.md)
+
+#### [#368](https://github.com/PierreGode/Ragnar/pull/368) — Net integrity monitor: ARP-spoof detection + passive DNS/ARP watch with alerts
+*Merged 2026-07-07 · branch `Keys` · 6 file(s), +483 / −1*
+
+- DNS Doctor: explicit note that it checks for DNS poisoning/hijacking
+- Diagnostics: give ARP poisoning its own card (on-demand check)
+
+#### [#367](https://github.com/PierreGode/Ragnar/pull/367) — Net diag: 2.7" HAT key pad for diagnostic mode + DNS poisoning detection
+*Merged 2026-07-07 · branch `Keys` · 6 file(s), +533 / −39*
+
+### 2026-07-06
+
+#### [#366](https://github.com/PierreGode/Ragnar/pull/366) — Network tools: re-enable VPN indicators — known-VPN egress-IP list catches VPN/Tor on the router
+*Merged 2026-07-06 · branch `features07` · 6 file(s), +306 / −19*
+
+- RuSense: self-heal data ownership so CSI recording survives root-run updates
+- Network tools: per-interface VPN egress check + stop hiding NICs without an address
+
+### 2026-07-05
+
+#### [#364](https://github.com/PierreGode/Ragnar/pull/364) — Rusense and Net tools
+*Merged 2026-07-05 · branch `View` · 148 file(s), +21404 / −320*
+
+- Bundle WiFi-CSI sensing backend + RuSense dashboard fixes
+- Observatory fullscreen + branding cleanup; fix RuSense Training tab
+- Sync pending working-tree changes to install/pager/wifi scripts and assets
+- Gitignore secrets and runtime data (zap api key, auth db, scan state)
+- Replace Piglet flasher Pages with RuSense CSI-node flasher (ESP32-S3/C6)
+- Update README.md
+- …and 141 more commit(s)
+- **Docs:** [README (root)](../README.md), [nettools.md](nettools.md), [rusense.md](rusense.md)
+
+### 2026-06-10
+
+#### [#360](https://github.com/PierreGode/Ragnar/pull/360) — real
+*Merged 2026-06-10 · branch `export` · 4 file(s), +10 / −8*
+
+- hy
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#359](https://github.com/PierreGode/Ragnar/pull/359) — Rows whose position was estimated via backfill_gps_from_track
+*Merged 2026-06-10 · branch `export` · 5 file(s), +139 / −33*
+
+- Rows whose position was estimated via backfill_gps_from_track (gps_backfilled = 1) are excluded. Interpolated coordinates are not actual observations, so they're omitted from WiGLE submissions to avoid polluting the dataset with synthetic positions.
+- **Docs:** [wardriving.md](wardriving.md)
+
+### 2026-06-07
+
+#### [#357](https://github.com/PierreGode/Ragnar/pull/357) — huginn
+*Merged 2026-06-07 · branch `Huginn` · 8 file(s), +868 / −35*
+
+- paper
+- wee
+- claims
+- fixes
+- auto
+
+### 2026-06-03
+
+#### [#354](https://github.com/PierreGode/Ragnar/pull/354) — patch
+*Merged 2026-06-03 · branch `overview` · 2 file(s), +12 / −0*
+
+#### [#353](https://github.com/PierreGode/Ragnar/pull/353) — gps
+*Merged 2026-06-03 · branch `overview` · 6 file(s), +241 / −7*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#352](https://github.com/PierreGode/Ragnar/pull/352) — sate
+*Merged 2026-06-03 · branch `overview` · 1 file(s), +19 / −4*
+
+### 2026-06-02
+
+#### [#351](https://github.com/PierreGode/Ragnar/pull/351) — zap fixes
+*Merged 2026-06-02 · branch `overview` · 2 file(s), +194 / −5*
+
+### 2026-06-01
+
+#### [#350](https://github.com/PierreGode/Ragnar/pull/350) — str
+*Merged 2026-06-01 · branch `structure` · 5 file(s), +139 / −95*
+
+- clean
+
+#### [#348](https://github.com/PierreGode/Ragnar/pull/348) — grade
+*Merged 2026-06-01 · branch `grade` · 0 file(s), +0 / −0*
+
+- dd
+- gt
+- kl
+
+### 2026-05-31
+
+#### [#347](https://github.com/PierreGode/Ragnar/pull/347) — patch
+*Merged 2026-05-31 · branch `grades` · 0 file(s), +0 / −0*
+
+- fix
+
+#### [#346](https://github.com/PierreGode/Ragnar/pull/346) — patch
+*Merged 2026-05-31 · branch `bughunt` · 2 file(s), +16 / −3*
+
+#### [#345](https://github.com/PierreGode/Ragnar/pull/345) — CIS PCI DSS
+*Merged 2026-05-31 · branch `grades` · 17 file(s), +1190 / −322*
+
+- Update grade.md
+- **Docs:** [PWNAGOTCHI.md](PWNAGOTCHI.md)
+
+#### [#344](https://github.com/PierreGode/Ragnar/pull/344) — server network
+*Merged 2026-05-31 · branch `servers` · 14 file(s), +320 / −313*
+
+- **Docs:** [PWNAGOTCHI.md](PWNAGOTCHI.md)
+
+#### [#343](https://github.com/PierreGode/Ragnar/pull/343) — pwnss
+*Merged 2026-05-31 · branch `pwnss` · 9 file(s), +243 / −36*
+
+- **Docs:** [PWNAGOTCHI.md](PWNAGOTCHI.md)
+
+### 2026-05-30
+
+#### [#342](https://github.com/PierreGode/Ragnar/pull/342) — Update README.md
+*Merged 2026-05-30 · branch `PierreGode-patch-2` · 1 file(s), +2 / −0*
+
+- **Docs:** [README (root)](../README.md)
+
+#### [#341](https://github.com/PierreGode/Ragnar/pull/341) — Stop web portal during wardriving without WiFi; reconnect on device disconnect
+*Merged 2026-05-30 · branch `claude/ragnar-wifi-auto-connect-e5k4Z` · 4 file(s), +179 / −6*
+
+#### [#340](https://github.com/PierreGode/Ragnar/pull/340) — sort
+*Merged 2026-05-30 · branch `comp` · 3 file(s), +135 / −174*
+
+#### [#339](https://github.com/PierreGode/Ragnar/pull/339) — companions
+*Merged 2026-05-30 · branch `comp` · 4 file(s), +478 / −527*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#338](https://github.com/PierreGode/Ragnar/pull/338) — nuclei
+*Merged 2026-05-30 · branch `nuclei` · 7 file(s), +576 / −184*
+
+### 2026-05-29
+
+#### [#337](https://github.com/PierreGode/Ragnar/pull/337) — names
+*Merged 2026-05-29 · branch `netscanner` · 3 file(s), +101 / −15*
+
+### 2026-05-28
+
+#### [#336](https://github.com/PierreGode/Ragnar/pull/336) — feat(pwn-bridge): add _execute_pwn_git_update helper and PWN_REPO_PATH
+*Merged 2026-05-28 · branch `pwns` · 4 file(s), +703 / −1*
+
+- fix(pwn-bridge): address Task 1 review issues
+- feat(pwn-bridge): add /api/pwn/check-updates endpoint
+- fix(pwn-bridge): address Task 2 review issues
+- feat(pwn-bridge): add /api/pwn/update endpoint
+- feat(pwn-bridge): add /api/pwn/stash-update endpoint
+- feat(pwn-bridge): add Pwnagotchi Updates card to Bridge section
+- …and 7 more commit(s)
+
+#### [#335](https://github.com/PierreGode/Ragnar/pull/335) — network
+*Merged 2026-05-28 · branch `NetworkScan` · 9 file(s), +1478 / −112*
+
+- **Docs:** [spec.md](spec.md)
+
+#### [#334](https://github.com/PierreGode/Ragnar/pull/334) — traffic
+*Merged 2026-05-28 · branch `2628` · 11 file(s), +2152 / −12*
+
+- data
+- alerts
+- no false irc
+
+### 2026-05-27
+
+#### [#333](https://github.com/PierreGode/Ragnar/pull/333) — zap
+*Merged 2026-05-27 · branch `2628` · 9 file(s), +1685 / −1*
+
+- **Docs:** [superpowers/specs/2026-05-27-web-recon-subsystem-design.md](superpowers/specs/2026-05-27-web-recon-subsystem-design.md)
+
+### 2026-05-26
+
+#### [#332](https://github.com/PierreGode/Ragnar/pull/332) — gps from piglet
+*Merged 2026-05-26 · branch `pigletgps` · 2 file(s), +115 / −1*
+
+- gps
+
+### 2026-05-25
+
+#### [#330](https://github.com/PierreGode/Ragnar/pull/330) — Love to Hamspiced
+*Merged 2026-05-25 · branch `Hamspiced` · 1 file(s), +2 / −2*
+
+- Update wardriving.md
+- **Docs:** [wardriving.md](wardriving.md)
+
+#### [#329](https://github.com/PierreGode/Ragnar/pull/329) — Love Hamspiced, Update Piglet (USB) mode description for clarity
+*Merged 2026-05-25 · branch `Hamspiced` · 1 file(s), +1 / −1*
+
+- **Docs:** [wardriving.md](wardriving.md)
+
+### 2026-05-24
+
+#### [#328](https://github.com/PierreGode/Ragnar/pull/328) — Update README.md
+*Merged 2026-05-24 · branch `PierreGode-patch-1` · 1 file(s), +1 / −1*
+
+- **Docs:** [README (root)](../README.md)
+
+#### [#323](https://github.com/PierreGode/Ragnar/pull/323) — Fix command to delete monitor interface
+*Merged 2026-05-24 · branch `fix-services-script-typo` · 1 file(s), +1 / −1*
+
+#### [#324](https://github.com/PierreGode/Ragnar/pull/324) — bug: Pwnagotchi swap status not clearing after switching back to Ragnar
+*Merged 2026-05-24 · branch `fix-pwnagotchi-handout` · 1 file(s), +3 / −1*
+
+- bug: Fix ragnar to pwngotchi handout
+
+#### [#327](https://github.com/PierreGode/Ragnar/pull/327) — Ragnar Piglet Coordinator
+*Merged 2026-05-24 · branch `Ragnar-piglet-coordinator` · 15 file(s), +3368 / −83*
+
+- web
+- site
+- branch
+- Read this for wardriving
+- **Docs:** [wardriving.md](wardriving.md)
+
+### 2026-05-23
+
+#### [#321](https://github.com/PierreGode/Ragnar/pull/321) — mobile fit
+*Merged 2026-05-23 · branch `2623` · 3 file(s), +111 / −60*
+
+- mobile
+
+### 2026-05-22
+
+#### [#318](https://github.com/PierreGode/Ragnar/pull/318) — Auto-detect WiGLE 1.6 column shift
+*Merged 2026-05-22 · branch `piglet` · 6 file(s), +1263 / −18*
+
+- update
+- piglet parsing
+- parse
+- updates
+- external scanning
+- external scan
+- …and 5 more commit(s)
+
+### 2026-05-21
+
+#### [#317](https://github.com/PierreGode/Ragnar/pull/317) — settings
+*Merged 2026-05-21 · branch `2621` · 8 file(s), +291 / −15*
+
+- data fixes
+- fixes
+
+### 2026-05-20
+
+#### [#316](https://github.com/PierreGode/Ragnar/pull/316) — Revert power warning feature entirely
+*Merged 2026-05-20 · branch `2620` · 4 file(s), +3 / −110*
+
+- den
+
+#### [#315](https://github.com/PierreGode/Ragnar/pull/315) — Power warning: lower EXT5V thresholds to match real Pi 5 readings
+*Merged 2026-05-20 · branch `gps` · 1 file(s), +3 / −3*
+
+#### [#314](https://github.com/PierreGode/Ragnar/pull/314) — Wardriving card: power-health warning banner
+*Merged 2026-05-20 · branch `gps` · 3 file(s), +109 / −2*
+
+#### [#313](https://github.com/PierreGode/Ragnar/pull/313) — Backfill: use endpoint speeds for constant-accel interpolation
+*Merged 2026-05-20 · branch `gps` · 3 file(s), +163 / −34*
+
+- docs: update wardriving guide with current behavior
+- docs: highlight GPS recovery during dropouts
+- **Docs:** [README (root)](../README.md), [wardriving.md](wardriving.md)
+
+#### [#312](https://github.com/PierreGode/Ragnar/pull/312) — Bump Huginn serial baud to 460800
+*Merged 2026-05-20 · branch `gps` · 4 file(s), +64 / −34*
+
+- Always drive Huginn with its fast wardrive loop
+- Strip explanatory comments
+- Don't null GPS columns when stronger RSSI lands without a fix
+
+#### [#311](https://github.com/PierreGode/Ragnar/pull/311) — Gps updates
+*Merged 2026-05-20 · branch `gps` · 3 file(s), +102 / −15*
+
+- Fix GPS parser to surface pre-fix state (sats in view + alive signal)
+- Wardriving GPS card: show satellites in view + SNR
+
+### 2026-05-17
+
+#### [#309](https://github.com/PierreGode/Ragnar/pull/309) — Add gpsd and native serial port GPS support
+*Merged 2026-05-17 · branch `claude/add-serial-gps-support-d6vhm` · 1 file(s), +172 / −21*
+
+### 2026-05-14
+
+#### [#308](https://github.com/PierreGode/Ragnar/pull/308) — fields
+*Merged 2026-05-14 · branch `e-paper` · 1 file(s), +35 / −20*
+
+#### [#307](https://github.com/PierreGode/Ragnar/pull/307) — Count only unique WiFi networks for HuginnESP display
+*Merged 2026-05-14 · branch `claude/filter-duplicate-networks-hn3Ls` · 1 file(s), +11 / −6*
+
+### 2026-05-13
+
+#### [#306](https://github.com/PierreGode/Ragnar/pull/306) — companions
+*Merged 2026-05-13 · branch `kiosk` · 1 file(s), +18 / −0*
+
+### 2026-05-12
+
+#### [#304](https://github.com/PierreGode/Ragnar/pull/304) — Kiosk mode for ON display
+*Merged 2026-05-12 · branch `kiosk` · 9 file(s), +1224 / −4*
+
+- test
+- fix
+- kiosk
+- site
+- xorg
+
+### 2026-05-11
+
+#### [#303](https://github.com/PierreGode/Ragnar/pull/303) — Expand camera detection: add SSID pattern matching + more OUIs
+*Merged 2026-05-11 · branch `claude/investigate-camera-detection-IRHvc` · 2 file(s), +38 / −4*
+
+#### [#302](https://github.com/PierreGode/Ragnar/pull/302) — map
+*Merged 2026-05-11 · branch `ward` · 5 file(s), +279 / −12*
+
+- wardrive
+
+#### [#301](https://github.com/PierreGode/Ragnar/pull/301) — wigle: header-driven CSV parser for Piglet (1.4 + 1.6 compatible)
+*Merged 2026-05-11 · branch `huginn` · 1 file(s), +123 / −46*
+
+#### [#300](https://github.com/PierreGode/Ragnar/pull/300) — Better wifi
+*Merged 2026-05-11 · branch `huginn` · 7 file(s), +1045 / −56*
+
+- wardriving: WiFi adapter details + fix USB serial conflicts
+- fix: suppress Pylance import-not-found for pyserial (Pi-only dep)
+- revert: remove type: ignore comments, keep get_shared_data bugfix
+- multiple wifi-antenas
+- wifi pach
+- wifi
+- …and 12 more commit(s)
+
+### 2026-05-10
+
+#### [#299](https://github.com/PierreGode/Ragnar/pull/299) — wardriving: active full-channel sweep for faster stationary discovery
+*Merged 2026-05-10 · branch `huginn` · 1 file(s), +53 / −3*
+
+#### [#298](https://github.com/PierreGode/Ragnar/pull/298) — GPS updates
+*Merged 2026-05-10 · branch `huginn` · 4 file(s), +319 / −107*
+
+- sec
+- GPS fix
+
+#### [#297](https://github.com/PierreGode/Ragnar/pull/297) — update
+*Merged 2026-05-10 · branch `huginn` · 2 file(s), +50 / −30*
+
+#### [#296](https://github.com/PierreGode/Ragnar/pull/296) — patch
+*Merged 2026-05-10 · branch `huginn` · 3 file(s), +96 / −20*
+
+### 2026-05-09
+
+#### [#293](https://github.com/PierreGode/Ragnar/pull/293) — Wardrive
+*Merged 2026-05-09 · branch `huginn` · 3 file(s), +9 / −27*
+
+#### [#292](https://github.com/PierreGode/Ragnar/pull/292) — huginn
+*Merged 2026-05-09 · branch `huginn` · 1 file(s), +55 / −12*
+
+#### [#291](https://github.com/PierreGode/Ragnar/pull/291) — huginn
+*Merged 2026-05-09 · branch `huginn` · 5 file(s), +283 / −1*
+
+### 2026-05-08
+
+#### [#288](https://github.com/PierreGode/Ragnar/pull/288) — fix: blacklisted hosts were still written to DB during scans
+*Merged 2026-05-08 · branch `devel/blacklist` · 3 file(s), +67 / −25*
+
+- fix: enforce blacklist across all remaining upsert_host call sites
+- fix: filter blacklisted hosts when loading existing DB entries in update_netkb
+
+#### [#287](https://github.com/PierreGode/Ragnar/pull/287) — Issue #284 fix: web preview no longer rotated when screen_reversed is set
+*Merged 2026-05-08 · branch `devel/webdisplay` · 1 file(s), +6 / −6*
+
+- fix: web preview no longer rotated when screen_reversed is set
+
+#### [#290](https://github.com/PierreGode/Ragnar/pull/290) — WarDriving
+*Merged 2026-05-08 · branch `wardriving` · 3 file(s), +45 / −10*
+
+#### [#289](https://github.com/PierreGode/Ragnar/pull/289) — ward
+*Merged 2026-05-08 · branch `wardriving` · 15 file(s), +4938 / −26*
+
+- fix wardriving: robust freq/channel parsing, SSID sanitization, WPA/WEP detection
+- feat: wardriving display mode for all screens (EPD, GC9A01, SSD1306, LCD1602, MAX7219)
+- fix: sanitize literal \\xNN escape sequences in SSIDs from iw scan
+- fix: wardriving start/stop button reliability and tab refresh
+- fix: wardriving toggle button + fix indent syntax error in wardriving.py
+- feat: add GPS column to wardriving network table
+- …and 53 more commit(s)
+- **Docs:** [wardriving.md](wardriving.md)
+
+### 2026-05-05
+
+#### [#286](https://github.com/PierreGode/Ragnar/pull/286) — fixes
+*Merged 2026-05-05 · branch `260505` · 8 file(s), +108 / −33*
+
+#### [#285](https://github.com/PierreGode/Ragnar/pull/285) — not rotate in ui
+*Merged 2026-05-05 · branch `260505` · 7 file(s), +60 / −28*
+
+- path fix
+- scroll fix
+
+### 2026-04-27
+
+#### [#281](https://github.com/PierreGode/Ragnar/pull/281) — Waveshare EPD  driver "epd2in13b_V4" (black/white/red) added.
+*Merged 2026-04-27 · branch `epd2in13b_V4-driver` · 3 file(s), +284 / −23*
+
+- Update shared.py
+- Update install_ragnar.sh
+
+### 2026-04-22
+
+#### [#280](https://github.com/PierreGode/Ragnar/pull/280) — Wifi updates
+*Merged 2026-04-22 · branch `wifi` · 4 file(s), +151 / −47*
+
+- wifi
+- fix
+- wifi fix
+- patch
+- button
+- del
+
+#### [#279](https://github.com/PierreGode/Ragnar/pull/279) — Support for open WiFi networks
+*Merged 2026-04-22 · branch `wifi` · 1 file(s), +8 / −7*
+
+- open networks
+
+#### [#278](https://github.com/PierreGode/Ragnar/pull/278) — Install fixes
+*Merged 2026-04-22 · branch `merge` · 2 file(s), +386 / −16*
+
+- install fixes
+- **Docs:** [PWNAGOTCHI.md](PWNAGOTCHI.md)
+
+#### [#277](https://github.com/PierreGode/Ragnar/pull/277) — min
+*Merged 2026-04-22 · branch `merge` · 1 file(s), +1 / −1*
+
+#### [#267](https://github.com/PierreGode/Ragnar/pull/267) — fix: stop auto-scroll caused by password manager extension
+*Merged 2026-04-22 · branch `fix/auto-scroll-password-manager-extension` · 2 file(s), +17 / −16*
+
+- fix: stop auto-scroll caused by password manager extension reacting to frequent DOM mutations
+
+#### [#268](https://github.com/PierreGode/Ragnar/pull/268) — fix: resolve permanent 'Loading...' in Data Management card (Config tab)
+*Merged 2026-04-22 · branch `fix/data-management-loading-duplicate-id` · 2 file(s), +3 / −1*
+
+- fix: resolve permanent 'Loading...' in Data Management card
+
+#### [#269](https://github.com/PierreGode/Ragnar/pull/269) — feat: display human-readable temperature sensor names
+*Merged 2026-04-22 · branch `feat/temperature-sensor-labels` · 1 file(s), +33 / −1*
+
+#### [#271](https://github.com/PierreGode/Ragnar/pull/271) — fix: show filter-aware empty state in Vulnerabilities by Host
+*Merged 2026-04-22 · branch `fix/vuln-filter-empty-state` · 1 file(s), +8 / −2*
+
+### 2026-04-07
+
+#### [#272](https://github.com/PierreGode/Ragnar/pull/272) — fix: prevent XSS in onclick handlers and innerHTML
+*Merged 2026-04-07 · branch `fix/xss-escaping` · 1 file(s), +25 / −11*
+
+- fix: prevent XSS in onclick handlers and innerHTML (Critical/High)
+- fix: escape file.name in innerHTML (XSS follow-up)
+
+#### [#273](https://github.com/PierreGode/Ragnar/pull/273) — chore: update socket.io client from 4.5.4 to 4.8.3
+*Merged 2026-04-07 · branch `chore/update-socketio-4.8.3` · 1 file(s), +1 / −1*
+
+### 2026-03-31
+
+#### [#266](https://github.com/PierreGode/Ragnar/pull/266) — docs: add attribution for brAinphreAk's Loki/PagerBjorn pager work (closes #265)
+*Merged 2026-03-31 · branch `fix/issue-265-pager-attribution` · 1 file(s), +13 / −0*
+
+- docs: add attribution for brAinphreAk's Loki/PagerBjorn pager work (issue #265)
+- **Docs:** [README (root)](../README.md)
+
+### 2026-03-23
+
+#### [#262](https://github.com/PierreGode/Ragnar/pull/262) — test
+*Merged 2026-03-23 · branch `Fixes` · 12 file(s), +289 / −177*
+
+- fa
+- flip
+- 90
+- up
+
+### 2026-03-22
+
+#### [#261](https://github.com/PierreGode/Ragnar/pull/261) — update
+*Merged 2026-03-22 · branch `Fixes` · 7 file(s), +152 / −28*
+
+- nr
+- nrf
+- test
+- fix
+- df
+- hm
+- …and 4 more commit(s)
+
+#### [#239](https://github.com/PierreGode/Ragnar/pull/239) — feat: add LCD1602 16x2 I2C character display support
+*Merged 2026-03-22 · branch `pr/lcd1602-upstream` · 6 file(s), +574 / −38*
+
+- feat: redesign LCD1602 display with rotating info pages
+- fix: skip EPD buffer validation for character displays (lcd1602)
+- fix: use f-string in logger.info for character display init message
+- fix: handle None epd_helper for character displays in Display init
+- fix: f-string logger calls and increase EN pulse timing in lcd1602
+- feat: redesign lcd1602 display with independent top/bottom timers
+- …and 5 more commit(s)
+
+### 2026-03-21
+
+#### [#260](https://github.com/PierreGode/Ragnar/pull/260) — patch
+*Merged 2026-03-21 · branch `Fixes` · 4 file(s), +33 / −16*
+
+#### [#259](https://github.com/PierreGode/Ragnar/pull/259) — fix: add timeout to epd4in26 ReadBusy to prevent startup hang
+*Merged 2026-03-21 · branch `claude/fix-epaper-startup-BkBHf` · 1 file(s), +7 / −2*
+
+#### [#258](https://github.com/PierreGode/Ragnar/pull/258) — fix(web): start web server before EPD display init to prevent startup delays
+*Merged 2026-03-21 · branch `claude/fix-web-startup-8pYL9` · 2 file(s), +15 / −10*
+
+#### [#257](https://github.com/PierreGode/Ragnar/pull/257) — Claude/add spi clock config 7 u gw m
+*Merged 2026-03-21 · branch `claude/add-spi-clock-config-7UGwM` · 4 file(s), +45 / −5*
+
+- Add configurable SPI clock speed for e-paper display
+- Rebuild minified JS after SPI clock config addition
+
+### 2026-03-20
+
+#### [#256](https://github.com/PierreGode/Ragnar/pull/256) — Add Waveshare 4.26" e-paper (epd4in26) support
+*Merged 2026-03-20 · branch `claude/add-epaper-426-support-7OyQh` · 7 file(s), +247 / −14*
+
+### 2026-03-19
+
+#### [#254](https://github.com/PierreGode/Ragnar/pull/254) — Bundle vulners.nse NSE script for Pineapple Pager vuln scanning
+*Merged 2026-03-19 · branch `funcs` · 4 file(s), +442 / −0*
+
+### 2026-03-18
+
+#### [#252](https://github.com/PierreGode/Ragnar/pull/252) — fix(pager): readable fonts + pager-only settings (no ethernet/websrv)
+*Merged 2026-03-18 · branch `Pineapple` · 2 file(s), +107 / −89*
+
+- fix
+
+#### [#250](https://github.com/PierreGode/Ragnar/pull/250) — feat(pager): add 4 interactive settings pages to pager display
+*Merged 2026-03-18 · branch `Pineapple` · 1 file(s), +393 / −18*
+
+#### [#240](https://github.com/PierreGode/Ragnar/pull/240) — feat: add MAX7219 LED matrix display support (4-panel and 8-panel)
+*Merged 2026-03-18 · branch `pr/max7219-upstream` · 9 file(s), +427 / −17*
+
+- feat: add display_brightness config for non-e-ink displays
+- fix: skip EPD init for MAX7219 display types in shared.py
+- fix: guard epd_helper.init_partial_update() in Display.__init__
+- fix: skip wipe_epd for non-EPD displays; use sudo pip3 for luma install
+- fix: MAX7219 all-pixels-on on startup
+- fix: correct MAX7219 block_orientation default to -90 for horizontal strips
+- …and 3 more commit(s)
+- **Docs:** [README (root)](../README.md)
+
+#### [#243](https://github.com/PierreGode/Ragnar/pull/243) — feat(ui): rename E-Paper to Display across all user-facing web UI text
+*Merged 2026-03-18 · branch `pr/display-rename` · 2 file(s), +36 / −36*
+
+- feat(ui): rename E-Paper → Display across all user-facing web UI text
+
+#### [#244](https://github.com/PierreGode/Ragnar/pull/244) — feat(ui): add AP Archive tab — browse collected data per access point
+*Merged 2026-03-18 · branch `pr/ap-archive` · 3 file(s), +430 / −1*
+
+- feat(networks): add /api/networks/all and /api/networks/<slug>/files endpoints
+- feat(networks): add All Scanned Networks tab to web UI
+- fix(qa): restore missing wrapper divs in Network Map tab
+- fix(networks): escape JSON strings in onclick to prevent HTML attribute breakage
+- feat(networks): rename 'Networks' tab to 'AP Archive' across all user-facing UI
+
+#### [#245](https://github.com/PierreGode/Ragnar/pull/245) — fix(discovered): fix View Full Report 404 for per-network scans
+*Merged 2026-03-18 · branch `pr/fix-view-full-report` · 1 file(s), +34 / −19*
+
+### 2026-03-17
+
+#### [#248](https://github.com/PierreGode/Ragnar/pull/248) — Claude/optimize pager deploy y pd ax
+*Merged 2026-03-17 · branch `claude/optimize-pager-deploy-yPdAx` · 3 file(s), +69 / −5*
+
+- Fix Resolve Git Conflicts button in Settings
+- Rebuild minified JS with terser
+
+#### [#247](https://github.com/PierreGode/Ragnar/pull/247) — Pinapple Pager
+*Merged 2026-03-17 · branch `pagers` · 15 file(s), +998 / −175*
+
+- pager
+- ui
+- fix
+- Organise pager files, fix vuln display, slim deployment
+- Fix pager crash on Exit from main menu
+- pinapple
+
+### 2026-03-14
+
+#### [#242](https://github.com/PierreGode/Ragnar/pull/242) — fix(airsnitch): correct interface order and wire client.conf credentials
+*Merged 2026-03-14 · branch `claude/add-airsnitch-tool-oWS7y` · 5 file(s), +63 / −7*
+
+#### [#241](https://github.com/PierreGode/Ragnar/pull/241) — airsnitch tool
+*Merged 2026-03-14 · branch `claude/add-airsnitch-tool-oWS7y` · 8 file(s), +1123 / −2*
+
+- feat: integrate AirSnitch Wi-Fi client isolation testing tool
+- feat: add AirSnitch UI panel to the Pentest tab
+- chore: rebuild minified JS bundle
+- fix: move AirSnitch above Bluetooth, fix install reliability, add live install log
+- fix: install libnl-3/openssl build deps before running AirSnitch setup.sh
+- fix: correct airsnitch.py path and clone submodules
+- …and 3 more commit(s)
+- **Docs:** [README (root)](../README.md), [airsnitch.md](airsnitch.md)
+
+### 2026-03-11
+
+#### [#235](https://github.com/PierreGode/Ragnar/pull/235) — feat: add GC9A01 1.28" 240x240 round TFT LCD display support
+*Merged 2026-03-11 · branch `screens` · 9 file(s), +1264 / −40*
+
+- feat: add GC9A01 TFT LCD as install-time display option
+- fix: prevent GPIO27 'already in use' on repeated init() calls
+- feat(gc9a01): fix flashing + add round display UI
+- fix(gc9a01): correct mirrored display + wifi label
+- feat(gc9a01): animated mascot using status BMP frame sequences
+- feat(gc9a01): revert mascot to flat tint colorization
+- …and 13 more commit(s)
+
+### 2026-03-09
+
+#### [#229](https://github.com/PierreGode/Ragnar/pull/229) — fix: display selection during install ignored when reinstalling
+*Merged 2026-03-09 · branch `fix/epd-type-install-overwrite` · 1 file(s), +25 / −18*
+
+- fix: epd_type selection ignored on install when not epd2in13_V4
+
+#### [#233](https://github.com/PierreGode/Ragnar/pull/233) — req
+*Merged 2026-03-09 · branch `deptpatch` · 3 file(s), +28 / −6*
+
+### 2026-03-06
+
+#### [#226](https://github.com/PierreGode/Ragnar/pull/226) — pwn
+*Merged 2026-03-06 · branch `pi` · 6 file(s), +587 / −2*
+
+- test
+- pw
+- ok
+- low
+- page
+- fix
+- …and 3 more commit(s)
+
+### 2026-03-03
+
+#### [#210](https://github.com/PierreGode/Ragnar/pull/210) — fixed ZAP
+*Merged 2026-03-03 · branch `releases` · 2 file(s), +225 / −50*
+
+- zap fix
+- zapfix
+- fixes
+
+#### [#209](https://github.com/PierreGode/Ragnar/pull/209) — faster
+*Merged 2026-03-03 · branch `releases` · 2 file(s), +9 / −2*
+

@@ -5,7 +5,8 @@
   "main": "tailwind.config.js",
   "scripts": {
     "build:css": "tailwindcss -i ./web/css/tailwind-input.css -o ./web/css/tailwind.css --minify",
-    "watch:css": "tailwindcss -i ./web/css/tailwind-input.css -o ./web/css/tailwind.css --watch"
+    "watch:css": "tailwindcss -i ./web/css/tailwind-input.css -o ./web/css/tailwind.css --watch",
+    "i18n:check": "node scripts/i18n/extract_strings.js"
   },
   "repository": {
     "type": "git",
@@ -19,6 +20,8 @@
   },
   "homepage": "https://github.com/PierreGode/Ragnar#readme",
   "devDependencies": {
+    "acorn": "^8.14.0",
+    "htmlparser2": "^9.1.0",
     "tailwindcss": "^3.4.19"
   }
 }

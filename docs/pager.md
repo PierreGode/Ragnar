@@ -1,0 +1,142 @@
+# 🍍 WiFi Pineapple Pager
+
+Ragnar can be deployed to the WiFi Pineapple Pager as a native payload with a
+full-color LCD display, button controls, and LED status indicators.
+
+> **Attribution.** The WiFi Pineapple Pager port of Ragnar is based on the
+> original work of **brAinphreAk** — the developer who first ported Bjorn to the
+> Pineapple Pager as [PagerBjorn /
+> Loki](https://github.com/pineapple-pager-projects/pineapple_pager_loki). The
+> pager adaptation layer (display system, hardware control wrapper, MIPS-compiled
+> binaries and libraries) originated in that project. Full credit and thanks to
+> brAinphreAk for making pager hardware support possible.
+
+---
+
+## Prerequisites
+
+- Firmware 1.0.7+
+- PAGERCTL payload installed (provides `libpagerctl.so`)
+- SSH access from your workstation
+- Python 3 + nmap (auto-installed on first run)
+- MIPS-compiled Python libraries bundled in `pager_lib/` (or sourced from the
+  PAGERCTL payload)
+
+## Features on the Pager
+
+- Full-color 480×222 LCD with Viking-themed status display
+- Physical button controls (navigate menus, pause/resume, adjust brightness)
+- LED indicators (blue = idle, cyan = scanning, red = brute force, yellow = stealing)
+- Graphical startup menu with interface selection and Web UI toggle
+- Auto-dim for battery saving and payload handoff support
+
+## WiFi Spectrum (native spectrum app)
+
+From the PagerRagnar menu, select **WiFi Spectrum** (directly under **Start
+Ragnar**) for a real-time, tri-band WiFi
+spectrum analyser rendered natively on the LCD. It uses the Pager's **own** radio —
+no external SDR, no HackRF, no extra binaries. It retunes the monitor interface
+(`wlan1mon`) across every 2.4 / 5 / **6 GHz** channel the radio supports,
+captures 802.11 frames through a raw packet socket, reads the per-frame
+radiotap RSSI, and passively parses beacons/probe-responses for SSID, BSSID,
+channel and encryption. Nothing is transmitted.
+
+Three views, cycled with **GREEN**:
+
+- **Waterfall** — a per-pixel scrolling inferno waterfall across the full
+  480 px width, interpolated between channels, newest line on top (about three
+  new lines a second). A thin line under the header shows sweep progress; in
+  ALL mode thin vertical lines mark the 2.4 / 5 / 6 GHz boundaries.
+- **Networks** — a scrollable list of every discovered access point (SSID, band,
+  channel, signal bar, open/locked), strongest first.
+- **Survey** — counts (total / open / secured), per-band bars, the strongest
+  networks, and the clearest 2.4 GHz channel recommendation.
+
+Controls: **GREEN** cycle view · **UP/DOWN** change band (or scroll the list) ·
+**LEFT/RIGHT** brightness · **RED** exit. The 4 d-pad RGB LEDs run a physical
+radar sweep tinted by the strongest band. On exit the discovered networks are
+written to `data/spectrum_networks.csv`.
+
+---
+
+## Installation
+
+**Option A — from the main installer (select option 3):**
+
+```bash
+sudo ./install_ragnar.sh
+# Choose: 3. Install on WiFi Pineapple Pager
+```
+
+**Option B — direct deployment:**
+
+```bash
+./scripts/install_pineapple_pager.sh [pager-ip]
+```
+
+If you omit the IP, the installer offers the Pager it detects on this machine's
+USB network (the `172.16.<N>.1` of whichever `172.16.<N>.0/24` you have an
+address on — `N` differs between units, e.g. `42` or `52`).
+
+## Troubleshooting install
+
+- **"No SSH service reachable at …:22".** The Pager is not plugged in, not
+  powered, or you passed the wrong IP. Check with `ip -4 addr | grep 172.16.` —
+  the Pager is the `.1` of the subnet you see there, and the installer prints
+  the detected address to try.
+- **Key auth fails.** The installer falls back to the Pager's root password and
+  asks for it once (connections are multiplexed). To avoid the prompt entirely:
+  `ssh-copy-id root@<pager-ip>`.
+- **"Payload package is incomplete".** The installer refuses to deploy a broken
+  payload (it used to silently ship an empty one). It means the Ragnar checkout
+  it found is incomplete — run it from a full clone, not a tarball/partial copy.
+- **Python / nmap install.** The installer prefers the Pager's own `opkg`
+  (needs internet on the Pager). With no internet it downloads the current
+  `mipsel_24kc` Python packages on your workstation and streams them over; it
+  never pins a package version, so it will not 404 when the OpenWrt feed rolls
+  forward. If both fail, it prints the one-line `opkg` command to run on the
+  Pager yourself, then re-run the installer.
+
+- **arp-scan.** Optional. The installer tries to add it with `opkg` (needs
+  internet on the Pager); with it, hosts get vendor names. Without it Ragnar
+  logs one warning and reads MAC addresses from the neighbour table.
+
+## Screens while Ragnar is running
+
+**LEFT/RIGHT** move between screens; **UP/DOWN** scroll lists.
+
+- **Dashboard** — status, the six counters, level and Norse rank title (Thrall,
+  Karl, Hersir, Jarl ...), Ragnar's comment, and the animated Viking art for
+  whatever action is running.
+- **Radar** — every known host as a blip: bearing is the last IP octet, and the
+  more open ports a host has the closer it sits to the centre. Red = has
+  vulnerabilities, cyan = open ports, green = alive, grey = down. The side list
+  shows the most exposed hosts.
+- **Hosts** — scrollable list; UP/DOWN moves the selection and **GREEN** opens
+  a detail page for that host (MAC, vendor, every open port, vulnerabilities,
+  credentials found on it). GREEN or RED closes it.
+- **Creds / Vulns** — scrollable lists.
+- **Activity** — the latest orchestrator and scanner log lines (warnings in
+  yellow, errors in red); UP/DOWN scrolls back.
+- **Device** — battery, CPU load, memory, uptime, storage, scan interface and
+  level progress.
+- **WiFi** — press **GREEN** to open WiFi Spectrum without stopping Ragnar;
+  RED inside it returns to this screen.
+- **Scan / Attack / Network / System settings** — edit with GREEN.
+
+When the host, credential or vulnerability counter goes up, a banner appears at
+the bottom of whatever screen is showing and the Pager buzzes (a short vibration
+for a new host, a three-note chime with vibration for credentials or a
+vulnerable host). Turn the buzz off with **Buzz On New Finds** on the System
+settings screen; the banner still shows.
+
+**RED** opens the pause menu: UP/DOWN sets brightness, LEFT/RIGHT picks
+Back / Main Menu / Exit Ragnar (plus any installed launchers).
+
+## Usage
+
+1. Launch from the Pager menu: **Reconnaissance > PagerRagnar**
+2. Press **GREEN** to confirm the splash screen
+3. Select the network interface and toggle the Web UI on/off
+4. Press **GREEN** on "Start Ragnar" to begin scanning
+5. Press **RED** while running to open the pause menu

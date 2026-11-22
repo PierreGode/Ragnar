@@ -89,9 +89,15 @@ detect_desktop_mode() {
        || systemctl is-active --quiet display-manager 2>/dev/null; then
         return 0
     fi
+    # A real desktop is caught by its display manager (above) or its Wayland
+    # compositor (labwc/wayfire) / Xwayland below. A bare Xorg is deliberately
+    # NOT a desktop signal: on a Pi OS Lite image the only Xorg running is
+    # usually our OWN service-mode kiosk, so counting it would make a re-run of
+    # the installer (on update, or web-UI Reinstall) flip a working service
+    # kiosk into autostart mode — which has no session to launch into on Lite,
+    # blanking the screen. An X11 desktop is covered by its display manager.
     if pgrep -x labwc >/dev/null 2>&1 \
        || pgrep -x Xwayland >/dev/null 2>&1 \
-       || pgrep -x Xorg >/dev/null 2>&1 \
        || pgrep -x wayfire >/dev/null 2>&1; then
         return 0
     fi
@@ -159,10 +165,15 @@ detect_kiosk_user_bare() {
     getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 {print $1; exit}'
 }
 
-# Browser detection (both modes need this)
+# Browser detection (both modes need this). The kiosk wrapper launches the
+# browser with Chromium-only flags (--kiosk, --app, etc.), so only Chromium
+# counts — a pre-installed firefox-esr is deliberately NOT treated as "a
+# browser" here (it would be handed Chromium flags and exit, ending the X
+# session). Prefer the native 'chromium' (Debian 13/trixie); 'chromium-browser'
+# is the older Raspberry Pi OS name.
 HAS_BROWSER=0
 BROWSER_BIN=""
-for bin in chromium-browser chromium firefox-esr; do
+for bin in chromium chromium-browser; do
     if command -v "$bin" >/dev/null 2>&1; then
         HAS_BROWSER=1
         BROWSER_BIN="$bin"
@@ -190,11 +201,30 @@ if [[ -z "${KIOSK_USER:-}" ]]; then
     exit 1
 fi
 
+# Clear any half-configured packages before apt runs. A Kali/Debian image built
+# in a chroot ships systemd/dbus unpacked-but-not-configured (no running init in
+# the chroot to configure them), so the FIRST real apt on the device otherwise
+# stops at a "system.conf (Y/I/N/O/D/Z)?" conffile prompt and this install
+# aborts. Force-keep the shipped conffiles so the configure completes silently.
+if [[ -n "$(dpkg --audit 2>/dev/null)" ]] || [[ -n "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ]]; then
+    echo "[kiosk-install] repairing half-configured packages before apt"
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -f -y \
+        -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold >/dev/null 2>&1 || true
+fi
+
 # Package installation depends on mode.
 PKGS_TO_INSTALL=()
 if [[ "$HAS_BROWSER" -eq 0 ]]; then
-    echo "[kiosk-install] no browser detected — adding chromium-browser"
-    PKGS_TO_INSTALL+=(chromium-browser)
+    # Install Chromium in its own apt call (not the batch below) so the package
+    # name can be tried release-aware: Debian 13/trixie ships it as 'chromium',
+    # older Raspberry Pi OS as 'chromium-browser'. Keeping it out of the batch
+    # also means a Chromium hiccup can't take the whole X-stack install down.
+    echo "[kiosk-install] no Chromium detected — installing it"
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium \
+        || DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium-browser \
+        || echo "[kiosk-install] WARN: could not install Chromium — the on-screen kiosk needs it"
 fi
 # unclutter: hides X cursor. Only useful in service mode where we own X.
 if [[ "$MODE" == "service" ]] && ! command -v unclutter >/dev/null 2>&1; then
@@ -209,6 +239,15 @@ if [[ "$MODE" == "service" ]]; then
         echo "[kiosk-install] no X detected — adding minimal X stack"
         PKGS_TO_INSTALL+=(xserver-xorg xinit x11-xserver-utils openbox)
     fi
+    # openbox is the window manager chromium --kiosk needs to go full-screen. It
+    # is bundled with the "no X" stack above, but a distro that ALREADY ships X
+    # (e.g. Kali — HAS_X=1) can lack openbox specifically. Without a WM, chromium
+    # stays at its default ~945x1060 window and the dashboard fills only part of
+    # the screen. So ensure openbox on its own, regardless of the X-stack check.
+    if ! command -v openbox >/dev/null 2>&1; then
+        echo "[kiosk-install] openbox (WM) missing — adding it (kiosk needs a WM to fill the screen)"
+        PKGS_TO_INSTALL+=(openbox)
+    fi
     # xserver-xorg-legacy provides the suid Xorg.wrap that lets a non-root user
     # start X (our needs_root_rights=yes + allowed_users=anybody below). On Pi OS
     # Bookworm — the default on Pi 5 — X is rootless by default and this package
@@ -218,6 +257,12 @@ if [[ "$MODE" == "service" ]]; then
     fi
     if ! command -v xauth >/dev/null 2>&1; then
         PKGS_TO_INSTALL+=(xauth)
+    fi
+    # chvt (from kbd) lets the service make its VT the ACTIVE console before X
+    # starts, so logind hands Xorg an active (not paused) DRM master. Usually
+    # present on Pi OS Lite; pull it in if missing.
+    if ! command -v chvt >/dev/null 2>&1; then
+        PKGS_TO_INSTALL+=(kbd)
     fi
 fi
 # Autostart mode: wlr-randr rotates the Wayland output (labwc/wlroots).
@@ -250,9 +295,23 @@ if [[ -n "$OSK_PKG" ]]; then
         || echo "[kiosk-install] WARN: could not install $OSK_PKG — touch keyboard unavailable"
 fi
 
+# Kiosk escape hatch (floating ✕ touch button + Ctrl+Alt+Q hotkey). Needed on
+# handhelds like the Hackberry Pi CM5 whose keyboard has no easy Ctrl/F-keys, so
+# Chromium's --kiosk would otherwise trap you in the dashboard. python3-tk draws
+# the touch button; xbindkeys binds the hotkey on X. Best-effort — a miss just
+# leaves that affordance off (the wrapper auto-enables it only for touchscreens).
+HATCH_PKGS=()
+python3 -c 'import tkinter' >/dev/null 2>&1 || HATCH_PKGS+=(python3-tk)
+command -v xbindkeys >/dev/null 2>&1 || HATCH_PKGS+=(xbindkeys)
+if [[ "${#HATCH_PKGS[@]}" -gt 0 ]]; then
+    echo "[kiosk-install] installing kiosk escape-hatch deps: ${HATCH_PKGS[*]} (best-effort)"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${HATCH_PKGS[@]}" \
+        || echo "[kiosk-install] WARN: could not install ${HATCH_PKGS[*]} — the ✕/Ctrl+Alt+Q exit may be limited"
+fi
+
 # Re-detect browser after install
 if [[ -z "$BROWSER_BIN" ]]; then
-    for bin in chromium-browser chromium firefox-esr; do
+    for bin in chromium chromium-browser; do
         if command -v "$bin" >/dev/null 2>&1; then
             BROWSER_BIN="$bin"
             break
@@ -312,7 +371,7 @@ if [[ "$MODE" == "autostart" ]]; then
 Type=Application
 Name=Ragnar Kiosk
 Comment=Ragnar on-screen UI
-Exec=$WRAPPER_DST
+Exec=env RAGNAR_REPO=$REPO_ROOT $WRAPPER_DST
 X-GNOME-Autostart-enabled=true
 NoDisplay=true
 Terminal=false
@@ -365,7 +424,17 @@ Environment=RAGNAR_BROWSER=$BROWSER_BIN
 # and socket of a live desktop session would disrupt that session while still
 # leaving our own X unable to bind :0.
 ExecStartPre=+/bin/sh -c 'pgrep -x Xorg >/dev/null 2>&1 || pgrep -x X >/dev/null 2>&1 || { rm -f /tmp/.X0-lock; rm -rf /tmp/.X11-unix/X0; }'
+# Make the kiosk's VT (tty7, where the wrapper starts Xorg) the ACTIVE console
+# first. The tty1 autologin getty otherwise holds the active VT, so logind hands
+# our Xorg a PAUSED drm fd, modesetting can't master KMS, Xorg falls back to the
+# fbdev driver on the vc4 framebuffer and aborts. Best-effort (|| true).
+ExecStartPre=+/bin/sh -c 'chvt 7 2>/dev/null || true'
 ExecStart=$WRAPPER_DST
+# When the kiosk stops (escape hatch, crash, or disable) Xorg dies on tty7 and
+# the active console is left on that now-blank VT — a black screen with no way
+# back to the CLI. Switch the display back to tty1 (the autologin getty above)
+# so stopping the kiosk always drops to a usable console, not a black screen.
+ExecStopPost=+/bin/sh -c 'command -v chvt >/dev/null 2>&1 && chvt 1 2>/dev/null || true'
 Restart=on-failure
 # 10s (not 5) so a dying Xorg releases the VT/DRM master before the next start.
 RestartSec=10
@@ -374,6 +443,22 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 echo "[kiosk-install] systemd unit installed -> $SERVICE_FILE"
+
+# Let the kiosk escape hatch stop the unit in service mode (autostart mode kills
+# the browser directly and needs no sudo). Scoped to exactly this one command so
+# the ✕ button / Ctrl+Alt+Q can close a service-mode kiosk instead of it just
+# respawning. Validated before install so a malformed rule can't wedge sudo.
+KIOSK_SUDOERS="/etc/sudoers.d/ragnar-kiosk"
+KIOSK_SUDOERS_TMP="$(mktemp)"
+printf '%s ALL=(root) NOPASSWD: /bin/systemctl stop ragnar-kiosk.service, /usr/bin/systemctl stop ragnar-kiosk.service\n' \
+    "$KIOSK_USER" > "$KIOSK_SUDOERS_TMP"
+if visudo -c -f "$KIOSK_SUDOERS_TMP" >/dev/null 2>&1; then
+    install -m 0440 "$KIOSK_SUDOERS_TMP" "$KIOSK_SUDOERS"
+    echo "[kiosk-install] escape-hatch sudoers installed -> $KIOSK_SUDOERS"
+else
+    echo "[kiosk-install] WARN: sudoers validation failed — service-mode ✕/Ctrl+Alt+Q may only respawn the kiosk"
+fi
+rm -f "$KIOSK_SUDOERS_TMP"
 
 systemctl daemon-reload
 
@@ -399,8 +484,97 @@ else
     echo "[kiosk-install] Xwrapper.config updated"
 fi
 
+# Pin the KMS display as the PRIMARY GPU (Pi 5 and other dual-DRM boards). The
+# board exposes two DRM devices: vc4 (KMS, drives HDMI/DSI — has the outputs)
+# and v3d (render only, no outputs). Xorg autoconfig sometimes makes v3d primary
+# and then reports "no screens found"; it can also co-load the legacy fbdev
+# driver, which collides with modesetting and aborts the server
+# (dixRegisterPrivateKey assertion / FBIOPUTCMAP on vc4drmfb). An OutputClass —
+# unlike an explicit Device section, which forces the old probe that fails here
+# — keeps Xorg's working platform/KMS probe while forcing vc4 + modesetting as
+# the primary GPU. Harmless on boards with a single DRM device.
+mkdir -p /etc/X11/xorg.conf.d
+cat > /etc/X11/xorg.conf.d/99-ragnar-kiosk.conf <<'XORGCONF'
+# Managed by Ragnar install_kiosk.sh — forces the KMS (vc4) device to be the
+# primary GPU so the kiosk's Xorg finds the HDMI/DSI output. Safe to delete if
+# you are not running the Ragnar on-screen kiosk.
+Section "OutputClass"
+    Identifier "Ragnar vc4 primary"
+    MatchDriver "vc4"
+    Driver "modesetting"
+    Option "PrimaryGPU" "true"
+EndSection
+XORGCONF
+echo "[kiosk-install] xorg.conf.d/99-ragnar-kiosk.conf written (vc4 = primary GPU)"
+
+# Graphics / input / console group membership. A non-root Xorg (our Xwrapper
+# setup above) still has to OPEN the GPU, the VT and the input devices itself,
+# so the kiosk user must be in:
+#   video, render -> /dev/dri/card* + renderD* (KMS GPU) and /dev/fb*
+#   input         -> /dev/input/* (keyboard / mouse / touchscreen)
+#   tty           -> the virtual terminal Xorg runs on (tty7)
+# On a desktop Pi OS the default 'pi' user is pre-added to all of these; on a
+# Lite image (e.g. Ragnar OS) the service user is not, so Xorg dies with
+# "no screens found" / cannot open the DRM device and the unit crash-loops.
+# usermod is all-or-nothing, so only add the groups that actually exist here.
+kiosk_wanted_groups=()
+for grp in video render input tty; do
+    if getent group "$grp" >/dev/null 2>&1; then
+        kiosk_wanted_groups+=("$grp")
+    fi
+done
+if [[ ${#kiosk_wanted_groups[@]} -gt 0 ]]; then
+    kiosk_join_groups="$(IFS=,; echo "${kiosk_wanted_groups[*]}")"
+    if usermod -a -G "$kiosk_join_groups" "$KIOSK_USER"; then
+        echo "[kiosk-install] added $KIOSK_USER to groups: $kiosk_join_groups (takes effect on next service start)"
+    else
+        echo "[kiosk-install] WARN: could not add $KIOSK_USER to $kiosk_join_groups — Xorg may fail to open the GPU/VT"
+    fi
+fi
+
+# Local kiosk auth-bypass token. The on-screen browser passes this to skip
+# login; the server only trusts it from loopback, so a tailnet visitor proxied
+# through `tailscale serve` (who can't read this file) still has to log in — the
+# server no longer blanket-trusts every loopback request, which is what lets
+# kiosk mode and Tailscale HTTPS publishing run together. Local-readable is fine:
+# any local user already has shell, and the token only gates the loopback bypass.
+KIOSK_TOKEN_FILE="$REPO_ROOT/data/kiosk_token"
+if [[ ! -s "$KIOSK_TOKEN_FILE" ]]; then
+    mkdir -p "$(dirname "$KIOSK_TOKEN_FILE")"
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 32 > "$KIOSK_TOKEN_FILE" 2>/dev/null
+    else
+        head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$KIOSK_TOKEN_FILE"
+    fi
+    chmod 0644 "$KIOSK_TOKEN_FILE" 2>/dev/null || true
+    echo "[kiosk-install] generated kiosk auth-bypass token ($KIOSK_TOKEN_FILE)"
+fi
+
 # Pre-create Xorg log dir for the kiosk user
 install -d -o "$KIOSK_USER" -g "$KIOSK_USER" -m 0755 \
     "$KIOSK_HOME/.local" "$KIOSK_HOME/.local/share" "$KIOSK_HOME/.local/share/xorg"
+
+# The kiosk user must own its HOME and be able to write .Xauthority, the openbox
+# cache and the Chromium profile. Some images create /home/<user> root-owned
+# (the home existed before the user did), which makes Chromium's zygote abort
+# and openbox fail to create its cache — the session then dies on every start.
+# Fix it (idempotent; only re-chown the top dir when it isn't already correct so
+# a large home is not needlessly walked).
+if [[ "$(stat -c %U "$KIOSK_HOME" 2>/dev/null)" != "$KIOSK_USER" ]]; then
+    chown "$KIOSK_USER:$KIOSK_USER" "$KIOSK_HOME" 2>/dev/null \
+        && echo "[kiosk-install] fixed ownership of $KIOSK_HOME -> $KIOSK_USER" || true
+fi
+install -d -o "$KIOSK_USER" -g "$KIOSK_USER" -m 0755 \
+    "$KIOSK_HOME/.cache" "$KIOSK_HOME/.config"
+
+# If the kiosk is already enabled (re-run to heal a broken install), clear any
+# crash-loop backoff and restart so the new group membership takes effect — a
+# session only picks up groups on a fresh start, so the old crash-looping one
+# would otherwise keep failing until a reboot.
+if command -v systemctl >/dev/null 2>&1 && systemctl is-enabled ragnar-kiosk.service >/dev/null 2>&1; then
+    systemctl reset-failed ragnar-kiosk.service 2>/dev/null || true
+    systemctl restart ragnar-kiosk.service 2>/dev/null || true
+    echo "[kiosk-install] restarted ragnar-kiosk.service to apply new group membership"
+fi
 
 echo "[kiosk-install] done. Enable with: sudo systemctl enable --now ragnar-kiosk.service"

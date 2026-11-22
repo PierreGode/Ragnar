@@ -29,6 +29,7 @@ from comment import Commentaireia
 from logger import Logger
 import subprocess  
 from shared import detect_wifi_interface
+from ups_hat import battery_source
 
 def _short_scan_error(err):
     """Squeeze a BT/Zigbee scanner error into the ~10 chars the net-diag card's
@@ -141,8 +142,47 @@ NETDIAG_CYCLE_SECONDS = 5
 #   0=STATS  1=MAP  2=GPS  3=SKY  4=SESSION  5=VIKING
 # The 2.7" e-paper HAT is unaffected — it keeps its KEY3 stats/map toggle.
 WARDRIVE_PAGE_COUNT = 6
+
+# Dark colour theme for those screens on the colour LCD HAT (see
+# Display._wd_color_panel / _wd_c). Unused on 1-bit panels.
+_WD_COLORS = {
+    'bg':    (0, 0, 0),
+    'ink':   (236, 236, 228),   # values
+    'dim':   (140, 146, 156),   # row labels, footer key hints
+    'frame': (70, 78, 90),      # border + dividers
+    'grid':  (70, 78, 90),      # sky-view rings / crosshair
+    'title': (255, 200, 90),    # page title, page counter, viking
+    'b24':   (255, 176, 60),    # 2.4 GHz  - amber
+    'b5':    (60, 210, 255),    # 5 GHz    - cyan
+    'b6':    (205, 135, 255),   # 6 GHz    - violet
+    'wifi':  (90, 235, 130),    # Wi-Fi total - green
+    'ble':   (95, 160, 255),    # BLE total   - blue
+    'good':  (90, 235, 130),
+    'warn':  (255, 190, 70),
+    'bad':   (255, 95, 85),
+}
 (WD_PAGE_STATS, WD_PAGE_MAP, WD_PAGE_GPS, WD_PAGE_SKY,
  WD_PAGE_SESSION, WD_PAGE_VIKING) = range(6)
+
+# Display types that manage their own driver in a dedicated _run_* method and
+# legitimately leave epd_helper as None. For every other type, a None helper
+# means EPD init failed and we must not call methods on it in the render loop.
+_SELF_MANAGED_DISPLAYS = ("gc9a01", "ssd1306", "lcd1602", "max7219_4panel", "max7219_8panel")
+
+
+class _NullEPDHelper:
+    """No-op stand-in for an EPD helper that failed to initialise.
+
+    When a real SPI/EPD panel can't be driven (for example the kernel fbtft
+    driver already owns it for a framebuffer kiosk), the render loop would
+    otherwise call methods on ``None`` and raise on every frame — freezing the
+    web ``screen.png`` mirror and pegging a CPU core. Returning a no-op for any
+    attribute access lets the loop keep running and updating screen.png.
+    """
+
+    def __getattr__(self, _name):
+        return lambda *args, **kwargs: None
+
 
 class Display:
     def __init__(self, shared_data):
@@ -169,6 +209,14 @@ class Display:
 
         try:
             self.epd_helper = self.shared_data.epd_helper
+            # A configured EPD panel whose helper is None means init failed
+            # (e.g. the SPI panel is owned by the kernel fbtft driver). Fall back
+            # to a no-op helper so the render loop keeps writing screen.png
+            # headlessly instead of crash-looping on None. Self-managed display
+            # types legitimately use None and are handled by their _run_* method.
+            if self.epd_helper is None and self.config.get("epd_type") not in _SELF_MANAGED_DISPLAYS:
+                logger.warning(f"EPD helper for '{self.config.get('epd_type')}' unavailable; rendering headlessly (screen.png only).")
+                self.epd_helper = _NullEPDHelper()
             # MAX7219, LCD1602 and other non-EPD displays set epd_helper to None;
             # skip EPD-specific init — their _run_* method handles setup.
             if self.epd_helper is not None:
@@ -210,6 +258,15 @@ class Display:
                 self.button_listener.start()
             except Exception as e:
                 logger.warning(f"LCD HAT input listener unavailable: {e}")
+        elif self.config.get("epd_type") == "st7789v2":
+            # M5Stack CardputerZero: 46-key TCA8418 keyboard drives the same
+            # page/net-diag/wardriving state as the LCD HAT joystick.
+            try:
+                from cardputer_input import CardputerInputListener
+                self.button_listener = CardputerInputListener(shared_data)
+                self.button_listener.start()
+            except Exception as e:
+                logger.warning(f"CardputerZero keyboard listener unavailable: {e}")
         elif self.is_wide and EPDButtonListener is not None:
             self.button_listener = EPDButtonListener(shared_data)
             self.button_listener.start()
@@ -799,7 +856,15 @@ class Display:
         return self.shared_data.manual_mode
 
     def is_interface_connected(self, interface):
-        """Check if any device is connected to the specified interface."""
+        """Check if any device is connected to the specified interface.
+
+        A missing interface is a normal condition (e.g. ``usb0`` when the box is
+        not set up as a USB-ethernet gadget), so treat it as "not connected"
+        quietly instead of logging an error on every poll — ``ip neigh show dev
+        usb0`` otherwise fails with ``Cannot find device "usb0"`` every cycle.
+        """
+        if not os.path.exists(f'/sys/class/net/{interface}'):
+            return False
         try:
             result = subprocess.Popen(['ip', 'neigh', 'show', 'dev', interface], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             output, error = result.communicate()
@@ -812,17 +877,12 @@ class Display:
             return False
 
     def is_usb_connected(self):
-        """Check if any device is connected to the USB interface."""
-        try:
-            result = subprocess.Popen(['ip', 'neigh', 'show', 'dev', 'usb0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            output, error = result.communicate()
-            if result.returncode != 0:
-                logger.error(f"Error executing 'ip neigh show dev usb0': {error}")
-                return False
-            return bool(output.strip())
-        except Exception as e:
-            logger.error(f"Error checking USB connection status: {e}")
-            return False
+        """Check if any device is connected to the USB (usb0) interface.
+
+        usb0 only exists when the box is a USB-ethernet gadget; on Wi-Fi /
+        Ethernet-HAT / dongle setups it is absent, which is not an error.
+        """
+        return self.is_interface_connected('usb0')
 
     def _sleep_interruptible(self, current_page):
         """Sleep for screen_delay but wake early if button changes the page.
@@ -842,6 +902,7 @@ class Display:
                 time.sleep(0.1)
             return
         wd_page = getattr(self.button_listener, 'wardrive_page', 0)
+        key_seq = getattr(self.button_listener, 'key_seq', 0)
         # Check every 0.1s if page changed, otherwise do full sleep
         steps = max(1, int(self.shared_data.screen_delay / 0.1))
         for _ in range(steps):
@@ -849,6 +910,8 @@ class Display:
                 return  # Page changed, skip remaining sleep
             if getattr(self.button_listener, 'wardrive_page', 0) != wd_page:
                 return  # Wardriving sub-page changed (joystick)
+            if getattr(self.button_listener, 'key_seq', 0) != key_seq:
+                return  # A key was pressed (keyboard echo / any action)
             if self._wardriving_active_cheap() != wd_active0:
                 return  # Wardriving started/stopped — redraw now
             time.sleep(0.1)
@@ -870,6 +933,40 @@ class Display:
                         or getattr(eng, '_starting', False))
         except Exception:
             return False
+
+    # --- CardputerZero manual display blank ("0" key) ---------------------
+
+    def _cardputer_display_off(self):
+        """True when the CardputerZero keyboard has blanked the display. On
+        every other board the listener has no such flag, so this is False."""
+        return bool(getattr(self.button_listener, 'display_off', False))
+
+    def _set_cardputer_backlight(self, on):
+        """Switch the LCD backlight through the st7789v2 driver, if this panel
+        has one. Returns True when the driver reports it acted."""
+        epd = getattr(self.epd_helper, 'epd', None)
+        if epd is not None and hasattr(epd, 'set_backlight'):
+            try:
+                return bool(epd.set_backlight(on))
+            except Exception as e:
+                logger.warning("CardputerZero backlight %s failed: %s",
+                               "on" if on else "off", e)
+        return False
+
+    def _run_display_off(self):
+        """Hold the screen dark while the "0"-key blank is set: backlight off,
+        then idle (Ragnar keeps running) until the key is pressed again or the
+        service stops. Re-lights the backlight on the way out so the next frame
+        is visible. The web preview (screen.png) keeps its last frame."""
+        if not self._set_cardputer_backlight(False):
+            logger.info("CardputerZero: display-off requested but the backlight "
+                        "could not be switched; idling anyway")
+        try:
+            while (self._cardputer_display_off()
+                   and not self.shared_data.display_should_exit):
+                time.sleep(0.1)
+        finally:
+            self._set_cardputer_backlight(True)
 
     def _get_cached_page_data(self, key, fetch_fn, ttl=10):
         """Get cached page data, refreshing if older than ttl seconds."""
@@ -952,8 +1049,27 @@ class Display:
         self._unit_title_cache = (key, title)
         return title
 
+    # Footer key hints as the CardputerZero's keyboard labels them. The keys
+    # drive the LCD HAT's input layers (cardputer_input.py): F/X/Z/C are the
+    # joystick directions, OK (Enter) its centre press, Esc goes back.
+    _KEYBOARD_HINTS = {
+        "K1:Home K2:Flip K3:Next K4:Rst": "F/X/Z/C:Page OK:Diag Esc:Home A:Auto P:Cam 0:Off Bksp:Flip",
+        "K2 back · press=open":           "F/X:Move  OK:Open  Esc:Back",
+        "K1 back to pages":               "OK:Close  Esc:Back",
+        "K1Exit K2WiFi K3AP":             "Z/C:Page Esc:Exit Bksp:WiFi Tab:AP",
+        "K1Exit K2WiFi K3APoff":          "Z/C:Page Esc:Exit Bksp:WiFi Tab:AP-off",
+    }
+
+    def _key_hint(self, hint):
+        """The footer hint for this panel's controls: the keyboard wording on
+        the CardputerZero, the text as given everywhere else."""
+        if self.config.get("epd_type") == "st7789v2":
+            return self._KEYBOARD_HINTS.get(hint, hint)
+        return hint
+
     def _draw_page_frame(self, draw, title, hint="K1:Home K2:Flip K3:Next K4:Rst"):
         """Draw standard page frame: border, title, divider, footer."""
+        hint = self._key_hint(hint)
         w = getattr(self, 'render_w', self.shared_data.width)
         h = getattr(self, 'render_h', self.shared_data.height)
         sx = getattr(self, 'render_sx', self.scale_factor_x)
@@ -963,16 +1079,20 @@ class Display:
         # DOCTOR") aren't clipped mid-word on the narrow LCD.
         font_title = self._fit_font('Viking.TTF', self.shared_data.font_viking,
                                     title, w - int(8 * sx))
-        draw.rectangle((1, 1, w - 1, h - 1), outline=0)
-        draw.text((int(4 * sx), int(4 * sy)), title, font=font_title, fill=0)
-        draw.line((1, int(22 * sy), w - 1, int(22 * sy)), fill=0)
-        draw.line((1, h - int(18 * sy), w - 1, h - int(18 * sy)), fill=0)
+        # Outer border: kept on the wider e-paper panels (where it sits clear of
+        # the edge), dropped on the narrow LCD HAT where the ST7735S's few-pixel
+        # visible-area offset makes an edge-hugging line look ragged.
+        if w >= 150:
+            draw.rectangle((1, 1, w - 1, h - 1), outline=self._wd_c(draw, 'frame'))
+        draw.text((int(4 * sx), int(4 * sy)), title, font=font_title, fill=self._wd_c(draw, 'title'))
+        draw.line((1, int(22 * sy), w - 1, int(22 * sy)), fill=self._wd_c(draw, 'frame'))
+        draw.line((1, h - int(18 * sy), w - 1, h - int(18 * sy)), fill=self._wd_c(draw, 'frame'))
         # Trim the footer hint so it never overflows a narrow panel (e.g. the
         # 128px LCD HAT); on wider e-paper it already fits, so this is a no-op.
         avail = w - int(8 * sx)
         while hint and font.getlength(hint) > avail:
             hint = hint[:-1]
-        draw.text((int(4 * sx), h - int(16 * sy)), hint, font=font, fill=0)
+        draw.text((int(4 * sx), h - int(16 * sy)), hint, font=font, fill=self._wd_c(draw, 'dim'))
 
     def _draw_stat_rows(self, draw, y, stats):
         """Draw key-value stat rows. Returns final y position."""
@@ -987,8 +1107,8 @@ class Display:
         pad_x = int(6 * sx)
         for label, value in stats:
             val_str = str(value)[:22]
-            draw.text((pad_x, y), label, font=font, fill=0)
-            draw.text((w - pad_x - font.getlength(val_str), y), val_str, font=font, fill=0)
+            draw.text((pad_x, y), label, font=font, fill=self._wd_c(draw, 'dim'))
+            draw.text((w - pad_x - font.getlength(val_str), y), val_str, font=font, fill=self._wd_c(draw, 'ink'))
             y += line_h
         return y
 
@@ -1020,8 +1140,8 @@ class Display:
             available = right_edge - value_x
             while text and font.getlength(text) > available:
                 text = text[:-1]
-            draw.text((pad_x, y), label_str, font=font, fill=0)
-            draw.text((value_x, y), text, font=font, fill=0)
+            draw.text((pad_x, y), label_str, font=font, fill=self._wd_c(draw, 'ink'))
+            draw.text((value_x, y), text, font=font, fill=self._wd_c(draw, 'ink'))
             y += line_h
         return y
 
@@ -1046,19 +1166,23 @@ class Display:
             for kind, payload in row_groups:
                 if kind == 'divider':
                     y += int(2 * sy)
-                    d.line((int(4 * sx), y, w - int(4 * sx), y), fill=0)
+                    d.line((int(4 * sx), y, w - int(4 * sx), y), fill=self._wd_c(d, 'frame'))
                     y += int(4 * sy)
                 else:
                     y = self._draw_stat_rows(d, y, payload)
             return y
 
-        total_h = _emit(ImageDraw.Draw(Image.new('1', (w, 1), 255)), 0)
+        # Scratch canvases match the page's mode, so the colours _wd_c hands
+        # out are valid on them (an RGB ink on a 1-bit canvas raises).
+        mode = 'RGB' if getattr(image, 'mode', '1') == 'RGB' else '1'
+        blank = _WD_COLORS['bg'] if mode == 'RGB' else 255
+        total_h = _emit(ImageDraw.Draw(Image.new(mode, (w, 1), blank)), 0)
 
         if total_h <= available_h:
             _emit(draw, top_y)
             return
 
-        strip = Image.new('1', (w, total_h), 255)
+        strip = Image.new(mode, (w, total_h), blank)
         _emit(ImageDraw.Draw(strip), 0)
 
         overflow = total_h - available_h
@@ -1317,11 +1441,13 @@ class Display:
         dbm_w = font.getlength(dbm_txt) + int(5 * sx)
         bar_x1 = x1 - dbm_w
         if bar_x1 > x0:
-            draw.rectangle([x0, y, bar_x1, y + bar_h], outline=0)
+            draw.rectangle([x0, y, bar_x1, y + bar_h], outline=self._wd_c(draw, 'frame'))
             fill_w = int((bar_x1 - x0) * q / 100.0)
             if fill_w > 0:
-                draw.rectangle([x0, y, x0 + fill_w, y + bar_h], fill=0)
-        draw.text((bar_x1 + int(4 * sx), y - int(1 * sy)), dbm_txt, font=font, fill=0)
+                # Green quality bar, matching the web GUI's signal meters; on a
+                # 1-bit panel _wd_c returns 0 so it stays a solid black bar.
+                draw.rectangle([x0, y, x0 + fill_w, y + bar_h], fill=self._wd_c(draw, 'good'))
+        draw.text((bar_x1 + int(4 * sx), y - int(1 * sy)), dbm_txt, font=font, fill=self._wd_c(draw, 'ink'))
         return y + bar_h
 
     def _draw_signal_bars(self, draw, y, aps):
@@ -1346,7 +1472,7 @@ class Display:
             s = ssid
             while s and font.getlength(s) > name_w:
                 s = s[:-1]
-            draw.text((pad_x, y), s or '·', font=font, fill=0)
+            draw.text((pad_x, y), s or '·', font=font, fill=self._wd_c(draw, 'ink'))
             self._draw_signal_bar(draw, y, ap.get('signal'),
                                   pad_x + name_w, w - pad_x)
             y += row_h
@@ -1361,16 +1487,20 @@ class Display:
         w = getattr(self, 'render_w', self.shared_data.width)
         h = getattr(self, 'render_h', self.shared_data.height)
         font = self.shared_data.font_arial9
+        rgb = getattr(draw, 'mode', '1') == 'RGB'
         # Thin border + footer hint only (no "NET CARDS" title / top divider),
-        # reclaiming that space for the list.
-        draw.rectangle((1, 1, w - 1, h - 1), outline=0)
+        # reclaiming that space for the list. The border is dropped on the narrow
+        # LCD HAT (like _draw_page_frame) where the ST7735S edge offset makes it
+        # look ragged.
+        if w >= 150:
+            draw.rectangle((1, 1, w - 1, h - 1), outline=self._wd_c(draw, 'frame'))
         foot_y = h - int(18 * sy)
-        draw.line((1, foot_y, w - 1, foot_y), fill=0)
-        hint = "K2 back · press=open"
+        draw.line((1, foot_y, w - 1, foot_y), fill=self._wd_c(draw, 'frame'))
+        hint = self._key_hint("K2 back · press=open")
         avail_hint = w - int(8 * sx)
         while hint and font.getlength(hint) > avail_hint:
             hint = hint[:-1]
-        draw.text((int(4 * sx), h - int(16 * sy)), hint, font=font, fill=0)
+        draw.text((int(4 * sx), h - int(16 * sy)), hint, font=font, fill=self._wd_c(draw, 'dim'))
         pad_x = int(8 * sx)
         n = len(NETDIAG_CARD_NAMES)
         # Fit every card between the top and the footer divider. The lower bound
@@ -1389,11 +1519,15 @@ class Display:
             sel = (i == highlight % n)
             label = f"{i + 1}. {nm}"
             if sel:
+                # Highlighted row: amber bar with dark text on the colour LCD;
+                # the classic black bar with white text on a 1-bit panel.
                 draw.rectangle([int(3 * sx), y,
-                                w - int(3 * sx), y + row_h - int(1 * sy)], fill=0)
-                draw.text((pad_x, y + text_dy), label, font=font, fill=1)
+                                w - int(3 * sx), y + row_h - int(1 * sy)],
+                               fill=(_WD_COLORS['title'] if rgb else 0))
+                draw.text((pad_x, y + text_dy), label, font=font,
+                          fill=(_WD_COLORS['bg'] if rgb else 1))
             else:
-                draw.text((pad_x, y + text_dy), label, font=font, fill=0)
+                draw.text((pad_x, y + text_dy), label, font=font, fill=self._wd_c(draw, 'ink'))
             y += row_h
 
     def _render_netdiag_page(self, image, draw, page, frozen=False, func_idx=-1):
@@ -1409,7 +1543,15 @@ class Display:
         state = "auto" if not frozen else "manual"
         render_w = getattr(self, 'render_w', self.shared_data.width)
         funcs = netdiag_card_funcs(page)
-        if render_w < 150:
+        if self.config.get("epd_type") == "st7789v2":
+            # CardputerZero: the LCD HAT's card model on a keyboard, with room
+            # to name the keys beside the highlighted function.
+            if funcs and func_idx >= 0:
+                hint = (f"{page + 1}/{NETDIAG_PAGE_COUNT} >{funcs[func_idx % len(funcs)][0]}"
+                        "  Z/C:Card F/X:Func OK:Run Esc:Exit")
+            else:
+                hint = f"{page + 1}/{NETDIAG_PAGE_COUNT} {state}  Z/C:Card Bksp:Menu Esc:Exit"
+        elif render_w < 150:
             # Narrow LCD HAT: show the page counter + the highlighted function
             # (the joystick's Up/Down selects it, press runs it). Cards with no
             # functions just show the auto/manual state.
@@ -1468,7 +1610,7 @@ class Display:
             lldp = data.get('lldp') or {}
             if not lldp.get('installed', True):
                 self._draw_stat_rows(draw, y, [("LLDP", "not installed"),
-                                               ("Enable via", "Switch tab")])
+                                               ("Enable via", "Diag > L2")])
                 return
             n = lldp.get('neighbor')
             if not n:
@@ -1672,7 +1814,7 @@ class Display:
         # Adapter name, right-aligned on the header row (answers "which radio?").
         if iface:
             iw = font.getlength(iface)
-            draw.text((w - pad_x - iw, y), iface, font=font, fill=0)
+            draw.text((w - pad_x - iw, y), iface, font=font, fill=self._wd_c(draw, 'ink'))
             hdr_avail = w - 2 * pad_x - iw - int(4 * sx)
         else:
             hdr_avail = w - 2 * pad_x
@@ -1681,7 +1823,7 @@ class Display:
         chans = info.get('channels') or []
         if not chans:
             reason = 'not supported' if not supported.get(band, True) else 'no APs seen'
-            draw.text((pad_x, y), band_lbl, font=font, fill=0)
+            draw.text((pad_x, y), band_lbl, font=font, fill=self._wd_c(draw, 'ink'))
             self._draw_stat_rows(draw, y + int(13 * sy),
                                  [(reason, ""), ("Up/Down", "= band")])
             return
@@ -1696,7 +1838,7 @@ class Display:
             hdr += f"  ch{best.get('channel')} {int(best_sig)}"
         while hdr and font.getlength(hdr) > hdr_avail:
             hdr = hdr[:-1]
-        draw.text((pad_x, y), hdr, font=font, fill=0)
+        draw.text((pad_x, y), hdr, font=font, fill=self._wd_c(draw, 'ink'))
 
         # Plot area under the header, leaving a row for channel-axis labels
         # above the footer divider (h - 18·sy) so they don't collide with it.
@@ -1706,7 +1848,7 @@ class Display:
         x0, x1 = pad_x, w - pad_x
         if bottom - top < int(10 * sy) or x1 - x0 < 8:
             return
-        draw.line((x0, axis_y, x1, axis_y), fill=0)         # baseline
+        draw.line((x0, axis_y, x1, axis_y), fill=self._wd_c(draw, 'frame'))         # baseline
         n = len(chans)
         slot = (x1 - x0) / float(n)
         bar_w = max(1, int(slot) - 1)
@@ -1720,18 +1862,18 @@ class Display:
                 continue
             by = axis_y - bh
             if c.get('radar'):                              # DFS/radar → hollow
-                draw.rectangle([bx, by, bx + bar_w, axis_y], outline=0)
+                draw.rectangle([bx, by, bx + bar_w, axis_y], outline=self._wd_c(draw, 'frame'))
             else:
-                draw.rectangle([bx, by, bx + bar_w, axis_y], fill=0)
+                draw.rectangle([bx, by, bx + bar_w, axis_y], fill=self._wd_c(draw, 'ink'))
             if c is best and bh > 0:                        # mark the busiest
-                draw.line((bx, by - int(3 * sy), bx + bar_w, by - int(3 * sy)), fill=0)
+                draw.line((bx, by - int(3 * sy), bx + bar_w, by - int(3 * sy)), fill=self._wd_c(draw, 'frame'))
 
         # Channel-axis ticks: label first, middle and last channel numbers.
         for i in (0, n // 2, n - 1):
             lab = str(chans[i].get('channel'))
             lx = int(x0 + i * slot)
             lx = min(lx, x1 - int(font.getlength(lab)))
-            draw.text((max(x0, lx), axis_y + int(1 * sy)), lab, font=font, fill=0)
+            draw.text((max(x0, lx), axis_y + int(1 * sy)), lab, font=font, fill=self._wd_c(draw, 'ink'))
 
     def _draw_wrapped_note(self, draw, y, text, max_lines=3):
         """Word-wrap a short note across up to max_lines using the small font."""
@@ -1755,7 +1897,7 @@ class Display:
             lines.append(cur)
         line_h = int(11 * sy)
         for ln in lines[:max_lines]:
-            draw.text((pad_x, y), ln, font=font, fill=0)
+            draw.text((pad_x, y), ln, font=font, fill=self._wd_c(draw, 'ink'))
             y += line_h
         return y
 
@@ -1778,7 +1920,7 @@ class Display:
             big = str(verdict[0])
             font_big = self.shared_data.font_viking
             tw = font_big.getlength(big)
-            draw.text(((w - tw) / 2, y), big, font=font_big, fill=0)
+            draw.text(((w - tw) / 2, y), big, font=font_big, fill=self._wd_c(draw, 'ink'))
             y += int(24 * sy)
         y = self._draw_stat_rows(draw, y, result.get('rows') or [])
         note = result.get('note')
@@ -1787,6 +1929,7 @@ class Display:
 
     def _commit_netdiag_frame(self, image):
         """Push a rendered netdiag frame to the panel and the web mirror."""
+        self._cardputer_overlays(image)
         epd_img = _apply_epd_rotation(image, self.screen_reversed)
         self.epd_helper.display_partial(epd_img)
         self.epd_helper.display_partial(epd_img)
@@ -1799,6 +1942,198 @@ class Display:
         except Exception:
             pass
 
+    # ── Camera screen (CardputerZero: P key) ─────────────────────────────
+    CAMERA_WEB_MIRROR_SECONDS = 1.0
+
+    def _push_frame_quiet(self, image):
+        """One frame to the panel without the per-update log line, for the
+        camera view's several frames a second."""
+        epd_img = _apply_epd_rotation(image, self.shared_data.screen_reversed)
+        try:
+            epd = self.epd_helper.epd
+            epd.displayPartial(epd.getbuffer(epd_img))
+        except Exception:
+            self.epd_helper.display_partial(epd_img)
+
+    def _camera_layout(self, W, H):
+        """(view box, text box) on a W x H canvas: the largest 4:3 picture,
+        and what is left beside it (wide screen) or under it (tall)."""
+        if W * 3 >= H * 4:
+            vw = int(H * 4 / 3)
+            return (0, 0, vw, H), (vw, 0, W, H)
+        vh = int(W * 3 / 4)
+        return (0, 0, W, vh), (0, vh, W, H)
+
+    def _render_camera_frame(self, image, draw, picture, bl, cam, problem=None):
+        W, H = image.size
+        view, side = self._camera_layout(W, H)
+        if picture is not None:
+            image.paste(picture, (view[0], view[1]))
+        font = self.shared_data.font_arial9
+        title_font = self._font_at('Viking.TTF', 13) or font
+        C = _WD_COLORS
+        x, y = side[0] + 5, side[1] + 16
+        width = side[2] - side[0] - 8
+        try:
+            rec = cam.recording() if cam is not None else None
+        except Exception:
+            rec = None
+        video = bool(getattr(bl, 'camera_video', False)) or bool(rec)
+        draw.text((x, y), "VIDEO" if video else "PHOTO", font=title_font, fill=C['title'])
+        y += 20
+        if rec:
+            secs = int(rec.get('seconds', 0))
+            draw.ellipse((x, y + 2, x + 7, y + 9), fill=C['bad'])
+            draw.text((x + 11, y), "REC %d:%02d" % (secs // 60, secs % 60), font=font, fill=C['bad'])
+            y += 14
+            # A red frame around the picture too: recording must be obvious.
+            draw.rectangle((view[0], view[1], view[2] - 1, view[3] - 1), outline=C['bad'])
+        note = getattr(bl, 'camera_note', None)
+        text = problem or (note[0] if note and time.monotonic() < note[1] else None)
+        if text:
+            line = ""
+            for word in str(text).split():
+                trial = (line + " " + word).strip()
+                if line and font.getlength(trial) > width:
+                    draw.text((x, y), line, font=font, fill=C['warn'] if problem else C['good'])
+                    y += 11
+                    line = word
+                else:
+                    line = trial
+            if line:
+                draw.text((x, y), line, font=font, fill=C['warn'] if problem else C['good'])
+        hints = ["OK: stop" if rec else ("OK: record" if video else "OK: photo")]
+        if not rec:
+            hints.append("Z/C: mode")
+        hints.append("Esc: exit")
+        hy = side[3] - 4 - 11 * len(hints)
+        for hint in hints:
+            draw.text((x, hy), hint, font=font, fill=C['dim'])
+            hy += 11
+
+    def _camera_screen(self, bl, W, H):
+        """The camera's live view on the device's own screen, with OK to take
+        a photo or start / stop a video (cardputer_input.py handles the keys).
+        Returns when the camera screen is left."""
+        import io
+        import pi_camera
+        cam = pi_camera.get_camera(self.config)
+        view, _ = self._camera_layout(W, H)
+        size = (view[2] - view[0], view[3] - view[1])
+        holding = False
+        picture = None
+        last = 0
+        next_try = 0.0
+        next_web = 0.0
+        try:
+            while getattr(bl, 'camera_mode', False) and not self.shared_data.display_should_exit:
+                # "0" blanks the screen from the camera view too; any recording
+                # keeps running (it is driven in pi_camera, not here).
+                if self._cardputer_display_off():
+                    self._run_display_off()
+                    continue
+                now = time.monotonic()
+                problem = None
+                if not holding and now >= next_try:
+                    holding = cam.acquire()
+                    next_try = now + 3.0
+                if not holding:
+                    problem = cam.last_error or "No camera"
+                    time.sleep(0.2)
+                else:
+                    last, frame = cam.wait_frame(last, 0.5)
+                    if frame is not None:
+                        try:
+                            shot = Image.open(io.BytesIO(frame))
+                            shot.draft('RGB', size)
+                            picture = shot.convert('RGB').resize(size, Image.BILINEAR)
+                        except Exception as e:
+                            logger.debug(f"camera frame decode error: {e}")
+                    elif not cam.streaming and not getattr(bl, 'camera_busy', False):
+                        # The live view ended by itself: say why and retry.
+                        problem = cam.last_error or "Camera stopped"
+                        if now >= next_try:
+                            cam.ensure_stream()
+                            next_try = now + 3.0
+                image = Image.new('RGB', (W, H), _WD_COLORS['bg'])
+                draw = ImageDraw.Draw(image)
+                self._render_camera_frame(image, draw, picture, bl, cam, problem)
+                self._cardputer_overlays(image)
+                self._push_frame_quiet(image)
+                if now >= next_web:
+                    next_web = now + self.CAMERA_WEB_MIRROR_SECONDS
+                    try:
+                        web_img = _apply_web_rotation(image, self.shared_data.web_screen_reversed)
+                        with open(os.path.join(self.shared_data.webdir, "screen.png"), 'wb') as f:
+                            web_img.save(f)
+                    except Exception:
+                        pass
+        finally:
+            if holding:
+                cam.release()
+
+    def _cardputer_landscape(self, render_w=None, render_h=None):
+        """True on the M5Stack CardputerZero's built-in 320x170 LCD held the
+        way its keyboard dictates (landscape, either way up). It gets its own
+        wide main screen, the paged wardriving screens and keyboard key
+        hints. Turned on its side (90/270) it falls back to the generic
+        layouts."""
+        if self.config.get("epd_type") != "st7789v2":
+            return False
+        w = render_w if render_w is not None else getattr(self, 'render_w', self.shared_data.width)
+        h = render_h if render_h is not None else getattr(self, 'render_h', self.shared_data.height)
+        return w > h
+
+    def _lcd_color_panel(self, render_w=None, render_h=None):
+        """True when the main screen should render in colour: the 1.44"
+        ST7735S LCD HAT (a 128x128 RGB TFT) and the CardputerZero's 320x170
+        LCD in landscape. Every other panel is 1-bit. `lcd_color: false` in
+        the config keeps the black-on-white look (the wardriving screens have
+        their own switch, `wardriving_lcd_color`)."""
+        if not self.config.get("lcd_color", True):
+            return False
+        if self._cardputer_landscape(render_w, render_h):
+            return True
+        if self.config.get("epd_type") != "st7735s":
+            return False
+        w = render_w if render_w is not None else getattr(self, 'render_w', self.shared_data.width)
+        h = render_h if render_h is not None else getattr(self, 'render_h', self.shared_data.height)
+        return w < 150 and h < 170
+
+    def _paste_ink(self, image, art, pos, color):
+        """Paste a black-on-white icon. On a colour canvas its ink is used as
+        a stencil and laid down in `color`; on a 1-bit canvas it is pasted
+        as-is."""
+        if getattr(image, 'mode', '1') == 'RGB' and color != 0:
+            from PIL import ImageOps
+            image.paste(color, pos, mask=ImageOps.invert(art.convert('L')))
+        else:
+            image.paste(art, pos)
+
+    def _color_character(self, image, frame, target_h=None, max_w=None):
+        """The current character as a full-colour RGBA sprite sized for a
+        colour canvas, or None (1-bit canvas, colour off, no colour art) so
+        the caller falls back to its 1-bit drawing. Fits `target_h`, and
+        `max_w` when given, preserving the aspect ratio."""
+        if getattr(image, 'mode', '1') != 'RGB' or frame is None:
+            return None
+        try:
+            sprite = self.shared_data.color_sprite(frame)
+            if sprite is None:
+                return None
+            ratio = (target_h or sprite.height) / sprite.height
+            if max_w:
+                ratio = min(ratio, max_w / sprite.width)
+            size = (max(1, int(round(sprite.width * ratio))), max(1, int(round(sprite.height * ratio))))
+            if size != sprite.size:
+                # Smooth when shrinking; keep the pixels crisp when enlarging.
+                resample = Image.LANCZOS if ratio < 1 else Image.NEAREST
+                sprite = sprite.resize(size, resample)
+            return sprite
+        except Exception as e:
+            logger.debug(f"colour character unavailable: {e}")
+            return None
+
     def _render_main_compact(self, image, draw, W, H):
         """Compact PAGE_MAIN layout for a small square panel (e.g. the 128x128
         LCD HAT). The default dashboard is authored for a ~122x250 canvas, so on
@@ -1808,12 +2143,16 @@ class Display:
         the speech line beside a shrunk character, all inside 128x128."""
         sd = self.shared_data
         font = sd.font_arial9
-        # --- frame + header ---
-        # The header keeps a small connection glyph in the top-left corner and
-        # the battery in the top-right, so the centred title is fitted to the
-        # middle strip only (never colliding with either) and the divider sits
-        # below all three.
-        draw.rectangle((0, 0, W - 1, H - 1), outline=0)
+        # On the colour LCD HAT the canvas is RGB with a dark background and
+        # every element gets a theme colour; on a 1-bit canvas c() is plain
+        # black ink, exactly as before.
+        c = lambda key: self._wd_c(draw, key)
+        # --- header ---
+        # No outer border frame: a line hugging the panel edge collides with the
+        # ST7735S's few-pixel visible-area offset and looks ragged. The section
+        # dividers below are kept. The header keeps a small connection glyph in
+        # the top-left corner and the battery in the top-right, so the centred
+        # title is fitted to the middle strip only (never colliding with either).
         # Left connection glyph + IP octet, confined to the top-left so they
         # clear the title. `left_used` grows to whatever they occupy so the
         # title padding can step around them.
@@ -1823,7 +2162,7 @@ class Display:
                 ap_text = "AP"
                 if getattr(sd, 'ap_client_count', 0) > 0:
                     ap_text = f"AP:{sd.ap_client_count}"
-                draw.text((2, 3), ap_text, font=font, fill=0)
+                draw.text((2, 3), ap_text, font=font, fill=c('warn'))
                 left_used = 2 + int(font.getlength(ap_text))
             elif getattr(sd, 'wifi_connected', False):
                 try:
@@ -1836,28 +2175,27 @@ class Display:
                 cx, cy = 4, 13
                 for i in range(waves):
                     r = 3 + i * 3
-                    draw.arc((cx - r, cy - r, cx + r, cy + r), start=225, end=315, fill=0, width=1)
+                    draw.arc((cx - r, cy - r, cx + r, cy + r), start=225, end=315, fill=c('good'), width=1)
                 left_used = 14
                 try:
                     ip_octet = self.get_wifi_ip_last_octet()
                 except Exception:
                     ip_octet = None
                 if ip_octet:
-                    draw.text((15, 4), ip_octet, font=font, fill=0)
+                    draw.text((15, 4), ip_octet, font=font, fill=c('dim'))
                     left_used = 15 + int(font.getlength(ip_octet))
         except Exception:
             pass
-        # Battery %, top-right (PiSugar)
+        # Battery %, top-right (PiSugar or Waveshare UPS HAT)
         bat_w = 0
         try:
-            _ri = getattr(sd, 'ragnar_instance', None)
-            _ps = getattr(_ri, 'pisugar_listener', None) if _ri else None
-            if _ps and _ps.available:
+            _ps = battery_source(sd)
+            if _ps:
                 bl = _ps.get_battery_level()
                 if bl is not None:
                     bt = f"{int(round(bl))}%{'+' if _ps.is_charging() else ''}"
                     bat_w = int(font.getlength(bt)) + 3
-                    draw.text((W - bat_w + 1, 3), bt, font=font, fill=0)
+                    draw.text((W - bat_w + 1, 3), bt, font=font, fill=c('good'))
         except Exception:
             pass
         # Centre the title in the strip between the glyph/IP and the battery.
@@ -1867,8 +2205,8 @@ class Display:
         _title = self._unit_display_title()
         title_font = self._fit_font('Viking.TTF', sd.font_viking, _title, avail)
         tw = title_font.getlength(_title)
-        draw.text((left_pad + (avail - tw) / 2, 1), _title, font=title_font, fill=0)
-        draw.line((1, 16, W - 1, 16), fill=0)
+        draw.text((left_pad + (avail - tw) / 2, 1), _title, font=title_font, fill=c('title'))
+        draw.line((1, 16, W - 1, 16), fill=c('frame'))
 
         # --- two icon+count stat rows (icons ~30% smaller so they fit) ---
         icon_h = 13   # 18px source icons scaled down ~30%
@@ -1886,43 +2224,48 @@ class Display:
 
         def _row(y, items):
             slot = W // len(items)
-            for i, (icon, val) in enumerate(items):
+            for i, (icon, val, tint) in enumerate(items):
                 x = i * slot + 2
                 icon = _fit_icon(icon)
                 if icon is not None:
                     try:
-                        image.paste(icon, (x, y))
+                        self._paste_ink(image, icon, (x, y), c(tint))
                         tx = x + icon.width + 1
                     except Exception:
                         tx = x + icon_h + 1
                 else:
                     tx = x
-                draw.text((tx, y + 2), str(val), font=font, fill=0)
+                draw.text((tx, y + 2), str(val), font=font, fill=c('ink'))
 
-        _row(20, [(getattr(sd, 'target', None), sd.targetnbr),
-                  (getattr(sd, 'port', None),   sd.portnbr),
-                  (getattr(sd, 'vuln', None),   sd.vulnnbr),
-                  (getattr(sd, 'cred', None),   sd.crednbr)])
-        _row(37, [(getattr(sd, 'zombie', None),  sd.zombiesnbr),
-                  (getattr(sd, 'data', None),    sd.datanbr),
-                  (getattr(sd, 'money', None),   sd.coinnbr),
-                  (getattr(sd, 'attacks', None), sd.attacksnbr)])
-        draw.line((1, 54, W - 1, 54), fill=0)
+        _row(20, [(getattr(sd, 'target', None), sd.targetnbr, 'good'),
+                  (getattr(sd, 'port', None),   sd.portnbr,   'b5'),
+                  (getattr(sd, 'vuln', None),   sd.vulnnbr,   'bad'),
+                  (getattr(sd, 'cred', None),   sd.crednbr,   'warn')])
+        _row(37, [(getattr(sd, 'zombie', None),  sd.zombiesnbr, 'b6'),
+                  (getattr(sd, 'data', None),    sd.datanbr,    'ble'),
+                  (getattr(sd, 'money', None),   sd.coinnbr,    'title'),
+                  (getattr(sd, 'attacks', None), sd.attacksnbr, 'b24')])
+        draw.line((1, 54, W - 1, 54), fill=c('frame'))
 
         # --- mood / status lines ---
         try:
             sd.update_ragnarstatus()
         except Exception:
             pass
-        draw.text((3, 56), str(getattr(sd, 'ragnarstatustext', '') or '')[:24], font=font, fill=0)
-        draw.text((3, 66), str(getattr(sd, 'ragnarstatustext2', '') or '')[:24], font=font, fill=0)
+        draw.text((3, 56), str(getattr(sd, 'ragnarstatustext', '') or '')[:24], font=font, fill=c('title'))
+        draw.text((3, 66), str(getattr(sd, 'ragnarstatustext2', '') or '')[:24], font=font, fill=c('dim'))
 
         # --- character sprite, shrunk into the bottom-right corner ---
         vk_w = 0
         vk = getattr(sd, 'imagegen', None)
-        if vk is not None:
+        target_h = 46
+        # Colour canvas: the full-colour character, cut out of its backdrop.
+        sprite = self._color_character(image, vk, target_h)
+        if sprite is not None:
+            vk_w = sprite.width
+            image.paste(sprite, (W - vk_w - 1, H - sprite.height - 1), sprite)
+        elif vk is not None:
             try:
-                target_h = 46
                 if vk.height > target_h:
                     ratio = target_h / vk.height
                     vk = vk.resize((max(1, int(vk.width * ratio)), target_h), Image.NEAREST)
@@ -1943,9 +2286,444 @@ class Display:
             for line in lines:
                 if y > H - 12:
                     break
-                draw.text((3, y), line, font=sd.font_arialbold, fill=0)
+                draw.text((3, y), line, font=sd.font_arialbold, fill=c('ink'))
                 bb = sd.font_arialbold.getbbox(line)
                 y += (bb[3] - bb[1]) + 2
+
+    # What the key echo calls each action.
+    _ACTION_LABELS = {"press": "OK", "back": "back", "auto": "autoscroll",
+                      "key1": "diagnostics", "key2": "flip / WiFi", "key3": "next / AP"}
+    KEY_ECHO_SECONDS = 2.0
+
+    def _draw_battery_icon(self, image, draw, right, top, with_text=True):
+        """Phone-style battery: percentage, then a battery outline filled to
+        the charge level, right-aligned at `right`. Green above 30 %, amber
+        above 15 %, red below; a bolt while charging. Returns the width used
+        (0 when no battery is reporting)."""
+        try:
+            src = battery_source(self.shared_data)
+            level = src.get_battery_level() if src else None
+            if level is None:
+                return 0
+            level = max(0, min(100, int(round(level))))
+            charging = bool(src.is_charging())
+        except Exception:
+            return 0
+        rgb = getattr(image, 'mode', '1') == 'RGB'
+        ink = self._wd_c(draw, 'ink')
+        tint = self._wd_c(draw, 'good' if level > 30 else ('warn' if level > 15 else 'bad'))
+        bg = _WD_COLORS['bg'] if rgb else 255
+        body_w, body_h, nub = 21, 11, 2
+        font = self.shared_data.font_arial9
+        text = f"{level}%" if with_text else ""
+        text_w = int(font.getlength(text)) + 3 if text else 0
+        width = text_w + body_w + nub
+        x0 = right - width
+        # Clear what is underneath so the icon stays readable over artwork.
+        draw.rectangle((x0 - 2, top - 1, right, top + body_h), fill=bg)
+        if text:
+            draw.text((x0, top + 1), text, font=font, fill=ink)
+        bx = x0 + text_w
+        draw.rectangle((bx, top, bx + body_w - 1, top + body_h - 1), outline=ink)
+        draw.rectangle((bx + body_w, top + 3, bx + body_w + nub - 1, top + body_h - 4), fill=ink)
+        inner = body_w - 4
+        fill_w = max(1, int(round(inner * level / 100.0))) if level > 0 else 0
+        if fill_w:
+            draw.rectangle((bx + 2, top + 2, bx + 1 + fill_w, top + body_h - 3), fill=tint)
+        if charging:
+            # Lightning bolt, centred in the body.
+            cx, cy = bx + body_w // 2, top + body_h // 2
+            bolt = [(cx + 1, top + 1), (cx - 3, cy), (cx, cy), (cx - 2, top + body_h - 2),
+                    (cx + 3, cy - 1), (cx, cy - 1)]
+            draw.polygon(bolt, fill=bg if fill_w > inner // 2 else ink)
+        return width + 2
+
+    def _draw_key_echo(self, image, draw):
+        """For a moment after a key press, name the key and what it did in
+        the bottom-left corner. It makes the keyboard self-explaining, and a
+        key that shows nothing here is not reaching Ragnar at all.
+        `cardputer_key_echo: false` turns it off."""
+        if not self.config.get("cardputer_key_echo", True):
+            return
+        last = getattr(self.button_listener, 'last_key', None)
+        if not last:
+            return
+        code, action, when = last
+        if time.monotonic() - when > self.KEY_ECHO_SECONDS:
+            return
+        namer = getattr(self.button_listener, 'key_label', None)
+        label = namer(code) if namer else f"key {code}"
+        # A named key with no action shows its code too, so a wrong name
+        # (a board revision wired differently) can be reported and remapped.
+        if action:
+            text = f"{label}: {self._ACTION_LABELS.get(action, action)}"
+        else:
+            text = f"{label} (code {code}): no action" if not label.startswith("key ") \
+                else f"{label}: no action"
+        rgb = getattr(image, 'mode', '1') == 'RGB'
+        font = self._font_at('Arial.ttf', 11)
+        w = int(font.getlength(text)) + 8
+        h = image.height
+        draw.rectangle((2, h - 17, 2 + w, h - 2),
+                       fill=(_WD_COLORS['title'] if rgb else 0))
+        draw.text((6, h - 16), text, font=font, fill=(_WD_COLORS['bg'] if rgb else 255))
+
+    def _cardputer_overlays(self, image, battery_text=True):
+        """Drawn last on every CardputerZero frame: the battery icon in the
+        top-right corner and the key echo. A no-op on every other panel.
+        `battery_text=False` leaves out the percentage where the corner is
+        tight (the wardriving band counts)."""
+        if self.config.get("epd_type") != "st7789v2":
+            return
+        try:
+            draw = ImageDraw.Draw(image)
+            self._draw_battery_icon(image, draw, image.width - 3, 3, with_text=battery_text)
+            self._draw_key_echo(image, draw)
+        except Exception as e:
+            logger.debug(f"cardputer overlay error: {e}")
+
+    def _render_main_cardputer(self, image, draw, W, H):
+        """PAGE_MAIN for the CardputerZero's 320x170 landscape LCD.
+
+        The character gets the right-hand side at twice its native size (in
+        full colour on a colour canvas); the left column carries the header,
+        two rows of stat icons, the status lines and the speech text. Works on
+        a 1-bit canvas too (`lcd_color: false`): c() is then plain black ink."""
+        sd = self.shared_data
+        rgb = getattr(image, 'mode', '1') == 'RGB'
+        c = lambda key: self._wd_c(draw, key)
+        font = self._font_at('Arial.ttf', 11)
+        small = sd.font_arial9
+
+        # --- character: bottom-right, integer-scaled so the pixels stay even ---
+        vk = getattr(sd, 'imagegen', None)
+        box = H - 8                       # tallest the figure may be
+        art_w = 0
+        sprite = None
+        if rgb and vk is not None:
+            try:
+                sprite = sd.color_sprite(vk)
+            except Exception:
+                sprite = None
+        if sprite is None and vk is not None:
+            sprite = vk
+        if sprite is not None:
+            try:
+                if sprite.height > box:
+                    ratio = box / sprite.height
+                    sprite = sprite.resize((max(1, int(sprite.width * ratio)), box), Image.LANCZOS
+                                           if sprite.mode in ('RGB', 'RGBA') else Image.NEAREST)
+                else:
+                    n = max(1, box // sprite.height)
+                    if n > 1:
+                        sprite = sprite.resize((sprite.width * n, sprite.height * n), Image.NEAREST)
+                art_w = sprite.width
+                pos = (W - art_w - 2, H - sprite.height - 1)
+                if sprite.mode == 'RGBA':
+                    image.paste(sprite, pos, sprite)
+                else:
+                    image.paste(sprite, pos)
+            except Exception as e:
+                logger.debug(f"cardputer character render error: {e}")
+                art_w = 0
+        col_w = W - art_w - 6 if art_w else W - 2     # right edge of the left column
+
+        # --- header: connection glyph + IP, title, battery ---
+        left_used = 3
+        try:
+            if getattr(sd, 'ap_mode_active', False):
+                ap_text = "AP"
+                if getattr(sd, 'ap_client_count', 0) > 0:
+                    ap_text = f"AP:{sd.ap_client_count}"
+                draw.text((3, 4), ap_text, font=font, fill=c('warn'))
+                left_used = 3 + int(font.getlength(ap_text))
+            elif getattr(sd, 'wifi_connected', False):
+                try:
+                    q = getattr(sd, 'wifi_signal_quality', None)
+                    if q is None:
+                        q = self._dbm_to_quality(getattr(sd, 'wifi_signal_dbm', None))
+                    waves = max(1, min(3, self.get_wifi_wave_count(q)))
+                except Exception:
+                    waves = 3
+                cx, cy = 8, 15
+                for i in range(waves):
+                    r = 3 + i * 3
+                    draw.arc((cx - r, cy - r, cx + r, cy + r), start=225, end=315, fill=c('good'), width=1)
+                left_used = 18
+                try:
+                    ip_octet = self.get_wifi_ip_last_octet()
+                except Exception:
+                    ip_octet = None
+                if ip_octet:
+                    draw.text((19, 5), ip_octet, font=small, fill=c('dim'))
+                    left_used = 19 + int(small.getlength(ip_octet))
+        except Exception:
+            pass
+        # The battery is the icon in the screen's top-right corner
+        # (_cardputer_overlays), as on a phone.
+        bat_w = 0
+        left_pad = left_used + 4
+        avail = col_w - left_pad - bat_w - 2
+        _title = self._unit_display_title()
+        title_font = self._fit_font('Viking.TTF', sd.font_viking, _title, avail)
+        tw = title_font.getlength(_title)
+        draw.text((left_pad + (avail - tw) / 2, 3), _title, font=title_font, fill=c('title'))
+        draw.line((1, 21, col_w, 21), fill=c('frame'))
+
+        # --- two rows of stat icons + counts ---
+        def _short(val):
+            """Counts past three digits as 1.9k / 12k so a slot never overflows."""
+            try:
+                n = int(val)
+            except (TypeError, ValueError):
+                return str(val)
+            if n < 1000:
+                return str(n)
+            if n < 10000:
+                return f"{n / 1000:.1f}".rstrip('0').rstrip('.') + "k"
+            if n < 1000000:
+                return f"{n // 1000}k"
+            return f"{n // 1000000}M"
+
+        def _row(y, items):
+            slot = col_w // len(items)
+            for i, (icon, val, tint) in enumerate(items):
+                x = i * slot + 2
+                tx = x
+                if icon is not None:
+                    try:
+                        self._paste_ink(image, icon, (x, y), c(tint))
+                        tx = x + icon.width + 2
+                    except Exception:
+                        pass
+                draw.text((tx, y + 3), _short(val), font=font, fill=c('ink'))
+
+        _row(25, [(getattr(sd, 'target', None), sd.targetnbr, 'good'),
+                  (getattr(sd, 'port', None),   sd.portnbr,   'b5'),
+                  (getattr(sd, 'vuln', None),   sd.vulnnbr,   'bad'),
+                  (getattr(sd, 'cred', None),   sd.crednbr,   'warn')])
+        _row(46, [(getattr(sd, 'zombie', None),  sd.zombiesnbr, 'b6'),
+                  (getattr(sd, 'data', None),    sd.datanbr,    'ble'),
+                  (getattr(sd, 'money', None),   sd.coinnbr,    'title'),
+                  (getattr(sd, 'attacks', None), sd.attacksnbr, 'b24')])
+        draw.line((1, 67, col_w, 67), fill=c('frame'))
+
+        # --- status icon + the two status lines ---
+        try:
+            sd.update_ragnarstatus()
+        except Exception:
+            pass
+        tx = 4
+        icon = getattr(sd, 'ragnarstatusimage', None)
+        if icon is not None:
+            try:
+                self._paste_ink(image, icon, (3, 70), c('title'))
+                tx = 3 + icon.width + 4
+            except Exception:
+                pass
+        line_w = col_w - tx
+
+        def _clip(text, f):
+            text = str(text or '')
+            while text and f.getlength(text) > line_w:
+                text = text[:-1]
+            return text
+
+        draw.text((tx, 71), _clip(getattr(sd, 'ragnarstatustext', ''), font), font=font, fill=c('title'))
+        draw.text((tx, 85), _clip(getattr(sd, 'ragnarstatustext2', ''), small), font=small, fill=c('dim'))
+        draw.line((1, 101, col_w, 101), fill=c('frame'))
+
+        # --- speech, wrapped into the left column ---
+        says = str(getattr(sd, 'ragnarsays', '') or '')
+        if says:
+            say_font = self._font_at('Arial.ttf', 12)
+            try:
+                lines = sd.wrap_text(says, say_font, col_w - 6)
+            except Exception:
+                lines = [says]
+            y = 105
+            for line in lines:
+                if y > H - 13:
+                    break
+                draw.text((4, y), line, font=say_font, fill=c('ink'))
+                y += 13
+
+    def _render_main_horizontal(self, image, draw, W, H):
+        """Landscape PAGE_MAIN layout for a small e-paper rotated 90°/270°
+        (e.g. the 2.13" 122x250 panel lying down → ~250x122).
+
+        The default dashboard is authored for a tall 122x250 portrait canvas;
+        when the panel lies down the canvas becomes wide and short, and the
+        absolute portrait coordinates squash badly (text overlaps, sprite spills
+        off the edge). This re-lays the same elements to fit a landscape strip:
+        a header, two 5-wide icon+count stat rows, the status line, the speech
+        text, and a HALF-SIZE character sprite tucked in the bottom-right.
+        The frise ribbon is dropped — there is no vertical room for it lying down.
+        """
+        sd = self.shared_data
+        font = sd.font_arial9
+
+        draw.rectangle((0, 0, W - 1, H - 1), outline=0)
+
+        # --- header: connection glyph + IP (left), USB/battery (right), title ---
+        left_used = 3
+        try:
+            if getattr(sd, 'ap_mode_active', False):
+                ap_text = "AP"
+                if getattr(sd, 'ap_client_count', 0) > 0:
+                    ap_text = f"AP:{sd.ap_client_count}"
+                draw.text((3, 3), ap_text, font=font, fill=0)
+                left_used = 3 + int(font.getlength(ap_text))
+            elif getattr(sd, 'wifi_connected', False):
+                try:
+                    q = getattr(sd, 'wifi_signal_quality', None)
+                    if q is None:
+                        q = self._dbm_to_quality(getattr(sd, 'wifi_signal_dbm', None))
+                    waves = max(1, min(3, self.get_wifi_wave_count(q)))
+                except Exception:
+                    waves = 3
+                cx, cy = 6, 12
+                for i in range(waves):
+                    r = 3 + i * 3
+                    draw.arc((cx - r, cy - r, cx + r, cy + r), start=225, end=315, fill=0, width=1)
+                left_used = 16
+                try:
+                    ip_octet = self.get_wifi_ip_last_octet()
+                except Exception:
+                    ip_octet = None
+                if ip_octet:
+                    draw.text((17, 4), ip_octet, font=font, fill=0)
+                    left_used = 17 + int(font.getlength(ip_octet))
+        except Exception:
+            pass
+        # Battery %, top-right (PiSugar or Waveshare UPS HAT)
+        bat_w = 0
+        try:
+            _ps = battery_source(sd)
+            if _ps:
+                bl = _ps.get_battery_level()
+                if bl is not None:
+                    bt = f"{int(round(bl))}%{'+' if _ps.is_charging() else ''}"
+                    bat_w = int(font.getlength(bt)) + 3
+                    draw.text((W - bat_w + 1, 4), bt, font=font, fill=0)
+        except Exception:
+            pass
+        # Centre the title in the strip between the left glyph and the battery.
+        left_pad = max(20, left_used + 3)
+        right_pad = max(6, bat_w)
+        avail = W - left_pad - right_pad
+        _title = self._unit_display_title()
+        title_font = self._fit_font('Viking.TTF', sd.font_viking, _title, avail)
+        tw = title_font.getlength(_title)
+        draw.text((left_pad + (avail - tw) / 2, 2), _title, font=title_font, fill=0)
+        draw.line((1, 17, W - 1, 17), fill=0)
+
+        # --- two icon+count stat rows, 5 wide so they use the full width ---
+        icon_h = 15  # 18px source icons scaled down a touch
+
+        def _fit_icon(icon):
+            if icon is None:
+                return None
+            try:
+                if icon.height > icon_h:
+                    ratio = icon_h / icon.height
+                    return icon.resize((max(1, int(icon.width * ratio)), icon_h), Image.NEAREST)
+            except Exception:
+                return icon
+            return icon
+
+        def _row(y, items):
+            slot = W // len(items)
+            for i, (icon, val) in enumerate(items):
+                x = i * slot + 3
+                icon = _fit_icon(icon)
+                if icon is not None:
+                    try:
+                        image.paste(icon, (x, y))
+                        tx = x + icon.width + 2
+                    except Exception:
+                        tx = x + icon_h + 2
+                else:
+                    tx = x
+                draw.text((tx, y + 3), str(val), font=font, fill=0)
+
+        _row(21, [(getattr(sd, 'target', None),    sd.targetnbr),
+                  (getattr(sd, 'port', None),      sd.portnbr),
+                  (getattr(sd, 'vuln', None),      sd.vulnnbr),
+                  (getattr(sd, 'cred', None),      sd.crednbr),
+                  (getattr(sd, 'zombie', None),    sd.zombiesnbr)])
+        _row(40, [(getattr(sd, 'data', None),      sd.datanbr),
+                  (getattr(sd, 'money', None),     sd.coinnbr),
+                  (getattr(sd, 'level', None),     sd.levelnbr),
+                  (getattr(sd, 'networkkb', None), sd.networkkbnbr),
+                  (getattr(sd, 'attacks', None),   sd.attacksnbr)])
+        draw.line((1, 58, W - 1, 58), fill=0)
+
+        # --- lower zone: info column on the left, a framed sprite panel right ---
+        # The whole point of the landscape rework: don't leave the bottom two
+        # thirds empty with a lone sprite blob in the corner. Split the lower
+        # band into a left info column (mood + speech, using the roomy 14px
+        # font) and a right panel that frames the shrunk character so it reads
+        # as a deliberate element instead of an afterthought.
+        try:
+            sd.update_ragnarstatus()
+        except Exception:
+            pass
+
+        panel_x = W - 70                      # vertical split for the sprite panel
+        top = 58                              # y of the stats divider above
+        draw.line((panel_x, top, panel_x, H - 1), fill=0)
+
+        vk = getattr(sd, 'imagegen', None)
+        if vk is not None:
+            try:
+                # ~50% of the native 78px sprite, centred in its panel.
+                vk = vk.resize((max(1, vk.width // 2), max(1, vk.height // 2)), Image.NEAREST)
+                px = panel_x + ((W - panel_x) - vk.width) // 2
+                py = top + ((H - top) - vk.height) // 2
+                image.paste(vk, (px, py))
+            except Exception:
+                pass
+
+        # Left info column.
+        left_w = panel_x - 4
+        # Mood face + status label on the first line.
+        face = getattr(sd, 'ragnarstatusimage', None)
+        label_x = 4
+        face_bottom = top + 4
+        if face is not None:
+            try:
+                f = face
+                if f.height > 16:
+                    r = 16 / f.height
+                    f = f.resize((max(1, int(f.width * r)), 16), Image.NEAREST)
+                image.paste(f, (4, top + 3))
+                label_x = 4 + f.width + 3
+                face_bottom = top + 3 + f.height
+            except Exception:
+                label_x = 4
+        status_line = str(getattr(sd, 'ragnarstatustext', '') or '')
+        if status_line:
+            s = status_line
+            while s and font.getlength(s) > (left_w - label_x):
+                s = s[:-1]
+            draw.text((label_x, top + 6), s, font=font, fill=0)
+
+        # Speech beneath, in the larger 14px font so the column doesn't read empty.
+        speech_font = getattr(sd, 'font_arial14', None) or sd.font_arialbold
+        says = str(getattr(sd, 'ragnarsays', '') or '')
+        if says:
+            try:
+                lines = sd.wrap_text(says, speech_font, left_w - 4)
+            except Exception:
+                lines = [says]
+            y = face_bottom + 4
+            for line in lines:
+                if y > H - 14:
+                    break
+                draw.text((4, y), line, font=speech_font, fill=0)
+                bb = speech_font.getbbox(line)
+                y += (bb[3] - bb[1]) + 3
 
     def _fetch_network_data(self):
         """Fetch real host data from database."""
@@ -2123,7 +2901,7 @@ class Display:
 
             # Divider before host list
             y += int(2 * sy)
-            draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=0)
+            draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=self._wd_c(draw, 'frame'))
             y += int(4 * sy)
 
             # List actual discovered hosts
@@ -2136,8 +2914,8 @@ class Display:
                 port_count = len([p for p in str(ports).split(';') if p.strip()]) if ports else 0
                 line = f"{ip}"
                 extra = f"{status[:3]} p:{port_count}"
-                draw.text((pad_x, y), line, font=font, fill=0)
-                draw.text((w - pad_x - font.getlength(extra), y), extra, font=font, fill=0)
+                draw.text((pad_x, y), line, font=font, fill=self._wd_c(draw, 'ink'))
+                draw.text((w - pad_x - font.getlength(extra), y), extra, font=font, fill=self._wd_c(draw, 'ink'))
                 y += row_h
         else:
             stats = [
@@ -2178,13 +2956,13 @@ class Display:
             targets = data.get('targets', [])
             if targets:
                 y += int(2 * sy)
-                draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=0)
+                draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=self._wd_c(draw, 'frame'))
                 y += int(4 * sy)
-                draw.text((pad_x, y), "Recent targets:", font=font, fill=0)
+                draw.text((pad_x, y), "Recent targets:", font=font, fill=self._wd_c(draw, 'ink'))
                 y += row_h
                 max_rows = (h - int(18 * sy) - y) // row_h
                 for ip in targets[:max_rows]:
-                    draw.text((int(10 * sx), y), ip, font=font, fill=0)
+                    draw.text((int(10 * sx), y), ip, font=font, fill=self._wd_c(draw, 'ink'))
                     y += row_h
         else:
             stats = [
@@ -2262,18 +3040,18 @@ class Display:
                 scanner_items.append((name.capitalize(), status))
 
             for label, value in scanner_items:
-                draw.text((pad_x, y), label, font=font, fill=0)
-                draw.text((w - pad_x - font.getlength(value), y), value, font=font, fill=0)
+                draw.text((pad_x, y), label, font=font, fill=self._wd_c(draw, 'ink'))
+                draw.text((w - pad_x - font.getlength(value), y), value, font=font, fill=self._wd_c(draw, 'ink'))
                 y += line_h
 
             y += int(2 * sy)
-            draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=0)
+            draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=self._wd_c(draw, 'frame'))
             y += int(4 * sy)
 
             # Findings summary
             total = summary.get('total_findings', 0)
-            draw.text((pad_x, y), "Findings", font=font, fill=0)
-            draw.text((w - pad_x - font.getlength(str(total)), y), str(total), font=font, fill=0)
+            draw.text((pad_x, y), "Findings", font=font, fill=self._wd_c(draw, 'ink'))
+            draw.text((w - pad_x - font.getlength(str(total)), y), str(total), font=font, fill=self._wd_c(draw, 'ink'))
             y += line_h
 
             # Severity breakdown on one line each
@@ -2282,13 +3060,13 @@ class Display:
             med = sev.get('medium', 0)
             low = sev.get('low', 0)
             sev_line = f"C:{crit} H:{high} M:{med} L:{low}"
-            draw.text((pad_x, y), sev_line, font=font, fill=0)
+            draw.text((pad_x, y), sev_line, font=font, fill=self._wd_c(draw, 'ink'))
             y += line_h
 
             # Active scans
             active_count = len([s for s in active if s.get('status') == 'running'])
-            draw.text((pad_x, y), "Active scans", font=font, fill=0)
-            draw.text((w - pad_x - font.getlength(str(active_count)), y), str(active_count), font=font, fill=0)
+            draw.text((pad_x, y), "Active scans", font=font, fill=self._wd_c(draw, 'ink'))
+            draw.text((w - pad_x - font.getlength(str(active_count)), y), str(active_count), font=font, fill=self._wd_c(draw, 'ink'))
             y += line_h
 
             # Show running scan details
@@ -2297,7 +3075,7 @@ class Display:
                     stype = scan.get('scan_type', '?')[:8]
                     progress = scan.get('progress_percent', 0)
                     line = f"{stype} {progress}%"
-                    draw.text((int(10 * sx), y), line, font=font, fill=0)
+                    draw.text((int(10 * sx), y), line, font=font, fill=self._wd_c(draw, 'ink'))
                     y += row_h
         else:
             stats = [
@@ -2364,6 +3142,29 @@ class Display:
         except Exception:
             return None
 
+    def _wd_color_panel(self, render_w=None, render_h=None):
+        """True when the paged wardriving screens should render in colour:
+        the 1.44" ST7735S LCD HAT (a 128x128 RGB TFT) and the CardputerZero's
+        LCD in landscape. Every other panel that reaches these screens is
+        1-bit. `wardriving_lcd_color: false` in the config keeps the old
+        black-on-white look."""
+        if not self.config.get("wardriving_lcd_color", True):
+            return False
+        if self._cardputer_landscape(render_w, render_h):
+            return True
+        if self.config.get("epd_type") != "st7735s":
+            return False
+        w = render_w if render_w is not None else getattr(self, 'render_w', self.shared_data.width)
+        h = render_h if render_h is not None else getattr(self, 'render_h', self.shared_data.height)
+        return w < 150 and h < 150
+
+    def _wd_c(self, draw, key):
+        """Colour for a compact wardriving screen element. On a 1-bit canvas
+        everything is plain black ink (0), exactly as before."""
+        if getattr(draw, 'mode', '1') != 'RGB':
+            return 0
+        return _WD_COLORS.get(key, _WD_COLORS['ink'])
+
     def _wd_compact_page(self):
         """Which wardriving screen the LCD joystick has paged to (0..N-1)."""
         try:
@@ -2402,28 +3203,30 @@ class Display:
         h = getattr(self, 'render_h', self.shared_data.height)
         font = self.shared_data.font_arial9
 
-        draw.rectangle((1, 1, w - 1, h - 1), outline=0)
+        # No outer border frame — it hugs the panel edge where the ST7735S's
+        # visible-area offset makes it look ragged; the footer divider below and
+        # the per-page dividers are kept.
 
         ap_on = getattr(self.shared_data, 'wardrive_ap_active', False)
-        hint = "K1Exit K2WiFi K3APoff" if ap_on else "K1Exit K2WiFi K3AP"
+        hint = self._key_hint("K1Exit K2WiFi K3APoff" if ap_on else "K1Exit K2WiFi K3AP")
         page_str = f"{self._wd_compact_page() + 1}/{WARDRIVE_PAGE_COUNT}"
 
         footer_y = h - int(18 * sy)
-        draw.line((1, footer_y, w - 1, footer_y), fill=0)
+        draw.line((1, footer_y, w - 1, footer_y), fill=self._wd_c(draw, 'frame'))
 
         # Page counter is pinned right; the hint is trimmed to whatever is left
         # so a longer hint never overruns it on the 128 px panel.
         pw = font.getlength(page_str)
-        draw.text((w - int(4 * sx) - pw, h - int(16 * sy)), page_str, font=font, fill=0)
+        draw.text((w - int(4 * sx) - pw, h - int(16 * sy)), page_str, font=font, fill=self._wd_c(draw, 'title'))
         avail = w - int(8 * sx) - pw - int(4 * sx)
         _hint = hint
         while _hint and font.getlength(_hint) > avail:
             _hint = _hint[:-1]
-        draw.text((int(4 * sx), h - int(16 * sy)), _hint, font=font, fill=0)
+        draw.text((int(4 * sx), h - int(16 * sy)), _hint, font=font, fill=self._wd_c(draw, 'dim'))
 
         if title:
             tw = font.getlength(title)
-            draw.text(((w - tw) / 2, int(3 * sy)), title, font=font, fill=0)
+            draw.text(((w - tw) / 2, int(3 * sy)), title, font=font, fill=self._wd_c(draw, 'title'))
 
         return footer_y
 
@@ -2441,8 +3244,8 @@ class Display:
             msg1, msg2 = "Starting...", "Waiting for engine"
         else:
             msg1, msg2 = "Stopped", "Enable in WebUI"
-        draw.text(((w - font_row.getlength(msg1)) / 2, int(45 * sy)), msg1, font=font_row, fill=0)
-        draw.text(((w - font.getlength(msg2)) / 2, int(62 * sy)), msg2, font=font, fill=0)
+        draw.text(((w - font_row.getlength(msg1)) / 2, int(45 * sy)), msg1, font=font_row, fill=self._wd_c(draw, 'warn'))
+        draw.text(((w - font.getlength(msg2)) / 2, int(62 * sy)), msg2, font=font, fill=self._wd_c(draw, 'dim'))
         return True
 
     def _render_wd_compact_stats(self, image, draw, wd):
@@ -2450,7 +3253,8 @@ class Display:
 
         The square panel is too small for the full stat page, so we drop the
         "WARDRIVING" header entirely and show only what matters on the move:
-        the 2.4 / 5 / 6 GHz network counts, GPS fix, and companion status.
+        the 2.4 / 5 / 6 GHz network counts, the session totals (all Wi-Fi
+        networks and Bluetooth/BLE devices), GPS fix, and companion status.
         The key controls stay in the footer.
         """
         sx = getattr(self, 'render_sx', self.scale_factor_x)
@@ -2474,82 +3278,130 @@ class Display:
         gps = wd.get('gps', {})
 
         # --- Band counts: 2.4 / 5 / 6 GHz as a three-column grid ---
+        # (label, count, colour key) — one hue per band on a colour panel.
         bands = [
-            ("2.4G", st.get('band_2_4ghz', 0)),
-            ("5G",   st.get('band_5ghz', 0)),
-            ("6G",   st.get('band_6ghz', 0)),
+            ("2.4G", st.get('band_2_4ghz', 0), 'b24'),
+            ("5G",   st.get('band_5ghz', 0), 'b5'),
+            ("6G",   st.get('band_6ghz', 0), 'b6'),
         ]
         col_w = (w - 2) / 3.0
-        y_lbl = int(6 * sy)
+        y_lbl = int(4 * sy)
         # A long drive pushes counts into the thousands, and a fixed size would
         # spill each number into its neighbour's column. Shrink the shared
         # number font until the widest of the three fits its column — one size
         # for all three so they stay visually consistent.
         max_num_w = col_w - int(4 * sx)
-        widest = max((str(v) for _, v in bands), key=font_num.getlength)
-        num_size = int(22 * sy)
+        widest = max((str(v) for _, v, _c in bands), key=font_num.getlength)
+        num_size = int(19 * sy)
+        font_num = self._font_at('Arial.ttf', num_size)
         while num_size > 8 and font_num.getlength(widest) > max_num_w:
             num_size -= 1
             font_num = self._font_at('Arial.ttf', num_size)
 
         # Vertically centre the numbers in the band under the labels, so the
         # row stays balanced at whatever size the fit above settled on.
-        band_top = int(18 * sy)
-        band_bot = int(46 * sy)
-        for i, (label, val) in enumerate(bands):
+        band_top = int(16 * sy)
+        band_bot = int(38 * sy)
+        for i, (label, val, ckey) in enumerate(bands):
+            col = self._wd_c(draw, ckey)
             cx = 1 + col_w * (i + 0.5)
             lw = font_lbl.getlength(label)
-            draw.text((cx - lw / 2, y_lbl), label, font=font_lbl, fill=0)
+            draw.text((cx - lw / 2, y_lbl), label, font=font_lbl, fill=col)
             vs = str(val)
             bbox = font_num.getbbox(vs)
             vw, vh = bbox[2] - bbox[0], bbox[3] - bbox[1]
             ty = band_top + (band_bot - band_top - vh) / 2 - bbox[1]
-            draw.text((cx - vw / 2 - bbox[0], ty), vs, font=font_num, fill=0)
+            draw.text((cx - vw / 2 - bbox[0], ty), vs, font=font_num, fill=col)
 
-        y = int(48 * sy)
-        draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=0)
-        y += int(6 * sy)
+        y = int(41 * sy)
+        draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=self._wd_c(draw, 'frame'))
+
+        # --- Session totals: all Wi-Fi networks + Bluetooth/BLE devices ---
+        # The band columns above only split Wi-Fi by band; the grand total and
+        # the BLE tally (the bulk of what a Huginn/Piglet companion reports)
+        # were only reachable by paging to SESSION. Show both here, on the
+        # screen the panel sits on while driving.
+        # These two are the headline numbers, so they are set in bold; the
+        # band columns above stay in the regular weight.
+        totals = [
+            ("WIFI", st.get('total_networks', 0), 'wifi'),
+            ("BLE",  st.get('bluetooth_devices', 0), 'ble'),
+        ]
+        tcol_w = (w - 2) / 2.0
+        y_tlbl = int(43 * sy)
+        tot_size = int(16 * sy)
+        font_tot = self._font_at('ArialB.TTF', tot_size)
+        t_widest = max((str(v) for _, v, _c in totals), key=font_tot.getlength)
+        while tot_size > 8 and font_tot.getlength(t_widest) > tcol_w - int(6 * sx):
+            tot_size -= 1
+            font_tot = self._font_at('ArialB.TTF', tot_size)
+        tot_top = int(52 * sy)
+        tot_bot = int(69 * sy)
+        for i, (label, val, ckey) in enumerate(totals):
+            col = self._wd_c(draw, ckey)
+            cx = 1 + tcol_w * (i + 0.5)
+            lw = font_lbl.getlength(label)
+            draw.text((cx - lw / 2, y_tlbl), label, font=font_lbl, fill=col)
+            vs = str(val)
+            bbox = font_tot.getbbox(vs)
+            vw, vh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            ty = tot_top + (tot_bot - tot_top - vh) / 2 - bbox[1]
+            draw.text((cx - vw / 2 - bbox[0], ty), vs, font=font_tot, fill=col)
+        draw.line((w / 2, int(45 * sy), w / 2, int(68 * sy)), fill=self._wd_c(draw, 'frame'))
+
+        y = int(71 * sy)
+        draw.line((int(4 * sx), y, w - int(4 * sx), y), fill=self._wd_c(draw, 'frame'))
+        y += int(2 * sy)
 
         # --- GPS + Companion rows (right-aligned key/value, roomy font) ---
+        # Value colour doubles as a status light: green = good, amber =
+        # working on it, red = missing.
         if gps.get('has_fix'):
             gps_str = f"{gps.get('latitude', 0):.3f},{gps.get('longitude', 0):.3f}"
+            gps_col = 'good'
         elif gps.get('connected'):
             in_view = gps.get('satellites_in_view')
             if isinstance(in_view, (int, float)) and in_view > 0:
                 gps_str = f"Search {int(in_view)}v"
             else:
                 gps_str = "Searching"
+            gps_col = 'warn'
         else:
             gps_str = "No GPS"
+            gps_col = 'bad'
 
         companions = wd.get('companions') or []
         active = [c for c in companions if c.get('connected')]
         if active:
             first = active[0].get('name') or 'Companion'
             comp_str = first if len(active) == 1 else f"{first}+{len(active) - 1}"
+            comp_col = 'good'
         else:
             comp_str = "None"
+            comp_col = 'dim'
 
         # Speed row: only while we have a fix and are actually moving, so a
         # stationary stop doesn't waste one of the few rows this panel affords.
-        rows = [("GPS", gps_str)]
+        rows = [("GPS", gps_str, gps_col)]
         spd = gps.get('speed_kmh')
         if gps.get('has_fix') and spd is not None and spd > 0:
             unit = self.config.get('wardriving_speed_unit', 'kmh')
-            rows.append(("Spd", _fmt_wd_speed(spd, unit)))
-        rows.append(("Comp", comp_str))
+            rows.append(("Spd", _fmt_wd_speed(spd, unit), 'ink'))
+        rows.append(("Comp", comp_str, comp_col))
 
+        # 12 px lines: three rows (GPS / Spd / Comp) fit between the totals
+        # block and the footer divider.
         pad_x = int(6 * sx)
-        line_h = int(18 * sy)
-        for label, value in rows:
+        line_h = int(12 * sy)
+        for label, value, ckey in rows:
             val_str = str(value)
             vw = font_row.getlength(val_str)
             # Trim the value if it would collide with the label.
             while val_str and pad_x + font_row.getlength(label) + int(6 * sx) > w - pad_x - vw:
                 val_str = val_str[:-1]
                 vw = font_row.getlength(val_str)
-            draw.text((pad_x, y), label, font=font_row, fill=0)
-            draw.text((w - pad_x - vw, y), val_str, font=font_row, fill=0)
+            draw.text((pad_x, y), label, font=font_row, fill=self._wd_c(draw, 'dim'))
+            draw.text((w - pad_x - vw, y), val_str, font=font_row, fill=self._wd_c(draw, ckey))
             y += line_h
 
     def _wd_compact_rows(self, draw, rows, top, footer_y):
@@ -2573,8 +3425,8 @@ class Display:
             while val_str and pad_x + font_row.getlength(label) + int(6 * sx) > w - pad_x - vw:
                 val_str = val_str[:-1]
                 vw = font_row.getlength(val_str)
-            draw.text((pad_x, y), label, font=font_row, fill=0)
-            draw.text((w - pad_x - vw, y), val_str, font=font_row, fill=0)
+            draw.text((pad_x, y), label, font=font_row, fill=self._wd_c(draw, 'dim'))
+            draw.text((w - pad_x - vw, y), val_str, font=font_row, fill=self._wd_c(draw, 'ink'))
             y += line_h
         return y
 
@@ -2657,24 +3509,24 @@ class Display:
 
         # Horizon + a mid ring at elevation 45°, then the N/E/S/W crosshairs so
         # the azimuth of each satellite is readable.
-        draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius), outline=0)
+        draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius), outline=self._wd_c(draw, 'grid'))
         mid = radius / 2.0
-        draw.ellipse((cx - mid, cy - mid, cx + mid, cy + mid), outline=0)
-        draw.line((cx, cy - radius, cx, cy + radius), fill=0)
-        draw.line((cx - radius, cy, cx + radius, cy), fill=0)
+        draw.ellipse((cx - mid, cy - mid, cx + mid, cy + mid), outline=self._wd_c(draw, 'grid'))
+        draw.line((cx, cy - radius, cx, cy + radius), fill=self._wd_c(draw, 'grid'))
+        draw.line((cx - radius, cy, cx + radius, cy), fill=self._wd_c(draw, 'grid'))
 
         for lbl, dx, dy in (("N", 0, -1), ("S", 0, 1), ("E", 1, 0), ("W", -1, 0)):
             lw = font.getlength(lbl)
             lx = cx + dx * (radius + int(6 * sx)) - lw / 2.0
             ly = cy + dy * (radius + int(6 * sy)) - int(5 * sy)
-            draw.text((lx, ly), lbl, font=font, fill=0)
+            draw.text((lx, ly), lbl, font=font, fill=self._wd_c(draw, 'dim'))
 
         sats = self._wd_sky_data()
         if not sats:
             gps = (wd.get('gps') or {})
             msg = "Searching..." if gps.get('connected') else "No GPS"
             draw.text(((w - font.getlength(msg)) / 2, cy - int(4 * sy)),
-                      msg, font=font, fill=0)
+                      msg, font=font, fill=self._wd_c(draw, 'warn'))
             return
 
         plotted = 0
@@ -2691,13 +3543,13 @@ class Display:
             strong = isinstance(snr, (int, float)) and snr >= 25
             dot = int(2 * sx)
             if strong:
-                draw.ellipse((x - dot, y - dot, x + dot, y + dot), fill=0)
+                draw.ellipse((x - dot, y - dot, x + dot, y + dot), fill=self._wd_c(draw, 'good'))
             else:
-                draw.ellipse((x - dot, y - dot, x + dot, y + dot), outline=0)
+                draw.ellipse((x - dot, y - dot, x + dot, y + dot), outline=self._wd_c(draw, 'warn'))
             plotted += 1
 
         cnt = f"{plotted} sat"
-        draw.text((int(3 * sx), top), cnt, font=font, fill=0)
+        draw.text((int(3 * sx), top), cnt, font=font, fill=self._wd_c(draw, 'ink'))
 
     def _render_wd_compact_session(self, image, draw, wd):
         """Compact session totals — the running tally the stats page's band
@@ -2752,7 +3604,7 @@ class Display:
         if not pts:
             msg = "Waiting for GPS..."
             draw.text(((w - font.getlength(msg)) / 2, (top + bottom) / 2),
-                      msg, font=font, fill=0)
+                      msg, font=font, fill=self._wd_c(draw, 'warn'))
             return
 
         lats = [p[0] for p in pts]
@@ -2775,14 +3627,14 @@ class Display:
         # Networks first so the track draws over them.
         for lat, lon in nets:
             x, y = X(lon), Y(lat)
-            draw.point((x, y), fill=0)
+            draw.point((x, y), fill=self._wd_c(draw, 'b5'))
         if len(track) > 1:
-            draw.line([(X(p[1]), Y(p[0])) for p in track], fill=0, width=1)
+            draw.line([(X(p[1]), Y(p[0])) for p in track], fill=self._wd_c(draw, 'b24'), width=1)
         if here:
             x, y = X(here[1]), Y(here[0])
             r = int(3 * sx)
-            draw.ellipse((x - r, y - r, x + r, y + r), outline=0)
-            draw.ellipse((x - 1, y - 1, x + 1, y + 1), fill=0)
+            draw.ellipse((x - r, y - r, x + r, y + r), outline=self._wd_c(draw, 'bad'))
+            draw.ellipse((x - 1, y - 1, x + 1, y + 1), fill=self._wd_c(draw, 'ink'))
 
     def _render_wd_compact_viking(self, image, draw, wd):
         """Full-screen Ragnar viking — the 'am I still alive?' glance screen.
@@ -2802,7 +3654,12 @@ class Display:
         band_h = footer_y - top - int(2 * sy)
         if vk is None or band_h <= 0:
             msg = self._unit_display_title()
-            draw.text(((w - font.getlength(msg)) / 2, footer_y / 2), msg, font=font, fill=0)
+            draw.text(((w - font.getlength(msg)) / 2, footer_y / 2), msg, font=font, fill=self._wd_c(draw, 'ink'))
+            return
+        # Colour canvas: the full-colour character instead of a gold stencil.
+        sprite = self._color_character(image, getattr(sd, 'imagegen', None), band_h, w - 4)
+        if sprite is not None:
+            image.paste(sprite, ((w - sprite.width) // 2, top + (band_h - sprite.height) // 2), sprite)
             return
         try:
             # Fill the band on the tighter axis so the whole viking stays visible.
@@ -2810,7 +3667,14 @@ class Display:
             if ratio > 0:
                 vk = vk.resize((max(1, int(vk.width * ratio)),
                                 max(1, int(vk.height * ratio))), Image.NEAREST)
-            image.paste(vk, ((w - vk.width) // 2, top + (band_h - vk.height) // 2))
+            pos = ((w - vk.width) // 2, top + (band_h - vk.height) // 2)
+            if image.mode == 'RGB':
+                # The sprite is black ink on white. On the dark colour theme,
+                # use its ink as a stencil and lay the viking down in gold.
+                from PIL import ImageOps
+                image.paste(self._wd_c(draw, 'title'), pos, mask=ImageOps.invert(vk.convert('L')))
+            else:
+                image.paste(vk, pos)
         except Exception as e:
             logger.debug(f"viking page render failed: {e}")
 
@@ -2850,7 +3714,9 @@ class Display:
         # so render a header-less essentials-only layout instead.
         _w = getattr(self, 'render_w', self.shared_data.width)
         _h = getattr(self, 'render_h', self.shared_data.height)
-        if _w < 150 and _h < 150:
+        # The CardputerZero pages the same screens from its keyboard, so it
+        # gets them too (drawn across its 320x170).
+        if (_w < 150 and _h < 150) or self._cardputer_landscape(_w, _h):
             self._render_wardriving_page_compact(image, draw, self._get_wardriving_data())
             return
         ap_on = getattr(self.shared_data, 'wardrive_ap_active', False)
@@ -3201,11 +4067,21 @@ class Display:
         # ── frame cache: (status, frame_idx, tint) → RGBA sprite ─────────
         _frame_cache = {}
 
+        def _active_series():
+            # Shieldmaiden frames for a female mesh unit, default ones otherwise.
+            sd = self.shared_data
+            try:
+                return sd.active_image_series()
+            except Exception:
+                return getattr(sd, "image_series", {})
+
         def _get_colorized_frame(status, idx, tint):
-            key = (status, idx, tint)
+            series = _active_series()
+            # id(series) keeps male and female frames apart if the unit's
+            # gender is changed while the display is running.
+            key = (id(series), status, idx, tint)
             if key in _frame_cache:
                 return _frame_cache[key]
-            series = getattr(self.shared_data, "image_series", {})
             frames = series.get(status) or series.get("IDLE") or []
             if not frames:
                 _frame_cache[key] = None
@@ -3213,7 +4089,15 @@ class Display:
             src = frames[idx % len(frames)]
             tint = _tint_for(status)
             try:
-                gray  = src.convert("L").resize((MASCOT_SZ, MASCOT_SZ), _Image.LANCZOS)
+                gray = src.convert("L")
+                if gray.width != gray.height:
+                    # Portrait frames (the shieldmaiden) are centred on a white
+                    # square so they are not stretched to the mascot box.
+                    side = max(gray.size)
+                    sq = _Image.new("L", (side, side), 255)
+                    sq.paste(gray, ((side - gray.width) // 2, (side - gray.height) // 2))
+                    gray = sq
+                gray  = gray.resize((MASCOT_SZ, MASCOT_SZ), _Image.LANCZOS)
                 alpha = _ImageOps.invert(gray)   # dark pixels → opaque, white → transparent
                 sprite = _Image.new("RGBA", (MASCOT_SZ, MASCOT_SZ), tint + (255,))
                 sprite.putalpha(alpha)
@@ -3224,7 +4108,7 @@ class Display:
             return _frame_cache[key]
 
         def _frame_count(status):
-            series = getattr(self.shared_data, "image_series", {})
+            series = _active_series()
             frames = series.get(status) or series.get("IDLE") or []
             return max(1, len(frames))
 
@@ -4242,6 +5126,12 @@ class Display:
         self.manual_mode_txt = ""
         while not self.shared_data.display_should_exit:
             try:
+                # CardputerZero: the "0" key blanks the LCD (manual, no
+                # auto-off). Turn the backlight off and idle here until it is
+                # pressed again, then re-light and fall through to redraw.
+                if self._cardputer_display_off():
+                    self._run_display_off()
+                    continue
                 self.epd_helper.init_partial_update()
                 # Pull latest orientation settings so web toggles take effect without restarting the service.
                 self.screen_reversed = self.shared_data.screen_reversed
@@ -4272,6 +5162,17 @@ class Display:
                 if self.button_listener and self.button_listener.available:
                     current_page = self.button_listener.current_page
 
+                # Camera screen (CardputerZero, P key): the live view owns the
+                # panel until it is left.
+                if (self.button_listener is not None
+                        and getattr(self.button_listener, 'camera_mode', False)):
+                    try:
+                        self._camera_screen(self.button_listener, render_w, render_h)
+                    except Exception as e:
+                        logger.warning(f"camera screen error: {e}")
+                        self.button_listener.camera_mode = False
+                    continue
+
                 # Network Diagnostic display mode: an Ethernet-focused,
                 # internet-independent field screen (link / addressing / switch
                 # port via LLDP). Web-toggled; it overrides every normal page
@@ -4285,6 +5186,13 @@ class Display:
                     bl = (self.button_listener
                           if (self.button_listener and self.button_listener.available)
                           else None)
+                    # Colour LCD HAT: swap the 1-bit canvas for an RGB dark-theme
+                    # one so the net-diag cards, menu and signal bars render in
+                    # colour. Their draw calls route through _wd_c, so on every
+                    # other panel the 1-bit canvas is kept and they look the same.
+                    if self._lcd_color_panel(render_w, render_h):
+                        image = Image.new('RGB', (render_w, render_h), _WD_COLORS['bg'])
+                        draw = ImageDraw.Draw(image)
                     seq0 = getattr(bl, 'netdiag_seq', 0) if bl else 0
                     result = getattr(bl, 'netdiag_result', None) if bl else None
                     if result is not None:
@@ -4361,10 +5269,25 @@ class Display:
                         if show_map:
                             self._render_wardriving_map_page(image, draw)
                         else:
+                            # Colour LCD HAT: swap the 1-bit canvas for an RGB
+                            # one so the compact screens can use colour. The
+                            # panel driver and the web preview take any mode.
+                            if self._wd_color_panel(render_w, render_h):
+                                image = Image.new('RGB', (render_w, render_h), _WD_COLORS['bg'])
+                                draw = ImageDraw.Draw(image)
                             self._render_wardriving_page(image, draw)
                         _wd_override = True
 
                 if not _wd_override:
+                    # Colour LCD HAT: these info pages render on an RGB dark-theme
+                    # canvas (like the main and wardriving screens); their
+                    # draw calls route colour through _wd_c, so on any other
+                    # panel the 1-bit canvas is kept and they look unchanged.
+                    if (current_page in (PAGE_NETWORK, PAGE_VULN, PAGE_DISCOVERED,
+                                         PAGE_ADVANCED, PAGE_TRAFFIC)
+                            and self._lcd_color_panel(render_w, render_h)):
+                        image = Image.new('RGB', (render_w, render_h), _WD_COLORS['bg'])
+                        draw = ImageDraw.Draw(image)
                     if current_page == PAGE_NETWORK:
                         self._render_network_page(image, draw)
                     elif current_page == PAGE_VULN:
@@ -4380,6 +5303,8 @@ class Display:
 
                 if current_page != PAGE_MAIN or _wd_override:
                     # Non-main pages are fully rendered above, skip to display
+                    self._cardputer_overlays(image, battery_text=not (
+                        _wd_override and self._wd_compact_page() == WD_PAGE_STATS))
                     epd_img = _apply_epd_rotation(image, self.screen_reversed)
                     self.epd_helper.display_partial(epd_img)
                     self.epd_helper.display_partial(epd_img)
@@ -4400,11 +5325,57 @@ class Display:
                 # tall e-paper dashboard — its absolute coords fall off-screen and
                 # the speech text collides with the character sprite. Render a
                 # dedicated compact layout instead and commit it directly.
+                # CardputerZero (320x170 landscape): its own wide layout with
+                # the character at double size, in colour unless switched off.
+                if self._cardputer_landscape(render_w, render_h):
+                    try:
+                        if self._lcd_color_panel(render_w, render_h):
+                            image = Image.new('RGB', (render_w, render_h), _WD_COLORS['bg'])
+                            draw = ImageDraw.Draw(image)
+                        self._render_main_cardputer(image, draw, W, H)
+                    except Exception as e:
+                        logger.debug(f"cardputer main render error: {e}")
+                    self._cardputer_overlays(image)
+                    epd_img = _apply_epd_rotation(image, self.screen_reversed)
+                    self.epd_helper.display_partial(epd_img)
+                    self.epd_helper.display_partial(epd_img)
+                    web_img = _apply_web_rotation(image, self.web_screen_reversed)
+                    with open(os.path.join(self.shared_data.webdir, "screen.png"), 'wb') as img_file:
+                        web_img.save(img_file)
+                        img_file.flush()
+                        os.fsync(img_file.fileno())
+                    self._sleep_interruptible(PAGE_MAIN)
+                    continue
                 if render_w < 150 and 100 <= render_h < 170:
                     try:
+                        # Colour LCD HAT: swap the 1-bit canvas for an RGB one
+                        # with the dark theme, as the wardriving screens do.
+                        if self._lcd_color_panel(render_w, render_h):
+                            image = Image.new('RGB', (render_w, render_h), _WD_COLORS['bg'])
+                            draw = ImageDraw.Draw(image)
                         self._render_main_compact(image, draw, W, H)
                     except Exception as e:
                         logger.debug(f"compact main render error: {e}")
+                    epd_img = _apply_epd_rotation(image, self.screen_reversed)
+                    self.epd_helper.display_partial(epd_img)
+                    self.epd_helper.display_partial(epd_img)
+                    web_img = _apply_web_rotation(image, self.web_screen_reversed)
+                    with open(os.path.join(self.shared_data.webdir, "screen.png"), 'wb') as img_file:
+                        web_img.save(img_file)
+                        img_file.flush()
+                        os.fsync(img_file.fileno())
+                    self._sleep_interruptible(PAGE_MAIN)
+                    continue
+                # A small e-paper rotated 90°/270° is now wide-and-short (the
+                # 2.13" 122x250 panel "lying down" → ~250x122). The portrait
+                # dashboard's 122x250 coordinates squash horribly there, so use a
+                # dedicated landscape layout (no frise, half-size sprite).
+                if (self.screen_reversed in (90, 270)
+                        and render_w > render_h and render_h < 170 and render_w < 340):
+                    try:
+                        self._render_main_horizontal(image, draw, W, H)
+                    except Exception as e:
+                        logger.debug(f"horizontal main render error: {e}")
                     epd_img = _apply_epd_rotation(image, self.screen_reversed)
                     self.epd_helper.display_partial(epd_img)
                     self.epd_helper.display_partial(epd_img)
@@ -4424,12 +5395,11 @@ class Display:
                     sx = self.scale_factor_x
                     sy = self.scale_factor_y
 
-                # Check PiSugar once per frame for title sizing + battery text
+                # Check for a battery (PiSugar / Waveshare UPS HAT) once per frame for title sizing + battery text
                 _pisugar_available = False
                 try:
-                    _ri = getattr(self.shared_data, 'ragnar_instance', None)
-                    _ps = getattr(_ri, 'pisugar_listener', None) if _ri else None
-                    _pisugar_available = _ps and _ps.available
+                    _ps = battery_source(self.shared_data)
+                    _pisugar_available = _ps is not None
                 except Exception:
                     pass
                 _title = self._unit_display_title()
@@ -4452,7 +5422,7 @@ class Display:
                 if self.shared_data.usb_active:
                     image.paste(self.shared_data.usb, (int(90 * sx), int(4 * sy)))
 
-                # Battery percentage (PiSugar) - flush right in header
+                # Battery percentage (PiSugar / UPS HAT) - flush right in header
                 if _pisugar_available:
                     try:
                         bat_level = _ps.get_battery_level()

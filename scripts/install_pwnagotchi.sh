@@ -148,6 +148,108 @@ EOF
     chown root:root /usr/bin/monstart /usr/bin/monstop
 }
 
+# Stage the bettercap service layer that Pwnagotchi mode depends on.
+#
+# Pwnagotchi does not sniff Wi-Fi itself — it drives a local bettercap over its
+# REST API (127.0.0.1:8081) and blocks forever on "waiting for bettercap API to
+# be available ..." until that API answers. The upstream pwnagotchiworking tree
+# only ships bettercap.service / bettercap-launcher as pi-gen *build-stage*
+# templates under stage3/06-patches/files; a from-scratch Ragnar install never
+# copies them onto the running system, so the whole service layer is simply
+# absent and the swap hangs (GitHub #896).
+#
+# We also cannot reuse the stage launcher verbatim: it hardcodes `-iface
+# wlan0mon` (the onboard Broadcom monitor alias), while a Ragnar node runs the
+# monitor on the external adapter as mon0 (config.toml mon_iface, created by
+# /usr/bin/monstart). So the launcher is templated from the configured monitor
+# interface instead of the upstream-hardcoded wlan0mon.
+#
+# pwngrid-peer.service is intentionally NOT staged: Ragnar runs a pwngrid no-op
+# shim with grid/advertise disabled (see the config above), so the peer daemon
+# is unused and would only add another wlan0mon-hardcoded unit to fail.
+install_bettercap_service() {
+    local monitor_if="$1"
+    local station_if="$2"
+
+    local bettercap_bin
+    bettercap_bin="$(command -v bettercap 2>/dev/null || true)"
+    [[ -z "$bettercap_bin" ]] && bettercap_bin="/usr/bin/bettercap"
+
+    # Launcher: bring up the monitor interface (idempotent — monstart recreates a
+    # stale mon0) then exec bettercap with the pwnagotchi-auto caplet. That caplet
+    # already enables api.rest + api.rest.websocket on 127.0.0.1:8081 with the
+    # pwnagotchi/pwnagotchi credentials the client expects, so no websocket
+    # systemd drop-in is needed here (the stock one would override ExecStart and
+    # bypass this launcher — we remove it below).
+    cat > /usr/bin/bettercap-launcher <<EOF
+#!/usr/bin/env bash
+# ragnar-managed bettercap launcher
+# Creates the monitor interface then runs bettercap for Pwnagotchi mode.
+# Monitor interface is templated from config.toml (mon_iface=${monitor_if}),
+# NOT the upstream-hardcoded wlan0mon.
+set -u
+
+STA_IF="${station_if}"
+MON_IF="${monitor_if}"
+
+# Fail-loud preflight (GitHub #1023). Pwnagotchi mode runs monitor mode on an
+# external USB adapter (\$STA_IF); the onboard wlan0 is deliberately left on the
+# home-WiFi STA connection for the Web UI. With no such adapter present, monstart
+# cannot build \$MON_IF and bettercap would loop forever on "-iface \$MON_IF" —
+# leaving the screen/Web UI stuck on "Reading last session logs". Stop here with
+# a readable reason instead of hanging on a cryptic bind failure.
+if [[ ! -e "/sys/class/net/\$STA_IF" ]]; then
+    echo "bettercap-launcher: FATAL: station interface '\$STA_IF' not found." >&2
+    echo "bettercap-launcher: Pwnagotchi mode needs an EXTERNAL USB WiFi adapter that supports monitor mode." >&2
+    echo "bettercap-launcher: The onboard wlan0 stays on your home WiFi for the Web UI and is NOT used for monitor mode." >&2
+    echo "bettercap-launcher: Plug in a supported adapter (it should appear as '\$STA_IF'), then restart Pwnagotchi mode." >&2
+    exit 1
+fi
+
+if [[ -x /usr/bin/monstart ]]; then
+    /usr/bin/monstart || echo "bettercap-launcher: monstart reported a problem (continuing)" >&2
+fi
+
+exec ${bettercap_bin} -no-colors -caplet pwnagotchi-auto -iface "\$MON_IF"
+EOF
+    chmod 755 /usr/bin/bettercap-launcher
+    chown root:root /usr/bin/bettercap-launcher
+
+    cat > /etc/systemd/system/bettercap.service <<'EOF'
+[Unit]
+Description=bettercap API for Pwnagotchi (Ragnar-managed)
+Documentation=https://bettercap.org
+Wants=network.target
+After=network.target
+
+[Service]
+Type=simple
+LimitNOFILE=65535
+TasksMax=infinity
+ExecStartPre=/bin/mkdir -p /etc/pwnagotchi/log
+ExecStart=/usr/bin/bettercap-launcher
+StandardOutput=append:/etc/pwnagotchi/log/bettercap.log
+StandardError=append:/etc/pwnagotchi/log/bettercap.log
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 644 /etc/systemd/system/bettercap.service
+
+    # A stale ragnar-websocket drop-in from an older install overrides ExecStart
+    # and would run bettercap directly — skipping monstart and the templated
+    # -iface — so the monitor interface would never be created. The caplet now
+    # owns the websocket setting, so drop the override entirely.
+    if [[ -f /etc/systemd/system/bettercap.service.d/ragnar-websocket.conf ]]; then
+        rm -f /etc/systemd/system/bettercap.service.d/ragnar-websocket.conf
+        rmdir /etc/systemd/system/bettercap.service.d 2>/dev/null || true
+    fi
+
+    echo "[INFO] Staged bettercap.service + /usr/bin/bettercap-launcher (station: ${station_if}, monitor: ${monitor_if}, binary: ${bettercap_bin})"
+}
+
 # Helper: check if all packages in a list are already installed
 all_packages_installed() {
     for pkg in "$@"; do
@@ -174,8 +276,12 @@ ensure_dpkg_healthy() {
 
     echo "[WARN] dpkg is in an interrupted state — repairing before installing"
     write_status "installing" "Repairing interrupted package state" "apt_repair"
-    DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1 || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -f -y >/dev/null 2>&1 || true
+    # --force-confdef/--force-confold: keep the shipped conffiles so a package
+    # deferred during a chroot image build (systemd/dbus on Kali) configures
+    # non-interactively instead of stopping at a conffile prompt.
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a --force-confdef --force-confold >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -f -y \
+        -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold >/dev/null 2>&1 || true
 
     if [[ -n "$(dpkg --audit 2>/dev/null)" ]]; then
         echo "[WARN] dpkg still reports problems — package installs may fail"
@@ -328,8 +434,21 @@ python3 -m pip install \
     --extra-index-url https://www.piwheels.org/simple \
     PyYAML dbus-python file-read-backwards flask flask-cors flask-wtf \
     gast gpiozero inky numpy pycryptodome python-dateutil requests \
-    rpi-lgpio rpi_hardware_pwm scapy setuptools shimmy smbus2 spidev \
+    rpi_hardware_pwm scapy setuptools shimmy smbus2 spidev \
     tomlkit toml tweepy websockets pisugar python-prctl 2>&1 || true
+
+# rpi-lgpio (the RPi.GPIO shim pwnagotchi needs) is pure-Python, but it depends
+# on lgpio, whose only PyPI release (0.2.2.0) uses removed Python-2 C API and
+# will NOT compile on Kali's Python 3.14. Left in the shared batch above, that
+# one build failure aborts the ENTIRE pip call, so even python-prctl never
+# lands — which is the "No module named 'prctl'" crash loop. Install it in its
+# OWN best-effort call with --no-deps so the un-buildable lgpio is skipped; a
+# headless pwnagotchi never touches GPIO at runtime, so the shim alone suffices.
+python3 -m pip install \
+    --break-system-packages \
+    --index-url https://pypi.org/simple \
+    --extra-index-url https://www.piwheels.org/simple \
+    --no-deps rpi-lgpio 2>&1 || true
 
 # pydrive2 is a hard dependency (pwnagotchi crashes without it).
 # Force PyPI only - piwheels drops connections on large packages like google-api-python-client.
@@ -398,6 +517,18 @@ write_status "installing" "Detecting WiFi interfaces" "interface_detect"
 STATION_IFACE="${PWN_DATA_IFACE:-$(select_station_interface)}"
 MONITOR_IFACE_NAME="${PWN_MON_IFACE:-mon0}"
 echo "[INFO] Using managed iface: ${STATION_IFACE} (monitor alias: ${MONITOR_IFACE_NAME})"
+
+# Fail-loud visibility (GitHub #1023): a device with only the onboard wlan0 (e.g.
+# a Pi Zero 2 W with no USB adapter) has no station interface for monitor mode.
+# The install still continues so the adapter can be plugged in later, but we warn
+# clearly here rather than silently defaulting to a phantom wlan1 — otherwise
+# bettercap loops at boot and the UI hangs on "Reading last session logs".
+if [[ ! -e "/sys/class/net/${STATION_IFACE}" ]]; then
+    echo "[WARN] Station interface '${STATION_IFACE}' is not present right now."
+    echo "[WARN] Pwnagotchi mode needs an EXTERNAL USB WiFi adapter with monitor-mode support;"
+    echo "[WARN] the onboard wlan0 is reserved for the home-WiFi Web UI and is not used for monitor mode."
+    echo "[WARN] Install will continue — plug the adapter in before switching to Pwnagotchi mode."
+fi
 
 write_status "installing" "Installing monitor mode scripts" "monitor_scripts"
 install_monitor_scripts "$STATION_IFACE" "$MONITOR_IFACE_NAME"
@@ -468,6 +599,12 @@ enabled = false
 
 [personality]
 advertise = false
+# Pin recon to valid 2.4/5 GHz channels. Leaving this empty makes pwnagotchi
+# use every channel the card reports, and Wi-Fi 6E adapters (e.g. the common
+# MediaTek MT7921U) report 6 GHz channels (like 221) that bettercap rejects
+# with "error 400: <n> is not a valid wifi channel", which breaks recon and
+# stops handshake capture. This list covers 2.4 GHz + non-DFS 5 GHz.
+channels = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 36, 40, 44, 48, 149, 153, 157, 161, 165]
 EOF
     echo "[INFO] Created default config at ${CONFIG_FILE}"
 else
@@ -695,13 +832,76 @@ else
 fi
 
 # -------------------------------------------------------------------
-# BETTERCAP SERVICE SYNC
+# PWNAGOTCHI / BETTERCAP EVENT-PIPELINE FIXES
 # -------------------------------------------------------------------
-echo "[INFO] Checking bettercap..."
-if [[ -f "/usr/bin/bettercap-launcher" ]]; then
-    chmod 755 /usr/bin/bettercap-launcher
+# Without these, Pwnagotchi mode boots but is effectively useless: the PWND
+# counter stays 0, captures never reach the wpa-sec upload queue, and the live
+# UI never updates -- because pwnagotchi's bettercap event WebSocket never
+# connects. Root cause chain (all verified on hardware):
+echo "[INFO] Applying Pwnagotchi/bettercap event-pipeline fixes..."
+
+# 1. bettercap only upgrades GET /api/events to a WebSocket when
+#    api.rest.websocket is true; it DEFAULTS TO FALSE and otherwise returns
+#    plain JSON (HTTP 200), which pwnagotchi's client rejects with
+#    "server rejected WebSocket connection: HTTP 200". Our Ragnar-managed
+#    bettercap.service (staged below) runs the pwnagotchi-auto caplet, which
+#    already sets `api.rest.websocket true`, so there is nothing to patch here —
+#    the websocket is enabled by the caplet, not by a systemd drop-in.
+
+# 2. python3-websockets >= 14 no longer sends HTTP Basic Auth from the
+#    ws://user:pass@host URL userinfo, so bettercap sees an unauthenticated
+#    upgrade. Pin a compatible version for pwnagotchi's client code.
+PIP_CONFIG_FILE=/dev/null python3 -m pip install --break-system-packages \
+    --index-url https://pypi.org/simple "websockets<14" >/dev/null 2>&1 || \
+    echo "[WARN] could not pin websockets<14"
+
+# 3. Belt-and-suspenders: send the Authorization header explicitly so the event
+#    WebSocket authenticates regardless of the installed websockets version.
+BCAP_PY="${PWN_DIR}/pwnagotchi/bettercap.py"
+if [[ -f "$BCAP_PY" ]] && ! grep -q 'extra_headers' "$BCAP_PY"; then
+    if python3 - "$BCAP_PY" <<'PY' 2>/dev/null
+import sys
+p = sys.argv[1]; s = open(p).read()
+if 'import base64' not in s:
+    s = s.replace('import websockets', 'import websockets\nimport base64', 1)
+s = s.replace('max_queue=max_queue) as ws:',
+    "max_queue=max_queue, extra_headers={'Authorization': 'Basic ' + base64.b64encode((self.username + ':' + self.password).encode()).decode()}) as ws:", 1)
+open(p, 'w').write(s)
+PY
+    then
+        echo "[INFO] Patched bettercap.py to authenticate the event WebSocket"
+    else
+        echo "[WARN] bettercap.py auth patch skipped"
+    fi
 fi
-echo "[INFO] bettercap will start on swap to Pwnagotchi"
+
+# 4. pwnagotchi tallies total handshakes by globbing *.pcapng, but bettercap
+#    writes *.pcap in this setup, so PWND (total) reads 0 despite real captures.
+#    Match both extensions.
+UTILS_PY="${PWN_DIR}/pwnagotchi/utils.py"
+if [[ -f "$UTILS_PY" ]]; then
+    sed -i 's/"\*\.pcapng"/"*.pcap*"/' "$UTILS_PY" || true
+fi
+
+# clear stale bytecode so a running service picks up the source patches
+find "$PWN_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+
+# -------------------------------------------------------------------
+# BETTERCAP SERVICE LAYER
+# -------------------------------------------------------------------
+# Pwnagotchi mode blocks forever on "waiting for bettercap API to be available"
+# unless bettercap.service is present and serving its REST API. The upstream
+# tree ships this only as a pi-gen build-stage template, so a from-scratch
+# Ragnar install must create it here (GitHub #896). Templated to the configured
+# monitor interface (mon0), not the upstream-hardcoded wlan0mon.
+echo "[INFO] Staging bettercap service layer..."
+write_status "installing" "Staging bettercap service" "bettercap_service"
+install_bettercap_service "$MONITOR_IFACE_NAME" "$STATION_IFACE"
+timeout 15 systemctl daemon-reload || echo "[WARN] daemon-reload slow"
+# Started on demand by the Ragnar→Pwnagotchi swap, not enabled at boot (Ragnar
+# is the default mode). Make sure a stale enable from an older install is gone.
+timeout 10 systemctl disable bettercap >/dev/null 2>&1 || true
+echo "[INFO] bettercap.service staged — will start on swap to Pwnagotchi"
 
 # -------------------------------------------------------------------
 # CLEANUP

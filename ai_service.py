@@ -12,10 +12,84 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except Exception:  # noqa: BLE001 — SDK optional
+    # The openai SDK may be absent on a lean/airgapped image. Importing this
+    # module must still succeed so the non-LLM helpers (normalize_base_url, the
+    # endpoint discovery/listing routes) keep working; real AI calls raise a
+    # clear, actionable error instead of a 500. Heal with the Ragnar updater or
+    # `pip install "openai>=2.0.0"`.
+    OpenAI = None
+
+_OPENAI_MISSING_MSG = ("The 'openai' package is not installed — run the Ragnar "
+                       "updater, or: pip install 'openai>=2.0.0'.")
 
 from logger import Logger
 from env_manager import EnvManager, load_env
+
+
+RESPONSE_LANGUAGES = {
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+}
+
+
+def response_language(config) -> str:
+    try:
+        code = str((config or {}).get("language", "en") or "en").strip().lower()
+    except Exception:  # noqa: BLE001
+        return "en"
+    return code if code in RESPONSE_LANGUAGES else "en"
+
+
+def prose_language_directive(code: str) -> str:
+    if code not in RESPONSE_LANGUAGES or code == "en":
+        return ""
+    name = RESPONSE_LANGUAGES[code]
+    return (
+        f"\n\nRESPONSE LANGUAGE: Write your entire reply in {name}, including "
+        "headings, labels and list items, whatever language the data or the "
+        "instructions above are written in. Keep these exactly as they are: "
+        "code and JSON blocks (keys and values), commands, file paths, display "
+        "filters, protocol, tool and product names, CVE IDs, IP and MAC addresses, "
+        "SSIDs, hostnames, and any value quoted from the data."
+    )
+
+
+def json_fields_language_directive(code: str, fields) -> str:
+    if code not in RESPONSE_LANGUAGES or code == "en" or not fields:
+        return ""
+    names = ", ".join(f'"{f}"' for f in fields)
+    return (
+        f"\n\nLANGUAGE: write the values of {names} in {RESPONSE_LANGUAGES[code]}. "
+        "Every JSON key, phase, action, parameter name, tool name, argument and "
+        "other value stays exactly as specified above, in English."
+    )
+
+
+def normalize_base_url(url: str) -> str:
+    """Tidy an OpenAI-compatible base URL so common shorthands just work.
+
+    Adds a missing http:// scheme, strips trailing slashes, and appends the
+    conventional ``/v1`` path when the operator gave only a host[:port] (every
+    supported server — Ollama, LocalAI, vLLM, LM Studio — serves the OpenAI API
+    under /v1). The port is never guessed. Empty input stays empty.
+    """
+    import re
+    from urllib.parse import urlparse
+
+    url = (url or "").strip()
+    if not url:
+        return ""
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        url = "http://" + url
+    url = url.rstrip("/")
+    if urlparse(url).path in ("", "/"):
+        url = url + "/v1"
+    return url
 
 # Load environment variables immediately
 load_env()
@@ -38,6 +112,21 @@ class AIService:
         # Configuration
         self.enabled = cfg.get("ai_enabled", False)
         self.model = cfg.get("ai_model", "gpt-5.4-nano")
+
+        # Self-hosted / OpenAI-compatible endpoint support (issue #462).
+        # When ai_base_url is set (e.g. an Ollama/LocalAI/vLLM/LM Studio server
+        # on the LAN or mesh), Ragnar talks to it as a thin HTTP client and
+        # uses the Chat Completions API — local servers implement /v1/chat/
+        # completions, not OpenAI's proprietary Responses API. Empty base URL
+        # keeps the default OpenAI Responses behavior unchanged.
+        self.base_url = normalize_base_url(cfg.get("ai_base_url", ""))
+        self.use_chat_api = self._resolve_use_chat_api()
+
+        # OpenAI-cloud fallback for when a self-hosted endpoint goes away
+        # (issue #462). Built lazily the first time it's needed.
+        self._fallback_client = None
+        self._fallback_model = None
+        self.fallback_active = False  # True while running on the cloud fallback
 
         # These must remain for backward compatibility (but not used)
         self.max_tokens = cfg.get("ai_max_tokens")
@@ -64,19 +153,60 @@ class AIService:
     #   INITIALIZATION
     # ===================================================================
 
+    def _resolve_use_chat_api(self):
+        """Decide which API dialect to speak.
+
+        ``ai_api_style`` ('auto'|'responses'|'chat') overrides when set;
+        otherwise a configured base URL implies a self-hosted, Chat-Completions
+        server and the default OpenAI cloud uses the Responses API.
+        """
+        style = str(self.shared_data.config.get("ai_api_style", "auto") or "auto").strip().lower()
+        if style == "chat":
+            return True
+        if style == "responses":
+            return False
+        return bool(self.base_url)
+
     def _initialize_client(self):
         if not self.enabled:
             return
 
-        if not self.api_token:
+        # A real key is mandatory for OpenAI's cloud, but self-hosted endpoints
+        # usually accept any non-empty string — the SDK still requires one, so
+        # fall back to a harmless placeholder when the operator left it blank.
+        if not self.api_token and not self.base_url:
             self.initialization_error = "No OpenAI API key found."
             self.logger.warning(self.initialization_error)
             return
 
+        if OpenAI is None:
+            self.client = None
+            self.initialization_error = _OPENAI_MISSING_MSG
+            self.logger.warning(self.initialization_error)
+            return
+
         try:
-            self.client = OpenAI(api_key=self.api_token)
+            # Bound every request: the SDK default is 600s, so a single stuck or
+            # rate-limited call (common when several field units share one API
+            # key and each fans out concurrent dashboard calls) would otherwise
+            # hang for minutes — well past any client timeout — instead of
+            # failing fast and letting the rest of the insights render. One retry
+            # keeps the worst-case bounded (~40s/call) so the background insights
+            # run resolves quickly even on a slow board.
+            client_kwargs = {
+                "api_key": self.api_token or "ragnar-local",
+                "timeout": 20.0,
+                "max_retries": 1,
+            }
+            if self.base_url:
+                client_kwargs["base_url"] = self.base_url
+            self.client = OpenAI(**client_kwargs)
             self.initialization_error = None
-            self.logger.info(f"AI Service initialized using model: {self.model}")
+            endpoint = self.base_url or "OpenAI"
+            api_dialect = "chat.completions" if self.use_chat_api else "responses"
+            self.logger.info(
+                f"AI Service initialized (model: {self.model}, endpoint: {endpoint}, api: {api_dialect})"
+            )
         except Exception as exc:
             self.client = None
             self.initialization_error = f"OpenAI client initialization failed: {exc}"
@@ -86,9 +216,16 @@ class AIService:
     def reload_token(self) -> bool:
         """Refresh the API token from disk and reinitialize the OpenAI client."""
 
-        # Keep enabled flag synced with latest config intent
+        # Keep enabled flag + endpoint config synced with latest config intent
         if hasattr(self.shared_data, "config"):
-            self.enabled = self.shared_data.config.get("ai_enabled", self.enabled)
+            cfg = self.shared_data.config
+            self.enabled = cfg.get("ai_enabled", self.enabled)
+            self.model = cfg.get("ai_model", self.model)
+            self.base_url = normalize_base_url(cfg.get("ai_base_url", ""))
+            self.use_chat_api = self._resolve_use_chat_api()
+            # Force the cloud fallback to rebuild with the latest token/model.
+            self._fallback_client = None
+            self.fallback_active = False
 
         self.api_token = self.env_manager.get_token()
         self.client = None
@@ -98,7 +235,7 @@ class AIService:
             self.logger.info("AI service disabled in config; skipping token reload.")
             return False
 
-        if not self.api_token:
+        if not self.api_token and not self.base_url:
             self.logger.warning("AI token reload requested but no token present in environment.")
             self.initialization_error = "No OpenAI API key found."
             return False
@@ -118,6 +255,19 @@ class AIService:
 
         return success
 
+    def complete(self, user_msg: str, system_msg: Optional[str] = None) -> Optional[str]:
+        """One-shot completion returning the model's raw text (or None).
+
+        Public entry over the unified `_ask` call, used by callers that need the
+        AI to emit a structured artifact rather than a cached 'analysis' — e.g.
+        the Ulfberht playbook generator. Routes OpenAI vs self-hosted the same
+        way every other call does. Returns None when AI is disabled/unavailable.
+        """
+        if system_msg is None:
+            system_msg = ("You are a security automation assistant. Output exactly one "
+                          "JSON object and nothing else — no prose, no markdown fences.")
+        return self._ask(system_msg, user_msg, localize=False)
+
 
 
     # ===================================================================
@@ -127,6 +277,15 @@ class AIService:
     def is_enabled(self):
         """Return True when the service is enabled and the client is ready."""
         return self.ensure_ready()
+
+    def response_language(self) -> str:
+        return response_language(getattr(self.shared_data, "config", None))
+
+    def language_directive(self) -> str:
+        return prose_language_directive(self.response_language())
+
+    def json_language_directive(self, fields) -> str:
+        return json_fields_language_directive(self.response_language(), fields)
 
     def ensure_ready(self):
         """Lazily initialize the OpenAI client if configuration says AI is enabled."""
@@ -151,7 +310,9 @@ class AIService:
         if not self.api_token:
             self.api_token = self.env_manager.get_token()
 
-        if not self.api_token:
+        # A token is only mandatory for the OpenAI cloud; a self-hosted base URL
+        # can run keyless.
+        if not self.api_token and not self.base_url:
             self.initialization_error = "No OpenAI API key found."
             self.logger.warning(self.initialization_error)
             return False
@@ -161,7 +322,7 @@ class AIService:
 
     def _cache_key(self, name: str, content: Any):
         import hashlib
-        raw = f"{name}:{json.dumps(content, sort_keys=True)}"
+        raw = f"{name}:{self.response_language()}:{json.dumps(content, sort_keys=True)}"
         return hashlib.md5(raw.encode()).hexdigest()
 
     def _cache_get(self, key: str):
@@ -182,7 +343,7 @@ class AIService:
     #   CORE GPT-5 CALL — NEW RESPONSES API
     # ===================================================================
 
-    def _ask(self, system_msg: str, user_msg: str) -> Optional[str]:
+    def _ask(self, system_msg: str, user_msg: str, localize: bool = True) -> Optional[str]:
         """
         Unified GPT-5 call with temperature fallback (required for tests).
         """
@@ -194,9 +355,120 @@ class AIService:
             self.logger.error("AI client unavailable despite service being enabled.")
             return None
 
-        # Base GPT-5 payload
+        if localize:
+            system_msg = (system_msg or "") + self.language_directive()
+
+        # Self-hosted / OpenAI-compatible servers speak Chat Completions, not
+        # the proprietary Responses API — route them separately.
+        if self.use_chat_api:
+            return self._ask_chat(system_msg, user_msg)
+
+        return self._ask_responses(system_msg, user_msg)
+
+    # ===================================================================
+    #   MULTI-TURN CHAT — used by the interactive assistant (ai_chat.py)
+    # ===================================================================
+
+    def chat_messages(self, messages, max_tokens=None):
+        """Multi-turn chat completion for the interactive dashboard assistant.
+
+        Takes a full ``[{"role": ..., "content": ...}]`` list (system / user /
+        assistant turns) and returns the model's text reply. Routes to the
+        Responses API on OpenAI's cloud and to Chat Completions on self-hosted
+        endpoints — mirroring :meth:`_ask` — so the assistant works the same on
+        the cloud and on a local Ollama/LocalAI server. The agentic loop that
+        drives tool use lives in ai_chat.py; this method is just the raw call.
+        """
+        if not self.ensure_ready() or self.client is None:
+            return None
+        if self.use_chat_api:
+            return self._chat_messages_chat(messages, max_tokens)
+        return self._chat_messages_responses(messages, max_tokens)
+
+    def _chat_messages_responses(self, messages, max_tokens=None, client=None, model=None):
+        """Responses-API path for :meth:`chat_messages` (OpenAI cloud + the
+        self-hosted cloud fallback). Passes the message list straight through as
+        ``input`` — the Responses API accepts system/user/assistant roles."""
+        client = client or self.client
+        model = model or self.model
         payload = {
-            "model": self.model,
+            "model": model,
+            "input": messages,
+            "reasoning": {"effort": "low"},
+            "text": {"verbosity": "low"},
+        }
+        if max_tokens:
+            payload["max_output_tokens"] = int(max_tokens)
+        if self.temperature_supported and self.temperature is not None:
+            payload["temperature"] = self.temperature
+        try:
+            return self._extract_output(client.responses.create(**payload))
+        except Exception as e:
+            err = str(e).lower()
+            if "temperature" in err and "unsupported" in err:
+                self.temperature_supported = False
+                payload.pop("temperature", None)
+                try:
+                    return self._extract_output(client.responses.create(**payload))
+                except Exception as e2:
+                    self.logger.error(f"[chat] responses retry failed: {e2}")
+                    return None
+            self.logger.error(f"[chat] responses call failed: {e}")
+            return None
+
+    def _chat_messages_chat(self, messages, max_tokens=None):
+        """Chat-Completions path for :meth:`chat_messages` (self-hosted). Falls
+        back to OpenAI's cloud when the endpoint looks unreachable, exactly like
+        :meth:`_ask_chat` does."""
+        payload = {"model": self.model, "messages": messages}
+        if max_tokens:
+            payload["max_tokens"] = int(max_tokens)
+        if self.temperature_supported and self.temperature is not None:
+            payload["temperature"] = self.temperature
+        try:
+            result = self.client.chat.completions.create(**payload)
+        except Exception as e:
+            err = str(e).lower()
+            if "temperature" in err and payload.pop("temperature", None) is not None:
+                self.temperature_supported = False
+                try:
+                    result = self.client.chat.completions.create(**payload)
+                except Exception as e2:
+                    return self._chat_messages_fallback(messages, max_tokens, e2)
+            else:
+                return self._chat_messages_fallback(messages, max_tokens, e)
+        self.fallback_active = False
+        try:
+            content = result.choices[0].message.content
+            return content.strip() if content else None
+        except (AttributeError, IndexError, TypeError):
+            self.logger.error("[chat] self-hosted response had no message content.")
+            return None
+
+    def _chat_messages_fallback(self, messages, max_tokens, error):
+        """Retry a failed self-hosted chat on OpenAI's cloud when the endpoint
+        looks unreachable and a token is configured (mirrors _maybe_fallback)."""
+        if self._should_fallback(error):
+            fb = self._ensure_fallback_client()
+            if fb is not None:
+                self.logger.warning(
+                    f"[chat] self-hosted endpoint unavailable ({error}); falling "
+                    f"back to OpenAI cloud (model: {self._fallback_model})."
+                )
+                self.fallback_active = True
+                return self._chat_messages_responses(
+                    messages, max_tokens, client=fb, model=self._fallback_model)
+        self.logger.error(f"[chat] self-hosted chat failed: {error}")
+        return None
+
+    def _ask_responses(self, system_msg, user_msg, client=None, model=None):
+        """OpenAI Responses-API call (GPT-5 family). Reused for both the primary
+        cloud path and the self-hosted fallback (with a cloud client + model)."""
+        client = client or self.client
+        model = model or self.model
+
+        payload = {
+            "model": model,
             "input": [
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
@@ -211,7 +483,7 @@ class AIService:
 
         # FIRST ATTEMPT
         try:
-            result = self.client.responses.create(**payload)
+            result = client.responses.create(**payload)
             return self._extract_output(result)
 
         except Exception as e:
@@ -228,7 +500,7 @@ class AIService:
 
                 # SECOND ATTEMPT WITHOUT TEMPERATURE
                 try:
-                    result = self.client.responses.create(**payload)
+                    result = client.responses.create(**payload)
                     return self._extract_output(result)
                 except Exception as e2:
                     self.logger.error(f"Retry after removing temperature failed: {e2}")
@@ -238,6 +510,112 @@ class AIService:
             return None
 
 
+
+    def _ask_chat(self, system_msg: str, user_msg: str) -> Optional[str]:
+        """Chat Completions call for self-hosted OpenAI-compatible endpoints.
+
+        No reasoning/verbosity params (unsupported by local servers); reads the
+        classic ``choices[0].message.content`` response shape.
+        """
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+        }
+        if self.temperature_supported and self.temperature is not None:
+            payload["temperature"] = self.temperature
+
+        try:
+            result = self.client.chat.completions.create(**payload)
+        except Exception as e:
+            error_text = str(e).lower()
+            if "temperature" in error_text and payload.pop("temperature", None) is not None:
+                self.temperature_supported = False
+                self.logger.warning("Endpoint rejected temperature — retrying without it.")
+                try:
+                    result = self.client.chat.completions.create(**payload)
+                except Exception as e2:
+                    return self._maybe_fallback(system_msg, user_msg, e2)
+            else:
+                return self._maybe_fallback(system_msg, user_msg, e)
+
+        # A successful self-hosted call clears any prior fallback state.
+        self.fallback_active = False
+
+        # Usage fields on OpenAI-compatible servers use prompt/completion naming.
+        usage = getattr(result, "usage", None)
+        if usage is not None:
+            self.logger.info(
+                "AI Tokens → input:{} output:{} total:{}".format(
+                    getattr(usage, "prompt_tokens", "?"),
+                    getattr(usage, "completion_tokens", "?"),
+                    getattr(usage, "total_tokens", "?"),
+                )
+            )
+
+        try:
+            content = result.choices[0].message.content
+            return content.strip() if content else None
+        except (AttributeError, IndexError, TypeError):
+            self.logger.error("Self-hosted AI response had no message content.")
+            return None
+
+    def _maybe_fallback(self, system_msg, user_msg, error):
+        """Retry a failed self-hosted call on OpenAI's cloud when the endpoint
+        looks unreachable and a token is configured (issue #462)."""
+        if self._should_fallback(error):
+            fb = self._ensure_fallback_client()
+            if fb is not None:
+                self.logger.warning(
+                    f"Self-hosted endpoint unavailable ({error}); falling back to "
+                    f"OpenAI cloud (model: {self._fallback_model})."
+                )
+                self.fallback_active = True
+                return self._ask_responses(
+                    system_msg, user_msg, client=fb, model=self._fallback_model
+                )
+        self.logger.error(f"Self-hosted AI call failed: {error}")
+        return None
+
+    def _should_fallback(self, error):
+        """True when the error looks like the endpoint is unreachable / timed
+        out, rather than a bad request the cloud would also reject."""
+        if type(error).__name__ in (
+            "APIConnectionError", "APITimeoutError", "InternalServerError",
+            "ConnectionError", "Timeout", "ConnectTimeout", "ReadTimeout",
+        ):
+            return True
+        msg = str(error).lower()
+        return any(s in msg for s in (
+            "connection", "timed out", "timeout", "refused", "unreachable",
+            "failed to establish", "max retries", "connect", "temporarily unavailable",
+        ))
+
+    def _ensure_fallback_client(self):
+        """Lazily build an OpenAI-cloud client used only for fallback. Requires a
+        real token; returns None when none is configured (so no fallback)."""
+        if not self.base_url:
+            return None  # already on the cloud — no separate fallback needed
+        if self._fallback_client is not None:
+            return self._fallback_client
+        if OpenAI is None:
+            return None  # SDK absent — no cloud fallback possible
+        token = self.api_token or self.env_manager.get_token()
+        if not token:
+            return None
+        try:
+            self._fallback_client = OpenAI(api_key=token, timeout=20.0, max_retries=1)
+            self._fallback_model = (
+                str(self.shared_data.config.get("ai_fallback_model", "") or "").strip()
+                or "gpt-5.4-nano"
+            )
+            self.logger.info(f"AI cloud fallback ready (model: {self._fallback_model}).")
+            return self._fallback_client
+        except Exception as e:
+            self.logger.warning(f"Could not initialize AI fallback client: {e}")
+            return None
 
     def _extract_output(self, result):
         """Extract output text and log token usage."""
@@ -456,6 +834,68 @@ one capture/filter that would confirm it."""
             self._cache_set(key, resp)
         return resp
 
+    def analyze_signal(self, question: str, context: Dict, facts: Dict = None):
+        """RF-analyst assistant for the Signal Analyzer (SigMF IQ captures).
+
+        Acts as an expert RF / SIGINT / signal-reverse-engineering analyst: helps
+        the user interpret the analyzer's measurements, choose demod parameters,
+        read a recovered bitstream / frame structure / CRC, guess the likely
+        device or protocol, and decide the next step. ``context`` is what the page
+        currently shows (summary, classification, bursts, demod bits, frame
+        analysis, decoded devices, marker); ``facts`` are freshly-measured values
+        the server re-derived from the capture so the AI is grounded in real
+        numbers. Chat-style, so this is NOT cached. Returns text, or None."""
+        if not self.is_enabled():
+            return None
+        merged = dict(context or {})
+        if facts:
+            merged["measured"] = facts
+        ctx_json = json.dumps(merged, indent=2, default=str)[:7000]
+        q = (question or "").strip() or "What is this signal, and how would I decode it?"
+        system = (
+            "You are a senior RF / SIGINT and signal-reverse-engineering analyst helping a user "
+            "at a software-defined-radio workbench. They have captured raw IQ (a SigMF recording "
+            "from an RTL-SDR, ~24 MHz-1.7 GHz, receive-only) and are looking at an on-device "
+            "analyzer: spectrogram, PSD, envelope, automatic burst detection, an OOK/AM & FSK/FM "
+            "demodulator that recovers a bitstream, a modulation classifier, and a protocol tool "
+            "(preamble / repeated-frame alignment / CRC scan). "
+            "Your job: interpret the measurements and TEACH the user how a professional would "
+            "proceed - what the signal likely is, which band/service it belongs to, what "
+            "modulation and symbol rate the numbers imply, how to set the demod (centre offset, "
+            "bandwidth, OOK vs FSK), how to read the recovered bits / frame structure / CRC, and "
+            "the single best NEXT step. "
+            "IMPORTANT HONESTY RULES: the analyzer's dB values are RELATIVE (uncalibrated), not "
+            "absolute dBm - never present them as calibrated power. LoRa / chirp-spread and most "
+            "digital mesh (Meshtastic) CANNOT be demodulated here - it is energy/occupancy only; "
+            "say so. Rolling-code remotes and unlisted protocols won't be 'named' by rtl_433 - "
+            "explain what the bits still tell you (fixed vs rolling fields). Do NOT invent values "
+            "that aren't in the provided context; if something needed isn't there, tell the user "
+            "which analyzer control to use to get it. Reference the analyzer's own controls by "
+            "name (Zoom/Measure, Demodulate, BW, Frames, Decode, Bin/Hex/Manchester). Be concise "
+            "and practical; use short markdown sections/bullets. This is receive-only analysis.\n\n"
+            "TAKING ACTIONS: you can DRIVE the analyzer. When a concrete next step would help, END "
+            "your reply with a fenced ```json block: {\"actions\":[ ... ]} — the user gets one-click "
+            "buttons to run them (nothing runs without their click). Use ONLY these actions and only "
+            "with values grounded in the data shown:\n"
+            "  {\"action\":\"tune\",\"f_mhz\":<centre>,\"bw_khz\":<width>,\"mode\":\"ook|fsk\"}  — mark + zoom a signal and set demod BW\n"
+            "  {\"action\":\"demod\",\"mode\":\"ook|fsk\",\"bw_khz\":<width>}  — demodulate to bits\n"
+            "  {\"action\":\"classify\"}         — auto modulation classification\n"
+            "  {\"action\":\"frames\",\"line\":\"raw|manchester|nrzi\"}  — preamble/frame/CRC analysis\n"
+            "  {\"action\":\"decode433\"}         — run rtl_433 to name known ISM devices\n"
+            "  {\"action\":\"zoom\",\"t0\":<s>,\"t1\":<s>,\"f0_mhz\":<lo>,\"f1_mhz\":<hi>}\n"
+            "  {\"action\":\"reset\"}             — reset zoom\n"
+            "Propose at most 4 actions, in the order to try them. Omit the block entirely if there's "
+            "nothing concrete to do. Keep the readable answer ABOVE the block; put no prose after it."
+        )
+        user = (
+            "Here is the current analyzer state for the selected capture (JSON):\n\n"
+            + ctx_json
+            + "\n\nUser question:\n" + q[:2000]
+            + "\n\nAnswer as their RF analyst: interpret what's measured, be specific about the "
+            "numbers present, and end with a concrete next step using the analyzer's controls."
+        )
+        return self._ask(system, user)
+
     # ===================================================================
     #   ATTACK VECTOR IDENTIFICATION
     # ===================================================================
@@ -540,15 +980,38 @@ Limit to 2-3 most viable attack paths. Be specific and tactical.
             return None
 
         connected = (context or {}).get("connected")
+        bt = (context or {}).get("bt")
+        zb = (context or {}).get("zigbee")
         key = self._cache_key("wifi_conn", {
             "bssid": (connected or {}).get("bssid"),
             "signal": (connected or {}).get("signal_dbm"),
             "cochannel": (context or {}).get("co_channel_count"),
             "aps": (context or {}).get("ap_total"),
+            # Include the non-Wi-Fi 2.4 GHz overlays so enabling/refreshing them
+            # busts the cache instead of serving a Wi-Fi-only verdict.
+            "bt": (bt or {}).get("device_count") if bt else None,
+            "zb": (zb or {}).get("device_count") if zb else None,
         })
         cached = self._cache_get(key)
         if cached:
             return cached
+
+        # Which non-Wi-Fi 2.4 GHz sources are present shapes what we ask for.
+        overlays = []
+        if bt:
+            overlays.append("Bluetooth/BLE")
+        if zb:
+            overlays.append("Zigbee / 802.15.4")
+        overlay_line = (
+            (" The data also includes non-Wi-Fi 2.4 GHz emitters discovered "
+             "alongside the Wi-Fi scan (" + " and ".join(overlays) + "), under "
+             "the 'bt' and/or 'zigbee' keys, with an estimated per-Wi-Fi-channel "
+             "pressure for channels 1/6/11/13. Treat these as coexistence load on "
+             "the 2.4 GHz band: factor them into 2.4 GHz channel advice and, when "
+             "they are significant, recommend moving affected clients to 5/6 GHz. "
+             "The pressure figures are heuristic activity estimates, not measured "
+             "energy — say so and do not overstate them.") if overlays else ""
+        )
 
         data_json = json.dumps(context, indent=2, default=str)[:6000]
         system = (
@@ -560,6 +1023,7 @@ Limit to 2-3 most viable attack paths. Be specific and tactical.
             "do not invent SSIDs, channels or values that are not present. If the "
             "user is not associated to a network, say so and analyze the "
             "environment instead. Use short markdown sections and bullet points."
+            + overlay_line
         )
         user = f"""Analyze this Wi-Fi connection and RF environment.
 
@@ -574,8 +1038,10 @@ short paragraph.
 
 **Issues found** — concrete problems supported by the data, e.g. co-channel or
 adjacent-channel congestion, 2.4 GHz use where 5 GHz is available, weak signal,
-legacy/weak security (Open/WEP/WPA/TKIP), a narrow channel width, or a crowded
-channel. Only list issues the data supports.
+legacy/weak security (Open/WEP/WPA/TKIP), a narrow channel width, a crowded
+channel, or — when the bt/zigbee overlays are present — non-Wi-Fi 2.4 GHz
+coexistence pressure from Bluetooth/BLE or Zigbee on channels 1/6/11. Only list
+issues the data supports.
 
 **Recommendations** — prioritized, specific actions (e.g. "move to 5 GHz",
 "change to channel 44", "widen to 80 MHz", "upgrade to WPA2/WPA3-CCMP",
@@ -641,6 +1107,92 @@ note which watchers are reporting. Keep it short."""
         return resp
 
     # ===================================================================
+    #   WI-FI DEFENSE  (WIDS + airtime + client-isolation, one read)
+    # ===================================================================
+
+    def analyze_wifi_defense(self, context: Dict):
+        """One professional read across the three WiFi Defense modules for a
+        single capture window: the 802.11 WIDS scan (deauth/beacon floods,
+        rogue/evil-twin APs, KARMA, airspace posture), the airtime / link-quality
+        analysis (retry rates, airtime hogs, slow/legacy clients, weak security),
+        and the client-isolation observer (whether stations can reach each other
+        on the same BSS/mesh). `context` is assembled by /api/ai/wifidef-analyze
+        from whatever the panel currently holds. Neutral SOC-analyst tone."""
+        if not self.is_enabled():
+            return None
+
+        wids = (context or {}).get('wids') or {}
+        airtime = (context or {}).get('airtime') or {}
+        isolation = (context or {}).get('isolation') or {}
+        key = self._cache_key("wifidef", {
+            "threat": wids.get('threat'),
+            "dets": len(wids.get('detections') or []),
+            "at": len(airtime.get('findings') or []),
+            "iso": [(b.get('bssid'), b.get('verdict')) for b in (isolation.get('bss') or [])[:12]],
+            "frames": wids.get('frames'),
+        })
+        cached = self._cache_get(key)
+        if cached:
+            return cached
+
+        present = []
+        if wids:
+            present.append("WIDS")
+        if airtime:
+            present.append("airtime/link-quality")
+        if isolation:
+            present.append("client-isolation")
+
+        data_json = json.dumps(context, indent=2, default=str)[:6500]
+        system = (
+            "You are a professional wireless security operations analyst reviewing "
+            "a single passive 802.11 monitor-mode capture through three lenses: an "
+            "intrusion-detection (WIDS) view (deauth/disassoc and beacon floods, "
+            "rogue / evil-twin APs, KARMA/MANA, airspace posture such as SSID/BSSID "
+            "counts, randomized-MAC ratio), an airtime / link-quality view (retry "
+            "rates, airtime hogs, slow or legacy clients, ERP/HT protection, weak "
+            "security/ciphers, WPS exposure), and a client-isolation view (whether "
+            "stations on the same BSS/mesh can reach each other). Correlate ACROSS "
+            "the three — e.g. tie a deauth burst to a retry spike, or note that a "
+            "flagged 'rogue' is likely a legit AP with a randomized-MAC client. "
+            "Base every statement strictly on the data; do not invent BSSIDs, SSIDs "
+            "or counts. Calibrate severity against capture length and volume — a few "
+            "deauths or a short hopping capture is weak evidence, not an incident; "
+            "say when the data is inconclusive and what would confirm it. If the "
+            "airspace looks clean, say so plainly. Neutral professional tone, no "
+            "personas. Use short markdown sections and bullet points."
+        )
+        user = f"""Review this WiFi Defense capture ({', '.join(present) or 'no modules'} present).
+
+Data (JSON):
+{data_json}
+
+Provide:
+
+**Verdict** — one or two sentences: is the airspace clear, or the single most
+important issue (threat, link-quality, or isolation) if not.
+
+**Threats & anomalies** — WIDS detections that matter, quoting the counts /
+reason codes / BSSIDs. Distinguish real attacks from benign explanations.
+
+**Link quality** — the airtime findings worth acting on (retry/airtime/legacy/
+security), only if the airtime data supports them.
+
+**Client isolation** — the isolation verdicts and what they mean, only if that
+data is present.
+
+**Recommended actions** — concrete, prioritized next steps for the highest
+items. If the capture is too short/hopping to be sure, say so and name the one
+capture (fixed channel, longer dwell) that would confirm it.
+
+Keep it tight and practical."""
+
+        resp = self._ask(system, user)
+        if resp:
+            self._cache_set(key, resp)
+        return resp
+
+    # ===================================================================
     #   PARALLEL BATCH PREP (FUTURE SUPPORT)
     # ===================================================================
 
@@ -670,11 +1222,6 @@ note which watchers are reporting. Keep it short."""
             output["message"] = self.initialization_error or "AI disabled"
             return output
 
-        # Passive-monitoring posture (Watchtower + Wi-Fi Defense), if supplied by
-        # the caller — the route gathers it since the aggregator lives there.
-        if posture is not None:
-            output["posture_analysis"] = self.analyze_security_posture(posture)
-
         net = {
             "target_count": self.shared_data.targetnbr,
             "port_count": self.shared_data.portnbr,
@@ -682,22 +1229,57 @@ note which watchers are reporting. Keep it short."""
             "credential_count": self.shared_data.crednbr,
         }
 
-        # Summary
-        output["network_summary"] = self.analyze_network_summary(net)
+        # Assemble the independent analyses as callables, then run them
+        # CONCURRENTLY. Each is its own OpenAI round-trip (~4-6s); running the
+        # four back-to-back made the dashboard's insights card take ~18s cold,
+        # which read as "never loads" (and could trip proxy timeouts). Fan them
+        # out so the whole call costs about the slowest single request instead.
+        tasks = {"network_summary": lambda: self.analyze_network_summary(net)}
 
-        # Additional analyses if intelligence system is available
+        # Passive-monitoring posture (Watchtower + Wi-Fi Defense), if supplied by
+        # the caller — the route gathers it since the aggregator lives there.
+        if posture is not None:
+            tasks["posture_analysis"] = lambda: self.analyze_security_posture(posture)
+
+        # Additional analyses if intelligence system is available. Guard the
+        # findings fetch: if it raises on some unit (DB state, etc.) it must not
+        # sink the whole insights run — the network summary should still render.
+        # (The Wi-Fi analyze path works on those units precisely because it never
+        # touches this, so isolate it here.)
         if hasattr(self.shared_data, "network_intelligence") and \
            self.shared_data.network_intelligence:
+            try:
+                findings = self.shared_data.network_intelligence.get_active_findings_for_dashboard()
+                vulns = list(findings.get("vulnerabilities", {}).values())
+                if vulns:
+                    creds = list(findings.get("credentials", {}).values())
+                    combined = vulns + creds
+                    tasks["vulnerability_analysis"] = lambda: self.analyze_vulnerabilities(vulns)
+                    tasks["weakness_analysis"] = lambda: self.identify_network_weaknesses(net, combined)
+            except Exception as exc:
+                self.logger.error(f"AI insights: findings fetch failed, "
+                                  f"skipping vuln/weakness: {exc}")
 
-            findings = self.shared_data.network_intelligence.get_active_findings_for_dashboard()
+        # Run the analyses SEQUENTIALLY. This whole method runs in a background
+        # thread (the dashboard doesn't wait on it), so latency no longer matters
+        # — and sequential is the most robust choice on a small board: no nested
+        # thread pool to spawn under memory pressure, and never more than one
+        # OpenAI request in flight per unit, which is the gentlest possible on a
+        # shared API key. Each call is independently bounded by the client's
+        # per-request timeout, and one failing never sinks the rest.
+        for key, fn in tasks.items():
+            try:
+                output[key] = fn()
+            except Exception as exc:  # one analysis failing shouldn't sink the rest
+                self.logger.error(f"AI insight '{key}' failed: {exc}")
+                output[key] = None
 
-            vulns = list(findings.get("vulnerabilities", {}).values())
-            if vulns:
-                output["vulnerability_analysis"] = self.analyze_vulnerabilities(vulns)
-
-                creds = list(findings.get("credentials", {}).values())
-                combined = vulns + creds
-                output["weakness_analysis"] = self.identify_network_weaknesses(net, combined)
+        # Tell the UI which analyses were attempted and which of those came back
+        # empty (failed/rate-limited) — so it can show "temporarily unavailable +
+        # retry" for a genuine failure instead of a permanent "Analyzing…", and
+        # distinguish that from a section that simply had nothing to report.
+        output["attempted"] = list(tasks.keys())
+        output["failed"] = [k for k in tasks if not output.get(k)]
 
         return output
 

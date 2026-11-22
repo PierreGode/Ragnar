@@ -1,0 +1,20 @@
+{
+  "attribution_mode": "l2",
+  "known_os10": [
+    {
+      "label": "leaf1",
+      "mac": "00:1e:c9:aa:bb:cc",
+      "addrs": ["10.10.0.5", "2001:db8:0:10::5"]
+    }
+  ],
+  "bpf": "",
+  "cleartext_mgmt_ports": [23, 80],
+  "metadata_endpoints": ["169.254.169.254", "fd00:ec2::254"],
+  "fanout_threshold": 8,
+  "fanout_window_s": 60,
+  "learn_min_seconds": 86400,
+  "learn_min_frames_per_device": 500,
+  "learn_min_endpoints_per_device": 3,
+  "suppress_window_s": 300,
+  "suppress_max": 3
+}

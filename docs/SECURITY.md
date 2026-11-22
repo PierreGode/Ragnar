@@ -6,7 +6,7 @@ Ragnar includes a hardware-bound authentication and database encryption system. 
 
 1. **All endpoints are locked** &mdash; every API route and the dashboard return `401 Unauthorized` until you log in. Only `/api/kill` (the kill switch), the login page, and the auth API remain open.
 2. **The database is encrypted at rest** &mdash; `ragnar.db` is encrypted with AES-128 (Fernet) into `ragnar.db.enc` whenever you log out or Ragnar shuts down. The plaintext file is deleted.
-3. **Hardware binding** &mdash; the encryption key is tied to a fingerprint derived from the device's machine-id, MAC address, and CPU serial. Moving the database to different hardware will not decrypt it.
+3. **Hardware binding** &mdash; the encryption key is tied to a fingerprint derived from the device's machine-id and (on a Raspberry Pi) its CPU serial. Moving the database to different hardware will not decrypt it with your password alone; a **recovery code** can rebind it to the new hardware (see [Password recovery](#password-recovery)).
 4. **Recovery codes** &mdash; 10 one-time codes are generated at setup. Each can independently reset your password and decrypt the database if you forget your password.
 
 ## Enabling authentication
@@ -33,6 +33,20 @@ If you forget your password:
 4. You will be logged in automatically with the new password.
 
 Check how many codes you have left from the **Config > Security** panel and regenerate them if needed.
+
+### Recovering after a hardware change
+
+The hardware fingerprint can legitimately change &mdash; you moved the install to a
+new Pi, migrated the VM, or updated the host kernel of a container (an LXC/VM shares
+the host kernel). After that, **password login is refused** ("Hardware mismatch") on
+purpose, because the encryption key is bound to the old hardware.
+
+Use the recovery flow to get back in **without losing data and without reinstalling**:
+the recovery code decrypts your key and **rebinds** it to the new hardware. Because
+your other recovery codes were tied to the old hardware, a **fresh set is issued** and
+shown on screen &mdash; save them; the old ones stop working. Only a recovery code can
+rebind; a password alone cannot, which is what keeps a copied database from being
+unlocked on someone else's machine.
 
 ## Changing your password
 
@@ -61,12 +75,30 @@ Click the **Logout** button in the navigation bar or go to **Config > Security >
 |-----------|--------|
 | **Password hashing** | PBKDF2-HMAC-SHA256, 200 000 iterations, random 32-byte salt |
 | **Database encryption** | Fernet (AES-128-CBC + HMAC-SHA256) via the `cryptography` Python package |
-| **Hardware fingerprint** | SHA-256 of `/etc/machine-id` + CPU serial (`/proc/cpuinfo`). MAC address is intentionally excluded because it changes between WiFi and Ethernet. Falls back to hostname + platform on non-Linux systems |
+| **Hardware fingerprint** | SHA-256 of `/etc/machine-id` + CPU serial (`/proc/cpuinfo`, Raspberry Pi). MAC address is intentionally excluded because it changes between WiFi and Ethernet. If neither is available (e.g. a container with an empty `/etc/machine-id`) it falls back to a random ID persisted once in `data/hwid` &mdash; deliberately **not** the kernel/platform string, so a host kernel update can't change it. A recovery code can rebind the fingerprint if it ever does change |
 | **Key management** | A random Fernet key is generated once at setup. It is wrapped (encrypted) with a key derived from `password + hardware_fingerprint` via PBKDF2. Each recovery code also independently wraps the same Fernet key. The Fernet key itself never changes, so password changes and recovery only re-wrap the key &mdash; the database is never re-encrypted |
 | **Session** | Flask signed cookie with a random `SECRET_KEY` persisted in `ragnar_auth.db`. 24-hour expiration |
 | **Auth database** | `data/ragnar_auth.db` &mdash; small unencrypted SQLite DB containing only password hashes, the hardware fingerprint, the wrapped Fernet key, and hashed recovery codes. No sensitive data is stored here in plaintext |
 | **WebSocket** | SocketIO connections are rejected during the HTTP upgrade handshake if the session is not authenticated |
 | **Kill switch** | `/api/kill` remains accessible without authentication (requires separate `ERASE_ALL_DATA` confirmation) so the device can always be wiped |
+
+## Web hardening (HTTP response headers)
+
+Every response from the web server carries a baseline set of security headers, applied centrally in `webapp_modern.py` so the whole dashboard is covered in one place:
+
+| Header | Value | Purpose |
+|--------|-------|---------|
+| **Content-Security-Policy** | `default-src 'self'` with `'unsafe-inline'` scripts/styles, `img-src … https:` for map tiles | Mitigates XSS / data injection; blocks framing, object embeds and cross-origin script sources. Override the whole policy with the `RAGNAR_CSP` env var |
+| **X-Frame-Options** | `SAMEORIGIN` | Anti-clickjacking (belt-and-suspenders with CSP `frame-ancestors`) |
+| **X-Content-Type-Options** | `nosniff` | Stops MIME sniffing |
+| **Referrer-Policy** | `strict-origin-when-cross-origin` | Limits referrer leakage to other origins |
+| **Permissions-Policy** | `geolocation=(), microphone=(), camera=(), usb=()` | Disables powerful browser features Ragnar does not use |
+| **Strict-Transport-Security** | `max-age=31536000; includeSubDomains` (HTTPS only) | Enforces TLS once served over HTTPS |
+| **Server** | `Ragnar` | Suppresses the exact Werkzeug/Python version |
+
+**No wildcard CORS.** Ragnar is a same-origin dashboard (the mobile app talks to it over native HTTP), so it does **not** emit `Access-Control-Allow-Origin: *`. Cross-origin access can be re-enabled explicitly by listing trusted origins in the `RAGNAR_CORS_ORIGINS` env var (comma-separated); the same list is applied to the Socket.IO handshake.
+
+**Vendored frontend libraries.** Socket.IO, d3, Leaflet, Leaflet.markercluster and Three.js (r160 + the post-processing/OrbitControls addons used by the RuSense Observatory) are served locally from `web/vendor/` instead of a third-party CDN. This removes the cross-origin script-inclusion / Sub-Resource-Integrity exposure and lets the dashboard — including the 3D Observatory — load with no internet access in the field. The Observatory's importmap points at the vendored Three.js, and its fonts fall back to the system stack instead of Google Fonts. Map tiles are still fetched from OpenStreetMap over HTTPS (allowed by the CSP `img-src`).
 
 ## Crash recovery
 

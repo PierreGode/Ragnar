@@ -1086,10 +1086,79 @@ def _survey_noise(interface):
     return noise
 
 
+def _radio_monitor_conflict(interface):
+    """If ``interface``'s radio is in monitor mode, name the culprit VIF.
+
+    A managed multi-channel passive scan cannot run while any VIF on the same
+    wiphy is in monitor mode (a single radio can only do one at a time) — the
+    scan just blocks until it times out. This catches that up front so we can
+    fail fast with a clear message instead of a ~20 s (×retry) hang. Returns
+    the monitor interface name (e.g. ``ragmon0``, or ``interface`` itself when
+    the target is the monitor VIF), or ``None`` when there is no conflict.
+    """
+    rc, out, _ = _run([_IW, "dev"], timeout=5)
+    if rc != 0:
+        return None
+    ifaces, cur_phy, cur = {}, None, None
+    for line in out.splitlines():
+        m = re.match(r"^(phy#\d+)", line)
+        if m:
+            cur_phy = m.group(1)
+            continue
+        m = re.match(r"^\s*Interface\s+(\S+)", line)
+        if m:
+            cur = {"phy": cur_phy, "type": None}
+            ifaces[m.group(1)] = cur
+            continue
+        if cur:
+            mt = re.match(r"^\s*type\s+(\S+)", line)
+            if mt:
+                cur["type"] = mt.group(1)
+    target = ifaces.get(interface)
+    if not target:
+        return None
+    conflict = None
+    if target["type"] == "monitor":
+        conflict = interface  # scanning the monitor VIF directly — never works
+    else:
+        # A sibling monitor VIF on the same radio ties it to one channel.
+        for name, info in ifaces.items():
+            if name != interface and info["phy"] == target["phy"] and info["type"] == "monitor":
+                conflict = name
+                break
+    if not conflict:
+        return None
+    # Suggest a managed radio on a DIFFERENT phy the caller could survey on
+    # instead — this box often has the Pi's built-in wlan0 free alongside a
+    # monitor-mode Alfa (or vice-versa), so the watch and a survey can coexist.
+    alt = None
+    for name, info in ifaces.items():
+        if info["type"] in ("managed", None) and info["phy"] != target["phy"]:
+            alt = name
+            break
+    return {"monitor": conflict, "alt": alt}
+
+
 def do_scan(interface="wlan0", band="all", passive=True):
     """Run a passive scan and return the full analysed survey."""
     if not _valid_iface(interface):
         return {"error": "invalid interface"}
+    # Fail fast if the radio is held in monitor mode (e.g. the HaleHound 24/7
+    # watch's ragmon0 VIF) — a managed scan there just blocks until timeout.
+    _mon = _radio_monitor_conflict(interface)
+    if _mon:
+        culprit, alt = _mon["monitor"], _mon.get("alt")
+        alt_tip = (" Survey on %s instead (a different radio)." % alt if alt
+                   else " Pause the watch, or use a second adapter.")
+        if culprit == interface:
+            msg = ("%s is a monitor interface — a passive survey needs a managed "
+                   "radio.%s" % (interface, alt_tip))
+        else:
+            msg = ("%s's radio is in monitor mode as %s (the WiFi Defense / "
+                   "HaleHound 24/7 watch) — a single radio can't survey and "
+                   "monitor at once.%s" % (interface, culprit, alt_tip))
+        return {"error": msg, "monitor_conflict": culprit,
+                "alt_iface": alt, "interface": interface}
     # A freshly-plugged dongle is usually admin-down; you can't scan a down
     # radio. Bring the link up first (link-up only, never associates).
     if not _iface_is_up(interface):
@@ -1248,6 +1317,7 @@ def _heatmap_load():
         data["predict_aps"] = [data["predict_ap"]] if data.get("predict_ap") else []
     # Mesh survey: registry of the nodes (BSSIDs) seen for the surveyed SSID.
     data.setdefault("mesh_nodes", {})
+    data.setdefault("floorplan_transform", None)
     return data
 
 
@@ -1263,12 +1333,62 @@ def heatmap_get():
     return _heatmap_load()
 
 
+def _floorplan_to_web(data_uri):
+    """Browsers cannot display TIFF/BMP/etc. in <img>, so an uploaded floorplan
+    in one of those formats silently fails to render. Transcode anything that is
+    not a web-native image to PNG (via Pillow); web formats pass through."""
+    if not isinstance(data_uri, str) or not data_uri.startswith("data:"):
+        return data_uri
+    try:
+        header, b64 = data_uri.split(",", 1)
+    except ValueError:
+        return data_uri
+    mime = header[5:].split(";", 1)[0].lower()
+    web_ok = {"image/png", "image/jpeg", "image/jpg", "image/webp",
+             "image/gif", "image/svg+xml", "image/avif"}
+    if mime in web_ok:
+        return data_uri
+    try:
+        import base64, io
+        from PIL import Image
+        im = Image.open(io.BytesIO(base64.b64decode(b64)))
+        im.load()
+        if im.mode not in ("RGB", "RGBA"):
+            im = im.convert("RGBA" if (im.mode == "P" or "A" in im.mode) else "RGB")
+        maxd = 2500
+        if max(im.size) > maxd:
+            r = maxd / float(max(im.size))
+            im = im.resize((max(1, int(im.size[0] * r)), max(1, int(im.size[1] * r))))
+        out = io.BytesIO()
+        im.save(out, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(out.getvalue()).decode("ascii")
+    except Exception:
+        return data_uri   # let the client show its unsupported-format message
+
+
 def heatmap_set_floorplan(floorplan_data_uri, target_bssid=None, target_ssid=None):
     data = _heatmap_load()
-    data["floorplan"] = floorplan_data_uri
+    data["floorplan"] = _floorplan_to_web(floorplan_data_uri)
+    data["floorplan_transform"] = None  # new image re-fits to the floor
     data["target_bssid"] = target_bssid
     data["target_ssid"] = target_ssid
     data["samples"] = []  # new floorplan => reset survey
+    _heatmap_save(data)
+    return data
+
+
+def heatmap_set_floorplan_transform(transform):
+    """Persist how the floorplan image is placed on the floor (world rect
+    x,y,w,h in 0..1) so the operator can move/scale it onto the metre grid."""
+    data = _heatmap_load()
+    t = None
+    if isinstance(transform, dict):
+        try:
+            t = {"x": float(transform["x"]), "y": float(transform["y"]),
+                 "w": max(0.02, float(transform["w"])), "h": max(0.02, float(transform["h"]))}
+        except (KeyError, TypeError, ValueError):
+            t = None
+    data["floorplan_transform"] = t
     _heatmap_save(data)
     return data
 
@@ -1326,7 +1446,7 @@ def _clean_predict_ap(ap):
     `width_m`/`height_m` give the floorplan's real size so normalized distances
     become metres for the path-loss model."""
     try:
-        return {
+        out = {
             "x": float(ap["x"]), "y": float(ap["y"]),
             "tx_dbm": float(ap.get("tx_dbm", _DEFAULT_TX_DBM)),
             "freq": float(ap.get("freq", 5200)),
@@ -1336,6 +1456,16 @@ def _clean_predict_ap(ap):
         }
     except (KeyError, TypeError, ValueError):
         return None
+    # Preserve optional identity so imported/scanned APs keep their real name.
+    for _k in ("ssid", "bssid"):
+        if ap.get(_k):
+            out[_k] = str(ap[_k])
+    try:
+        if ap.get("rssi") is not None:
+            out["rssi"] = int(ap["rssi"])
+    except (TypeError, ValueError):
+        pass
+    return out
 
 
 def heatmap_set_predict_aps(aps):
@@ -2051,7 +2181,7 @@ def selftest():
 
     # --- AP history DB + change detection (Tier 3) — temp file, no real state ---
     global _DB_FILE
-    _orig_db, _DB_FILE = _DB_FILE, __import__("tempfile").mktemp(suffix=".json")
+    _orig_db, _DB_FILE = _DB_FILE, os.path.join(__import__("tempfile").mkdtemp(), "db.json")
     try:
         db_reset()
         base = {"bssid": "a0:00:00:00:00:01", "ssid": "H", "channel_util": 10,
@@ -2082,8 +2212,8 @@ def selftest():
     global _HEATMAP_FILE, _SURVEYS_FILE
     _oh, _os_ = _HEATMAP_FILE, _SURVEYS_FILE
     import tempfile as _tf
-    _HEATMAP_FILE = _tf.mktemp(suffix=".json")
-    _SURVEYS_FILE = _tf.mktemp(suffix=".json")
+    _HEATMAP_FILE = os.path.join(_tf.mkdtemp(), "heatmap.json")
+    _SURVEYS_FILE = os.path.join(_tf.mkdtemp(), "surveys.json")
     try:
         heatmap_add_sample(0.5, 0.5, -55, "b0:00:00:00:00:01", "SurveyNet",
                            snr=25, noise=-90, band="5", channel=36)
@@ -2140,7 +2270,7 @@ def selftest():
     check("iperf3 parse: missing data => None", _parse_iperf3({}) is None)
     # throughput fields flatten onto a heatmap sample (_HEATMAP_FILE already
     # declared global above in this function)
-    _oh2, _HEATMAP_FILE = _HEATMAP_FILE, __import__("tempfile").mktemp(suffix=".json")
+    _oh2, _HEATMAP_FILE = _HEATMAP_FILE, os.path.join(__import__("tempfile").mkdtemp(), "heatmap.json")
     try:
         d = heatmap_add_sample(0.5, 0.5, -55, "aa:bb:cc:00:00:01", "TP",
                                throughput={"method": "iperf3", "down_mbps": 500.0,
@@ -2214,7 +2344,7 @@ def selftest():
     two = predict_point_rssi_multi(0.85, 0.5, [ap_a, ap_b], [])
     check("adding a node never lowers predicted coverage", two >= one, f"{one}->{two}")
     # Persistence round-trips a list and keeps legacy predict_ap in sync.
-    _oh3, _HEATMAP_FILE = _HEATMAP_FILE, _tf.mktemp(suffix=".json")
+    _oh3, _HEATMAP_FILE = _HEATMAP_FILE, os.path.join(_tf.mkdtemp(), "heatmap.json")
     try:
         heatmap_set_predict_aps([ap_a, ap_b])
         hd = heatmap_get()

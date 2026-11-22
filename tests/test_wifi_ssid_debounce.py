@@ -25,6 +25,10 @@ def manager():
         'wifi_default_interface': 'auto',
     }
     shared.active_network_ssid = None
+    # No storage manager: these tests exercise the debounce itself, reading the
+    # active SSID from shared_data. The durable storage_manager source (issue
+    # #818) is covered in test_multi_interface_context.py.
+    shared.storage_manager = None
     shared.currentdir = '/tmp'
 
     with patch('wifi_manager.detect_wifi_interface', return_value='wlan0'), \

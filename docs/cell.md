@@ -8,6 +8,9 @@ hotspot (e.g. Orbic Speed) shared over USB.
 
 Confirm any device with `mmcli -L` — if it lists the modem, cell capture works.
 
+A tethered hotspot or phone can still serve as a **backup internet uplink**. See
+[Cellular Uplink Fallback](cellular-uplink.md).
+
 ## Quectel
 - EG25-G
 - EC25 (EC25-E / EC25-A / EC25-AF)

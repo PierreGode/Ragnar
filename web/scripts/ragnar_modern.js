@@ -161,12 +161,10 @@ function displayCredentials(data) {
     if (countEl) countEl.textContent = `Showing ${rows.length} of ${data.length} credential${data.length !== 1 ? 's' : ''}`;
 }
 
-function copyCredToClipboard(text) {
-    navigator.clipboard.writeText(text).then(() => {
-        addConsoleMessage('Password copied to clipboard', 'success');
-    }).catch(() => {
-        addConsoleMessage('Copy failed — check browser permissions', 'warning');
-    });
+async function copyCredToClipboard(text) {
+    // copyToClipboard has the execCommand fallback needed on plain-HTTP.
+    const ok = await copyToClipboard(text, { silent: true });
+    addConsoleMessage(ok ? 'Password copied to clipboard' : 'Copy failed — check browser permissions', ok ? 'success' : 'warning');
 }
 
 function exportCredentialsCSV() {
@@ -278,6 +276,14 @@ const configMetadata = {
     scan_vuln_no_ports: {
         label: "Scan Hosts Without Ports",
         description: "When enabled, vulnerability scans will scan the top 50 common ports on hosts where no ports were discovered. When disabled, only hosts with discovered ports will be scanned."
+    },
+    distro_cve_enrichment: {
+        label: "Distro-aware CVE Check",
+        description: "Check the Debian / Ubuntu security trackers before surfacing a CVE. When a service banner shows the distro patch level (e.g. OpenSSH 9.2p1 Debian 2+deb12u10), CVEs the distro already fixed are tagged and hidden from the default view instead of shown as open. Downloads tracker data (about 15 MB for Debian, cached); only CVE ids are sent."
+    },
+    ups_hat_monitor: {
+        label: "Waveshare UPS HAT Battery",
+        description: "Auto-detect a Waveshare UPS HAT on I2C (UPS HAT (C) for the Pi Zero at 0x43, UPS HAT / (B) at 0x42) and show its battery percentage on the display header and the System tab. Read-only; does nothing when no HAT is fitted. Needs I2C enabled and a restart to take effect."
     },
     enable_attacks: {
         label: "Enable Automatic Attacks",
@@ -575,6 +581,14 @@ const configMetadata = {
         label: "GPS Baud Rate",
         description: "Serial baud rate for the GPS module. Most USB GPS modules use 9600. Some high-speed modules use 38400 or 115200."
     },
+    wardriving_gps_assist: {
+        label: "GPS Assisted Start",
+        description: "Pre-load the GPS with its last-known position, the NTP time and its own saved almanac/ephemeris at start, so a battery-less u-blox puck starts warm instead of cold and fixes much faster on a weak sky. Time is only sent when the clock is NTP-synced."
+    },
+    wardriving_gps_set_clock: {
+        label: "Set Clock from GPS",
+        description: "When the Pi's clock isn't NTP-synced (no RTC — e.g. booted away from Wi-Fi), set it from GPS time once there is a fix, and repair the running session's earlier timestamps when the clock is corrected. Without this, sessions recorded offline are stamped with the stale boot time."
+    },
     wardriving_auto_export: {
         label: "Auto Export on Stop",
         description: "Automatically export a WiGLE CSV file when a wardriving session is stopped."
@@ -620,6 +634,7 @@ function epdTypeToSizeKey(epd_type) {
     if (epd_type === 'ili9486' || epd_type === 'ili9488') return '3in5_tft';
     if (epd_type === 'gc9a01') return '1in28_tft';
     if (epd_type === 'st7735s') return '1in44_lcd';
+    if (epd_type === 'st7789v2') return '1in9_cardputer';
     if (epd_type === 'whisplay') return '1in69_tft';
     if (epd_type === 'ssd1306') return '0in96_oled';
     if (epd_type === 'lcd1602') return 'lcd1602';
@@ -628,6 +643,7 @@ function epdTypeToSizeKey(epd_type) {
 
 const displaySelectOptions = {
     epd_type: [
+        { value: 'headless', label: 'Headless — no screen (web UI only)' },
         { value: 'auto', label: 'Auto-detect' },
         { value: '2in13', label: '2.13" e-Paper (122x250)' },
         { value: '2in7', label: '2.7" e-Paper (176x264)' },
@@ -637,6 +653,7 @@ const displaySelectOptions = {
         { value: '3in5_tft', label: '3.5" SPI TFT — ILI9486/ILI9488 (320x480)' },
         { value: '1in28_tft', label: '1.28" GC9A01 Round TFT (240x240)' },
         { value: '1in44_lcd', label: '1.44" ST7735S LCD HAT + joystick (128x128)' },
+        { value: '1in9_cardputer', label: '1.9" M5Stack CardputerZero ST7789 V3 (320x170)' },
         { value: '1in69_tft', label: '1.69" Whisplay ST7789 TFT (240x280)' },
         { value: '0in96_oled', label: '0.96" SSD1306 OLED (128x64)' },
         { value: 'lcd1602', label: '16×2 LCD1602 Character LCD (I2C)' },
@@ -701,6 +718,10 @@ document.addEventListener('DOMContentLoaded', function() {
     applyRusenseTabVisibility();
     applyTerminalVisibility();
     applyMeshTabVisibility();
+    // Ensure pentest tab is hidden initially (will be unhidden if manual_mode is enabled)
+    document.querySelectorAll('.pentest-nav-btn').forEach(btn => {
+        btn.classList.add('hidden');
+    });
     // localStorage gave us an instant paint above; now reconcile with the
     // server (the shared source of truth) without blocking startup.
     syncRusenseTabFromServer();
@@ -773,6 +794,11 @@ function initializeSocket() {
         }
     });
 
+    // Live presence: only the hosts that flipped, patched in place.
+    socket.on('host_presence', function(data) {
+        applyHostPresenceChanges(data && data.changes);
+    });
+
     socket.on('credentials_update', function(data) {
         if (currentTab === 'discovered') {
             displayCredentialsTable(data);
@@ -785,12 +811,21 @@ function initializeSocket() {
         }
     });
 
+    socket.on('language_changed', function(data) {
+        applyServerLanguage(data && data.language);
+    });
+
     socket.on('config_updated', function(config) {
         addConsoleMessage('Configuration updated successfully', 'info');
+        if (config && config.language) applyServerLanguage(config.language);
         if (currentTab === 'config') {
             displayConfigForm(config);
         }
         updateAttackWarningBanner(Boolean(config && config.enable_attacks));
+        // Ensure Pentest tab visibility is updated when config changes
+        if (config && typeof config.manual_mode !== 'undefined') {
+            syncManualModeUI(Boolean(config.manual_mode));
+        }
     });
 
     socket.on('scan_started', function(data) {
@@ -839,16 +874,13 @@ function initializeSocket() {
 function updateConnectionStatus(connected) {
     const statusEl = document.getElementById('connection-status');
     if (statusEl) {
+        // Just the dot — no wording. Colour carries the state; tooltip labels it.
         if (connected) {
-            statusEl.innerHTML = `
-                <span class="w-2 h-2 bg-green-500 rounded-full pulse-glow"></span>
-                <span class="text-xs text-gray-400">Connected</span>
-            `;
+            statusEl.title = 'Connected';
+            statusEl.innerHTML = `<span class="w-2 h-2 bg-green-500 rounded-full pulse-glow"></span>`;
         } else {
-            statusEl.innerHTML = `
-                <span class="w-2 h-2 bg-red-500 rounded-full"></span>
-                <span class="text-xs text-gray-400">Disconnected</span>
-            `;
+            statusEl.title = 'Disconnected';
+            statusEl.innerHTML = `<span class="w-2 h-2 bg-red-500 rounded-full"></span>`;
         }
     }
 }
@@ -922,7 +954,7 @@ function initializeTabs() {
 function routeFromHash() {
     const raw = (window.location.hash || '').replace(/^#/, '').trim();
     if (!raw) return false;
-    const [tab, sub] = raw.split('/');
+    const [tab, sub, layer] = raw.split('/');
     const known = new Set([
         'dashboard', 'network', 'wifidef', 'discovered', 'rusense', 'pentest',
         'threat-intel', 'traffic', 'adv-vuln', 'wardriving', 'epaper', 'files',
@@ -939,13 +971,8 @@ function routeFromHash() {
             const anchor = onDiag[sub];
             // Let the network tab finish mounting before selecting a subtab.
             setTimeout(() => {
-                try { showNetworkSubtab(realSub); } catch (e) {}
-                if (anchor) {
-                    setTimeout(() => {
-                        const el = document.getElementById(anchor);
-                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                    }, 120);
-                }
+                try { showNetworkSubtab(realSub, layer); } catch (e) {}
+                if (anchor) setTimeout(() => revealNetCard(anchor), 120);
             }, 60);
         }
         return true;
@@ -975,7 +1002,7 @@ function _setRusenseActive(name) {
 function loadRusenseLoader() {
     if (_rusenseLoader) return Promise.resolve(_rusenseLoader);
     if (!_rusenseLoading) {
-        _rusenseLoading = import('/web/rusense/app/loader.js?v=20260705-calpresets')
+        _rusenseLoading = import('/web/rusense/app/loader.js?v=20260819-nodecal3')
             .then(m => { _rusenseLoader = m; return m; })
             .catch(err => { _rusenseLoading = null; throw err; });
     }
@@ -1069,6 +1096,7 @@ function refreshSensingInstallCard() {
             const installBtn = document.getElementById('sensing-install-btn');
             const rebuildBtn = document.getElementById('sensing-rebuild-btn');
             const uninstallBtn = document.getElementById('sensing-uninstall-btn');
+            const restartBtn = document.getElementById('sensing-restart-btn');
             const archNote = document.getElementById('sensing-arch-note');
             // Always visible in the RuSense tab: doubles as a status + management panel
             // (Install when absent, Reinstall / Uninstall when present).
@@ -1090,6 +1118,7 @@ function refreshSensingInstallCard() {
             if (installBtn) { installBtn.disabled = busy; installBtn.textContent = s.installed ? 'Reinstall' : 'Install'; }
             if (rebuildBtn) rebuildBtn.disabled = busy;
             if (uninstallBtn) { uninstallBtn.classList.toggle('hidden', !s.installed); uninstallBtn.disabled = busy; }
+            if (restartBtn) { restartBtn.classList.toggle('hidden', !s.installed); restartBtn.disabled = busy; }
             if (s.installing) startSensingLogPoll();
         })
         .catch(() => {});
@@ -1109,6 +1138,27 @@ function uninstallSensingBackend() {
     if (!confirm('Stop and remove the bundled sensing backend?')) return;
     fetch('/api/sensing/uninstall', { method: 'POST' })
         .then(() => startSensingLogPoll()).catch(() => {});
+}
+
+function restartSensingBackend() {
+    const btn = document.getElementById('sensing-restart-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Restarting…'; }
+    fetch('/api/sensing/restart', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+            if (typeof showNotification === 'function') {
+                showNotification(d.success ? (d.message || 'Sensing service restarted')
+                                           : (d.error || 'Restart failed'),
+                                 d.success ? 'success' : 'error');
+            }
+        })
+        .catch(() => {
+            if (typeof showNotification === 'function') showNotification('Restart request failed', 'error');
+        })
+        .finally(() => {
+            if (btn) btn.textContent = 'Restart';
+            refreshSensingInstallCard();
+        });
 }
 
 function startSensingLogPoll() {
@@ -1277,39 +1327,79 @@ function _termTeardown() {
     try { if (_termSocket) { _termSocket.disconnect(); _termSocket = null; } } catch (e) { /* ignore */ }
 }
 
+// Fit retried until the mount is actually laid out (classic xterm gotcha: a
+// fit() while the tab is display:none gives 0 cols and the terminal renders
+// blank). Retries a few times until cols>0, then syncs the server PTY size.
+function _termFitRetry(tries) {
+    tries = (tries == null) ? 8 : tries;
+    if (!_term || !_termFit) return;
+    try { _termFit.fit(); } catch (e) { /* mount not sized yet */ }
+    if ((!_term.cols || _term.cols < 2) && tries > 0) {
+        setTimeout(() => _termFitRetry(tries - 1), 120);
+    } else {
+        _sendTermResize();
+    }
+}
+
+let _termWatchdog = null;
 function initTerminal() {
     const mount = document.getElementById('xterm-mount');
     const status = document.getElementById('terminal-status');
     if (!mount) return;
-    if (typeof Terminal === 'undefined') {
-        if (status) status.innerHTML = '<span class="text-red-400">Terminal library failed to load.</span>';
+    const setStatus = (html) => { if (status) status.innerHTML = html; };
+    if (typeof Terminal === 'undefined' || typeof FitAddon === 'undefined') {
+        setStatus('<span class="text-red-400">Terminal library failed to load. Reload the page; if it persists the vendored xterm assets are missing.</span>');
         return;
     }
     if (!_terminalEnabled()) {
-        if (status) status.innerHTML = '<span class="text-amber-300">Web terminal is disabled.</span> Enable it in Config → Web Terminal.';
+        setStatus('<span class="text-amber-300">Web terminal is disabled.</span> Enable it in Config → Web Terminal.');
         _termTeardown();
         return;
     }
-    if (status) status.textContent = '';
+    setStatus('<span class="text-gray-400">Connecting…</span>');
 
-    if (!_term) {
-        _term = new Terminal({ cursorBlink: true, fontSize: 13,
-            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-            theme: { background: '#0f172a', foreground: '#e2e8f0' } });
-        _termFit = new FitAddon.FitAddon();
-        _term.loadAddon(_termFit);
-        _term.open(mount);
-        _term.onData(d => { if (_termSocket && _termSocket.connected) _termSocket.emit('terminal_input', { data: d }); });
+    try {
+        if (!_term) {
+            _term = new Terminal({ cursorBlink: true, fontSize: 13,
+                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+                theme: { background: '#0f172a', foreground: '#e2e8f0' } });
+            _termFit = new FitAddon.FitAddon();
+            _term.loadAddon(_termFit);
+            _term.open(mount);
+            _term.onData(d => { if (_termSocket && _termSocket.connected) _termSocket.emit('terminal_input', { data: d }); });
+        }
+    } catch (e) {
+        setStatus('<span class="text-red-400">Terminal failed to initialise: ' + _esc(e.message || e) + '</span>');
+        return;
     }
-    try { _termFit.fit(); } catch (e) { /* mount not sized yet */ }
+    _termFitRetry();
 
     if (!_termSocket || !_termSocket.connected) {
         _term.reset();
-        _termSocket = io('/terminal', { reconnection: false });
-        _termSocket.on('connect', () => { setTimeout(() => { try { _termFit.fit(); } catch (e) {} _sendTermResize(); _term.focus(); }, 60); });
-        _termSocket.on('terminal_output', d => _term.write(d.data || ''));
-        _termSocket.on('terminal_exit', () => _term.write('\r\n\x1b[33m[session ended — press Reconnect for a new shell]\x1b[0m\r\n'));
-        _termSocket.on('connect_error', () => _term.write('\r\n\x1b[31m[could not open terminal — is it enabled and are you logged in?]\x1b[0m\r\n'));
+        try { _termSocket = io('/terminal', { reconnection: false, timeout: 8000 }); }
+        catch (e) { setStatus('<span class="text-red-400">Could not open socket: ' + _esc(e.message || e) + '</span>'); return; }
+        if (_termWatchdog) clearTimeout(_termWatchdog);
+        // If neither connect nor connect_error fires (e.g. the namespace is
+        // silently refused), never leave the pane blank — say so.
+        _termWatchdog = setTimeout(() => {
+            if (!_termSocket || !_termSocket.connected) {
+                setStatus('<span class="text-amber-300">Still connecting… if this hangs, the terminal may be disabled server-side or you need to log in. Press Reconnect.</span>');
+            }
+        }, 8000);
+        _termSocket.on('connect', () => {
+            if (_termWatchdog) { clearTimeout(_termWatchdog); _termWatchdog = null; }
+            setStatus('');
+            setTimeout(() => { _termFitRetry(); try { _term.focus(); } catch (e) {} }, 60);
+        });
+        _termSocket.on('terminal_output', d => { if (status && status.textContent) setStatus(''); _term.write(d.data || ''); });
+        _termSocket.on('terminal_exit', () => { _term.write('\r\n\x1b[33m[session ended — press Reconnect for a new shell]\x1b[0m\r\n'); });
+        _termSocket.on('disconnect', () => { setStatus('<span class="text-amber-300">Disconnected. Press Reconnect for a new shell.</span>'); });
+        _termSocket.on('connect_error', (err) => {
+            if (_termWatchdog) { clearTimeout(_termWatchdog); _termWatchdog = null; }
+            const m = (err && (err.message || err)) || 'unknown';
+            setStatus('<span class="text-red-400">Could not open terminal (' + _esc(String(m)) + ') — is it enabled in Config → Web Terminal, and are you logged in?</span>');
+            _term.write('\r\n\x1b[31m[could not open terminal — enable it in Config → Web Terminal and ensure you are logged in]\x1b[0m\r\n');
+        });
     }
 
     if (!_termResizeHooked) {
@@ -1320,12 +1410,32 @@ function initTerminal() {
         });
         _termResizeHooked = true;
     }
-    setTimeout(() => { try { _termFit.fit(); } catch (e) {} _sendTermResize(); }, 80);
+    setTimeout(() => _termFitRetry(), 120);
+}
+
+// Auto clone/pull the external RagnarScripts library when the Dashboard or
+// Pentest tab opens, so newly-pushed shared scripts appear without a manual
+// git pull. Best-effort and throttled both here and server-side; if either
+// install section is open, it re-lists once the sync returns.
+let _ragnarScriptsSyncedAt = 0;
+async function ragnarScriptsAutoSync() {
+    const now = Date.now();
+    if (now - _ragnarScriptsSyncedAt < 20000) return;   // client-side throttle
+    _ragnarScriptsSyncedAt = now;
+    try {
+        await fetch('/api/ragnar-scripts/sync', { method: 'POST' });
+    } catch (e) { return; /* offline / best-effort */ }
+    // Re-list so freshly-pulled scripts appear: the ducky Payload Library (which
+    // now folds in the RagnarScripts payloads) and the console install section.
+    if (document.getElementById('rubber-ducky-library') && typeof rubberDuckyLoadLibrary === 'function') rubberDuckyLoadLibrary();
+    const s = document.getElementById('sc-library');
+    if (s && s.open && typeof scLoadLibrary === 'function') scLoadLibrary();
 }
 
 function showTab(tabName) {
     // Backward-compat: these tabs are now sub-tabs of Network / Discovered
     if (tabName === 'networks') { showTab('network'); showNetworkSubtab('archive'); return; }
+    if (tabName === 'assets') { showTab('network'); showNetworkSubtab('assets'); return; }
     if (tabName === 'network-map') { showTab('network'); showNetworkSubtab('map'); return; }
     if (tabName === 'credentials') { showTab('discovered'); showDiscoveredSubtab('credentials'); return; }
     if (tabName === 'diagnostics') { showTab('network'); showNetworkSubtab('diagnostics'); return; }
@@ -1346,7 +1456,15 @@ function showTab(tabName) {
         clearInterval(systemMonitoringInterval);
         systemMonitoringInterval = null;
     }
-    
+
+    // Mesh File Transfer polling only runs while the transfer view is on screen.
+    if (tabName !== 'mesh') {
+        try { _xferStopPolling(); } catch (e) { /* ignore */ }
+    } else {
+        const tv = document.getElementById('mesh-view-transfer');
+        if (tv && !tv.classList.contains('hidden')) { try { xferRefresh(); _xferStartPolling(); } catch (e) { /* ignore */ } }
+    }
+
     document.querySelectorAll('.tab-content').forEach(tab => {
         tab.classList.add('hidden');
     });
@@ -1360,7 +1478,12 @@ function showTab(tabName) {
     if (selectedTab) {
         selectedTab.classList.remove('hidden');
     }
-    
+
+    // File Management uses the full page width (its file browser benefits from
+    // the extra room); every other tab keeps the centered max-width column.
+    const mainEl = document.querySelector('main');
+    if (mainEl) mainEl.style.maxWidth = (tabName === 'files') ? 'none' : '';
+
     const selectedBtn = document.querySelector(`[data-tab="${tabName}"]`);
     if (selectedBtn) {
         selectedBtn.classList.add('bg-Ragnar-600');
@@ -1369,8 +1492,13 @@ function showTab(tabName) {
     
     loadTabData(tabName);
 
+    if (tabName === 'dashboard' || tabName === 'pentest') {
+        ragnarScriptsAutoSync();
+    }
+
     if (tabName === 'config') {
         try { refreshSensingInstallCard(); syncRusenseTabToggle(); syncTerminalToggle(); syncMeshTabToggle(); } catch (e) { /* ignore */ }
+        try { showConfigSubtab(localStorage.getItem('cfg-subtab') || 'system'); } catch (e) { /* ignore */ }
     }
 
     const mobileMenu = document.getElementById('mobile-menu');
@@ -1388,10 +1516,33 @@ function _setSubtabActive(btn, active) {
     btn.classList.toggle('hover:text-white', !active);
 }
 
-function showNetworkSubtab(name) {
+function showConfigSubtab(name) {
     const views = {
-        hosts: 'net-sub-hosts', archive: 'net-sub-archive', map: 'net-sub-map',
-        diagnostics: 'net-sub-diagnostics', switch: 'net-sub-switch', interfaces: 'net-sub-interfaces',
+        system: 'cfg-sub-system',
+        network: 'cfg-sub-network',
+        bluetooth: 'cfg-sub-bluetooth',
+        wardriving: 'cfg-sub-wardriving',
+        security: 'cfg-sub-security',
+        integrations: 'cfg-sub-integrations',
+        advanced: 'cfg-sub-advanced'
+    };
+    if (!views[name]) name = 'system';
+    Object.keys(views).forEach(key => {
+        const el = document.getElementById(views[key]);
+        if (el) el.classList.toggle('hidden', key !== name);
+        _setSubtabActive(document.getElementById('cfg-subtab-' + key), key === name);
+    });
+    try { localStorage.setItem('cfg-subtab', name); } catch (e) { /* ignore */ }
+}
+
+function showNetworkSubtab(name, layer) {
+    // Diagnostics and the old "Switch & L2/L3" sub-tab are one Diagnostics view now,
+    // split into OSI-layer panels. 'switch' stays as an alias (its cards were mostly L2/L3).
+    if (name === 'switch') { name = 'diagnostics'; layer = layer || 'l2'; }
+    const views = {
+        hosts: 'net-sub-hosts', archive: 'net-sub-archive', assets: 'net-sub-assets',
+        map: 'net-sub-map',
+        diagnostics: 'net-sub-diagnostics', interfaces: 'net-sub-interfaces',
         wifi: 'net-sub-wifi'
     };
     Object.keys(views).forEach(key => {
@@ -1401,13 +1552,33 @@ function showNetworkSubtab(name) {
     });
     if (name === 'archive') {
         loadAllNetworksData();
+    } else if (name === 'assets') {
+        loadAssetsData();
     } else if (name === 'map') {
         if (!_mapInitialized) { loadNetworkMap(); }
     } else if (name === 'hosts') {
         loadNetworkData();
-    } else if (name === 'switch') {
+    } else if (name === 'diagnostics') {
+        // Pick the layer panel first so a failing picker fill can't leave it blank.
+        showNetLayer(layer || _netLayerSaved());
+        populateMtrSources();
+        syncNetDiagDisplayFromServer();
+        syncNetIntegrityFromServer();
+        syncWatchtowerFromServer();
+        _macWatchFillIfaces();
+        _ntpFillIfaces();
+        _snmpFillIfaces();
+        _fillIfaceSel('modbus-iface');
+        _modbusLoadBaseline();
+        _fillIfaceSel('lorawan-iface');
+        _fillIfaceSel('lldpw-iface');
+        _fillIfaceSel('oam-iface');
+        _fillIfaceSel('cfm-iface');
+        cfmLoadRings();
+        cfmLoadEvcs();
+        _certFillIfaces();
+        _tlsFillIfaces();
         _lldpFillIfaces();
-        loadLldp();
         _arpScanFillIfaces();
         _pcapCapFillIfaces();
         _locateFillIfaces();
@@ -1428,32 +1599,173 @@ function showNetworkSubtab(name) {
         _isisFillIfaces();
         _fhrpFillIfaces();
         _bgpFillIfaces();
-        dhcpSnoopStatus();
+        _ssdpFillIfaces();
+        _httpFillIfaces();
     } else if (name === 'interfaces') {
         loadNetworkIdentity();
         loadInterfaces();
+        loadCellularUplink();
     } else if (name === 'wifi') {
         wifiInit();
-    } else if (name === 'diagnostics') {
-        populateMtrSources();
-        syncNetDiagDisplayFromServer();
-        syncNetIntegrityFromServer();
-        syncWatchtowerFromServer();
-        _macWatchFillIfaces();
-        _ntpFillIfaces();
-        _snmpFillIfaces();
-        _certFillIfaces();
-        _tlsFillIfaces();
     }
-    // Diagnostics tools run on demand; we only prefill the MTR start-point list.
+    // Diagnostics tools run on demand; opening the view only prefills interface pickers.
+}
+
+// ---- Diagnostics: one panel per OSI layer ----------------------------------
+const NET_LAYERS = ['overview', 'l7', 'l6', 'l5', 'l4', 'l3', 'l2', 'l1'];
+const _NET_LAYER_ON = ['bg-Ragnar-600', 'text-white'];
+const _NET_LAYER_OFF = ['text-slate-400', 'hover:bg-slate-700', 'hover:text-white'];
+
+function _netLayerSaved() {
+    try {
+        const v = localStorage.getItem('ragnar.netLayer');
+        return NET_LAYERS.includes(v) ? v : 'overview';
+    } catch (e) { return 'overview'; }
+}
+
+// --- Diagnostics module search ----------------------------------------------
+// There are ~70 Diagnostics cards spread across the OSI-layer panels, so a live
+// search that reveals matching modules from every layer at once (not just the
+// open one) is far quicker than hunting tab by tab. It filters on each card's
+// visible text (title + description), which already carries protocol names, CVE
+// ids and vendor names, so "ble", "nrf", "zerologon" or "mikrotik" all hit.
+const _NET_LAYER_LABELS = {
+    overview: 'Overview', l7: 'L7 · Application', l6: 'L6 · Presentation',
+    l5: 'L5 · Session', l4: 'L4 · Transport', l3: 'L3 · Network',
+    l2: 'L2 · Data Link', l1: 'L1 · Physical'
+};
+let _netDiagSearching = false;
+
+function _netDiagLayerCards(layer) {
+    const panel = document.getElementById('net-layer-' + layer);
+    const grid = panel && panel.querySelector(':scope > .grid');
+    return grid ? Array.from(grid.children) : [];
+}
+
+function _netDiagSetLayerLabel(panel, layer, show) {
+    let lbl = panel.querySelector(':scope > .diag-search-layerlabel');
+    if (show) {
+        if (!lbl) {
+            lbl = document.createElement('div');
+            lbl.className = 'diag-search-layerlabel text-[11px] uppercase tracking-wide font-semibold text-Ragnar-300/80 mb-2 mt-1';
+            panel.insertBefore(lbl, panel.firstChild);
+        }
+        lbl.textContent = _NET_LAYER_LABELS[layer] || layer;
+    } else if (lbl) {
+        lbl.remove();
+    }
+}
+
+// Drop out of search mode without re-selecting a layer (the caller does that).
+function _netDiagClearSearchState() {
+    _netDiagSearching = false;
+    const input = document.getElementById('net-diag-search');
+    if (input) input.value = '';
+    const clearBtn = document.getElementById('net-diag-search-clear');
+    if (clearBtn) clearBtn.classList.add('hidden');
+    const count = document.getElementById('net-diag-search-count');
+    if (count) { count.textContent = ''; count.classList.add('hidden'); }
+    document.querySelectorAll('#net-sub-diagnostics .diag-search-hidden')
+        .forEach(e => e.classList.remove('diag-search-hidden'));
+    document.querySelectorAll('#net-sub-diagnostics .diag-search-layerlabel')
+        .forEach(e => e.remove());
+}
+
+function netDiagSearch(q) {
+    const terms = (q || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) {                       // cleared -> back to normal layer view
+        _netDiagClearSearchState();
+        showNetLayer(_netLayerSaved());
+        return;
+    }
+    _netDiagSearching = true;
+    const clearBtn = document.getElementById('net-diag-search-clear');
+    if (clearBtn) clearBtn.classList.remove('hidden');
+    // Match each term at a WORD BOUNDARY (start of a word, prefix allowed) so
+    // "ble" finds BLE Watch but not "ta[ble]", and "router" still matches
+    // "RouterOS". Non-alphanumerics (/, -, .) count as separators, so "mac",
+    // "cve" or "1472" (from CVE-2020-1472) all hit.
+    const res = terms.map(t =>
+        new RegExp('(^|[^a-z0-9])' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    let total = 0;
+    NET_LAYERS.forEach(layer => {
+        const panel = document.getElementById('net-layer-' + layer);
+        if (!panel) return;
+        let shown = 0;
+        _netDiagLayerCards(layer).forEach(card => {
+            const txt = (card.textContent || '').toLowerCase();
+            const match = res.every(re => re.test(txt));
+            card.classList.toggle('diag-search-hidden', !match);
+            if (match) shown++;
+        });
+        total += shown;
+        panel.classList.toggle('hidden', shown === 0);
+        _netDiagSetLayerLabel(panel, layer, shown > 0);
+        const btn = document.getElementById('net-layer-btn-' + layer);
+        if (btn) {                             // no single layer is "active" while searching
+            _NET_LAYER_ON.forEach(c => btn.classList.remove(c));
+            _NET_LAYER_OFF.forEach(c => btn.classList.add(c));
+            btn.setAttribute('aria-pressed', 'false');
+        }
+    });
+    const count = document.getElementById('net-diag-search-count');
+    if (count) {
+        count.textContent = total
+            ? (total + ' module' + (total === 1 ? '' : 's') + ' match — across every layer')
+            : 'No modules match — try a protocol, vendor or CVE name';
+        count.classList.remove('hidden');
+    }
+    const desc = document.getElementById('net-layer-desc');
+    if (desc) desc.textContent = 'Showing modules from every OSI layer that match your search. Clear the search to return to the layer view.';
+}
+
+function showNetLayer(layer) {
+    if (_netDiagSearching) _netDiagClearSearchState();   // a layer click exits search
+    if (!NET_LAYERS.includes(layer)) layer = 'overview';
+    NET_LAYERS.forEach(l => {
+        const panel = document.getElementById('net-layer-' + l);
+        if (panel) panel.classList.toggle('hidden', l !== layer);
+        const btn = document.getElementById('net-layer-btn-' + l);
+        if (btn) {
+            _NET_LAYER_ON.forEach(c => btn.classList.toggle(c, l === layer));
+            _NET_LAYER_OFF.forEach(c => btn.classList.toggle(c, l !== layer));
+            btn.setAttribute('aria-pressed', l === layer ? 'true' : 'false');
+        }
+    });
+    const panel = document.getElementById('net-layer-' + layer);
+    const desc = document.getElementById('net-layer-desc');
+    if (desc && panel) desc.textContent = (panel.dataset.desc || '') + ' Modules that act on more than one layer sit at the one they mostly watch.';
+    try { localStorage.setItem('ragnar.netLayer', layer); } catch (e) {}
+    // The two views that talk to the network when opened, only when you look at them.
+    if (layer === 'l2') loadLldp();
+    if (layer === 'l7') dhcpSnoopStatus();
+}
+
+// Visibility-matrix reference cards load their image the first time they are opened.
+function netMatrixLoad(d) {
+    if (!d || !d.open) return;
+    d.querySelectorAll('img[data-src]').forEach(img => {
+        img.src = img.dataset.src;
+        img.removeAttribute('data-src');
+    });
+}
+
+// Scroll to a Diagnostics card, switching to the layer panel that holds it.
+function revealNetCard(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const panel = el.closest('.net-layer');
+    if (panel) showNetLayer(panel.id.replace('net-layer-', ''));
+    setTimeout(() => el.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
 }
 
 // ============================================================================
 // WiFi Spectrum Analyzer (Network > WiFi Analyzer sub-tab)
 // Passive tri-band survey. Backend: /api/net/wifi/* (wifi_analyzer.py)
 // ============================================================================
-const _wifiState = { iface: '', band: 'all', view: 'bar', data: null, selected: null, auto: null, inited: false, bt: null, btOn: false, btBusy: false, btSelected: null,
+const _wifiState = { iface: '', band: 'all', view: 'dome', data: null, selected: null, auto: null, inited: false, bt: null, btOn: false, btBusy: false, btSelected: null,
     zb: null, zbOn: false, zbBusy: false, zbSelected: null, zbAvailable: false,
+    ble: null, bleOn: false, bleBusy: false, bleSelected: null, bleAvailable: false,
     hoverBssid: null, radius: null, fs: { open: false, wired: false, native: false },
     sdr: { available: false, running: false, band: '2.4', bandMhz: null, floor: -120, seq: 0, rows: [], maxhold: null, poll: null, statusPoll: null, error: null } };
 
@@ -1516,6 +1828,16 @@ function wifiInit() {
             if (_wifiState.zbOn) wifiZbScan();
             else { if (_wifiState.data) _wifiDrawSpectrum(); }
         });
+        // BLE Watch overlay toggle (gated on an nRF / Bluefruit LE sniffer being present)
+        const bleChk = document.getElementById('wifi-ble');
+        if (bleChk) bleChk.addEventListener('change', (e) => {
+            if (bleChk.disabled) { e.target.checked = false; return; }
+            _wifiState.bleOn = e.target.checked;
+            const panel = document.getElementById('wifi-ble-panel');
+            if (panel) panel.classList.toggle('hidden', !_wifiState.bleOn);
+            if (_wifiState.bleOn) wifiBleScan();
+            else { if (_wifiState.data) _wifiDrawSpectrum(); }
+        });
         ['wifi-tx', 'wifi-ple'].forEach(id => {
             const el = document.getElementById(id);
             if (el) el.addEventListener('change', () => { if (_wifiState.selected) wifiSelectAp(_wifiState.selected); });
@@ -1530,8 +1852,11 @@ function wifiInit() {
     _wifiFillIfaces();
     _wifiSdrCheck();
     _wifiZbCheck();
+    _wifiBleCheck();
+    _wifiRtlCheck();
+    _wifiRfwfDemoInit();
     if (!_wifiState.sdr.statusPoll)
-        _wifiState.sdr.statusPoll = setInterval(() => { _wifiSdrCheck(); _wifiZbCheck(); }, 15000);
+        _wifiState.sdr.statusPoll = setInterval(() => { _wifiSdrCheck(); _wifiZbCheck(); _wifiBleCheck(); _wifiRtlCheck(); }, 15000);
     window.addEventListener('beforeunload', () => { if (_wifiState.sdr.running) _wifiSdrStop(); });
 }
 
@@ -1678,10 +2003,19 @@ function _wifiFillIfaces() {
         const sel = document.getElementById('wifi-iface');
         const ifs = (d && d.interfaces) || [];
         if (!ifs.length) { sel.innerHTML = '<option value="">No wireless interface</option>'; return; }
-        // Prefer the radio that supports the most bands (the Alfa 6E dongle)
-        ifs.sort((a, b) => (b.bands || []).length - (a.bands || []).length);
+        // Order the survey radios. A passive survey needs a MANAGED radio, so a
+        // monitor VIF (e.g. ragmon0, held by WiFi Defense) must never be the
+        // default — it sinks to the bottom. Among managed radios: wlan1 is the
+        // preferred primary, then wlan0, then any other radio by band count
+        // (keeps the Alfa 6E auto-pick), then name.
+        const _ifaceRank = i => (i.type === 'monitor') ? 900
+            : i.iface === 'wlan1' ? 0
+                : i.iface === 'wlan0' ? 1 : 10;
+        ifs.sort((a, b) => _ifaceRank(a) - _ifaceRank(b)
+            || (b.bands || []).length - (a.bands || []).length
+            || String(a.iface).localeCompare(String(b.iface)));
         sel.innerHTML = ifs.map(i =>
-            `<option value="${i.iface}">${i.iface} (${(i.bands || []).join('/') || '?'} GHz)</option>`).join('');
+            `<option value="${i.iface}">${i.iface} (${(i.bands || []).join('/') || '?'} GHz)${i.type === 'monitor' ? ' — monitor' : ''}</option>`).join('');
         if (!_wifiState.iface || !ifs.some(i => i.iface === _wifiState.iface)) _wifiState.iface = ifs[0].iface;
         sel.value = _wifiState.iface;
         sel.onchange = () => { _wifiState.iface = sel.value; wifiScan(); };
@@ -1699,8 +2033,12 @@ function wifiScan() {
     fetch(`/api/net/wifi/scan?interface=${encodeURIComponent(iface)}&band=${_wifiState.band}`)
         .then(r => r.json()).then(d => {
             busy(false);
-            if (d.error) { _wifiSetStatus('⚠ ' + d.error); return; }
+            if (d.error) { _wifiState.scanError = d.error; _wifiSetStatus('⚠ ' + d.error); _wifiFlagBanner(); return; }
+            _wifiState.scanError = null;
             _wifiState.data = d;
+            // A fresh scan invalidates any earlier AI read, so it isn't embedded
+            // into a report describing different scan data.
+            _wifiState.ai = null;
             _wifiSetStatus(`${d.ap_count} AP(s) · ${new Date(d.timestamp * 1000).toLocaleTimeString()}`);
             wifiRender();
         }).catch(e => { busy(false); _wifiSetStatus('Scan failed'); });
@@ -1726,9 +2064,15 @@ async function wifiAnalyzeAI() {
             if (!d.error) { _wifiState.data = d; wifiRender(); }
         }
         content.innerHTML = '<span class="text-gray-400">Analyzing your connection and the RF environment…</span>';
+        // Fold in the 2.4 GHz Bluetooth / Zigbee overlays when they're active so
+        // the AI reasons over non-Wi-Fi coexistence too, not just the AP list.
         const resp = await fetch('/api/ai/wifi-analyze', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ scan: _wifiState.data || {} })
+            body: JSON.stringify({
+                scan: _wifiState.data || {},
+                bt: _wifiState.btOn ? _wifiState.bt : null,
+                zb: (_wifiState.zbOn && _wifiState.zbAvailable) ? _wifiState.zb : null
+            })
         });
         const d = await resp.json();
         if (d.enabled === false) {
@@ -1737,10 +2081,15 @@ async function wifiAnalyzeAI() {
         }
         if (d.error) { content.innerHTML = '<span class="text-red-400">⚠ ' + _esc(d.error) + '</span>'; return; }
         content.innerHTML = formatAIText(d.analysis || 'No analysis returned.');
+        // Stash the analysis so the printable spectrum report can embed it.
+        _wifiState.ai = { text: d.analysis || '', connected: d.connected || null,
+            overlays: d.overlays || [], ts: Date.now() };
         const c = d.connected;
-        status.textContent = c
+        const ov = (d.overlays && d.overlays.length)
+            ? ' · +' + d.overlays.map(o => o === 'zigbee' ? 'Zigbee' : 'BT').join('/') : '';
+        status.textContent = (c
             ? `${c.ssid || c.bssid} · ${c.band || '?'} GHz ch ${c.channel ?? '?'} · ${d.context ? d.context.co_channel_count + ' co-channel' : ''}`
-            : 'not associated — analyzed the environment';
+            : 'not associated — analyzed the environment') + ov;
     } catch (e) {
         content.innerHTML = '<span class="text-red-400">AI analysis failed.</span>';
     } finally {
@@ -1751,7 +2100,7 @@ async function wifiAnalyzeAI() {
 // Open a printable HTML report in a new tab. POSTs the scan data the panel
 // already holds to a render endpoint (no re-scan), then writes the returned
 // self-contained HTML into the new window so the user can Save-as-PDF.
-function _openScanReport(url, scan, emptyMsg) {
+function _openScanReport(url, scan, emptyMsg, extra) {
     // A WIDS capture is valid even with zero APs (a genuinely clear airspace),
     // so accept anything carrying a threat verdict; the spectrum survey needs APs.
     const hasData = !!scan && (('threat' in scan) || (Array.isArray(scan.aps) && scan.aps.length > 0));
@@ -1760,17 +2109,17 @@ function _openScanReport(url, scan, emptyMsg) {
     if (w) w.document.write('<!DOCTYPE html><title>Generating report…</title>'
         + '<body style="font-family:system-ui,sans-serif;padding:2rem;color:#334">Generating report…</body>');
     fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                 body: JSON.stringify({ scan }) })
+                 body: JSON.stringify(Object.assign({ scan }, extra || {})) })
         .then(r => r.text())
         .then(html => { if (w) { w.document.open(); w.document.write(html); w.document.close(); } })
         .catch(() => { if (w) { try { w.document.body.textContent = 'Report generation failed.'; } catch (e) {} } });
 }
 
-// Printable Wi-Fi spectrum & channel report from the current scan.
-function wifiExportReport() {
-    _openScanReport('/api/net/wifi/report', _wifiState.data,
-        'Run a spectrum scan first, then export the report.');
-}
+// NOTE: the active printable Wi-Fi report is the richer client-side
+// wifiExportReport() further down (it also carries the heatmap image + build
+// plan). It renders the 2.4 GHz Bluetooth / Zigbee overlays and the last AI
+// analysis inline. This slot previously held a second, server-rendered
+// wifiExportReport() that was shadowed by that later definition and never ran.
 
 // One auto-refresh tick: the Wi-Fi survey plus any enabled overlays. The
 // Waterfall view streams on its own poll, so it's left alone here.
@@ -1778,6 +2127,7 @@ function _wifiAutoTick() {
     if (_wifiState.view !== 'waterfall') wifiScan();
     if (_wifiState.btOn) wifiBtScan();
     if (_wifiState.zbOn && _wifiState.zbAvailable) wifiZbScan();
+    if (_wifiState.bleOn && _wifiState.bleAvailable) wifiBleScan();
 }
 
 // ---- Bluetooth / BLE 2.4 GHz overlay ---------------------------------------
@@ -1934,6 +2284,113 @@ function wifiZbSelect(id) {
     if (_wifiState.data) _wifiDrawSpectrum();
 }
 
+// ---- BLE Watch 2.4 GHz overlay (via an on-demand nRF-sniffer link-layer sniff)
+// Unlike the 📶 Bluetooth overlay (a BlueZ device-discovery estimate), this uses
+// the external nRF / Bluefruit LE sniffer to hear BLE advertising on channels
+// 37/38/39 directly — real energy on the band — and marks any advertiser BLE
+// Watch flags as a clone, spoof or advertising flood in red. The toggle stays
+// greyed until a sniffer is on USB (the status poll writes nothing to any port).
+const _BLE_FREQ = { 37: 2402, 38: 2426, 39: 2480 };
+const _BLE_PRESSURE_COLOR = { low: '#64748b', moderate: '#f59e0b', high: '#ef4444' };
+
+function _wifiBleCheck() {
+    if (_wifiState.bleBusy) return;            // never probe a port mid-capture
+    fetch('/api/net/ble-watch/status').then(r => r.json()).then(st => {
+        const ok = !!(st && st.available);
+        _wifiState.bleAvailable = ok;
+        const chk = document.getElementById('wifi-ble'), lab = document.getElementById('wifi-ble-label');
+        if (chk) chk.disabled = !ok;
+        if (lab) {
+            lab.classList.toggle('opacity-40', !ok);
+            lab.classList.toggle('cursor-not-allowed', !ok);
+            lab.classList.toggle('cursor-pointer', ok);
+            lab.title = ok ? ('Passive BLE link-layer sniff — ' + (st.note || 'sniffer ready'))
+                : (st && st.note ? st.note : 'Attach an nRF / Bluefruit LE sniffer to monitor BLE advertising');
+        }
+        _wifiFsSyncGates();
+    }).catch(() => {});
+}
+
+function wifiBleScan() {
+    if (_wifiState.bleBusy) return;
+    _wifiState.bleBusy = true;
+    const st = document.getElementById('wifi-ble-status');
+    if (st) st.textContent = 'Sniffing BLE advertising (37/38/39)…';
+    // quick=1 suppresses the Watchtower incident export for this short overlay sniff.
+    fetch('/api/net/ble-watch?seconds=8&quick=1').then(r => r.json()).then(d => {
+        _wifiState.bleBusy = false;
+        if (!d.success) {
+            if (st) st.textContent = '⚠ ' + ((d.error || 'BLE sniff failed').split('.')[0]);
+            _wifiState.ble = null;
+            if (_wifiState.data) _wifiDrawSpectrum();
+            return;
+        }
+        const ov = d.overlay || { devices: [], markers: [], device_count: 0 };
+        _wifiState.ble = ov;
+        // Drop a selection that dropped off the air this sniff.
+        if (_wifiState.bleSelected && !(ov.devices || []).some(v => v.addr === _wifiState.bleSelected))
+            _wifiState.bleSelected = null;
+        const fl = ov.flagged_count || 0;
+        if (st) st.textContent = `${ov.device_count || 0} advertiser(s)` +
+            (fl ? ` · ${fl} flagged` : '') + ` · ${d.packet_count || 0} pkt`;
+        _wifiBleRender();
+        _wifiFsRenderSide();
+        if (_wifiState.data) _wifiDrawSpectrum();
+    }).catch(() => { _wifiState.bleBusy = false; if (st) st.textContent = 'BLE sniff failed'; });
+}
+
+// A short label for the status cell: the flagged finding codes, or "clean".
+function _wifiBleStatusCell(v) {
+    if (v.flagged) {
+        const codes = (v.codes || []).join(', ');
+        return `<span style="color:#f87171" title="${_esc(codes)}">⚠ ${_esc(codes || (v.severity || 'finding'))}</span>`;
+    }
+    return '<span style="color:#4ade80">clean</span>';
+}
+
+function _wifiBleRender() {
+    const ov = _wifiState.ble; if (!ov) return;
+    const sum = document.getElementById('wifi-ble-summary');
+    if (sum) sum.textContent = `${ov.device_count || 0} advertiser(s) · ${ov.flagged_count || 0} flagged` +
+        (ov.verdict ? ` · ${ov.verdict}` : '');
+    const note = document.getElementById('wifi-ble-note');
+    if (note) note.textContent = ov.note || '';
+    const pr = document.getElementById('wifi-ble-pressure');
+    if (pr) pr.innerHTML = (ov.wifi_channels || []).map(c => {
+        const col = _BLE_PRESSURE_COLOR[c.level] || '#64748b';
+        return `<span class="px-1.5 py-0.5 rounded" style="background:${col}22;color:${col};border:1px solid ${col}55" title="BLE advertising pressure near Wi-Fi ch ${c.wifi_channel}">ch${c.wifi_channel}: ${c.level}</span>`;
+    }).join('');
+    const tb = document.getElementById('wifi-ble-tbody');
+    if (!tb) return;
+    if (!(ov.devices || []).length) {
+        tb.innerHTML = '<tr><td colspan="5" class="py-3 text-gray-500">No BLE advertising heard this sniff.</td></tr>';
+        return;
+    }
+    tb.innerHTML = ov.devices.map(v => {
+        const sel = _wifiState.bleSelected === v.addr;
+        const rssi = (v.rssi == null) ? '—' : `${v.rssi}`;
+        const rcol = (v.rssi == null) ? '#64748b' : _wifiSignalColor(v.rssi);
+        const name = v.name ? _esc(v.name) : '<span class="text-gray-600">(no name)</span>';
+        const chans = (v.channels || []).join('/') || '—';
+        const atype = v.rpa_class === 'public' ? 'public' : v.rpa_class === 'static' ? 'static'
+            : v.rpa_class === 'rpa' ? 'random (RPA)' : 'random';
+        return `<tr class="border-b border-slate-800/60 cursor-pointer hover:bg-slate-800/40${sel ? ' bg-fuchsia-500/15' : ''}" onclick="wifiBleSelect('${v.addr}')" title="Click to highlight this advertiser on the spectrum">
+            <td class="py-1 pr-3">${sel ? '<span class="text-fuchsia-400">▸</span> ' : ''}${name}<div class="text-[10px] text-gray-600 font-mono">${_esc(v.addr)}</div></td>
+            <td class="py-1 pr-3">${atype}</td>
+            <td class="py-1 pr-3 font-mono">${chans}</td>
+            <td class="py-1 pr-3">${_wifiBleStatusCell(v)}</td>
+            <td class="py-1 pr-3 text-right font-mono" style="color:${rcol}">${rssi}</td>
+        </tr>`;
+    }).join('');
+}
+
+function wifiBleSelect(addr) {
+    _wifiState.bleSelected = (_wifiState.bleSelected === addr) ? null : addr;
+    _wifiFsRenderSide();
+    _wifiBleRender();
+    if (_wifiState.data) _wifiDrawSpectrum();
+}
+
 // ---- True-RF waterfall (HackRF SDR) ----------------------------------------
 // The Waterfall button stays greyed out until the backend actually sees a
 // HackRF; this polls detection and enables/labels the button accordingly.
@@ -1955,7 +2412,219 @@ function _wifiSdrCheck() {
             ? `HackRF ready${det.board ? ' (' + det.board + ')' : ''} — true-RF waterfall`
             : (det.error || 'Connect a HackRF SDR to enable true-RF waterfall');
         _wifiFsSyncGates();
+        _wifiRfwfShow();
     }).catch(() => {});
+}
+
+// ---- RF Waterfall page (full-screen HackRF + RTL-SDR waterfall) -------------
+// A dedicated page (/rf-waterfall) that stacks the sub-GHz RTL-SDR sweep over
+// the Wi-Fi-band HackRF sweep. The button here appears once either radio is
+// detected, or while the "RF Waterfall demo" toggle is on (synthetic feed).
+function _wifiRtlCheck() {
+    fetch('/api/net/rtl/status').then(r => r.json()).then(st => {
+        const det = (st && st.detect) || {};
+        // Show the SDR-page buttons when an RTL is physically PRESENT, not only
+        // when it's openable right now: `available` flips to false the moment a
+        // tool (e.g. dump1090 for the ADS-B radar) opens the dongle, which would
+        // otherwise hide the very button that leads to the running radar.
+        _wifiState.rtlAvailable = !!(det.available || det.device_present);
+        _wifiRfwfShow();
+    }).catch(() => {});
+    fetch('/api/net/esp/status').then(r => r.json()).then(st => {
+        _wifiState.espAvailable = !!(st && st.detect && st.detect.available);
+        _wifiRfwfShow();
+    }).catch(() => {});
+    // Meshtastic companion node (separate USB device) gates the Mesh Nodes button.
+    fetch('/api/net/mesh/status').then(r => r.json()).then(st => {
+        _wifiState.meshAvailable = !!(st && st.detect && st.detect.available);
+        _wifiRfwfShow();
+    }).catch(() => {});
+}
+
+function _wifiRfwfShow() {
+    const btn = document.getElementById('wifi-rfwf-btn');
+    if (!btn) return;
+    const hackrf = !!(_wifiState.sdr && _wifiState.sdr.available);
+    const rtl = !!_wifiState.rtlAvailable;
+    const esp = !!_wifiState.espAvailable;
+    const demo = !!_wifiState.rfwfDemo;
+    // Always offer the waterfall: the page collapses the panel of any radio
+    // that isn't connected instead of the button hiding here.
+    btn.classList.remove('hidden');
+    btn.classList.add('inline-flex');
+    const bits = [];
+    if (hackrf) bits.push('HackRF');
+    if (rtl) bits.push('RTL-SDR');
+    if (esp) bits.push('ESP-SDR');
+    btn.title = bits.length
+        ? 'Open the RF Waterfall page — live: ' + bits.join(' + ')
+        : (demo ? 'Open the RF Waterfall page (synthetic demo — connect an RTL-SDR, HackRF or ESP-SDR for true RF)'
+                : 'Open the RF Waterfall page (no SDR connected — panels stay collapsed until a radio is plugged in)');
+    // Signal Analyzer works offline on recorded SigMF captures (no live SDR
+    // needed) — always offer it; the page itself guides you if no capture exists.
+    const analyzer = document.getElementById('wifi-analyzer-btn');
+    if (analyzer) {
+        analyzer.classList.remove('hidden');
+        analyzer.classList.add('inline-flex');
+    }
+    // ADS-B radar needs an RTL-SDR (1090 MHz via dump1090); show alongside when
+    // an RTL is present or the demo is on (synthetic sky).
+    const adsb = document.getElementById('wifi-adsb-btn');
+    if (adsb) {
+        const showA = rtl || demo;
+        adsb.classList.toggle('hidden', !showA);
+        adsb.classList.toggle('inline-flex', showA);
+    }
+    // Mesh Nodes reads a USB Meshtastic node, but its MQTT source works over the
+    // Internet with no node at all (like APRS-IS), so always offer it — the page
+    // guides plugging in a node / connecting MQTT / installing the packages.
+    const mesh = document.getElementById('wifi-mesh-btn');
+    if (mesh) {
+        mesh.classList.remove('hidden');
+        mesh.classList.add('inline-flex');
+    }
+    // Pager decode needs an RTL-SDR (rtl_fm|multimon-ng); show when RTL present
+    // or demo on (synthetic feed).
+    const pager = document.getElementById('wifi-pager-btn');
+    if (pager) {
+        const showP = rtl || demo;
+        pager.classList.toggle('hidden', !showP);
+        pager.classList.toggle('inline-flex', showP);
+    }
+    // VOR radial decode needs an RTL-SDR tuned to 108–118 MHz; show when RTL
+    // present or demo on (synthetic radial).
+    const vor = document.getElementById('wifi-vor-btn');
+    if (vor) {
+        const showV = rtl || demo;
+        vor.classList.toggle('hidden', !showV);
+        vor.classList.toggle('inline-flex', showV);
+    }
+    // APRS off-air needs an RTL-SDR, but the APRS-IS Internet feed works with no
+    // dongle at all — so always offer it (it's the one that doesn't need hardware).
+    const aprs = document.getElementById('wifi-aprs-btn');
+    if (aprs) {
+        aprs.classList.remove('hidden');
+        aprs.classList.add('inline-flex');
+    }
+}
+
+// Load the demo toggle's state from config and persist changes.
+function _wifiRfwfDemoInit() {
+    const cb = document.getElementById('wifi-rfwf-demo');
+    if (!cb || cb._wired) return;
+    cb._wired = true;
+    fetch('/api/config').then(r => r.json()).then(c => {
+        _wifiState.rfwfDemo = !!(c && (c.sdr_demo === true || c.sdr_demo === 'true'));
+        cb.checked = _wifiState.rfwfDemo;
+        _wifiRfwfShow();
+    }).catch(() => {});
+    cb.addEventListener('change', () => {
+        _wifiState.rfwfDemo = cb.checked;
+        postAPI('/api/config', { sdr_demo: cb.checked }).catch(() => {});
+        _wifiRfwfShow();
+    });
+}
+
+// "SDR check" button: diagnose why an SDR isn't detected and show the fix
+// inline. Reachable with no device connected, so a user can find out *why*.
+// Colours are inline hex (not Tailwind classes) so they survive the CSS purge.
+function wifiSdrCheck() {
+    const box = document.getElementById('wifi-sdr-diag');
+    if (!box) return;
+    box.classList.remove('hidden');
+    box.innerHTML = '<span style="color:#9ca3af">🩺 Checking SDR — USB bus, drivers, tools, power…</span>';
+    Promise.all([
+        fetch('/api/net/rtl/diagnose').then(r => r.json()).catch(() => null),
+        fetch('/api/net/sdr/status').then(r => r.json()).catch(() => null),
+        fetch('/api/net/esp/status').then(r => r.json()).catch(() => null)
+    ]).then(([d, hk, esp]) => {
+        if (!d) { box.innerHTML = '<span style="color:#f87171">SDR check failed — the endpoint did not respond.</span>'; return; }
+        const tone = { ok: ['#34d399', '✅'], no_usb: ['#fb7185', '⛔'], tools_missing: ['#fbbf24', '⚙️'],
+                       dvb_held: ['#fbbf24', '🔒'], probe_timeout: ['#fbbf24', '⏱️'],
+                       usb_stuck: ['#fbbf24', '🔁'], usb_flapping: ['#fb7185', '⚡'] }[d.state] || ['#94a3b8', 'ℹ️'];
+        const col = tone[0], icon = tone[1];
+        const fixes = (d.fix || []).map(s =>
+            `<li style="display:flex;gap:.4rem"><span style="color:${col}">›</span><code class="font-mono text-xs" style="color:#e5e7eb;word-break:break-all">${escapeHtml(String(s))}</code></li>`).join('');
+        const yn = (v, t, f) => v ? `<span style="color:#34d399">${escapeHtml(String(t))}</span>` : `<span style="color:#6b7280">${escapeHtml(String(f))}</span>`;
+        const facts = [
+            `RTL-SDR on USB: ${yn(d.usb_present, d.usb_id || 'yes', 'no')}`,
+            `tools: ${yn(d.tools_installed, 'installed', 'missing')}`,
+            `DVB driver: ${d.dvb_loaded ? '<span style="color:#fbbf24">loaded (blocking)</span>' : '<span style="color:#34d399">clear</span>'}`,
+            `blacklist: ${yn(d.blacklisted, 'set', 'absent')}`,
+            d.throttled ? `power: ${d.undervoltage ? '<span style="color:#fb7185">under-voltage (' + escapeHtml(String(d.throttled)) + ')</span>' : '<span style="color:#34d399">ok</span>'}` : ''
+        ].filter(Boolean).join(' · ');
+        // Self-healing: what the watcher is doing about the dongle, and a button
+        // to run the recovery ladder now (power-cycles a stuck port).
+        const h = d.heal || {};
+        const last = (h.history || []).slice(-1)[0];
+        const healLine = (h.state && h.state !== 'ok')
+            ? `<div class="mt-2 text-xs" style="color:#9ca3af">🩹 Self-heal: ${escapeHtml(String(h.message || h.state))}`
+              + (last ? ` <span style="color:#6b7280">(last: ${escapeHtml(String(last.action).replace('_', ' '))} ${escapeHtml(String(last.target || ''))} → ${last.back ? 'back' : 'not back yet'})</span>` : '')
+              + (h.enabled === false ? ' <span style="color:#fbbf24">— switched off</span>' : '') + `</div>`
+            : '';
+        const healBtn = (h.state && ['recovering', 'failed', 'flapping', 'unplugged'].indexOf(h.state) >= 0) || d.state === 'no_usb'
+            ? `<button type="button" onclick="wifiSdrHeal(this)" style="margin-top:.6rem;margin-left:.4rem;background:#0f766e;color:#fff;border:0;border-radius:6px;padding:.45rem .8rem;font-weight:600;cursor:pointer" title="Run the recovery ladder now: USB reset, or power-cycle the port the dongle is stuck on (the same as replugging it).">⭮ Recover now</button>`
+            : '';
+        const hkline = hk && hk.detect
+            ? `<div class="mt-2 text-xs" style="color:#9ca3af">HackRF (Wi-Fi bands): ${hk.detect.available ? '<span style="color:#34d399">detected</span>' : escapeHtml(String(hk.detect.error || 'not detected'))}</div>`
+            : '';
+        const espline = esp && esp.detect
+            ? `<div class="mt-2 text-xs" style="color:#9ca3af">ESP-SDR (2.4 GHz): ${esp.detect.available
+                ? '<span style="color:#34d399">detected' + (esp.detect.model_name ? ' (' + escapeHtml(String(esp.detect.model_name)) + ')' : '') + '</span>'
+                : escapeHtml(String(esp.detect.error || 'not detected'))}</div>`
+            : '';
+        // One-click fix button when the SDR check says the tools are missing or
+        // the DVB-T driver is holding the dongle (both fixable from the server).
+        const actLabel = (d.tools_installed === false)
+            ? '⬇ Install RTL-SDR tools' : '🔓 Free the dongle (unload DVB driver)';
+        const actBtn = d.can_install
+            ? `<button type="button" onclick="wifiSdrInstall()" style="margin-top:.6rem;background:#4f46e5;color:#fff;border:0;border-radius:6px;padding:.45rem .8rem;font-weight:600;cursor:pointer">${actLabel}</button>`
+            : '';
+        box.innerHTML =
+            `<div style="display:flex;align-items:flex-start;gap:.5rem">
+               <span style="font-size:1.15rem;line-height:1">${icon}</span>
+               <div style="flex:1;min-width:0">
+                 <div class="font-semibold" style="color:${col}">${escapeHtml(String(d.summary || 'SDR check'))}</div>
+                 ${fixes ? `<ul style="margin-top:.5rem;display:flex;flex-direction:column;gap:.25rem">${fixes}</ul>` : ''}
+                 ${actBtn}${healBtn}
+                 ${healLine}
+                 <div class="mt-2 text-xs" style="color:#9ca3af">${facts}</div>
+                 ${hkline}
+                 ${espline}
+               </div>
+               <button type="button" onclick="document.getElementById('wifi-sdr-diag').classList.add('hidden')" class="text-xs" style="color:#6b7280" title="Dismiss">✕</button>
+             </div>`;
+    });
+}
+
+// "Recover now": run the self-heal ladder once (it can take ~30 s: a stuck
+// dongle is power-cycled and then has to re-enumerate), then re-run the check.
+function wifiSdrHeal(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = '⭮ Recovering… (up to ~40 s)'; }
+    fetch('/api/net/rtl/heal', { method: 'POST' }).then(r => r.json()).catch(() => null)
+        .then(() => wifiSdrCheck());
+}
+
+// One-click install/fix from the SDR check panel: apt-installs rtl-sdr+rtl-433
+// and unloads/blacklists the DVB-T driver on the server, then re-runs the check.
+function wifiSdrInstall() {
+    const box = document.getElementById('wifi-sdr-diag');
+    if (!box) return;
+    box.classList.remove('hidden');
+    box.innerHTML = '<span style="color:#fbbf24">⏳ Installing RTL-SDR tools and freeing the device… this can take a minute — don\'t close the page.</span>';
+    fetch('/api/net/rtl/install', { method: 'POST' }).then(r => r.json()).then(res => {
+        if (res && res.ok) { wifiSdrCheck(); return; }   // success → show the fresh (green) state
+        const steps = ((res && res.steps) || []).map(s =>
+            `<li style="display:flex;gap:.4rem"><span style="color:#f87171">›</span><span style="color:#e5e7eb">${escapeHtml(String(s))}</span></li>`).join('');
+        box.innerHTML =
+            `<div class="font-semibold" style="color:#f87171">Install didn't complete — ${escapeHtml(String((res && res.error) || 'unknown error'))}</div>`
+            + (steps ? `<ul style="margin-top:.5rem;display:flex;flex-direction:column;gap:.25rem">${steps}</ul>` : '')
+            + (res && res.output ? `<pre class="font-mono text-xs" style="color:#9ca3af;white-space:pre-wrap;overflow-x:auto;margin-top:.5rem">${escapeHtml(String(res.output))}</pre>` : '')
+            + `<div class="mt-2 text-xs" style="color:#9ca3af">You can also run it on the host: <code class="font-mono" style="color:#e5e7eb">sudo apt install -y rtl-sdr rtl-433</code></div>`
+            + `<button type="button" onclick="wifiSdrCheck()" style="margin-top:.5rem;background:#334155;color:#e5e7eb;border:0;border-radius:6px;padding:.35rem .7rem;cursor:pointer" class="text-xs">↻ Re-run check</button>`;
+    }).catch(() => {
+        box.innerHTML = '<span style="color:#f87171">Install request failed — the endpoint did not respond. Try again, or install on the host: <code class="font-mono">sudo apt install -y rtl-sdr rtl-433</code></span>';
+    });
 }
 
 function _wifiSdrStart() {
@@ -1971,7 +2640,10 @@ function _wifiSdrStart() {
             if (res && res.error) { s.error = res.error; _wifiDrawWaterfall(); return; }
             if (s.poll) clearInterval(s.poll);
             s.running = true;
-            s.poll = setInterval(_wifiSdrPoll, 400);
+            // The backend emits 20 rows/s, so each 200 ms poll pulls ~4 rows.
+            // Not polled faster: every poll repaints the whole view cell by cell
+            // (rows × 512 fillRects), so doubling the poll doubles that cost.
+            s.poll = setInterval(_wifiSdrPoll, 200);
         }).catch(() => { s.error = 'Failed to start SDR'; _wifiDrawWaterfall(); });
 }
 
@@ -1985,12 +2657,14 @@ function _wifiSdrStop() {
 function _wifiSdrPoll() {
     const s = _wifiState.sdr;
     fetch('/api/net/sdr/frames?since=' + s.seq).then(r => r.json()).then(d => {
-        if (d.error) s.error = d.error;
+        // Assign (don't OR-in) so a transient backend hiccup that clears can't
+        // leave a stale error pinned over the waterfall forever.
+        s.error = d.error || null;
         if (d.band_mhz) s.bandMhz = d.band_mhz;
         if (typeof d.floor_dbm === 'number') s.floor = d.floor_dbm;
         if (d.max_hold) s.maxhold = d.max_hold;
         (d.frames || []).forEach(f => { s.seq = f.seq; s.rows.unshift(f.power); });
-        if (s.rows.length > 260) s.rows.length = 260;
+        if (s.rows.length > 600) s.rows.length = 600;
         if (_wifiState.view === 'waterfall') _wifiDrawWaterfall();
     }).catch(() => {});
 }
@@ -2280,6 +2954,80 @@ function wifiExportCsv() {
 
 function _esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
+// ---- Report section builders for the printable WiFi survey report ----------
+// Light-theme markup (own CSS in the print window — no Tailwind), so these emit
+// plain HTML rather than reusing the on-screen dark-themed renderers.
+
+const _RPT_PRESSURE_COLOR = { low: '#64748b', moderate: '#ca8a04', high: '#dc2626' };
+const _RPT_BT_KIND = { le: 'BLE', classic: 'Classic', dual: 'Dual' };
+
+function _wifiReportPressureChips(channels) {
+    const chips = (channels || []).map(c => {
+        const col = _RPT_PRESSURE_COLOR[c.level] || '#64748b';
+        return `<span style="display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600;color:#fff;background:${col}">ch${c.wifi_channel}: ${_esc(c.level || '—')}</span>`;
+    });
+    if (!chips.length) return '';
+    return `<p style="margin:6px 0 4px;color:#666;font-size:12px">Estimated Wi-Fi-channel pressure (heuristic, not measured):</p><div style="display:flex;gap:6px;flex-wrap:wrap">${chips.join('')}</div>`;
+}
+
+// Bluetooth / BLE 2.4 GHz overlay → HTML section (or '' when absent/off).
+function _wifiReportBtHtml() {
+    if (!_wifiState.btOn) return '';
+    const bt = _wifiState.bt;
+    const devices = (bt && bt.devices) || [];
+    if (!bt || (!devices.length && !bt.device_count)) return '';
+    const i = bt.interference || {};
+    const rows = devices.slice(0, 60).map(d => `<tr><td>${_esc(d.name) || '<i>(no name)</i>'}</td><td>${_esc(_RPT_BT_KIND[d.kind] || d.kind || '—')}</td><td>${_esc(d.vendor) || '—'}</td><td>${_esc(d.major_class) || '—'}</td><td>${d.rssi == null ? '—' : d.rssi + ' dBm'}</td></tr>`).join('');
+    return `<h2>Bluetooth / BLE (2.4 GHz coexistence)</h2>`
+        + `<p><b>${bt.device_count || devices.length}</b> device(s) · ${i.le_count || 0} BLE · ${i.classic_count || 0} Classic/dual · ${i.strong_count || 0} close</p>`
+        + _wifiReportPressureChips(i.channels)
+        + `<table><thead><tr><th>Device</th><th>Type</th><th>Vendor</th><th>Class</th><th>RSSI</th></tr></thead><tbody>${rows}</tbody></table>`
+        + (bt.coexistence_note ? `<p class="sub" style="margin-top:6px">${_esc(bt.coexistence_note)}</p>` : '');
+}
+
+// Zigbee / 802.15.4 overlay → HTML section (or '' when absent/off).
+function _wifiReportZbHtml() {
+    if (!(_wifiState.zbOn && _wifiState.zbAvailable)) return '';
+    const zb = _wifiState.zb;
+    const devices = (zb && zb.devices) || [];
+    if (!zb || (!devices.length && !zb.device_count)) return '';
+    const i = zb.interference || {};
+    const rows = devices.slice(0, 60).map(d => `<tr><td class="mono">${_esc(d.addr || d.short_addr) || '—'}</td><td>${_esc(d.panid) || '—'}</td><td>${d.channel == null ? '—' : d.channel}</td><td>${_esc(d.proto) || '—'}</td><td>${_esc(d.vendor) || '—'}</td><td>${d.rssi == null ? '—' : d.rssi + ' dBm'}</td><td>${d.lqi == null ? '—' : d.lqi}</td></tr>`).join('');
+    return `<h2>Zigbee / 802.15.4 (2.4 GHz coexistence)</h2>`
+        + `<p><b>${zb.device_count || devices.length}</b> device(s) · ${i.channel_count || 0} active channel(s) · ${i.strong_count || 0} close</p>`
+        + _wifiReportPressureChips(i.wifi_channels)
+        + `<table><thead><tr><th>Address</th><th>PAN ID</th><th>Ch</th><th>Proto</th><th>Vendor</th><th>RSSI</th><th>LQI</th></tr></thead><tbody>${rows}</tbody></table>`
+        + (zb.companion_note ? `<p class="sub" style="margin-top:6px">${_esc(zb.companion_note)}</p>` : '');
+}
+
+// Stashed AI analysis → HTML section (light-theme markdown-lite; or '' when
+// the user hasn't run "Analyze with AI" on the current scan).
+function _wifiReportAIHtml() {
+    const ai = _wifiState.ai;
+    const text = ai && (ai.text || '').trim();
+    if (!text) return '';
+    const lines = text.replace(/\r\n/g, '\n').split('\n');
+    const out = []; let inList = false;
+    const inline = (s) => _esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`]+?)`/g, '<code>$1</code>');
+    const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
+    for (const raw of lines) {
+        const s = raw.trim();
+        if (!s) { closeList(); continue; }
+        const bullet = s.match(/^(?:[-*•]|\d+[.)])\s+(.*)$/);
+        if (bullet) { if (!inList) { out.push('<ul>'); inList = true; } out.push(`<li>${inline(bullet[1])}</li>`); continue; }
+        closeList();
+        const head = s.match(/^\*\*(.+?):?\*\*:?$/);
+        if (head) out.push(`<div style="font-weight:700;color:#4338ca;margin:10px 0 3px">${inline(head[1])}</div>`);
+        else out.push(`<p style="margin:0 0 6px">${inline(s)}</p>`);
+    }
+    closeList();
+    const ov = (ai.overlays || []).map(o => o === 'zigbee' ? 'Zigbee' : 'Bluetooth/BLE');
+    const meta = ov.length ? `<div class="sub">Includes ${ov.join(', ')}</div>` : '';
+    return `<h2>AI analysis</h2>${meta}`
+        + `<div style="background:#f5f3ff;border:1px solid #ddd6fe;border-left:4px solid #4f46e5;border-radius:8px;padding:12px 16px;font-size:12.5px;color:#312e5e">${out.join('')}</div>`
+        + `<p class="sub" style="margin-top:6px">Generated by Ragnar's AI assistant from the scan above. Advisory only.</p>`;
+}
+
 function wifiExportReport() {
     const d = _wifiState.data;
     // Coverage stats from the current heatmap metric.
@@ -2332,6 +3080,10 @@ function wifiExportReport() {
     const rows = aps.map(a => `<tr><td>${_esc(a.ssid) || '<i>hidden</i>'}</td><td class="mono">${_esc(a.bssid)}</td><td>${_esc(a.vendor) || '—'}</td><td>${a.band}</td><td>${a.channel}</td><td>${a.width}M</td><td>${a.signal}</td><td>${a.snr == null ? '—' : a.snr}</td><td>${_esc(a.security)}</td></tr>`).join('');
     const now = new Date();
     const issues = aps.filter(a => a.security_findings && a.security_findings.length);
+    // 2.4 GHz coexistence overlays + the AI read (only when active / run).
+    const btHtml = _wifiReportBtHtml();
+    const zbHtml = _wifiReportZbHtml();
+    const aiHtml = _wifiReportAIHtml();
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>WiFi Survey Report</title>
 <style>
   body{font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#111;max-width:900px;margin:24px auto;padding:0 16px}
@@ -2339,19 +3091,23 @@ function wifiExportReport() {
   .sub{color:#666;font-size:12px;margin-bottom:14px}
   table{border-collapse:collapse;width:100%;font-size:11.5px} th,td{border:1px solid #ddd;padding:3px 6px;text-align:left}
   th{background:#f4f4f5} .mono{font-family:ui-monospace,monospace;font-size:10.5px}
+  code{background:#ece9fb;padding:1px 5px;border-radius:4px;font-family:ui-monospace,monospace;font-size:11px}
   .foot{margin-top:26px;color:#999;font-size:11px} @media print{body{margin:0}}
 </style></head><body>
   <h1>WiFi Survey Report</h1>
   <div class="sub">${now.toLocaleString()} · interface ${_esc(_wifiState.iface || '—')} · ${aps.length} APs heard${_wifiHm.data && _wifiHm.data.target_ssid ? ' · target ' + _esc(_wifiHm.data.target_ssid) : ''}</div>
+  ${aiHtml}
   ${cov ? '<h2>Coverage</h2>' + cov : ''}
   ${plan ? '<h2>Build plan</h2>' + plan : ''}
   ${img ? '<h2>Heatmap</h2>' + img : ''}
   ${bands ? '<h2>Bands &amp; channel plan</h2>' + bands : ''}
   ${intf ? '<h2>Interference</h2>' + intf : ''}
+  ${btHtml}
+  ${zbHtml}
   ${issues.length ? '<h2>Security issues (' + issues.length + ')</h2><ul>' + issues.map(a => `<li><b>${_esc(a.ssid) || 'hidden'}</b> (${_esc(a.bssid)}): ${_esc(a.security_findings.join('; '))}</li>`).join('') + '</ul>' : ''}
   <h2>AP inventory</h2>
   <table><thead><tr><th>SSID</th><th>BSSID</th><th>Vendor</th><th>Band</th><th>Ch</th><th>Width</th><th>RSSI</th><th>SNR</th><th>Security</th></tr></thead><tbody>${rows}</tbody></table>
-  <div class="foot">Generated by Ragnar WiFi Analyzer. Passive survey — estimates, not survey-grade measurements.</div>
+  <div class="foot">Generated by Ragnar Signal Intelligence. Passive survey — estimates, not survey-grade measurements.</div>
   <script>window.onload=function(){setTimeout(function(){window.print();},250);};<\/script>
 </body></html>`;
     const w = window.open('', '_blank');
@@ -2394,10 +3150,11 @@ function wifiRender() {
     _wifiDrawSpectrum();
     _wifiFsRender();
     if (_wifiHm.mesh) wifiHeatmapPopulateSsids(); else wifiHeatmapPopulateAps();
-    // WIDS pivot: once the flagged BSSID shows up in a survey, select it
-    // (applied guards recursion — wifiSelectAp() re-enters wifiRender()).
+    // WIDS/inspect pivot: once the flagged or just-selected BSSID shows up in a
+    // survey, select it (applied guards recursion — wifiSelectAp() re-enters
+    // wifiRender()).
     _wifiFlagBanner();
-    const f = _wifiState.flagged;
+    const f = _wifiState.flagged || _wifiState.pivotSelect;
     if (f && !f.applied && d.aps.some(a => a.bssid === f.bssid)) {
         f.applied = true;
         wifiSelectAp(f.bssid);
@@ -2573,6 +3330,66 @@ function _wifiDrawSpectrumInto(canvas, opts) {
     // Zigbee / 802.15.4 overlay on the 2.4 GHz segment (device-activity estimate)
     if (_wifiState.zbOn && _wifiState.zb && ranges['2.4']) {
         _wifiDrawZbOverlay(ctx, ranges['2.4'], xFor, { padT, padB, H, plotH, yFor });
+    }
+    // BLE Watch overlay on the 2.4 GHz segment (real sniffed advertising activity)
+    if (_wifiState.bleOn && _wifiState.ble && ranges['2.4']) {
+        _wifiDrawBleOverlay(ctx, ranges['2.4'], xFor, { padT, padB, H, plotH, yFor });
+    }
+}
+
+// Draw BLE Watch advertising-channel markers (37/38/39, from a real link-layer
+// sniff) on the 2.4 GHz segment: a solid fuchsia bar per channel, height scaled
+// by activity, turning red on any channel carrying a flagged advertiser (clone /
+// spoof / flood). A selected advertiser draws its RSSI level across the band.
+function _wifiDrawBleOverlay(ctx, r24, xFor, g) {
+    const ov = _wifiState.ble || {};
+    const baseY = g.H - g.padB;
+    const bleX = (freqMhz) => {
+        const chFrac = (freqMhz - 2407) / 5;
+        return Math.max(r24.x0 + 2, Math.min(r24.x1 - 2, xFor('2.4', chFrac)));
+    };
+    // Which advertising channels carry a flagged advertiser → draw those red.
+    const flaggedCh = new Set();
+    (ov.devices || []).forEach(v => { if (v.flagged) (v.channels || []).forEach(c => flaggedCh.add(c)); });
+    const sel = _wifiState.bleSelected
+        ? (ov.devices || []).find(v => v.addr === _wifiState.bleSelected) : null;
+    const dim = sel ? 0.35 : 1.0;
+    // Per advertising-channel markers. Offset +3px so they sit beside (not under)
+    // the 📶 Bluetooth overlay's dashed markers when both are shown.
+    (ov.markers || []).forEach(m => {
+        if (!m.freq_mhz) return;
+        const x = bleX(m.freq_mhz) + 3;
+        const intensity = Math.max(0, Math.min(100, m.intensity || 0));
+        const h = (g.plotH || (baseY - g.padT)) * (0.18 + 0.32 * intensity / 100);
+        const yTop = baseY - h;
+        const red = flaggedCh.has(m.adv_channel);
+        const rgb = red ? '239,68,68' : '232,121,249';
+        ctx.strokeStyle = `rgba(${rgb},${(0.4 + intensity / 100 * 0.5) * dim})`;
+        ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(x, yTop); ctx.lineTo(x, baseY); ctx.stroke();
+        ctx.fillStyle = `rgba(${red ? '254,202,202' : '245,208,254'},${dim})`;
+        ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText((red ? '⚠' : '🛡') + m.adv_channel, x, yTop - 3);
+    });
+    // Selected advertiser: RSSI level line + emphasis on the channels it used.
+    if (sel && sel.rssi != null) {
+        const yR = g.yFor(sel.rssi);
+        const col = sel.flagged ? '#f87171' : _wifiSignalColor(sel.rssi);
+        ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+        ctx.beginPath(); ctx.moveTo(r24.x0, yR); ctx.lineTo(r24.x1, yR); ctx.stroke(); ctx.setLineDash([]);
+        (sel.channels || []).forEach(c => {
+            const x = bleX(_BLE_FREQ[c]) + 3;
+            ctx.strokeStyle = col; ctx.lineWidth = 2.5;
+            ctx.beginPath(); ctx.moveTo(x, yR); ctx.lineTo(x, baseY); ctx.stroke();
+            ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, yR, 4, 0, 2 * Math.PI); ctx.fill();
+            ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+        });
+        const nm = sel.name || sel.addr;
+        const tag = `${nm.length > 18 ? nm.slice(0, 17) + '…' : nm}  ${sel.rssi} dBm${sel.flagged ? '  ⚠ ' + (sel.codes || []).join(', ') : '  (BLE adv)'}`;
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'left';
+        ctx.fillText(tag, r24.x0 + 3, yR - 5);
+    } else if (sel) {
+        ctx.fillStyle = '#f5d0fe'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'left';
+        ctx.fillText(`${sel.addr} — RSSI not heard this sniff`, r24.x0 + 3, g.padT + 26);
     }
 }
 
@@ -2766,7 +3583,8 @@ function _wifiFsWire() {
         b.addEventListener('click', () => { if (!b.disabled) wifiSetView(b.dataset.view); }));
     // Overlay toggles mirror the in-page checkboxes, so the existing change
     // handlers stay the single implementation.
-    [['wifi-auto', 'wifi-fs-auto'], ['wifi-bt', 'wifi-fs-bt'], ['wifi-zb', 'wifi-fs-zb']].forEach(([mainId, fsId]) => {
+    [['wifi-auto', 'wifi-fs-auto'], ['wifi-bt', 'wifi-fs-bt'], ['wifi-zb', 'wifi-fs-zb'],
+     ['wifi-ble', 'wifi-fs-ble']].forEach(([mainId, fsId]) => {
         const m = document.getElementById(mainId), f = document.getElementById(fsId);
         if (!m || !f) return;
         f.addEventListener('change', () => {
@@ -2830,7 +3648,7 @@ function _wifiFsAps() {
 }
 
 function _wifiSetStatus(text) {
-    const st = document.getElementById('wifi-status');
+    const st = document.getElementById('wifi-scan-status');
     if (st) st.textContent = text;
     const fs = document.getElementById('wifi-fs-status');
     if (fs) fs.textContent = text;
@@ -2844,6 +3662,12 @@ function _wifiFsSyncGates() {
     if (zb && zbMain) {
         zb.disabled = zbMain.disabled;
         if (zbl) { zbl.style.opacity = zbMain.disabled ? '.4' : '1'; zbl.style.cursor = zbMain.disabled ? 'not-allowed' : 'pointer'; }
+    }
+    const ble = document.getElementById('wifi-fs-ble'), blel = document.getElementById('wifi-fs-ble-label');
+    const bleMain = document.getElementById('wifi-ble');
+    if (ble && bleMain) {
+        ble.disabled = bleMain.disabled;
+        if (blel) { blel.style.opacity = bleMain.disabled ? '.4' : '1'; blel.style.cursor = bleMain.disabled ? 'not-allowed' : 'pointer'; }
     }
     const wf = document.getElementById('wifi-fs-view-wf'), wfMain = document.getElementById('wifi-view-wf');
     if (wf && wfMain) {
@@ -2860,7 +3684,7 @@ function _wifiFsRender() {
     const d = _wifiState.data;
     const iface = document.getElementById('wifi-fs-iface');
     if (iface) iface.textContent = _wifiState.iface ? `· ${_wifiState.iface}` : '';
-    const st = document.getElementById('wifi-fs-status'), main = document.getElementById('wifi-status');
+    const st = document.getElementById('wifi-fs-status'), main = document.getElementById('wifi-scan-status');
     if (st && main) st.textContent = main.textContent;
     _wifiFsSyncGates();
     // Band chips — clicking one filters the spectrum to that band.
@@ -2981,6 +3805,16 @@ function _wifiFsRenderSide() {
                     <span style="color:${_wifiSignalColor(v.rssi)}">${v.rssi == null ? '—' : v.rssi}</span></div>`; }).join('')
                 || '<div class="wifi-fs-empty">No devices heard.</div>'}</div>`;
     }
+    if (_wifiState.bleOn && _wifiState.ble) {
+        const ov = _wifiState.ble;
+        const devs = (ov.devices || []).slice(0, 40);
+        html += `<div class="wifi-fs-card"><h4>🛡 BLE Watch (${ov.device_count || devs.length}${ov.flagged_count ? ' · ' + ov.flagged_count + ' flagged' : ''})</h4>
+            <div style="font-size:11px;color:#64748b;margin-bottom:5px">${_esc(ov.verdict || '')}${ov.verdict ? ' · ' : ''}adv channels 37/38/39</div>
+            ${devs.map(v => `<div class="wifi-fs-devrow ${_wifiState.bleSelected === v.addr ? 'sel' : ''}" onclick="wifiBleSelect('${v.addr}')">
+                <span>${v.flagged ? '<span style="color:#f87171">⚠</span> ' : ''}${_esc(v.name || v.addr)} <span style="color:#64748b">${(v.channels || []).join('/')}</span></span>
+                <span style="color:${v.flagged ? '#f87171' : _wifiSignalColor(v.rssi)}">${v.rssi == null ? '—' : v.rssi}</span></div>`).join('')
+                || '<div class="wifi-fs-empty">No advertising heard.</div>'}</div>`;
+    }
     side.innerHTML = html;
 }
 
@@ -3063,9 +3897,10 @@ function _wifiApDetailHtml(a) {
     ${radHtml}`;
 }
 
-function wifiFsCopy(bssid) {
-    if (navigator.clipboard) navigator.clipboard.writeText(bssid).catch(() => {});
-    _wifiSetStatus('copied ' + bssid);
+async function wifiFsCopy(bssid) {
+    // copyToClipboard has the execCommand fallback needed on plain-HTTP.
+    const ok = await copyToClipboard(bssid, { silent: true });
+    _wifiSetStatus(ok ? 'copied ' + bssid : 'copy failed');
 }
 
 function wifiFsClearSelection() {
@@ -3093,9 +3928,19 @@ function wifiFsSurveyAp(bssid) {
 // ---- WiFi Defense → Analyzer pivot -----------------------------------------
 // WIDS detections link here: jump to the Spectrum Analyzer, select the
 // offending BSSID and keep it highlighted (red, ⚠ WIDS) until dismissed.
-function wifiPivotFromDefense(bssid, ssidEnc) {
-    _wifiState.flagged = { bssid: (bssid || '').toLowerCase(),
+// `flagged` true  → this BSSID is an actual WiFi Defense finding: red "🛡 Flagged
+//                   by WiFi Defense" banner + ⚠ WIDS highlight, kept until dismissed.
+// `flagged` false → the user just clicked an AP to inspect it: it's selected and
+//                   shown in blue ("📶 Access Point selected"), with no threat
+//                   styling, so a benign AP is never mistaken for a WIDS hit.
+// Defaults to true so any un-updated caller keeps the safe (flagged) behaviour.
+function wifiPivotFromDefense(bssid, ssidEnc, flagged) {
+    flagged = (flagged === undefined) ? true : !!flagged;
+    const target = { bssid: (bssid || '').toLowerCase(),
         ssid: ssidEnc ? decodeURIComponent(ssidEnc) : '', applied: false };
+    if (flagged) { _wifiState.flagged = target; _wifiState.pivotSelect = null; }
+    else { _wifiState.pivotSelect = target; _wifiState.flagged = null; }
+    const pick = _wifiState.flagged || _wifiState.pivotSelect;
     // Widen to all bands so the band filter can't hide the target.
     _wifiState.band = 'all';
     document.querySelectorAll('#wifi-band-group .wifi-band').forEach(b => {
@@ -3107,18 +3952,19 @@ function wifiPivotFromDefense(bssid, ssidEnc) {
     showNetworkSubtab('wifi');      // wifiInit() — auto-scans when there's no survey yet
     _wifiFlagBanner();
     if (_wifiState.data) {
-        if (_wifiState.data.aps.some(a => a.bssid === _wifiState.flagged.bssid)) {
-            _wifiState.flagged.applied = true;
-            wifiSelectAp(_wifiState.flagged.bssid);
+        if (_wifiState.data.aps.some(a => a.bssid === pick.bssid)) {
+            pick.applied = true;
+            wifiSelectAp(pick.bssid);
             _wifiFlagBanner();
         } else {
-            wifiScan();             // stale survey — the rogue may only just have appeared
+            wifiScan();             // stale survey — the target may only just have appeared
         }
     }
 }
 
 function wifiClearFlag() {
     _wifiState.flagged = null;
+    _wifiState.pivotSelect = null;
     _wifiFlagBanner();
     if (_wifiState.data) wifiRender();
 }
@@ -3126,17 +3972,29 @@ function wifiClearFlag() {
 function _wifiFlagBanner() {
     const el = document.getElementById('wifi-flag-banner'); if (!el) return;
     const f = _wifiState.flagged;
-    if (!f) { el.className = 'hidden'; el.innerHTML = ''; return; }
-    const found = !!(_wifiState.data && _wifiState.data.aps.some(a => a.bssid === f.bssid));
-    const state = !_wifiState.data ? 'surveying…'
-        : found ? 'highlighted in the spectrum below'
-            : 'not heard in the latest survey — it may be down, out of range, or beaconing intermittently';
-    el.className = 'flex flex-wrap items-center gap-2 mb-3 text-xs px-3 py-2 rounded-lg bg-red-950/50 border border-red-800 text-red-200';
-    el.innerHTML = '<span>🛡 Flagged by WiFi Defense:</span>'
-        + `<b>${_esc(f.ssid) || '<span class="italic">hidden SSID</span>'}</b>`
-        + `<span class="font-mono">${_esc(f.bssid)}</span>`
-        + `<span style="color:rgba(252,165,165,.8)">· ${state}</span>`
-        + '<button onclick="wifiClearFlag()" class="ml-auto px-2 py-0.5 rounded bg-red-900/60 hover:bg-red-800 text-red-100" title="Clear the WIDS highlight">✕ dismiss</button>';
+    const s = _wifiState.pivotSelect;
+    const t = f || s;
+    if (!t) { el.className = 'hidden'; el.innerHTML = ''; return; }
+    const found = !!(_wifiState.data && _wifiState.data.aps.some(a => a.bssid === t.bssid));
+    const state = _wifiState.scanError ? ('survey unavailable — ' + _esc(_wifiState.scanError))
+        : !_wifiState.data ? 'surveying…'
+            : found ? 'highlighted in the spectrum below'
+                : 'not heard in the latest survey — it may be down, out of range, or beaconing intermittently';
+    const name = `<b>${_esc(t.ssid) || '<span class="italic">hidden SSID</span>'}</b>`
+        + `<span class="font-mono">${_esc(t.bssid)}</span>`;
+    if (f) {
+        // Genuine WiFi Defense finding — red WIDS treatment.
+        el.className = 'flex flex-wrap items-center gap-2 mb-3 text-xs px-3 py-2 rounded-lg bg-red-950/50 border border-red-800 text-red-200';
+        el.innerHTML = '<span>🛡 Flagged by WiFi Defense:</span>' + name
+            + `<span style="color:rgba(252,165,165,.8)">· ${state}</span>`
+            + '<button onclick="wifiClearFlag()" class="ml-auto px-2 py-0.5 rounded bg-red-900/60 hover:bg-red-800 text-red-100" title="Clear the WIDS highlight">✕ dismiss</button>';
+    } else {
+        // Plain inspection — blue "selected", no threat implication.
+        el.className = 'flex flex-wrap items-center gap-2 mb-3 text-xs px-3 py-2 rounded-lg bg-blue-900/50 border border-blue-700 text-blue-200';
+        el.innerHTML = '<span>📶 Access Point selected:</span>' + name
+            + `<span style="color:rgba(147,197,253,.85)">· ${state}</span>`
+            + '<button onclick="wifiClearFlag()" class="ml-auto px-2 py-0.5 rounded bg-blue-900/50 border border-blue-700 text-blue-100" title="Clear the selection highlight">✕ dismiss</button>';
+    }
 }
 
 function wifiSelectAp(bssid) {
@@ -3273,7 +4131,7 @@ function _wifiDrawRadius(d) {
 // ---- WiFi coverage heatmap (walk-around survey) ----------------------------
 const _wifiHm = { floorplan: null, data: null, inited: false, metric: 'rssi',
     mode: 'survey', tool: 'wall', walls: [], columns: [], predictAps: [], predicting: true,
-    wallStart: null, mesh: false, drag: null, dragMoved: false, suppressClick: false,
+    wallStart: null, mesh: false, drag: null, dragMoved: false, suppressClick: false, fp: null,
     view: { zoom: 1, cx: 0.5, cy: 0.5 }, pan: null };
 
 // ---- Floor scale + zoomable viewport ---------------------------------------
@@ -3505,6 +4363,49 @@ function wifiHeatmapInit() {
                 wifiHeatmapLoad();
             }).catch(() => { st.textContent = 'sample failed'; });
     });
+    // --- Hover tooltip: identify the survey sample under the cursor -------
+    if (cv) {
+        let tip = document.getElementById('wifi-hm-tip');
+        if (!tip) {
+            tip = document.createElement('div');
+            tip.id = 'wifi-hm-tip';
+            tip.style.cssText = 'position:fixed;z-index:9999;pointer-events:none;display:none;'
+                + 'background:#0b1220;color:#e2e8f0;border:1px solid #334155;border-radius:6px;'
+                + 'padding:5px 8px;font:11px sans-serif;line-height:1.35;max-width:260px;'
+                + 'box-shadow:0 4px 14px rgba(0,0,0,.5)';
+            document.body.appendChild(tip);
+        }
+        const hideTip = () => { tip.style.display = 'none'; };
+        cv.addEventListener('mousemove', (e) => {
+            if (_wifiHm.pan || _wifiHm.drag) { hideTip(); return; }
+            const samples = (_wifiHm.data && _wifiHm.data.samples) || [];
+            if (!samples.length) { hideTip(); return; }
+            const rect = cv.getBoundingClientRect();
+            const px = e.clientX - rect.left, py = e.clientY - rect.top;
+            const vp = _wifiHmViewport(cv.clientWidth, cv.clientHeight || cv.clientWidth);
+            let best = null, bestD = 12 * 12;
+            for (const sp of samples) {
+                const dx = vp.toX(sp.x) - px, dy = vp.toY(sp.y) - py;
+                const d = dx * dx + dy * dy;
+                if (d < bestD) { bestD = d; best = sp; }
+            }
+            if (!best) { hideTip(); return; }
+            const ssid = best.ssid || best.serving || '<hidden>';
+            const bssid = best.bssid || best.serving || '\u2014';
+            const parts = [];
+            if (best.rssi != null) parts.push(best.rssi + ' dBm');
+            if (best.snr != null) parts.push('SNR ' + best.snr);
+            if (best.band) parts.push(best.band + 'GHz');
+            if (best.channel) parts.push('ch' + best.channel);
+            tip.innerHTML = '<b>' + _esc(ssid) + '</b><br>'
+                + '<span style="font-family:monospace;color:#93c5fd">' + _esc(bssid) + '</span>'
+                + (parts.length ? '<br><span style="color:#94a3b8">' + _esc(parts.join(' \u00b7 ')) + '</span>' : '');
+            tip.style.left = (e.clientX + 12) + 'px';
+            tip.style.top = (e.clientY + 12) + 'px';
+            tip.style.display = 'block';
+        });
+        cv.addEventListener('mouseleave', hideTip);
+    }
     // --- Zoom (wheel) + pan (drag) + drag existing AP nodes / walls ---
     if (cv) {
         const norm = (e) => {
@@ -3577,6 +4478,7 @@ function wifiHeatmapInit() {
             if (_wifiHm.dragMoved) {
                 if (_wifiHm.drag.kind === 'ap') _wifiHmPersistAp();
                 else if (_wifiHm.drag.kind === 'column' || _wifiHm.drag.kind === 'column-resize') _wifiHmPersistColumns();
+                else if (_wifiHm.drag.kind === 'fp-move' || _wifiHm.drag.kind === 'fp-resize') _wifiHmPersistFp();
                 else _wifiHmPersistWalls();
             }
             _wifiHm.suppressClick = true;   // swallow the click that follows this press
@@ -3627,10 +4529,12 @@ function wifiHmSetTool(t) {
     sel('wifi-hm-tool-wall', t === 'wall');
     sel('wifi-hm-tool-ap', t === 'ap');
     sel('wifi-hm-tool-column', t === 'column');
+    sel('wifi-hm-tool-floorplan', t === 'floorplan');
     const st = document.getElementById('wifi-hm-design-status');
     const msg = { wall: 'Click two points to draw a wall — or drag an existing wall to move it.',
         ap: 'Click the plan to drop an AP node (add several for a mesh) — or drag a node to move it.',
-        column: 'Click to drop a structural column (pillar) — drag it to move, or drag its white edge handle to resize. Columns shadow WiFi behind them.' };
+        column: 'Click to drop a structural column (pillar) — drag it to move, or drag its white edge handle to resize. Columns shadow WiFi behind them.',
+        floorplan: 'Drag the image to move it; drag its blue corner handle to resize. Line the plan up with the metre grid, then switch back to a placement tool. Use Fit to reset.' };
     if (st) st.textContent = msg[t] || '';
 }
 
@@ -3656,6 +4560,13 @@ function _wifiHmColumnPxRadius(c, vp) {
 // or null. Distances in CSS px.
 function _wifiHmHitTest(p) {
     const { px, py, wx, wy, vp } = p, R = 12;
+    if (_wifiHm.tool === 'floorplan' && _wifiHm.floorplan && _wifiHm.fp) {
+        const f = _wifiHm.fp;
+        const hx = vp.toX(f.x + f.w), hy = vp.toY(f.y + f.h);
+        if (Math.hypot(hx - px, hy - py) <= 12) return { kind: 'fp-resize' };
+        if (wx >= f.x && wx <= f.x + f.w && wy >= f.y && wy <= f.y + f.h)
+            return { kind: 'fp-move', ox: f.x - wx, oy: f.y - wy };
+    }
     for (let i = _wifiHm.predictAps.length - 1; i >= 0; i--) {
         const ap = _wifiHm.predictAps[i];
         if (Math.hypot(vp.toX(ap.x) - px, vp.toY(ap.y) - py) <= R)
@@ -3692,12 +4603,29 @@ function _wifiHmHitTest(p) {
 }
 
 const _clamp01 = v => Math.max(0, Math.min(1, v));
+function _wifiHmPersistFp() {
+    fetch('/api/net/wifi/heatmap', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'floorplan_transform', transform: _wifiHm.fp }) }).catch(() => {});
+}
+function wifiHmFitFloorplan() {
+    const im = _wifiHm.floorplan; if (!im) return;
+    const s = Math.min(1 / im.width, 1 / im.height);
+    _wifiHm.fp = { x: (1 - im.width * s) / 2, y: (1 - im.height * s) / 2, w: im.width * s, h: im.height * s };
+    _wifiHmPersistFp(); wifiHeatmapRender();
+}
 
 function _wifiHmApplyDrag(nx, ny) {
     const d = _wifiHm.drag; if (!d) return;
     if (d.kind === 'ap') {
         const ap = _wifiHm.predictAps[d.idx]; if (!ap) return;
         ap.x = _clamp01(nx + d.ox); ap.y = _clamp01(ny + d.oy);
+    } else if (d.kind === 'fp-move') {
+        const f = _wifiHm.fp; if (!f) return;
+        f.x = nx + d.ox; f.y = ny + d.oy;
+    } else if (d.kind === 'fp-resize') {
+        const f = _wifiHm.fp, im = _wifiHm.floorplan; if (!f || !im) return;
+        const w = Math.max(0.05, nx - f.x);
+        f.w = w; f.h = w * (im.height / im.width);
     } else if (d.kind === 'column') {
         const c = _wifiHm.columns[d.idx]; if (!c) return;
         c.x = _clamp01(nx + d.ox); c.y = _clamp01(ny + d.oy);
@@ -3957,13 +4885,59 @@ function wifiHeatmapLoad() {
         const st = document.getElementById('wifi-hm-status');
         if (st && d.samples) st.textContent = d.samples.length + ' sample(s)';
         if (d.floorplan) {
+            _wifiHm.fp = d.floorplan_transform || null;
             const img = new Image();
             img.onload = () => { _wifiHm.floorplan = img; wifiHeatmapRender(); };
+            img.onerror = () => {
+                _wifiHm.floorplan = null; wifiHeatmapRender();
+                const st = document.getElementById('wifi-hm-status');
+                if (st) st.textContent = '\u26a0 Could not display that floorplan \u2014 use PNG or JPG (TIFF/HEIC/PDF are not supported by browsers).';
+            };
             img.src = d.floorplan;
         } else { _wifiHm.floorplan = null; wifiHeatmapRender(); }
     }).catch(() => {});
 }
 
+// ── RoomScan touchscreen device (Waveshare ESP32-S3 4B over USB serial) ──
+function _roomscanStatusEl() { return document.getElementById('roomscan-status'); }
+function _roomscanPost(body) {
+    return fetch('/api/net/wifi/heatmap', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    }).then(r => r.json());
+}
+function roomscanStatus() {
+    const el = _roomscanStatusEl(); if (el) el.textContent = 'Checking\u2026';
+    _roomscanPost({ action: 'roomscan_status' }).then(r => {
+        if (el) el.textContent = (r && r.ok)
+            ? ('Connected ' + (r.port || ''))
+            : ('Not found' + (r && r.error ? ' \u2014 ' + r.error : ''));
+    }).catch(() => { if (el) el.textContent = 'Error'; });
+}
+function roomscanPushAps() {
+    const el = _roomscanStatusEl();
+    const aps = (_wifiState.data && _wifiState.data.aps) || [];
+    const slim = aps.map(a => ({ ssid: a.ssid, bssid: a.bssid, signal: a.signal, band: a.band, channel: a.channel }));
+    if (el) el.textContent = 'Pushing ' + slim.length + ' APs\u2026';
+    const body = { action: 'roomscan_push_aps' };
+    if (slim.length) body.aps = slim;
+    else { const s = document.getElementById('wifi-iface'); body.interface = _wifiState.iface || (s ? s.value : ''); }
+    _roomscanPost(body).then(r => {
+        if (el) el.textContent = (r && r.ok)
+            ? ('Pushed ' + (r.pushed || 0) + ' APs to device')
+            : ('Push failed' + (r && r.error ? ' \u2014 ' + r.error : ''));
+    }).catch(() => { if (el) el.textContent = 'Push error'; });
+}
+function roomscanImport() {
+    const el = _roomscanStatusEl(); if (el) el.textContent = 'Importing from device\u2026';
+    _roomscanPost({ action: 'roomscan_import' }).then(r => {
+        if (!r || !r.ok) { if (el) el.textContent = 'Import failed' + (r && r.error ? ' \u2014 ' + r.error : ''); return; }
+        if (el) el.textContent = 'Imported ' + (r.rooms || 0) + ' room(s), ' + (r.aps || 0) + ' AP(s)';
+        try { wifiHmSetMode('design'); } catch (e) {}
+        if (typeof wifiHeatmapLoad === 'function') wifiHeatmapLoad();
+        else if (typeof wifiHeatmapRender === 'function') wifiHeatmapRender();
+    }).catch(() => { if (el) el.textContent = 'Import error'; });
+}
 function wifiHeatmapRender() {
     const cv = document.getElementById('wifi-heatmap'); if (!cv) return;
     const dpr = window.devicePixelRatio || 1;
@@ -3986,11 +4960,14 @@ function wifiHeatmapRender() {
     // Floorplan (contain, centred on the square floor)
     if (_wifiHm.floorplan) {
         const im = _wifiHm.floorplan;
-        const s = Math.min(1 / im.width, 1 / im.height);   // world units per image px
-        const iw = im.width * s, ih = im.height * s;
-        const pxPerWorld = vp.pw / vp.span;
+        if (!_wifiHm.fp) {
+            const s = Math.min(1 / im.width, 1 / im.height);
+            _wifiHm.fp = { x: (1 - im.width * s) / 2, y: (1 - im.height * s) / 2,
+                           w: im.width * s, h: im.height * s };
+        }
+        const f = _wifiHm.fp, pxPerWorld = vp.pw / vp.span;
         ctx.globalAlpha = 0.85;
-        ctx.drawImage(im, vp.toX((1 - iw) / 2), vp.toY((1 - ih) / 2), iw * pxPerWorld, ih * pxPerWorld);
+        ctx.drawImage(im, vp.toX(f.x), vp.toY(f.y), f.w * pxPerWorld, f.h * pxPerWorld);
         ctx.globalAlpha = 1;
     }
     const design = _wifiHm.mode === 'design';
@@ -4111,6 +5088,18 @@ function _wifiHmDrawRulers(ctx, vp, floorM) {
 }
 
 function _wifiHmDrawDesign(ctx, vp) {
+    // Floorplan move/resize handles (only while the Image tool is active)
+    if (_wifiHm.tool === 'floorplan' && _wifiHm.floorplan && _wifiHm.fp) {
+        const f = _wifiHm.fp, ppw = vp.pw / vp.span;
+        ctx.save();
+        ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+        ctx.strokeRect(vp.toX(f.x), vp.toY(f.y), f.w * ppw, f.h * ppw);
+        ctx.setLineDash([]);
+        ctx.beginPath(); ctx.arc(vp.toX(f.x + f.w), vp.toY(f.y + f.h), 6, 0, 2 * Math.PI);
+        ctx.fillStyle = '#38bdf8'; ctx.fill();
+        ctx.strokeStyle = '#0b1220'; ctx.stroke();
+        ctx.restore();
+    }
     // Walls
     ctx.lineCap = 'round';
     _wifiHm.walls.forEach(w => {
@@ -4160,8 +5149,16 @@ function _wifiHmDrawDesign(ctx, vp) {
         ctx.beginPath(); ctx.arc(x, y, 8, 0, 2 * Math.PI);
         ctx.fillStyle = '#22d3ee'; ctx.fill();
         ctx.strokeStyle = '#0b1220'; ctx.lineWidth = 2; ctx.stroke();
-        ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText('AP' + (i + 1), x, y - 12);
+        ctx.textAlign = 'center';
+        // Real name when known (imported/scanned AP), else AP1, AP2, …
+        const nm = ap.ssid || ap.bssid || ('AP' + (i + 1));
+        ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 10px sans-serif';
+        ctx.fillText(nm.length > 18 ? nm.slice(0, 17) + '\u2026' : nm, x, y - 12);
+        if (ap.bssid || ap.rssi != null) {
+            ctx.fillStyle = '#94a3b8'; ctx.font = '8px sans-serif';
+            const sub = (ap.bssid || '') + (ap.rssi != null ? '  ' + ap.rssi + 'dBm' : '');
+            ctx.fillText(sub, x, y - 23);
+        }
     });
 }
 
@@ -4226,13 +5223,33 @@ function wifiSurveyDelete() {
 // WiFi Defense — 802.11 frame monitor / WIDS (top-level tab)
 // Backend: /api/wifidef/* (wifi_defense.py)
 // ============================================================================
-const _wifidef = { iface: '', monitor: null, data: null, continuous: false, timer: null, abort: null };
+const _wifidef = { iface: '', monitor: null, data: null, continuous: false, timer: null, abort: null, btCache: { devices: null, ts: 0 } };
 
 const _WIFIDEF_THREAT = {
     clear: ['CLEAR', 'bg-green-600/20 text-green-300 border border-green-600/50'],
+    info: ['INFO', 'bg-sky-600/20 text-sky-300 border border-sky-600/50'],
     warning: ['WARNING', 'bg-amber-600/20 text-amber-300 border border-amber-600/50'],
     critical: ['⚠ UNDER ATTACK', 'bg-red-600/25 text-red-300 border border-red-600/60'],
 };
+
+// The WiFi Defense scan-option checkboxes are per-viewer UI preferences, so
+// remember them in localStorage — a browser refresh must not silently reset the
+// user's choices. (The 24/7 watch is server state and restores from its own
+// status endpoint, not from here.)
+const _WIFIDEF_OPTS_KEY = 'ragnar.wifidef.opts';
+function _wifidefLoadOpts() {
+    try { return JSON.parse(localStorage.getItem(_WIFIDEF_OPTS_KEY)) || {}; }
+    catch (e) { return {}; }
+}
+function _wifidefSaveOpts() {
+    try {
+        localStorage.setItem(_WIFIDEF_OPTS_KEY, JSON.stringify({
+            auto: !!(document.getElementById('wifidef-auto') || {}).checked,
+            deep: !!(document.getElementById('wifidef-deep') || {}).checked,
+            subghz: !!(document.getElementById('wifidef-hh-subghz') || {}).checked,
+        }));
+    } catch (e) { /* private mode / storage disabled — best effort */ }
+}
 
 function initWifiDefense() {
     _wifidefFillIfaces();
@@ -4241,6 +5258,14 @@ function initWifiDefense() {
         const el = document.getElementById('wifidef-flood-ssids');
         if (el && t && t.beacon_ssids) el.value = t.beacon_ssids;
     }).catch(() => {});
+    // Restore the remembered scan options and keep them saved on change.
+    const opts = _wifidefLoadOpts();
+    [['wifidef-deep', 'deep'], ['wifidef-hh-subghz', 'subghz']].forEach(([id, key]) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.checked = !!opts[key];
+        if (!el._persist) { el._persist = true; el.addEventListener('change', _wifidefSaveOpts); }
+    });
     const auto = document.getElementById('wifidef-auto');
     if (auto && !auto._wired) {
         auto._wired = true;
@@ -4248,6 +5273,13 @@ function initWifiDefense() {
             if (e.target.checked) _wifidefStartContinuous();
             else wifidefStopContinuous();
         });
+    }
+    // Resume continuous scanning if it was left running before the refresh
+    // (wifidefScan() no-ops until the adapter list resolves, then the loop
+    // picks up on its own).
+    if (auto && opts.auto && !_wifidef.continuous) {
+        auto.checked = true;
+        _wifidefStartContinuous();
     }
     _wifidefUpdateRunUI();
 }
@@ -4258,6 +5290,8 @@ function initWifiDefense() {
 function _wifidefStartContinuous() {
     if (_wifidef.continuous) return;
     _wifidef.continuous = true;
+    const cb = document.getElementById('wifidef-auto'); if (cb) cb.checked = true;
+    _wifidefSaveOpts();
     _wifidefUpdateRunUI();
     _wifidefLoop();
 }
@@ -4272,7 +5306,51 @@ function _wifidefLoop() {
 // Printable WIDS incident report from the latest capture.
 function wifidefExportReport() {
     _openScanReport('/api/wifidef/report', _wifidef.data,
-        'Run a WiFi Defense scan first, then export the report.');
+        'Run a WiFi Defense scan first, then export the report.',
+        { ai: _wifidef.ai || null });
+}
+
+// One professional AI read across all three WiFi Defense modules (WIDS +
+// airtime + client isolation) for whatever the panel currently holds. Stashes
+// the result so the report can embed it.
+async function wifidefAnalyzeAI() {
+    const panel = document.getElementById('wifidef-ai-panel');
+    const content = document.getElementById('wifidef-ai-content');
+    const status = document.getElementById('wifidef-ai-status');
+    const btn = document.getElementById('wifidef-ai-btn');
+    if (panel) panel.classList.remove('hidden');
+    if (!_wifidef.data || !('threat' in _wifidef.data)) {
+        if (content) content.innerHTML = '<span class="text-amber-400">Run a WiFi Defense scan first, then Analyze with AI.</span>';
+        return;
+    }
+    if (btn) btn.disabled = true;
+    if (status) status.textContent = '';
+    if (content) content.innerHTML = '<span class="text-gray-400">Correlating WIDS, airtime and client-isolation evidence…</span>';
+    try {
+        const resp = await fetch('/api/ai/wifidef-analyze', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                wids: _wifidef.data || null,
+                airtime: _wifidef.airtime || null,
+                isolation: _wifidef.isolation || null
+            })
+        });
+        const d = await resp.json();
+        if (d.enabled === false) {
+            content.innerHTML = '<span class="text-amber-400">' + _esc(d.message || 'AI is not enabled.') + '</span>';
+            return;
+        }
+        if (d.error) { content.innerHTML = '<span class="text-red-400">⚠ ' + _esc(d.error) + '</span>'; return; }
+        if (!d.analysis) { content.innerHTML = '<span class="text-amber-400">' + _esc(d.message || 'No analysis returned.') + '</span>'; return; }
+        content.innerHTML = formatAIText(d.analysis);
+        _wifidef.ai = { text: d.analysis, modules: d.modules || [], ts: Date.now() };
+        const mods = (d.modules || []).map(m => m === 'isolation' ? 'client-isolation' : m).join(' + ');
+        if (status) status.textContent = mods ? 'covers ' + mods : '';
+    } catch (e) {
+        content.innerHTML = '<span class="text-red-400">AI analysis failed.</span>';
+    } finally {
+        if (btn) btn.disabled = false;
+    }
 }
 
 function wifidefStopContinuous() {
@@ -4280,6 +5358,7 @@ function wifidefStopContinuous() {
     if (_wifidef.timer) { clearTimeout(_wifidef.timer); _wifidef.timer = null; }
     if (_wifidef.abort) { try { _wifidef.abort.abort(); } catch (e) {} _wifidef.abort = null; }
     const cb = document.getElementById('wifidef-auto'); if (cb) cb.checked = false;
+    _wifidefSaveOpts();
     _wifidefUpdateRunUI();
     const st = document.getElementById('wifidef-status');
     if (st) st.textContent = 'Continuous scan stopped';
@@ -4295,7 +5374,7 @@ function _wifidefUpdateRunUI() {
 // Must match wifi_defense.py `_BUILD`. If the running service reports something
 // else, the webapp is executing an OLD wifi_defense module (service not restarted
 // after a git pull) — the #1 cause of "the fix didn't work in the web UI".
-const WIFIDEF_BUILD = '20260730-panel-iface2';
+const WIFIDEF_BUILD = '20260902-halehound-toolnames';
 
 function _wifidefFillIfaces() {
     fetch('/api/wifidef/interfaces').then(r => r.json()).then(d => {
@@ -4328,6 +5407,17 @@ function _wifidefFillIfaces() {
         _wifidefFillPanelIface('wifidef-at-iface', ifs);
         _wifidefFillPanelIface('wifidef-iso-iface', ifs);
         _wifidefUpdateMonBtn();
+        // Show the PineAP card on tab open so the Active-probe button is always
+        // reachable; the passive verdict fills in after a WiFi Defense scan.
+        const paBox = document.getElementById('wifidef-pa-inline');
+        const paBody = document.getElementById('wifidef-pa-body');
+        if (paBox) paBox.classList.remove('hidden');
+        if (paBody && !paBody.innerHTML.trim()) {
+            paBody.innerHTML = '<div class="text-[12px] text-gray-400">Run a WiFi Defense scan for the passive verdict, or click <b>Active probe</b> for the definitive test.</div>';
+        }
+        // Reflect the headless 24/7 watch's current state (it may already be
+        // running from a previous session — the daemon persists "if enabled").
+        wifidefHaleHoundWatchStatus();
     }).catch(() => {});
 }
 
@@ -4446,7 +5536,13 @@ function wifidefScan() {
     const prog = _wifidefProgress(st, parseInt(secs) || 15,
         (_wifidef.continuous ? 'Continuous — capturing' : 'Capturing') + (chParam !== 'auto' ? ' ch ' + chParam : ''));
     if (btn) btn.disabled = true;
-    return fetch(`/api/wifidef/scan?interface=${encodeURIComponent(iface)}&seconds=${secs}&channel=${chParam}`,
+    // Deep scan (opt-in): also capture EAPOL frames + fold in wifiwatch's
+    // client/handshake-layer detectors (PMKID, handshake-after-deauth, PNL leak).
+    // Off by default — it's heavier, so a normal scan stays light and the AP
+    // survey is never starved.
+    const deepEl = document.getElementById('wifidef-deep');
+    const deep = deepEl && deepEl.checked ? 1 : 0;
+    return fetch(`/api/wifidef/scan?interface=${encodeURIComponent(iface)}&seconds=${secs}&channel=${chParam}&deep=${deep}`,
         { signal: ctrl.signal })
         .then(r => r.json()).then(d => {
             prog.done();
@@ -4454,9 +5550,18 @@ function wifidefScan() {
             _wifidef.monitor = d.monitor || _wifidef.monitor;
             _wifidefUpdateMonBtn();
             _wifidef.data = d;
+            // A fresh WIDS capture invalidates an earlier AI read so it isn't
+            // embedded into a report describing a different capture window.
+            _wifidef.ai = null;
             st.textContent = `${d.frames} frames · ${new Date(d.timestamp * 1000).toLocaleTimeString()}`
                 + (_wifidef.continuous ? ' · live' : '');
             wifidefRender();
+            // Fold the ESP32 attack-tool correlation into the same scan. SubGHz
+            // only on manual scans (it grabs the shared SDR for ~20s), never in
+            // the continuous loop.
+            const wantSub = !_wifidef.continuous
+                && !!(document.getElementById('wifidef-hh-subghz') || {}).checked;
+            _wifidefFusion({ subghz: wantSub });
         }).catch((e) => {
             prog.done();
             if (e && e.name === 'AbortError') { st.textContent = 'Stopped.'; return; }
@@ -4532,6 +5637,7 @@ function wifidefAirtime() {
             if (btn) btn.disabled = false;
             if (d.error) { st.textContent = '⚠ ' + d.error; return; }
             st.textContent = `${d.frames} frames${d.hopping ? ' · hopping (airtime % approx)' : ''}`;
+            _wifidef.airtime = d;  // stash for the unified AI read + report
             wifidefRenderAirtime(d);
         }).catch(() => { prog.done(); if (btn) btn.disabled = false; st.textContent = 'Airtime scan failed'; });
 }
@@ -4577,7 +5683,7 @@ function wifidefRenderAirtime(d) {
             ? ` <span class="text-[10px] ${a.group_cipher === 'TKIP' ? 'text-rose-400' : 'text-gray-500'}">${a.group_cipher}</span>` : '';
         const htMix = a.ht_protection === 3
             ? ' <span class="text-[9px] px-1 rounded bg-fuchsia-600/20 text-fuchsia-300 border border-fuchsia-700/50" title="HT Protection = Non-HT Mixed: a pre-11n station is associated">MIXED</span>' : '';
-        return `<tr class="border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40" title="Open in Spectrum Analyzer" onclick="wifiPivotFromDefense('${a.bssid}','${encodeURIComponent(a.ssid || '').replace(/'/g, '%27')}')">
+        return `<tr class="border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40" title="Open in Signal Intelligence" onclick="wifiPivotFromDefense('${a.bssid}','${encodeURIComponent(a.ssid || '').replace(/'/g, '%27')}', false)">
             <td class="py-1 pr-2" data-label="SSID">${a.ssid ? _esc(a.ssid) : '<span class="text-gray-600">—</span>'}${a.erp_protection ? ' <span class="text-[9px] px-1 rounded bg-fuchsia-600/20 text-fuchsia-300 border border-fuchsia-700/50" title="ERP protection ON — a legacy 802.11b client is taxing this BSS">ERP</span>' : ''}${wpsBadge}</td>
             <td class="py-1 pr-2 font-mono text-[11px]" data-label="BSSID">${a.bssid}</td>
             <td class="py-1 pr-2 text-xs ${secCol}" data-label="Security">${a.security || '—'}${cipher}</td>
@@ -4690,6 +5796,7 @@ function wifidefIsolation() {
             if (d.error) { st.textContent = '⚠ ' + d.error; return; }
             st.textContent = `${d.frames} data frames · ${(d.bss || []).length} BSS`
                 + (d.hopping ? ' · hopping (dwell on one channel for solid verdicts)' : '');
+            _wifidef.isolation = d;  // stash for the unified AI read + report
             wifidefRenderIsolation(d);
         }).catch(() => { prog.done(); if (btn) btn.disabled = false; st.textContent = 'Observation failed'; });
 }
@@ -4708,7 +5815,7 @@ function wifidefRenderIsolation(d) {
     const bss = d.bss || [];
     if (!bss.length) {
         tb.innerHTML = '<tr><td colspan="7" class="py-4 text-center text-gray-500">No data frames captured — wrong channel, or the air is idle.</td></tr>';
-    } else tb.innerHTML = bss.map(b => `<tr class="border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40" title="Open in Spectrum Analyzer" onclick="wifiPivotFromDefense('${b.bssid}','${encodeURIComponent(b.ssid || '').replace(/'/g, '%27')}')">
+    } else tb.innerHTML = bss.map(b => `<tr class="border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40" title="Open in Signal Intelligence" onclick="wifiPivotFromDefense('${b.bssid}','${encodeURIComponent(b.ssid || '').replace(/'/g, '%27')}', false)">
             <td class="py-1 pr-2">${b.ssid ? _esc(b.ssid) : '<span class="text-gray-600">—</span>'}</td>
             <td class="py-1 pr-2 font-mono text-[11px]">${b.bssid}</td>
             <td class="py-1 pr-2">${b.clients}</td>
@@ -4730,8 +5837,8 @@ function wifidefRenderIsolation(d) {
 function _wifidefMacLink(mac, ssid) {
     if (!mac) return '';
     const s = encodeURIComponent(ssid || '').replace(/'/g, '%27');
-    return `<a href="javascript:void(0)" onclick="event.stopPropagation();wifiPivotFromDefense('${mac}','${s}')"`
-        + ` class="underline decoration-dotted hover:text-white" title="Open in Spectrum Analyzer">${mac}</a>`;
+    return `<a href="javascript:void(0)" onclick="event.stopPropagation();wifiPivotFromDefense('${mac}','${s}', true)"`
+        + ` class="underline decoration-dotted hover:text-white" title="Open in Signal Intelligence">${mac}</a>`;
 }
 
 function wifidefRender() {
@@ -4745,8 +5852,10 @@ function wifidefRender() {
         det.innerHTML = '<div class="glass rounded-xl p-4 text-sm text-green-300 md:col-span-2">✓ No wireless attacks detected in this capture.</div>';
     } else {
         det.innerHTML = d.detections.map(x => {
-            const crit = ['flood', 'evil_twin', 'karma'].includes(x.severity);
-            const border = crit ? 'border-l-4 border-red-500' : 'border-l-4 border-amber-500';
+            const crit = ['flood', 'evil_twin', 'karma', 'spoofed_bssid', 'attack_tool_ssid', 'wpa3_strip', 'pmkid', 'handshake'].includes(x.severity);
+            const info = ['band_steering', 'wpa3_transition', 'wpa3_mixed', 'duplicate_ssid', 'rogue_lure'].includes(x.severity);
+            const border = crit ? 'border-l-4 border-red-500'
+                : info ? 'border-l-4 border-emerald-500' : 'border-l-4 border-amber-500';
             let title = '', body = '';
             if (x.type === 'deauth') {
                 title = x.severity === 'flood' ? '💥 Deauth/Disassoc FLOOD' : 'Deauth/Disassoc frames seen';
@@ -4761,15 +5870,51 @@ function wifidefRender() {
                 title = '🎣 KARMA / MANA rogue AP';
                 body = `<div class="font-mono text-[11px] text-gray-400">${_wifidefMacLink(x.bssid)}</div><div>answered ${x.ssid_count} SSIDs: ${(x.ssids || []).join(', ')}</div>`;
             } else if (x.type === 'rogue_ap') {
-                title = x.severity === 'evil_twin' ? '👿 Evil twin (untrusted BSSID)' : '⚠ Duplicate SSID';
-                body = `<div>SSID <b>${x.ssid}</b></div><div class="font-mono text-[11px] text-gray-400">${(x.rogue_bssids || x.bssids || []).map(b => _wifidefMacLink(b, x.ssid)).join(', ')}</div>`;
+                title = x.severity === 'attack_tool_ssid' ? '☠️ Attack-tool SSID (EvilPortal/Marauder/Ghost ESP class)'
+                    : x.severity === 'esp32_open_ap' ? '🛰️ ESP32 open soft-AP (Espressif radio — name-independent)'
+                    : x.severity === 'evil_twin' ? '👿 Evil twin (untrusted BSSID)'
+                    : x.severity === 'spoofed_bssid' ? '🚫 Spoofed BSSID (multicast/group bit set)'
+                    : x.severity === 'rogue_lure' ? '🎣 Open Wi-Fi lure — possible evil-twin portal'
+                    : x.severity === 'band_steering' ? '📶 Band-steering / mesh (benign)'
+                    : '⚠ Duplicate SSID';
+                const bssids = (x.rogue_bssids || x.bssids || (x.bssid ? [x.bssid] : []));
+                body = `<div>SSID <b>${x.ssid || '<span class=\'text-gray-500 italic\'>hidden</span>'}</b></div><div class="font-mono text-[11px] text-gray-400">${bssids.map(b => _wifidefMacLink(b, x.ssid)).join(', ')}</div>`;
+                // A lure / spoofed AP is the shape of a captive-portal evil twin —
+                // offer a one-click active probe (needs an adapter joined to it).
+                if (x.severity === 'rogue_lure' || x.severity === 'spoofed_bssid' || x.severity === 'attack_tool_ssid' || x.severity === 'esp32_open_ap') {
+                    body += `<button onclick="event.stopPropagation(); wifidefProbePortal('${_esc(x.ssid || '')}')" class="mt-2 bg-fuchsia-600 hover:bg-fuchsia-700 text-white px-2 py-1 rounded text-[11px] font-semibold">Probe captive portal…</button>`;
+                }
+            } else if (x.type === 'auth_flood') {
+                title = x.severity === 'flood' ? '🌊 Auth flood (client-table exhaustion)' : '⚠ Auth frames seen';
+                const laTag = (x.la_ratio != null) ? ` · <span class="${x.la_ratio >= 0.5 ? 'text-red-300' : 'text-gray-500'}">${Math.round(x.la_ratio * 100)}% randomized MACs</span>` : '';
+                body = `<div>${x.count} auth frames from ${x.sources} MACs${laTag}.</div><div class="font-mono text-[11px] text-gray-400">target ${_wifidefMacLink(x.bssid)}</div>`;
+            } else if (x.type === 'wpa3_downgrade') {
+                title = x.severity === 'wpa3_strip' ? '🔓 WPA3-strip downgrade (evil twin)'
+                    : x.severity === 'wpa3_transition' ? '🔁 WPA3 transition mode (downgradeable)'
+                    : '📶 WPA3/WPA2 mixed-mode (same vendor — benign)';
+                body = `<div>SSID <b>${_esc(x.ssid || '')}</b></div>`;
+                const sae = x.sae_bssids || [];
+                const psk = x.rogue_bssids || (x.bssid ? [x.bssid] : []);
+                if (sae.length) body += `<div class="text-[11px] text-emerald-300">WPA3-SAE: <span class="font-mono">${sae.map(b => _wifidefMacLink(b, x.ssid)).join(', ')}</span></div>`;
+                if (psk.length) body += `<div class="text-[11px] ${x.severity === 'wpa3_strip' ? 'text-red-300' : 'text-gray-400'}">PSK-only: <span class="font-mono">${psk.map(b => _wifidefMacLink(b, x.ssid)).join(', ')}</span></div>`;
+            } else if (x.type === 'pmkid_harvest') {
+                title = '🔑 PMKID harvest (offline-crackable)';
+                body = `<div>AP <span class="font-mono">${_wifidefMacLink(x.bssid)}</span> exposed a PMKID in an EAPOL M1${x.station ? ` to <span class="font-mono">${_wifidefMacLink(x.station)}</span>` : ''}.</div>`;
+            } else if (x.type === 'handshake_harvest') {
+                title = '🤝 Handshake capture (deauth-and-capture)';
+                body = `<div>Client <span class="font-mono">${_wifidefMacLink(x.station)}</span> was deauthed then completed a 4-way handshake${x.bssid ? ` with <span class="font-mono">${_wifidefMacLink(x.bssid)}</span>` : ''} — forced-reconnect capture.</div>`;
+            } else if (x.type === 'pnl_leak') {
+                title = '📢 PNL leak (saved-network list)';
+                const ss = (x.ssids || []);
+                body = `<div>Client <span class="font-mono">${_wifidefMacLink(x.station)}</span> is broadcasting its saved networks — evil-twin/KARMA bait.</div>`
+                    + (ss.length ? `<div class="text-[11px] text-gray-400">${ss.slice(0, 8).map(_esc).join(', ')}${ss.length > 8 ? '…' : ''}</div>` : '');
             }
-            return `<div class="glass rounded-xl p-4 ${border}"><div class="font-semibold text-sm mb-1">${title}</div><div class="text-sm text-gray-300">${body}</div><div class="text-[11px] text-gray-500 mt-1">${x.detail || ''}${body.indexOf('wifiPivotFromDefense') >= 0 ? ' <span class="text-gray-600">· click a MAC to inspect it in the Spectrum Analyzer</span>' : ''}</div></div>`;
+            return `<div class="glass rounded-xl p-4 ${border}"><div class="font-semibold text-sm mb-1">${title}</div><div class="text-sm text-gray-300">${body}</div><div class="text-[11px] text-gray-500 mt-1">${x.detail || ''}${body.indexOf('wifiPivotFromDefense') >= 0 ? ' <span class="text-gray-600">· click a MAC to inspect it in Signal Intelligence</span>' : ''}</div></div>`;
         }).join('');
     }
     // Counts
     const c = d.counts || {};
-    let chips = [['frames', d.frames], ['deauth', c.deauth], ['beacons', c.beacon], ['probe-req', c.probe_req], ['probe-resp', c.probe_resp]]
+    let chips = [['frames', d.frames], ['deauth', c.deauth], ['auth', c.auth], ['beacons', c.beacon], ['probe-req', c.probe_req], ['probe-resp', c.probe_resp]]
         .map(([k, v]) => `<span class="px-3 py-1 rounded bg-slate-800 border border-slate-700"><b>${v || 0}</b> <span class="text-gray-400">${k}</span></span>`).join('');
     // Airspace density vs the flood threshold — lets the user calibrate.
     const a = d.airspace;
@@ -4784,7 +5929,7 @@ function wifidefRender() {
     const body = document.getElementById('wifidef-ap-tbody');
     const trusted = null;
     if (!d.aps || !d.aps.length) body.innerHTML = '<tr><td colspan="5" class="py-4 text-center text-gray-500">No beacons captured (wrong channel? try “hop”).</td></tr>';
-    else body.innerHTML = d.aps.map(a => `<tr class="border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40" title="Open in Spectrum Analyzer" onclick="wifiPivotFromDefense('${a.bssid}','${encodeURIComponent(a.ssid || '').replace(/'/g, '%27')}')">
+    else body.innerHTML = d.aps.map(a => `<tr class="border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40" title="Open in Signal Intelligence" onclick="wifiPivotFromDefense('${a.bssid}','${encodeURIComponent(a.ssid || '').replace(/'/g, '%27')}', false)">
         <td class="py-1 pr-2">${a.ssid || '<span class=\'text-gray-500 italic\'>hidden</span>'}</td>
         <td class="py-1 pr-2 font-mono text-[11px]">${a.bssid}</td>
         <td class="py-1 pr-2">${a.channel == null ? '—' : a.channel}</td>
@@ -4792,8 +5937,277 @@ function wifidefRender() {
         <td class="py-1 pr-2">${a.beacons}</td></tr>`).join('');
 }
 
+// ESP32 attack-tool correlation, folded inline into the WIDS scan: the fused
+// verdict is computed from the SAME capture the WIDS just rendered (no second
+// Wi-Fi scan) plus a cached BLE overlay + LAN inventory (+ opt-in SubGHz), and
+// shown above the detections. Backend: POST /api/wifidef/halehound.
+const _WIFIDEF_HH = {
+    confirmed: ['CONFIRMED', 'bg-red-600 text-white'],
+    likely: ['LIKELY', 'bg-red-500 text-white'],
+    possible: ['POSSIBLE', 'bg-amber-500 text-slate-900'],
+    trace: ['trace', 'bg-slate-600 text-slate-200'],
+    none: ['clear', 'bg-emerald-600 text-white'],
+};
+// Fold the ESP32 fusion into the main WIDS scan: reuse the just-captured WIDS
+// data (no second Wi-Fi capture), a cached BLE snapshot (refreshed on a slow
+// timer, not every scan — kind on a Pi Zero and on the continuous loop), and an
+// opt-in SubGHz sweep on manual scans only. Renders inline above the detections.
+async function _wifidefFusion(opts) {
+    opts = opts || {};
+    const box = document.getElementById('wifidef-hh-inline');
+    const vb = document.getElementById('wifidef-hh-verdict');
+    const body = document.getElementById('wifidef-hh-body');
+    if (!box || !_wifidef.data) return;
+    box.classList.remove('hidden');
+    vb.textContent = '…'; vb.className = 'px-3 py-1 rounded text-xs font-bold bg-slate-700 text-slate-300';
+    // BLE overlay: reuse a cached snapshot unless it's older than 60s (an 8s
+    // scan briefly claims the controller, so it must NOT run every WIDS cycle).
+    let bt = null;
+    const now = Date.now();
+    if (_wifidef.btCache.devices && (now - _wifidef.btCache.ts) < 60000) {
+        bt = { devices: _wifidef.btCache.devices };
+    } else {
+        try {
+            const r = await fetch('/api/net/bt/scan?duration=8');
+            if (r.ok) { bt = await r.json(); _wifidef.btCache = { devices: (bt || {}).devices || null, ts: now }; }
+        } catch (e) { /* BLE optional */ }
+    }
+    const subghz = !!opts.subghz;
+    if (subghz) body.innerHTML = '<span class="text-fuchsia-300">Sweeping SubGHz 300–439 MHz off the RTL-SDR (~20s)…</span>';
+    try {
+        const res = await fetch('/api/wifidef/halehound', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scan: _wifidef.data, bt: bt, subghz: subghz }),
+        });
+        const v = await res.json();
+        if (v.error) { body.innerHTML = '<span class="text-red-300">⚠ ' + _esc(v.error) + '</span>'; return; }
+        const [label, cls] = _WIFIDEF_HH[v.verdict] || ['—', 'bg-slate-700 text-slate-300'];
+        vb.textContent = `${label} · ${v.score}%`;
+        vb.className = 'px-3 py-1 rounded text-xs font-bold ' + cls;
+        let html = '';
+        if (v.domains && v.domains.length) {
+            html += '<div class="mb-2 flex flex-wrap gap-1">' + v.domains.map(d =>
+                `<span class="px-2 py-0.5 rounded bg-fuchsia-600/20 border border-fuchsia-700/50 text-fuchsia-200 text-[11px]">${_esc(d)}</span>`).join('') + '</div>';
+        }
+        if (v.suspects && v.suspects.length) {
+            html += '<div class="text-[12px] text-gray-300 mb-2">Suspect host' + (v.suspects.length > 1 ? 's' : '') + ': '
+                + v.suspects.map(s => `<span class="font-mono text-red-300">${_esc(s.hostname || s.ip || s.mac || '?')}</span> <span class="text-gray-500">(${_esc(s.threat || '')})</span>`).join(', ') + '</div>';
+        }
+        if (v.reasons && v.reasons.length) {
+            html += '<ul class="list-disc pl-5 space-y-0.5 text-[12px] text-gray-300">'
+                + v.reasons.filter(r => r.detail).map(r => `<li><span class="text-gray-500">[${_esc(r.domain)}]</span> ${_esc(r.detail)}</li>`).join('') + '</ul>';
+        } else if (v.verdict === 'none') {
+            html += '<div class="text-emerald-300 text-[12px]">✓ No HaleHound-class activity in the fused signals.</div>';
+        }
+        if (v.subghz) {
+            const sg = v.subghz;
+            const sgTxt = sg.scanned
+                ? `📡 SubGHz swept ${_esc((sg.freqs || []).join(', '))} — ${sg.events} frame${sg.events === 1 ? '' : 's'} decoded`
+                : `📡 SubGHz not swept — ${_esc(sg.reason || 'unavailable')}`;
+            html += `<div class="mt-2 text-[10px] ${sg.scanned ? 'text-fuchsia-300' : 'text-amber-400'}">${sgTxt}</div>`;
+        }
+        if (v.blind_spots && v.blind_spots.length) {
+            html += '<div class="mt-2 text-[10px] text-gray-600">Blind spots: ' + v.blind_spots.map(_esc).join(' · ') + '</div>';
+        }
+        if (v.score >= 25) {
+            html += '<div class="mt-1 text-[10px] text-fuchsia-400">Fed into the Watchtower alert feed + incident correlation.</div>';
+        }
+        body.innerHTML = html;
+        // Fold the passive Wi-Fi Pineapple / PineAP verdict (scored from the same
+        // capture, returned as v.pineap by the halehound endpoint) into its box.
+        _wifidefRenderPineap(v.pineap);
+    } catch (e) {
+        body.innerHTML = '<span class="text-red-300">ESP32 correlation failed.</span>';
+    }
+}
+
+// Wi-Fi Pineapple / PineAP — the passive verdict folded from the same scan, plus
+// the opt-in ACTIVE probe test (the one action that transmits).
+const _WIFIDEF_PA = {
+    confirmed: ['CONFIRMED', 'bg-red-600 text-white'],
+    likely: ['LIKELY', 'bg-red-500 text-white'],
+    possible: ['POSSIBLE', 'bg-amber-500 text-slate-900'],
+    trace: ['trace', 'bg-slate-600 text-slate-200'],
+    none: ['clear', 'bg-emerald-600 text-white'],
+};
+
+function _wifidefRenderPineap(pa) {
+    const box = document.getElementById('wifidef-pa-inline');
+    const vb = document.getElementById('wifidef-pa-verdict');
+    const body = document.getElementById('wifidef-pa-body');
+    if (!box || !vb || !body) return;
+    box.classList.remove('hidden');     // show it so the Active-probe button is available
+    const v = pa || {};
+    const [label, cls] = _WIFIDEF_PA[v.verdict] || ['—', 'bg-slate-700 text-slate-300'];
+    vb.textContent = (v.score != null) ? `${label} · ${v.score}%` : label;
+    vb.className = 'px-3 py-1 rounded text-xs font-bold ' + cls;
+    if (v.verdict && v.verdict !== 'none') {
+        body.innerHTML = `<div class="text-[12px] text-rose-200">Passive signals suggest a Wi-Fi Pineapple / PineAP-family rogue AP (<b>${_esc(v.verdict)}</b>). Run <b>Active probe</b> for a definitive test.</div>`;
+    } else {
+        body.innerHTML = '<div class="text-[12px] text-emerald-300">✓ No passive PineAP-pool signature in this scan. The <b>Active probe</b> is the strongest check — it asks for a random SSID and sees if anything answers.</div>';
+    }
+}
+
+// ACTIVE PineAP probe — the ONE test that transmits. Sends probes for random,
+// never-advertised SSIDs and listens; anything that answers is impersonating.
+// Backend: POST /api/wifidef/pineap/active-probe. Needs a monitor-mode adapter.
+async function wifidefPineapActiveProbe() {
+    const box = document.getElementById('wifidef-pa-inline');
+    const body = document.getElementById('wifidef-pa-body');
+    const vb = document.getElementById('wifidef-pa-verdict');
+    if (box) box.classList.remove('hidden');
+    const iface = _wifidef.iface || _wifidef.monitor;
+    if (!iface) {
+        if (body) body.innerHTML = '<span class="text-amber-300">Select/enable a monitor-capable adapter first — the Pi\'s onboard radio can\'t transmit 802.11 frames.</span>';
+        return;
+    }
+    if (!confirm('The active PineAP test TRANSMITS a handful of probe frames on '
+        + iface + ' (it does not deauth or flood). Run it only on RF you are '
+        + 'authorized to test.\n\nRun the active probe now?')) return;
+    if (vb) { vb.textContent = 'probing…'; vb.className = 'px-3 py-1 rounded text-xs font-bold bg-slate-700 text-slate-300'; }
+    if (body) body.innerHTML = '<span class="text-rose-300">📡 Transmitting probes for random SSIDs on ' + _esc(iface) + ' (channels 1/6/11) and listening…</span>';
+    try {
+        const r = await fetch('/api/wifidef/pineap/active-probe', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ interface: iface, rounds: 3, listen_seconds: 2, channels: [1, 6, 11] }),
+        });
+        const d = await r.json();
+        const res = d.result || d;
+        if (res.error) {
+            if (vb) { vb.textContent = 'error'; vb.className = 'px-3 py-1 rounded text-xs font-bold bg-slate-600 text-slate-200'; }
+            if (body) body.innerHTML = '<span class="text-amber-400">⚠ ' + _esc(res.error) + '</span>'
+                + (res.hint ? '<div class="mt-1 text-[11px] text-gray-500">' + _esc(res.hint) + '</div>' : '');
+            return;
+        }
+        const v = d.verdict || {};
+        const [label, cls] = _WIFIDEF_PA[v.verdict] || ['—', 'bg-slate-700 text-slate-300'];
+        if (vb) { vb.textContent = `${label} · ${v.score || 0}%`; vb.className = 'px-3 py-1 rounded text-xs font-bold ' + cls; }
+        let html = '';
+        if ((res.answered || 0) > 0) {
+            html += '<div class="mb-2 px-2 py-1 rounded bg-red-950/60 border border-red-700 text-red-200 font-semibold">☠️ ' + res.answered + ' random SSID' + (res.answered > 1 ? 's were' : ' was') + ' answered — Karma/PineAP impersonation confirmed</div>';
+            html += '<ul class="list-disc pl-5 space-y-0.5 text-[12px] text-gray-300">'
+                + (res.detections || []).map(x => `<li>random <span class="font-mono text-red-300">${_esc(x.ssid)}</span> answered by <span class="font-mono">${_esc((x.bssids || []).join(', ') || x.bssid || '?')}</span></li>`).join('') + '</ul>';
+        } else {
+            html += '<div class="mb-1 px-2 py-1 rounded bg-emerald-950/50 border border-emerald-700 text-emerald-200">✓ Nothing answered ' + (res.sent ? res.sent.length : 0) + ' random SSID probes — no Karma/PineAP responder in range.</div>';
+        }
+        html += '<div class="mt-1 text-[10px] text-gray-500">' + (res.rounds || 0) + ' rounds · ch ' + _esc((res.channels || []).join('/')) + ' · monitor ' + _esc(res.monitor || iface) + '</div>';
+        if ((v.score || 0) >= 25) html += '<div class="mt-1 text-[10px] text-rose-400">Fed into the Watchtower alert feed + incident correlation.</div>';
+        if (body) body.innerHTML = html;
+    } catch (e) {
+        if (body) body.innerHTML = '<span class="text-red-300">Active probe failed.</span>';
+    }
+}
+
+// Headless 24/7 watcher toggle + status. Backend: /api/wifidef/halehound/watch.
+async function wifidefHaleHoundWatch(enable) {
+    const cb = document.getElementById('wifidef-hh-watch');
+    const st = document.getElementById('wifidef-hh-watch-status');
+    if (enable) {
+        const iface = _wifidef.monitor || _wifidef.iface;
+        if (!iface) {
+            if (cb) cb.checked = false;
+            if (st) { st.hidden = false; st.innerHTML = '<span class="text-amber-300">Enable monitor mode first — the 24/7 watch needs a monitor interface.</span>'; }
+            return;
+        }
+        try {
+            const r = await fetch('/api/wifidef/halehound/watch', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enable: true, interface: iface }),
+            });
+            const d = await r.json();
+            if (d.error) { if (cb) cb.checked = false; if (st) { st.hidden = false; st.innerHTML = '<span class="text-red-300">⚠ ' + _esc(d.error) + '</span>'; } return; }
+            _wifidefRenderWatch(d);
+        } catch (e) { if (cb) cb.checked = false; }
+    } else {
+        try {
+            const r = await fetch('/api/wifidef/halehound/watch', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enable: false }),
+            });
+            _wifidefRenderWatch(await r.json());
+        } catch (e) { /* ignore */ }
+    }
+}
+
+function _wifidefRenderWatch(d) {
+    const cb = document.getElementById('wifidef-hh-watch');
+    const st = document.getElementById('wifidef-hh-watch-status');
+    if (!st) return;
+    const on = !!(d && (d.enabled || d.running));
+    if (cb) cb.checked = on;
+    if (!on) { st.hidden = true; st.innerHTML = ''; return; }
+    st.hidden = false;
+    const cfg = d.config || {};
+    let bits = `🟢 24/7 watch active on <span class="font-mono">${_esc(cfg.interface || '?')}</span> · every ~${_esc(String(cfg.interval || 90))}s (BLE every ${_esc(String(cfg.ble_interval || 300))}s) · ${d.cycles || 0} cycles`;
+    const lv = d.last_verdict;
+    if (lv && lv.verdict) bits += ` · last: <span class="text-fuchsia-300">${_esc(lv.verdict)} ${lv.score}%</span>`;
+    if (d.last_error) bits += ` · <span class="text-amber-400">last error: ${_esc(String(d.last_error).slice(0, 80))}</span>`;
+    st.innerHTML = bits;
+}
+
+async function wifidefHaleHoundWatchStatus() {
+    try {
+        const r = await fetch('/api/wifidef/halehound/watch');
+        if (r.ok) _wifidefRenderWatch(await r.json());
+    } catch (e) { /* ignore */ }
+}
+
+// Active captive-portal probe for a suspected evil-twin lure. Read-only GET; the
+// backend restricts it to a local (private) IP and never submits credentials.
+// Run it with an adapter ASSOCIATED to the rogue SSID; the portal is the gateway.
+async function wifidefProbePortal(ssid) {
+    const box = document.getElementById('wifidef-hh-inline');
+    const body = document.getElementById('wifidef-hh-body');
+    if (box) box.classList.remove('hidden');
+    const ip = prompt('Captive-portal / gateway IP to probe'
+        + (ssid ? ' for "' + ssid + '"' : '')
+        + '\n(join an adapter to that SSID first — HaleHound GARMR defaults to 192.168.4.1):',
+        '192.168.4.1');
+    if (!ip) return;
+    const url = 'http://' + ip.trim() + '/';
+    if (body) body.innerHTML = '<span class="text-fuchsia-300">Probing captive portal at ' + _esc(url) + ' …</span>';
+    try {
+        const r = await fetch('/api/wifidef/halehound/portal-probe', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: url }),
+        });
+        const d = await r.json();
+        if (d.error) { if (body) body.innerHTML = '<span class="text-amber-400">Portal probe: ' + _esc(d.error) + '</span>'; return; }
+        const o = d.observed || {};
+        const v = d.verdict || {};
+        let html = '<div class="text-[12px] text-gray-300">';
+        // Headline verdict from the behavioural fingerprint.
+        if (v.confirmed) {
+            html += '<div class="mb-2 px-2 py-1 rounded bg-red-950/60 border border-red-700 text-red-200 font-semibold">☠️ Evil-twin captive portal CONFIRMED</div>';
+        } else if (v.captive_portal) {
+            html += '<div class="mb-2 px-2 py-1 rounded bg-amber-950/60 border border-amber-700 text-amber-200 font-semibold">⚠ Captive-portal behaviour detected</div>';
+        } else {
+            html += '<div class="mb-2 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-gray-300">No captive-portal behaviour — join the suspect SSID first, then re-probe</div>';
+        }
+        // The three name/IP-independent tells.
+        const tell = (ok, label) => '<div>' + (ok ? '<span class="text-red-300">●</span> ' : '<span class="text-gray-600">○</span> ') + _esc(label) + '</div>';
+        html += tell(v.dns_hijack, 'DNS hijack' + (v.hijack_ip ? ' — all names → ' + _esc(v.hijack_ip) : ''));
+        html += tell(v.http_intercept, 'HTTP interception (connectivity-check → portal)');
+        html += tell(v.credential_form, 'Credential (password) form served');
+        html += '<div class="mt-2 font-semibold text-fuchsia-300">Portal at ' + _esc(url) + '</div>';
+        html += '<div>Title: <span class="text-gray-100">' + _esc(o.title || '—') + '</span></div>';
+        html += '<div>Server: <span class="font-mono">' + _esc(o.server || '—') + '</span></div>';
+        html += '<div>Form fields: <span class="font-mono">' + _esc((o.form_fields || []).join(', ') || '—') + '</span></div>';
+        if (d.matched) {
+            html += '<div class="mt-1 text-emerald-300">✓ Matched loaded GARMR signature <b>' + _esc(d.garmr_signature) + '</b> (' + _esc(d.signature_confidence) + ') — HaleHound-specific confirm.</div>';
+        } else if (d.suggested_signature) {
+            html += '<div class="mt-2 text-amber-300">No signature loaded. If this IS a known GARMR portal, paste this into <span class="font-mono">halehound_watch._GARMR_SIGNATURES</span>:</div>';
+            html += '<pre class="mt-1 p-2 bg-slate-900 rounded text-[11px] overflow-x-auto text-fuchsia-200">' + _esc(JSON.stringify(d.suggested_signature, null, 2)) + '</pre>';
+        }
+        html += '</div>';
+        if (body) body.innerHTML = html;
+    } catch (e) {
+        if (body) body.innerHTML = '<span class="text-red-300">Portal probe failed.</span>';
+    }
+}
+
 // ============================================================================
-// Network diagnostics (Diagnostics / Switch & L2 / Interfaces sub-tabs)
+// Network diagnostics (Diagnostics — per-OSI-layer panels — and Interfaces sub-tabs)
 // Backend: /api/net/* (see network_diagnostics.py)
 // ============================================================================
 
@@ -4916,6 +6330,146 @@ async function _ndRunText(inputId, resultId, endpoint, verb, rerunFnName) {
 function runPing() { return _ndRunText('ping-target', 'ping-results', '/api/net/ping', 'Pinging', 'runPing'); }
 function runTraceroute() { return _ndRunText('trace-target', 'trace-results', '/api/net/traceroute', 'Tracing', 'runTraceroute'); }
 function runWhois() { return _ndRunText('whois-target', 'whois-results', '/api/net/whois', 'Looking up', 'runWhois'); }
+
+// ---- RDAP (structured successor to WHOIS, with WHOIS fallback) --------------
+const _RDAP_STATUS_STYLE = {
+    found:           ['bg-green-950/40 border-green-900 text-green-400', 'found'],
+    not_found:       ['bg-slate-800 border-slate-700 text-slate-300', 'not found'],
+    no_rdap_service: ['bg-slate-800 border-slate-700 text-slate-300', 'no RDAP service'],
+    no_service:      ['bg-slate-800 border-slate-700 text-slate-300', 'no service'],
+    invalid:         ['bg-amber-950/50 border-amber-800 text-amber-300', 'invalid input'],
+    error:           ['bg-red-950/60 border-red-800 text-red-300', 'error'],
+};
+function _rdapContact(c) {
+    if (!c || typeof c !== 'object') return '';
+    const who = c.name || c.org || c.handle || '';
+    const bits = [];
+    if (who) bits.push(escapeHtml(who));
+    if (c.email) bits.push(escapeHtml((Array.isArray(c.email) ? c.email.join(', ') : c.email)));
+    if (c.tel) bits.push(escapeHtml((Array.isArray(c.tel) ? c.tel.join(', ') : c.tel)));
+    if (c.country && !who) bits.push(escapeHtml(c.country));
+    return bits.join(' · ');
+}
+function _rdapRow(label, value, opts) {
+    if (value === null || value === undefined || value === '' ||
+        (Array.isArray(value) && !value.length)) return '';
+    const v = Array.isArray(value) ? value.join(', ') : String(value);
+    const o = opts || {};
+    const vcls = (o.mono ? 'font-mono ' : '') + (o.strong ? 'text-gray-100 ' : 'text-gray-300 ') + 'break-words text-right';
+    return `<div class="flex justify-between gap-3 py-1 border-t border-slate-800/70">
+        <span class="text-xs uppercase tracking-wide text-gray-500 shrink-0">${escapeHtml(label)}</span>
+        <span class="${vcls}">${o.html ? v : escapeHtml(v)}</span></div>`;
+}
+function _rdapResultHtml(rec) {
+    const r = rec.result || {};
+    const ev = r.events || {};
+    let h = '';
+    if (r.object === 'domain') {
+        const reg = r.registrar;
+        h += _rdapRow('Domain', (r.name || rec.normalized || '') + (r.unicode_name && r.unicode_name !== r.name ? ' (' + r.unicode_name + ')' : ''), { strong: true });
+        if (rec.matched_name && rec.matched_name !== rec.normalized)
+            h += _rdapRow('Note', rec.normalized + ' is not registered itself; showing ' + rec.matched_name);
+        if (reg) h += _rdapRow('Registrar', (reg.name || '?') + (reg.iana_id ? ' (IANA ' + reg.iana_id + ')' : ''));
+        h += _rdapRow('Registered', ev.registration);
+        h += _rdapRow('Expires', ev.expiration);
+        h += _rdapRow('Changed', ev['last changed']);
+        h += _rdapRow('Status', r.status);
+        h += _rdapRow('Nameservers', r.nameservers, { mono: true });
+        h += _rdapRow('DNSSEC', r.dnssec === true ? 'signed' : r.dnssec === false ? 'unsigned' : null);
+        h += _rdapRow('Registrant', _rdapContact(r.registrant), { html: true });
+        h += _rdapRow('Abuse', _rdapContact(r.abuse), { html: true, strong: true });
+        const ref = rec.referral;
+        if (ref && ref.ok && ref.result) {
+            h += `<div class="mt-2 pt-1 text-xs text-gray-500">— registrar record (${escapeHtml(ref.source_url || ref.url || '')})</div>`;
+            h += _rdapRow('Registrant', _rdapContact(ref.result.registrant), { html: true });
+            h += _rdapRow('Abuse', _rdapContact(ref.result.abuse), { html: true, strong: true });
+            h += _rdapRow('Expires', (ref.result.events || {}).expiration);
+        } else if (ref && !ref.ok) {
+            h += _rdapRow('Referral', (ref.url || '') + ' failed: ' + (ref.error || ''));
+        }
+    } else if (r.object === 'autnum') {
+        const rng = r.start == null ? null : (r.start === r.end ? 'AS' + r.start : 'AS' + r.start + ' – AS' + r.end);
+        h += _rdapRow('ASN', rng, { strong: true });
+        h += _rdapRow('Name', r.name);
+        h += _rdapRow('Handle', r.handle, { mono: true });
+        h += _rdapRow('Type', r.type);
+        h += _rdapRow('Country', r.country);
+        h += _rdapRow('Status', r.status);
+        h += _rdapRow('Registrant', _rdapContact(r.registrant), { html: true });
+        h += _rdapRow('NOC', _rdapContact(r.noc), { html: true });
+        h += _rdapRow('Abuse', _rdapContact(r.abuse), { html: true, strong: true });
+        h += _rdapRow('Registered', ev.registration);
+        h += _rdapRow('Changed', ev['last changed']);
+    } else if (r.object === 'ip network') {
+        h += _rdapRow('Network', (r.cidrs && r.cidrs.length) ? r.cidrs.join(', ') : (r.start ? r.start + ' – ' + r.end : ''), { mono: true, strong: true });
+        if (r.cidrs && r.cidrs.length && r.start) h += _rdapRow('Range', r.start + ' – ' + r.end, { mono: true });
+        h += _rdapRow('Name', r.name);
+        h += _rdapRow('Handle', r.handle, { mono: true });
+        h += _rdapRow('Type', r.type);
+        h += _rdapRow('Country', r.country);
+        h += _rdapRow('Parent', r.parent, { mono: true });
+        h += _rdapRow('Registrant', _rdapContact(r.registrant), { html: true });
+        h += _rdapRow('Abuse', _rdapContact(r.abuse), { html: true, strong: true });
+        h += _rdapRow('Registered', ev.registration);
+        h += _rdapRow('Changed', ev['last changed']);
+        (rec.origin_as || []).forEach(oa => {
+            if (oa.ok && oa.result) {
+                h += `<div class="mt-2 pt-1 text-xs text-gray-500">— origin AS${escapeHtml(String(oa.asn))} (${escapeHtml(oa.source_url || '')})</div>`;
+                h += _rdapRow('AS name', oa.result.name);
+                h += _rdapRow('AS org', _rdapContact(oa.result.registrant), { html: true });
+                h += _rdapRow('AS abuse', _rdapContact(oa.result.abuse), { html: true, strong: true });
+            } else {
+                h += _rdapRow('Origin AS', 'AS' + oa.asn + ': ' + (oa.error || oa.status || ''));
+            }
+        });
+    }
+    return h;
+}
+async function runRdap() {
+    const input = document.getElementById('rdap-target');
+    const out = document.getElementById('rdap-results');
+    if (!input || !out) return;
+    const target = (input.value || '').trim();
+    if (!target) { input.focus(); return; }
+    const noWhois = !!(document.getElementById('rdap-no-whois') || {}).checked;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    _ndBusy(btn, true, 'Looking up');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Querying the registry for ' + escapeHtml(target) + '…</p>';
+    try {
+        const d = await postAPI('/api/net/rdap', { target, whois_fallback: !noWhois });
+        if (!d || d.success === false) {
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml((d && d.error) || 'failed') + '</p>';
+            return;
+        }
+        const proto = d.protocol === 'whois' ? ['bg-amber-950/50 border-amber-800 text-amber-300', 'WHOIS'] : ['bg-green-950/40 border-green-900 text-green-400', 'RDAP'];
+        const [scls, slabel] = _RDAP_STATUS_STYLE[d.status] || ['bg-slate-800 border-slate-700 text-slate-400', d.status || 'unknown'];
+        const kindBits = [d.kind, d.family].filter(Boolean).join(' ');
+        let h = `<div class="flex flex-wrap items-center gap-2 mb-2">
+            <span class="px-2 py-0.5 rounded border text-xs font-semibold ${proto[0]}">${proto[1]}</span>
+            <span class="px-2 py-0.5 rounded border text-xs ${scls}">${escapeHtml(slabel)}</span>
+            <span class="text-xs text-gray-500">${escapeHtml(d.normalized || d.query || '')}${kindBits ? ' · ' + escapeHtml(kindBits) : ''}${d.mapped_from ? ' · mapped from ' + escapeHtml(d.mapped_from) : ''}</span>
+            ${d.source_url || d.server ? '<span class="text-xs text-gray-600 font-mono break-all">' + escapeHtml(d.source_url || d.server) + '</span>' : ''}
+        </div>`;
+        if (d.ok && d.result) {
+            h += '<div class="rounded-lg bg-slate-900/60 border border-slate-800 px-3 py-1">' + _rdapResultHtml(d) + '</div>';
+        } else {
+            if (d.error) h += '<p class="text-sm text-amber-300 mb-1">' + escapeHtml(d.error) + '</p>';
+            if (d.retry_after) h += '<p class="text-xs text-gray-400">Retry-After: ' + escapeHtml(String(d.retry_after)) + '</p>';
+            if (Array.isArray(d.tried) && d.tried.length) h += '<p class="text-xs text-gray-500">Tried: ' + escapeHtml(d.tried.join(', ')) + (d.server ? ' @ ' + escapeHtml(d.server) : '') + '</p>';
+        }
+        (d.notes || []).forEach(n => { h += '<p class="text-xs text-gray-500 mt-1">note: ' + escapeHtml(n) + '</p>'; });
+        if (d.report) {
+            h += `<details class="mt-2"><summary class="text-xs text-gray-500 cursor-pointer hover:text-gray-300">Full report${d.whois_text ? ' + raw WHOIS' : ''}</summary>
+                <pre class="mt-2 text-xs font-mono bg-slate-900/70 rounded p-3 overflow-x-auto whitespace-pre-wrap max-h-96">${escapeHtml(d.report)}${d.whois_text ? '\n\n-- raw WHOIS --\n' + escapeHtml(d.whois_text) : ''}</pre></details>`;
+        }
+        out.innerHTML = h;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
 
 // Fill the MTR start-point dropdown with this host's local IPv4 addresses.
 async function populateMtrSources() {
@@ -5208,7 +6762,7 @@ async function runIperf() {
 async function toggleIperfServer() {
     const btn = document.getElementById('iperf-server-btn');
     const status = document.getElementById('iperf-server-status');
-    const starting = btn.textContent.indexOf('Start') !== -1;
+    const starting = _i18nText(btn).indexOf('Start') !== -1;
     _ndBusy(btn, true, starting ? 'Starting…' : 'Stopping…');
     try {
         const d = await postAPI('/api/net/iperf3-server', { action: starting ? 'start' : 'stop' });
@@ -5809,7 +7363,7 @@ async function analyzeStoredPcap(el) {
 
 // PCAP source #3 — capture live traffic on an interface into a new pcap. The
 // interface <select> is static in the page (with "Auto (wired first)") and is
-// pre-filled on tab load like every other Switch & L2/L3 picker, so opening the
+// pre-filled on tab load like every other Diagnostics picker, so opening the
 // form just reveals it — no async populate.
 function _pcapCapFillIfaces() {
     const sel = document.getElementById('pcap-cap-iface');
@@ -6153,6 +7707,118 @@ async function checkVpnEgress() {
     }
 }
 
+// Cellular uplink fallback — USB-tethered hotspot / phone / LTE modem.
+async function loadCellularUplink() {
+    const out = document.getElementById('cellular-uplink-results');
+    if (!out) return;
+    try {
+        const d = await fetchAPI('/api/cellular/status');
+        if (!d.success) throw new Error(d.error || 'failed');
+        const set = (id, prop, v) => { const el = document.getElementById(id); if (el && document.activeElement !== el) el[prop] = v; };
+        set('cell-enabled', 'checked', !!d.enabled);
+        set('cell-allow-scan', 'checked', !!d.allow_scan);
+        set('cell-metric', 'value', d.metric);
+        set('cell-force', 'value', (d.force_ifaces || []).join(' '));
+        set('cell-exclude', 'value', (d.exclude_ifaces || []).join(' '));
+        set('cell-hb-enabled', 'checked', !!d.heartbeat_enabled);
+        set('cell-hb-targets', 'value', (d.heartbeat_targets || []).join(' '));
+        set('cell-hb-minok', 'value', d.heartbeat_min_ok);
+        set('cell-hb-fail', 'value', d.failover_after);
+        set('cell-hb-back', 'value', d.failback_after);
+        const pill = (txt, cls) => `<span class="px-2 py-0.5 rounded text-xs ${cls}">${escapeHtml(txt)}</span>`;
+        const uplink = d.active_uplink
+            ? (d.on_cellular ? pill('on cellular: ' + d.active_uplink, 'bg-amber-900/50 text-amber-300')
+                             : pill('primary: ' + d.active_uplink, 'bg-green-900/50 text-green-300'))
+            : pill('no internet uplink', 'bg-red-900/50 text-red-300');
+        const hooks = (d.nm_conf_installed || d.dhcpcd_hook_installed)
+            ? '' : ' ' + pill('route hooks not installed', 'bg-slate-700 text-slate-400');
+        let html = `<div class="flex flex-wrap items-center gap-2 mb-3">${uplink}${d.enabled ? '' : ' ' + pill('fallback pinning off', 'bg-red-900/50 text-red-300')}${hooks}</div>`;
+        html += _cellHeartbeatHtml(d, pill);
+        if (!(d.interfaces || []).length) {
+            html += '<p class="text-gray-400">No cellular device plugged in. Connect a hotspot or phone to a USB port and turn on its <strong>USB tethering</strong>; it shows up here within a few seconds.</p>';
+        } else {
+            html += '<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">' + d.interfaces.map(i => {
+                const role = i.role === 'active' ? pill('ACTIVE — carrying traffic', 'bg-amber-900/50 text-amber-300')
+                    : i.role === 'standby' ? pill('standby', 'bg-green-900/50 text-green-300')
+                    : pill(i.carrier ? 'no route (DHCP?)' : 'link down', 'bg-slate-700 text-slate-400');
+                const row = (k, v) => `<div class="flex justify-between gap-3"><span class="text-gray-500">${k}</span><span class="font-mono text-gray-300 break-all text-right">${escapeHtml(String(v))}</span></div>`;
+                return `<div class="bg-slate-900/40 border border-slate-700 rounded-lg p-3 space-y-1 min-w-0">
+                    <div class="flex flex-wrap items-center justify-between gap-2"><span class="font-mono font-semibold">${escapeHtml(i.name)}</span>${role}</div>
+                    ${row('Device', i.device || '—')}
+                    ${row('Detected by', i.reason || '—')}
+                    ${row('IPv4', (i.ipv4 || []).join(', ') || '—')}
+                    ${row('Gateway', i.gateway || '—')}
+                    ${row('Route metric', i.metric == null ? '—' : i.metric)}
+                    ${row('Data (rx / tx)', formatBytes(i.rx_bytes || 0) + ' / ' + formatBytes(i.tx_bytes || 0))}
+                </div>`;
+            }).join('') + '</div>';
+        }
+        if ((d.events || []).length) {
+            html += '<div class="mt-3 text-xs text-gray-500 space-y-1">' + d.events.slice(-5).reverse().map(e =>
+                `<div>${escapeHtml(new Date(e.ts * 1000).toLocaleString())} — ${escapeHtml(e.msg)}</div>`).join('') + '</div>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-red-400">' + escapeHtml(e.message || String(e)) + '</p>';
+    }
+}
+
+function _cellHeartbeatHtml(d, pill) {
+    const hb = d.heartbeat;
+    if (!d.heartbeat_enabled) return '<p class="text-xs text-gray-500 mb-3">Heartbeat failover off — cellular takes over only when Ethernet/Wi-Fi lose their link.</p>';
+    if (!hb) return '';
+    const t = ts => ts ? new Date(ts * 1000).toLocaleTimeString() : '—';
+    const dur = s => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return (h ? h + 'h ' : '') + (h || m ? m + 'm ' : '') + (s % 60) + 's'; };
+    let state;
+    if (hb.state === 'failover') {
+        state = pill(`FAILED OVER since ${t(hb.failover_at)} — fail back ${hb.good_streak}/${d.failback_after}`, 'bg-amber-900/50 text-amber-300');
+    } else if (hb.bad_streak) {
+        state = pill(`primary failing ${hb.bad_streak}/${d.failover_after}`, 'bg-red-900/50 text-red-300');
+    } else if (Object.keys(hb.last_round || {}).length) {
+        state = pill('primary healthy', 'bg-green-900/50 text-green-300');
+    } else {
+        state = pill('idle — no cellular link to fail over to', 'bg-slate-700 text-slate-400');
+    }
+    const rounds = Object.entries(hb.last_round || {}).map(([iface, r]) => {
+        const good = r.total && r.ok >= d.heartbeat_min_ok;
+        const rtt = (r.results || []).filter(x => x.ok && x.ms != null).map(x => x.ms);
+        const detail = (r.results || []).map(x => `${x.target} ${x.ok ? '✓' : '✗'}`).join(' · ');
+        return `<div class="flex flex-wrap justify-between gap-2"><span class="font-mono">${escapeHtml(iface)}</span>`
+            + `<span class="${good ? 'text-green-400' : 'text-red-400'}">${r.ok}/${r.total} targets${rtt.length ? ' · ' + Math.min(...rtt) + ' ms' : ''}</span></div>`
+            + (detail ? `<div class="text-xs text-gray-500 break-all">${escapeHtml(detail)}</div>` : '')
+            + ((r.skipped || []).length ? `<div class="text-xs text-amber-300 break-all">skipped: ${escapeHtml(r.skipped.join(', '))}</div>` : '');
+    }).join('');
+    const lo = hb.last_outage;
+    const last = lo ? `<div class="text-xs text-gray-400 mt-2">Last outage: ${t(lo.start)} → ${t(lo.end)} (${dur(lo.duration)}), cellular carried ${formatBytes(lo.cellular_bytes || 0)}</div>` : '';
+    return `<div class="bg-slate-900/40 border border-slate-700 rounded-lg p-3 mb-3 space-y-1 min-w-0">
+        <div class="flex flex-wrap items-center justify-between gap-2"><span class="font-semibold">Heartbeat</span>${state}</div>
+        ${rounds || '<div class="text-xs text-gray-500">No primary uplink with a default route.</div>'}${last}</div>`;
+}
+
+async function saveCellularUplink() {
+    const st = document.getElementById('cell-save-status');
+    const payload = {
+        enabled: document.getElementById('cell-enabled').checked,
+        allow_scan: document.getElementById('cell-allow-scan').checked,
+        metric: parseInt(document.getElementById('cell-metric').value, 10),
+        force_ifaces: document.getElementById('cell-force').value,
+        exclude_ifaces: document.getElementById('cell-exclude').value,
+        heartbeat_enabled: document.getElementById('cell-hb-enabled').checked,
+        heartbeat_targets: document.getElementById('cell-hb-targets').value,
+        heartbeat_min_ok: parseInt(document.getElementById('cell-hb-minok').value, 10),
+        failover_after: parseInt(document.getElementById('cell-hb-fail').value, 10),
+        failback_after: parseInt(document.getElementById('cell-hb-back').value, 10)
+    };
+    try {
+        const d = await postAPI('/api/cellular/settings', payload);
+        if (!d.success) throw new Error(d.error || 'failed');
+        if (st) st.textContent = '✓ Saved' + ((d.applied || []).length ? ' — ' + d.applied.join('; ') : '');
+        loadCellularUplink();
+    } catch (e) {
+        if (st) st.textContent = '✗ ' + (e.message || e);
+    }
+}
+
 async function loadInterfaces() {
     const out = document.getElementById('interfaces-results');
     out.innerHTML = '<p class="text-gray-400">Loading…</p>';
@@ -6174,6 +7840,7 @@ async function loadInterfaces() {
         const typeLabel = (i) => {
             if (i.type === 'vpn') return '<span class="px-2 py-0.5 rounded text-xs bg-amber-900/50 text-amber-300">🔒 ' + escapeHtml(i.vpn_kind || 'VPN') + '</span>';
             if (i.type === 'wifi') return '<span class="px-2 py-0.5 rounded text-xs bg-sky-900/50 text-sky-300">wifi</span>';
+            if (i.type === 'cellular') return '<span class="px-2 py-0.5 rounded text-xs bg-amber-900/50 text-amber-300">📶 cellular</span>';
             return '<span class="px-2 py-0.5 rounded text-xs bg-slate-700 text-slate-300">ethernet</span>';
         };
         const rows = data.interfaces.map(i => {
@@ -6252,8 +7919,8 @@ const _NETINT_STYLE = {
 // A verdict is clean/informational, an active attack (critical, red), or — anything
 // else non-clean — a suspicious finding (amber). Mirrors the server's _ni_rank so the
 // chips colour every scanner's verdicts without enumerating them all.
-const _NETINT_CLEAN = new Set(['clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a', 'no-traffic', 'disabled']);
-const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp']);
+const _NETINT_CLEAN = new Set(['clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a', 'no-traffic', 'disabled', 'not-applicable', 'randomization', 'fhrp', 'observed', 'learning']);
+const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'responder-challenge', 'krb-recon', 'eternalblue-probe', 'krb-rc4md4', 'smbghost-exploit', 'smb-reflection', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn', 'autokey-exploit', 'crash-exploit', 'auth-bypass', 'lag-hijack', 'zerologon', 'dcsync', 'credential-exposure', 'failover-manipulation', 'segment-injection', 'modcopy-exploited', 'payload-queued', 'plc-abuse', 'exploit', 'attack']);
 function _netintRank(verdict) {
     const v = verdict || 'unknown';
     if (_NETINT_CLEAN.has(v)) return 0;
@@ -6275,7 +7942,7 @@ function renderNetIntegrity(d) {
     // Prefer the full per-check map (extended monitor); fall back to dns/arp/dhcp.
     let entries;
     if (d.checks && Object.keys(d.checks).length) {
-        const order = ['dns', 'arp', 'dhcp', 'raguard', 'stp', 'dtp', 'cdp', 'vtp', 'igmp', 'ipv6', 'ndp', 'fhrp', 'ospf', 'eigrp', 'isis', 'bgp', 'smb', 'relay', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'ldap'];
+        const order = ['dns', 'arp', 'dhcp', 'raguard', 'stp', 'dtp', 'cdp', 'vtp', 'igmp', 'ipv6', 'ndp', 'fhrp', 'ospf', 'eigrp', 'isis', 'bgp', 'smb', 'relay', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'ldap', 'ssh', 'telnet'];
         entries = Object.keys(d.checks).sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99))
             .map(k => [d.checks[k].label || k.toUpperCase(), d.checks[k].verdict, d.checks[k].reasons || []]);
     } else {
@@ -6573,6 +8240,20 @@ async function watchtowerRefresh() {
     try { renderWatchtower(await fetchAPI(q)); } catch (e) { /* offline — leave as-is */ }
     refreshIncidents('watchtower-incidents');
 }
+async function watchtowerClear() {
+    if (!confirm('Clear the Watchtower alerts shown here?\n\nThe watchers keep their place in each log, so only genuinely new findings will re-appear.')) return;
+    try {
+        await postAPI('/api/net/watchtower/clear', {});
+        addConsoleMessage('Watchtower alerts cleared', 'info');
+    } catch (err) {
+        addConsoleMessage('Failed to clear Watchtower: ' + err.message, 'error');
+    }
+    // Refresh both views — the button lives on the Diagnostics pane and the
+    // Dashboard summary card. Each refresher re-pulls its own incident rows too,
+    // so the fused view empties alongside the raw alerts.
+    watchtowerRefresh();
+    if (typeof refreshDashWatchtower === 'function') refreshDashWatchtower();
+}
 async function syncWatchtowerFromServer() {
     const cb = document.getElementById('watchtower-enabled');
     try {
@@ -6684,6 +8365,7 @@ async function runArpCheck() {
             `<tr class="border-t border-slate-800"><td class="px-3 py-1.5 text-gray-500">Gateway</td><td class="px-3 py-1.5 font-mono">${escapeHtml(gw.ip || '—')}</td></tr>` +
             `<tr class="border-t border-slate-800"><td class="px-3 py-1.5 text-gray-500">Current MAC</td><td class="px-3 py-1.5 font-mono ${mismatch ? 'text-red-400' : ''}">${escapeHtml(gw.mac || '—')}</td></tr>` +
             `<tr class="border-t border-slate-800"><td class="px-3 py-1.5 text-gray-500">Trusted MAC</td><td class="px-3 py-1.5 font-mono">${escapeHtml(gw.baseline || '—')}${gw.learned ? ' <span class="text-xs text-gray-500">(learned now)</span>' : ''}</td></tr>` +
+            (gw.fhrp_shape ? `<tr class="border-t border-slate-800"><td class="px-3 py-1.5 text-gray-500">FHRP</td><td class="px-3 py-1.5">${escapeHtml(gw.fhrp_shape)} virtual MAC ${gw.fhrp_confirmed ? '<span class="text-green-400">✓ confirmed (expected HSRP/VRRP gateway)</span>' : '<span class="text-amber-300">shape match — confirm via FHRP Watch</span>'}</td></tr>` : '') +
             `<tr class="border-t border-slate-800"><td class="px-3 py-1.5 text-gray-500">Neighbours</td><td class="px-3 py-1.5">${d.neighbor_count != null ? d.neighbor_count : '—'}</td></tr>` +
             '</tbody></table>';
         if (d.impersonators && d.impersonators.length) {
@@ -6825,7 +8507,8 @@ function _tlsFillIfaces() {
     }).catch(() => {});
 }
 function _tlsVerName(v) {
-    return ({ 772: 'TLS 1.3', 771: 'TLS 1.2', 770: 'TLS 1.1', 769: 'TLS 1.0' })[v] || (v ? '0x' + v.toString(16) : '');
+    return ({ 772: 'TLS 1.3', 771: 'TLS 1.2', 770: 'TLS 1.1', 769: 'TLS 1.0',
+        65276: 'DTLS 1.3', 65277: 'DTLS 1.2', 65279: 'DTLS 1.0' })[v] || (v ? '0x' + v.toString(16) : '');
 }
 async function runTlsWatch() {
     const out = document.getElementById('tls-results');
@@ -6852,7 +8535,7 @@ async function runTlsWatch() {
         }
         const [cls, label] = _TLS_VERDICT_STYLE[d.verdict] || _TLS_VERDICT_STYLE.unknown;
         let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
-        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s window · ${d.tls || 0} TLS · ${d.quic || 0} QUIC handshake(s)</p>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s window · ${d.tls || 0} TLS · ${d.quic || 0} QUIC${d.dtls ? ' · ' + d.dtls + ' DTLS' : ''} handshake(s)</p>`;
         const S = d.sessions || [];
         if (!S.length) {
             html += '<p class="text-sm text-gray-400">No TLS/QUIC handshakes observed. On a switched network you need a SPAN/mirror port to see other hosts.</p>';
@@ -6864,9 +8547,11 @@ async function runTlsWatch() {
                 const neg = s.negotiated_version ? (_tlsVerName(s.negotiated_version) + (s.cipher ? ' ' + s.cipher : '')) : '—';
                 const bad = (s.findings || []).some(f => f.severity === 'high');
                 const dup = (s.count > 1) ? ` <span class="text-slate-500" title="${s.count} duplicate connections collapsed">×${s.count}</span>` : '';
+                const protoCls = s.proto === 'quic' ? 'text-cyan-300' : s.proto === 'dtls' ? 'text-violet-300' : 'text-gray-400';
+                const svc = s.service ? ` <span class="px-1.5 py-0.5 rounded bg-slate-700 text-[10px] text-sky-300 uppercase" title="server-side service port">${escapeHtml(s.service)}</span>` : '';
                 html += `<tr class="border-t border-slate-800 align-top">
-                    <td class="px-2 py-1 uppercase ${s.proto === 'quic' ? 'text-cyan-300' : 'text-gray-400'}">${escapeHtml(s.proto)}</td>
-                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(s.src)} → ${escapeHtml(s.dst)}${dup}</td>
+                    <td class="px-2 py-1 uppercase ${protoCls}">${escapeHtml(s.proto)}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(s.src)} → ${escapeHtml(s.dst)}${dup}${svc}</td>
                     <td class="px-2 py-1 ${bad ? 'text-red-300' : 'text-gray-200'}">${escapeHtml(s.sni || '—')}</td>
                     <td class="px-2 py-1 text-gray-400">${escapeHtml(alpn)}</td>
                     <td class="px-2 py-1 font-mono text-gray-300" title="${escapeHtml(s.ja4_r || '')}">${escapeHtml(s.ja4 || '—')}</td>
@@ -6874,6 +8559,158 @@ async function runTlsWatch() {
                 </tr>`;
                 (s.findings || []).forEach(f => {
                     html += `<tr class="border-0"><td></td><td colspan="5" class="px-2 pb-1 text-xs ${_TLS_SEV_COLOR[f.severity] || 'text-gray-400'}">└ ${escapeHtml(f.severity)} ${escapeHtml(f.code)}: ${escapeHtml(f.message)}</td></tr>`;
+                });
+            });
+            html += '</tbody></table>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- SSH Watch (passive regreSSHion / Terrapin observer) -------------------
+const _SSH_VERDICT_STYLE = {
+    clean:       ['bg-green-950/40 border-green-900 text-green-400', '✓ No SSH posture issues — modern algorithms, no regreSSHion pattern'],
+    suspicious:  ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ SSH exposure — regreSSHion posture, Terrapin, or weak algorithms; review the findings'],
+    unknown:     ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _SSH_SEV_COLOR = { high: 'text-red-300', warn: 'text-amber-300', notice: 'text-gray-300', info: 'text-gray-500' };
+function _sshFillIfaces() {
+    const sel = document.getElementById('ssh-iface');
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+async function runSshWatch() {
+    const out = document.getElementById('ssh-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('ssh-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('ssh-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '12';
+    const graceEl = document.getElementById('ssh-grace');
+    const grace = graceEl && graceEl.value ? graceEl.value : '120';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing SSH handshakes on the segment…</p>';
+    try {
+        _sshFillIfaces();
+        const qs = '?seconds=' + encodeURIComponent(secs) + '&grace_seconds=' + encodeURIComponent(grace) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/ssh-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool === 'tcpdump') extra = ' <button onclick="installNetTool(\'tcpdump\', this, runSshWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _SSH_VERDICT_STYLE[d.verdict] || _SSH_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s window · ${d.count || 0} flow(s) · ${d.grace_bursts || 0} grace burst(s)</p>`;
+        const S = d.sessions || [];
+        if (!S.length) {
+            html += '<p class="text-sm text-gray-400">No SSH handshakes observed. On a switched network you need a SPAN/mirror port to see other hosts.</p>';
+        } else {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Flow</th><th class="px-2 py-1">Server</th><th class="px-2 py-1">Client</th><th class="px-2 py-1">Negotiated</th></tr></thead><tbody>';
+            S.forEach(s => {
+                const bad = (s.findings || []).some(f => f.severity === 'high' || f.severity === 'warn');
+                const neg = s.negotiated ? `${escapeHtml(s.negotiated.kex || '')} · ${escapeHtml(s.negotiated.cipher_c2s || '')} · ${escapeHtml(s.negotiated.mac_c2s || '')}` : '—';
+                const ep = s.source ? ('grace burst · ' + escapeHtml(s.source)) : (escapeHtml(s.client || '—') + ' → ' + escapeHtml(s.server || '—'));
+                html += `<tr class="border-t border-slate-800 align-top">
+                    <td class="px-2 py-1 font-mono ${bad ? 'text-red-300' : 'text-gray-400'}">${ep}</td>
+                    <td class="px-2 py-1 text-gray-200">${escapeHtml(s.server_ident || '—')}</td>
+                    <td class="px-2 py-1 text-gray-400">${escapeHtml(s.client_ident || '—')}</td>
+                    <td class="px-2 py-1 text-gray-400">${neg}</td>
+                </tr>`;
+                (s.findings || []).forEach(f => {
+                    html += `<tr class="border-0"><td></td><td colspan="3" class="px-2 pb-1 text-xs ${_SSH_SEV_COLOR[f.severity] || 'text-gray-400'}">└ ${escapeHtml(f.severity)} ${escapeHtml(f.code)}: ${escapeHtml(f.message || '')}${f.cve ? ' <span class="text-cyan-400">[' + escapeHtml(f.cve) + ']</span>' : ''}</td></tr>`;
+                });
+            });
+            html += '</tbody></table>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- Telnet Watch (passive CVE-2026-24061 / 32746 observer) ----------------
+const _TELNET_VERDICT_STYLE = {
+    clean:       ['bg-green-950/40 border-green-900 text-green-400', '✓ No Telnet / r-services attack signatures or cleartext-credential exposure'],
+    suspicious:  ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Telnet / r-services exposure — cleartext credentials, .rhosts trust, an SLC probe or an EC/EL crash attempt; review the findings'],
+    compromised: ['bg-red-950/60 border-red-800 text-red-300', '🛑 Remote-login attack on the wire — login -f argument injection (Telnet or rlogin/rsh), SLC or key-id overflow, an ftp-data trust bounce, or a confirmed-vulnerable server'],
+    unknown:     ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _TELNET_SEV_COLOR = { critical: 'text-red-300', high: 'text-red-300', warning: 'text-amber-300', notice: 'text-gray-300', low: 'text-gray-400', info: 'text-gray-500' };
+function _telnetFillIfaces() {
+    const sel = document.getElementById('telnet-iface');
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+async function runTelnetWatch() {
+    const out = document.getElementById('telnet-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('telnet-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('telnet-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '12';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing Telnet on the segment…</p>';
+    try {
+        _telnetFillIfaces();
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/telnet-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool === 'tcpdump') extra = ' <button onclick="installNetTool(\'tcpdump\', this, runTelnetWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _TELNET_VERDICT_STYLE[d.verdict] || _TELNET_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s window · ${d.count || 0} flow(s) · ${d.findings_total || 0} finding(s)</p>`;
+        const S = d.sessions || [];
+        if (!S.length) {
+            html += '<p class="text-sm text-gray-400">No Telnet sessions observed. On a switched network you need a SPAN/mirror port to see other hosts.</p>';
+        } else {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Client</th><th class="px-2 py-1">Server</th><th class="px-2 py-1">Findings</th></tr></thead><tbody>';
+            S.forEach(s => {
+                const bad = (s.findings || []).some(f => f.severity === 'critical' || f.severity === 'high');
+                html += `<tr class="border-t border-slate-800 align-top">
+                    <td class="px-2 py-1 font-mono ${bad ? 'text-red-300' : 'text-gray-400'}">${escapeHtml(s.client || '—')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(s.server || '—')}</td>
+                    <td class="px-2 py-1 text-gray-400">${(s.findings || []).length}</td>
+                </tr>`;
+                (s.findings || []).forEach(f => {
+                    html += `<tr class="border-0"><td></td><td colspan="2" class="px-2 pb-1 text-xs ${_TELNET_SEV_COLOR[f.severity] || 'text-gray-400'}">└ ${escapeHtml(f.severity)} ${escapeHtml(f.code)}: ${escapeHtml(f.desc || '')}</td></tr>`;
                 });
             });
             html += '</tbody></table>';
@@ -7276,6 +9113,10 @@ const _NTP_VERDICT_STYLE = {
     kod:              ['bg-red-950/60 border-red-800 text-red-300', '🛑 NTP Kiss-o\'-Death — time-sync DoS'],
     'rogue-server':   ['bg-red-950/60 border-red-800 text-red-300', '🛑 Rogue NTP server answering on the segment'],
     'time-injection': ['bg-red-950/60 border-red-800 text-red-300', '🛑 NTP time injection — a source is serving a skewed clock'],
+    autokey:          ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ NTP Autokey extension field on the wire — deprecated (CVE-2014-9295 surface)'],
+    'autokey-exploit':['bg-red-950/60 border-red-800 text-red-300', '🛑 Malformed NTP Autokey EF — crypto_recv() overflow signature (CVE-2014-9295 RCE)'],
+    'crash-exploit':  ['bg-red-950/60 border-red-800 text-red-300', '🛑 NTP crash / overrun shape — oversize datagram (CVE-2016-9312) or mode-6 count overrun (CVE-2019-6444/6443)'],
+    'auth-bypass':    ['bg-red-950/60 border-red-800 text-red-300', '🛑 NTP crypto-NAK auth bypass — symmetric-association clock steering (CVE-2015-7871)'],
     unknown:          ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
 function _ntpFillIfaces() {
@@ -7316,7 +9157,7 @@ async function runNtpWatch() {
         }
         const [cls, label] = _NTP_VERDICT_STYLE[d.verdict] || _NTP_VERDICT_STYLE.unknown;
         let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
-        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.server_count} source(s) · ${d.packet_count} pkts (${d.rate}/s)${d.control_count ? ' · ' + d.control_count + ' mode-6/7' : ''}${d.learned ? ' · <span class="text-gray-400">baseline learned now</span>' : ''}</p>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.server_count} source(s) · ${d.packet_count} pkts (${d.rate}/s)${d.control_count ? ' · ' + d.control_count + ' mode-6/7' : ''}${d.autokey_count ? ' · <span class="text-amber-400">' + d.autokey_count + ' Autokey EF' + (d.autokey_malformed ? ', ' + d.autokey_malformed + ' malformed' : '') + '</span>' : ''}${d.learned ? ' · <span class="text-gray-400">baseline learned now</span>' : ''}</p>`;
         const servers = d.servers || [];
         if (servers.length) {
             html += '<p class="text-xs uppercase text-gray-400 mt-2 mb-1">Time sources (' + servers.length + ')</p>' +
@@ -7361,6 +9202,191 @@ async function ntpTrustBaseline() {
         await runNtpWatch();
     } catch (e) {
         addConsoleMessage('Failed to reset NTP baseline: ' + e.message, 'error');
+    }
+}
+
+// ---- Vendor CVE Guards (Cisco / Juniper / Arista) --------------------------
+const _GUARD_VERDICT_STYLE = {
+    clean:    ['bg-green-950/40 border-green-900 text-green-400', '✓ No tracked CVE evidence on the segment'],
+    observed: ['bg-slate-800 border-slate-700 text-slate-300', 'ℹ Vendor device observed — no CVE-relevant finding'],
+    posture:  ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ A version/platform screens into a tracked CVE range — verify THIS device'],
+    exposure: ['bg-orange-950/50 border-orange-800 text-orange-300', '⚠ A CVE enabling-condition is exposed on the wire'],
+    attack:   ['bg-red-950/60 border-red-800 text-red-300', '🛑 An exploitation primitive was observed in transit'],
+    unknown:  ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _GUARD_SEV_STYLE = {
+    CRITICAL: 'bg-red-900/70 text-red-200',
+    HIGH:     'bg-orange-900/60 text-orange-200',
+    MEDIUM:   'bg-amber-900/50 text-amber-200',
+    LOW:      'bg-slate-700 text-slate-200',
+    INFO:     'bg-slate-800 text-slate-400',
+};
+const _GUARD_KLASS_STYLE = {
+    POSTURE:  'text-slate-400', EXPOSURE: 'text-orange-300', ATTACK: 'text-red-300',
+};
+function _guardFillIfaces(selId) {
+    const sel = document.getElementById(selId);
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).filter(i => i.type !== 'wifi').forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+function _guardDetailStr(det) {
+    if (!det || typeof det !== 'object') return '';
+    const parts = [];
+    for (const k of Object.keys(det)) parts.push(k + '=' + det[k]);
+    return parts.join(' · ');
+}
+function _renderGuardResult(d) {
+    const [cls, label] = _GUARD_VERDICT_STYLE[d.verdict] || _GUARD_VERDICT_STYLE.unknown;
+    const cc = d.class_counts || {};
+    let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+    html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.packet_count} pkts · ${d.finding_count} finding(s)`;
+    const bits = [];
+    if (cc.POSTURE) bits.push(cc.POSTURE + ' posture');
+    if (cc.EXPOSURE) bits.push(cc.EXPOSURE + ' exposure');
+    if (cc.ATTACK) bits.push(cc.ATTACK + ' attack');
+    if (bits.length) html += ' · ' + bits.join(', ');
+    html += '</p>';
+    if ((d.cves || []).length) {
+        html += '<p class="text-xs text-gray-400 mb-2">CVEs in scope: <span class="font-mono text-amber-300">' + d.cves.map(escapeHtml).join(', ') + '</span></p>';
+    }
+    const fs = d.findings || [];
+    if (fs.length) {
+        html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+            '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Finding</th><th class="px-2 py-1">Class</th><th class="px-2 py-1">Source</th><th class="px-2 py-1">CVEs</th><th class="px-2 py-1">Detail</th></tr>' +
+            '</thead><tbody>' +
+            fs.map(f => {
+                const sev = _GUARD_SEV_STYLE[f.severity] || 'bg-slate-800 text-slate-400';
+                const kl = _GUARD_KLASS_STYLE[f.klass] || 'text-gray-400';
+                return '<tr class="border-t border-slate-800">' +
+                    `<td class="px-2 py-1"><span class="px-1.5 py-0.5 rounded ${sev} text-[10px] font-semibold">${escapeHtml(f.severity)}</span></td>` +
+                    `<td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.code)}</td>` +
+                    `<td class="px-2 py-1">${escapeHtml(f.name)}</td>` +
+                    `<td class="px-2 py-1 ${kl}">${escapeHtml(f.klass)}</td>` +
+                    `<td class="px-2 py-1 font-mono">${escapeHtml(f.src || '—')}</td>` +
+                    `<td class="px-2 py-1 font-mono text-amber-300/80">${escapeHtml((f.cves || []).join(', ') || '—')}</td>` +
+                    `<td class="px-2 py-1 text-gray-500">${escapeHtml(_guardDetailStr(f.detail))}</td>` +
+                    '</tr>';
+            }).join('') +
+            '</tbody></table>';
+    } else if (d.verdict === 'clean') {
+        html += '<p class="text-xs text-gray-500">Segment quiet — no vendor management or attack traffic seen in the window.</p>';
+    }
+    return html;
+}
+async function _runGuard(module, label, btn) {
+    const out = document.getElementById(module + '-guard-results');
+    if (!out) return;
+    const ifaceSel = document.getElementById(module + '-guard-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById(module + '-guard-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Capturing…');
+    out.classList.remove('hidden');
+    out.innerHTML = `<p class="text-sm text-gray-400">Passively capturing the ${escapeHtml(label)} attack surface…</p>`;
+    try {
+        _guardFillIfaces(module + '-guard-iface');
+        const roleEl = document.getElementById(module + '-guard-role');
+        const roleQs = (roleEl && roleEl.value) ? '&role=' + encodeURIComponent(roleEl.value) : '';
+        const cardsEl = document.getElementById(module + '-guard-cards');
+        const forgetEl = document.getElementById(module + '-guard-forget');
+        const cardsQs = (cardsEl && cardsEl.dataset.dirty === '1') ? '&cards=' + encodeURIComponent(cardsEl.value) : '';
+        const forgetQs = (forgetEl && forgetEl.checked) ? '&forget=1' : '';
+        const portEl = document.getElementById(module + '-guard-port');
+        const portQs = (portEl && portEl.value) ? '&port=' + encodeURIComponent(portEl.value) : '';
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '') + roleQs + cardsQs + forgetQs + portQs;
+        const d = await fetchAPI('/api/net/' + module + '-guard' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, run' + label + 'Guard)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        out.innerHTML = _renderGuardResult(d);
+        if (d.cards) {
+            if (cardsEl) { cardsEl.value = d.cards.declared || ''; cardsEl.dataset.dirty = '0'; }
+            if (forgetEl) forgetEl.checked = false;
+            const learned = d.cards.learned || [];
+            const fresh = d.cards.new || [];
+            out.insertAdjacentHTML('beforeend', '<p class="text-xs text-gray-400 mt-2 break-words">Known cards: '
+                + (d.cards.declared ? 'declared <span class="font-mono">' + escapeHtml(d.cards.declared) + '</span> · ' : 'none declared · ')
+                + learned.length + ' learned from SNMP' + (learned.length ? ' (<span class="font-mono">' + escapeHtml(learned.slice(0, 12).join(', ')) + (learned.length > 12 ? ', …' : '') + '</span>)' : '')
+                + (fresh.length ? ' · <span class="text-emerald-300">new: ' + escapeHtml(fresh.join(', ')) + '</span>' : '') + '</p>');
+        }
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+function runCiscoGuard() { _runGuard('cisco', 'Cisco', (typeof event !== 'undefined' && event && event.target) ? event.target : null); }
+function runJuniperGuard() { _runGuard('juniper', 'Juniper', (typeof event !== 'undefined' && event && event.target) ? event.target : null); }
+function runAristaGuard() { _runGuard('arista', 'Arista', (typeof event !== 'undefined' && event && event.target) ? event.target : null); }
+function runComwareGuard() { _runGuard('comware', 'Comware', (typeof event !== 'undefined' && event && event.target) ? event.target : null); }
+function runMikroTikGuard() { _runGuard('mikrotik', 'MikroTik', (typeof event !== 'undefined' && event && event.target) ? event.target : null); }
+function runArubaGuard() { _runGuard('aruba', 'Aruba', (typeof event !== 'undefined' && event && event.target) ? event.target : null); }
+function runAPCGuard() { _runGuard('apc', 'APC', (typeof event !== 'undefined' && event && event.target) ? event.target : null); }
+function runLiebertGuard() { _runGuard('liebert', 'Liebert', (typeof event !== 'undefined' && event && event.target) ? event.target : null); }
+// --- Dell Guard daemon control (standalone systemd sensor; enable/disable switch) ---
+function _dellGuardRender(d) {
+    if (!d) return '<span class="text-red-400">No status returned.</span>';
+    if (d.success === false && d.error) return '<span class="text-red-400">Error: ' + escapeHtml(d.error) + '</span>';
+    const pills = {
+        'enforcing':     ['bg-emerald-950/50 border-emerald-800 text-emerald-300', '● Enforcing'],
+        'learning':      ['bg-amber-950/50 border-amber-800 text-amber-300', '◐ Learning baseline'],
+        'installed':     ['bg-slate-800 border-slate-700 text-slate-300', '○ Installed · idle'],
+        'not-installed': ['bg-slate-800 border-slate-700 text-slate-400', '○ Not installed'],
+    };
+    const p = pills[d.state] || ['bg-slate-800 border-slate-700 text-slate-400', escapeHtml(d.state || 'unknown')];
+    const bits = [];
+    if (d.active_interface) bits.push('iface <span class="font-mono">' + escapeHtml(d.active_interface) + '</span>');
+    bits.push('config ' + (d.config_present ? 'present' : '<span class="text-amber-300">missing — LLDP-only attribution</span>'));
+    if (d.baseline_present) {
+        const h = (d.baseline_age_seconds != null) ? Math.floor(d.baseline_age_seconds / 3600) : null;
+        bits.push('baseline ' + (h != null ? h + 'h old' : 'present') + ((h != null && h < 24) ? ' <span class="text-amber-300">(thin, &lt;24h)</span>' : ''));
+    } else {
+        bits.push('<span class="text-amber-300">no baseline yet</span>');
+    }
+    let html = '<span class="inline-block px-2 py-0.5 rounded border text-xs ' + p[0] + '">' + p[1] + '</span> '
+         + '<span class="text-gray-400">' + bits.join(' · ') + '</span>';
+    if (d.message) html += '<div class="text-emerald-300 text-xs mt-1">✓ ' + escapeHtml(d.message) + '</div>';
+    return html;
+}
+async function dellGuardRefresh(btn) {
+    const out = document.getElementById('dell-guard-status');
+    _guardFillIfaces('dell-guard-iface');
+    if (out) out.innerHTML = '<span class="text-gray-500">Checking…</span>';
+    try {
+        const d = await fetchAPI('/api/net/dell-guard');
+        if (out) out.innerHTML = _dellGuardRender(d);
+    } catch (e) {
+        if (out) out.innerHTML = '<span class="text-red-400">Error: ' + escapeHtml(e.message) + '</span>';
+    }
+}
+async function dellGuardAction(action, btn) {
+    const out = document.getElementById('dell-guard-status');
+    const sel = document.getElementById('dell-guard-iface');
+    const iface = sel && sel.value ? sel.value : '';
+    if (!iface) { if (out) out.innerHTML = '<span class="text-amber-300">Select an interface first.</span>'; return; }
+    const labels = { baseline: 'Starting 24h baseline…', enforce: 'Enabling enforcement…', disable: 'Disabling…' };
+    _ndBusy(btn, true, labels[action] || 'Working…');
+    if (out) out.innerHTML = '<span class="text-gray-500">' + escapeHtml(labels[action] || 'Working…') + '</span>';
+    try {
+        const d = await postAPI('/api/net/dell-guard', { action: action, interface: iface });
+        if (out) out.innerHTML = _dellGuardRender(d);
+    } catch (e) {
+        if (out) out.innerHTML = '<span class="text-red-400">Error: ' + escapeHtml(e.message) + '</span>';
+    } finally {
+        _ndBusy(btn, false);
     }
 }
 
@@ -7414,7 +9440,7 @@ async function runIcmpWatch() {
         const [cls, label] = _ICMP_VERDICT_STYLE[d.verdict] || _ICMP_VERDICT_STYLE.unknown;
         const c = d.counts || {};
         let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
-        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.icmp_count} pkts (${d.rate}/s) · redirect ${c.redirect || 0} · echo ${c.echo || 0} · IRDP ${c.irdp || 0} · recon ${c.recon || 0}${d.learned ? ' · <span class="text-gray-400">gateway baseline learned now</span>' : ''}</p>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.icmp_count} pkts (${d.rate}/s) · redirect ${c.redirect || 0} · echo ${c.echo || 0} · IRDP ${c.irdp || 0} · recon ${c.recon || 0}${c.arp ? ' · ARP ' + c.arp : ''}${d.learned ? ' · <span class="text-gray-400">gateway baseline learned now</span>' : ''}</p>`;
         if ((d.gateways || []).length) {
             html += `<p class="text-xs text-gray-500 mb-2">Trusted gateway(s): <span class="font-mono text-gray-400">${escapeHtml(d.gateways.join(', '))}</span></p>`;
         }
@@ -7434,6 +9460,29 @@ async function runIcmpWatch() {
                         <td class="px-2 py-1">${mal ? '<span class="text-red-300">MITM</span>' : '<span class="text-gray-500">benign</span>'}</td>
                     </tr>`;
                 }).join('') + '</tbody></table>';
+        }
+        const rfindings = d.redirect_findings || [];
+        if (rfindings.length) {
+            const sevChip = {
+                CRITICAL: 'bg-red-950/60 border-red-800 text-red-300',
+                HIGH: 'bg-orange-950/50 border-orange-800 text-orange-300',
+                MEDIUM: 'bg-amber-950/40 border-amber-800 text-amber-300',
+                LOW: 'bg-slate-800 border-slate-700 text-gray-400',
+                INFO: 'bg-slate-800 border-slate-700 text-gray-500',
+            };
+            // The RFC 1122 / gateway-MAC / ARP-poison detail behind the verdict,
+            // most-severe first.
+            const rank = { INFO: 0, LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 };
+            const shown = rfindings.slice().sort((a, b) => (rank[b.severity] || 0) - (rank[a.severity] || 0));
+            html += '<p class="text-xs uppercase text-gray-400 mt-3 mb-1">Redirect analysis (' + rfindings.length + ')</p>' +
+                '<ul class="space-y-1">' + shown.map(f => {
+                    const chip = sevChip[f.severity] || sevChip.INFO;
+                    return '<li class="text-xs text-gray-300 flex flex-wrap items-baseline gap-x-2">' +
+                        '<span class="inline-block px-1.5 py-0.5 rounded border font-mono ' + chip + '">' + escapeHtml(f.severity) + '</span>' +
+                        '<span class="font-mono text-gray-200">' + escapeHtml(f.check) + '</span>' +
+                        '<span class="text-gray-400">' + escapeHtml(f.message || '') + '</span>' +
+                        '</li>';
+                }).join('') + '</ul>';
         }
         if (d.reasons && d.reasons.length) {
             html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
@@ -7467,6 +9516,7 @@ const _SNMP_VERDICT_STYLE = {
     amplification:   ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ SNMP GetBulk amplification — reflection-DDoS vector'],
     cleartext:       ['bg-red-950/60 border-red-800 text-red-300', '🛑 SNMP v1/v2c — community string exposed in cleartext'],
     'write-exposed': ['bg-red-950/60 border-red-800 text-red-300', '🛑 SNMP write community on the wire — device takeover risk'],
+    exploit:         ['bg-red-950/60 border-red-800 text-red-300', '🛑 SNMP CVE signature on the wire — USM HMAC bypass / Cisco RCE / snmptrapd overflow / VACM malformed-OID'],
     unknown:         ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
 function _snmpFillIfaces() {
@@ -7568,8 +9618,83 @@ async function snmpTrustBaseline() {
     }
 }
 
+// ---- RADIUS Watch (passive RADIUS/EAP — BlastRADIUS + FreeRADIUS CVEs) ------
+const _RADIUS_VERDICT_STYLE = {
+    clean:       ['bg-green-950/40 border-green-900 text-green-400', '✓ No RADIUS posture or attack findings on the segment'],
+    'weak-auth': ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ RADIUS exposure — cleartext / PAP / CHAP / weak-EAP / missing Message-Authenticator (the BlastRADIUS enabler)'],
+    attack:      ['bg-red-950/60 border-red-800 text-red-300', '🛑 RADIUS attack shape — forgery / Proxy-State injection / malformed-CVE on the wire'],
+    unknown:     ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _RADIUS_SEV_COLOR = { CRITICAL: 'text-red-300', HIGH: 'text-red-300', MEDIUM: 'text-amber-300', LOW: 'text-gray-300', INFO: 'text-gray-500' };
+function _radiusFillIfaces() {
+    const sel = document.getElementById('radius-iface');
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+async function runRadiusWatch() {
+    const out = document.getElementById('radius-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('radius-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('radius-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing RADIUS / EAP on the segment…</p>';
+    try {
+        _radiusFillIfaces();
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/radius-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool === 'tcpdump') extra = ' <button onclick="installNetTool(\'tcpdump\', this, runRadiusWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _RADIUS_VERDICT_STYLE[d.verdict] || _RADIUS_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.packet_count || 0} RADIUS pkt(s)${d.radsec_segments ? ' · ' + d.radsec_segments + ' RadSec seg' : ''}${d.unknown_code ? ' · ' + d.unknown_code + ' unknown-code' : ''}</p>`;
+        if ((d.findings || []).length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Code</th><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Class</th><th class="px-2 py-1">Finding</th></tr></thead><tbody>';
+            d.findings.forEach(f => {
+                const sev = _RADIUS_SEV_COLOR[f.severity] || 'text-gray-400';
+                const cve = (f.cves || []).length ? ` <span class="text-slate-500">(${f.cves.map(escapeHtml).join(', ')})</span>` : '';
+                const kl = f.class === 'attack' ? 'text-red-300' : 'text-amber-300';
+                html += `<tr class="border-t border-slate-800 align-top">
+                    <td class="px-2 py-1 font-mono ${sev}">${escapeHtml(f.code)}</td>
+                    <td class="px-2 py-1 ${sev}">${escapeHtml(f.severity)}</td>
+                    <td class="px-2 py-1 ${kl}">${escapeHtml(f.class || '')}</td>
+                    <td class="px-2 py-1">${escapeHtml(f.name || '')}${cve}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+        } else if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
 // ---- Cert Watch (active certificate & TLS hygiene checker) ------------------
 const _CERT_VERDICT_STYLE = {
+    'cert-cve':         ['bg-red-950/60 border-red-800 text-red-300', '🛑 certificate CVE (CurveBall / non-prime field / ROCA)'],
     valid:              ['bg-green-950/40 border-green-900 text-green-400', '✓ valid'],
     clean:              ['bg-green-950/40 border-green-900 text-green-400', '✓ All certificates valid, trusted and in-date'],
     expiring:           ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ expiring soon'],
@@ -7785,8 +9910,10 @@ const _STP_VERDICT_STYLE = {
     'bpdu-flood':       ['bg-red-950/60 border-red-800 text-red-300', '🛑 BPDU flood — spanning-tree reconvergence storm (DoS)'],
     'rogue-bridge':     ['bg-red-950/60 border-red-800 text-red-300', '🛑 New STP bridge on the segment — unexpected switch / spoofed bridge'],
     'root-hijack':      ['bg-red-950/60 border-red-800 text-red-300', '🛑 ROOT HIJACK — a superior BPDU is taking over the root bridge (L2 MITM)'],
+    anomaly:            ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ BPDU anomaly — field-sanity / MST / per-MSTI violation (see findings)'],
     unknown:            ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
+const _STP_SEV_STYLE = { critical: 'text-red-300', high: 'text-red-300', medium: 'text-amber-300', low: 'text-sky-300', info: 'text-gray-400' };
 function _stpFillIfaces() {
     const sel = document.getElementById('stp-iface');
     if (!sel || sel.dataset.filled === '1') return Promise.resolve();
@@ -7824,49 +9951,36 @@ async function runStpWatch() {
             return;
         }
         const [cls, label] = _STP_VERDICT_STYLE[d.verdict] || _STP_VERDICT_STYLE.unknown;
+        const sm = d.summary || {};
         let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
-        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.packet_count} BPDUs, ${d.bridge_count} bridge(s), ${d.instance_count} instance(s) @ ${d.rate}/s · ${d.tcn_count} TCN${d.learned ? ' · <span class="text-gray-400">baseline learned now</span>' : ''}</p>`;
-        if ((d.instances || []).length) {
-            html += '<p class="text-xs uppercase text-gray-400 mt-2 mb-1">Root bridge per instance</p>' +
-                '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
-                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Proto</th><th class="px-2 py-1">VLAN/inst</th><th class="px-2 py-1">Advertised root</th><th class="px-2 py-1">By</th><th class="px-2 py-1">Status</th></tr>' +
-                '</thead><tbody>' +
-                d.instances.map(i => {
-                    const bad = (i.status === 'hijacked' || i.status === 'new');
-                    const st = bad ? `<span class="text-red-300">${escapeHtml(i.status)}</span>` : `<span class="text-gray-500">${escapeHtml(i.status)}</span>`;
-                    return `<tr class="border-t border-slate-800">
-                        <td class="px-2 py-1 text-gray-400">${escapeHtml(i.proto)}</td>
-                        <td class="px-2 py-1 font-mono">${i.vlan}</td>
-                        <td class="px-2 py-1 font-mono ${bad ? 'text-red-300' : ''}">${i.root_prio == null ? '—' : i.root_prio}.${escapeHtml(i.root_mac || '?')}</td>
-                        <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(i.advertised_by || '—')}</td>
-                        <td class="px-2 py-1">${st}</td>
-                    </tr>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${sm.bpdus || 0} BPDUs, ${sm.segments || 0} segment(s), ${sm.msti || 0} MSTI · ${sm.findings || 0} finding(s)${d.learned ? ' · <span class="text-gray-400">baseline learned now</span>' : ''}</p>`;
+        // v2 detection findings (STP-001..031), worst severity first.
+        if ((d.findings || []).length) {
+            html += '<p class="text-xs uppercase text-amber-400 mt-2 mb-1">Findings</p>' +
+                '<ul class="text-xs text-gray-300 list-disc pl-5">' +
+                d.findings.map(f => {
+                    const sev = (f.severity || 'info');
+                    const scls = _STP_SEV_STYLE[sev] || 'text-gray-400';
+                    const vlan = (f.vlan === null || f.vlan === undefined) ? '' : ` <span class="text-gray-500">vlan=${escapeHtml(String(f.vlan))}</span>`;
+                    return `<li><span class="font-mono ${scls}">[${escapeHtml(f.code)}]</span> <span class="${scls}">${escapeHtml(sev.toUpperCase())}</span> ${escapeHtml(f.summary || f.name || '')}${vlan}${f.count > 1 ? ` <span class="text-gray-500">(x${f.count})</span>` : ''}</li>`;
                 }).join('') +
+                '</ul>';
+        }
+        // Spanning-tree segments observed this capture (compact health view).
+        if ((d.segments || []).length) {
+            html += '<p class="text-xs uppercase text-gray-400 mt-3 mb-1">Segments observed (' + d.segments.length + ')</p>' +
+                '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">VLAN/inst</th><th class="px-2 py-1">Root</th><th class="px-2 py-1">Bridges</th><th class="px-2 py-1">BPDUs</th><th class="px-2 py-1">Encap</th></tr>' +
+                '</thead><tbody>' +
+                d.segments.map(s => `<tr class="border-t border-slate-800">
+                        <td class="px-2 py-1 font-mono">${escapeHtml(String(s.vlan))}</td>
+                        <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(s.root || '—')}</td>
+                        <td class="px-2 py-1">${s.bridges}</td>
+                        <td class="px-2 py-1">${s.bpdus}</td>
+                        <td class="px-2 py-1 text-gray-400">${escapeHtml(s.encap || '—')}</td>
+                    </tr>`).join('') +
                 '</tbody></table>';
         }
-        if ((d.bridges || []).length) {
-            html += '<p class="text-xs uppercase text-gray-400 mt-2 mb-1">Bridges seen (' + d.bridges.length + ')</p>' +
-                '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
-                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Bridge MAC</th><th class="px-2 py-1">Proto</th><th class="px-2 py-1">Role(s)</th><th class="px-2 py-1">Status</th></tr>' +
-                '</thead><tbody>' +
-                d.bridges.map(b => {
-                    const badge = b.baseline ? '<span class="text-green-400">✓ known</span>' : '<span class="text-amber-300">? new</span>';
-                    return `<tr class="border-t border-slate-800">
-                        <td class="px-2 py-1 font-mono ${b.baseline ? '' : 'text-amber-300'}">${escapeHtml(b.mac)}</td>
-                        <td class="px-2 py-1 text-gray-400">${escapeHtml(b.proto)}</td>
-                        <td class="px-2 py-1 text-gray-400">${escapeHtml((b.roles || []).join(', ') || '—')}</td>
-                        <td class="px-2 py-1">${badge}</td>
-                    </tr>`;
-                }).join('') +
-                '</tbody></table>';
-        }
-        if (d.reasons && d.reasons.length) {
-            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
-                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
-        }
-        (d.advisories || []).forEach(a => {
-            html += `<div class="mt-2 px-3 py-2 rounded border text-xs text-gray-400 border-slate-700 bg-slate-900/40">${escapeHtml(a)}</div>`;
-        });
         out.innerHTML = html;
     } catch (e) {
         out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
@@ -7881,6 +9995,77 @@ async function stpTrustBaseline() {
         await runStpWatch();
     } catch (e) {
         addConsoleMessage('Failed to reset STP baseline: ' + e.message, 'error');
+    }
+}
+
+// ---- MRP Watch (MVRP / MMRP / GVRP / GMRP registration protocols) ----
+const _MRP_VERDICT_STYLE = {
+    clean:      ['bg-green-950/40 border-green-900 text-green-400', '✓ No MVRP / MMRP / GVRP / GMRP registration traffic observed'],
+    observed:   ['bg-sky-950/40 border-sky-900 text-sky-300', 'ℹ Registration protocol(s) in use — inventory only, nothing abusive'],
+    suspicious: ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Registration burst / structural anomaly — possible VLAN-hopping setup'],
+    attack:     ['bg-red-950/60 border-red-800 text-red-300', '🛑 LeaveAll flood — forced network-wide re-registration (the standards-based VTP bomb)'],
+    unknown:    ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _MRP_SEV_STYLE = { high: 'text-red-300', medium: 'text-amber-300', low: 'text-sky-300', info: 'text-gray-400' };
+function _mrpFillIfaces() {
+    const sel = document.getElementById('mrp-iface');
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+async function runMrpWatch() {
+    const out = document.getElementById('mrp-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const iface = (document.getElementById('mrp-iface') || {}).value || '';
+    const secs = (document.getElementById('mrp-secs') || {}).value || '20';
+    const kv = ((document.getElementById('mrp-known-vlans') || {}).value || '').trim();
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing MVRP / MMRP / GVRP / GMRP…</p>';
+    try {
+        _mrpFillIfaces();
+        let qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        if (kv) qs += '&known_vlans=' + encodeURIComponent(kv);
+        const d = await fetchAPI('/api/net/mrp-watch' + qs);
+        if (!d || d.success === false) {
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runMrpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml((d && d.error) || 'failed') + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _MRP_VERDICT_STYLE[d.verdict] || _MRP_VERDICT_STYLE.unknown;
+        const sm = d.summary || {};
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${sm.frames || 0} frame(s) · ${sm.findings || 0} finding(s)${(sm.protocols || []).length ? ' · ' + escapeHtml((sm.protocols || []).join(', ')) : ''}</p>`;
+        const fnd = d.findings || [];
+        const abuse = fnd.filter(f => f.severity !== 'info');
+        const inv = fnd.filter(f => f.severity === 'info');
+        if (abuse.length) {
+            html += '<p class="text-xs uppercase text-red-400 mt-2 mb-1">Findings</p><ul class="text-xs text-gray-300 list-disc pl-5">' +
+                abuse.map(f => {
+                    const scls = _MRP_SEV_STYLE[f.severity] || 'text-gray-300';
+                    return `<li><span class="font-mono ${scls}">[${escapeHtml(f.code)}]</span> <span class="text-gray-500">${escapeHtml(f.proto)}</span> ${escapeHtml(f.title)}${f.count > 1 ? ` <span class="text-gray-500">(x${f.count})</span>` : ''}${f.src ? ` <span class="text-gray-500">src ${escapeHtml(f.src)}</span>` : ''}</li>`;
+                }).join('') + '</ul>';
+        }
+        if (inv.length) {
+            html += '<p class="text-xs uppercase text-sky-400 mt-3 mb-1">In use (inventory)</p><ul class="text-xs text-gray-400 list-disc pl-5">' +
+                inv.map(f => `<li><span class="font-mono text-sky-300">[${escapeHtml(f.code)}]</span> ${escapeHtml(f.title)}${f.src ? ` <span class="text-gray-500">src ${escapeHtml(f.src)}</span>` : ''}</li>`).join('') + '</ul>';
+        }
+        if (!fnd.length) html += '<p class="text-xs text-gray-500 mt-2">Capture ran — no registration traffic observed in the window.</p>';
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
     }
 }
 
@@ -7938,7 +10123,7 @@ async function runRelayWatch() {
                 '<tr class="text-left text-gray-500"><th class="px-2 py-1">Technique</th><th class="px-2 py-1">Interface</th><th class="px-2 py-1">Attacker</th><th class="px-2 py-1">Victim</th></tr>' +
                 '</thead><tbody>' +
                 d.coercion.map(c => `<tr class="border-t border-slate-800">
-                    <td class="px-2 py-1 text-red-300">${escapeHtml(c.technique)}</td>
+                    <td class="px-2 py-1 text-red-300">${escapeHtml(c.technique)}${c.cve ? `<div class="font-mono text-[11px] text-red-400/80">${escapeHtml(c.cve)}${c.call ? ' · ' + escapeHtml(c.call) : ''}</div>` : ''}</td>
                     <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(c.interface)}</td>
                     <td class="px-2 py-1 font-mono">${escapeHtml(c.attacker)}</td>
                     <td class="px-2 py-1 font-mono">${escapeHtml(c.victim)}</td>
@@ -7978,23 +10163,1323 @@ async function relayTrustBaseline() {
     }
 }
 
+// ---- LACP Watch (link-aggregation integrity / LAG hijack) ------------------
+const _LACP_VERDICT_STYLE = {
+    clean:         ['bg-green-950/40 border-green-900 text-green-400', '✓ LAG members clean — no delivery, identity, state-machine or Marker anomaly'],
+    instability:   ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Aggregation instability — sync/timeout flapping, distributing loss or malformed PDUs'],
+    takeover:      ['bg-red-950/60 border-red-800 text-red-300', '🛑 Takeover tell — aggregation-selection identity manipulation or an LACPDU off its link'],
+    'lag-hijack':  ['bg-red-950/60 border-red-800 text-red-300', '🛑 LAG HIJACK — identity manipulation correlated with member disruption in one window'],
+    unknown:       ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _LACP_SEV_STYLE = {
+    critical: 'text-red-300', high: 'text-red-300', medium: 'text-amber-300',
+    low: 'text-gray-400', info: 'text-gray-500',
+};
+function _fillIfaceSel(id) {
+    const sel = document.getElementById(id);
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+async function runLacpWatch() {
+    const out = document.getElementById('lacp-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('lacp-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('lacp-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing slow-protocol (LACP/Marker) frames…</p>';
+    try {
+        _fillIfaceSel('lacp-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/lacp-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runLacpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _LACP_VERDICT_STYLE[d.verdict] || _LACP_VERDICT_STYLE.unknown;
+        const st = d.stats || {};
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · members: ${d.members || 0}, LAGs: ${d.lags || 0} · LACPDUs: ${st.lacpdus || 0}, Markers: ${st.markers || 0}${st.resyncs ? ', resyncs: ' + st.resyncs : ''}</p>`;
+        const findings = (d.findings || []).filter(f => ['critical', 'high', 'medium'].includes(f.severity));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Member / source</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_LACP_SEV_STYLE[f.severity] || 'text-gray-400'}">${escapeHtml(f.severity)}</td>
+                    <td class="px-2 py-1 font-mono ${_LACP_SEV_STYLE[f.severity] || 'text-gray-300'}">${escapeHtml((f.code || '').replace(/^LACP-/, ''))}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.session || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- RPC / NetLogon Watch (Zerologon / DCSync / WinRM posture) --------------
+const _RPC_VERDICT_STYLE = {
+    clean:                 ['bg-green-950/40 border-green-900 text-green-400', '✓ No Zerologon, NetLogon-posture, DCERPC-auth, DCSync/EPM or WinRM exposure'],
+    posture:               ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Weak authentication posture (NTLM/WinRM/EPM) observed on the wire'],
+    exposure:              ['bg-red-950/60 border-red-800 text-red-300', '🛑 High-severity RPC/NetLogon/NTLM exposure observed'],
+    'credential-exposure': ['bg-red-950/60 border-red-800 text-red-300', '🛑 CREDENTIAL EXPOSURE — DPAPI backup-key / NetLogon password / WinRM Basic'],
+    dcsync:                ['bg-red-950/60 border-red-800 text-red-300', '🛑 DCSYNC — DRSUAPI directory-replication pull (credential theft)'],
+    zerologon:             ['bg-red-950/60 border-red-800 text-red-300', '🛑 ZEROLOGON (CVE-2020-1472) — NetLogon zero-cred / unsigned bind / brute-force'],
+    unknown:               ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _RPC_SEV_STYLE = {
+    critical: 'text-red-300', high: 'text-red-300', medium: 'text-amber-300',
+    low: 'text-gray-400', info: 'text-gray-500',
+};
+async function runRpcWatch() {
+    const out = document.getElementById('rpc-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('rpc-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('rpc-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    const dcsEl = document.getElementById('rpc-dcs');
+    const dcs = dcsEl && dcsEl.value ? dcsEl.value.trim() : '';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing DCERPC / NetLogon / WinRM…</p>';
+    try {
+        _fillIfaceSel('rpc-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) +
+            (iface ? '&interface=' + encodeURIComponent(iface) : '') +
+            (dcs ? '&dcs=' + encodeURIComponent(dcs) : '');
+        const d = await fetchAPI('/api/net/rpc-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool === 'tcpdump') extra = ' <button onclick="installNetTool(\'tcpdump\', this, runRpcWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            else if (d && d.missing_tool === 'scapy') extra = ' <span class="ml-2 text-amber-400">Install Scapy in Detector Self-Test.</span>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _RPC_VERDICT_STYLE[d.verdict] || _RPC_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        const deferred = d.coercion_deferred_to_relay || 0;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · findings: ${(d.findings || []).length}${deferred ? ' · <span class="text-gray-400">' + deferred + ' coercion finding' + (deferred === 1 ? '' : 's') + ' deferred to Relay Watch</span>' : ''}</p>`;
+        const findings = (d.findings || []).filter(f => ['critical', 'high', 'medium'].includes(f.severity));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Subject</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_RPC_SEV_STYLE[f.severity] || 'text-gray-400'}">${escapeHtml(f.severity)}</td>
+                    <td class="px-2 py-1 font-mono ${_RPC_SEV_STYLE[f.severity] || 'text-gray-300'}">${escapeHtml((f.code || '').replace(/^RPC-|^WINRM-/, m => m))}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.subject || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- RDP Watch (passive X.224 negotiation posture + abuse) -----------------
+const _RDP_VERDICT_STYLE = {
+    clean:    ['bg-green-950/40 border-green-900 text-green-400', '✓ RDP clean — no Standard-Security, TLS-refusal, NLA-downgrade, Restricted-Admin, cleartext-cookie or brute/spray/scan'],
+    posture:  ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ RDP posture — Restricted Admin, a legacy negotiation path or a horizontal scan seen'],
+    exposure: ['bg-red-950/60 border-red-800 text-red-300', '🛑 RDP exposure — Standard RDP Security selected / TLS refused / NLA not enforced, or brute-force / username-spray'],
+    unknown:  ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _RDP_SEV_STYLE = {
+    high: 'text-red-300', medium: 'text-amber-300', notice: 'text-gray-300', info: 'text-gray-500',
+};
+async function runRdpWatch() {
+    const out = document.getElementById('rdp-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('rdp-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('rdp-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing RDP X.224 negotiation (tcp/3389)…</p>';
+    try {
+        _fillIfaceSel('rdp-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/rdp-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool === 'tcpdump') extra = ' <button onclick="installNetTool(\'tcpdump\', this, runRdpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            else if (d && d.missing_tool === 'scapy') extra = ' <span class="ml-2 text-amber-400">Install Scapy in Detector Self-Test.</span>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _RDP_VERDICT_STYLE[d.verdict] || _RDP_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · findings: ${(d.findings || []).length}</p>`;
+        const findings = (d.findings || []).filter(f => ['high', 'medium', 'notice'].includes(f.severity));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Source</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_RDP_SEV_STYLE[f.severity] || 'text-gray-400'}">${escapeHtml(f.severity)}</td>
+                    <td class="px-2 py-1 font-mono ${_RDP_SEV_STYLE[f.severity] || 'text-gray-300'}">${escapeHtml(f.code || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.src || f.dst || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- BFD Watch (forged teardown / failover manipulation) -------------------
+const _BFD_VERDICT_STYLE = {
+    clean:                    ['bg-green-950/40 border-green-900 text-green-400', '✓ BFD clean — no forged teardown, malformed header, auth downgrade, GTSM or instability'],
+    instability:              ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Session instability — flapping, convergence storm or collapsed detect-time'],
+    exposure:                 ['bg-red-950/60 border-red-800 text-red-300', '🛑 High-severity BFD exposure — no-auth / echo / GTSM / malformed header (CVE-2018-0155)'],
+    'failover-manipulation':  ['bg-red-950/60 border-red-800 text-red-300', '🛑 FAILOVER MANIPULATION — forged teardown / forced AdminDown / illegal state regression inducing reconvergence'],
+    unknown:                  ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _BFD_SEV_STYLE = {
+    critical: 'text-red-300', high: 'text-red-300', medium: 'text-amber-300',
+    low: 'text-gray-400', info: 'text-gray-500',
+};
+async function runBfdWatch() {
+    const out = document.getElementById('bfd-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('bfd-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('bfd-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing BFD (UDP 3784/3785/4784/6784)…</p>';
+    try {
+        _fillIfaceSel('bfd-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/bfd-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runBfdWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _BFD_VERDICT_STYLE[d.verdict] || _BFD_VERDICT_STYLE.unknown;
+        const st = d.stats || {};
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · sessions: ${d.sessions || 0} · BFD packets: ${st.bfd_packets || 0} (control: ${st.control || 0}, echo: ${st.echo || 0})</p>`;
+        const findings = (d.findings || []).filter(f => ['CRITICAL', 'HIGH', 'MEDIUM', 'critical', 'high', 'medium'].includes(f.severity));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Session</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_BFD_SEV_STYLE[(f.severity || '').toLowerCase()] || 'text-gray-400'}">${escapeHtml((f.severity || '').toLowerCase())}</td>
+                    <td class="px-2 py-1 font-mono ${_BFD_SEV_STYLE[(f.severity || '').toLowerCase()] || 'text-gray-300'}">${escapeHtml((f.code || '').replace(/^BFD-/, ''))}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.session || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- PTP Watch (IEEE-1588 / PTPv2 / gPTP timing-plane manipulation) --------
+const _PTP_VERDICT_STYLE = {
+    clean:                 ['bg-green-950/40 border-green-900 text-green-400', '✓ No PTP traffic seen on this segment'],
+    posture:               ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ PTP posture note — no integrity protection, multiple domains, or version downgrade on the timing plane'],
+    'attack-indicator':    ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ PTP attack indicator — a self-contradiction or protocol violation (not, on its own, a confirmed grandmaster takeover)'],
+    exposure:              ['bg-red-950/60 border-red-800 text-red-300', '🛑 High-severity PTP exposure — announce/sync flood, sequence regression or identity conflict'],
+    'time-manipulation':   ['bg-red-950/60 border-red-800 text-red-300', '🛑 TIME MANIPULATION — grandmaster takeover / correctionField or timestamp injection / utcOffset flip / management WRITE / peer-delay denial'],
+    unknown:               ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _PTP_SEV_STYLE = {
+    critical: 'text-red-300', high: 'text-red-300', medium: 'text-amber-300',
+    low: 'text-gray-400', info: 'text-gray-500',
+};
+async function runPtpWatch() {
+    const out = document.getElementById('ptpwatch-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('ptpwatch-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('ptpwatch-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing PTP (Annex F 0x88F7 · Annex D+E UDP 319/320)…</p>';
+    try {
+        _fillIfaceSel('ptpwatch-iface');
+        const profEl = document.getElementById('ptpwatch-profile');
+        const prof = profEl && profEl.value ? profEl.value : 'auto';
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '') + '&profile=' + encodeURIComponent(prof);
+        const d = await fetchAPI('/api/net/ptp-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runPtpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _PTP_VERDICT_STYLE[d.verdict] || _PTP_VERDICT_STYLE.unknown;
+        const transports = (d.transports || []).join(', ') || '—';
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        const profLabel = (d.profile && d.profile !== 'auto') ? ` · profile: ${escapeHtml(d.profile)}` : ' · no profile declared (telecom checks off)';
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · clocks: ${d.clocks || 0} · transports: ${escapeHtml(transports)}${profLabel}</p>`;
+        const findings = (d.findings || []).filter(f => ['critical', 'high', 'medium'].includes((f.severity || '').toLowerCase()));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Title</th><th class="px-2 py-1">Clock</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_PTP_SEV_STYLE[(f.severity || '').toLowerCase()] || 'text-gray-400'}">${escapeHtml((f.severity || '').toLowerCase())}</td>
+                    <td class="px-2 py-1 font-mono ${_PTP_SEV_STYLE[(f.severity || '').toLowerCase()] || 'text-gray-300'}">${escapeHtml((f.code || '').replace(/^PTP-/, ''))}</td>
+                    <td class="px-2 py-1 text-gray-300 whitespace-normal">${escapeHtml(f.title || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.port_identity || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- SMTP Watch (Exim ${...} expansion / SNI / AUTH base64) ----------------
+const _SMTP_VERDICT_STYLE = {
+    clean:              ['bg-green-950/40 border-green-900 text-green-400', '\u2713 No Exim CVE signature or affected banner seen'],
+    observed:           ['bg-green-950/40 border-green-900 text-green-400', '\u2713 SMTP observed \u2014 nothing CVE-relevant'],
+    posture:            ['bg-amber-950/50 border-amber-800 text-amber-300', '\u26a0 Posture \u2014 an Exim banner inside an affected version range (low confidence: distro backports patch without a version bump, so verify this server)'],
+    'attack-indicator': ['bg-red-950/60 border-red-800 text-red-300', '\ud83d\uded1 Attack indicator \u2014 a ${...} expansion attempt, malformed SNI / client-cert DN, or an AUTH 4n+3 base64 token'],
+    'payload-queued':   ['bg-red-950/60 border-red-800 text-red-300', '\ud83d\uded1 PAYLOAD QUEUED \u2014 the server accepted a recipient carrying a ${...} expansion (CVE-2019-10149): it expands at delivery, so treat this host as compromised until checked'],
+    unknown:            ['bg-slate-800 border-slate-700 text-slate-400', '\u2014 Could not determine'],
+};
+async function runSmtpWatch() {
+    const out = document.getElementById('smtpwatch-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('smtpwatch-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('smtpwatch-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening\u2026');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing SMTP (tcp/25 \u00b7 587 \u00b7 465)\u2026</p>';
+    try {
+        _fillIfaceSel('smtpwatch-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/smtp-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runSmtpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _SMTP_VERDICT_STYLE[d.verdict] || _SMTP_VERDICT_STYLE.unknown;
+        const servers = (d.servers || []).join(', ') || '\u2014';
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '\u2014')} \u00b7 ${d.seconds}s \u00b7 tcp/${escapeHtml((d.ports || []).join(','))} \u00b7 servers: ${escapeHtml(servers)}</p>`;
+        const findings = (d.findings || []).filter(f => ['critical', 'high', 'warn', 'notice'].includes((f.severity || '').toLowerCase()));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">CVE</th><th class="px-2 py-1">What</th><th class="px-2 py-1">Server</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_FTP_SEV_STYLE[(f.severity || '').toLowerCase()] || 'text-gray-400'}">${escapeHtml((f.severity || '').toLowerCase())}</td>
+                    <td class="px-2 py-1 font-mono ${_FTP_SEV_STYLE[(f.severity || '').toLowerCase()] || 'text-gray-300'}">${escapeHtml((f.code || '').replace(/^SMTP-/, ''))}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400 whitespace-normal">${escapeHtml(f.cve || '')}</td>
+                    <td class="px-2 py-1 text-gray-300 whitespace-normal">${escapeHtml(f.detail || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.srv_ep || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- FTP Watch (ProFTPD mod_copy / quoted command verb) --------------------
+const _FTP_VERDICT_STYLE = {
+    clean:               ['bg-green-950/40 border-green-900 text-green-400', '\u2713 No mod_copy abuse, quoted command verb or affected ProFTPD banner seen'],
+    posture:             ['bg-amber-950/50 border-amber-800 text-amber-300', '\u26a0 Posture \u2014 a ProFTPD banner inside an affected version range (low confidence: distributions backport fixes, so verify this server)'],
+    exposure:            ['bg-amber-950/50 border-amber-800 text-amber-300', '\u26a0 Exposure \u2014 mod_copy is loaded and advertised (SITE HELP lists CPFR/CPTO)'],
+    'attack-indicator':  ['bg-red-950/60 border-red-800 text-red-300', '\ud83d\uded1 Attack indicator \u2014 a pre-auth or anonymous mod_copy attempt, or a quoted command verb (CVE-2023-51713 input shape)'],
+    'modcopy-exploited': ['bg-red-950/60 border-red-800 text-red-300', '\ud83d\uded1 MOD_COPY EXPLOITED \u2014 the server accepted or completed a copy (CVE-2015-3306 / CVE-2019-12815): treat the destination as attacker-controlled'],
+    unknown:             ['bg-slate-800 border-slate-700 text-slate-400', '\u2014 Could not determine'],
+};
+const _FTP_SEV_STYLE = {
+    critical: 'text-red-300', high: 'text-red-300', warn: 'text-amber-300',
+    notice: 'text-gray-400', info: 'text-gray-500',
+};
+async function runFtpWatch() {
+    const out = document.getElementById('ftpwatch-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('ftpwatch-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('ftpwatch-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    const portsEl = document.getElementById('ftpwatch-ports');
+    const ports = portsEl && portsEl.value ? portsEl.value : '';
+    _ndBusy(btn, true, 'Listening\u2026');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing the FTP control channel\u2026</p>';
+    try {
+        _fillIfaceSel('ftpwatch-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs)
+            + (iface ? '&interface=' + encodeURIComponent(iface) : '')
+            + (ports ? '&ports=' + encodeURIComponent(ports) : '');
+        const d = await fetchAPI('/api/net/ftp-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runFtpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _FTP_VERDICT_STYLE[d.verdict] || _FTP_VERDICT_STYLE.unknown;
+        const servers = (d.servers || []).join(', ') || '\u2014';
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '\u2014')} \u00b7 ${d.seconds}s \u00b7 tcp/${escapeHtml((d.ports || []).join(','))} \u00b7 sessions: ${d.sessions || 0} \u00b7 servers: ${escapeHtml(servers)}</p>`;
+        const findings = (d.findings || []).filter(f => ['critical', 'high', 'warn', 'notice'].includes((f.severity || '').toLowerCase()));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">CVE</th><th class="px-2 py-1">What</th><th class="px-2 py-1">Server</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_FTP_SEV_STYLE[(f.severity || '').toLowerCase()] || 'text-gray-400'}">${escapeHtml((f.severity || '').toLowerCase())}</td>
+                    <td class="px-2 py-1 font-mono ${_FTP_SEV_STYLE[(f.severity || '').toLowerCase()] || 'text-gray-300'}">${escapeHtml((f.code || '').replace(/^FTP-/, ''))}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400 whitespace-normal">${escapeHtml((f.cves || []).join(' '))}</td>
+                    <td class="px-2 py-1 text-gray-300 whitespace-normal">${escapeHtml(f.message || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.server || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- OAM Watch (IEEE 802.3ah Link OAM: loopback blackhole / flag forgery) ----
+const _OAM_VERDICT_STYLE = {
+    'no-traffic': ['bg-slate-800 border-slate-700 text-slate-300', 'ℹ No Link OAM on this port — it is point-to-point and config-gated, normally only on a metro / access handoff link'],
+    clean:        ['bg-green-950/40 border-green-900 text-green-400', '✓ Link OAM seen — well-formed, no loopback, flag forgery, re-peering or MIB read'],
+    observed:     ['bg-sky-950/40 border-sky-900 text-sky-300', 'ℹ The Link OAM peer advertises capabilities that make the abuse primitives reachable (loopback / variable retrieval) — notes, not an attack'],
+    exposure:     ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Exposure — a low-severity OAMPDU defect (e.g. an illegal OAM version)'],
+    suspicious:   ['bg-orange-950/50 border-orange-800 text-orange-300', '⚠ Suspicious — a failure flag (Dying Gasp / Critical Event / Link Fault), a MIB read, event replay or a reserved encoding'],
+    attack:       ['bg-red-950/60 border-red-800 text-red-300', '🛑 LINK OAM ATTACK — loopback blackhole, flapping failure flags, peer substitution, a second speaker, a rate-cap flood or a malformed OAMPDU'],
+    unknown:      ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _OAM_SEV_STYLE = {
+    critical: 'text-red-300', high: 'text-orange-300', medium: 'text-amber-300', low: 'text-yellow-300', info: 'text-sky-300',
+};
+async function runOamWatch() {
+    const out = document.getElementById('oam-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('oam-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('oam-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '30';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing Link OAM (slow protocols 0x8809, subtype 3)…</p>';
+    try {
+        _fillIfaceSel('oam-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/oam-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runOamWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _OAM_VERDICT_STYLE[d.verdict] || _OAM_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.packet_count} OAMPDU(s) · ${(d.peers || []).length} peer(s)</p>`;
+        const findings = d.findings || [];
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">What</th><th class="px-2 py-1">Source MAC</th><th class="px-2 py-1">#</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => {
+                    const sc = _OAM_SEV_STYLE[f.severity] || 'text-gray-400';
+                    return `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${sc}">${escapeHtml(f.severity || '')}</td>
+                    <td class="px-2 py-1 font-mono ${sc}">${escapeHtml(f.code || '')}</td>
+                    <td class="px-2 py-1 text-gray-300 whitespace-normal" style="min-width:16rem">${escapeHtml(f.name || '')} <span class="text-gray-600">${escapeHtml(f.klass || '')}</span><span class="block text-gray-500">${escapeHtml(f.detail || '')}</span></td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.src || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${f.count}</td>
+                </tr>`; }).join('') +
+                '</tbody></table>';
+        }
+        const peers = d.peers || [];
+        if (peers.length) {
+            html += '<div class="text-xs text-gray-500 mt-3 mb-1">OAM peers (session state kept across scans)</div>' +
+                '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Source MAC</th><th class="px-2 py-1">OUI</th><th class="px-2 py-1">Capabilities</th><th class="px-2 py-1">State</th><th class="px-2 py-1">PDUs</th></tr>' +
+                '</thead><tbody>' +
+                peers.slice(0, 20).map(p => {
+                    const st = p.remote_loopback ? '<span class="text-red-300">remote loopback</span>' : (p.operational ? '<span class="text-green-400">operational</span>' : '<span class="text-gray-400">discovery</span>');
+                    return `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 font-mono text-gray-200">${escapeHtml(p.src)}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(p.oui || '—')}</td>
+                    <td class="px-2 py-1 text-amber-300/90">${escapeHtml((p.capabilities || []).join(', ') || '—')}</td>
+                    <td class="px-2 py-1">${st}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${p.pdus}</td>
+                </tr>`; }).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+async function oamReset() {
+    if (!confirm('Forget the learned Link OAM session state (peer identity, flags, event sequence)? Use after a legitimate peer swap.')) return;
+    try {
+        await postAPI('/api/net/oam-reset', {});
+        addConsoleMessage('Link OAM session state cleared', 'info');
+    } catch (e) {
+        addConsoleMessage('Link OAM reset failed: ' + e.message, 'error');
+    }
+}
+// ---- CFM Watch (IEEE 802.1ag CFM / ITU-T Y.1731 service OAM) ----------------
+const _CFM_VERDICT_STYLE = {
+    'no-traffic': ['bg-slate-800 border-slate-700 text-slate-300', 'ℹ No CFM on this port — 802.1ag / Y.1731 service OAM normally only appears on a carrier / metro Ethernet service handoff'],
+    clean:        ['bg-green-950/40 border-green-900 text-green-400', '✓ CFM seen — well-formed, no forgery, protection-switch abuse, linktrace sweep or flood (inventory only)'],
+    observed:     ['bg-sky-950/40 border-sky-900 text-sky-300', 'ℹ Operational CFM events seen (RDI, AIS, CSF, loopback / linktrace) — worth a look, not an attack'],
+    suspicious:   ['bg-orange-950/50 border-orange-800 text-orange-300', '⚠ Suspicious — a manual switch, LCK, an MD-level or MAID anomaly, a reserved encoding, or a load pattern'],
+    attack:       ['bg-red-950/60 border-red-800 text-red-300', '🛑 CFM ATTACK — forged protection switching, a forged AIS / CCM, a moved or duplicate MEP, a linktrace sweep, an LBM flood or a malformed CFM frame'],
+    unknown:      ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+async function runCfmWatch() {
+    const out = document.getElementById('cfm-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('cfm-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('cfm-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '30';
+    const ceilEl = document.getElementById('cfm-ceiling');
+    const ceil = ceilEl && ceilEl.value !== '' ? ceilEl.value : '';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing CFM (EtherType 0x8902, untagged / 802.1Q / QinQ)…</p>';
+    try {
+        _fillIfaceSel('cfm-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '') +
+            (ceil !== '' ? '&md_ceiling=' + encodeURIComponent(ceil) : '');
+        const d = await fetchAPI('/api/net/cfm-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runCfmWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _CFM_VERDICT_STYLE[d.verdict] || _CFM_VERDICT_STYLE.unknown;
+        const inv = d.inventory || {};
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.packet_count} CFM frame(s) · ${(inv.meps || []).length} MEP(s)` +
+            (d.md_ceiling !== null && d.md_ceiling !== undefined ? ` · MD ceiling ${d.md_ceiling}` : '') + '</p>';
+        const findings = (d.findings || []).filter(f => f.klass !== 'P');
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">What</th><th class="px-2 py-1">Source</th><th class="px-2 py-1">#</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => {
+                    const sc = _OAM_SEV_STYLE[f.severity] || 'text-gray-400';
+                    const cves = (f.cves || []).filter(c => !(f.name || '').includes(c));
+                    const cve = cves.length ? ` <span class="text-red-300 font-mono">${escapeHtml(cves.join(', '))}</span>` : '';
+                    const conf = f.confidence === 'low' ? ' <span class="text-gray-500">(low confidence)</span>' : '';
+                    return `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${sc}">${escapeHtml(f.severity || '')}</td>
+                    <td class="px-2 py-1 font-mono ${sc}">${escapeHtml(f.code || '')}</td>
+                    <td class="px-2 py-1 text-gray-300 whitespace-normal" style="min-width:16rem">${escapeHtml(f.name || '')}${cve}${conf} <span class="text-gray-600">${escapeHtml(f.class_name || '')}</span><span class="block text-gray-500">${escapeHtml(f.detail || '')}</span></td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.src || f.context || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${f.count}</td>
+                </tr>`; }).join('') +
+                '</tbody></table>';
+        }
+        const meps = inv.meps || [];
+        if (meps.length) {
+            html += '<div class="text-xs text-gray-500 mt-3 mb-1">Maintenance endpoints (state kept across scans)</div>' +
+                '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Level</th><th class="px-2 py-1">MEP</th><th class="px-2 py-1">MAID</th><th class="px-2 py-1">MAC</th><th class="px-2 py-1">VLAN</th><th class="px-2 py-1">Interval</th></tr>' +
+                '</thead><tbody>' +
+                meps.slice(0, 20).map(m => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 font-mono text-gray-400">${m.md_level}</td>
+                    <td class="px-2 py-1 font-mono text-gray-200">${m.mepid}</td>
+                    <td class="px-2 py-1 text-gray-300">${escapeHtml(m.maid || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(m.mac || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml((m.vlan || []).join('/') || 'untagged')}</td>
+                    <td class="px-2 py-1 text-gray-400">${escapeHtml(m.interval || '')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if ((inv.y1731 || []).length) {
+            html += `<p class="text-xs text-gray-500 mt-2">Y.1731 overlay: ${escapeHtml(inv.y1731.join(', '))}</p>`;
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+async function cfmReset() {
+    if (!confirm('Forget the learned CFM state (MEPs, associations, protection groups)? Use after a legitimate MEP or protection change.')) return;
+    try {
+        await postAPI('/api/net/cfm-reset', {});
+        addConsoleMessage('CFM state cleared', 'info');
+    } catch (e) {
+        addConsoleMessage('CFM reset failed: ' + e.message, 'error');
+    }
+}
+function _cfmRenderRings(d) {
+    const box = document.getElementById('cfm-rings');
+    if (!box) return;
+    const rings = (d && d.rings) || [];
+    if (!rings.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+    box.classList.remove('hidden');
+    box.innerHTML = '<div class="text-gray-500 mb-1">Declared ERPS rings (ring-topology rules armed):</div>' +
+        rings.map(r => {
+            const ok = r.ok !== false;
+            const name = escapeHtml(r.name || '?');
+            const spec = escapeHtml(r.spec || '');
+            const warn = ok ? '' : ` <span class="text-red-400">(invalid: ${escapeHtml(r.error || '')})</span>`;
+            return `<div class="flex items-center gap-2 py-0.5">
+                <span class="font-mono ${ok ? 'text-sky-300' : 'text-red-400'}">${name}</span>
+                <span class="font-mono text-gray-500 flex-1 min-w-0 truncate" title="${spec}">${spec}</span>${warn}
+                <button onclick="cfmRemoveRing('${spec.replace(/'/g, "\\'")}')" class="text-gray-500 hover:text-red-300 whitespace-nowrap" title="Remove this ring">✕</button>
+            </div>`;
+        }).join('');
+}
+async function cfmLoadRings() {
+    try { _cfmRenderRings(await fetchAPI('/api/net/cfm-ring')); } catch (e) { /* non-fatal */ }
+}
+async function cfmDeclareRing() {
+    const el = document.getElementById('cfm-ring-spec');
+    const spec = el && el.value ? el.value.trim() : '';
+    if (!spec) { addConsoleMessage('Enter an ERPS ring spec first (e.g. 100,rpl=…,nodes=…)', 'warn'); return; }
+    try {
+        const d = await postAPI('/api/net/cfm-ring', { action: 'declare', spec });
+        if (d && d.success) { if (el) el.value = ''; addConsoleMessage('ERPS ring declared: ' + (d.name || spec), 'info'); _cfmRenderRings(d); }
+        else { addConsoleMessage('Declare failed: ' + ((d && d.error) || 'invalid ring'), 'error'); }
+    } catch (e) { addConsoleMessage('Declare failed: ' + e.message, 'error'); }
+}
+async function cfmRemoveRing(spec) {
+    try { _cfmRenderRings(await postAPI('/api/net/cfm-ring', { action: 'remove', spec })); }
+    catch (e) { addConsoleMessage('Remove failed: ' + e.message, 'error'); }
+}
+async function cfmClearRings() {
+    if (!confirm('Forget all declared ERPS rings? Ring-topology rules go quiet until you declare one again.')) return;
+    try { _cfmRenderRings(await postAPI('/api/net/cfm-ring', { action: 'clear' })); addConsoleMessage('ERPS rings cleared', 'info'); }
+    catch (e) { addConsoleMessage('Clear failed: ' + e.message, 'error'); }
+}
+function _cfmRenderEvcs(d) {
+    const box = document.getElementById('cfm-evcs');
+    if (!box) return;
+    const evcs = (d && d.evcs) || [];
+    if (!evcs.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+    box.classList.remove('hidden');
+    box.innerHTML = '<div class="text-gray-500 mb-1">Declared E-LMI EVCs (cross-plane rules armed):</div>' +
+        evcs.map(r => {
+            const ok = r.ok !== false;
+            const name = escapeHtml(r.name || '?');
+            const spec = escapeHtml(r.spec || '');
+            const warn = ok ? '' : ` <span class="text-red-400">(invalid: ${escapeHtml(r.error || '')})</span>`;
+            return `<div class="flex items-center gap-2 py-0.5">
+                <span class="font-mono ${ok ? 'text-sky-300' : 'text-red-400'}">${name}</span>
+                <span class="font-mono text-gray-500 flex-1 min-w-0 truncate" title="${spec}">${spec}</span>${warn}
+                <button onclick="cfmRemoveEvc('${spec.replace(/'/g, "\\'")}')" class="text-gray-500 hover:text-red-300 whitespace-nowrap" title="Remove this EVC">✕</button>
+            </div>`;
+        }).join('');
+}
+async function cfmLoadEvcs() {
+    try { _cfmRenderEvcs(await fetchAPI('/api/net/cfm-evc')); } catch (e) { /* non-fatal */ }
+}
+async function cfmDeclareEvc() {
+    const el = document.getElementById('cfm-evc-spec');
+    const spec = el && el.value ? el.value.trim() : '';
+    if (!spec) { addConsoleMessage('Enter an E-LMI EVC spec first (e.g. 7,vlan=500,name=cust-A)', 'warn'); return; }
+    try {
+        const d = await postAPI('/api/net/cfm-evc', { action: 'declare', spec });
+        if (d && d.success) { if (el) el.value = ''; addConsoleMessage('E-LMI EVC declared: ' + (d.name || spec), 'info'); _cfmRenderEvcs(d); }
+        else { addConsoleMessage('Declare failed: ' + ((d && d.error) || 'invalid EVC'), 'error'); }
+    } catch (e) { addConsoleMessage('Declare failed: ' + e.message, 'error'); }
+}
+async function cfmRemoveEvc(spec) {
+    try { _cfmRenderEvcs(await postAPI('/api/net/cfm-evc', { action: 'remove', spec })); }
+    catch (e) { addConsoleMessage('Remove failed: ' + e.message, 'error'); }
+}
+async function cfmClearEvcs() {
+    if (!confirm('Forget all declared E-LMI EVCs? Cross-plane rules go quiet until you declare one again.')) return;
+    try { _cfmRenderEvcs(await postAPI('/api/net/cfm-evc', { action: 'clear' })); addConsoleMessage('E-LMI EVCs cleared', 'info'); }
+    catch (e) { addConsoleMessage('Clear failed: ' + e.message, 'error'); }
+}
+// ---- LLDP Watch (802.1AB malformed-TLV CVE shapes / screening / flood) ------
+const _LLDPW_VERDICT_STYLE = {
+    'no-traffic': ['bg-slate-800 border-slate-700 text-slate-300', 'ℹ No LLDP seen — LLDP is off on this port, or the window was shorter than the ~30 s hello'],
+    clean:        ['bg-green-950/40 border-green-900 text-green-400', '✓ LLDP seen and every LLDPDU was well-formed — no flood, no forged neighbour'],
+    observed:     ['bg-sky-950/40 border-sky-900 text-sky-300', 'ℹ Neighbour advertises software in a vulnerable LLDP-parser family — verify its patch level (a version string is not patch state)'],
+    exposure:     ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Exposure — advertised version below your floor, or an LLDPDU with no End TLV'],
+    suspicious:   ['bg-orange-950/50 border-orange-800 text-orange-300', '⚠ Suspicious — reserved TLV type, duplicated TLV, or non-zero data smuggled after End-of-LLDPDU'],
+    attack:       ['bg-red-950/60 border-red-800 text-red-300', '🛑 LLDP ATTACK SHAPE — a malformed TLV matching an LLDP parser CVE, an LLDP flood, or a forged neighbour'],
+    unknown:      ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _LLDPW_SEV_STYLE = {
+    critical: 'text-red-300', high: 'text-orange-300', medium: 'text-amber-300', low: 'text-yellow-300', notice: 'text-sky-300',
+};
+async function runLldpWatch() {
+    const out = document.getElementById('lldpw-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('lldpw-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('lldpw-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '30';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing LLDP (EtherType 0x88CC — hellos are ~30s apart)…</p>';
+    try {
+        _fillIfaceSel('lldpw-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/lldp-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runLldpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _LLDPW_VERDICT_STYLE[d.verdict] || _LLDPW_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.packet_count} LLDP frame(s), ${(d.neighbours || []).length} neighbour(s) · forged-neighbour check: ${d.enforce ? 'on (' + d.baseline_count + ' trusted)' : 'off — click “Trust current” to enable'}</p>`;
+        const findings = d.findings || [];
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">What</th><th class="px-2 py-1">Source MAC</th><th class="px-2 py-1">#</th><th class="px-2 py-1">CVE</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => {
+                    const sc = _LLDPW_SEV_STYLE[f.severity] || 'text-gray-400';
+                    return `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${sc}">${escapeHtml(f.severity || '')}</td>
+                    <td class="px-2 py-1 font-mono ${sc}">${escapeHtml(f.code || '')}</td>
+                    <td class="px-2 py-1 text-gray-300 whitespace-normal" style="min-width:16rem">${escapeHtml(f.name || '')}<span class="block text-gray-500">${escapeHtml(f.detail || '')}</span></td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.src || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${f.count}</td>
+                    <td class="px-2 py-1 font-mono text-cyan-300 whitespace-normal" style="min-width:8rem">${escapeHtml((f.cves || []).join(' '))}</td>
+                </tr>`; }).join('') +
+                '</tbody></table>';
+        }
+        const nb = d.neighbours || [];
+        if (nb.length) {
+            html += '<div class="text-xs text-gray-500 mt-3 mb-1">Neighbours (directly attached — LLDP is never forwarded)</div>' +
+                '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">System name</th><th class="px-2 py-1">Description</th><th class="px-2 py-1">Port</th><th class="px-2 py-1">Mgmt</th><th class="px-2 py-1">VLAN</th><th class="px-2 py-1">Source MAC</th><th class="px-2 py-1">Trust</th></tr>' +
+                '</thead><tbody>' +
+                nb.slice(0, 40).map(n => {
+                    const badge = n.trusted == null ? '<span class="text-gray-500">—</span>' : (n.trusted ? '<span class="text-green-400">✓ known</span>' : '<span class="text-red-300">? new</span>');
+                    return `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 text-gray-200">${escapeHtml(n.name || n.chassis || '—')}</td>
+                    <td class="px-2 py-1 text-gray-400" title="${escapeHtml(n.desc || '')}">${escapeHtml((n.desc || '—').slice(0, 46))}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(n.port || '—')}</td>
+                    <td class="px-2 py-1 font-mono text-amber-300/90">${escapeHtml((n.mgmt || []).join(', ') || '—')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml((n.vlans || []).join('/') || '—')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-500">${escapeHtml(n.src)}</td>
+                    <td class="px-2 py-1">${badge}</td>
+                </tr>`; }).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+async function lldpwBaseline(action) {
+    if (action === 'reset' && !confirm('Forget the trusted LLDP neighbours? The forged-neighbour check (LLDP-049) turns off until you trust again.')) return;
+    try {
+        const d = await postAPI('/api/net/lldp-baseline', { action: action });
+        if (action === 'trust' && d && !d.enforce) {
+            addConsoleMessage('No LLDP neighbours seen yet — run a scan first, then trust', 'warning');
+            return;
+        }
+        addConsoleMessage(action === 'trust' ? 'LLDP neighbours trusted — an unknown LLDP speaker now raises LLDP-049' : 'LLDP baseline cleared — forged-neighbour check off', 'info');
+    } catch (e) {
+        addConsoleMessage('LLDP baseline update failed: ' + e.message, 'error');
+    }
+}
+// ---- Modbus Watch (Modbus/TCP posture: PLC writes / listen-only / UMAS) ----
+const _MODBUS_VERDICT_STYLE = {
+    clean:       ['bg-green-950/40 border-green-900 text-green-400', '✓ No off-baseline write, listen-only, UMAS, sweep or malformed framing seen'],
+    learning:    ['bg-slate-800 border-slate-700 text-slate-300', 'ℹ Learning — recording which masters talk to each PLC; off-baseline alerts start when the window closes'],
+    exposure:    ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Exposure — device enumeration, a unit-ID sweep or cleartext Modbus where it should not be'],
+    suspicious:  ['bg-orange-950/50 border-orange-800 text-orange-300', '⚠ Suspicious — an unlearned master, UMAS activity, a restart / clear-counters, or malformed framing (libmodbus CVE trigger)'],
+    'plc-abuse': ['bg-red-950/60 border-red-800 text-red-300', '🛑 PLC ABUSE — a write from an unlearned master, Force Listen Only, or the ModiPwn UMAS sequence (CVE-2021-22779)'],
+    unknown:     ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _MODBUS_SEV_STYLE = {
+    high: 'text-red-300', medium: 'text-amber-300', low: 'text-gray-400', info: 'text-gray-500',
+};
+function _modbusLearnLine(d) {
+    if (d.learning_ends == null) return 'baseline: waiting for the first Modbus traffic';
+    const t = new Date(d.learning_ends * 1000);
+    return d.learning
+        ? 'baseline: learning until ' + t.toLocaleString()
+        : 'baseline: armed (learned ' + (d.slaves || 0) + ' slave/unit pair' + ((d.slaves || 0) === 1 ? '' : 's') + ')';
+}
+async function _modbusLoadBaseline() {
+    const el = document.getElementById('modbus-ot');
+    const st = document.getElementById('modbus-baseline');
+    try {
+        const d = await fetchAPI('/api/net/modbus-baseline');
+        if (!d || d.success === false) return;
+        if (el && !el.dataset.touched) el.value = (d.ot_subnets || []).join(', ');
+        if (st) st.textContent = _modbusLearnLine(d) + (d.masters && d.masters.length ? ' · masters: ' + d.masters.slice(0, 8).join(', ') : '');
+    } catch (e) { /* card still works without the status line */ }
+}
+async function modbusBaseline(action) {
+    if (action === 'reset' && !confirm('Forget the learned Modbus masters? The next Modbus traffic starts a new learning window.')) return;
+    try {
+        await postAPI('/api/net/modbus-baseline', { action: action });
+        addConsoleMessage(action === 'arm' ? 'Modbus baseline armed — off-baseline masters alert from now on' : 'Modbus baseline reset — re-learning masters', 'info');
+        await _modbusLoadBaseline();
+    } catch (e) {
+        addConsoleMessage('Modbus baseline update failed: ' + e.message, 'error');
+    }
+}
+async function runModbusWatch() {
+    const out = document.getElementById('modbus-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('modbus-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('modbus-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    const otEl = document.getElementById('modbus-ot');
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing Modbus/TCP (tcp/502)…</p>';
+    try {
+        _fillIfaceSel('modbus-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs)
+            + (iface ? '&interface=' + encodeURIComponent(iface) : '')
+            // Only send the OT list once the user edited it: an empty field before the
+            // saved list has loaded must not wipe the stored subnets.
+            + (otEl && otEl.dataset.touched ? '&ot=' + encodeURIComponent(otEl.value.trim()) : '');
+        const d = await fetchAPI('/api/net/modbus-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runModbusWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _MODBUS_VERDICT_STYLE[d.verdict] || _MODBUS_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · Modbus ADUs: ${d.adus || 0} · ${escapeHtml(_modbusLearnLine(d))}${(d.ot_subnets || []).length ? ' · OT: ' + escapeHtml(d.ot_subnets.join(', ')) : ''}</p>`;
+        const findings = d.findings || [];
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">What</th><th class="px-2 py-1">Master → PLC</th><th class="px-2 py-1">Unit</th><th class="px-2 py-1">#</th><th class="px-2 py-1">CVE</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => {
+                    const sc = _MODBUS_SEV_STYLE[f.severity] || 'text-gray-400';
+                    return `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${sc}">${escapeHtml(f.severity || '')}</td>
+                    <td class="px-2 py-1 font-mono ${sc}">${escapeHtml(f.code || '')}</td>
+                    <td class="px-2 py-1 text-gray-300 whitespace-normal" style="min-width:14rem">${escapeHtml(f.name || '')}<span class="block text-gray-500">${escapeHtml(f.detail || '')}</span></td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.af)} ${escapeHtml(f.master)} → ${escapeHtml(f.slave)}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${f.unit}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${f.count}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400 whitespace-normal" style="min-width:8rem">${escapeHtml((f.cves || []).join(' '))}</td>
+                </tr>`; }).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+        _modbusLoadBaseline();
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- LoRaWAN gateway backhaul (Semtech GWMP over udp/1700; part of Modbus & LoRaWAN Watch) ----
+// A separate scan from Modbus: no learning window, no baseline, no arming timer.
+const _LORAWAN_VERDICT_STYLE = {
+    clean:        ['bg-green-950/40 border-green-900 text-green-400', '✓ No LoRaWAN gateway backhaul seen on udp/1700'],
+    backhaul:     ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Cleartext LoRaWAN backhaul present — gateway census + fingerprint, recoverable PHYPayloads, or a gateway location leaking in the clear'],
+    suspicious:   ['bg-orange-950/50 border-orange-800 text-orange-300', '⚠ Suspicious — a JoinRequest DevNonce replay (join replay or a non-compliant device)'],
+    'lora-abuse': ['bg-red-950/60 border-red-800 text-red-300', '🛑 LoRaWAN ABUSE — gateway impersonation (one EUI, two source addresses), a downlink injected from a non-server address, or an uplink frame-counter reset'],
+    unknown:      ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+async function runLorawanWatch() {
+    const out = document.getElementById('lorawan-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('lorawan-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('lorawan-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing LoRaWAN backhaul (Semtech GWMP, udp/1700)…</p>';
+    try {
+        _fillIfaceSel('lorawan-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs)
+            + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/lorawan-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runLorawanWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _LORAWAN_VERDICT_STYLE[d.verdict] || _LORAWAN_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · gateways: ${(d.gateways || []).length} · DevAddrs: ${d.devaddrs || 0} · DevEUIs: ${d.deveuis || 0}</p>`;
+        const findings = d.findings || [];
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">What</th><th class="px-2 py-1">Src → Dst</th><th class="px-2 py-1">#</th><th class="px-2 py-1">Fingerprint</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => {
+                    const sc = _MODBUS_SEV_STYLE[f.severity] || 'text-gray-400';
+                    return `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${sc}">${escapeHtml(f.severity || '')}</td>
+                    <td class="px-2 py-1 font-mono ${sc}">${escapeHtml(f.code || '')}</td>
+                    <td class="px-2 py-1 text-gray-300 whitespace-normal" style="min-width:14rem">${escapeHtml(f.name || '')}<span class="block text-gray-500">${escapeHtml(f.detail || '')}</span></td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.af)} ${escapeHtml(f.src)} → ${escapeHtml(f.dst)}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${f.count}</td>
+                    <td class="px-2 py-1 font-mono text-gray-500 whitespace-normal" style="min-width:16rem">${escapeHtml(f.meta || '')}</td>
+                </tr>`; }).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- BLE Watch (Bluetooth Low Energy attack monitor, external sniffer) -----
+const _BLE_VERDICT_STYLE = {
+    clean:               ['bg-green-950/40 border-green-900 text-green-400', '✓ No clone, spoof, flood or connection abuse seen'],
+    observed:            ['bg-slate-800 border-slate-700 text-slate-300', '— BLE activity observed; nothing anomalous'],
+    suspicious:          ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Suspicious — RPA churn / vendor-shape anomaly'],
+    'attack-indicator':  ['bg-red-950/60 border-red-800 text-red-300', '🛑 Attack indicator — clone, beacon spoof, advertising flood / BLE-spam, hijack attempt or pairing downgrade'],
+    impersonation:       ['bg-red-950/60 border-red-800 text-red-300', '🛑 IMPERSONATION — two radios sharing one address, or two centrals racing a connection (connection MITM)'],
+    unknown:             ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _BLE_SEV_STYLE = {
+    critical: 'text-red-300', high: 'text-red-300', medium: 'text-amber-300',
+    low: 'text-gray-400', info: 'text-gray-500',
+};
+async function runBleWatch() {
+    const out = document.getElementById('blewatch-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const devEl = document.getElementById('blewatch-device');
+    const device = devEl && devEl.value ? devEl.value.trim() : '';
+    const secsEl = document.getElementById('blewatch-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Capturing the BLE link layer via the sniffer…</p>';
+    try {
+        const qs = '?seconds=' + encodeURIComponent(secs)
+            + (device ? '&device=' + encodeURIComponent(device) : '');
+        const d = await fetchAPI('/api/net/ble-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            // Device-gated: no sniffer is a normal state, not a red error.
+            const cls = (d && (d.missing_hw || d.missing_tool))
+                ? 'bg-slate-800 border border-slate-700 text-slate-300'
+                : 'text-red-400';
+            if (d && (d.missing_hw || d.missing_tool)) {
+                // Per-port diagnosis: which firmware answered on each USB serial port
+                // (a Bluefruit LE Friend looks identical to the Sniffer by USB name).
+                const kindStyle = { 'bluefruit-friend': 'text-amber-300', 'nrf-other-fw': 'text-amber-300', 'nrf-sniffer': 'text-green-400' };
+                const ports = (d.candidates || []).map(c =>
+                    '<li class="break-words"><span class="font-mono ' + (kindStyle[c.kind] || 'text-gray-300') + '">'
+                    + escapeHtml(c.path) + '</span> <span class="text-gray-500">(' + escapeHtml(c.usb || '') + ')</span><br>'
+                    + '<span class="text-gray-400">' + escapeHtml(c.note || c.kind) + '</span></li>').join('');
+                out.innerHTML = '<div class="px-3 py-2 rounded ' + cls + ' text-sm">🔌 '
+                    + escapeHtml(msg)
+                    + (ports ? '<ul class="mt-2 space-y-1 text-xs">' + ports + '</ul>' : '')
+                    + '</div>';
+            } else {
+                out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + '</p>';
+            }
+            return;
+        }
+        // Remember the advertisers seen this scan so "Trust current" can persist
+        // them (addr -> {name, services}); keep it on window across handlers.
+        window._bleLastSeen = (d && d.seen && typeof d.seen === 'object') ? d.seen : {};
+        const seenCount = Object.keys(window._bleLastSeen).length;
+        const [cls, label] = _BLE_VERDICT_STYLE[d.verdict] || _BLE_VERDICT_STYLE.unknown;
+        const devs = (d.devices || []).slice(0, 6).join(', ') || '—';
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Source: ${escapeHtml(d.device || '—')} · ${d.seconds}s · ${d.packet_count || 0} PDUs · ${seenCount} advertiser${seenCount === 1 ? '' : 's'} seen · ${d.trusted_count || 0} trusted · flagged: ${escapeHtml(devs)}</p>`;
+        const findings = (d.findings || []).filter(f => ['critical', 'high', 'medium', 'low'].includes((f.severity || '').toLowerCase()));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Class</th><th class="px-2 py-1">What</th><th class="px-2 py-1">Address</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_BLE_SEV_STYLE[(f.severity || '').toLowerCase()] || 'text-gray-400'}">${escapeHtml((f.severity || '').toLowerCase())}</td>
+                    <td class="px-2 py-1 font-mono ${_BLE_SEV_STYLE[(f.severity || '').toLowerCase()] || 'text-gray-300'}">${escapeHtml((f.code || '').replace(/^BLE-/, ''))}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.klass || '')}</td>
+                    <td class="px-2 py-1 text-gray-300 whitespace-normal">${escapeHtml((f.detail && f.detail.text) || f.name || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.src || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// Add the advertisers from the last scan to the BLE trusted-device list, so
+// they stop being flagged as clones/masquerades. Uses window._bleLastSeen,
+// populated by runBleWatch (so run a scan first).
+async function bleTrustCurrent() {
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const seen = window._bleLastSeen || {};
+    if (!Object.keys(seen).length) {
+        showNotification('Run a BLE scan first — nothing seen to trust yet', 'info');
+        return;
+    }
+    _ndBusy(btn, true, 'Saving…');
+    try {
+        const d = await postAPI('/api/net/ble-watch/baseline', { action: 'trust', devices: seen });
+        if (d && d.success) {
+            const skipped = d.skipped_rotating || 0;
+            let msg = `Trusted ${d.added || 0} new device${d.added === 1 ? '' : 's'} (${d.count || 0} total) — re-scan to confirm they're no longer flagged`;
+            if (skipped) {
+                msg += `. Skipped ${skipped} rotating private address${skipped === 1 ? '' : 'es'} (phones/watches reshuffle their MAC every ~15 min, so they can't be trusted by address)`;
+            }
+            showNotification(msg, skipped ? 'info' : 'success');
+        } else {
+            showNotification('Could not update the trusted list', 'error');
+        }
+    } catch (e) {
+        showNotification('Trust current failed: ' + e.message, 'error');
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// Empty the BLE trusted-device list and clear the on-screen results.
+async function bleClearList() {
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    _ndBusy(btn, true, 'Clearing…');
+    try {
+        const d = await postAPI('/api/net/ble-watch/baseline', { action: 'clear' });
+        if (d && d.success) {
+            showNotification('Trusted-device list cleared', 'success');
+        } else {
+            showNotification('Could not clear the trusted list', 'error');
+        }
+    } catch (e) {
+        showNotification('Clear list failed: ' + e.message, 'error');
+    } finally {
+        _ndBusy(btn, false);
+        window._bleLastSeen = {};
+        const out = document.getElementById('blewatch-results');
+        if (out) { out.innerHTML = ''; out.classList.add('hidden'); }
+    }
+}
+
+// ---- SR-MPLS Watch (MPLS / SR-MPLS / SRv6 label & segment manipulation) -----
+const _SRM_VERDICT_STYLE = {
+    clean:                 ['bg-green-950/40 border-green-900 text-green-400', '✓ No label/segment injection, reserved-label, TTL-expiry or SR control-plane anomaly'],
+    posture:               ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ SR posture note — label-depth / entropy / SR control-plane hygiene'],
+    exposure:              ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Exposure — SRv6 path disclosure / missing SRH HMAC / explicit-null exposed'],
+    'label-manipulation':  ['bg-red-950/60 border-red-800 text-red-300', '🛑 Label manipulation — reserved-label / TTL-expiry-forwarded / label rebind'],
+    'segment-injection':   ['bg-red-950/60 border-red-800 text-red-300', '🛑 SEGMENT INJECTION — an MPLS label or SRH chosen by the far end on a customer-facing port (label-injection / VRF-hopping)'],
+    unknown:               ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _SRM_SEV_STYLE = {
+    critical: 'text-red-300', high: 'text-red-300', medium: 'text-amber-300',
+    low: 'text-gray-400', info: 'text-gray-500',
+};
+async function runDnsWatch() {
+    const out = document.getElementById('dnswatch-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('dnswatch-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('dnswatch-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing DNS (port 53)…</p>';
+    try {
+        _fillIfaceSel('dnswatch-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/dns-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runDnsWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const styles = { attack: ['bg-red-900/40 border-red-700 text-red-200', 'ATTACK'], exposure: ['bg-amber-900/40 border-amber-700 text-amber-200', 'EXPOSURE'], observed: ['bg-slate-800 border-slate-600 text-gray-300', 'OBSERVED'], clean: ['bg-green-900/30 border-green-700 text-green-300', 'CLEAN'] };
+        const [cls, label] = styles[d.verdict] || styles.observed;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · frames: ${d.packet_count || 0} · findings: ${d.finding_count || 0}</p>`;
+        const sev = { critical: 'text-red-300', warning: 'text-amber-300', notice: 'text-gray-400' };
+        if ((d.findings || []).length) {
+            html += '<ul class="space-y-1">';
+            for (const f of d.findings) {
+                const sc = sev[f.severity] || 'text-gray-400';
+                html += `<li class="text-sm"><span class="${sc} font-mono">${escapeHtml(f.code || '')}</span> ${escapeHtml(f.name || '')}${f.cve ? ' <span class="text-xs text-gray-500">' + escapeHtml(f.cve) + '</span>' : ''}${f.zone ? ' <span class="text-xs text-gray-500">[' + escapeHtml(f.zone) + ']</span>' : ''}<br><span class="text-xs text-gray-400">${escapeHtml(f.detail || '')}</span></li>`;
+            }
+            html += '</ul>';
+        } else {
+            html += '<p class="text-sm text-green-300">No DNS-response threats observed.</p>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(String(e)) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+async function runIpsecWatch() {
+    const out = document.getElementById('ipsec-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('ipsec-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('ipsec-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing IKE (UDP 500/4500)…</p>';
+    try {
+        _fillIfaceSel('ipsec-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) +
+            (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/ipsec-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runIpsecWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const styles = { attack: ['bg-red-900/40 border-red-700 text-red-200', 'ATTACK'], exposure: ['bg-amber-900/40 border-amber-700 text-amber-200', 'EXPOSURE'], observed: ['bg-slate-800 border-slate-600 text-gray-300', 'OBSERVED'], clean: ['bg-green-900/30 border-green-700 text-green-300', 'CLEAN'] };
+        const [cls, label] = styles[d.verdict] || styles.observed;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · IKE msgs: ${d.ike_msgs || 0} · findings: ${d.finding_count || 0}</p>`;
+        const sev = { high: 'text-red-300', medium: 'text-amber-300', low: 'text-gray-400' };
+        if ((d.findings || []).length) {
+            html += '<ul class="space-y-1">';
+            for (const f of d.findings) {
+                const sc = sev[f.severity] || sev.low;
+                html += `<li class="text-sm"><span class="${sc} font-mono">${escapeHtml(f.code || '')}</span>${f.algorithm ? ' <span class="text-gray-400">' + escapeHtml(f.algorithm) + '</span>' : ''}${f.family ? ' <span class="text-xs text-gray-500">[' + escapeHtml(f.family) + ']</span>' : ''}<br><span class="text-xs text-gray-400">${escapeHtml(f.detail || '')}</span></li>`;
+            }
+            html += '</ul>';
+        } else {
+            html += '<p class="text-sm text-green-300">No IKE weaknesses observed.</p>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(String(e)) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+async function runSrMplsWatch() {
+    const out = document.getElementById('srmpls-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('srmpls-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('srmpls-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    const roleEl = document.getElementById('srmpls-role');
+    const role = roleEl && roleEl.value ? roleEl.value : 'unknown';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing MPLS / SR-MPLS / SRv6 + SR control plane…</p>';
+    try {
+        _fillIfaceSel('srmpls-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) +
+            (iface ? '&interface=' + encodeURIComponent(iface) : '') +
+            '&role=' + encodeURIComponent(role);
+        const d = await fetchAPI('/api/net/srmpls-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runSrMplsWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _SRM_VERDICT_STYLE[d.verdict] || _SRM_VERDICT_STYLE.unknown;
+        const st = d.stats || {};
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · role: <span class="font-mono">${escapeHtml(d.role || 'unknown')}</span> · frames: ${st.frames || 0}${st.mpls_frames ? ', MPLS: ' + st.mpls_frames : ''}${st.srh_frames ? ', SRH: ' + st.srh_frames : ''}</p>`;
+        const findings = (d.findings || []).filter(f => ['critical', 'high', 'medium'].includes(f.severity));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Class</th><th class="px-2 py-1">Key</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_SRM_SEV_STYLE[f.severity] || 'text-gray-400'}">${escapeHtml(f.severity)}</td>
+                    <td class="px-2 py-1 font-mono ${_SRM_SEV_STYLE[f.severity] || 'text-gray-300'}">${escapeHtml((f.code || '').replace(/^SRM-/, ''))}</td>
+                    <td class="px-2 py-1 text-gray-500">${escapeHtml(f.class || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.key || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
 // ---- SMB Watch (SMBv1 + LLMNR/NBT-NS/mDNS poisoning / Responder) ------------
 const _SMB_VERDICT_STYLE = {
     clean:            ['bg-green-950/40 border-green-900 text-green-400', '✓ No SMBv1, name-resolution poisoning, or Kerberos downgrade'],
     'name-exposure':  ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ LLMNR/NBT-NS in use — hosts are exposed to Responder poisoning'],
     'smbv1-offered':  ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ SMBv1 offered in negotiation — disable the fallback'],
     'krb-exposure':   ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Kerberos: weak (RC4/DES) encryption still enabled alongside AES'],
+    'ntlm-workstation-mismatch': ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ NTLM workstation ≠ source name — a relayed-authentication tell'],
     'krb-downgrade':  ['bg-red-950/60 border-red-800 text-red-300', '🛑 KERBEROS DOWNGRADE — a DES/RC4 ticket issued or AES stripped from a client'],
+    'krb-recon':      ['bg-red-950/60 border-red-800 text-red-300', '🛑 KERBEROS RECON — a burst of KDC errors (user enumeration / password spray)'],
     'spoof-conflict': ['bg-red-950/60 border-red-800 text-red-300', '🛑 Conflicting name answers — a poisoner racing the real owner'],
     'smbv1-active':   ['bg-red-950/60 border-red-800 text-red-300', '🛑 SMBv1 in active use — EternalBlue/WannaCry (MS17-010) vector'],
     poisoning:        ['bg-red-950/60 border-red-800 text-red-300', '🛑 NAME POISONING — a host is answering LLMNR/NBT-NS (Responder/Inveigh)'],
     'asrep-roast':    ['bg-red-950/60 border-red-800 text-red-300', '🛑 AS-REP ROASTING — a Kerberos account with no pre-auth (offline-crackable hash)'],
     kerberoast:       ['bg-red-950/60 border-red-800 text-red-300', '🛑 KERBEROASTING — a TGS-REQ forcing RC4 on a service SPN (crackable service ticket)'],
+    'responder-challenge': ['bg-red-950/60 border-red-800 text-red-300', '🛑 RESPONDER ON THE WIRE — a server issued the fixed NTLM challenge (rogue auth server)'],
+    'smbghost-exposure': ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ SMBGhost EXPOSURE — SMB3.1.1 compression negotiated (CVE-2020-0796) — patch/disable'],
+    'eternalblue-probe': ['bg-red-950/60 border-red-800 text-red-300', '🛑 ETERNALBLUE probe — SMBv1 TRANS2 SESSION_SETUP (CVE-2017-0144 / MS17-010)'],
+    'krb-rc4md4':     ['bg-red-950/60 border-red-800 text-red-300', '🛑 KERBEROS RC4-MD4 — etype -128 offered/granted/advertised (CVE-2022-33679 downgrade)'],
+    'smbghost-exploit': ['bg-red-950/60 border-red-800 text-red-300', '🛑 SMBGhost EXPLOIT — compression-transform 32-bit overflow (CVE-2020-0796) — patch now'],
+    'smb-reflection': ['bg-red-950/60 border-red-800 text-red-300', '🛑 REFLECTIVE RELAY — client == server / marshalled target (CVE-2025-33073)'],
     unknown:          ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
 const _KRB_FINDING_STYLE = {
     kerberoast:    'text-red-300',
     'asrep-roast': 'text-red-300',
+    'krb-recon':   'text-red-300',
     downgrade:     'text-red-300',
     'weak-etype':  'text-amber-300',
 };
@@ -8076,6 +11561,16 @@ async function runSmbWatch() {
         (nr.conflicts || []).forEach(c => {
             html += `<div class="mt-2 px-3 py-2 rounded border text-xs text-red-300 border-red-800 bg-red-950/40">Name <span class="font-mono">${escapeHtml(c.name)}</span> answered with conflicting IPs: <span class="font-mono">${escapeHtml((c.answers || []).join(', '))}</span></div>`;
         });
+        if ((d.ntlm || []).length) {
+            html += '<p class="text-xs uppercase text-gray-400 mt-3 mb-1">NTLM relay tells</p>';
+            d.ntlm.forEach(f => {
+                if (f.type === 'responder-challenge') {
+                    html += `<div class="mt-1 px-3 py-2 rounded border text-xs text-red-300 border-red-800 bg-red-950/40">🛑 Static Responder challenge <span class="font-mono">${escapeHtml(f.challenge || '')}</span> from server <span class="font-mono">${escapeHtml(f.server || '?')}</span> — a rogue NTLM server is harvesting NetNTLM responses.</div>`;
+                } else if (f.type === 'workstation-mismatch') {
+                    html += `<div class="mt-1 px-3 py-2 rounded border text-xs text-amber-300 border-amber-800 bg-amber-950/40">⚠ <span class="font-mono">${escapeHtml(f.source || '?')}</span> (known as ${escapeHtml((f.known || []).join(', ') || '—')}) claimed NTLM workstation <span class="font-mono">${escapeHtml(f.workstation || '?')}</span> for ${escapeHtml(f.account || '?')} — a relayed-authentication tell.</div>`;
+                }
+            });
+        }
         const krb = d.kerberos || {};
         const kc = krb.counts || {};
         const krbTotal = Object.values(kc).reduce((a, b) => a + (b || 0), 0);
@@ -8295,6 +11790,8 @@ const _CDP_VERDICT_STYLE = {
     'cdp-enabled': ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ CDP is enabled here — it leaks IOS version / mgmt IP / native VLAN in clear'],
     spoof:         ['bg-red-950/60 border-red-800 text-red-300', '🛑 Rogue CDP speaker — spoofed neighbour (possible fake IP phone / VoIP-VLAN-hop)'],
     flood:         ['bg-red-950/60 border-red-800 text-red-300', '🛑 CDP flood — neighbour-table / CPU exhaustion DoS (Yersinia)'],
+    cdpwn:         ['bg-red-950/60 border-red-800 text-red-300', '🛑 CDPwn / LCDPwn exploit shape — malformed CDP TLV matching a CDPwn-family CVE (Armis CDPwn + LCDPwn cross-vendor set)'],
+    'trailing-data': ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Trailing data after the declared length — smuggled bytes / Etherleak (CVE-2003-0001)'],
     unknown:       ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
 function _cdpFillIfaces() {
@@ -8336,6 +11833,20 @@ async function runCdpWatch() {
         const [cls, label] = _CDP_VERDICT_STYLE[d.verdict] || _CDP_VERDICT_STYLE.unknown;
         let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
         html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.packet_count} CDP frame(s), ${d.speaker_count} speaker(s)${d.learned ? ' · <span class="text-gray-400">baseline learned now</span>' : ''}</p>`;
+        if (d.cdpwn && d.cdpwn.length) {
+            const _sev = {
+                critical: 'text-red-300 border-red-800 bg-red-950/50',
+                high:     'text-orange-300 border-orange-800 bg-orange-950/40',
+                medium:   'text-amber-300 border-amber-800 bg-amber-950/40',
+                low:      'text-yellow-300 border-yellow-800 bg-yellow-950/30',
+            };
+            html += '<div class="mb-2"><div class="text-xs text-red-300 font-semibold mb-1">CDPwn — CDP exploit-shape / CVE screening</div>' +
+                d.cdpwn.map(f => {
+                    const c = _sev[f.severity] || 'text-gray-300 border-slate-700 bg-slate-900/40';
+                    const cves = (f.cves || []).length ? ' <span class="font-mono text-cyan-300">[' + f.cves.map(escapeHtml).join(', ') + ']</span>' : '';
+                    return `<div class="px-3 py-1.5 rounded border text-xs mb-1 ${c}"><span class="font-mono">${escapeHtml(f.code)}</span> <span class="uppercase text-[10px] opacity-80">${escapeHtml(f.severity)}</span> · <span class="font-mono text-gray-400">${escapeHtml(f.src)}</span> — ${escapeHtml(f.detail)}${cves}</div>`;
+                }).join('') + '</div>';
+        }
         if ((d.speakers || []).length) {
             html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
                 '<tr class="text-left text-gray-500"><th class="px-2 py-1">Device-ID</th><th class="px-2 py-1">Platform</th><th class="px-2 py-1">IOS / version</th><th class="px-2 py-1">Mgmt IP</th><th class="px-2 py-1">Native VLAN</th><th class="px-2 py-1">Voice VLAN</th><th class="px-2 py-1">Port</th><th class="px-2 py-1">Trust</th></tr>' +
@@ -8472,6 +11983,7 @@ async function vtpTrustBaseline() {
 const _ISIS_VERDICT_STYLE = {
     clean:          ['bg-green-950/40 border-green-900 text-green-400', '✓ No IS-IS anomalies detected'],
     'weak-auth':    ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ IS-IS without HMAC auth (or cleartext) — exposed to LSP injection'],
+    exposure:       ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ IS-IS feature exposure — multi-instance / SR-Flex-Algo (IOS XR CVE preconditions)'],
     anomaly:        ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ IS-IS anomaly — duplicate system-id / new area'],
     storm:          ['bg-red-950/60 border-red-800 text-red-300', '🛑 IS-IS flooding storm detected'],
     'rogue-router': ['bg-red-950/60 border-red-800 text-red-300', '🛑 Rogue IS-IS speaker — adjacency spoofing'],
@@ -8684,6 +12196,364 @@ async function eigrpTrustBaseline() {
         await runEigrpWatch();
     } catch (e) {
         addConsoleMessage('Failed to reset EIGRP baseline: ' + e.message, 'error');
+    }
+}
+
+// ---- RIP / RIPng Watch (passive routing-plane security scanner) ------------
+const _RIP_VERDICT_STYLE = {
+    clean:       ['bg-green-950/40 border-green-900 text-green-400', '✓ RIP sources/prefixes match the baseline — no injection, hijack or malformation'],
+    learning:    ['bg-slate-800 border-slate-700 text-slate-300', '… Learning the RIP baseline (sources · prefixes · auth posture) — now armed, re-scan to detect'],
+    'weak-auth': ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Weak / no RIP authentication — unauthenticated, cleartext simple-password, or dated keyed-MD5'],
+    anomaly:     ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ RIP anomaly — malformed RTE, full-table recon, off-link RIPng, or protocol violation'],
+    storm:       ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ RIP metric-16 mass-poison / withdrawal storm'],
+    rogue:       ['bg-red-950/60 border-red-800 text-red-300', '🛑 Rogue RIP responder — a new speaker began advertising routes after arm'],
+    injection:   ['bg-red-950/60 border-red-800 text-red-300', '🛑 RIP route injection — a prefix or default-route not in the learned baseline'],
+    hijack:      ['bg-red-950/60 border-red-800 text-red-300', '🛑 RIP metric-undercut hijack — a new source undercut a known prefix to attract traffic'],
+    unknown:     ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _RIP_SEV_COLOR = { high: 'text-red-300', medium: 'text-amber-300', low: 'text-gray-300', info: 'text-gray-500' };
+function _ripFillIfaces() {
+    const sel = document.getElementById('rip-iface');
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+async function runRipWatch() {
+    const out = document.getElementById('rip-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('rip-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('rip-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing RIP / RIPng on the segment…</p>';
+    try {
+        _ripFillIfaces();
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/rip-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool === 'tcpdump') extra = ' <button onclick="installNetTool(\'tcpdump\', this, runRipWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _RIP_VERDICT_STYLE[d.verdict] || _RIP_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.packet_count || 0} RIP pkt(s) (${d.rip || 0} RIP / ${d.ripng || 0} RIPng) · ${d.source_count || 0} source(s), ${d.prefix_count || 0} prefix(es)${d.armed ? '' : ' · <span class="text-slate-400">not yet armed</span>'}${d.learned ? ' · <span class="text-gray-400">baseline learned now</span>' : ''}</p>`;
+        if ((d.findings || []).length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Code</th><th class="px-2 py-1">Sev</th><th class="px-2 py-1">AF</th><th class="px-2 py-1">Finding</th><th class="px-2 py-1">Source → Dest</th></tr></thead><tbody>';
+            d.findings.forEach(f => {
+                const sev = _RIP_SEV_COLOR[f.severity] || 'text-gray-400';
+                const cve = (f.cves || []).length ? ` <span class="text-slate-500">(${f.cves.map(escapeHtml).join(', ')})</span>` : '';
+                const roll = f.rolled_up ? ` <span class="text-slate-500">×${f.distinct_sources}+ sources</span>` : '';
+                html += `<tr class="border-t border-slate-800 align-top">
+                    <td class="px-2 py-1 font-mono ${sev}">${escapeHtml(f.code)}</td>
+                    <td class="px-2 py-1 ${sev}">${escapeHtml(f.severity)}</td>
+                    <td class="px-2 py-1 text-gray-400">${escapeHtml(f.af || '')}</td>
+                    <td class="px-2 py-1">${escapeHtml(f.title)}${cve}${roll}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.src || '')} → ${escapeHtml(f.dst || '')}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+        }
+        if ((d.sources || []).length) {
+            html += '<p class="text-xs uppercase text-gray-400 mt-2 mb-1">RIP sources (' + d.sources.length + ')</p>' +
+                '<p class="text-xs font-mono text-gray-400">' + d.sources.map(escapeHtml).join(', ') + '</p>';
+        }
+        if ((d.prefixes || []).length) {
+            html += '<p class="text-xs uppercase text-gray-400 mt-2 mb-1">Advertised prefixes (' + d.prefixes.length + ')</p>' +
+                '<p class="text-xs font-mono text-gray-400">' + d.prefixes.map(escapeHtml).join(', ') + '</p>';
+        }
+        if (!(d.findings || []).length && d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+async function ripTrustBaseline() {
+    try {
+        await postAPI('/api/net/rip-baseline', { action: 'reset' });
+        addConsoleMessage('RIP baseline reset — re-learning current sources & prefixes', 'info');
+        await runRipWatch();
+    } catch (e) {
+        addConsoleMessage('Failed to reset RIP baseline: ' + e.message, 'error');
+    }
+}
+
+// ---- PIM / MSDP Watch (passive multicast routing-control-plane scanner) -----
+const _PIM_VERDICT_STYLE = {
+    clean:   ['bg-green-950/40 border-green-900 text-green-400', '✓ PIM/MSDP control plane healthy — no rogue RP/BSR, injection or malformation'],
+    anomaly: ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ PIM/MSDP posture issue — AH-protection loss, SSM violation, Auto-RP/Embedded-RP anomaly, or malformed message'],
+    attack:  ['bg-red-950/60 border-red-800 text-red-300', '🛑 PIM/MSDP attack shape — rogue RP / BSR spoofing / DR hijack / Register or SA injection / flood'],
+    unknown: ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _PIM_SEV_COLOR = { critical: 'text-red-300', warn: 'text-amber-300', notice: 'text-gray-300', info: 'text-gray-500' };
+function _pimFillIfaces() {
+    const sel = document.getElementById('pim-iface');
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+async function runPimWatch() {
+    const out = document.getElementById('pim-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('pim-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('pim-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing PIM / MSDP on the segment…</p>';
+    try {
+        _pimFillIfaces();
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/pim-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool === 'tcpdump') extra = ' <button onclick="installNetTool(\'tcpdump\', this, runPimWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _PIM_VERDICT_STYLE[d.verdict] || _PIM_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.pim_packets || 0} PIM / ${d.msdp_packets || 0} MSDP / ${d.autorp_packets || 0} Auto-RP pkt(s) · ${d.neighbors || 0} neighbour(s), ${d.rps || 0} RP(s), ${d.msdp_peers || 0} MSDP peer(s)${d.armed ? '' : ' · <span class="text-slate-400">learning (not armed)</span>'}</p>`;
+        if ((d.findings || []).length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Code</th><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Class</th><th class="px-2 py-1">AF</th><th class="px-2 py-1">Finding</th></tr></thead><tbody>';
+            d.findings.forEach(f => {
+                const sev = _PIM_SEV_COLOR[f.severity] || 'text-gray-400';
+                const kl = f.class === 'attack' ? 'text-red-300' : 'text-amber-300';
+                const af = f.af ? ('v' + f.af) : '';
+                html += `<tr class="border-t border-slate-800 align-top">
+                    <td class="px-2 py-1 font-mono ${sev}">${escapeHtml(f.code)}</td>
+                    <td class="px-2 py-1 ${sev}">${escapeHtml(f.severity)}</td>
+                    <td class="px-2 py-1 ${kl}">${escapeHtml(f.class || '')}</td>
+                    <td class="px-2 py-1 text-gray-400">${escapeHtml(String(af))}</td>
+                    <td class="px-2 py-1">${escapeHtml(f.title || '')}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+        } else if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- SSDP / UPnP Watch (passive discovery + GENA eventing + IGD scanner) ----
+const _SSDP_VERDICT_STYLE = {
+    clean:   ['bg-green-950/40 border-green-900 text-green-400', '✓ SSDP/UPnP healthy — no CallStranger, reflection/amplifier or IGD-abuse shape'],
+    anomaly: ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ SSDP/UPnP posture issue — scope/TTL escape, advert spoof, byebye flood or unbounded GENA timeout'],
+    attack:  ['bg-red-950/60 border-red-800 text-red-300', '🛑 SSDP/UPnP attack / exposure — CallStranger off-link CALLBACK, reflection/amplifier, or WAN-side / third-party IGD control'],
+    unknown: ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _SSDP_SEV_COLOR = { high: 'text-red-300', medium: 'text-amber-300', low: 'text-gray-400' };
+function _ssdpFillIfaces() {
+    const sel = document.getElementById('ssdp-iface');
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+async function runSsdpWatch() {
+    const out = document.getElementById('ssdp-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('ssdp-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('ssdp-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing SSDP / UPnP on the segment…</p>';
+    try {
+        _ssdpFillIfaces();
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/ssdp-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool === 'tcpdump') extra = ' <button onclick="installNetTool(\'tcpdump\', this, runSsdpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _SSDP_VERDICT_STYLE[d.verdict] || _SSDP_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.ssdp_messages || 0} SSDP / ${d.gena || 0} GENA / ${d.igd || 0} IGD msg(s) · ${d.device_count || 0} device(s) · ${d.high || 0} high, ${d.medium || 0} med, ${d.low || 0} low</p>`;
+        if ((d.findings || []).length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Code</th><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Tier</th><th class="px-2 py-1">AF</th><th class="px-2 py-1">CVE</th><th class="px-2 py-1">Finding</th></tr></thead><tbody>';
+            d.findings.forEach(f => {
+                const sev = _SSDP_SEV_COLOR[f.severity] || 'text-gray-400';
+                html += `<tr class="border-t border-slate-800 align-top">
+                    <td class="px-2 py-1 font-mono ${sev}">${escapeHtml(f.code)}</td>
+                    <td class="px-2 py-1 ${sev}">${escapeHtml(f.severity)}</td>
+                    <td class="px-2 py-1 text-gray-400">${escapeHtml(f.tier || '')}</td>
+                    <td class="px-2 py-1 text-gray-400">${escapeHtml(f.af || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.cve || '')}</td>
+                    <td class="px-2 py-1">${escapeHtml(f.title || '')}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+        } else if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        // v2 passive device census / fingerprint (UPnP/DLNA devices seen on the wire).
+        if ((d.devices || []).length) {
+            html += `<p class="text-xs text-gray-400 mt-3 mb-1 font-semibold">Device census — ${d.device_count} device(s)${d.named_devices ? ', ' + d.named_devices + ' named' : ''} <span class="font-normal text-gray-500">(passive UPnP/DLNA fingerprint — nothing fetched)</span></p>`;
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Name</th><th class="px-2 py-1">Type</th><th class="px-2 py-1">Vendor</th><th class="px-2 py-1">Address</th><th class="px-2 py-1">MAC</th><th class="px-2 py-1">Services</th></tr></thead><tbody>';
+            d.devices.slice(0, 60).forEach(v => {
+                const vendor = v.vendor ? escapeHtml(v.vendor) + (v.vendor_source ? ` <span class="text-gray-600">(${escapeHtml(v.vendor_source)})</span>` : '') : '<span class="text-gray-600">—</span>';
+                html += `<tr class="border-t border-slate-800 align-top">
+                    <td class="px-2 py-1 ${v.named ? 'text-gray-200' : 'text-gray-500'}">${escapeHtml(v.name || '—')}${v.description_seen ? ' <span class="text-green-500" title="UPnP device description seen on the wire">✓desc</span>' : ''}</td>
+                    <td class="px-2 py-1 text-gray-400 whitespace-normal" style="min-width:9rem">${escapeHtml(v.device_type || '—')}</td>
+                    <td class="px-2 py-1 text-gray-400">${vendor}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml((v.addresses || []).slice(0, 3).join(', '))}</td>
+                    <td class="px-2 py-1 font-mono text-gray-500">${escapeHtml((v.macs || []).join(', ') || '—')}</td>
+                    <td class="px-2 py-1 text-gray-500 whitespace-normal" style="min-width:12rem">${escapeHtml((v.service_types || []).join(', ') || '—')}</td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- HTTP Watch (passive cleartext HTTP/1.x + h2c + gRPC observer) ----------
+const _HTTP_VERDICT_STYLE = {
+    'no-traffic':          ['bg-slate-800 border-slate-700 text-slate-300', '— No cleartext HTTP / h2c / gRPC on the watched ports during this window'],
+    clean:                 ['bg-green-950/40 border-green-900 text-green-400', '✓ Cleartext HTTP healthy — consistent framing, no HTTP.sys exploit shape, credentials or h2c/gRPC abuse'],
+    observed:              ['bg-sky-950/40 border-sky-900 text-sky-300', 'ℹ Informational — h2c in use, a TRACE request or bare-LF line endings'],
+    anomaly:               ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ HTTP posture issue — CL+TE in one message, obs-fold, Host conflict, slow-read, h2c on gNMI or trailers toward http.sys'],
+    'credential-exposure': ['bg-red-950/60 border-red-800 text-red-300', '🛑 Credentials in the clear — Basic / form / cookie / URL / gRPC metadata secrets on cleartext HTTP (values redacted)'],
+    attack:                ['bg-red-950/60 border-red-800 text-red-300', '🛑 HTTP attack shape — request smuggling / desync, HTTP.sys exploit, or h2c/gRPC abuse'],
+    unknown:               ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _HTTP_SEV_COLOR = { critical: 'text-red-400', high: 'text-red-300', warn: 'text-amber-300', info: 'text-sky-300' };
+function _httpFillIfaces() {
+    const sel = document.getElementById('http-iface');
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+function _httpEvidence(ev) {
+    // Evidence is already redacted server-side (8-hex SHA-256 tags for secrets).
+    if (!ev || typeof ev !== 'object') return '';
+    return Object.entries(ev).filter(([k]) => k !== 'note').slice(0, 6).map(([k, v]) => {
+        const val = (v && typeof v === 'object') ? JSON.stringify(v) : String(v);
+        return `<span class="text-gray-500">${escapeHtml(k)}:</span> ${escapeHtml(val.length > 80 ? val.slice(0, 80) + '…' : val)}`;
+    }).join(' · ');
+}
+async function runHttpWatch() {
+    const out = document.getElementById('http-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('http-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('http-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    const portsEl = document.getElementById('http-ports');
+    const ports = portsEl && portsEl.value ? portsEl.value.replace(/\s+/g, '') : '';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing cleartext HTTP / h2c / gRPC on the segment…</p>';
+    try {
+        _httpFillIfaces();
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '') + (ports ? '&ports=' + encodeURIComponent(ports) : '');
+        const d = await fetchAPI('/api/net/http-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool === 'tcpdump') extra = ' <button onclick="installNetTool(\'tcpdump\', this, runHttpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _HTTP_VERDICT_STYLE[d.verdict] || _HTTP_VERDICT_STYLE.unknown;
+        const s = d.by_severity || {};
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2 break-words">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ports ${escapeHtml((d.ports || []).join(','))} · ${d.flows || 0} flow(s) · ${d.http1_messages || 0} HTTP/1 msg(s) · ${d.h2_frames || 0} h2 frame(s) · IPv4 ${d.ipv4 || 0} / IPv6 ${d.ipv6 || 0} seg(s) · ${s.critical || 0} critical, ${s.high || 0} high, ${s.warn || 0} warn, ${s.info || 0} info${d.kev_findings ? ` · <span class="text-red-300">${d.kev_findings} on CISA KEV</span>` : ''}</p>`;
+        if ((d.findings || []).length) {
+            html += '<div class="overflow-x-auto"><table class="nd-card-table min-w-full text-xs text-gray-300"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Code</th><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Client → server</th><th class="px-2 py-1">AF</th><th class="px-2 py-1">CVE</th><th class="px-2 py-1">Finding</th></tr></thead><tbody>';
+            d.findings.forEach(f => {
+                const sev = _HTTP_SEV_COLOR[f.severity] || 'text-gray-400';
+                const cves = (f.cves || []).join(', ');
+                const ev = _httpEvidence(f.evidence);
+                html += `<tr class="border-t border-slate-800 align-top">
+                    <td class="nd-card-head px-2 py-1 font-mono whitespace-nowrap ${sev}" data-label="Code">${escapeHtml(f.code)} <span class="text-gray-500">tier ${escapeHtml(f.tier || '')}</span>${f.count > 1 ? ` <span class="text-gray-500">×${f.count}</span>` : ''}</td>
+                    <td class="px-2 py-1 whitespace-nowrap ${sev}" data-label="Severity">${escapeHtml(f.severity)} <span class="text-gray-500">${escapeHtml(f.confidence || '')}</span></td>
+                    <td class="px-2 py-1 font-mono text-gray-400 whitespace-nowrap" data-label="Client → server">${escapeHtml(f.client || '')} → ${escapeHtml(f.server || '')}:${escapeHtml(String(f.port || ''))}</td>
+                    <td class="px-2 py-1 text-gray-400 whitespace-nowrap" data-label="AF">${escapeHtml(f.af || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400 whitespace-nowrap" data-label="CVE">${cves ? escapeHtml(cves) + (f.kev ? ' <span class="text-red-300">KEV</span>' : '') : '—'}</td>
+                    <td class="px-2 py-1 whitespace-normal" style="min-width:14rem" data-label="Finding">${escapeHtml(f.summary || f.name || '')}${ev ? `<div class="text-[11px] text-gray-400 mt-0.5 break-words">${ev}</div>` : ''}</td>
+                </tr>`;
+            });
+            html += '</tbody></table></div>';
+            if (d.finding_total > (d.findings || []).length) {
+                html += `<p class="text-xs text-gray-500 mt-1">Showing ${d.findings.length} of ${d.finding_total} findings (highest severity first).</p>`;
+            }
+        } else if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
     }
 }
 
@@ -9011,11 +12881,77 @@ async function runPathAsymmetry() {
     }
 }
 
+const _PC_SEV = {
+    confirmed: ['bg-red-950/60 border-red-800 text-red-300', '🛑 CONFIRMED — BGP RIB corroborates a convergence event'],
+    active:    ['bg-red-950/50 border-red-800 text-red-300', '⚠️ ACTIVE — loss + a real path change happening now'],
+    suspected: ['bg-orange-950/50 border-orange-800 text-orange-300', '⚠️ SUSPECTED — strong convergence evidence'],
+    watch:     ['bg-amber-950/40 border-amber-800 text-amber-300', '👀 WATCH — intra-AS wobble worth logging'],
+    none:      ['bg-green-950/40 border-green-900 text-green-400', '✓ No convergence signal — path stable'],
+};
+async function runPathConvergence() {
+    const out = document.getElementById('pc-results');
+    if (!out) return;
+    const target = (document.getElementById('pc-target').value || '').trim();
+    if (!target) { out.classList.remove('hidden'); out.innerHTML = '<span class="text-amber-300">enter a target</span>'; return; }
+    out.classList.remove('hidden');
+    out.innerHTML = '<span class="text-gray-400">tracing flows…</span>';
+    try {
+        const body = {
+            target,
+            flows: parseInt(document.getElementById('pc-flows').value, 10) || 3,
+            method: document.getElementById('pc-method').value || 'icmp',
+        };
+        const d = await postAPI('/api/net/path-convergence', body);
+        if (!d.success) {
+            let extra = '';
+            if (d.missing_tool === 'scapy') extra = ' <button onclick="installNetTool(\'scapy\', this, runPathConvergence)" class="ml-2 underline text-cyan-400">Install Scapy</button>';
+            out.innerHTML = '<span class="text-red-300">' + escapeHtml(d.error || 'failed') + '</span>' + extra;
+            return;
+        }
+        const [cls, label] = _PC_SEV[d.severity] || _PC_SEV.none;
+        let h = '<div class="mb-2 px-3 py-2 rounded border ' + cls + ' text-sm">' + label + ' <span class="opacity-70">(score ' + d.score + ')</span></div>';
+        const f = d.floor || {};
+        h += '<p class="text-xs text-gray-500 mb-2">' + d.flows_probed + ' flow(s) · method ' + escapeHtml(d.method) + ' · floor ' + (f.replies || 0) + '/' + (f.sent || 0) + ' replies' + (f.loss_burst ? ' · <span class="text-red-300">loss burst ' + f.loss_burst + '</span>' : '') + (d.rib_correlation ? ' · <span class="text-cyan-400">RIB-correlated</span>' : '') + '</p>';
+        if (d.reasons && d.reasons.length) {
+            h += '<ul class="text-xs text-gray-300 list-disc pl-5 mb-2">' + d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        const asy = d.asymmetry || {};
+        if (asy.forward_hops != null || asy.reverse_hops != null) {
+            h += '<p class="text-xs text-gray-400 mb-2">Hop asymmetry: fwd ' + (asy.forward_hops ?? '?') + ' / rev ' + (asy.reverse_hops ?? '?') + (asy.delta != null ? ' (Δ' + asy.delta + ', ' + escapeHtml(asy.confidence) + ')' : '') + ' — ' + escapeHtml(asy.note || '') + '</p>';
+        }
+        const flows = d.flows || [];
+        if (flows.length) {
+            h += '<p class="text-xs uppercase text-gray-400 mt-2 mb-1">Per-flow paths</p><ul class="space-y-1">';
+            for (const fl of flows) {
+                const flags = [];
+                if (fl.as_path_changed) flags.push('<span class="text-red-300">AS-path changed</span>');
+                if (fl.ip_path_changed) flags.push('<span class="text-amber-300">IP-path changed</span>');
+                if (fl.loop) flags.push('<span class="text-red-300">loop</span>');
+                if (fl.oscillating) flags.push('<span class="text-red-300">oscillating</span>');
+                if (fl.flapping) flags.push('<span class="text-red-300">flapping</span>');
+                h += '<li class="text-xs text-gray-300"><span class="font-mono text-gray-400">flow ' + fl.flow + '</span> ' +
+                    (fl.as_path && fl.as_path.length ? 'AS ' + fl.as_path.map(a => 'AS' + a).join(' → ') : (fl.hops || []).filter(Boolean).join(' → ') || '—') +
+                    (flags.length ? ' · ' + flags.join(' · ') : '') + '</li>';
+            }
+            h += '</ul>';
+        }
+        if (d.enrich_note) h += '<p class="text-xs text-amber-300/80 mt-2">' + escapeHtml(d.enrich_note) + '</p>';
+        out.innerHTML = h;
+    } catch (e) {
+        out.innerHTML = '<span class="text-red-300">' + escapeHtml(e.message) + '</span>';
+    }
+}
+
 // ---- Routing-scanner detector self-test (+ optional Scapy) ------------------
 function _scapyLegLabel(sc) {
     if (!sc) return '';
     if (sc.ran) return sc.pass ? '<span class="text-green-400">e2e ✓</span>' : '<span class="text-red-300">e2e ✗</span>';
-    return '<span class="text-gray-500">e2e skipped</span>';
+    // Distinguish "no packet path to exercise" (detector reads a table, not the
+    // wire — the offline scenarios ARE the full path) from "Scapy not installed".
+    const reason = (sc.reason || '').toLowerCase();
+    if (reason.includes('offline only') || reason.includes('n/a'))
+        return '<span class="text-gray-500" title="This detector reads the kernel table, not captured packets — the offline scenarios already cover its full code path.">e2e n/a</span>';
+    return '<span class="text-gray-500" title="Install Scapy to run the packet-crafting end-to-end leg.">e2e skipped</span>';
 }
 async function runRoutingSelftest() {
     const out = document.getElementById('routing-selftest-results');
@@ -9025,7 +12961,19 @@ async function runRoutingSelftest() {
     out.classList.remove('hidden');
     out.innerHTML = '<p class="text-sm text-gray-400">Running IGMP / OSPF / BGP detector self-tests…</p>';
     try {
-        const d = await fetchAPI('/api/net/routing-selftest');
+        // The full sweep (~60 detector suites) is minutes of Scapy work on a
+        // small board — too long to hold one request open. Start it in the
+        // background and poll, updating the running line with elapsed seconds.
+        await postAPI('/api/net/routing-selftest/start', {});
+        let d = null;
+        for (let i = 0; i < 300; i++) {            // ~15 min ceiling at 3s/poll
+            await new Promise(r => setTimeout(r, 3000));
+            const s = await fetchAPI('/api/net/routing-selftest/status');
+            if (s && s.status === 'done') { d = s.result; break; }
+            if (s && s.status === 'error') throw new Error(s.error || 'self-test failed');
+            if (out) out.innerHTML = '<p class="text-sm text-gray-400">Running IGMP / OSPF / BGP detector self-tests… '
+                + (s && s.elapsed != null ? Math.round(s.elapsed) + 's' : '') + '</p>';
+        }
         if (!d || d.success === undefined) {
             out.innerHTML = '<p class="text-sm text-red-400">Self-test failed to run.</p>';
             return;
@@ -9038,7 +12986,15 @@ async function runRoutingSelftest() {
             : 'Scapy: <span class="text-amber-300">not installed</span> — end-to-end leg skipped';
         if (instBtn) instBtn.classList.toggle('hidden', !!d.scapy_available);
 
-        const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
+        const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory)', ssh: 'SSH Watch (regreSSHion / Terrapin)', telnet: 'Telnet Watch (CVE-2026-24061 / 32746)', ftp: 'FTP Watch (ProFTPD mod_copy / quoted verb)', smtp: 'SMTP Watch (Exim expansion / SNI / AUTH b64)', http: 'HTTP Watch (smuggling / HTTP.sys / cleartext creds / h2c-gRPC)', ble: 'BLE Watch (Bluetooth LE clone/spoof/MITM)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', lldp: 'LLDP Watch (802.1AB malformed TLV / CVE screening)', oam: 'OAM Watch (802.3ah Link OAM loopback / flag forgery)', cfm: 'CFM Watch (802.1ag / Y.1731 service OAM)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
+                        arp: 'ARP Poisoning (incl. HSRP/VRRP virtual-MAC awareness)', dns: 'DNS Doctor (poison parser / anchors / ASN)',
+                        mac: 'MAC Watch (spoof / vendor-OUI / randomization / HSRP-VRRP virtual-MAC)', dhcp: 'DHCP Guardian (rogue server / starvation)',
+                        lacp: 'LACP Watch (802.1AX LAG-hijack / flapping)', rpc: 'RPC/NetLogon Watch (Zerologon / DCSync / WinRM)',
+                        bfd: 'BFD Watch (failover manipulation)', ptp: 'PTP Watch (IEEE-1588 grandmaster takeover)', srmpls: 'SR-MPLS Watch (MPLS segment injection)', ipsec: 'IPsec/IKE Watch (D(HE)at / weak-DH / SWEET32)',
+                        dns_passive: 'DNS Watch (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS / SAD DNS)',
+                        modbus: 'Modbus + LoRaWAN Watch (PLC write / listen-only / UMAS / libmodbus framing; LoRaWAN GWMP census / impersonation / replay)',
+                        cisco_guard: 'Cisco Guard (IOS/IOS-XE/NX-OS CVEs)', juniper_guard: 'Juniper Guard (J-Web/SSR/Space CVEs)', arista_guard: 'Arista Guard (EOS CVEs)', comware_guard: 'Comware Guard (VRF-hop / MPLS CVEs)',
+                        mikrotik_guard: 'MikroTik Guard (RouterOS CVEs)', aruba_guard: 'Aruba Guard (ArubaOS PAPI CVEs)', apc_guard: 'APC Guard (NMC Ripple20)', liebert_guard: 'Liebert Guard (RomPager / RDU101)', dell_guard: 'Dell Guard (OS10 SmartFabric CVE)',
                         bgp_speaker: 'BGP Speaker (codec/FSM/RIB)', path_asymmetry: 'Path Asymmetry (OWD)' };
         const overall = d.success
             ? '<div class="mb-2 px-3 py-2 rounded border bg-green-950/40 border-green-900 text-green-400 text-sm">✓ All detector self-tests passed' + (d.scapy_available ? ' (including Scapy end-to-end)' : ' — install Scapy for the end-to-end leg') + '</div>'
@@ -9047,11 +13003,17 @@ async function runRoutingSelftest() {
             '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
             '<tr class="text-left text-gray-500"><th class="px-2 py-1">Scanner</th><th class="px-2 py-1">Scenarios</th><th class="px-2 py-1">End-to-end</th><th class="px-2 py-1">Result</th></tr>' +
             '</thead><tbody>';
-        ['igmp', 'ipv6', 'ndp', 'raguard', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'stp', 'smb', 'relay', 'dtp', 'cdp', 'vtp', 'eigrp', 'isis', 'fhrp', 'ospf', 'bgp', 'bgp_speaker', 'path_asymmetry'].forEach(k => {
+        const order = ['igmp', 'ipv6', 'ndp', 'raguard', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'ssh', 'telnet', 'stp', 'smb', 'relay', 'ldap', 'dtp', 'cdp', 'lldp', 'vtp', 'eigrp', 'isis', 'fhrp', 'ospf', 'arp', 'mac', 'dhcp', 'dns', 'bgp', 'lacp', 'oam', 'cfm', 'rpc', 'bfd', 'ptp', 'srmpls', 'ipsec', 'dns_passive', 'ftp', 'smtp', 'http', 'modbus', 'cisco_guard', 'juniper_guard', 'arista_guard', 'comware_guard', 'mikrotik_guard', 'aruba_guard', 'apc_guard', 'liebert_guard', 'dell_guard', 'bgp_speaker', 'path_asymmetry'];
+        // Append any suite the backend returned that isn't in the preferred order,
+        // so a newly-wired detector can never again be counted toward pass/fail yet
+        // stay invisible in the table.
+        const seen = new Set(order);
+        Object.keys(d.suites || {}).forEach(k => { if (!seen.has(k)) { order.push(k); seen.add(k); } });
+        order.forEach(k => {
             const s = d.suites[k]; if (!s) return;
             const okAll = s.success;
             html += `<tr class="border-t border-slate-800">
-                <td class="px-2 py-1">${names[k]}</td>
+                <td class="px-2 py-1">${names[k] || k}</td>
                 <td class="px-2 py-1 font-mono ${okAll ? 'text-gray-300' : 'text-red-300'}">${s.passed}/${s.total}</td>
                 <td class="px-2 py-1">${_scapyLegLabel(s.scapy)}</td>
                 <td class="px-2 py-1">${okAll ? '<span class="text-green-400">PASS</span>' : '<span class="text-red-300">FAIL</span>'}</td>
@@ -9182,6 +13144,7 @@ async function runDhcpSnoop() {
 const _MACWATCH_VERDICT_STYLE = {
     clean:         ['bg-green-950/40 border-green-900 text-green-400', '✓ No MAC spoofing or rotation detected'],
     randomization: ['bg-sky-950/40 border-sky-900 text-sky-300', 'ℹ Privacy-randomized MACs present (no spoofing)'],
+    fhrp:          ['bg-sky-950/40 border-sky-900 text-sky-300', 'ℹ FHRP (HSRP/VRRP/GLBP) redundancy virtual MAC present (expected)'],
     suspicious:    ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Device rotating randomized MACs — being tracked'],
     spoofed:       ['bg-red-950/60 border-red-800 text-red-300', '🛑 MAC spoofing / cloning detected'],
     unknown:       ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
@@ -9214,7 +13177,10 @@ async function runMacWatch(scan) {
     out.innerHTML = '<p class="text-sm text-gray-400">' + (scan ? ('Sweeping ' + (iface ? escapeHtml(iface) : 'the default segment') + ' (arp-scan)…') : 'Reading neighbour table…') + '</p>';
     try {
         _macWatchFillIfaces();
-        const d = await fetchAPI('/api/net/mac-watch?scan=' + (scan ? '1' : '0') + (iface ? '&interface=' + encodeURIComponent(iface) : ''));
+        const l2cb = document.getElementById('macwatch-l2sec');
+        const l2sec = !!(l2cb && l2cb.checked);
+        if (l2sec) out.innerHTML = '<p class="text-sm text-gray-400">' + (scan ? 'Sweeping' : 'Reading') + ' + sniffing MACsec / 802.1X / MKA…</p>';
+        const d = await fetchAPI('/api/net/mac-watch?scan=' + (scan ? '1' : '0') + (iface ? '&interface=' + encodeURIComponent(iface) : '') + (l2sec ? '&l2sec=1' : ''));
         if (!d || d.success === false) {
             out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml((d && d.error) || 'failed') + '</p>';
             return;
@@ -9237,7 +13203,36 @@ async function runMacWatch(scan) {
             chip(s.randomized || 0, ' randomized') +
             chip(s.virtual || 0, ' virtual') +
             chip(s.tracks || 0, ' tracked devices') +
+            chip(s.fhrp_virtual || 0, ' FHRP virtual') +
+            chip(s.fhrp_hijacks || 0, ' FHRP hijacks', true) +
+            ((d.halow && d.halow.radios) ? chip(s.halow_radios || 0, ' HaLow radios') : '') +
+            ((d.halow && d.halow.unexpected) ? chip(s.halow_unexpected || 0, ' HaLow unlisted') : '') +
+            ((d.l2sec && d.l2sec.ran) ? chip(s.l2sec_high || 0, ' L2-sec high', true) : '') +
             '</div>';
+
+        // L2-security control plane (MACsec / 802.1X-EAPOL / MKA) — opt-in sniff.
+        const l2 = d.l2sec || {};
+        if (l2.ran) {
+            const SEV = { high: 'text-red-300', medium: 'text-amber-300', info: 'text-sky-300' };
+            const fnd = l2.findings || [];
+            const abuse = fnd.filter(f => f.severity !== 'info');
+            const inv = fnd.filter(f => f.severity === 'info');
+            if (abuse.length) {
+                html += '<p class="text-xs uppercase text-red-400 mt-3 mb-1">L2 security — MACsec / 802.1X / MKA</p>' +
+                    '<ul class="text-xs text-gray-300 list-disc pl-5">' +
+                    abuse.map(f => `<li><span class="font-mono ${SEV[f.severity] || 'text-gray-300'}">[${escapeHtml(f.code)}]</span> ${escapeHtml(f.detail)}</li>`).join('') +
+                    '</ul>';
+            }
+            if (inv.length) {
+                html += '<p class="text-xs uppercase text-sky-400 mt-3 mb-1">L2 security inventory (in use — expected)</p>' +
+                    '<ul class="text-xs text-gray-400 list-disc pl-5">' +
+                    inv.map(f => `<li><span class="font-mono text-sky-300">[${escapeHtml(f.code)}]</span> ${escapeHtml(f.detail)}</li>`).join('') +
+                    '</ul>';
+            }
+            if (!fnd.length) {
+                html += '<p class="text-xs text-gray-500 mt-3">L2-security sniff ran — no MACsec / 802.1X / MKA frames observed in the window.</p>';
+            }
+        }
 
         // Spoofed / disguised-vendor MACs
         if (d.spoofed && d.spoofed.length) {
@@ -9252,6 +13247,55 @@ async function runMacWatch(scan) {
                 '<ul class="text-xs text-gray-300 list-disc pl-5">' +
                 d.clones.map(c => `<li class="font-mono">${escapeHtml(c.mac)} → ${escapeHtml((c.ips || []).slice(0, 6).join(', '))}${(c.ips || []).length > 6 ? '…' : ''}</li>`).join('') +
                 '</ul>';
+        }
+        // FHRP (HSRP/VRRP/GLBP) VIP hijack — a redundancy VIP answered by a
+        // non-virtual MAC (ARP-spoof of the gateway group). Critical.
+        const fhrp = d.fhrp || {};
+        if (fhrp.hijacks && fhrp.hijacks.length) {
+            html += '<p class="text-xs uppercase text-red-400 mt-3 mb-1">FHRP VIP hijack (redundancy gateway spoof)</p>' +
+                '<ul class="text-xs text-gray-300 list-disc pl-5">' +
+                fhrp.hijacks.map(h => `<li class="font-mono">${escapeHtml(h.vip)} answered by ${escapeHtml(h.mac)} <span class="text-gray-500">(non-virtual — ${escapeHtml(h.proto || 'FHRP')} virtual MAC expected${h.expected_mac ? ', was ' + escapeHtml(h.expected_mac) : ''})</span></li>`).join('') +
+                '</ul>';
+        }
+        // FHRP virtual-MAC inventory (benign redundancy addresses on the segment).
+        if (fhrp.virtual && fhrp.virtual.length) {
+            html += '<p class="text-xs uppercase text-sky-400 mt-3 mb-1">FHRP redundancy virtual MACs (expected)</p>' +
+                '<ul class="text-xs text-gray-400 list-disc pl-5">' +
+                fhrp.virtual.map(v => `<li class="font-mono">${escapeHtml(v.mac)} <span class="text-gray-500">(${escapeHtml(v.note || v.proto || 'FHRP')})</span> → ${escapeHtml((v.ips || []).join(', ') || 'no IP')}</li>`).join('') +
+                '</ul>';
+        }
+        // Wi-Fi HaLow (802.11ah) radio-presence census — bridged HaLow radios
+        // identified on the wire by Morse Micro OUI 0C:BF:74 and EUI-64 IPv6 IIDs
+        // (no radio of our own). Census/fingerprint INFO; an unlisted radio is a
+        // LOW posture note, not an alarm.
+        const halow = d.halow || {};
+        if ((halow.devices && halow.devices.length) || (halow.findings && halow.findings.length)) {
+            html += '<p class="text-xs uppercase text-cyan-400 mt-3 mb-1">Wi-Fi HaLow (802.11ah) radios</p>';
+            if (halow.devices && halow.devices.length) {
+                html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                    '<tr class="text-left text-gray-500"><th class="px-2 py-1">Radio</th><th class="px-2 py-1">Seen via</th><th class="px-2 py-1">Paired host</th><th class="px-2 py-1">IP(s)</th><th class="px-2 py-1">Allowed</th></tr>' +
+                    '</thead><tbody>' +
+                    halow.devices.map(v => {
+                        const who = (v.macs && v.macs.length) ? v.macs[0] : ('…' + escapeHtml(v.suffix || '?'));
+                        const legs = v.routed_only ? 'routed-only' : (v.legs || []).join(', ');
+                        const ips = (v.ips || []);
+                        return `<tr class="border-t border-slate-800">
+                            <td class="px-2 py-1 font-mono text-cyan-300">${escapeHtml(who)}</td>
+                            <td class="px-2 py-1 text-gray-400">${escapeHtml(legs || 'L2')}</td>
+                            <td class="px-2 py-1 font-mono text-gray-400">${v.paired_host ? escapeHtml(v.paired_host) : '—'}</td>
+                            <td class="px-2 py-1 font-mono">${escapeHtml(ips.slice(0, 3).join(', ')) || '—'}${ips.length > 3 ? '…' : ''}</td>
+                            <td class="px-2 py-1 ${v.approved ? 'text-green-400' : 'text-amber-300'}">${v.approved ? '✓' : 'unlisted'}</td>
+                        </tr>`;
+                    }).join('') +
+                    '</tbody></table>';
+            }
+            const hp = (halow.findings || []).filter(f => f.severity !== 'info');
+            if (hp.length) {
+                html += '<ul class="text-xs text-amber-300 list-disc pl-5 mt-2">' +
+                    hp.map(f => `<li><span class="font-mono">[${escapeHtml(f.code)}]</span> ${escapeHtml(f.detail)}</li>`).join('') +
+                    '</ul>';
+            }
+            html += '<p class="text-xs text-gray-600 mt-1">Presence census of bridged HaLow clients only (radio/NAT-mode radios are invisible and never inferred).</p>';
         }
         // Tracked devices (rotating randomized MACs)
         if (d.tracks && d.tracks.length) {
@@ -9283,6 +13327,7 @@ async function runMacWatch(scan) {
             const KLASS = {
                 spoofed_vendor_oui: ['Spoofed', 'text-red-300'],
                 universal:          ['Vendor', 'text-gray-300'],
+                fhrp_virtual:       ['FHRP virtual', 'text-sky-300'],
                 randomized:         ['Randomized', 'text-sky-300'],
                 virtual_laa:        ['Virtual/VM', 'text-gray-400'],
             };
@@ -9330,13 +13375,15 @@ async function macWatchReset() {
 function exportMacWatchCsv() {
     const d = _ndLastMacWatch;
     const TYPE = { spoofed_vendor_oui: 'Spoofed', universal: 'Vendor',
-                  randomized: 'Randomized', virtual_laa: 'Virtual/VM' };
+                  fhrp_virtual: 'FHRP virtual', randomized: 'Randomized',
+                  virtual_laa: 'Virtual/VM' };
     _ndDownloadCsv('mac_watch' + (d && d.interface ? '_' + d.interface : ''),
         ['MAC', 'Type', 'Vendor', 'IPs', 'Flag', 'Note'],
         ((d && d.observed_macs) || []).map(c => {
             const ips = c.ips || [];
             const flag = c.klass === 'spoofed_vendor_oui' ? 'SPOOFED'
-                : (ips.length > 1 ? 'CLONE (multiple IPs)' : '');
+                : (c.klass === 'fhrp_virtual' ? 'FHRP redundancy'
+                : (ips.length > 1 ? 'CLONE (multiple IPs)' : ''));
             return [c.mac, TYPE[c.klass] || c.klass, c.vendor || '',
                     ips.join(' '), flag, c.note || ''];
         }));
@@ -9492,6 +13539,14 @@ function setupAutoRefresh() {
         checkForUpdatesQuiet();
     }, 30000); // Check 30 seconds after page load (deferred from 5s)
 
+    // Flag the Files nav when a file has been sent to this unit's Inbox.
+    autoRefreshIntervals.filesFlag = setInterval(refreshFilesFlag, 20000); // every 20s
+    setTimeout(refreshFilesFlag, 4000);   // initial check shortly after load
+    // …and when a peer shares new files to the mesh (slower — the aggregate
+    // polls peers, so keep it light).
+    autoRefreshIntervals.sharedFlag = setInterval(refreshSharedFlag, 120000); // every 2 min
+    setTimeout(refreshSharedFlag, 8000);
+
     setPwnStatusPollInterval(PWN_STATUS_POLL_INTERVAL);
 }
 
@@ -9505,48 +13560,27 @@ function initializeMobileMenu() {
         });
     }
 
-    // Auto-collapse: switch between desktop nav and hamburger based on overflow
+    // Switch between the desktop nav and the hamburger based on the WINDOW
+    // SIZE — not on how many items are in the menu. On tablets/phones the
+    // hamburger is used; on wider windows the desktop nav is shown and simply
+    // wraps to a second row (flex-wrap) when the items don't all fit on one.
     const desktopNav = document.getElementById('desktop-nav');
     if (!desktopNav || !menuBtn) return;
 
+    // Below this viewport width we treat it as a tablet/phone (covers iPad
+    // portrait at 768 and landscape at 1024) and collapse to the hamburger.
+    const NAV_HAMBURGER_MAX_WIDTH = 1024;
+
     function updateNavMode() {
-        // Temporarily show desktop nav offscreen to measure natural width
-        desktopNav.style.position = 'absolute';
-        desktopNav.style.visibility = 'hidden';
-        desktopNav.style.whiteSpace = 'nowrap';
-        desktopNav.classList.remove('hidden');
-        desktopNav.classList.add('flex');
+        const useHamburger = window.innerWidth <= NAV_HAMBURGER_MAX_WIDTH;
 
-        // Sum widths of visible buttons
-        let totalWidth = 0;
-        const gap = 4; // gap-1 = 0.25rem = 4px
-        let visibleCount = 0;
-        for (const btn of desktopNav.children) {
-            if (!btn.classList.contains('hidden')) {
-                totalWidth += btn.scrollWidth;
-                visibleCount++;
-            }
-        }
-        totalWidth += Math.max(0, visibleCount - 1) * gap;
-
-        // Reset temp styles
-        desktopNav.style.position = '';
-        desktopNav.style.visibility = '';
-        desktopNav.style.whiteSpace = '';
-
-        // Available space = parent width minus logo area
-        const parent = desktopNav.parentElement;
-        const logo = parent ? parent.querySelector('.flex.items-center.space-x-3') : null;
-        const logoWidth = logo ? logo.offsetWidth + 24 : 200; // 24px gap
-        const available = (parent ? parent.offsetWidth : window.innerWidth) - logoWidth - 48; // 48px for hamburger btn
-
-        if (totalWidth > available) {
-            // Too wide — show hamburger
+        if (useHamburger) {
+            // Tablet / phone — show hamburger
             desktopNav.classList.add('hidden');
             desktopNav.classList.remove('flex');
             menuBtn.classList.remove('hidden');
         } else {
-            // Fits — show desktop nav
+            // Desktop — show the wrapping nav bar
             desktopNav.classList.remove('hidden');
             desktopNav.classList.add('flex');
             menuBtn.classList.add('hidden');
@@ -9602,6 +13636,10 @@ async function loadInitialData() {
             // Update both stats and status from single response
             updateDashboardStats(quickData);
             updateDashboardStatus(quickData);
+            // Ensure Pentest tab visibility is set based on manual_mode on initial load
+            if (typeof quickData.manual_mode !== 'undefined') {
+                syncManualModeUI(Boolean(quickData.manual_mode));
+            }
         }
         
         // OPTIMIZATION: Defer WiFi + LAN status to after dashboard is visible
@@ -9776,6 +13814,7 @@ async function loadTabData(tabName) {
                 checkAirSnitchInstalled();
                 populateAirSnitchInterfaceDropdowns();
                 refreshAirSnitchResults();
+                rubberDuckyInit();
             } else {
                 addConsoleMessage('Enable Pentest Mode to access the Pentest tab', 'warning');
                 showTab('dashboard');
@@ -10005,12 +14044,12 @@ function updateDashboardStats(stats) {
 
     const newCountElement = document.getElementById('target-new-count');
     if (newCountElement) {
-        newCountElement.title = newTargetList.length > 0 ? newTargetList.join(', ') : 'No recent additions';
+        newCountElement.title = newTargetList.length > 0 ? newTargetList.join(', ') : 'No new hosts in the last 24 hours';
     }
 
     const lostCountElement = document.getElementById('target-lost-count');
     if (lostCountElement) {
-        lostCountElement.title = lostTargetList.length > 0 ? lostTargetList.join(', ') : 'No recent drops';
+        lostCountElement.title = lostTargetList.length > 0 ? lostTargetList.join(', ') : 'No hosts lost in the last 24 hours';
     }
 
     updateElement('port-count', portCount);
@@ -10042,22 +14081,6 @@ async function loadNetworkData() {
     try {
         // Use the new stable network data endpoint
         await loadStableNetworkData();
-        
-        // Update the status detection info banner with current config
-        updateNetworkStatusBanner();
-    } catch (error) {
-        console.error('Error loading network data:', error);
-        addConsoleMessage('Failed to load network data', 'error');
-    }
-}
-
-async function loadNetworkData() {
-    try {
-        // Use the new stable network data endpoint
-        await loadStableNetworkData();
-        
-        // Update the status detection info banner with current config
-        updateNetworkStatusBanner();
     } catch (error) {
         console.error('Error loading network data:', error);
         addConsoleMessage('Failed to load network data', 'error');
@@ -10291,14 +14314,83 @@ async function updateNetworkStatusBanner() {
 // STABLE NETWORK DATA FUNCTIONS
 // ============================================================================
 
+// Per-device scan ignore lists (issue #459). Cached client-side so the hosts
+// table can show the correct Ignore/Unignore state without re-fetching config
+// on every row. Kept in sync by loadScanBlacklist() and toggleIgnoreHost().
+let scanBlacklist = { macs: new Set(), ips: new Set() };
+
+async function loadScanBlacklist() {
+    try {
+        const data = await fetchAPI('/api/config/scan-blacklist');
+        scanBlacklist.macs = new Set((data.macs || []).map(m => String(m).toLowerCase()));
+        scanBlacklist.ips = new Set(data.ips || []);
+    } catch (error) {
+        console.warn('Could not load scan blacklist:', error);
+    }
+}
+
+function isHostIgnored(ip, mac) {
+    const m = (mac && mac !== 'Unknown') ? String(mac).toLowerCase() : '';
+    return (m && scanBlacklist.macs.has(m)) || (ip && scanBlacklist.ips.has(ip));
+}
+
+// Add or remove a host from the scan ignore list, then refresh the table.
+async function toggleIgnoreHost(ip, mac, ignore) {
+    const m = (mac && mac !== 'Unknown' && mac !== '00:00:00:00:00:00') ? mac : '';
+    const body = {};
+    if (m) body.mac = m;
+    if (ip && ip !== 'Unknown') body.ip = ip;
+    if (!body.mac && !body.ip) {
+        showNotification('This host has no MAC or IP to ignore.', 'error');
+        return;
+    }
+    try {
+        const resp = await fetch('/api/config/scan-blacklist', {
+            method: ignore ? 'POST' : 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        // Parse defensively: a stale server without this route returns an HTML
+        // 404, so resp.json() would throw a cryptic "did not match the expected
+        // pattern" instead of a useful message.
+        let data;
+        try {
+            data = await resp.json();
+        } catch (_) {
+            if (resp.status === 404) {
+                throw new Error('Ignore-list endpoint not found — restart the Ragnar web service to load this feature.');
+            }
+            throw new Error(`Server returned a non-JSON response (HTTP ${resp.status}).`);
+        }
+        if (!resp.ok) throw new Error(data.error || `Request failed (HTTP ${resp.status})`);
+        scanBlacklist.macs = new Set((data.macs || []).map(x => String(x).toLowerCase()));
+        scanBlacklist.ips = new Set(data.ips || []);
+        const label = m || ip;
+        showNotification(
+            ignore ? `Ignoring ${label} — it will be skipped in future scans.`
+                   : `${label} removed from the ignore list.`,
+            'success'
+        );
+        if (!data.enabled) {
+            showNotification('Note: "Honor Scan Blacklists" is off in Settings, so ignore lists are not enforced yet.', 'info');
+        }
+        loadStableNetworkData();
+    } catch (error) {
+        console.error('Error toggling host ignore state:', error);
+        showNotification(`Failed to update ignore list: ${error.message}`, 'error');
+    }
+}
+
 async function loadStableNetworkData() {
     try {
+        await loadScanBlacklist();
         const { network } = getSelectedDashboardNetworkKey() || {};
         const query = network ? `/api/network/stable?network=${encodeURIComponent(network)}` : '/api/network/stable';
         const data = await fetchAPI(query);
         
         if (data.success) {
             displayStableNetworkTable(data);
+            setHostPresenceBanner(!!data.presence_live);
             addConsoleMessage(`Network data loaded: ${data.count} hosts`, 'info');
         } else {
             addConsoleMessage(`Failed to load network data: ${data.error}`, 'error');
@@ -10341,21 +14433,14 @@ function displayStableNetworkTable(data) {
     // Use DocumentFragment for better performance
     const fragment = document.createDocumentFragment();
     
-    data.hosts.forEach((host, index) => {
-        // DEBUG: Log first few host objects to see structure
-        if (index < 5) {
-            console.log(`🔍 Host ${index}:`, host);
-            console.log(`   IP field:`, host.ip, typeof host.ip);
-            console.log(`   All fields:`, Object.keys(host));
-        }
-        
+    data.hosts.forEach((host) => {
         const row = document.createElement('tr');
-        row.className = 'border-b border-slate-700 hover:bg-slate-700/50 transition-colors';
-        
+        const ignored = isHostIgnored(host.ip, host.mac);
+        row.className = 'border-b border-slate-700 hover:bg-slate-700/50 transition-colors' +
+            (ignored ? ' opacity-50' : '');
+
         // Status indicator
-        const statusIcon = host.status === 'up' ? 
-            '<span class="flex items-center"><div class="w-2 h-2 bg-green-500 rounded-full mr-2"></div>Online</span>' :
-            '<span class="flex items-center"><div class="w-2 h-2 bg-gray-500 rounded-full mr-2"></div>Unknown</span>';
+        const statusIcon = hostStatusBadge(host.status);
         
         // Format MAC address
         let macDisplay = host.mac === 'Unknown' ? 
@@ -10378,7 +14463,7 @@ function displayStableNetworkTable(data) {
             `<span class="text-xs">${formatTimeAgo(host.last_scan)}</span>`;
         
         row.innerHTML = `
-            <td class="py-3 px-4">${statusIcon}</td>
+            <td class="py-3 px-4" data-host-status="${host.status}">${statusIcon}</td>
             <td class="py-3 px-4 font-mono text-sm">${host.ip}</td>
             <td class="py-3 px-4">${host.hostname === 'Unknown' ? '<span class="text-gray-500">Unknown</span>' : host.hostname}</td>
             <td class="py-3 px-4">${macDisplay}</td>
@@ -10386,13 +14471,26 @@ function displayStableNetworkTable(data) {
             <td class="py-3 px-4">${vulnDisplay}</td>
             <td class="py-3 px-4">${lastScanDisplay}</td>
             <td class="py-3 px-4">
-                <button onclick="triggerDeepScan('${host.ip}', { mode: 'full' })" 
-                        id="deep-scan-btn-${host.ip.replace(/\./g, '-')}"
-                        data-scan-status="idle"
-                        class="deep-scan-button bg-purple-600 hover:bg-purple-700 text-white text-xs px-3 py-1 rounded transition-all duration-300"
-                        title="Scan all 65535 ports with TCP connect (-sT). IP: ${host.ip}">
-                    Deep Scan
-                </button>
+                <div class="flex items-center gap-2">
+                    <button onclick="triggerDeepScan('${host.ip}', { mode: 'full' })"
+                            id="deep-scan-btn-${host.ip.replace(/\./g, '-')}"
+                            data-scan-status="idle"
+                            class="deep-scan-button bg-purple-600 hover:bg-purple-700 text-white text-xs px-3 py-1 rounded transition-all duration-300"
+                            title="Scan all 65535 ports with TCP connect (-sT). IP: ${host.ip}">
+                        Deep Scan
+                    </button>
+                    ${ignored
+                        ? `<button onclick="toggleIgnoreHost('${host.ip}', '${host.mac}', false)"
+                                class="bg-slate-600 hover:bg-slate-700 text-white text-xs px-3 py-1 rounded transition-all duration-300"
+                                title="Remove this host from the scan ignore list">
+                            Unignore
+                        </button>`
+                        : `<button onclick="toggleIgnoreHost('${host.ip}', '${host.mac}', true)"
+                                class="bg-amber-700 hover:bg-amber-800 text-white text-xs px-3 py-1 rounded transition-all duration-300"
+                                title="Skip this host in future scans and automated actions">
+                            Ignore
+                        </button>`}
+                </div>
             </td>
         `;
         
@@ -10414,13 +14512,84 @@ function displayStableNetworkTable(data) {
     });
     
     // Update host count
-    if (hostCountSpan) {
-        hostCountSpan.textContent = `${data.hosts.length} hosts`;
-    }
-    
+    updateStableHostCount();
+
     // Cleanup old button states for removed hosts
     cleanupOldDeepScanStates();
 }
+
+// ---------------------------------------------------------------------------
+// Live host presence (Discovered Hosts "Status" column)
+// ---------------------------------------------------------------------------
+
+function hostStatusBadge(status) {
+    if (status === 'up') {
+        return '<span class="flex items-center"><div class="w-2 h-2 bg-green-500 rounded-full mr-2"></div>Online</span>';
+    }
+    if (status === 'down') {
+        return '<span class="flex items-center text-gray-400"><div class="w-2 h-2 bg-red-500 rounded-full mr-2"></div>Offline</span>';
+    }
+    return '<span class="flex items-center"><div class="w-2 h-2 bg-gray-500 rounded-full mr-2"></div>Unknown</span>';
+}
+
+function updateStableHostCount() {
+    const tableBody = document.getElementById('network-hosts-table');
+    const hostCountSpan = document.getElementById('host-count');
+    if (!tableBody || !hostCountSpan) return;
+    const cells = tableBody.querySelectorAll('td[data-host-status]');
+    if (!cells.length) return;          // table drawn by another renderer
+    let online = 0;
+    cells.forEach(cell => { if (cell.dataset.hostStatus === 'up') online++; });
+    hostCountSpan.textContent = `${cells.length} hosts`;
+    // Separate nodes so each piece still matches its own translation key.
+    hostCountSpan.appendChild(document.createTextNode(' \u00b7 '));
+    const onlineSpan = document.createElement('span');
+    onlineSpan.className = 'text-green-400';
+    onlineSpan.textContent = `${online} online`;
+    hostCountSpan.appendChild(onlineSpan);
+}
+
+// Patch only the Status cells that changed; the table is never rebuilt here.
+function applyHostPresenceChanges(changes) {
+    if (!Array.isArray(changes) || !changes.length) return;
+    const tableBody = document.getElementById('network-hosts-table');
+    if (!tableBody) return;
+    let touched = false;
+    changes.forEach(change => {
+        if (!change || !change.ip) return;
+        const row = tableBody.querySelector(`tr[data-ip="${escapeSelector(change.ip)}"]`);
+        const cell = row && row.querySelector('td[data-host-status]');
+        if (!cell || cell.dataset.hostStatus === change.status) return;
+        cell.dataset.hostStatus = change.status;
+        cell.innerHTML = hostStatusBadge(change.status);
+        touched = true;
+    });
+    if (touched) updateStableHostCount();
+}
+
+function setHostPresenceBanner(live) {
+    const liveEl = document.getElementById('network-status-live');
+    const legacyEl = document.getElementById('network-status-legacy');
+    if (!liveEl || !legacyEl) return;
+    liveEl.classList.toggle('hidden', !live);
+    legacyEl.classList.toggle('hidden', live);
+    if (!live) updateNetworkStatusBanner();
+}
+
+// Safety net for when the WebSocket is down: poll the small presence
+// endpoint instead, and only while the hosts table is actually on screen.
+setInterval(async () => {
+    if (currentTab !== 'network' || document.hidden) return;
+    if (typeof socket !== 'undefined' && socket && socket.connected) return;
+    if (!document.querySelector('#network-hosts-table td[data-host-status]')) return;
+    try {
+        const data = await fetchAPI('/api/network/presence');
+        if (!data || !data.hosts) return;
+        applyHostPresenceChanges(Object.keys(data.hosts).map(ip => ({ ip, status: data.hosts[ip].status })));
+    } catch (error) {
+        console.debug('Presence poll failed:', error);
+    }
+}, 3000);
 
 function formatTimeAgo(timeString) {
     try {
@@ -10725,6 +14894,179 @@ async function handleCustomDeepScanRequest() {
         buttonEl.classList.remove('cursor-wait', 'opacity-80');
         buttonEl.textContent = buttonEl.dataset.defaultText;
     }
+}
+
+// ============================================================================
+// IP RANGE SCAN (host discovery) — Hosts tab
+// ============================================================================
+
+// Last results, kept for the CSV export button.
+let _rangeScanResults = [];
+let _rangeScanLabel = '';
+
+// Lightweight client-side sanity check; the server is the real validator.
+function _looksLikeRange(value) {
+    const v = (value || '').trim().replace(/[–—−]/g, '-');
+    if (!v) return false;
+    const octet = '(25[0-5]|2[0-4]\\d|1?\\d?\\d)';
+    const ipv4 = `${octet}(\\.${octet}){3}`;
+    const cidr = new RegExp(`^${ipv4}/(\\d|[12]\\d|3[0-2])$`);
+    const startEnd = new RegExp(`^${ipv4}-(${ipv4}|${octet})$`);
+    const single = new RegExp(`^${ipv4}$`);
+    return cidr.test(v) || startEnd.test(v) || single.test(v);
+}
+
+async function runRangeScan() {
+    const inputEl = document.getElementById('range-scan-input');
+    const statusEl = document.getElementById('range-scan-status');
+    const buttonEl = document.getElementById('range-scan-btn');
+    const csvBtn = document.getElementById('range-scan-csv-btn');
+    const wrapEl = document.getElementById('range-scan-results-wrap');
+    const bodyEl = document.getElementById('range-scan-results');
+    if (!inputEl || !statusEl || !buttonEl || !bodyEl) return;
+
+    const range = inputEl.value.trim();
+    const netbios = !!(document.getElementById('range-scan-netbios') || {}).checked;
+
+    if (!range) {
+        statusEl.textContent = 'Enter an IP range before scanning.';
+        return;
+    }
+    if (!_looksLikeRange(range)) {
+        statusEl.textContent = 'That does not look like a CIDR (192.168.1.0/24) or start–end (192.168.1.1-192.168.1.254).';
+        return;
+    }
+
+    const originalText = buttonEl.dataset.defaultText || buttonEl.textContent;
+    buttonEl.dataset.defaultText = originalText;
+    buttonEl.disabled = true;
+    buttonEl.classList.add('cursor-wait', 'opacity-80');
+    buttonEl.textContent = 'Scanning…';
+    statusEl.textContent = `Discovering live hosts in ${range}${netbios ? ' (with NetBIOS)' : ''}… this can take a moment.`;
+    addConsoleMessage(`IP range scan started: ${range}${netbios ? ' + NetBIOS' : ''}`, 'info');
+
+    try {
+        const response = await networkAwareFetch('/api/scan/range', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ range: range, netbios: netbios })
+        });
+        const data = await response.json();
+
+        if (data.status === 'success') {
+            _rangeScanResults = Array.isArray(data.hosts) ? data.hosts : [];
+            _rangeScanLabel = range;
+            renderRangeScanResults(_rangeScanResults, { privileged: data.privileged });
+            wrapEl.classList.remove('hidden');
+
+            const parts = [`${data.count} host(s) up of ${data.scanned} scanned`];
+            if (!data.privileged) parts.push('MAC/vendor need root or a local segment');
+            statusEl.textContent = parts.join(' — ') + '.';
+            addConsoleMessage(`IP range scan complete: ${data.count} host(s) up in ${range}`, 'success');
+
+            if (csvBtn) {
+                const enabled = _rangeScanResults.length > 0;
+                csvBtn.disabled = !enabled;
+                csvBtn.classList.toggle('opacity-40', !enabled);
+                csvBtn.classList.toggle('cursor-not-allowed', !enabled);
+            }
+        } else {
+            statusEl.textContent = `Scan failed: ${data.message || 'unknown error'}`;
+            addConsoleMessage(`IP range scan failed: ${data.message || 'unknown error'}`, 'error');
+        }
+    } catch (error) {
+        statusEl.textContent = `Unexpected error: ${error.message}`;
+        addConsoleMessage(`IP range scan error: ${error.message}`, 'error');
+    } finally {
+        buttonEl.disabled = false;
+        buttonEl.classList.remove('cursor-wait', 'opacity-80');
+        buttonEl.textContent = buttonEl.dataset.defaultText;
+    }
+}
+
+function renderRangeScanResults(hosts, opts = {}) {
+    const bodyEl = document.getElementById('range-scan-results');
+    if (!bodyEl) return;
+
+    if (!hosts || hosts.length === 0) {
+        bodyEl.innerHTML = `
+            <tr><td colspan="8" class="text-center py-6 text-gray-400">No live hosts found in this range.</td></tr>`;
+        return;
+    }
+
+    const dash = '<span class="text-gray-600">—</span>';
+    bodyEl.innerHTML = hosts.map(h => {
+        const ip = escapeHtml(h.ip || '');
+        const hostname = h.hostname ? escapeHtml(h.hostname) : dash;
+        const netbios = h.netbios ? escapeHtml(h.netbios) : dash;
+        const mac = h.mac ? `<span class="font-mono text-xs">${escapeHtml(h.mac)}</span>` : dash;
+        const vendor = h.vendor ? escapeHtml(h.vendor) : dash;
+        const resp = (h.response_ms !== null && h.response_ms !== undefined)
+            ? `${h.response_ms} ms` : dash;
+        const ipAttr = (h.ip || '').replace(/'/g, '');
+        return `
+            <tr class="border-b border-slate-800 hover:bg-slate-800/40">
+                <td class="py-2 px-3 whitespace-nowrap">
+                    <span class="inline-flex items-center gap-1.5">
+                        <span class="w-2 h-2 rounded-full bg-green-500"></span>
+                        <span class="text-green-400">up</span>
+                    </span>
+                </td>
+                <td class="py-2 px-3 font-mono whitespace-nowrap">${ip}</td>
+                <td class="py-2 px-3">${hostname}</td>
+                <td class="py-2 px-3">${netbios}</td>
+                <td class="py-2 px-3 whitespace-nowrap">${mac}</td>
+                <td class="py-2 px-3">${vendor}</td>
+                <td class="py-2 px-3 whitespace-nowrap">${resp}</td>
+                <td class="py-2 px-3 whitespace-nowrap">
+                    <button onclick="rangeScanPortScan('${ipAttr}')"
+                            class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-xs font-medium transition-colors">
+                        Scan ports
+                    </button>
+                </td>
+            </tr>`;
+    }).join('');
+}
+
+// Per-host "Scan ports" — reuse the existing deep-scan pipeline (top 3000).
+async function rangeScanPortScan(ip) {
+    if (!ip) return;
+    const statusEl = document.getElementById('range-scan-status');
+    if (statusEl) statusEl.textContent = `Port scan queued for ${ip} — watch the console for live results.`;
+    addConsoleMessage(`Port scan requested for ${ip} from range results (top 3000 ports)`, 'info');
+    try {
+        await triggerDeepScan(ip, { mode: 'top3000', source: 'range' });
+    } catch (error) {
+        addConsoleMessage(`Failed to start port scan for ${ip}: ${error.message}`, 'error');
+    }
+}
+
+function exportRangeScanCsv() {
+    if (!_rangeScanResults || _rangeScanResults.length === 0) return;
+    const header = ['Status', 'IP Address', 'Hostname', 'NetBIOS', 'MAC', 'Vendor', 'Response (ms)'];
+    const esc = (val) => {
+        const s = (val === null || val === undefined) ? '' : String(val);
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const rows = _rangeScanResults.map(h => [
+        h.status || 'up', h.ip || '', h.hostname || '', h.netbios || '',
+        h.mac || '', h.vendor || '',
+        (h.response_ms !== null && h.response_ms !== undefined) ? h.response_ms : ''
+    ].map(esc).join(','));
+    const csv = [header.join(','), ...rows].join('\r\n');
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const safeLabel = (_rangeScanLabel || 'range').replace(/[^0-9a-zA-Z._-]/g, '_');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ragnar-range-scan-${safeLabel}-${stamp}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    addConsoleMessage(`Exported ${_rangeScanResults.length} host(s) to CSV`, 'success');
 }
 
 // TEST FUNCTION - Direct deep scan test
@@ -12619,6 +16961,7 @@ async function loadConfigData() {
 
         // Also check for updates when loading config tab
         checkForUpdates();
+        loadOsUpdates({ quiet: true });
 
         // Load security configuration
         await loadSecurityConfig();
@@ -12626,8 +16969,8 @@ async function loadConfigData() {
         // Load wardriving on-boot toggle state (card is in config page)
         loadWardrivingOnBootState();
 
-        // Load Bluetooth provisioning toggle + adapter picker state
-        loadBleProvisioning();
+        // Load Bluetooth card state (mobile app over Bluetooth)
+        loadBle();
 
         // Load GPS-backfill opt-in state (gates the map Backfill GPS button)
         loadWardrivingBackfillState();
@@ -12944,16 +17287,16 @@ async function handleAuthSetup(event) {
     }
 }
 
-function copyRecoveryCodes() {
-    if (window._tempRecoveryCodes) {
-        const text = window._tempRecoveryCodes.join('\n');
-        navigator.clipboard.writeText(text).then(() => {
-            const btn = document.getElementById('copy-codes-btn');
-            btn.textContent = 'Copied!';
-            setTimeout(() => { btn.textContent = 'Copy All Codes'; }, 2000);
-        }).catch(() => {
-            addConsoleMessage('Failed to copy - please select and copy manually', 'warning');
-        });
+async function copyRecoveryCodes() {
+    if (!window._tempRecoveryCodes) return;
+    const text = window._tempRecoveryCodes.join('\n');
+    // copyToClipboard has the execCommand fallback needed on plain-HTTP.
+    const ok = await copyToClipboard(text, { silent: true });
+    if (ok) {
+        const btn = document.getElementById('copy-codes-btn');
+        if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy All Codes'; }, 2000); }
+    } else {
+        addConsoleMessage('Failed to copy - please select and copy manually', 'warning');
     }
 }
 
@@ -14938,8 +19281,11 @@ async function checkForUpdates() {
         // repository metadata). Say which, and keep the button usable when the
         // updater can repair the problem itself.
         if (data.code) {
-            const repairable = data.code === 'not_a_repo' || data.code === 'ownership' ||
-                               data.code === 'locked' || data.code === 'no_remote';
+            // The update itself carries every repair the updater knows, up
+            // to rebuilding the git data, so the button stays usable for
+            // anything short of "git does not run" or "the disk is full". A
+            // dead button here is what left boxes unable to update at all.
+            const repairable = data.code !== 'git_missing' && data.code !== 'disk_full';
             reportUpdateProblem('Update check', data);
             updateElement('update-status', data.code === 'offline' ? 'Offline' : 'Needs attention');
             if (updateStatusEl) {
@@ -14950,7 +19296,8 @@ async function checkForUpdates() {
                 updateBtn.disabled = false;
                 updateBtn.onclick = performUpdate;
                 updateBtn.className = 'w-full bg-yellow-600 hover:bg-yellow-700 text-white py-2 px-4 rounded transition-colors';
-                updateElement('update-btn-text', 'Repair and Update');
+                updateElement('update-btn-text', data.code === 'offline' || data.code === 'timeout'
+                    ? 'Retry Update' : 'Repair and Update');
             }
             return;
         }
@@ -15313,6 +19660,62 @@ async function checkForUpdatesQuiet() {
     }
 }
 
+// ── Files nav flag ───────────────────────────────────────────────────────────
+// Put a dot on the "Files" nav word (like the Config update flag) when a file is
+// sent to this unit (its mesh Inbox has items) OR shared to the mesh by a peer
+// since it was last viewed.
+let _filesFlagInbox = 0;
+let _filesFlagSharedNew = false;
+function _applyFilesFlag() {
+    const on = _filesFlagInbox > 0 || _filesFlagSharedNew;
+    document.querySelectorAll('[data-tab="files"]').forEach(btn => {
+        let dot = btn.querySelector('.files-flag');
+        if (on) {
+            if (!dot) {
+                dot = document.createElement('span');
+                dot.className = 'files-flag absolute -top-1 -right-1 w-3 h-3 bg-amber-500 rounded-full pulse-glow';
+                btn.style.position = 'relative';
+                btn.appendChild(dot);
+            }
+        } else if (dot) {
+            dot.remove();
+        }
+    });
+}
+// Sent-to-this-unit case (Inbox count).
+function setFilesNavFlag(count) { _filesFlagInbox = count; _applyFilesFlag(); }
+function refreshFilesFlag() {
+    networkAwareFetch('/api/mesh/inbox')
+        .then(r => r.json())
+        .then(d => setFilesNavFlag((d && d.items) ? d.items.length : 0))
+        .catch(() => { /* silent — background check */ });
+}
+// Shared-to-the-mesh case: flag when a peer has shared more files than we last
+// saw. Baselines silently on first observation so pre-existing shares don't flag.
+function refreshSharedFlag() {
+    networkAwareFetch('/api/mesh/share')
+        .then(r => r.json())
+        .then(d => {
+            const peerCount = ((d && d.items) || []).filter(i => !i.is_local).length;
+            let raw = null;
+            try { raw = localStorage.getItem('mesh_share_seen'); } catch (e) { /* ignore */ }
+            if (raw === null) {
+                try { localStorage.setItem('mesh_share_seen', String(peerCount)); } catch (e) { /* ignore */ }
+                _filesFlagSharedNew = false;
+            } else {
+                _filesFlagSharedNew = peerCount > (parseInt(raw, 10) || 0);
+            }
+            _applyFilesFlag();
+        })
+        .catch(() => { /* silent — background check */ });
+}
+// Everything currently shared is now "seen" (called when Mesh Share is opened).
+function markSharedSeen(peerCount) {
+    try { localStorage.setItem('mesh_share_seen', String(peerCount || 0)); } catch (e) { /* ignore */ }
+    _filesFlagSharedNew = false;
+    _applyFilesFlag();
+}
+
 async function restartService() {
     if (!confirm('This will restart the Ragnar service. The web interface may be temporarily unavailable. Continue?')) {
         return;
@@ -15347,6 +19750,429 @@ async function restartService() {
         updateElement('service-status', 'Error');
         document.getElementById('service-status').className = 'text-sm px-2 py-1 rounded bg-red-700 text-red-300';
     }
+}
+
+// ============================================================================
+// OS PACKAGES (apt): Config -> System "OS Packages" card + Mesh-tab banner
+// ============================================================================
+// "Update System" above pulls Ragnar's code. This drives apt for the rest of the
+// box: kernel, security fixes and third-party repos such as Tailscale. The run
+// itself happens on the box in a transient systemd unit (os_updates.py), so the
+// page only starts it and polls. Failed polls are expected mid-upgrade - an
+// upgrade can restart tailscaled or Wi-Fi, which drops this page for a few
+// seconds - so they are retried quietly instead of being reported as errors.
+let osUpdatesPollTimer = null;
+let osUpdatesLast = null;
+let osUpdatesLastFetch = 0;
+let osUpdatesPollFailures = 0;
+let osUpdatesWatching = false;      // this page started (or attached to) the current run
+let osUpdatesLogPrevious = false;   // log panel shows the run before the last one
+const OS_UPDATES_POLL_MS = 3000;
+const OS_UPDATES_MAX_FAILURES = 600; // ~30 min of failed polls before giving up
+
+function osUpdatesAgo(ts) {
+    if (!ts) return 'never';
+    const secs = Math.max(0, Date.now() / 1000 - ts);
+    if (secs < 90) return 'just now';
+    if (secs < 3600) return `${Math.round(secs / 60)} min ago`;
+    if (secs < 172800) return `${Math.round(secs / 3600)} h ago`;
+    return `${Math.round(secs / 86400)} days ago`;
+}
+
+function osUpdatesSetBadge(text, cls) {
+    const badge = document.getElementById('os-updates-badge');
+    if (!badge) return;
+    badge.textContent = text;
+    badge.className = 'text-sm px-2 py-1 rounded ' + cls;
+}
+
+function renderOsUpdates(data) {
+    const card = document.getElementById('os-updates-card');
+    if (!card || !data) return;
+    const summary = document.getElementById('os-updates-summary');
+    const reboot = document.getElementById('os-updates-reboot');
+    const tsBox = document.getElementById('os-updates-tailscale');
+    const progress = document.getElementById('os-updates-progress');
+    const result = document.getElementById('os-updates-result');
+    const checkBtn = document.getElementById('os-updates-check-btn');
+    const upgradeBtn = document.getElementById('os-updates-upgrade-btn');
+    const tsBtn = document.getElementById('os-updates-ts-btn');
+    const listWrap = document.getElementById('os-updates-list-wrap');
+    const list = document.getElementById('os-updates-list');
+
+    const status = data.status || {};
+    const available = data.available || {};
+    const count = available.count || 0;
+    const packagesAll = available.packages || [];
+    const heldPkgs = packagesAll.filter(p => p.held);
+    // "Upgrade All" never installs a held-back package, so it is not counted as
+    // something to upgrade - it is listed on its own with the reason.
+    const upgradableNow = available.upgradable_now ?? count;
+    const security = available.security_now ?? (available.security_count || 0);
+    const running = !!data.running;
+    const heldBox = document.getElementById('os-updates-held');
+
+    if (!data.supported) {
+        osUpdatesSetBadge('Unavailable', 'bg-gray-700 text-gray-300');
+        summary.textContent = data.reason || 'OS package updates are not available on this system.';
+        [reboot, tsBox, heldBox, progress, result, listWrap].forEach(el => el && el.classList.add('hidden'));
+        checkBtn.disabled = true;
+        upgradeBtn.disabled = true;
+        return;
+    }
+
+    // Badge + summary line
+    if (running) {
+        osUpdatesSetBadge(status.action === 'check' ? 'Checking...' : 'Upgrading...',
+            'bg-blue-700 text-blue-200');
+    } else if (!available.ok && available.error) {
+        osUpdatesSetBadge('Error', 'bg-red-900 text-red-300');
+    } else if (count === 0) {
+        osUpdatesSetBadge('Up to date', 'bg-green-900 text-green-300');
+    } else if (upgradableNow === 0) {
+        osUpdatesSetBadge(`${heldPkgs.length} held back`, 'bg-amber-900 text-amber-200');
+    } else if (security > 0) {
+        osUpdatesSetBadge(`${upgradableNow} updates`, 'bg-red-900 text-red-300');
+    } else {
+        osUpdatesSetBadge(`${upgradableNow} updates`, 'bg-amber-900 text-amber-200');
+    }
+    const checked = `Package lists refreshed ${osUpdatesAgo(data.last_checked)}.`;
+    const stale = data.last_checked && (Date.now() / 1000 - data.last_checked) > 7 * 86400
+        ? ' Check for updates to see what is new.' : '';
+    if (!available.ok && available.error) {
+        summary.textContent = `Could not read the package list: ${available.error}`;
+    } else if (count === 0) {
+        summary.textContent = `Everything apt manages is up to date. ${checked}${stale}`;
+    } else if (upgradableNow === 0) {
+        const n = heldPkgs.length;
+        summary.textContent = `Nothing left for Upgrade All. ${n} package${n === 1 ? ' is' : 's are'} held back; see why below. ${checked}${stale}`;
+    } else {
+        const sec = security ? ` (${security} security fix${security === 1 ? '' : 'es'})` : '';
+        const heldNote = heldPkgs.length ? ` ${heldPkgs.length} more held back.` : '';
+        summary.textContent = `${upgradableNow} package${upgradableNow === 1 ? '' : 's'} can be upgraded${sec}.${heldNote} ${checked}${stale}`;
+    }
+
+    // Held back: each with the reason and, where it is safe to offer, a
+    // deliberate "Upgrade anyway" that names exactly what it removes.
+    if (heldPkgs.length && heldBox) {
+        heldBox.innerHTML = `<div class="text-sm font-medium text-amber-200 mb-1">Held back (${heldPkgs.length})</div>
+            <p class="text-xs text-gray-400 mb-2">Upgrade All skips these. Ragnar never removes a package unless you approve it here.</p>` +
+            heldPkgs.map(p => {
+                const h = p.held || {};
+                const bits = [];
+                if (h.removes && h.removes.length) bits.push(`<span class="text-red-300">removes ${escapeHtml(h.removes.join(', '))}</span>`);
+                if (h.new && h.new.length) bits.push(`adds ${escapeHtml(h.new.join(', '))}`);
+                if (h.detail) bits.push(escapeHtml(h.detail));
+                const btn = h.can_force
+                    ? `<button data-held-pkg="${escapeHtml(p.name)}" onclick="upgradeHeldPackage(this.dataset.heldPkg)" class="os-held-btn px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-600 text-white text-xs font-medium whitespace-nowrap disabled:bg-gray-600 disabled:cursor-not-allowed"${running ? ' disabled' : ''}>Upgrade anyway</button>`
+                    : '';
+                return `<div class="flex items-start justify-between gap-2 flex-wrap py-2 border-t border-slate-700">
+                    <div class="min-w-0 text-xs">
+                        <div><span class="font-mono text-gray-200 break-all">${escapeHtml(p.name)}</span>
+                            <span class="font-mono text-gray-400 ml-2 break-all">${escapeHtml(p.current)} \u2192 ${escapeHtml(p.candidate)}</span></div>
+                        <div class="text-gray-400 mt-1">${escapeHtml(h.explanation || '')}</div>
+                        ${bits.length ? `<div class="text-gray-500 mt-1 break-all">${bits.join(' \u00b7 ')}</div>` : ''}
+                    </div>
+                    ${btn}
+                </div>`;
+            }).join('');
+        heldBox.classList.remove('hidden');
+    } else if (heldBox) {
+        heldBox.classList.add('hidden');
+    }
+
+    // Reboot recommendation
+    if (data.reboot_required && !running) {
+        reboot.innerHTML = `<div class="flex items-center justify-between gap-2 flex-wrap">
+            <span><strong>Reboot recommended.</strong> ${escapeHtml(data.reboot_reason || '')}</span>
+            <button onclick="rebootSystem()" class="px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-600 text-white text-xs font-medium whitespace-nowrap">Reboot now</button>
+        </div>`;
+        reboot.classList.remove('hidden');
+    } else {
+        reboot.classList.add('hidden');
+    }
+
+    // Tailscale shortcut
+    if (data.tailscale) {
+        document.getElementById('os-updates-ts-versions').textContent =
+            `${data.tailscale.current} → ${data.tailscale.candidate}`;
+        tsBox.classList.remove('hidden');
+    } else {
+        tsBox.classList.add('hidden');
+    }
+
+    // Live progress
+    if (running) {
+        progress.classList.remove('hidden');
+        const p = status.progress;
+        let stepText = status.step || 'Working...';
+        let pct = null;
+        if (p && p.total) {
+            pct = Math.min(100, Math.round((p.done / p.total) * 100));
+            stepText = `${status.step || 'Installing'}: ${p.current || ''} (${p.done}/${p.total})`;
+        }
+        document.getElementById('os-updates-step').textContent = stepText;
+        document.getElementById('os-updates-pct').textContent = pct === null ? '' : `${pct}%`;
+        // Before the install starts there is no count to measure against; show
+        // a partial bar so the step text does not look stalled.
+        document.getElementById('os-updates-bar').style.width = pct === null ? '15%' : `${pct}%`;
+    } else {
+        progress.classList.add('hidden');
+    }
+
+    // Outcome of the last run (kept visible for a day, failures until the next run)
+    const finishedAgo = status.finished ? Date.now() / 1000 - status.finished : Infinity;
+    if (!running && status.state === 'finished' && (status.outcome !== 'ok' || finishedAgo < 86400)) {
+        let html;
+        if (status.outcome === 'ok') {
+            result.className = 'mb-3 p-3 rounded-lg text-xs bg-green-900 text-green-300';
+            if (status.action === 'check') {
+                html = `Package lists refreshed ${escapeHtml(osUpdatesAgo(status.finished))}.`;
+            } else {
+                const n = status.upgraded_count || 0;
+                html = n
+                    ? `Upgraded ${n} package${n === 1 ? '' : 's'} ${escapeHtml(osUpdatesAgo(status.finished))}.`
+                    : `Nothing to install ${escapeHtml(osUpdatesAgo(status.finished))}.`;
+                if (status.removed && status.removed.length) html += ` Removed (as approved): ${escapeHtml(status.removed.join(', '))}.`;
+                if (status.tailscale_upgraded) html += ' Tailscale was updated.';
+                if (status.held_count) html += ` ${status.held_count} held back (see above).`;
+            }
+        } else {
+            result.className = 'mb-3 p-3 rounded-lg text-xs bg-red-900 text-red-300';
+            html = `<strong>${escapeHtml(status.error || 'The last package run failed.')}</strong>`;
+            if (status.hint) html += `<br>${escapeHtml(status.hint)}`;
+        }
+        if (status.warnings && status.warnings.length) {
+            html += `<br><span class="text-amber-200">${status.warnings.length} repository warning${status.warnings.length === 1 ? '' : 's'}; see the output below.</span>`;
+        }
+        result.innerHTML = html;
+        result.classList.remove('hidden');
+    } else {
+        result.classList.add('hidden');
+    }
+
+    // Buttons
+    checkBtn.disabled = running;
+    upgradeBtn.disabled = running || upgradableNow === 0;
+    upgradeBtn.textContent = upgradableNow ? `Upgrade All (${upgradableNow})` : 'Upgrade All';
+    if (tsBtn) tsBtn.disabled = running;
+
+    // Package list
+    // Held-back packages go last: they are not part of Upgrade All.
+    const packages = packagesAll.filter(p => !p.held).concat(heldPkgs);
+    document.getElementById('os-updates-list-count').textContent = String(packages.length);
+    listWrap.classList.toggle('hidden', packages.length === 0);
+    list.innerHTML = packages.map(p => `
+        <div class="flex items-center justify-between gap-2 flex-wrap px-2 py-1">
+            <span class="min-w-0">
+                <span class="font-mono text-gray-200 break-all">${escapeHtml(p.name)}</span>
+                ${p.security ? '<span class="ml-2 px-1.5 py-0.5 rounded bg-red-900 text-red-300 text-[10px] uppercase">security</span>' : ''}
+                ${p.held ? '<span class="ml-2 px-1.5 py-0.5 rounded bg-amber-900 text-amber-200 text-[10px] uppercase">held back</span>' : ''}
+            </span>
+            <span class="font-mono text-gray-400 break-all">${escapeHtml(p.current)} → ${escapeHtml(p.candidate)}</span>
+        </div>`).join('');
+
+    const prevBtn = document.getElementById('os-updates-log-previous');
+    if (prevBtn) prevBtn.classList.toggle('hidden', !data.has_previous_log);
+    const logWrap = document.getElementById('os-updates-log-wrap');
+    if (running && logWrap && logWrap.open && !osUpdatesLogPrevious) loadOsUpdateLog(false);
+}
+
+// Mesh tab: only the Tailscale part, for this unit.
+function renderMeshTailscaleUpdate(data) {
+    const box = document.getElementById('mesh-ts-update');
+    if (!box || !data) return;
+    const status = data.status || {};
+    const tsRun = data.running && status.action === 'upgrade' &&
+        (!status.packages || !status.packages.length || status.packages.includes('tailscale'));
+    if (!data.supported || (!data.tailscale && !tsRun)) {
+        box.classList.add('hidden');
+        return;
+    }
+    box.classList.remove('hidden');
+    const versions = document.getElementById('mesh-ts-update-versions');
+    versions.textContent = data.tailscale ? `${data.tailscale.current} → ${data.tailscale.candidate}` : '';
+    const state = document.getElementById('mesh-ts-update-state');
+    const btn = document.getElementById('mesh-ts-update-btn');
+    if (data.running) {
+        state.textContent = tsRun
+            ? 'Updating... tailscaled restarts at the end; the mesh drops for a few seconds.'
+            : 'Another package run is in progress.';
+        btn.disabled = true;
+    } else {
+        state.textContent = 'Installed from the Tailscale apt repository. The mesh reconnects by itself after the update.';
+        btn.disabled = false;
+    }
+}
+
+function scheduleOsUpdatesPoll(delay = OS_UPDATES_POLL_MS) {
+    if (osUpdatesPollTimer) clearTimeout(osUpdatesPollTimer);
+    osUpdatesPollTimer = setTimeout(() => {
+        osUpdatesPollTimer = null;
+        loadOsUpdates({ fromPoll: true });
+    }, delay);
+}
+
+async function loadOsUpdates(opts = {}) {
+    const wasRunning = !!(osUpdatesLast && osUpdatesLast.running);
+    let data;
+    try {
+        data = await fetchAPI('/api/system/os-updates');
+    } catch (error) {
+        if (opts.fromPoll && osUpdatesWatching) {
+            // Expected while tailscaled / Wi-Fi / the service restarts.
+            osUpdatesPollFailures += 1;
+            const step = document.getElementById('os-updates-step');
+            if (step) step.textContent = 'Reconnecting to the box... (the upgrade keeps running)';
+            if (osUpdatesPollFailures < OS_UPDATES_MAX_FAILURES) {
+                scheduleOsUpdatesPoll(5000);
+            } else {
+                osUpdatesWatching = false;
+                showNotification('Lost contact with the box during the OS upgrade. Reload the page to see how it ended.', 'error');
+            }
+            return null;
+        }
+        if (!opts.quiet) {
+            osUpdatesSetBadge('Error', 'bg-red-900 text-red-300');
+            const summary = document.getElementById('os-updates-summary');
+            if (summary) summary.textContent = `Could not load OS update status: ${error.message}`;
+        }
+        return null;
+    }
+    osUpdatesPollFailures = 0;
+    osUpdatesLast = data;
+    osUpdatesLastFetch = Date.now();
+    renderOsUpdates(data);
+    renderMeshTailscaleUpdate(data);
+
+    if (data.running) {
+        osUpdatesWatching = true;
+        scheduleOsUpdatesPoll();
+    } else if (osUpdatesWatching && (wasRunning || opts.fromPoll)) {
+        osUpdatesWatching = false;
+        const status = data.status || {};
+        if (status.outcome === 'ok') {
+            const msg = status.action === 'check'
+                ? `Package lists refreshed: ${data.available?.count || 0} update(s) available.`
+                : `OS upgrade finished: ${status.upgraded_count || 0} package(s) upgraded.` +
+                  (status.reboot_recommended ? ' A reboot is recommended.' : '');
+            showNotification(msg, 'success');
+        } else if (status.state === 'finished') {
+            showNotification(status.error || 'The OS package run failed.', 'error');
+        }
+        const logWrap = document.getElementById('os-updates-log-wrap');
+        if (logWrap && logWrap.open) loadOsUpdateLog(false);
+    }
+    return data;
+}
+
+async function loadOsUpdateLog(previous) {
+    const pre = document.getElementById('os-updates-log');
+    if (!pre) return;
+    if (typeof previous === 'boolean') osUpdatesLogPrevious = previous;
+    const cur = document.getElementById('os-updates-log-current');
+    const prev = document.getElementById('os-updates-log-previous');
+    const on = 'px-2 py-1 rounded bg-slate-700 text-white';
+    const off = 'px-2 py-1 rounded bg-slate-800 text-gray-300 hover:bg-slate-700';
+    if (cur) cur.className = osUpdatesLogPrevious ? off : on;
+    if (prev) prev.className = (osUpdatesLogPrevious ? on : off) +
+        (prev.classList.contains('hidden') ? ' hidden' : '');
+    try {
+        const data = await fetchAPI('/api/system/os-updates/log' + (osUpdatesLogPrevious ? '?previous=1' : ''));
+        const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+        pre.textContent = data.log || '(no output yet)';
+        if (atBottom) pre.scrollTop = pre.scrollHeight;
+    } catch (error) {
+        // A dropped connection mid-upgrade; the next poll refreshes it.
+    }
+}
+
+async function osUpdatesStart(endpoint, body) {
+    try {
+        const data = await postAPI(endpoint, body);
+        osUpdatesWatching = true;
+        if (data.status) {
+            renderOsUpdates(Object.assign({}, osUpdatesLast || { supported: true }, {
+                running: true, status: data.status }));
+        }
+        scheduleOsUpdatesPoll(1000);
+        return true;
+    } catch (error) {
+        if (error.status === 409) {
+            // Already running (another tab, or the chat assistant): follow it.
+            osUpdatesWatching = true;
+            showNotification('A package run is already in progress. Showing its progress.', 'info');
+            scheduleOsUpdatesPoll(500);
+            return true;
+        }
+        showNotification(error.message || 'Could not start the package run.', 'error');
+        return false;
+    }
+}
+
+async function checkOsUpdates() {
+    await osUpdatesStart('/api/system/os-updates/check', {});
+}
+
+async function upgradeOsPackages(packages) {
+    const data = osUpdatesLast || {};
+    const available = data.available || {};
+    let message;
+    if (packages && packages.length === 1 && packages[0] === 'tailscale') {
+        const ts = data.tailscale;
+        message = `Update Tailscale${ts ? ` from ${ts.current} to ${ts.candidate}` : ''}?\n\n` +
+            'tailscaled restarts at the end. If you are reaching this page over Tailscale it ' +
+            'drops for a few seconds and reconnects; the mesh reconnects by itself.';
+    } else {
+        const count = available.upgradable_now ?? (available.count || 0);
+        const secN = available.security_now ?? available.security_count;
+        const sec = secN ? ` (${secN} security fixes)` : '';
+        message = `Upgrade ${count} OS package${count === 1 ? '' : 's'}${sec}?\n\n` +
+            'Large upgrades can take a long time on a Pi. Wi-Fi, Bluetooth and Tailscale may ' +
+            'restart briefly; the upgrade keeps running on the box if this page disconnects. ' +
+            'Packages are only upgraded or added, never removed.';
+    }
+    if (!confirm(message)) return;
+    ['os-updates-upgrade-btn', 'os-updates-ts-btn', 'mesh-ts-update-btn', 'os-updates-check-btn']
+        .forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true; });
+    const ok = await osUpdatesStart('/api/system/os-updates/upgrade',
+        packages && packages.length ? { packages } : {});
+    if (!ok) loadOsUpdates({ quiet: true });
+}
+
+// A held-back package that needs another one removed: the operator sees exactly
+// what goes and what comes, and the box refuses to remove anything beyond that.
+async function upgradeHeldPackage(name) {
+    const pkg = ((osUpdatesLast && osUpdatesLast.available && osUpdatesLast.available.packages) || [])
+        .find(p => p.name === name);
+    if (!pkg || !pkg.held) return;
+    const h = pkg.held;
+    const removes = h.removes || [];
+    let message = `Upgrade ${pkg.name} from ${pkg.current} to ${pkg.candidate}?\n\n`;
+    if (removes.length) message += `This REMOVES: ${removes.join(', ')}\n`;
+    if (h.new && h.new.length) message += `and installs: ${h.new.join(', ')}\n`;
+    message += removes.length
+        ? '\nThe box checks the plan again first and changes nothing if apt wants to remove anything else.'
+        : '\nNothing is removed.';
+    if (!confirm(message)) return;
+    document.querySelectorAll('.os-held-btn').forEach(b => { b.disabled = true; });
+    ['os-updates-upgrade-btn', 'os-updates-ts-btn', 'mesh-ts-update-btn', 'os-updates-check-btn']
+        .forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true; });
+    const ok = await osUpdatesStart('/api/system/os-updates/upgrade',
+        { packages: [pkg.name], allow_remove: removes });
+    if (!ok) loadOsUpdates({ quiet: true });
+}
+
+// The Mesh tab refreshes often; the package list only changes after a check or
+// an upgrade, so re-read it at most every five minutes from there.
+function meshMaybeLoadOsUpdates(meshData) {
+    if (!meshData || !meshData.installed) return;
+    if (osUpdatesPollTimer) return;  // a run is being polled already
+    if (osUpdatesLast && Date.now() - osUpdatesLastFetch < 5 * 60 * 1000) {
+        renderMeshTailscaleUpdate(osUpdatesLast);
+        return;
+    }
+    loadOsUpdates({ quiet: true });
 }
 
 async function rebootSystem() {
@@ -15487,7 +20313,25 @@ async function updateVulnerabilityCount() {
 // WI-FI MANAGEMENT FUNCTIONS
 // ============================================================================
 
+// Set from /api/wifi/status when the driver says the adapter cannot do AP mode.
+let wifiApBlocker = null;
+
+// Inline notice under the Start AP Mode button. An empty message hides it.
+function setApModeNotice(message) {
+    const el = document.getElementById('ap-mode-notice');
+    if (!el) return;
+    el.textContent = message || '';
+    el.classList.toggle('hidden', !message);
+}
+
 async function startAPMode() {
+    // Known up front that this adapter cannot be an access point: say so
+    // instead of asking to disconnect Wi-Fi for a hotspot that cannot start.
+    if (wifiApBlocker) {
+        setApModeNotice(wifiApBlocker);
+        addConsoleMessage(`AP Mode not available: ${wifiApBlocker}`, 'error');
+        return;
+    }
     if (!confirm('Start AP Mode?\n\nThis will:\n• Disconnect from current Wi-Fi\n• Start "Ragnar" access point\n• Enable 3-minute smart cycling\n• Allow Wi-Fi configuration via AP\n\nContinue?')) {
         return;
     }
@@ -15499,6 +20343,7 @@ async function startAPMode() {
         const data = await postAPI('/api/wifi/ap/enable', {});
         
         if (data.success) {
+            setApModeNotice('');
             addConsoleMessage(`AP Mode started: ${data.ap_config.ssid}`, 'success');
             updateWifiStatus(
                 `AP Mode Active: "${data.ap_config.ssid}" | ${data.ap_config.timeout}s timeout | Smart cycling enabled`,
@@ -15508,8 +20353,11 @@ async function startAPMode() {
             // Auto-refresh Wi-Fi status
             setTimeout(refreshWifiStatus, 2000);
         } else {
-            addConsoleMessage(`Failed to start AP Mode: ${data.message}`, 'error');
-            updateWifiStatus(`Failed to start AP Mode: ${data.message}`, 'error');
+            const reason = data.error || data.message || 'unknown error';
+            addConsoleMessage(`Failed to start AP Mode: ${reason}`, 'error');
+            updateWifiStatus(`Failed to start AP Mode: ${reason}`, 'error');
+            setApModeNotice(reason === data.error ? reason : `AP Mode was not started: ${reason}`);
+            setTimeout(refreshWifiStatus, 2000);
         }
         
     } catch (error) {
@@ -15555,6 +20403,17 @@ async function refreshWifiStatus() {
         }
         const interfaceLabel = data.interface ? data.interface : activeInterface;
         const ipBadge = data.ip_address ? ` (${data.ip_address})` : '';
+
+        // Say up front when this adapter cannot be an access point, instead of
+        // letting the user find out by losing Wi-Fi.
+        wifiApBlocker = (!data.ap_mode_active && data.ap_supported === false)
+            ? (data.ap_error || `The Wi-Fi adapter on ${data.ap_interface || 'this device'} does not support Access Point mode. AP Mode cannot be started with it.`)
+            : null;
+        if (data.ap_mode_active) {
+            setApModeNotice('');
+        } else {
+            setApModeNotice(wifiApBlocker || data.ap_error || '');
+        }
         
         if (data.ap_mode_active) {
             const apMessage = `AP Mode Active: "${data.ap_ssid || 'Ragnar'}" | Connect to configure Wi-Fi`;
@@ -16582,7 +21441,7 @@ async function scanWifiNetworks() {
         networksList.innerHTML = `
             <div class="text-center text-red-400 py-8">
                 <p>Error scanning for networks</p>
-                <p class="text-sm mt-2">${error.message}</p>
+                <p class="text-sm mt-2">${escapeHtml(error.message)}</p>
             </div>
         `;
     } finally {
@@ -17018,17 +21877,27 @@ async function connectToWifiNetwork() {
     }
 }
 
+let _logPollTimer = null;
+function _ensureLogPolling() {
+    if (_logPollTimer) return;
+    // Keep the rich per-module logs (orchestrator, scanning, GPS, WiFi, …) flowing
+    // so the source filters stay live — but only while the panel is on screen.
+    _logPollTimer = setInterval(() => {
+        const out = document.getElementById('console-output');
+        if (!out || out.offsetParent === null || document.hidden) return;
+        loadConsoleLogs();
+    }, 5000);
+}
+
 async function loadConsoleLogs() {
+    _ensureLogPolling();
     try {
         const data = await fetchAPI('/api/logs');
-        if (data && data.logs) {
+        if (data && Array.isArray(data.logs)) {
             updateConsole(data.logs);
         }
     } catch (error) {
-        console.error('Error loading console logs:', error);
-        // Add fallback console messages if log loading fails
-        addConsoleMessage('Unable to load historical logs from server', 'warning');
-        addConsoleMessage('Console will show new messages as they occur', 'info');
+        console.error('Error loading logs:', error);   // quiet: don't spam the feed each poll
     }
 }
 
@@ -17121,11 +21990,12 @@ async function toggleBluetoothPower() {
     if (!powerBtn || !powerText) return;
     
     const originalText = powerText.textContent;
+    const originalSource = _i18nText(powerText);
     powerText.textContent = 'Processing...';
     powerBtn.disabled = true;
     
     try {
-        const isEnabled = originalText === 'Disable Bluetooth';
+        const isEnabled = originalSource === 'Disable Bluetooth';
         const endpoint = isEnabled ? '/api/bluetooth/disable' : '/api/bluetooth/enable';
         
         const response = await postAPI(endpoint, {});
@@ -17142,7 +22012,7 @@ async function toggleBluetoothPower() {
         powerText.textContent = originalText;
     } finally {
         powerBtn.disabled = false;
-        if (powerText.textContent === 'Processing...') {
+        if (_i18nText(powerText) === 'Processing...') {
             powerText.textContent = originalText;
         }
     }
@@ -17155,11 +22025,12 @@ async function toggleBluetoothDiscoverable() {
     if (!discoverableBtn || !discoverableText) return;
     
     const originalText = discoverableText.textContent;
+    const originalSource = _i18nText(discoverableText);
     discoverableText.textContent = 'Processing...';
     discoverableBtn.disabled = true;
     
     try {
-        const isDiscoverable = originalText === 'Hide Device';
+        const isDiscoverable = originalSource === 'Hide Device';
         const endpoint = isDiscoverable ? '/api/bluetooth/discoverable/off' : '/api/bluetooth/discoverable/on';
         
         const response = await postAPI(endpoint, {});
@@ -17176,7 +22047,7 @@ async function toggleBluetoothDiscoverable() {
         discoverableText.textContent = originalText;
     } finally {
         discoverableBtn.disabled = false;
-        if (discoverableText.textContent === 'Processing...') {
+        if (_i18nText(discoverableText) === 'Processing...') {
             discoverableText.textContent = originalText;
         }
     }
@@ -17407,7 +22278,7 @@ async function pairBluetoothDevice() {
         statusDiv.classList.remove('hidden');
         statusDiv.innerHTML = `
             <div class="bg-blue-600 rounded p-3 text-sm">
-                ${device.paired ? 'Unpairing' : 'Pairing'} device ${device.name || address}...
+                ${device.paired ? 'Unpairing' : 'Pairing'} device ${escapeHtml(device.name || address)}...
             </div>
         `;
     }
@@ -17491,7 +22362,7 @@ async function enumerateBluetoothServices() {
         statusDiv.classList.remove('hidden');
         statusDiv.innerHTML = `
             <div class="bg-blue-600 rounded p-3 text-sm">
-                Enumerating services for ${device.name || address}...
+                Enumerating services for ${escapeHtml(device.name || address)}...
             </div>
         `;
     }
@@ -19000,6 +23871,631 @@ async function runManualLynisPentest() {
 }
 
 // ============================================================================
+// RUBBER DUCKY SCRIPT EXECUTOR
+// ============================================================================
+
+// Which Ragnar the Rubber Ducky card drives. 'local' = this unit; otherwise a
+// mesh peer id, sent as X-Ragnar-Target so this unit's secret-gated mesh gateway
+// relays each call there (the peer must also tick "Allow mesh units to run
+// payloads"). Mirrors the Device Console's scState.
+const duckyState = { unit: 'local', units: [], gateway: false };
+
+function rdTarget() {
+    return (duckyState.unit && duckyState.unit !== 'local') ? duckyState.unit : null;
+}
+
+// fetch() that tags the request for the selected mesh unit when one is picked.
+function rdFetch(url, opts = {}) {
+    const t = rdTarget();
+    if (!t) return fetch(url, opts);
+    const o = Object.assign({}, opts);
+    o.headers = Object.assign({}, opts.headers || {}, { 'X-Ragnar-Target': t });
+    return fetch(url, o);
+}
+
+async function rubberDuckyInit() {
+    /**Initialize rubber ducky UI on pentest tab load*/
+    await rubberDuckyRefreshUnits();
+    await rubberDuckyLoadMeshAllow();
+    await rubberDuckyRefreshScripts();
+    await rubberDuckyRefreshDevices();
+    await rubberDuckyGadgetStatus();
+    rubberDuckyLoadLibrary();
+    revshellInit();
+}
+
+async function rubberDuckyRefreshUnits() {
+    /**Populate the "Run on" picker with this unit + mesh peers that have HID.*/
+    const sel = document.getElementById('rubber-ducky-unit');
+    if (!sel) return;
+    try {
+        const u = await (await fetch('/api/rubber-ducky/units')).json();
+        duckyState.units = u.units || [];
+        duckyState.gateway = !!u.gateway_ready;
+        const keep = duckyState.unit;
+        sel.innerHTML = duckyState.units.map(x => {
+            const tag = x.local ? 'This unit' : (x.name || x.id);
+            let note = '';
+            if (!x.local) {
+                if (!x.online) note = ' — offline';
+                else if (!x.reachable) note = ' — unreachable';
+                else if (!x.has_gadget) note = ' — no HID';
+                else note = x.mesh_allow ? ' — HID, mesh-allowed' : ' — HID (not allowed)';
+            } else if (!x.has_gadget) {
+                note = ' — no HID gadget';
+            }
+            return `<option value="${escapeHtml(x.id)}">${escapeHtml(tag + note)}</option>`;
+        }).join('');
+        sel.value = duckyState.units.some(x => x.id === keep) ? keep : 'local';
+        duckyState.unit = sel.value;
+    } catch (e) { /* mesh off/unavailable: stay on this unit */ }
+    rubberDuckyUpdateUnitNote();
+}
+
+function rubberDuckyCurrentUnit() {
+    return duckyState.units.find(x => x.id === duckyState.unit) || { id: duckyState.unit, local: duckyState.unit === 'local' };
+}
+
+function rubberDuckyUpdateUnitNote() {
+    /**Explain why a selected peer can't be driven yet (no secret / not allowed).*/
+    const note = document.getElementById('rubber-ducky-unit-note');
+    if (!note) return;
+    const u = rubberDuckyCurrentUnit();
+    let msg = '';
+    if (!u.local) {
+        if (!duckyState.gateway) msg = 'Driving another unit needs the mesh secret armed on both units (Config → Mesh).';
+        else if (u.online === false) msg = 'That unit is offline.';
+        else if (u.reachable === false) msg = 'That unit is unreachable over the mesh.';
+        else if (!u.has_gadget) msg = 'That unit has no USB HID gadget configured.';
+        else if (!u.mesh_allow) msg = 'That unit has not ticked “Allow mesh units to run payloads”. Enable it on that unit’s Rubber Ducky card.';
+    }
+    note.textContent = msg;
+    note.classList.toggle('hidden', !msg);
+}
+
+function rubberDuckyUnitChanged() {
+    const sel = document.getElementById('rubber-ducky-unit');
+    duckyState.unit = sel ? sel.value : 'local';
+    rubberDuckyUpdateUnitNote();
+    // Re-pull everything from the newly-selected unit.
+    rubberDuckyRefreshScripts();
+    rubberDuckyRefreshDevices();
+    rubberDuckyGadgetStatus();
+    rubberDuckyLoadLibrary();
+    const sea = document.getElementById('rubber-ducky-preview');
+    if (sea) sea.classList.add('hidden');
+}
+
+async function rubberDuckyLoadMeshAllow() {
+    /**Reflect THIS unit's "allow mesh HID" flag in the checkbox (always local).*/
+    const cb = document.getElementById('rubber-ducky-mesh-allow');
+    if (!cb) return;
+    try {
+        const d = await (await fetch('/api/rubber-ducky/mesh-allow')).json();
+        cb.checked = !!d.mesh_allow;
+    } catch (e) { /* leave unchecked */ }
+}
+
+async function rubberDuckyMeshAllowChanged() {
+    /**Set THIS unit's opt-in (never relayed — each unit governs its own HID).*/
+    const cb = document.getElementById('rubber-ducky-mesh-allow');
+    if (!cb) return;
+    try {
+        const r = await fetch('/api/rubber-ducky/mesh-allow', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ allow: cb.checked }) });
+        const d = await r.json();
+        if (!d.success) { cb.checked = !cb.checked; }
+    } catch (e) { cb.checked = !cb.checked; }
+}
+
+async function _rdJson(r) {
+    /**Parse a fetch Response as JSON, or throw a clear message when the backend
+       is stale (new routes return 404/HTML until the webapp is restarted).*/
+    const ct = r.headers.get('content-type') || '';
+    if (!ct.includes('json')) {
+        throw new Error(r.status === 404
+            ? 'endpoint not found — restart Ragnar to load the new routes'
+            : `unexpected ${r.status} response`);
+    }
+    return r.json();
+}
+
+async function rubberDuckyLoadLibrary() {
+    /**Fetch the bundled payload library AND the external RagnarScripts library,
+       then render both as one combined list with per-row Install buttons.*/
+    const box = document.getElementById('rubber-ducky-library');
+    if (!box) return;
+    box.innerHTML = '<p class="text-gray-500">Loading…</p>';
+    try {
+        // Fetch both sources; a failure of either (e.g. no RagnarScripts clone)
+        // must not blank the whole list, so each falls back to empty.
+        const [libData, ragData] = await Promise.all([
+            rdFetch('/api/rubber-ducky/library').then(_rdJson).catch(() => ({ payloads: [] })),
+            rdFetch('/api/rubber-ducky/ragnar-scripts').then(_rdJson).catch(() => ({ available: false, scripts: [] })),
+        ]);
+        const rows = [];
+        ((libData && libData.payloads) || []).forEach(p =>
+            rows.push({ name: p.name, description: p.description, source: 'bundled' }));
+        if (ragData && ragData.available) {
+            (ragData.scripts || []).forEach(p =>
+                rows.push({ name: p.name, description: p.description, source: 'ragnar', installed: p.installed }));
+        }
+        if (!rows.length) { box.innerHTML = '<p class="text-gray-500">No library payloads.</p>'; return; }
+        box.innerHTML = '';
+        rows.forEach(p => {
+            const row = document.createElement('div');
+            row.className = 'flex items-start justify-between gap-2 border-b border-slate-800 pb-2';
+            const tag = p.source === 'ragnar'
+                ? '<span class="text-[10px] uppercase tracking-wide bg-indigo-900/60 text-indigo-300 px-1.5 py-0.5 rounded shrink-0" title="From the RagnarScripts library">RagnarScripts</span>'
+                : '<span class="text-[10px] uppercase tracking-wide bg-slate-700 text-gray-300 px-1.5 py-0.5 rounded shrink-0" title="Bundled with Ragnar">bundled</span>';
+            row.innerHTML = `<div class="min-w-0"><div class="text-gray-200 truncate flex items-center gap-1.5"><span class="truncate">${escapeHtml(p.name)}</span>${tag}</div>`
+                + `<div class="text-gray-500 truncate">${escapeHtml(p.description || '')}</div></div>`;
+            const btn = document.createElement('button');
+            const installed = p.installed === true;
+            btn.className = 'text-xs px-2 py-1 rounded shrink-0 ' + (installed ? 'bg-slate-800 text-gray-400 hover:bg-slate-700' : 'bg-slate-700 hover:bg-slate-600 text-white');
+            btn.textContent = installed ? 'Reinstall' : 'Install';
+            btn.onclick = () => (p.source === 'ragnar' ? rubberDuckyInstallRagnar(p.name) : rubberDuckyInstall(p.name));
+            row.appendChild(btn);
+            box.appendChild(row);
+        });
+    } catch (e) {
+        box.innerHTML = `<p class="text-red-400">Error: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+async function rubberDuckyInstall(name) {
+    /**Copy a library payload into the scripts folder and select it*/
+    try {
+        const r = await rdFetch('/api/rubber-ducky/library/install', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+        });
+        const data = await _rdJson(r);
+        if (!r.ok || !data.success) throw new Error(data.error || 'install failed');
+        await rubberDuckyRefreshScripts();
+        const sel = document.getElementById('rubber-ducky-script-select');
+        if (sel) { sel.value = data.name; rubberDuckyOnScriptSelect(); }
+    } catch (e) {
+        alert('Install failed: ' + e.message);
+    }
+}
+
+async function rubberDuckyInstallRagnar(name) {
+    /**Install a RagnarScripts payload (routed here from the combined Payload
+       Library list), then select it and refresh the list's Install/Reinstall.*/
+    try {
+        const r = await rdFetch('/api/rubber-ducky/ragnar-scripts/install', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+        });
+        const data = await _rdJson(r);
+        if (!r.ok || !data.success) throw new Error(data.error || 'install failed');
+        await rubberDuckyRefreshScripts();
+        const sel = document.getElementById('rubber-ducky-script-select');
+        if (sel) { sel.value = data.name; rubberDuckyOnScriptSelect(); }
+        rubberDuckyLoadLibrary();   // refresh the installed/reinstall labels
+    } catch (e) {
+        alert('Install failed: ' + e.message);
+    }
+}
+
+function rubberDuckyEditNew() {
+    /**Clear the editor for a new script*/
+    const n = document.getElementById('rubber-ducky-edit-name');
+    const c = document.getElementById('rubber-ducky-edit-content');
+    if (n) n.value = '';
+    if (c) c.value = '';
+    if (n) n.focus();
+}
+
+async function rubberDuckyEditLoad() {
+    /**Load the selected script's contents into the editor*/
+    const name = document.getElementById('rubber-ducky-script-select').value;
+    if (!name) { alert('Select a script first'); return; }
+    try {
+        const r = await rdFetch(`/api/files/preview?path=${encodeURIComponent('/rubber-ducky/' + name)}`);
+        const data = await r.json();
+        if (data.type !== 'text') throw new Error('not a text file');
+        document.getElementById('rubber-ducky-edit-name').value = name;
+        document.getElementById('rubber-ducky-edit-content').value = data.content || '';
+    } catch (e) {
+        alert('Could not load: ' + e.message);
+    }
+}
+
+async function rubberDuckyEditSave() {
+    /**Save the editor contents as a script in files/rubber-ducky/*/
+    const name = document.getElementById('rubber-ducky-edit-name').value.trim();
+    const content = document.getElementById('rubber-ducky-edit-content').value;
+    const statusDiv = document.getElementById('rubber-ducky-status');
+    const statusMsg = document.getElementById('rubber-ducky-status-message');
+    try {
+        const r = await rdFetch('/api/rubber-ducky/save', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, content })
+        });
+        const data = await _rdJson(r);
+        if (!r.ok || !data.success) throw new Error(data.error || 'save failed');
+        await rubberDuckyRefreshScripts();
+        const sel = document.getElementById('rubber-ducky-script-select');
+        if (sel) { sel.value = data.name; rubberDuckyOnScriptSelect(); }
+        if (statusMsg) {
+            statusMsg.textContent = `✅ Saved ${data.name}`;
+            statusMsg.className = 'rounded-lg border border-green-700 bg-green-900/70 px-4 py-3 text-sm text-green-200';
+            statusDiv.classList.remove('hidden');
+        }
+    } catch (e) {
+        if (statusMsg) {
+            statusMsg.textContent = `❌ Save failed: ${e.message}`;
+            statusMsg.className = 'rounded-lg border border-red-700 bg-red-900/70 px-4 py-3 text-sm text-red-200';
+            statusDiv.classList.remove('hidden');
+        }
+    }
+}
+
+function rubberDuckyRenderGadget(data) {
+    /**Render the USB HID gadget status line from a status/enable/disable payload*/
+    const el = document.getElementById('rubber-ducky-gadget-status');
+    if (!el) return;
+    if (!data || data.ok === false) {
+        el.textContent = '⚠ ' + ((data && data.error) || 'gadget status unavailable');
+        el.className = 'text-xs text-yellow-300 mt-1';
+        return;
+    }
+    if (data.hidg0) {
+        const attached = data.state === 'configured' ? ' · host attached' :
+                         (data.state ? ` · host: ${data.state}` : '');
+        el.textContent = `Enabled — /dev/hidg0 ready${attached}`;
+        el.className = 'text-xs text-green-400 mt-1';
+    } else if (!data.udc) {
+        el.textContent = 'No USB device controller — enable the HID-gadget option in the installer/updater and reboot';
+        el.className = 'text-xs text-yellow-300 mt-1';
+    } else {
+        el.textContent = 'Disabled — /dev/hidg0 not present';
+        el.className = 'text-xs text-gray-400 mt-1';
+    }
+}
+
+async function rubberDuckyGadgetStatus() {
+    /**Fetch and render the HID gadget status*/
+    try {
+        const r = await rdFetch('/api/rubber-ducky/gadget/status');
+        rubberDuckyRenderGadget(await r.json());
+    } catch (e) {
+        rubberDuckyRenderGadget({ ok: false, error: e.message });
+    }
+}
+
+async function rubberDuckyGadget(action) {
+    /**Enable or disable the HID gadget on demand, then refresh status + devices*/
+    const el = document.getElementById('rubber-ducky-gadget-status');
+    if (el) { el.textContent = action === 'enable' ? 'Enabling…' : 'Disabling…'; el.className = 'text-xs text-blue-300 mt-1'; }
+    try {
+        const r = await rdFetch(`/api/rubber-ducky/gadget/${action}`, { method: 'POST' });
+        rubberDuckyRenderGadget(await r.json());
+    } catch (e) {
+        rubberDuckyRenderGadget({ ok: false, error: e.message });
+    }
+    // The device dropdown depends on /dev/hidg0, so refresh it too.
+    await rubberDuckyRefreshDevices();
+}
+
+async function rubberDuckyRefreshScripts() {
+    /**Fetch and populate script list*/
+    try {
+        const response = await rdFetch('/api/rubber-ducky/scripts');
+        const data = await response.json();
+
+        if (!data.success) {
+            console.error('Failed to load scripts:', data.error);
+            return;
+        }
+
+        const select = document.getElementById('rubber-ducky-script-select');
+        select.innerHTML = '<option value="">Select a script...</option>';
+
+        if (data.scripts.length === 0) {
+            select.innerHTML += '<option disabled>No scripts found in files/rubber-ducky/</option>';
+            return;
+        }
+
+        data.scripts.forEach(script => {
+            const option = document.createElement('option');
+            option.value = script.name;
+            option.textContent = `${script.name} (${script.size} bytes)`;
+            select.appendChild(option);
+        });
+    } catch (error) {
+        console.error('Error loading scripts:', error);
+    }
+}
+
+async function rubberDuckyUploadScript(input) {
+    /**Upload a .ducky/.txt script into files/rubber-ducky/ and select it*/
+    const file = input.files && input.files[0];
+    input.value = '';  // allow re-uploading the same filename later
+    if (!file) return;
+    const statusDiv = document.getElementById('rubber-ducky-status');
+    const statusMsg = document.getElementById('rubber-ducky-status-message');
+    try {
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('path', '/rubber-ducky');
+        const r = await fetch('/api/files/upload', { method: 'POST', body: fd });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || data.error) throw new Error(data.error || `upload failed (${r.status})`);
+        await rubberDuckyRefreshScripts();
+        const sel = document.getElementById('rubber-ducky-script-select');
+        if (sel) { sel.value = file.name; rubberDuckyOnScriptSelect(); }
+        if (statusMsg) {
+            statusMsg.textContent = `✅ Uploaded ${file.name}`;
+            statusMsg.className = 'rounded-lg border border-green-700 bg-green-900/70 px-4 py-3 text-sm text-green-200';
+            statusDiv.classList.remove('hidden');
+        }
+    } catch (e) {
+        if (statusMsg) {
+            statusMsg.textContent = `❌ Upload failed: ${e.message}`;
+            statusMsg.className = 'rounded-lg border border-red-700 bg-red-900/70 px-4 py-3 text-sm text-red-200';
+            statusDiv.classList.remove('hidden');
+        }
+    }
+}
+
+async function rubberDuckyRefreshDevices() {
+    /**Fetch and populate HID device list*/
+    try {
+        const response = await rdFetch('/api/rubber-ducky/devices');
+        const data = await response.json();
+
+        if (!data.success) {
+            console.error('Failed to load devices:', data.error);
+            return;
+        }
+
+        const select = document.getElementById('rubber-ducky-device-select');
+        select.innerHTML = '<option value="">Select a device...</option>';
+
+        const hintEl = document.getElementById('rubber-ducky-device-hint');
+        if (data.devices.length === 0) {
+            select.innerHTML += '<option disabled>No HID keyboard gadget detected</option>';
+            if (hintEl) {
+                hintEl.textContent = data.hint || 'No USB HID keyboard gadget found.';
+                hintEl.classList.remove('hidden');
+            }
+            return;
+        }
+        if (hintEl) hintEl.classList.add('hidden');
+
+        data.devices.forEach(device => {
+            const option = document.createElement('option');
+            option.value = device.path;
+            option.textContent = device.name;
+            select.appendChild(option);
+        });
+    } catch (error) {
+        console.error('Error loading devices:', error);
+    }
+}
+
+async function rubberDuckyOnScriptSelect() {
+    /**Load and preview selected script*/
+    try {
+        const scriptName = document.getElementById('rubber-ducky-script-select').value;
+
+        if (!scriptName) {
+            document.getElementById('rubber-ducky-preview').classList.add('hidden');
+            return;
+        }
+
+        const response = await rdFetch('/api/rubber-ducky/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ script: scriptName })
+        });
+
+        const data = await response.json();
+        const previewDiv = document.getElementById('rubber-ducky-preview');
+        const previewContent = document.getElementById('rubber-ducky-preview-content');
+
+        if (!data.success) {
+            previewContent.textContent = `Error: ${data.error || 'Failed to parse script'}`;
+            previewContent.className = 'text-red-400 text-xs font-mono whitespace-pre-wrap';
+        } else {
+            previewContent.textContent = data.preview;
+            previewContent.className = 'text-gray-300 text-xs font-mono whitespace-pre-wrap';
+        }
+
+        previewDiv.classList.remove('hidden');
+    } catch (error) {
+        console.error('Error loading preview:', error);
+        document.getElementById('rubber-ducky-preview-content').textContent = `Error: ${error.message}`;
+    }
+}
+
+async function rubberDuckyExecute() {
+    /**Execute the selected script on the target device*/
+    try {
+        const scriptName = document.getElementById('rubber-ducky-script-select').value;
+        const devicePath = document.getElementById('rubber-ducky-device-select').value;
+        const statusDiv = document.getElementById('rubber-ducky-status');
+        const statusMsg = document.getElementById('rubber-ducky-status-message');
+        const executeBtn = document.getElementById('rubber-ducky-execute-btn');
+
+        if (!scriptName || !devicePath) {
+            statusMsg.textContent = '⚠️ Please select both a script and a target device';
+            statusMsg.className = 'rounded-lg border border-yellow-700 bg-yellow-900/70 px-4 py-3 text-sm text-yellow-200';
+            statusDiv.classList.remove('hidden');
+            return;
+        }
+
+        // Disable button and show executing state
+        executeBtn.disabled = true;
+        executeBtn.textContent = 'Executing...';
+        statusMsg.textContent = '⏳ Running script on device...';
+        statusMsg.className = 'rounded-lg border border-blue-700 bg-blue-900/70 px-4 py-3 text-sm text-blue-200';
+        statusDiv.classList.remove('hidden');
+
+        const response = await rdFetch('/api/rubber-ducky/execute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                script: scriptName,
+                device: devicePath
+            })
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            statusMsg.innerHTML = `✅ <strong>Script executed successfully!</strong><br>Executed ${result.executed}/${result.total} commands`;
+            statusMsg.className = 'rounded-lg border border-green-700 bg-green-900/70 px-4 py-3 text-sm text-green-200';
+        } else {
+            statusMsg.innerHTML = `❌ <strong>Execution failed:</strong><br>${result.error || 'Unknown error'}`;
+            statusMsg.className = 'rounded-lg border border-red-700 bg-red-900/70 px-4 py-3 text-sm text-red-200';
+        }
+
+        // Re-enable button
+        executeBtn.disabled = false;
+        executeBtn.textContent = 'Execute Script';
+    } catch (error) {
+        console.error('Error executing script:', error);
+        const statusMsg = document.getElementById('rubber-ducky-status-message');
+        statusMsg.textContent = `❌ Error: ${error.message}`;
+        statusMsg.className = 'rounded-lg border border-red-700 bg-red-900/70 px-4 py-3 text-sm text-red-200';
+        document.getElementById('rubber-ducky-status').classList.remove('hidden');
+
+        const executeBtn = document.getElementById('rubber-ducky-execute-btn');
+        executeBtn.disabled = false;
+        executeBtn.textContent = 'Execute Script';
+    }
+}
+
+// ============================================================================
+// REVERSE SHELL GENERATOR + LISTENER
+// ============================================================================
+
+let _revshellPollTimer = null;
+
+async function revshellInit() {
+    /**Prefill LHOST with the box LAN IP and sync listener state*/
+    try {
+        const ipEl = document.getElementById('revshell-ip');
+        if (ipEl && !ipEl.value) {
+            const r = await fetch('/api/revshell/lan-ip');
+            const d = await r.json();
+            if (d && d.ip) ipEl.value = d.ip;
+        }
+    } catch (e) { /* ignore */ }
+    revshellRefreshStatus();
+}
+
+async function revshellGenerate() {
+    /**Generate reverse-shell one-liners and render them with copy buttons*/
+    const box = document.getElementById('revshell-payloads');
+    const ip = document.getElementById('revshell-ip').value.trim();
+    const port = document.getElementById('revshell-port').value;
+    const shell = document.getElementById('revshell-shell').value.trim() || '/bin/bash';
+    box.innerHTML = '<p class="text-xs text-gray-500">Generating…</p>';
+    try {
+        const r = await fetch('/api/revshell/generate', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ip, port, shell })
+        });
+        const data = await _rdJson(r);
+        if (!r.ok || !data.success) throw new Error(data.error || 'generate failed');
+        const ipEl = document.getElementById('revshell-ip');
+        if (ipEl && !ipEl.value) ipEl.value = data.ip;
+        box.innerHTML = '';
+        (data.payloads || []).forEach(p => {
+            const row = document.createElement('div');
+            row.className = 'bg-slate-900/50 border border-slate-800 rounded p-2';
+            const head = document.createElement('div');
+            head.className = 'flex items-center justify-between mb-1';
+            head.innerHTML = `<span class="text-xs font-medium text-pink-200">${escapeHtml(p.name)}</span>`;
+            const copy = document.createElement('button');
+            copy.className = 'text-[11px] bg-slate-700 hover:bg-slate-600 text-white px-2 py-0.5 rounded';
+            copy.textContent = 'Copy';
+            copy.onclick = () => revshellCopy(p.payload, copy);
+            head.appendChild(copy);
+            const code = document.createElement('div');
+            code.className = 'text-[11px] font-mono text-gray-300 whitespace-pre-wrap break-all';
+            code.textContent = p.payload;
+            row.appendChild(head); row.appendChild(code);
+            box.appendChild(row);
+        });
+    } catch (e) {
+        box.innerHTML = `<p class="text-xs text-red-400">Error: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+async function revshellCopy(text, btn) {
+    // Route through copyToClipboard: a plain-HTTP Ragnar (http://192.168.x/100.x)
+    // has no navigator.clipboard, so this needs the execCommand fallback.
+    const ok = await copyToClipboard(text, { silent: true });
+    if (btn) { const t = btn.textContent; btn.textContent = ok ? 'Copied' : 'Copy failed'; setTimeout(() => { btn.textContent = t; }, 1200); }
+}
+
+async function revshellListener(action) {
+    /**Start or stop the catch listener*/
+    try {
+        const body = action === 'start'
+            ? JSON.stringify({ port: document.getElementById('revshell-port').value })
+            : '{}';
+        const r = await fetch(`/api/revshell/listener/${action}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body
+        });
+        const data = await _rdJson(r);
+        if (!r.ok || data.success === false) throw new Error(data.error || 'failed');
+        revshellRefreshStatus();
+    } catch (e) {
+        const c = document.getElementById('revshell-console');
+        if (c) c.textContent = 'Error: ' + e.message;
+    }
+}
+
+async function revshellRefreshStatus() {
+    /**Poll listener status and update the console; self-schedules while running*/
+    try {
+        const r = await fetch('/api/revshell/listener/status');
+        const s = await r.json();
+        const statusEl = document.getElementById('revshell-listener-status');
+        const con = document.getElementById('revshell-console');
+        if (statusEl) {
+            statusEl.textContent = s.running
+                ? (s.connected ? `Connected — ${s.peer}` : `Listening on :${s.port}`)
+                : 'Stopped';
+            statusEl.className = 'text-xs mt-1 ' + (s.connected ? 'text-green-400' : s.running ? 'text-blue-300' : 'text-gray-400');
+        }
+        if (con && typeof s.output === 'string') {
+            const atBottom = con.scrollHeight - con.scrollTop - con.clientHeight < 40;
+            con.textContent = s.output || (s.running ? '' : 'Listener stopped.');
+            if (atBottom) con.scrollTop = con.scrollHeight;
+        }
+        if (_revshellPollTimer) { clearTimeout(_revshellPollTimer); _revshellPollTimer = null; }
+        // Keep polling only while the tab is on Pentest and the listener runs.
+        if (s.running && currentTab === 'pentest') {
+            _revshellPollTimer = setTimeout(revshellRefreshStatus, 1500);
+        }
+    } catch (e) { /* ignore transient errors */ }
+}
+
+async function revshellSend() {
+    /**Send a command line to the connected session*/
+    const input = document.getElementById('revshell-cmd');
+    const data = input.value;
+    if (!data) return;
+    input.value = '';
+    try {
+        await fetch('/api/revshell/listener/send', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ data })
+        });
+        setTimeout(revshellRefreshStatus, 300);
+    } catch (e) { /* ignore */ }
+}
+
+// ============================================================================
 // API HELPERS
 // ============================================================================
 
@@ -19093,6 +24589,523 @@ function isLikelyNetworkError(error) {
     return error instanceof TypeError ||
         /failed to fetch|networkerror|load failed|network request failed/i.test(error?.message || '');
 }
+
+// ---- Device Console: READ-ONLY serial console viewer (this unit or a mesh peer) ----
+// Ragnar only ever reads the port; the backend opens it O_RDONLY. Viewing another
+// unit sends X-Ragnar-Target so this unit's mesh gateway relays the call there.
+const scState = { unit: 'local', last: 0, buf: [], timer: null, busy: false, gateway: false, units: [] };
+const SC_MAX_DOM_LINES = 5000;
+const SC_MAX_BUF = 20000;
+
+function scUnit() {
+    return scState.units.find(x => x.id === scState.unit) || { id: scState.unit, local: scState.unit === 'local' };
+}
+
+// How the selected unit is reached: 'local'; 'gateway' (mesh secret — full view +
+// control); 'shared' (its operator opted in — view-only on tag trust); 'blocked'.
+function scMode() {
+    const u = scUnit();
+    if (u.local || scState.unit === 'local') return 'local';
+    if (scState.gateway) return 'gateway';
+    if (u.shared) return 'shared';
+    return 'blocked';
+}
+
+function scSetControls(mode) {
+    const lock = mode === 'shared' || mode === 'blocked';
+    ['sc-port', 'sc-baud', 'sc-start', 'sc-stop', 'sc-release'].forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.disabled = lock;
+        el.classList.toggle('opacity-50', lock);
+    });
+    const wrap = document.getElementById('sc-share-wrap');
+    if (wrap) wrap.classList.toggle('hidden', mode !== 'local');
+    const ww = document.getElementById('sc-write-wrap');
+    if (ww) ww.classList.toggle('hidden', mode !== 'local');
+}
+
+function scUpdateWriteUI(st, mode) {
+    mode = mode || scMode();
+    const aw = !!(st && st.allow_write);
+    const sm = !!(st && st.share_mesh);
+    if (mode === 'local') {
+        const badge = document.getElementById('sc-badge');
+        if (badge) {
+            badge.textContent = aw ? 'READ-WRITE' : 'READ-ONLY';
+            badge.className = 'text-xs font-semibold px-2 py-0.5 rounded border '
+                + (aw ? 'bg-amber-900/60 text-amber-300 border-amber-800' : 'bg-emerald-900/60 text-emerald-300 border-emerald-800');
+        }
+        const box = document.getElementById('sc-write');
+        if (box) box.checked = aw;
+        const bar = document.getElementById('sc-cmd-bar');
+        if (bar) bar.classList.toggle('hidden', !aw);
+        const row = document.getElementById('sc-script-row');
+        if (row) row.classList.remove('hidden');
+        if (aw) scLoadScripts();
+        // update share label to reflect write state
+        const lbl = document.getElementById('sc-share-label');
+        if (lbl) lbl.textContent = aw ? 'Share with mesh (read-write)' : 'Share with mesh (view-only)';
+    } else {
+        // remote unit: show cmd bar if the peer has share_mesh + allow_write
+        const remoteWrite = !!(st && st.share_mesh_write);
+        const badge = document.getElementById('sc-badge');
+        if (badge) {
+            badge.textContent = remoteWrite ? 'REMOTE WRITE' : 'VIEW-ONLY';
+            badge.className = 'text-xs font-semibold px-2 py-0.5 rounded border '
+                + (remoteWrite ? 'bg-amber-900/60 text-amber-300 border-amber-800' : 'bg-sky-900/60 text-sky-300 border-sky-800');
+        }
+        const bar = document.getElementById('sc-cmd-bar');
+        if (bar) bar.classList.toggle('hidden', !remoteWrite);
+        // Scripts run on the target unit through the mesh gateway (mesh
+        // secret); a console that is only *shared* relays single commands.
+        const row = document.getElementById('sc-script-row');
+        if (row) row.classList.toggle('hidden', mode !== 'gateway');
+        if (remoteWrite && mode === 'gateway') scLoadScripts();
+    }
+}
+
+async function scShareChanged() {
+    const box = document.getElementById('sc-share');
+    if (!box) return;
+    try {
+        const r = await fetchAPI('/api/serial-console/share', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ share: box.checked }) });
+        box.checked = !!r.share_mesh;
+    } catch (e) {
+        box.checked = !box.checked;
+        scSetStatus(`<span class="text-red-400">${escapeHtml(e.message)}</span>`);
+    }
+}
+
+async function scWriteChanged() {
+    const box = document.getElementById('sc-write');
+    if (!box) return;
+    if (box.checked && !confirm('Enable writing to the device console? Commands you type will be sent to the device through the console cable.')) {
+        box.checked = false;
+        return;
+    }
+    try {
+        const r = await fetchAPI('/api/serial-console/allow-write', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ allow_write: box.checked }) });
+        scUpdateWriteUI(r);
+        if (r.status) scSetStatus(scDescribe(Object.assign({ reserved_port: (r.status || {}).port }, r.status)));
+    } catch (e) {
+        box.checked = !box.checked;
+        scSetStatus(`<span class="text-red-400">${escapeHtml(e.message)}</span>`);
+    }
+}
+
+async function scSendCmd() {
+    const inp = document.getElementById('sc-cmd-input');
+    if (!inp) return;
+    const cmd = inp.value;
+    if (!cmd) return;
+    const mode = scMode();
+    try {
+        let r;
+        if (mode === 'local' || mode === 'gateway') {
+            r = await fetchAPI('/api/serial-console/write', scOpts({
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ data: cmd + '\r' }) }));
+        } else {
+            r = await fetchAPI('/api/serial-console/peer-write', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ unit: scState.unit, data: cmd + '\r' }) });
+        }
+        if (r.success) {
+            inp.value = '';
+        } else {
+            scSetStatus(`<span class="text-red-400">Write failed: ${escapeHtml(r.error || 'unknown')}</span>`);
+        }
+    } catch (e) {
+        scSetStatus(`<span class="text-red-400">${escapeHtml(e.message)}</span>`);
+    }
+}
+
+let scScriptsLoadedAt = 0;
+let scScriptsUnit = null;
+async function scLoadScripts(force) {
+    // Called from every poll tick: throttle, and never clobber the user's pick.
+    // A unit switch always reloads — scripts come from the unit being viewed.
+    if (scScriptsUnit !== scState.unit) force = true;
+    if (!force && Date.now() - scScriptsLoadedAt < 15000) return;
+    scScriptsLoadedAt = Date.now();
+    scScriptsUnit = scState.unit;
+    try {
+        const d = await fetchAPI('/api/serial-console/scripts', scOpts());
+        const sel = document.getElementById('sc-script-sel');
+        if (!sel) return;
+        const scripts = d.scripts || [];
+        const html = '<option value="">Run script\u2026</option>' +
+            scripts.map(s => `<option value="${escapeHtml(s.id)}" title="${escapeHtml(s.description)}">${escapeHtml(s.name)} (${s.commands} cmds, ${escapeHtml(s.vendor)})</option>`).join('');
+        if (sel.dataset.html === html || document.activeElement === sel) return;
+        const keep = sel.value;
+        sel.innerHTML = html;
+        sel.dataset.html = html;
+        if (keep && scripts.some(s => s.id === keep)) sel.value = keep;
+    } catch (e) { /* scripts unavailable */ }
+}
+
+async function scRunScript() {
+    const sel = document.getElementById('sc-script-sel');
+    const sid = sel ? sel.value : '';
+    if (!sid) return;
+    const name = sel.options[sel.selectedIndex].textContent;
+    if (!confirm(`Run script "${name}" on the connected device? Each command will be sent sequentially.`)) return;
+    const statusEl = document.getElementById('sc-script-status');
+    try {
+        const r = await fetchAPI('/api/serial-console/run-script', scOpts({
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ script_id: sid }) }));
+        if (r.success) {
+            if (statusEl) statusEl.innerHTML = `<span class="text-emerald-300">Running ${escapeHtml(r.script)} (${r.steps} steps)…</span>`;
+            scPollScriptStatus();
+        } else {
+            if (statusEl) statusEl.innerHTML = `<span class="text-red-400">${escapeHtml(r.error)}</span>`;
+        }
+    } catch (e) {
+        if (statusEl) statusEl.innerHTML = `<span class="text-red-400">${escapeHtml(e.message)}</span>`;
+    }
+}
+
+async function scUploadScript(input) {
+    // Add a console script (.json) to this unit's library straight from the
+    // dashboard, then refresh the dropdown and pre-select it. Scripts are
+    // stored locally in data/console_scripts/ (same place list_scripts reads),
+    // so the upload always targets the local unit regardless of which unit is
+    // being *viewed* in the console.
+    const file = input.files && input.files[0];
+    input.value = '';  // allow re-uploading the same filename later
+    if (!file) return;
+    const statusEl = document.getElementById('sc-script-status');
+    const setStatus = (html) => { if (statusEl) statusEl.innerHTML = html; };
+    if (!/\.json$/i.test(file.name)) {
+        setStatus('<span class="text-red-400">Console scripts must be .json files</span>');
+        return;
+    }
+    setStatus(`<span class="text-amber-300">Uploading ${escapeHtml(file.name)}…</span>`);
+    try {
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('path', '/console_scripts');
+        const r = await fetch(resolveNetworkAwareEndpoint('/api/files/upload'), { method: 'POST', body: fd });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || data.error || !data.success) throw new Error(data.error || `upload failed (${r.status})`);
+        await scLoadScripts(true);
+        const sel = document.getElementById('sc-script-sel');
+        const stem = file.name.replace(/\.json$/i, '');
+        if (sel && [...sel.options].some(o => o.value === stem)) sel.value = stem;
+        setStatus(`<span class="text-emerald-300">Added ${escapeHtml(file.name)}</span>`);
+    } catch (e) {
+        setStatus(`<span class="text-red-400">Upload failed: ${escapeHtml(e.message)}</span>`);
+    }
+}
+
+async function scLoadLibrary() {
+    /**Fetch the external RagnarScripts console-script library and render install buttons*/
+    const box = document.getElementById('sc-library-list');
+    const repoEl = document.getElementById('sc-library-repo');
+    if (!box) return;
+    box.innerHTML = '<p class="text-gray-500">Loading…</p>';
+    try {
+        const r = await fetch('/api/serial-console/library');
+        const data = await r.json();
+        if (!data.available) {
+            if (repoEl) repoEl.textContent = '';
+            box.innerHTML = '<p class="text-gray-500">RagnarScripts repo not found. Clone it with '
+                + '<code class="bg-slate-800 px-1 rounded">git clone https://github.com/PierreGode/RagnarScripts</code> '
+                + 'next to Ragnar, or set <code class="bg-slate-800 px-1 rounded">RAGNAR_SCRIPTS_DIR</code>.</p>';
+            return;
+        }
+        if (repoEl) repoEl.textContent = data.repo || '';
+        const list = data.scripts || [];
+        if (!list.length) { box.innerHTML = '<p class="text-gray-500">No scripts in RagnarScripts/console-scripts/.</p>'; return; }
+        box.innerHTML = '';
+        list.forEach(s => {
+            const meta = [s.vendor, (s.commands || 0) + ' cmds'].filter(Boolean).join(' · ');
+            const row = document.createElement('div');
+            row.className = 'flex items-start justify-between gap-2 border-b border-slate-800 pb-2';
+            row.innerHTML = `<div class="min-w-0"><div class="text-gray-200 truncate">${escapeHtml(s.name)} <span class="text-gray-500">(${escapeHtml(meta)})</span></div>`
+                + `<div class="text-gray-500 truncate">${escapeHtml(s.description || '')}</div></div>`;
+            const btn = document.createElement('button');
+            btn.className = 'text-xs px-2 py-1 rounded shrink-0 ' + (s.installed ? 'bg-slate-800 text-gray-400 hover:bg-slate-700' : 'bg-indigo-600 hover:bg-indigo-700 text-white');
+            btn.textContent = s.installed ? 'Reinstall' : 'Install';
+            btn.onclick = () => scInstallLibrary(s.id);
+            row.appendChild(btn);
+            box.appendChild(row);
+        });
+    } catch (e) {
+        box.innerHTML = `<p class="text-red-400">Error: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+async function scInstallLibrary(id) {
+    /**Install a console script from the RagnarScripts repo into the local library*/
+    const box = document.getElementById('sc-library-list');
+    try {
+        const r = await fetch('/api/serial-console/library/install', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ script_id: id })
+        });
+        const data = await r.json();
+        if (!r.ok || !data.success) throw new Error(data.error || 'install failed');
+        await scLoadScripts(true);                // refresh the Run-script picker
+        const sel = document.getElementById('sc-script-sel');
+        if (sel && [...sel.options].some(o => o.value === id)) sel.value = id;
+        scLoadLibrary();                          // refresh the installed/reinstall labels
+    } catch (e) {
+        if (box) box.insertAdjacentHTML('afterbegin', `<p class="text-red-400">Install failed: ${escapeHtml(e.message)}</p>`);
+    }
+}
+
+async function scPollScriptStatus() {
+    const statusEl = document.getElementById('sc-script-status');
+    try {
+        const r = await fetchAPI('/api/serial-console/script-status', scOpts());
+        if (r.running) {
+            if (statusEl) statusEl.innerHTML = `<span class="text-amber-300">Step ${r.step}/${r.total}…</span>`;
+            setTimeout(scPollScriptStatus, 500);
+        } else if (r.error) {
+            if (statusEl) statusEl.innerHTML = `<span class="text-red-400">Failed at step ${r.step}: ${escapeHtml(r.error)}</span>`;
+        } else {
+            if (statusEl) statusEl.innerHTML = `<span class="text-emerald-300">Done (${r.total} commands sent)</span>`;
+            setTimeout(() => { if (statusEl) statusEl.textContent = ''; }, 5000);
+        }
+    } catch (e) {
+        if (statusEl) statusEl.textContent = '';
+    }
+}
+
+function scOpts(extra = {}) {
+    const headers = Object.assign({}, extra.headers || {});
+    if (scState.unit && scState.unit !== 'local') headers['X-Ragnar-Target'] = scState.unit;
+    return Object.assign({}, extra, { headers });
+}
+
+function scSetStatus(html) {
+    const el = document.getElementById('sc-status');
+    if (el) el.innerHTML = html;
+}
+
+function scDescribe(st) {
+    if (!st) return 'Idle.';
+    const ago = st.last_rx ? Math.max(0, Math.round(Date.now() / 1000 - st.last_rx)) : null;
+    const baud = st.baud_setting === 'auto'
+        ? `${st.baud} baud (auto${st.auto_settled ? ', locked' : ', detecting'})`
+        : `${st.baud} baud`;
+    const rw = st.allow_write ? ' · <span class="text-amber-300">read-write</span>' : '';
+    if (!st.running) {
+        return st.reserved_port
+            ? `Stopped · port <span class="font-mono">${escapeHtml(st.reserved_port)}</span> stays reserved — Start to view, or Release port.` + rw
+            : 'Stopped. Pick the USB serial port wired to the device console and press Start.';
+    }
+    const colour = st.state === 'reading' ? 'text-emerald-300' : 'text-amber-300';
+    let line = `<span class="${colour}">● ${escapeHtml(st.state)}</span> · <span class="font-mono">${escapeHtml(st.port || '')}</span> · ${baud} · ${st.bytes || 0} bytes` + rw;
+    line += ago === null ? ' · nothing received yet (a quiet console is normal — boot output and console logging appear here)' : ` · last data ${ago}s ago`;
+    if (st.error) line += ` · <span class="text-amber-300">${escapeHtml(st.error)}</span>`;
+    return line;
+}
+
+async function scRefresh() {
+    // Units (this unit + mesh peers with their console summary)
+    try {
+        const u = await fetchAPI('/api/serial-console/units');
+        scState.units = u.units || [];
+        scState.gateway = !!u.gateway_ready;
+        const sel = document.getElementById('sc-unit');
+        if (sel) {
+            const keep = scState.unit;
+            sel.innerHTML = scState.units.map(x => {
+                const tag = x.local ? 'This unit' : (x.name || x.id);
+                let note = '';
+                if (!x.local) {
+                    if (!x.online) note = ' — offline';
+                    else if (!x.reachable) note = ' — unreachable';
+                    else note = x.has_console ? (x.running ? ' — console live' : ' — console cabled') + (x.shared ? ' (shared)' : '') : ' — no console';
+                } else if (x.has_console) {
+                    note = x.running ? ' — console live' : ' — console cabled';
+                }
+                return `<option value="${escapeHtml(x.id)}">${escapeHtml(tag + note)}</option>`;
+            }).join('');
+            sel.value = scState.units.some(x => x.id === keep) ? keep : 'local';
+            scState.unit = sel.value;
+        }
+    } catch (e) { /* mesh off or unavailable: stay on this unit */ }
+
+    const mode = scMode();
+    scSetControls(mode);
+    if (mode === 'blocked') {
+        const u = scUnit();
+        scUpdateWriteUI({}, 'blocked');
+        scSetStatus(`<span class="text-amber-300">${escapeHtml(u.name || 'That unit')} has not shared its console. On that unit, tick <strong>Share with mesh (view-only)</strong> in this card — or arm the mesh secret on both units for full view + control.</span>`);
+        return;
+    }
+    if (mode === 'shared') {
+        const u = scUnit();
+        const writeNote = u.share_mesh_write ? ' · <span class="text-amber-300">write enabled</span>' : '';
+        scSetStatus(`<span class="text-emerald-300">${u.share_mesh_write ? 'Shared' : 'View-only'}:</span> ${escapeHtml(u.name || 'this unit')} shares its console with the mesh${u.port_label ? ' · ' + escapeHtml(u.port_label) : ''}${writeNote}. Start/stop happen on that unit.`);
+        scUpdateWriteUI({ share_mesh_write: u.share_mesh_write }, 'shared');
+        return;
+    }
+    // Ports on the selected unit
+    try {
+        const d = await fetchAPI('/api/serial-console/ports', scOpts());
+        const sel = document.getElementById('sc-port');
+        const ports = d.ports || [];
+        const st = d.status || {};
+        if (sel) {
+            const reserved = st.reserved_port || '';
+            let opts = ports.map(p => {
+                const label = `${p.device} — ${p.description || 'USB serial'}${p.held_by ? ' (in use by ' + p.held_by + ')' : ''}`;
+                return `<option value="${escapeHtml(p.path)}" ${p.held_by ? 'disabled' : ''}>${escapeHtml(label)}</option>`;
+            });
+            if (reserved && !ports.some(p => p.path === reserved || p.device === reserved)) {
+                opts.unshift(`<option value="${escapeHtml(reserved)}">${escapeHtml(reserved)} (reserved, not plugged in)</option>`);
+            }
+            sel.innerHTML = opts.length ? opts.join('') : '<option value="">No USB serial adapter found</option>';
+            if (reserved) sel.value = reserved;
+        }
+        const b = document.getElementById('sc-baud');
+        if (b && st.baud_setting) b.value = String(st.baud_setting);
+        const sh = document.getElementById('sc-share');
+        if (sh && mode === 'local') sh.checked = !!st.share_mesh;
+        scUpdateWriteUI(st, mode);
+        scSetStatus(scDescribe(st));
+    } catch (e) {
+        scSetStatus(`<span class="text-red-400">${escapeHtml(e.message)}</span>`);
+    }
+}
+
+function scUnitChanged() {
+    const sel = document.getElementById('sc-unit');
+    scState.unit = sel ? sel.value : 'local';
+    scState.last = 0;
+    scClearView(true);
+    scRefresh().then(() => scPoll());
+}
+
+async function scStart() {
+    const port = (document.getElementById('sc-port') || {}).value || '';
+    const baud = (document.getElementById('sc-baud') || {}).value || 'auto';
+    if (!port) { scSetStatus('<span class="text-amber-300">Plug in a USB console cable and press ↻ to find it.</span>'); return; }
+    try {
+        const r = await fetchAPI('/api/serial-console/start', scOpts({
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ port, baud }) }));
+        if (!r.success) { scSetStatus(`<span class="text-red-400">${escapeHtml(r.error || 'failed to start')}</span>`); return; }
+        scSetStatus(scDescribe(Object.assign({ reserved_port: port }, r.status)));
+        scPoll();
+    } catch (e) {
+        scSetStatus(`<span class="text-red-400">${escapeHtml(e.message)}</span>`);
+    }
+}
+
+async function scStop(release) {
+    if (release && !confirm('Stop the viewer and release the port? Other Ragnar components (GPS, CYD, RoomScan) may then open it — unplug the console cable first if it stays connected to the device.')) return;
+    try {
+        const r = await fetchAPI('/api/serial-console/stop', scOpts({
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ release: !!release }) }));
+        scSetStatus(scDescribe(Object.assign({ reserved_port: r.reserved }, r.status)));
+        if (release) scRefresh();
+    } catch (e) {
+        scSetStatus(`<span class="text-red-400">${escapeHtml(e.message)}</span>`);
+    }
+}
+
+function scFmt(l) {
+    if (!(document.getElementById('sc-stamps') || {}).checked) return l.text;
+    const d = new Date(l.t * 1000);
+    return `[${d.toLocaleTimeString([], { hour12: false })}] ${l.text}`;
+}
+
+function scAppend(lines) {
+    const out = document.getElementById('sc-output');
+    if (!out || !lines.length) return;
+    if (out.dataset.empty !== '0') { out.textContent = ''; out.dataset.empty = '0'; }
+    const frag = document.createDocumentFragment();
+    for (const l of lines) {
+        const div = document.createElement('div');
+        div.textContent = scFmt(l) || ' ';
+        frag.appendChild(div);
+    }
+    out.appendChild(frag);
+    while (out.childElementCount > SC_MAX_DOM_LINES) out.removeChild(out.firstChild);
+    if ((document.getElementById('sc-follow') || {}).checked) out.scrollTop = out.scrollHeight;
+}
+
+async function scPoll() {
+    if (scState.busy) return;
+    const mode = scMode();
+    if (mode === 'blocked') return;
+    scState.busy = true;
+    try {
+        const d = mode === 'shared'
+            ? await fetchAPI(`/api/serial-console/peer-output?unit=${encodeURIComponent(scState.unit)}&since=${scState.last}`)
+            : await fetchAPI(`/api/serial-console/output?since=${scState.last}`, scOpts());
+        if (mode === 'shared' && d.shared === false) {
+            scSetStatus(`<span class="text-amber-300">${escapeHtml(scUnit().name || 'That unit')} stopped sharing its console.</span>`);
+            return;
+        }
+        const lines = d.lines || [];
+        if (d.last < scState.last) {            // viewer restarted remotely: resync
+            scState.last = 0;
+        } else if (lines.length) {
+            scState.last = lines[lines.length - 1].seq;
+            scState.buf.push(...lines);
+            if (scState.buf.length > SC_MAX_BUF) scState.buf.splice(0, scState.buf.length - SC_MAX_BUF);
+            scAppend(lines);
+        }
+        if (d.status) {
+            const smw = d.share_mesh_write || (d.status && d.status.share_mesh_write);
+            const prefix = mode === 'shared'
+                ? `<span class="text-emerald-300">${smw ? 'Shared' : 'View-only'}</span> · ${escapeHtml(scUnit().name || '')} · ` : '';
+            scSetStatus(prefix + scDescribe(Object.assign({ reserved_port: d.status.port }, d.status)));
+            const stForUI = Object.assign({}, d.status, { share_mesh_write: smw });
+            scUpdateWriteUI(stForUI, mode);
+        }
+    } catch (e) {
+        scSetStatus(`<span class="text-red-400">${escapeHtml(e.message)}</span>`);
+    } finally {
+        scState.busy = false;
+    }
+}
+
+function scClearView(silent) {
+    const out = document.getElementById('sc-output');
+    if (out) {
+        out.innerHTML = '<span class="text-gray-500">No console output yet.</span>';
+        out.dataset.empty = '1';
+    }
+    scState.buf = [];
+}
+
+function scDownload() {
+    if (!scState.buf.length) return;
+    const unit = (scState.units.find(x => x.id === scState.unit) || {}).name || 'ragnar';
+    const text = scState.buf.map(l => `[${new Date(l.t * 1000).toISOString()}] ${l.text}`).join('\n') + '\n';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    a.download = `console-${unit}-${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+function scTick() {
+    if (document.hidden || currentTab !== 'dashboard') return;
+    if (!document.getElementById('sc-output')) return;
+    scPoll();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    if (!document.getElementById('serial-console-card')) return;
+    scRefresh().then(() => scPoll());
+    scState.timer = setInterval(scTick, 1000);
+});
 
 async function fetchAPI(endpoint, options = {}) {
     try {
@@ -19193,6 +25206,330 @@ function updateDashboardStatus(data) {
 
     updateReleaseGateState(data.release_gate);
     updatePwnToggleAvailability(Boolean(data.headless_mode));
+
+    renderPowerBadge(data.power);
+}
+
+// ============================================================================
+// POWER / UNDER-VOLTAGE BADGE
+//
+// The badge comes straight off the SoC throttle register (a measured signal),
+// so it only lights when the board is actually being starved — never on a
+// guess. Clicking it opens the breakdown of what is (estimated to be) drawing
+// the power, because on a Pi there is no per-port current meter to measure it.
+// ============================================================================
+function renderPowerBadge(power) {
+    const badge = document.getElementById('power-warning-badge');
+    if (!badge) return;
+    const level = power && power.level;
+    if (!power || (level !== 'warning' && level !== 'critical')) {
+        badge.classList.add('hidden');
+        badge.classList.remove('flex');
+        return;
+    }
+    const iconEl = document.getElementById('power-warning-icon');
+    const textEl = document.getElementById('power-warning-text');
+    const base = 'flex w-full items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-semibold border transition-colors text-left ';
+    if (level === 'critical') {
+        badge.className = base + 'bg-red-600/20 text-red-300 border-red-800 hover:bg-red-600/30';
+        if (iconEl) iconEl.textContent = '⚠️';
+    } else {
+        badge.className = base + 'bg-amber-600/20 text-amber-300 border-amber-800 hover:bg-amber-600/30';
+        if (iconEl) iconEl.textContent = '⚡';
+    }
+    badge.classList.remove('hidden');
+    if (textEl) textEl.textContent = power.headline || 'Power warning';
+}
+
+async function openPowerModal() {
+    let modal = document.getElementById('power-detail-modal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'power-detail-modal';
+        document.body.appendChild(modal);
+    }
+    modal.className = 'fixed inset-0 z-[70] bg-black/60 flex items-start justify-center p-4 overflow-auto';
+    modal.onclick = (e) => { if (e.target === modal) closePowerModal(); };
+    modal.innerHTML = `
+        <div class="glass rounded-xl w-full max-w-2xl my-8 p-6 border border-slate-700">
+            <div class="flex items-start justify-between gap-3 mb-4">
+                <h3 class="text-xl font-bold flex items-center gap-2"><span>⚡</span> Power &amp; supply health</h3>
+                <button onclick="closePowerModal()" class="text-gray-400 hover:text-white text-2xl leading-none flex-shrink-0">&times;</button>
+            </div>
+            <div id="power-modal-body" class="text-sm text-gray-300">Loading…</div>
+        </div>`;
+    document.addEventListener('keydown', _powerModalEsc);
+    try {
+        const data = await fetchAPI('/api/power');
+        renderPowerModalBody(data);
+    } catch (e) {
+        const body = document.getElementById('power-modal-body');
+        if (body) body.innerHTML = `<div class="text-red-300">Could not load power details: ${escapeHtml(String(e))}</div>`;
+    }
+}
+
+function closePowerModal() {
+    const modal = document.getElementById('power-detail-modal');
+    if (modal) modal.remove();
+    document.removeEventListener('keydown', _powerModalEsc);
+}
+function _powerModalEsc(e) { if (e.key === 'Escape') closePowerModal(); }
+
+function _pwMa(ma) {
+    if (ma === null || ma === undefined) return '—';
+    return ma >= 1000 ? `${(ma / 1000).toFixed(2)} A` : `${ma} mA`;
+}
+
+function renderPowerModalBody(d) {
+    const body = document.getElementById('power-modal-body');
+    if (body) body.innerHTML = buildPowerDetailHtml(d);
+}
+
+// Shared by the dashboard badge modal and the System tab's Power panel.
+// opts.actions adds the Pi 5 USB-limit buttons (System tab only).
+function _pwInputVolts(d) {
+    const r = d && d.pmic && (d.pmic.rails || []).find(x => x.rail === 'EXT5V');
+    return r && r.volts != null ? r.volts : null;
+}
+
+function _powerVerdict(d) {
+    const level = d.level;
+    if (level === 'critical') {
+        return d.cause === 'thermal'
+            ? { short: 'Too hot', title: 'Heat throttling now', cls: 'pw-bad' }
+            : { short: 'Under-voltage', title: d.summary && d.summary.headline || 'Under-voltage now', cls: 'pw-bad' };
+    }
+    if (level === 'warning') {
+        if (d.cause === 'thermal') return { short: 'Heat', title: 'Heat throttled since boot', cls: 'pw-warn' };
+        return { short: 'Warning', title: (d.summary && d.summary.headline) || 'Power warning', cls: 'pw-warn' };
+    }
+    if (d.usb_dropouts && d.usb_dropouts.looping) {
+        return { short: 'Dropouts', title: 'USB device keeps dropping out', cls: 'pw-warn' };
+    }
+    return { short: 'Healthy', title: 'Supply healthy', cls: 'pw-ok' };
+}
+
+function buildPowerDetailHtml(d, opts = {}) {
+    if (!d || d.supported === false) {
+        return `<div class="pw-muted">Power monitoring needs <code>vcgencmd</code> (Raspberry Pi only).</div>`;
+    }
+    const thr = d.throttle || {};
+    const est = d.estimate || {};
+    const usb = d.usb_power || {};
+    const drops = d.usb_dropouts || null;
+    const v = _powerVerdict(d);
+
+    // Status line
+    let html = `<div class="pw-status">
+        <span class="pw-status-title ${v.cls}">${escapeHtml(v.title)}</span>
+        <span class="pw-muted">${escapeHtml(d.model || '')}</span>
+    </div>`;
+    const effects = (d.effects || []).filter(t => d.level !== 'ok' || !/^No under-voltage/.test(t));
+    effects.forEach(t => { html += `<p class="${v.cls}" style="font-size:13px;margin:-6px 0 10px">${escapeHtml(t)}</p>`; });
+
+    // Measured values
+    const inV = _pwInputVolts(d);
+    const tiles = [];
+    if (inV != null) tiles.push(['Input', `${inV.toFixed(2)} V`, inV < 4.8 ? 'pw-bad' : inV < 5.0 ? 'pw-warn' : '']);
+    if (d.pmic && d.pmic.total_watts != null) tiles.push(['Board power', `${d.pmic.total_watts} W`, '']);
+    if (d.temp_c != null) tiles.push(['SoC temp', `${d.temp_c} °C`, d.temp_c >= 80 ? 'pw-bad' : d.temp_c >= 70 ? 'pw-warn' : '']);
+    if (d.core_volts != null) tiles.push(['Core', `${d.core_volts} V`, '']);
+    if (thr.raw) tiles.push(['Throttle flags', thr.raw, thr.healthy ? 'pw-ok' : 'pw-warn']);
+    html += `<div class="pw-tiles">${tiles.map(([l, val, c]) =>
+        `<div class="pw-tile"><div class="pw-tile-label">${l}</div><div class="pw-tile-value ${c}">${escapeHtml(val)}</div></div>`).join('')}</div>`;
+    if (thr.raw && !thr.healthy) {
+        const now = (thr.now || []).join(', ') || 'none';
+        const occ = (thr.occurred || []).join(', ') || 'none';
+        html += `<div class="pw-row"><span class="pw-muted">Right now</span><span>${escapeHtml(now)}</span></div>
+            <div class="pw-row"><span class="pw-muted">Since boot</span><span>${escapeHtml(occ)}</span></div>`;
+    }
+
+    // Pi 5: supply + USB current limit
+    if (usb.applies) {
+        const supply = usb.psu_max_ma ? `${(usb.psu_max_ma / 1000).toFixed(1)} A at 5 V` : 'unknown';
+        html += `<div class="pw-section"><div class="pw-section-title">USB power (Pi 5)</div>
+            <div class="pw-row"><span>Supply negotiated</span><span>${escapeHtml(supply)}</span></div>
+            <div class="pw-row"><span>USB limit, all ports</span><span class="${usb.usb_limit_ma >= 1600 ? 'pw-ok' : 'pw-warn'}">${_pwMa(usb.usb_limit_ma)}</span></div>
+            <div class="pw-row"><span>USB devices at peak (est.)</span><span class="${est.usb_over ? 'pw-bad' : ''}">${_pwMa(est.peripherals_peak_ma)}</span></div>`;
+        let fix = '';
+        if (usb.pd_5a_supply) {
+            fix = `<div class="pw-fix-text pw-ok">5 A USB-PD supply detected — the 1.6 A USB limit is already on.</div>`;
+        } else if (usb.pending_reboot) {
+            fix = `<div class="pw-fix-text pw-warn">Setting saved (${usb.configured ? '1.6 A' : '600 mA'}). Reboot to apply.</div>
+                ${opts.actions ? `<button class="pw-btn pw-btn-warn" onclick="rebootSystem()">Reboot now</button>` : ''}`;
+        } else if (usb.usb_limit_ma < 1600) {
+            fix = `<div class="pw-fix-text">USB devices share 600 mA. A Wi-Fi adapter plus an SDR or GPS exceeds it and drops off USB. Raising the limit to 1.6 A fixes that on a ≥3 A supply.</div>
+                ${opts.actions ? `<button class="pw-btn pw-btn-primary" onclick="setUsbMaxCurrent(true)">Raise to 1.6 A</button>` : ''}`;
+        } else {
+            fix = `<div class="pw-fix-text pw-ok">1.6 A USB limit active (usb_max_current_enable=1).</div>
+                ${opts.actions ? `<button class="pw-btn" onclick="setUsbMaxCurrent(false)">Revert to 600 mA</button>` : ''}`;
+        }
+        html += `<div class="pw-fix">${fix}</div></div>`;
+    }
+
+    // USB dropouts from the kernel log
+    if (drops) {
+        html += `<div class="pw-section"><div class="pw-section-title">USB dropouts since boot</div>`;
+        if (!drops.total) {
+            html += `<div class="pw-row"><span class="pw-ok">None</span><span></span></div>`;
+        } else {
+            drops.ports.forEach(p => {
+                html += `<div class="pw-row"><span>Port ${escapeHtml(p.port)}${p.device ? ' · ' + escapeHtml(p.device) : ''}${p.loop ? ' <span class="pw-bad">— reconnect loop</span>' : ''}</span>
+                    <span class="${p.loop ? 'pw-bad' : ''}">${p.count}×</span></div>`;
+            });
+            if (drops.looping) {
+                html += `<div class="pw-muted" style="margin-top:4px">A device reconnecting several times a minute is losing power.</div>`;
+            }
+        }
+        html += `</div>`;
+    }
+
+    // Estimated draw per device
+    html += `<div class="pw-section"><div class="pw-section-title">Estimated draw (peak)</div>`;
+    (d.devices || []).forEach(dev => {
+        const ifaces = (dev.interfaces || []).length ? ` · ${dev.interfaces.join(', ')}` : '';
+        html += `<div class="pw-row"><span title="${escapeHtml(dev.label || '')}">${escapeHtml(dev.role || 'USB device')}<span class="pw-muted">${escapeHtml(ifaces)}${dev.matched ? '' : ' · declared'}</span></span>
+            <span>${_pwMa(dev.est_peak_ma)}</span></div>`;
+    });
+    html += `<div class="pw-row"><span>Board (${escapeHtml(d.board ? d.board.name : '')})</span><span>${_pwMa(est.load_ma)}</span></div>
+        <div class="pw-row" style="font-weight:600"><span>Total</span><span class="${est.tight ? 'pw-warn' : ''}">${_pwMa(est.total_peak_ma)} / ${_pwMa(est.psu_ma)}${est.psu_detected ? '' : ' rec.'}</span></div>`;
+    if (d.summary && d.summary.undervoltage && est.headroom_ma > 0 && !est.tight) {
+        html += `<div class="pw-muted pw-warn" style="margin-top:4px">Under-voltage with headroom to spare points at the cable or connector, not the load. Try a short, thick cable.</div>`;
+    }
+    html += `</div>`;
+    return html;
+}
+
+async function setUsbMaxCurrent(enable) {
+    const msg = enable
+        ? 'Raise the Pi 5 USB current limit from 600 mA to 1.6 A?\n\nThis writes usb_max_current_enable=1 to config.txt (a backup is kept). It takes effect after a reboot. Use a supply rated 3 A or more.'
+        : 'Revert the USB current limit to 600 mA?\n\nTakes effect after a reboot.';
+    if (!confirm(msg)) return;
+    try {
+        const res = await postAPI('/api/power/usb-current', { enable });
+        if (res && res.success) {
+            showNotification(enable ? 'Saved — reboot to apply the 1.6 A limit' : 'Saved — reboot to apply', 'success');
+        } else {
+            showNotification('Could not change the setting: ' + ((res && res.error) || 'unknown error'), 'error');
+        }
+    } catch (e) {
+        showNotification('Could not change the setting: ' + e, 'error');
+    }
+    fetchPowerDetail();
+}
+
+// ---- Power test (System tab) ----------------------------------------------
+const _powerTest = { loaded: false, timer: null };
+
+async function fetchPowerTestStatus() {
+    try {
+        const st = await fetchAPI('/api/power/test');
+        _powerTest.loaded = true;
+        renderPowerTest(st);
+        if (st.running && !_powerTest.timer) {
+            _powerTest.timer = setInterval(pollPowerTest, 1500);
+        }
+    } catch (e) {
+        console.error('Power test status failed:', e);
+    }
+}
+
+async function pollPowerTest() {
+    try {
+        const st = await fetchAPI('/api/power/test');
+        renderPowerTest(st);
+        if (!st.running) {
+            clearInterval(_powerTest.timer);
+            _powerTest.timer = null;
+            fetchPowerDetail();
+        }
+    } catch (e) { /* keep polling; the next tick retries */ }
+}
+
+async function startPowerTest() {
+    const loads = Array.from(document.querySelectorAll('#power-test-loads input:checked')).map(el => el.value);
+    const duration = Number((document.getElementById('power-test-duration') || {}).value || 40);
+    try {
+        const res = await postAPI('/api/power/test', { duration, loads });
+        if (!res || !res.success) {
+            showNotification((res && res.error) || 'Could not start the power test', 'error');
+            return;
+        }
+        if (!_powerTest.timer) _powerTest.timer = setInterval(pollPowerTest, 1500);
+        pollPowerTest();
+    } catch (e) {
+        showNotification('Could not start the power test: ' + e, 'error');
+    }
+}
+
+// GPS rows for the power-test table (only when the GPS was watched).
+function _pwGpsRows(gi, gl) {
+    if (!gi && !gl) return '';
+    gi = gi || {}; gl = gl || {};
+    const cell = (x, fmt, bad) => `<td class="${bad ? 'pw-bad' : ''}">${x == null ? '—' : fmt(x)}</td>`;
+    const row = (label, key, fmt, badFn) =>
+        `<tr><td>${label}</td>${cell(gi[key], fmt, badFn && badFn(gi[key]))}${cell(gl[key], fmt, badFn && badFn(gl[key]))}</tr>`;
+    return row('GPS silent', 'silent_s', x => `${x} s`, x => x > 0)
+        + row('GPS fix', 'fix_pct', x => `${x}%`)
+        + `<tr><td>GPS satellites</td>${[gi, gl].map(g =>
+            `<td>${g.sats_used_avg == null ? '—' : `${g.sats_used_avg} / ${g.sats_view_avg}`}</td>`).join('')}</tr>`
+        + row('GPS best SNR', 'snr_max_avg', x => `${x} dB-Hz`);
+}
+
+function renderPowerTest(st) {
+    const loadsEl = document.getElementById('power-test-loads');
+    const btn = document.getElementById('power-test-btn');
+    const body = document.getElementById('power-test-body');
+    if (loadsEl && st.loads && !loadsEl.dataset.built) {
+        loadsEl.dataset.built = '1';
+        loadsEl.innerHTML = Object.entries(st.loads).map(([key, l]) =>
+            `<label class="${l.available ? '' : 'pw-muted'}"><input type="checkbox" value="${key}" ${l.available ? 'checked' : 'disabled'}> ${escapeHtml(l.label)}</label>`
+        ).join('');
+    }
+    if (btn) { btn.disabled = !!st.running; btn.textContent = st.running ? 'Running…' : 'Run test'; }
+    if (!body) return;
+    const r = st.result;
+    if (!r) {
+        body.innerHTML = `<div class="pw-muted">Measures the input voltage, throttling and USB dropouts at idle and under the selected load.</div>`;
+        return;
+    }
+    if (st.running) {
+        const live = r.live || {};
+        body.innerHTML = `<div class="pw-row"><span>${r.phase === 'load' ? 'Load phase' : 'Idle phase'}</span>
+                <span>${live.input_v != null ? live.input_v.toFixed(2) + ' V' : ''}${live.temp_c != null ? ' · ' + live.temp_c + ' °C' : ''}${live.gps ? ' · GPS ' + (live.gps.age_s != null && live.gps.age_s <= 3 ? live.gps.sats_used + '/' + live.gps.sats_view + ' sats' : 'silent') : ''}</span></div>
+            <div class="sys-bar"><div class="sys-bar-fill" style="width:${r.progress || 0}%"></div></div>`;
+        return;
+    }
+    if (r.phase === 'error') {
+        body.innerHTML = `<div class="pw-bad">Test failed: ${escapeHtml(r.error || 'unknown error')}</div>`;
+        return;
+    }
+    const vd = r.verdict || {};
+    const i = r.idle || {}, l = r.load || {};
+    const fmt = (x, u, dp = 2) => x == null ? '—' : `${Number(x).toFixed(dp)}${u}`;
+    const flags = f => (f && f.length) ? escapeHtml(f.join(', ')) : 'none';
+    const info = r.load_info || {};
+    const extras = [];
+    if (info.sdr_rate_pct != null) extras.push(`SDR ${info.sdr_rate_pct}% of full rate`);
+    if (info.scans_ok != null) extras.push(`${info.scans_ok} Wi-Fi scans ok, ${info.scans_failed} failed`);
+    if (i.gps || l.gps) extras.push('GPS satellites = used / in view');
+    const when = r.finished ? new Date(r.finished * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+    body.innerHTML = `
+        <div class="pw-status"><span class="pw-status-title ${vd.ok ? 'pw-ok' : 'pw-bad'}">${escapeHtml(vd.headline || '')}</span>
+            <span class="pw-muted">${escapeHtml((r.loads || []).join(' + ') || 'no load')} · ${r.duration} s · ${when}${r.usb_limit_ma ? ' · USB limit ' + _pwMa(r.usb_limit_ma) : ''}</span></div>
+        <div class="overflow-x-auto"><table class="pw-table">
+            <tr><th></th><th>Idle</th><th>Load</th></tr>
+            <tr><td>Input avg</td><td>${fmt(i.input_v_avg, ' V')}</td><td>${fmt(l.input_v_avg, ' V')}</td></tr>
+            <tr><td>Input min</td><td>${fmt(i.input_v_min, ' V')}</td><td>${fmt(l.input_v_min, ' V')}</td></tr>
+            <tr><td>Board power max</td><td>${fmt(i.board_w_max, ' W', 1)}</td><td>${fmt(l.board_w_max, ' W', 1)}</td></tr>
+            <tr><td>Temp max</td><td>${fmt(i.temp_max, ' °C', 1)}</td><td>${fmt(l.temp_max, ' °C', 1)}</td></tr>
+            <tr><td>Throttle flags</td><td>${flags(i.flags)}</td><td>${flags(l.flags)}</td></tr>
+            <tr><td>USB dropouts</td><td class="${i.usb_disconnects ? 'pw-bad' : ''}">${i.usb_disconnects ?? '—'}</td><td class="${l.usb_disconnects ? 'pw-bad' : ''}">${l.usb_disconnects ?? '—'}</td></tr>
+            ${_pwGpsRows(i.gps, l.gps)}
+        </table></div>
+        ${extras.length ? `<div class="pw-muted" style="margin-top:6px">${escapeHtml(extras.join(' · '))}</div>` : ''}
+        ${(vd.issues || []).slice(1).map(t => `<div class="pw-warn" style="font-size:13px;margin-top:4px">${escapeHtml(t)}</div>`).join('')}
+        ${(vd.advice || []).map(t => `<div style="font-size:13px;margin-top:4px">→ ${escapeHtml(t)}</div>`).join('')}`;
 }
 
 function updateAutomationToggleButton(automationEnabled, options = {}) {
@@ -19270,7 +25607,7 @@ function updateElement(id, value) {
     const element = document.getElementById(id);
     if (element) {
         const str = String(value ?? '');
-        if (element.textContent !== str) {
+        if (_i18nText(element) !== str) {
             element.textContent = str;
         }
     }
@@ -19336,7 +25673,7 @@ function updateConnectivityIndicator(id, active, ssid = null, apMode = false) {
                 text = 'Not connected';
                 cls = 'text-xs text-gray-500 truncate';
             }
-            if (ssidDisplay.textContent !== text) ssidDisplay.textContent = text;
+            if (_i18nText(ssidDisplay) !== text) ssidDisplay.textContent = text;
             if (ssidDisplay.className !== cls) ssidDisplay.className = cls;
         }
     }
@@ -19355,14 +25692,14 @@ function updateLanIndicator(data) {
             const ip = data.ethernet_ip || '';
             const text = ip ? `${iface}: ${ip}` : iface;
             const cls = 'text-xs text-green-400 truncate';
-            if (info.textContent !== text) info.textContent = text;
+            if (_i18nText(info) !== text) info.textContent = text;
             if (info.className !== cls) info.className = cls;
         }
     } else {
         const targetClass = 'w-3 h-3 bg-gray-600 rounded-full';
         if (dot && dot.className !== targetClass) dot.className = targetClass;
         if (info) {
-            if (info.textContent !== 'Not connected') info.textContent = 'Not connected';
+            if (_i18nText(info) !== 'Not connected') info.textContent = 'Not connected';
             const cls = 'text-xs text-gray-500 truncate';
             if (info.className !== cls) info.className = cls;
         }
@@ -19440,45 +25777,65 @@ function updatePrimaryConnectionCard(data) {
 // CONSOLE
 // ============================================================================
 
-const MAX_CONSOLE_LINES = 200;
+const MAX_CONSOLE_LINES = 400;
 const CONSOLE_NOISE_PATTERNS = [
     'comment.py - INFO - Comments loaded successfully from cache'
 ];
-const HISTORY_LOG_TYPE_COLORS = {
+const LOG_TYPE_COLORS = {
     'success': 'text-green-400',
     'error': 'text-red-400',
     'warning': 'text-yellow-400',
     'info': 'text-gray-300'
 };
+const HISTORY_LOG_TYPE_COLORS = LOG_TYPE_COLORS;   // back-compat alias
 
-let consoleBuffer = [];
-let lastConsoleLogLine = null;
+// One coherent, de-duplicated feed. Every source — the Python file loggers, the
+// real-time activity push, and client-side action messages — is normalized into
+// the same shape and merged here. The panel used to flip between two different
+// formats because two feeds wrote to it with reset-on-mismatch logic; a single
+// append-with-dedup store removes that "jumping between modes".
+let _logEntries = [];       // {tsLabel, source, level, colorClass, message, key}
+let _logKeys = new Set();   // de-dup server lines across overlapping fetches
+let _logFilter = 'all';     // selected source bucket, or 'all'
+let _logSeq = 0;
+let _logFilterSig = '';
 
-function addConsoleMessage(message, type = 'info') {
-    const timestamp = new Date().toLocaleTimeString();
-    const colors = {
-        'success': 'text-green-400',
-        'error': 'text-red-400',
-        'warning': 'text-yellow-400',
-        'info': 'text-blue-400'
-    };
-    
-    const colorClass = colors[type] || colors['info'];
-    const logEntry = {
-        timestamp,
-        message,
-        type,
-        colorClass
-    };
-    
-    consoleBuffer.push(logEntry);
-    
-    // Keep only the last MAX_CONSOLE_LINES
-    if (consoleBuffer.length > MAX_CONSOLE_LINES) {
-        consoleBuffer = consoleBuffer.slice(-MAX_CONSOLE_LINES);
-    }
-    
-    updateConsoleDisplay();
+// Source buckets, in the order they appear in the dropdown. A line is bucketed
+// by the logger/module that emitted it; generic modules fall back to the topic
+// mentioned in the line, so GPS / WiFi / Bluetooth activity still surfaces even
+// though those subsystems have no dedicated log file.
+const LOG_SOURCE_ORDER = ['Orchestrator', 'Scanning', 'Vulnerabilities', 'Attacks',
+    'WiFi', 'GPS', 'Bluetooth', 'Mesh', 'Network', 'Watchtower', 'Assets', 'AI',
+    'Database', 'System', 'Actions', 'Other'];
+
+function _logSourceFor(moduleToken, fullLine) {
+    const mod = String(moduleToken || '').toLowerCase().replace(/\.py$/, '');
+    const byMod =
+        /orchestrat/.test(mod) ? 'Orchestrator' :
+        /scanning|recon/.test(mod) ? 'Scanning' :
+        /vuln|nuclei|nikto|sqlmap|zap/.test(mod) ? 'Vulnerabilities' :
+        /connector|steal|bruteforce|attack|lynis/.test(mod) ? 'Attacks' :
+        /db_manager|database/.test(mod) ? 'Database' :
+        /aiservice|ai_service/.test(mod) ? 'AI' :
+        /wifi|wlan|halehound|pineap/.test(mod) ? 'WiFi' :
+        /gps|nmea|ublox/.test(mod) ? 'GPS' :
+        /bluetooth|bluez|bt_/.test(mod) ? 'Bluetooth' :
+        /mesh|tailscale|meshtastic/.test(mod) ? 'Mesh' :
+        /watchtower|incident/.test(mod) ? 'Watchtower' :
+        /asset/.test(mod) ? 'Assets' :
+        /threatintelligence|networkintelligence|multi_interface|traffic|^nmap$/.test(mod) ? 'Network' :
+        null;
+    if (byMod) return byMod;
+    // Generic module: bucket by the topic named in the line.
+    const s = String(fullLine || '').toLowerCase();
+    if (/\bgps\b|gpsd|nmea|u-?blox|satellite/.test(s)) return 'GPS';
+    if (/wifi|wlan|802\.?11|deauth|\bbeacon\b|monitor mode|hostapd/.test(s)) return 'WiFi';
+    if (/bluetooth|\bble\b|bluez/.test(s)) return 'Bluetooth';
+    if (/\bmesh\b|tailscale/.test(s)) return 'Mesh';
+    if (/nmap|\bscan\b|port scan|host discovery/.test(s)) return 'Scanning';
+    if (/vuln|cve-|exploit/.test(s)) return 'Vulnerabilities';
+    if (/env_manager|shared|hbp0|utils|display|resource_monitor|auth_manager|server_capabilit|compliance|provision|post_update/.test(mod)) return 'System';
+    return 'Other';
 }
 
 function shouldHideConsoleLog(logLine) {
@@ -19488,124 +25845,240 @@ function shouldHideConsoleLog(logLine) {
 function determineConsoleLogType(logLine) {
     if (!logLine) return 'info';
     const normalized = logLine.toLowerCase();
-    if (normalized.includes('error')) return 'error';
+    if (normalized.includes('error') || normalized.includes('critical') || normalized.includes(' fail')) return 'error';
     if (normalized.includes('warn')) return 'warning';
     if (normalized.includes('success')) return 'success';
     return 'info';
 }
 
-const LOG_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+// A server log line already carries its own time — either "YYYY-MM-DD HH:MM:SS"
+// from the Python loggers or "[HH:MM:SS]" from the activity feed. Pull that time
+// out and strip it from the message so the panel renders exactly ONE timestamp,
+// instead of stamping a second, render-time one in front of the line (which is
+// what produced entries like "[22:36:33] [22:36:32] [STATS] …").
+const LOG_TS_ISO_RE = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:,\d+)?\s*(?:-\s*)?([\s\S]*)$/;
+const LOG_TS_BRACKET_RE = /^\[(\d{2}:\d{2}:\d{2})\]\s*([\s\S]*)$/;
 
-function extractLogTimestamp(logLine) {
-    if (!logLine || logLine.length < 19) {
-        return new Date().toLocaleTimeString();
+function parseLogLine(logLine) {
+    if (typeof logLine !== 'string') {
+        return { timestamp: new Date().toLocaleTimeString(), message: String(logLine || '') };
     }
-    const timestampCandidate = logLine.slice(0, 19);
-    if (LOG_TIMESTAMP_PATTERN.test(timestampCandidate)) {
-        const parsed = new Date(timestampCandidate.replace(' ', 'T'));
-        if (!Number.isNaN(parsed.getTime())) {
-            return parsed.toLocaleTimeString();
-        }
+    let m = logLine.match(LOG_TS_ISO_RE);
+    if (m) {
+        const parsed = new Date(m[1].replace(' ', 'T'));
+        return {
+            timestamp: Number.isNaN(parsed.getTime()) ? m[1].slice(11) : parsed.toLocaleTimeString(),
+            message: m[2]
+        };
     }
-    return new Date().toLocaleTimeString();
+    m = logLine.match(LOG_TS_BRACKET_RE);
+    if (m) {
+        return { timestamp: m[1], message: m[2] };
+    }
+    return { timestamp: new Date().toLocaleTimeString(), message: logLine };
 }
 
-function createConsoleEntryFromLog(logLine) {
-    const type = determineConsoleLogType(logLine);
+// Turn one raw log line into a normalized panel entry: single timestamp, clean
+// message, and a source bucket. Handles "TIME - module - LEVEL - msg" and the
+// activity "[HH:MM:SS] [TAG] msg" / "[WEB] msg" shapes.
+function _normalizeLogLine(rawLine) {
+    const line = String(rawLine == null ? '' : rawLine);
+    const level = determineConsoleLogType(line);
+    const { timestamp, message } = parseLogLine(line);
+    let msg = message, source;
+    let m = msg.match(/^([\w.\-]+)\s*-\s*(?:DEBUG|INFO|WARNING|ERROR|CRITICAL)\s*-\s*([\s\S]*)$/);
+    if (m) { source = _logSourceFor(m[1], line); msg = m[2]; }
+    else {
+        const t = msg.match(/^\[([A-Za-z]+)\]\s*([\s\S]*)$/);
+        if (t) { source = _logSourceFor(t[1], line); msg = t[2]; }
+        else source = _logSourceFor('', line);
+    }
     return {
-        timestamp: extractLogTimestamp(logLine),
-        message: logLine,
-        type,
-        colorClass: HISTORY_LOG_TYPE_COLORS[type] || HISTORY_LOG_TYPE_COLORS['info']
+        tsLabel: timestamp,
+        source,
+        level,
+        colorClass: LOG_TYPE_COLORS[level] || LOG_TYPE_COLORS.info,
+        message: msg,
+        key: 'srv:' + line
     };
 }
 
-function updateConsole(logs) {
-    if (!logs || !Array.isArray(logs)) {
-        // If no logs available, add informational messages
-        if (consoleBuffer.length === 0) {
-            addConsoleMessage('No historical logs available', 'warning');
-            addConsoleMessage('New activity will appear here as it occurs', 'info');
-        }
-        return;
+function _pushLogEntry(entry) {
+    if (entry.key && _logKeys.has(entry.key)) return false;
+    if (entry.key) _logKeys.add(entry.key);
+    _logEntries.push(entry);
+    if (_logEntries.length > MAX_CONSOLE_LINES) {
+        _logEntries = _logEntries.slice(-MAX_CONSOLE_LINES);
+        _logKeys = new Set(_logEntries.map(e => e.key).filter(Boolean));
     }
-    
-    // If logs are empty array, provide user feedback
-    if (logs.length === 0) {
-        if (consoleBuffer.length === 0) {
-            addConsoleMessage('No recent activity logged', 'info');
-            addConsoleMessage('Waiting for new events...', 'info');
-        }
-        return;
-    }
-    
-    const cleanedLogs = logs
-        .map(log => typeof log === 'string' ? log.trim() : '')
-        .filter(log => log && !shouldHideConsoleLog(log));
+    return true;
+}
 
-    if (cleanedLogs.length === 0) {
-        return;
-    }
-
-    let newLogLines = [];
-    if (!lastConsoleLogLine) {
-        consoleBuffer = [];
-        newLogLines = cleanedLogs.slice(-MAX_CONSOLE_LINES);
-    } else {
-        const lastIndex = cleanedLogs.lastIndexOf(lastConsoleLogLine);
-        if (lastIndex === cleanedLogs.length - 1) {
-            lastConsoleLogLine = cleanedLogs[cleanedLogs.length - 1];
-            return;
-        }
-        if (lastIndex !== -1) {
-            newLogLines = cleanedLogs.slice(lastIndex + 1);
-        } else {
-            consoleBuffer = [];
-            newLogLines = cleanedLogs.slice(-MAX_CONSOLE_LINES);
-        }
-    }
-
-    if (newLogLines.length === 0) {
-        lastConsoleLogLine = cleanedLogs[cleanedLogs.length - 1];
-        return;
-    }
-    
-    newLogLines.forEach(logLine => {
-        consoleBuffer.push(createConsoleEntryFromLog(logLine));
+// Client-side action feedback (used in hundreds of places). Stays a first-class
+// part of the same feed under the "Actions" source, so it filters and renders
+// exactly like every other line.
+function addConsoleMessage(message, type = 'info') {
+    _pushLogEntry({
+        tsLabel: new Date().toLocaleTimeString(),
+        source: 'Actions',
+        level: type,
+        colorClass: LOG_TYPE_COLORS[type] || LOG_TYPE_COLORS.info,
+        message: String(message == null ? '' : message),
+        key: 'ui:' + (++_logSeq)
     });
-    
-    if (consoleBuffer.length > MAX_CONSOLE_LINES) {
-        consoleBuffer = consoleBuffer.slice(-MAX_CONSOLE_LINES);
-    }
-    
-    lastConsoleLogLine = cleanedLogs[cleanedLogs.length - 1];
-    updateConsoleDisplay();
+    renderLogPanel();
 }
 
-function updateConsoleDisplay() {
-    const console = document.getElementById('console-output');
-    if (!console) return;
-    
-    console.innerHTML = consoleBuffer.map(entry => 
-        `<div class="${entry.colorClass}">[${entry.timestamp}] ${escapeHtml(entry.message)}</div>`
-    ).join('');
-    
-    // Auto-scroll to bottom
-    console.scrollTop = console.scrollHeight;
+// Merge a batch of raw log lines (from /api/logs or the socket push) into the
+// unified feed. De-dupes so overlapping fetches don't stack the same lines, and
+// never wipes the buffer.
+function updateConsole(logs) {
+    if (!Array.isArray(logs)) return;
+    let added = false;
+    logs.forEach(raw => {
+        const line = typeof raw === 'string' ? raw.trim() : '';
+        if (!line || shouldHideConsoleLog(line)) return;
+        if (_pushLogEntry(_normalizeLogLine(line))) added = true;
+    });
+    if (added) renderLogPanel();
 }
+
+function _logSourcesPresent() {
+    const seen = new Set(_logEntries.map(e => e.source));
+    return LOG_SOURCE_ORDER.filter(s => seen.has(s));
+}
+
+// Rebuild the filter dropdown only when the set of present sources changes, so
+// it never flickers or steals focus mid-render.
+function populateLogFilter() {
+    const sel = document.getElementById('log-source-filter');
+    if (!sel) return;
+    if (!sel._wired) {
+        sel._wired = true;
+        try { const saved = localStorage.getItem('ragnar.log.filter'); if (saved) _logFilter = saved; } catch (e) {}
+        sel.addEventListener('change', () => {
+            _logFilter = sel.value || 'all';
+            try { localStorage.setItem('ragnar.log.filter', _logFilter); } catch (e) {}
+            renderLogPanel();
+        });
+    }
+    const present = _logSourcesPresent();
+    // Keep the active filter selectable even if it momentarily has no lines.
+    if (_logFilter !== 'all' && !present.includes(_logFilter)) present.push(_logFilter);
+    const sig = present.join('|');
+    if (sig !== _logFilterSig) {
+        _logFilterSig = sig;
+        sel.innerHTML = ['<option value="all">All sources</option>']
+            .concat(present.map(s => `<option value="${s}">${s}</option>`)).join('');
+    }
+    sel.value = _logFilter;
+}
+
+function renderLogPanel() {
+    const out = document.getElementById('console-output');
+    if (!out) return;
+    populateLogFilter();
+    const rows = _logFilter === 'all' ? _logEntries : _logEntries.filter(e => e.source === _logFilter);
+    if (!rows.length) {
+        out.innerHTML = '<div class="text-gray-500">' +
+            (_logEntries.length ? 'No entries for this filter yet.' : 'Waiting for activity…') + '</div>';
+        return;
+    }
+    // Only auto-scroll if the user is already at the bottom, so scrolling up to
+    // read isn't interrupted by new lines.
+    const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 40;
+    out.innerHTML = rows.map(e =>
+        `<div class="${e.colorClass}"${e.source === 'Actions' ? '' : ' translate="no"'}><span class="text-gray-600">[${e.tsLabel}]</span> ` +
+        `<span class="text-Ragnar-400">${escapeHtml(e.source)}</span> ${escapeHtml(e.message)}</div>`
+    ).join('');
+    if (atBottom) out.scrollTop = out.scrollHeight;
+}
+
+// Back-compat alias (older callers).
+function updateConsoleDisplay() { renderLogPanel(); }
 
 function clearConsole() {
-    consoleBuffer = [];
-    const console = document.getElementById('console-output');
-    if (console) {
-        console.innerHTML = '<div class="text-green-400">Console cleared</div>';
-    }
+    _logEntries = [];
+    _logKeys = new Set();
+    const out = document.getElementById('console-output');
+    if (out) out.innerHTML = '<div class="text-green-400">Activity log cleared</div>';
 }
 
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+// ============================================================================
+// UI LANGUAGE
+// ============================================================================
+function _i18nText(el) {
+    if (!el) return '';
+    return window.RagnarI18n ? window.RagnarI18n.source(el) : el.textContent;
+}
+
+function _setUiLanguageStatus(text, cls) {
+    const el = document.getElementById('ui-language-status');
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'text-xs mt-2 ' + cls;
+    el.classList.toggle('hidden', !text);
+}
+
+function _onUiLanguageApplied(lang) {
+    const select = document.getElementById('ui-language-select');
+    if (select && select.value !== lang) select.value = lang;
+    aiInsightsCache.data = null;
+    aiInsightsCache.timestamp = null;
+    if (currentTab === 'dashboard') loadAIInsights();
+}
+
+function initLanguageSelector() {
+    const i18n = window.RagnarI18n;
+    const select = document.getElementById('ui-language-select');
+    if (!i18n) {
+        if (select) select.disabled = true;
+        return;
+    }
+    if (select) select.value = i18n.lang;
+    i18n.onChange(_onUiLanguageApplied);
+}
+
+async function onUiLanguageChanged(select) {
+    const i18n = window.RagnarI18n;
+    if (!i18n || !select) return;
+    const code = select.value;
+    const previous = i18n.lang;
+    if (code === previous) return;
+    select.disabled = true;
+    _setUiLanguageStatus('Switching language…', 'text-gray-400');
+    try {
+        await i18n.setLanguage(code);
+        _setUiLanguageStatus('Language saved on this unit. AI answers now use it too.', 'text-green-400');
+    } catch (error) {
+        if (i18n.lang !== previous) {
+            try { await i18n.setLanguage(previous, { persist: false }); } catch (e) { /* keep current */ }
+        }
+        select.value = i18n.lang;
+        _setUiLanguageStatus(`Could not change the language: ${error && error.message ? error.message : error}`, 'text-red-400');
+    } finally {
+        select.disabled = false;
+    }
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initLanguageSelector);
+} else {
+    initLanguageSelector();
+}
+
+function applyServerLanguage(code) {
+    const i18n = window.RagnarI18n;
+    if (!i18n || !code || code === i18n.lang) return;
+    i18n.setLanguage(code, { persist: false }).catch(error => {
+        console.warn('Could not apply UI language', code, error);
+    });
 }
 
 // ============================================================================
@@ -19870,13 +26343,13 @@ function displayConfigForm(config) {
     
     // Group config by sections
     const sections = {
-        'General': ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck'],
+        'General': ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'distro_cve_enrichment', 'enable_attacks', 'blacklistcheck'],
         'Network': ['network_max_failed_pings'],
         'Timing': ['startup_delay', 'web_delay', 'screen_delay', 'scan_interval'],
-        'Display': ['epd_type', 'screen_reversed', 'spi_clock_mhz', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness']
+        'Display': ['epd_type', 'screen_reversed', 'spi_clock_mhz', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness', 'ups_hat_monitor']
     };
     
-    const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck', 'wardriving_enabled', 'wardriving_display', 'wardriving_auto_export', 'wardriving_wigle_include_zigbee'];
+    const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'distro_cve_enrichment', 'enable_attacks', 'blacklistcheck', 'ups_hat_monitor', 'wardriving_enabled', 'wardriving_display', 'wardriving_auto_export', 'wardriving_wigle_include_zigbee'];
     const alwaysShowKeys = new Set(['network_max_failed_pings', 'gc9a01_mascot_color', 'ssd1306_i2c_address', 'lcd1602_i2c_address', 'spi_clock_mhz', 'max7219_spi_port', 'max7219_spi_device', 'max7219_block_orientation', 'display_brightness', 'wardriving_scan_interval', 'wardriving_gps_port', 'wardriving_gps_baudrate']);
     const fallbackValues = {
         network_max_failed_pings: 15,
@@ -19926,9 +26399,13 @@ function displayConfigForm(config) {
                 
                 if (Array.isArray(selectOptions)) {
                     let selectedValue = typeof value === 'boolean' ? String(value) : (value ?? '');
-                    // For epd_type, map driver name to size key so the dropdown matches
+                    // For epd_type, map driver name to size key so the dropdown matches.
+                    // When the service is actually running headless (display_enabled
+                    // is false), show "Headless" regardless of the remembered driver.
                     if (key === 'epd_type') {
-                        selectedValue = epdTypeToSizeKey(selectedValue);
+                        selectedValue = (config.display_enabled === false)
+                            ? 'headless'
+                            : epdTypeToSizeKey(selectedValue);
                     }
                     // For screen_reversed, normalize legacy boolean values to rotation angles
                     if (key === 'screen_reversed') {
@@ -20136,7 +26613,7 @@ function displayConfigForm(config) {
     // Render wardriving config settings into the dedicated Wardriving section slot
     const wdSlot = document.getElementById('wardriving-config-slot');
     if (wdSlot) {
-        const wdKeys = ['wardriving_scan_interval', 'wardriving_gps_port', 'wardriving_gps_baudrate', 'wardriving_auto_export', 'wardriving_wigle_include_zigbee'];
+        const wdKeys = ['wardriving_scan_interval', 'wardriving_gps_port', 'wardriving_gps_baudrate', 'wardriving_gps_assist', 'wardriving_gps_set_clock', 'wardriving_auto_export', 'wardriving_wigle_include_zigbee'];
         let wdHtml = '<form id="wardriving-config-form" class="bg-slate-800 bg-opacity-50 rounded-lg p-4 mt-4"><h4 class="text-md font-bold mb-4 text-gray-300">Settings</h4><div class="grid grid-cols-1 md:grid-cols-2 gap-4">';
         wdKeys.forEach(key => {
             const hasKey = Object.prototype.hasOwnProperty.call(config, key);
@@ -20245,12 +26722,27 @@ async function saveConfig(form) {
     try {
         const result = await postAPI('/api/config', config);
         addConsoleMessage('Configuration saved successfully', 'success');
-        
+
+        // Almost every setting now applies live. Say so explicitly on the rare
+        // save that does bounce the service, so the UI dropping out is expected
+        // rather than alarming.
+        if (result && result.restart_required) {
+            const reason = result.restart_reason || 'a hardware setting';
+            addConsoleMessage(`${reason} changed — restarting the service to apply it…`, 'warning');
+            showNotification(`${reason} changed — Ragnar is restarting`, 'info');
+        }
+
+
         // If manual_mode was changed, refresh the dashboard to update UI
         if (config.hasOwnProperty('manual_mode')) {
+            console.log('manual_mode setting changed to:', config.manual_mode);
             setTimeout(() => {
                 refreshDashboard();
             }, 500);
+            // Also directly update the UI to ensure tab visibility updates immediately
+            setTimeout(() => {
+                syncManualModeUI(Boolean(config.manual_mode));
+            }, 100);
         }
         
     } catch (error) {
@@ -20269,7 +26761,23 @@ async function loadAIConfiguration(config) {
             : false;
         aiEnabledCheckbox.checked = aiEnabled;
     }
-    
+
+    const aiChatCheckbox = document.getElementById('ai-chat-toggle');
+    if (aiChatCheckbox) {
+        aiChatCheckbox.checked = !config || config.ai_chat_enabled !== false;
+    }
+
+    // Self-hosted endpoint + model (issue #462)
+    const baseUrlInput = document.getElementById('ai-base-url');
+    if (baseUrlInput) {
+        baseUrlInput.value = (config && config.ai_base_url) ? config.ai_base_url : '';
+    }
+    const modelInput = document.getElementById('ai-model-input');
+    if (modelInput) {
+        modelInput.value = (config && config.ai_model) ? config.ai_model : '';
+        if (!modelInput.value) modelInput.placeholder = 'gpt-5.4-nano  ·  or e.g. qwen2.5:7b';
+    }
+
     // Fetch token status from environment variable
     try {
         const tokenStatus = await fetchAPI('/api/ai/token');
@@ -20286,6 +26794,190 @@ async function loadAIConfiguration(config) {
         }
     } catch (error) {
         console.error('Failed to fetch AI token status:', error);
+    }
+}
+
+// Connect to a self-hosted endpoint and list the models it offers (#462).
+// Proxied via the backend so we hit the server from the Pi's vantage.
+async function connectAIEndpoint() {
+    const btn = document.getElementById('ai-connect-btn');
+    const statusDiv = document.getElementById('ai-config-status');
+    const statusMessage = document.getElementById('ai-config-status-message');
+    const modelsRow = document.getElementById('ai-models-row');
+    const select = document.getElementById('ai-model-select');
+    const baseUrl = (document.getElementById('ai-base-url')?.value || '').trim();
+    // The token field shows a masked placeholder when already saved; only send
+    // a value the operator actually typed, otherwise let the backend use the
+    // stored token.
+    const apiKey = (document.getElementById('openai-api-token')?.value || '').trim();
+
+    const show = (cls, msg) => {
+        if (!statusDiv || !statusMessage) return;
+        statusDiv.className = `p-3 rounded-lg text-sm ${cls}`;
+        statusMessage.textContent = msg;
+        statusDiv.classList.remove('hidden');
+    };
+
+    if (!baseUrl) {
+        show('bg-red-900/30 border border-red-700', '✗ Enter an endpoint URL first (e.g. http://host:11434/v1).');
+        setTimeout(() => statusDiv?.classList.add('hidden'), 5000);
+        return;
+    }
+
+    const prevLabel = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Connecting…'; }
+    show('bg-blue-900/30 border border-blue-700', `⏳ Contacting ${baseUrl}…`);
+
+    try {
+        const payload = { base_url: baseUrl };
+        if (apiKey) payload.api_key = apiKey;
+        const result = await postAPI('/api/ai/models', payload);
+        if (!result || !result.success) {
+            throw new Error((result && result.error) || 'Endpoint did not return a model list.');
+        }
+        const models = result.models || [];
+        if (select) {
+            const current = (document.getElementById('ai-model-input')?.value || '').trim();
+            select.innerHTML = '<option value="">Select a model…</option>' +
+                models.map(m => `<option value="${escapeHtml(m)}"${m === current ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('');
+        }
+        if (modelsRow) modelsRow.classList.remove('hidden');
+        // Prefill the model field if it's empty so Save works in one click.
+        const modelInput = document.getElementById('ai-model-input');
+        if (modelInput && !modelInput.value && models.length) {
+            modelInput.value = models[0];
+            if (select) select.value = models[0];
+        }
+        if (models.length) {
+            show('bg-green-900/30 border border-green-700', `✓ Connected — ${models.length} model${models.length === 1 ? '' : 's'} available. Pick one, then Save Endpoint.`);
+        } else {
+            show('bg-yellow-900/30 border border-yellow-700', 'ℹ Connected, but the endpoint reported no models. Pull a model on the server first.');
+        }
+        setTimeout(() => statusDiv?.classList.add('hidden'), 6000);
+    } catch (error) {
+        console.error('Failed to connect to AI endpoint:', error);
+        if (modelsRow) modelsRow.classList.add('hidden');
+        show('bg-red-900/30 border border-red-700', `✗ ${error.message || 'Connection failed'}`);
+        setTimeout(() => statusDiv?.classList.add('hidden'), 6000);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = prevLabel || 'Connect'; }
+    }
+}
+
+// Scan the tailnet + local subnet for a running Ollama and list what's found
+// (issue #462). Clicking a result fills the endpoint + model dropdown.
+let aiDiscovered = [];
+async function scanAIEndpoints() {
+    const btn = document.getElementById('ai-scan-btn');
+    const box = document.getElementById('ai-discover-results');
+    if (!box) return;
+    const prev = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
+    box.classList.remove('hidden');
+    box.innerHTML = '<div class="text-xs text-gray-400 p-2">⏳ Scanning Tailscale peers and the local subnet for Ollama… this can take a few seconds.</div>';
+
+    try {
+        const result = await postAPI('/api/ai/discover', {});
+        if (!result || !result.success) throw new Error((result && result.error) || 'Scan failed');
+        aiDiscovered = result.results || [];
+
+        if (!aiDiscovered.length) {
+            box.innerHTML = `<div class="text-xs text-gray-400 p-3 rounded-lg bg-slate-800 border border-slate-700">
+                No Ollama endpoints answered on :11434.<br><span class="text-gray-500">${escapeHtml(result.hint || '')}</span></div>`;
+            return;
+        }
+
+        const badge = (src) => src === 'tailnet'
+            ? '<span class="text-xs px-2 py-1 rounded bg-blue-900 text-blue-300 border border-blue-700">Tailscale</span>'
+            : '<span class="text-xs px-2 py-1 rounded bg-slate-700 text-gray-300 border border-slate-600">Local</span>';
+
+        const rows = aiDiscovered.map((r, i) => {
+            const n = r.models ? r.models.length : 0;
+            const label = r.name ? `${escapeHtml(r.name)} <span class="text-gray-500">${escapeHtml(r.ip)}</span>` : escapeHtml(r.ip);
+            const modelText = n ? `${n} model${n === 1 ? '' : 's'}` : '<span class="text-amber-400">0 models — pull one first</span>';
+            const os = r.os ? ` <span class="text-gray-600">${escapeHtml(r.os)}</span>` : '';
+            return `<button onclick="pickDiscoveredEndpoint(${i})" class="w-full text-left flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors">
+                        <span class="text-sm text-gray-200 flex items-center gap-2">${badge(r.source)} ${label}${os}</span>
+                        <span class="text-xs text-gray-400">${modelText}</span>
+                    </button>`;
+        }).join('');
+
+        box.innerHTML = `<div class="space-y-2">
+            <div class="text-xs text-gray-400">Found ${aiDiscovered.length} endpoint${aiDiscovered.length === 1 ? '' : 's'} — pick one:</div>
+            ${rows}
+            <div class="text-xs text-gray-600 mt-1">${escapeHtml(result.hint || '')}</div>
+        </div>`;
+    } catch (error) {
+        console.error('AI endpoint scan failed:', error);
+        box.innerHTML = `<div class="text-xs text-red-400 p-3 rounded-lg bg-red-900/30 border border-red-800">✗ ${escapeHtml(error.message || 'Scan failed')}</div>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = prev || 'Scan Network'; }
+    }
+}
+
+// Apply a scanned endpoint: fill the base URL + model dropdown, ready to Save.
+function pickDiscoveredEndpoint(idx) {
+    const r = aiDiscovered[idx];
+    if (!r) return;
+    const baseInput = document.getElementById('ai-base-url');
+    if (baseInput) baseInput.value = r.base_url;
+
+    const models = r.models || [];
+    const select = document.getElementById('ai-model-select');
+    const modelInput = document.getElementById('ai-model-input');
+    const current = (modelInput?.value || '').trim();
+    if (select) {
+        select.innerHTML = '<option value="">Select a model…</option>' +
+            models.map(m => `<option value="${escapeHtml(m)}"${m === current ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('');
+    }
+    document.getElementById('ai-models-row')?.classList.remove('hidden');
+    if (modelInput && models.length && !modelInput.value) {
+        modelInput.value = models[0];
+        if (select) select.value = models[0];
+    }
+    showNotification(`Selected ${r.name || r.ip} — click Save Endpoint to use it.`, 'success');
+}
+
+// Mirror the dropdown choice into the model field (the value Save persists).
+function onAIModelSelect() {
+    const select = document.getElementById('ai-model-select');
+    const modelInput = document.getElementById('ai-model-input');
+    if (select && modelInput && select.value) {
+        modelInput.value = select.value;
+    }
+}
+
+// Save the self-hosted endpoint + model (issue #462). Empty base URL reverts
+// to OpenAI's cloud. The backend re-inits the AI client on these keys.
+async function saveAIEndpoint() {
+    const statusDiv = document.getElementById('ai-config-status');
+    const statusMessage = document.getElementById('ai-config-status-message');
+    const baseUrl = (document.getElementById('ai-base-url')?.value || '').trim();
+    const model = (document.getElementById('ai-model-input')?.value || '').trim();
+
+    const payload = { ai_base_url: baseUrl };
+    if (model) payload.ai_model = model;
+
+    const show = (cls, msg) => {
+        if (!statusDiv || !statusMessage) return;
+        statusDiv.className = `p-3 rounded-lg text-sm ${cls}`;
+        statusMessage.textContent = msg;
+        statusDiv.classList.remove('hidden');
+        setTimeout(() => statusDiv.classList.add('hidden'), 5000);
+    };
+
+    try {
+        const result = await postAPI('/api/config', payload);
+        // A non-null false means the AI client failed to re-init with the new
+        // endpoint (unreachable server, wrong model name, etc.).
+        if (result && result.ai_reload_success === false) {
+            throw new Error(result.ai_reload_error || 'AI engine could not reach the endpoint. Check the URL and that the server is running.');
+        }
+        const target = baseUrl || 'OpenAI cloud';
+        show('bg-green-900/30 border border-green-700', `✓ Endpoint saved — using ${target}${model ? ` (model: ${model})` : ''}.`);
+    } catch (error) {
+        console.error('Failed to save AI endpoint:', error);
+        show('bg-red-900/30 border border-red-700', `✗ ${error.message || 'Failed to save endpoint'}`);
     }
 }
 
@@ -20334,6 +27026,35 @@ async function toggleAIEnabled() {
             statusDiv.classList.add('hidden');
         }, 5000);
     }
+}
+
+async function toggleAIChat() {
+    const checkbox = document.getElementById('ai-chat-toggle');
+    const statusDiv = document.getElementById('ai-config-status');
+    const statusMessage = document.getElementById('ai-config-status-message');
+    if (!checkbox || !statusDiv || !statusMessage) {
+        return;
+    }
+
+    const desiredState = checkbox.checked;
+    try {
+        await postAPI('/api/config', { ai_chat_enabled: desiredState });
+        // Update the panel directly: the dashboard's insights cache can return
+        // early without re-reading /api/ai/status.
+        ragnarChatAllowed = desiredState;
+        updateRagnarChatAvailability(ragnarChatAiReady, null);
+        statusDiv.className = 'p-3 rounded-lg text-sm bg-blue-900/30 border border-blue-700';
+        statusMessage.textContent = desiredState
+            ? 'ℹ Chat assistant shown on the Dashboard.'
+            : 'ℹ Chat assistant hidden and chat requests stopped.';
+    } catch (error) {
+        console.error('Failed to save chat assistant setting:', error);
+        checkbox.checked = !desiredState;  // Revert UI state on failure
+        statusDiv.className = 'p-3 rounded-lg text-sm bg-red-900/30 border border-red-700';
+        statusMessage.textContent = '✗ Could not save the chat assistant setting.';
+    }
+    statusDiv.classList.remove('hidden');
+    setTimeout(() => statusDiv.classList.add('hidden'), 4000);
 }
 
 async function saveAIToken() {
@@ -20390,7 +27111,7 @@ async function saveAIToken() {
     }
 }
 
-// ─── Pushover Notification Functions ───────────────────────────────────
+// ─── Push Notification Functions (Pushover + Slack) ────────────────────
 async function loadPushoverConfiguration(config) {
     // Sync toggle checkboxes from config
     const toggle = document.getElementById('pushover-enabled-toggle');
@@ -20401,7 +27122,9 @@ async function loadPushoverConfiguration(config) {
         'pushover-notify-new-vuln': 'pushover_notify_new_vulnerability',
         'pushover-notify-new-cred': 'pushover_notify_new_credential',
         'pushover-notify-device-lost': 'pushover_notify_device_lost',
-        'pushover-notify-device-back-online': 'pushover_notify_device_back_online'
+        'pushover-notify-device-back-online': 'pushover_notify_device_back_online',
+        'pushover-notify-wardrive-upload': 'pushover_notify_wardrive_upload',
+        'pushover-notify-cellular': 'pushover_notify_cellular'
     };
     for (const [elemId, key] of Object.entries(evtMap)) {
         const cb = document.getElementById(elemId);
@@ -20424,6 +27147,54 @@ async function loadPushoverConfiguration(config) {
     } catch (e) {
         console.error('Failed to fetch Pushover key status:', e);
     }
+
+    try {
+        const sw = await fetchAPI('/api/slack/webhook');
+        const whInput = document.getElementById('slack-webhook-url');
+        if (whInput) {
+            whInput.value = '';
+            whInput.placeholder = sw.configured ? `Configured: ${sw.preview || '••••'}` : 'https://hooks.slack.com/services/...';
+        }
+        const rm = document.getElementById('slack-webhook-remove');
+        if (rm) rm.classList.toggle('hidden', !sw.configured);
+    } catch (e) {
+        console.error('Failed to fetch Slack webhook status:', e);
+    }
+}
+
+async function saveSlackWebhook() {
+    const input = document.getElementById('slack-webhook-url');
+    const url = input ? input.value.trim() : '';
+    if (!url) {
+        showPushoverStatus('⚠ Please enter a Slack webhook URL.', 'yellow');
+        return;
+    }
+    try {
+        const result = await postAPI('/api/slack/webhook', { webhook_url: url });
+        if (result.success) {
+            showPushoverStatus('✓ Slack webhook saved!', 'green');
+            addConsoleMessage('Slack webhook saved', 'success');
+            const config = await fetchAPI('/api/config');
+            await loadPushoverConfiguration(config);
+        } else {
+            throw new Error(result.error || result.message || 'Save failed');
+        }
+    } catch (e) {
+        showPushoverStatus('✗ Failed to save Slack webhook: ' + (e.message || 'unknown error'), 'red');
+    }
+}
+
+async function removeSlackWebhook() {
+    try {
+        const resp = await networkAwareFetch('/api/slack/webhook', { method: 'DELETE' });
+        const result = await resp.json();
+        if (!resp.ok || !result.success) throw new Error(result.error || 'Remove failed');
+        showPushoverStatus('ℹ Slack webhook removed', 'blue');
+        const config = await fetchAPI('/api/config');
+        await loadPushoverConfiguration(config);
+    } catch (e) {
+        showPushoverStatus('✗ Failed to remove Slack webhook: ' + (e.message || 'unknown error'), 'red');
+    }
 }
 
 async function togglePushoverEnabled() {
@@ -20431,11 +27202,11 @@ async function togglePushoverEnabled() {
     if (!cb) return;
     try {
         await postAPI('/api/config', { pushover_enabled: cb.checked });
-        showPushoverStatus(cb.checked ? '✓ Pushover notifications enabled' : 'ℹ Pushover notifications disabled',
+        showPushoverStatus(cb.checked ? '✓ Push notifications enabled' : 'ℹ Push notifications disabled',
             cb.checked ? 'green' : 'blue');
     } catch (e) {
         cb.checked = !cb.checked;
-        showPushoverStatus('✗ Failed to toggle Pushover: ' + (e.message || 'unknown error'), 'red');
+        showPushoverStatus('✗ Failed to toggle push notifications: ' + (e.message || 'unknown error'), 'red');
     }
 }
 
@@ -20474,7 +27245,9 @@ async function savePushoverTriggers() {
         'pushover-notify-new-vuln': 'pushover_notify_new_vulnerability',
         'pushover-notify-new-cred': 'pushover_notify_new_credential',
         'pushover-notify-device-lost': 'pushover_notify_device_lost',
-        'pushover-notify-device-back-online': 'pushover_notify_device_back_online'
+        'pushover-notify-device-back-online': 'pushover_notify_device_back_online',
+        'pushover-notify-wardrive-upload': 'pushover_notify_wardrive_upload',
+        'pushover-notify-cellular': 'pushover_notify_cellular'
     };
     const payload = {};
     for (const [elemId, key] of Object.entries(evtMap)) {
@@ -20494,8 +27267,8 @@ async function testPushover() {
     try {
         const result = await postAPI('/api/pushover/test', {});
         if (result.success) {
-            showPushoverStatus('✓ Test notification sent! Check your device.', 'green', 5000);
-            addConsoleMessage('Pushover test notification sent', 'success');
+            showPushoverStatus('✓ ' + (result.message || 'Test notification sent') + ' — check your device/channel.', 'green', 6000);
+            addConsoleMessage('Push test notification sent', 'success');
         } else {
             throw new Error(result.message || 'Send failed');
         }
@@ -20632,6 +27405,258 @@ let fileOperationInProgress = false;
 let currentFileSort = 'name';
 let currentFileSearch = '';
 
+// Virtual path for the unlocked Vault, browsed in the main pane like a folder.
+const SAFE_VDIR = '/__safe__';
+// Current subfolder within the Vault ('' = root), preserved across refreshes.
+let currentSafeDir = '';
+
+// Real-filesystem locations the user may create folders in, rename and move
+// within — the general-purpose writable trees.
+function isWritablePath(p) {
+    return p === '/uploads' || p.startsWith('/uploads/') ||
+           p === '/backups' || p.startsWith('/backups/');
+}
+
+// Locations the user may upload files into. A superset of the writable trees:
+// it also covers the two script libraries (console scripts and rubber-ducky
+// payloads), so a script can be added straight from the Files tab without the
+// full folder/move/rename toolset those libraries don't need.
+function isUploadablePath(p) {
+    return isWritablePath(p) ||
+           p === '/console_scripts' || p.startsWith('/console_scripts/') ||
+           p === '/rubber-ducky' || p.startsWith('/rubber-ducky/') ||
+           p === '/engagement_playbooks' || p.startsWith('/engagement_playbooks/');
+}
+
+// The loot "category" virtual roots list networks rather than hold files — you
+// descend into a network before reaching a real folder.
+const LOOT_ROOTS = ['/data_stolen', '/scan_results', '/crackedpwd', '/vulnerabilities'];
+
+// A "real" directory on disk: anything that is not the synthetic top-level
+// listing ('/') and not a loot category root. Files sitting in a real folder
+// can be created, uploaded, moved, renamed and deleted — the Files tab behaves
+// as a general file manager across every browsable tree.
+function isRealDir(p) {
+    return !!p && p !== '/' && LOOT_ROOTS.indexOf(p) === -1;
+}
+
+// Open the OS file picker safely on every platform, including iOS Safari.
+//
+// iOS Safari garbage-collects a file <input> that is clicked while detached
+// from the DOM, so its `change` event never fires and the upload silently does
+// nothing — the root cause of "uploading from iPhone doesn't work". Keeping the
+// input in the document (visually hidden) until the user has chosen or
+// cancelled fixes it. `onPick` receives the FileList.
+function pickFiles(opts, onPick) {
+    opts = opts || {};
+    const input = document.createElement('input');
+    input.type = 'file';
+    if (opts.multiple) input.multiple = true;
+    if (opts.accept) input.accept = opts.accept;
+    input.style.position = 'fixed';
+    input.style.left = '-9999px';
+    input.style.top = '0';
+    input.style.opacity = '0';
+    input.setAttribute('aria-hidden', 'true');
+    input.tabIndex = -1;
+
+    let handled = false;
+    const cleanup = () => { if (input.parentNode) input.parentNode.removeChild(input); };
+
+    input.addEventListener('change', () => {
+        handled = true;
+        try { onPick(input.files); }
+        finally { setTimeout(cleanup, 0); }
+    });
+
+    // The picker being dismissed fires no `change`. The window regains focus
+    // when it closes, so use that to tidy up a cancelled, still-detached input.
+    const onFocus = () => {
+        window.removeEventListener('focus', onFocus);
+        setTimeout(() => { if (!handled) cleanup(); }, 1500);
+    };
+    window.addEventListener('focus', onFocus);
+
+    document.body.appendChild(input);
+    input.click();
+}
+
+// ── File-explorer navigation (Back = history, Up = parent folder) ────────────
+let fileHistory = [];   // stack of previously-visited locations
+
+function _fileLocationSnapshot() {
+    return currentDirectory === SAFE_VDIR
+        ? { vault: true, dir: currentSafeDir }
+        : { vault: false, path: currentDirectory };
+}
+function _applyFileLocation(loc) {
+    if (loc.vault) { currentSafeDir = loc.dir || ''; currentDirectory = SAFE_VDIR; loadSafeIntoBrowser(); }
+    else { loadFiles(loc.path); }
+}
+// Record-then-navigate for user-initiated moves, so Back can return here.
+function navFs(path) { fileHistory.push(_fileLocationSnapshot()); loadFiles(path); }
+function navVault(dir) { fileHistory.push(_fileLocationSnapshot()); currentSafeDir = dir || ''; currentDirectory = SAFE_VDIR; loadSafeIntoBrowser(); }
+
+function fileGoBack() {
+    if (!fileHistory.length) { showFileError('No previous location'); return; }
+    _applyFileLocation(fileHistory.pop());
+}
+function fileGoUp() {
+    const loc = _fileLocationSnapshot();
+    if (loc.vault) {
+        if (!loc.dir) navFs('/');                                  // Vault root → Directories list
+        else navVault(loc.dir.split('/').slice(0, -1).join('/'));  // up one Vault folder
+    } else {
+        if (loc.path === '/') { showFileError('Already at the top'); return; }
+        navFs(loc.path.split('/').slice(0, -1).join('/') || '/');
+    }
+}
+
+// ── Rename (files + folders), for the filesystem and the Vault ───────────────
+function _promptRename(currentName, apply) {
+    const name = (prompt('New name:', currentName) || '').trim();
+    if (!name || name === currentName) return;
+    apply(name);
+}
+function renameFsEntry(path, currentName) {
+    _promptRename(currentName, name => {
+        networkAwareFetch('/api/files/rename', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path, name })
+        })
+        .then(r => r.json())
+        .then(d => { if (d.success) { showFileSuccess(`Renamed to "${d.name}"`); refreshFiles(); } else showFileError(d.error || 'Rename failed'); })
+        .catch(e => showFileError(e.message));
+    });
+}
+function renameSafeFile(id, currentName) {
+    _promptRename(currentName, name => {
+        networkAwareFetch('/api/safe/rename', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, name })
+        })
+        .then(r => r.json())
+        .then(d => { if (d.locked) { afterSafeChange(); return; } if (d.success) { showFileSuccess(`Renamed to "${name}"`); afterSafeChange(); } else showFileError(d.error || 'Rename failed'); })
+        .catch(e => showFileError(e.message));
+    });
+}
+function renameSafeFolder(path, currentName) {
+    _promptRename(currentName, name => {
+        networkAwareFetch('/api/safe/rename', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ folder: path, name })
+        })
+        .then(r => r.json())
+        .then(d => { if (d.locked) { afterSafeChange(); return; } if (d.success) { showFileSuccess(`Renamed to "${name}"`); afterSafeChange(); } else showFileError(d.error || 'Rename failed'); })
+        .catch(e => showFileError(e.message));
+    });
+}
+
+// Small inline SVG icons reused by row action buttons.
+const ICON_RENAME = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>';
+const ICON_SEND = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>';
+const ICON_MOVE = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14h6m0 0l-2-2m2 2l-2 2"></path></svg>';
+
+// ── Move a file/folder to another folder (filesystem + Vault) ────────────────
+let _moveCtx = null;   // { kind:'fs'|'vault', src:{...}, dir }
+
+function moveFsEntry(path, name, isDir) { _openMove('fs', { path: path, name: name, isDir: !!isDir }, '/'); }
+function moveVaultFile(id, name) { _openMove('vault', { id: id, name: name, isDir: false }, ''); }
+function moveVaultFolder(folderPath, name) { _openMove('vault', { folderPath: folderPath, name: name, isDir: true }, ''); }
+
+function _openMove(kind, src, startDir) {
+    _moveCtx = { kind: kind, src: src, dir: startDir };
+    const t = document.getElementById('move-title');
+    if (t) t.textContent = `Move “${src.name}” to…`;
+    const m = document.getElementById('move-modal');
+    m.classList.remove('hidden'); m.classList.add('flex');
+    _moveCtx._history = [];
+    moveModalLoad(startDir);
+}
+function closeMoveModal() {
+    const m = document.getElementById('move-modal');
+    if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+    _moveCtx = null;
+}
+function moveModalBack() {
+    if (_moveCtx && _moveCtx._history && _moveCtx._history.length) moveModalLoad(_moveCtx._history.pop(), true);
+}
+function moveModalLoad(dir, isBack) {
+    if (!_moveCtx) return;
+    if (!isBack && dir !== _moveCtx.dir) _moveCtx._history.push(_moveCtx.dir);
+    _moveCtx.dir = dir;
+    const list = document.getElementById('move-list');
+    const pathEl = document.getElementById('move-path');
+    const hereBtn = document.getElementById('move-here-btn');
+    if (!list) return;
+    list.innerHTML = '<p class="text-gray-400 p-4">Loading…</p>';
+
+    if (_moveCtx.kind === 'vault') {
+        if (pathEl) pathEl.textContent = '🔒 Vault' + (dir ? '/' + dir : '');
+        if (hereBtn) hereBtn.classList.remove('hidden');   // vault root is a valid target
+        networkAwareFetch('/api/safe/list?dir=' + encodeURIComponent(dir))
+            .then(r => r.json())
+            .then(d => {
+                if (!d.success) { list.innerHTML = '<p class="text-amber-300 p-4">Vault locked.</p>'; return; }
+                // Hide the folder being moved (can't move into itself).
+                const folders = (d.folders || []).filter(f => !(_moveCtx.src.folderPath && (f.path === _moveCtx.src.folderPath || f.path.indexOf(_moveCtx.src.folderPath + '/') === 0)));
+                list.innerHTML = folders.length
+                    ? '<div class="space-y-1">' + folders.map(f => _moveFolderRow('vault', f.path, f.name)).join('') + '</div>'
+                    : '<p class="text-gray-500 p-4">No subfolders here.</p>';
+            })
+            .catch(e => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+        return;
+    }
+
+    // Filesystem: browse every tree. A move target is any real folder — the
+    // root listing and the loot category roots only list networks, so "Move
+    // here" stays hidden there until you descend into an actual folder.
+    if (pathEl) pathEl.textContent = dir === '/' ? 'Choose a folder' : dir;
+    if (hereBtn) hereBtn.classList.toggle('hidden', !isRealDir(dir));
+    networkAwareFetch('/api/files/list?path=' + encodeURIComponent(dir))
+        .then(r => r.json())
+        .then(files => {
+            let dirs = (Array.isArray(files) ? files : []).filter(f => f.is_directory);
+            // Don't allow descending into the folder being moved.
+            if (_moveCtx.src.isDir) dirs = dirs.filter(f => f.path !== _moveCtx.src.path);
+            dirs.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+            list.innerHTML = dirs.length
+                ? '<div class="space-y-1">' + dirs.map(f => _moveFolderRow('fs', f.path, f.name)).join('') + '</div>'
+                : '<p class="text-gray-500 p-4">No subfolders here.</p>';
+        })
+        .catch(e => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+function _moveFolderRow(kind, navPath, name) {
+    return `<div class="flex items-center p-2.5 hover:bg-slate-700 rounded-lg cursor-pointer" onclick="moveModalLoad('${escapeAttr(navPath)}')">
+        <svg class="w-5 h-5 mr-3 flex-shrink-0 ${kind === 'vault' ? 'text-amber-400' : 'text-yellow-400'}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path></svg>
+        <span class="truncate flex-1">${escapeHtml(name)}</span>
+        <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg></div>`;
+}
+function doMove() {
+    if (!_moveCtx) return;
+    const dir = _moveCtx.dir;
+    if (_moveCtx.kind === 'vault') {
+        const s = _moveCtx.src;
+        const body = s.folderPath ? { folder: s.folderPath, dir: dir } : { id: s.id, dir: dir };
+        networkAwareFetch('/api/safe/move', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        }).then(r => r.json()).then(d => {
+            if (d.locked) { closeMoveModal(); afterSafeChange(); return; }
+            if (d.success) { showFileSuccess(`Moved “${s.name}”`); closeMoveModal(); afterSafeChange(); }
+            else showFileError(d.error || 'Move failed');
+        }).catch(e => showFileError(e.message));
+    } else {
+        networkAwareFetch('/api/files/move', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: _moveCtx.src.path, dir: dir })
+        }).then(r => r.json()).then(d => {
+            if (d.success) { showFileSuccess(d.noop ? 'Already there' : `Moved “${_moveCtx.src.name}”`); closeMoveModal(); refreshFiles(); }
+            else showFileError(d.error || 'Move failed');
+        }).catch(e => showFileError(e.message));
+    }
+}
+document.getElementById('move-modal')?.addEventListener('click', function (e) { if (e.target === this) closeMoveModal(); });
+
 function setFileSort(sort) {
     currentFileSort = sort;
     document.querySelectorAll('.file-sort-btn').forEach(btn => {
@@ -20651,6 +27676,8 @@ function onFileSearch(value) {
 
 function loadFiles(path = '/', highlightFile = null) {
     if (fileOperationInProgress) return;
+    // The Vault is not a real filesystem path — browse it via the /api/safe API.
+    if (path === SAFE_VDIR) { loadSafeIntoBrowser(); return; }
     const desiredHighlight = highlightFile || (pendingFileHighlight && pendingFileHighlight.directory === path ? pendingFileHighlight.file : null);
     
     networkAwareFetch(`/api/files/list?path=${encodeURIComponent(path)}`)
@@ -20671,21 +27698,39 @@ function loadFiles(path = '/', highlightFile = null) {
 function displayFiles(files, path, highlightFile = null) {
     const fileList = document.getElementById('file-list');
     currentDirectory = path;
-    
+
     if (!fileList) return false;
-    
+
+    // A contextual toolbar for writable/uploadable locations: upload straight
+    // into the folder being browsed (and, in the general-purpose writable
+    // trees, create folders too). Shown even when the folder is empty — so a
+    // freshly created folder, or an empty script library, can be filled.
+    // A contextual toolbar for any real folder: create a text file, create a
+    // subfolder, or upload straight into the folder being browsed. Shown even
+    // when the folder is empty — so a fresh/empty folder can be filled. The
+    // button row wraps so it stays usable at phone width.
+    const toolbar = isRealDir(path) ? `
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 mb-1 bg-slate-800/60 border border-slate-700 rounded-lg">
+            <span class="text-sm text-gray-300 truncate">📁 ${escapeHtml(path)}</span>
+            <div class="flex flex-wrap items-center gap-2 sm:flex-shrink-0">
+                <button onclick="newTextFile()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors whitespace-nowrap">+ New file</button>
+                <button onclick="newFolder()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors whitespace-nowrap">+ New folder</button>
+                <button onclick="uploadFile()" class="bg-green-700 hover:bg-green-800 text-white text-xs px-2.5 py-1.5 rounded transition-colors whitespace-nowrap">⬆ Upload here</button>
+            </div>
+        </div>` : '';
+
     if (files.length === 0) {
-        fileList.innerHTML = '<p class="text-gray-400 p-4">No files found in this directory</p>';
+        fileList.innerHTML = toolbar + '<p class="text-gray-400 p-4">This folder is empty</p>';
         return false;
     }
-    
-    let html = '<div class="space-y-2">';
-    
+
+    let html = toolbar + '<div class="space-y-2">';
+
     // Add back button if not in root
     if (path !== '/') {
         const parentPath = path.split('/').slice(0, -1).join('/') || '/';
         html += `
-            <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors" onclick="loadFiles('${escapeAttr(parentPath)}')">
+            <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors" onclick="navFs('${escapeAttr(parentPath)}')">
                 <svg class="w-5 h-5 mr-3 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
                 </svg>
@@ -20714,41 +27759,53 @@ function displayFiles(files, path, highlightFile = null) {
     });
 
     files.forEach(file => {
-        const icon = file.is_directory ? 
-            `<svg class="w-5 h-5 mr-3 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        const icon = file.is_directory ?
+            `<svg class="w-5 h-5 mr-3 flex-shrink-0 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path>
             </svg>` :
-            `<svg class="w-5 h-5 mr-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            `<svg class="w-5 h-5 mr-3 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
             </svg>`;
         
         const size = file.is_directory ? '' : formatBytes(file.size);
         const date = file.modified ? new Date(file.modified * 1000).toLocaleDateString() : '';
         const fileKey = encodeURIComponent(file.name);
-        
+        // Everything inside a real folder is fully manageable (move/rename/
+        // delete work across every browsable tree). The loot category roots
+        // ('/data_stolen' etc.) only list networks, so their rows stay
+        // navigate-only.
+        const canModify = isRealDir(path);
+        const openAction = file.is_directory
+            ? `navFs('${escapeAttr(file.path)}')`
+            : `previewFile('${escapeAttr(file.path)}')`;
+
+        // Row actions: download + send (files); move/rename (files & folders in
+        // a real folder); delete (files always, folders in a real folder).
+        let actions = '';
+        if (!file.is_directory) {
+            actions += `<button onclick="downloadFile('${escapeAttr(file.path)}')" class="p-2 text-blue-400 hover:bg-slate-600 rounded" title="Download">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-4-4m4 4l4-4m6 4H6"></path></svg></button>`;
+            actions += `<button onclick="sendFsFile(event,'${escapeAttr(file.path)}','${escapeAttr(file.name)}')" class="p-2 text-sky-400 hover:bg-slate-600 rounded" title="Send to unit">${ICON_SEND}</button>`;
+        }
+        if (canModify) {
+            actions += `<button onclick="moveFsEntry('${escapeAttr(file.path)}','${escapeAttr(file.name)}',${file.is_directory ? 'true' : 'false'})" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Move to folder">${ICON_MOVE}</button>`;
+            actions += `<button onclick="renameFsEntry('${escapeAttr(file.path)}','${escapeAttr(file.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Rename">${ICON_RENAME}</button>`;
+        }
+        if (!file.is_directory || canModify) {
+            actions += `<button onclick="deleteFile('${escapeAttr(file.path)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded" title="Delete">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>`;
+        }
+
         html += `
-            <div class="flex items-center justify-between p-3 hover:bg-slate-700 rounded-lg transition-colors" data-file-key="${fileKey}">
-                <div class="flex items-center cursor-pointer flex-1" onclick="${file.is_directory ? `loadFiles('${escapeAttr(file.path)}')` : `previewFile('${escapeAttr(file.path)}')`}">
+            <div class="flex items-center justify-between gap-2 p-3 hover:bg-slate-700 rounded-lg transition-colors" data-file-key="${fileKey}">
+                <div class="flex items-center cursor-pointer flex-1 min-w-0" onclick="${openAction}">
                     ${icon}
-                    <div class="flex-1">
-                        <div class="font-medium">${escapeHtml(file.name)}</div>
+                    <div class="flex-1 min-w-0">
+                        <div class="font-medium truncate">${escapeHtml(file.name)}</div>
                         ${!file.is_directory && size ? `<div class="text-sm text-gray-400">${size} • ${date}</div>` : ''}
                     </div>
                 </div>
-                ${!file.is_directory ? `
-                    <div class="flex space-x-2">
-                        <button onclick="downloadFile('${escapeAttr(file.path)}')" class="p-2 text-blue-400 hover:bg-slate-600 rounded" title="Download">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-4-4m4 4l4-4m6 4H6"></path>
-                            </svg>
-                        </button>
-                        <button onclick="deleteFile('${escapeAttr(file.path)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded" title="Delete">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                            </svg>
-                        </button>
-                    </div>
-                ` : ''}
+                ${actions ? `<div class="flex space-x-2 flex-shrink-0">${actions}</div>` : ''}
             </div>
         `;
     });
@@ -20784,21 +27841,95 @@ function displayDirectoryTree() {
         { name: 'Vulnerabilities', path: '/vulnerabilities', icon: '⚠️' },
         { name: 'Logs', path: '/logs', icon: '📋' },
         { name: 'Backups', path: '/backups', icon: '💾' },
-        { name: 'Uploads', path: '/uploads', icon: '📤' }
+        { name: 'Uploads', path: '/uploads', icon: '📤' },
+        { name: 'Camera', path: '/camera', icon: '📷' }
     ];
     
     let html = '<div class="space-y-1">';
     directories.forEach(dir => {
         html += `
-            <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors" onclick="loadFiles('${dir.path}')">
+            <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors" onclick="navFs('${dir.path}')">
                 <span class="mr-3">${dir.icon}</span>
                 <span>${dir.name}</span>
             </div>
         `;
     });
+    // Mesh Inbox shortcut — jumps to Ragnar Mesh → File Transfer. Shown only
+    // when there are received files waiting (filled in asynchronously).
+    html += '<div id="directory-tree-inbox"></div>';
+    // Mesh Share shortcut — jumps to Ragnar Mesh → Mesh Share (only when the
+    // mesh is enabled).
+    html += '<div id="directory-tree-share"></div>';
+    // Placeholder for the Vault row — filled in asynchronously once we know its
+    // lock state, so it only appears in Directories while the Vault is unlocked.
+    html += '<div id="directory-tree-safe"></div>';
     html += '</div>';
-    
+
     treeContainer.innerHTML = html;
+
+    // Mesh inbox badge in Directories (cheap poll; silent on any failure).
+    networkAwareFetch('/api/mesh/inbox')
+        .then(r => r.json())
+        .then(d => {
+            const slot = document.getElementById('directory-tree-inbox');
+            const n = (d && d.items) ? d.items.length : 0;
+            setFilesNavFlag(n);   // keep the Files nav flag in sync
+            if (slot && n) {
+                slot.innerHTML = `
+                    <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors ring-1 ring-amber-600/40" onclick="showTab('mesh'); showMeshView('transfer')">
+                        <span class="mr-3">📥</span><span>Inbox</span>
+                        <span class="ml-auto text-xs bg-amber-500 text-slate-900 font-bold px-1.5 rounded-full">${n}</span>
+                    </div>`;
+            } else if (slot) { slot.innerHTML = ''; }
+        })
+        .catch(() => {});
+
+    // Mesh Share shortcut — shown when this unit is in a mesh. Badge = the
+    // number of files this unit is publishing.
+    networkAwareFetch('/api/mesh/status')
+        .then(r => r.json())
+        .then(s => {
+            const slot = document.getElementById('directory-tree-share');
+            if (!slot) return;
+            if (s && s.enabled) {
+                slot.innerHTML = `
+                    <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors ring-1 ring-sky-600/40" onclick="showTab('mesh'); showMeshView('share')">
+                        <span class="mr-3">📡</span><span>Mesh Share</span>
+                        <span id="directory-tree-share-badge" class="hidden ml-auto text-xs bg-sky-500 text-slate-900 font-bold px-1.5 rounded-full"></span>
+                    </div>`;
+                // Cheap local count for the badge (files WE publish).
+                networkAwareFetch('/api/mesh/share/local')
+                    .then(r => r.json())
+                    .then(d => {
+                        const b = document.getElementById('directory-tree-share-badge');
+                        const n = (d && d.files) ? d.files.length : 0;
+                        if (b && n) { b.textContent = n; b.classList.remove('hidden'); }
+                    })
+                    .catch(() => {});
+            } else {
+                slot.innerHTML = '';
+            }
+        })
+        .catch(() => {});
+
+    // Show the Vault as a browsable folder only when it is unlocked.
+    networkAwareFetch('/api/safe/status')
+        .then(r => r.json())
+        .then(s => {
+            const slot = document.getElementById('directory-tree-safe');
+            if (!slot) return;
+            if (s && s.success && s.configured && s.unlocked) {
+                slot.innerHTML = `
+                    <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors ring-1 ring-amber-600/40" onclick="navVault('')">
+                        <span class="mr-3">🔒</span>
+                        <span>Vault</span>
+                        <span class="ml-auto text-xs text-amber-300">unlocked</span>
+                    </div>`;
+            } else {
+                slot.innerHTML = '';
+            }
+        })
+        .catch(() => {});
 }
 
 function updateCurrentPath(path) {
@@ -20824,8 +27955,22 @@ function downloadFile(filePath) {
     showFileSuccess(`Downloading ${filePath.split('/').pop()}`);
 }
 
-// ── File Preview ────────────────────────────────────────────────
-function previewFile(filePath) {
+// ── File Preview & Editor ───────────────────────────────────────
+const _editState = { path: '', original: '', editing: false, editable: false };
+
+function _setEditBtns(editing, editable) {
+    const editBtn = document.getElementById('preview-edit-btn');
+    const saveBtn = document.getElementById('preview-save-btn');
+    const cancelBtn = document.getElementById('preview-cancel-btn');
+    const statusEl = document.getElementById('preview-save-status');
+    if (editBtn) editBtn.classList.toggle('hidden', !editable || editing);
+    if (saveBtn) saveBtn.classList.toggle('hidden', !editing);
+    if (cancelBtn) cancelBtn.classList.toggle('hidden', !editing);
+    if (statusEl) statusEl.classList.add('hidden');
+}
+
+function previewFile(filePath, opts) {
+    opts = opts || {};
     const modal = document.getElementById('file-preview-modal');
     const content = document.getElementById('preview-content');
     const filename = document.getElementById('preview-filename');
@@ -20833,9 +27978,15 @@ function previewFile(filePath) {
     const dlBtn = document.getElementById('preview-download-btn');
     if (!modal) return;
 
+    _editState.path = filePath;
+    _editState.editing = false;
+    _editState.editable = false;
+    _editState.original = '';
+
     const name = filePath.split('/').pop();
     filename.textContent = name;
     truncBadge.classList.add('hidden');
+    _setEditBtns(false, false);
     content.innerHTML = `<div class="text-center text-gray-400 py-12">
         <svg class="w-8 h-8 inline animate-spin mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
@@ -20855,14 +28006,18 @@ function previewFile(filePath) {
                 return;
             }
             if (data.type === 'image') {
-                content.innerHTML = `<div class="flex items-center justify-center h-full p-4">
-                    <img src="data:${data.mime};base64,${data.data}" alt="${escapeHtml(name)}" class="max-w-full max-h-full object-contain rounded">
-                </div>`;
+                renderPreviewImage(content, `data:${data.mime};base64,${data.data}`, name);
+            } else if (data.type === 'pdf') {
+                renderPreviewPdf(content, resolveNetworkAwareEndpoint(`/api/files/download?path=${encodeURIComponent(filePath)}&inline=1`), name);
+            } else if (data.type === 'video') {
+                renderPreviewVideo(content, resolveNetworkAwareEndpoint(`/api/files/download?path=${encodeURIComponent(filePath)}&inline=1`), name, data.mime, filePath);
             } else if (data.type === 'text') {
                 if (data.truncated) truncBadge.classList.remove('hidden');
+                _editState.editable = !!data.editable;
+                _editState.original = data.content;
+                _setEditBtns(false, _editState.editable);
                 const isCSV = name.toLowerCase().endsWith('.csv');
                 if (isCSV) {
-                    // Render CSV as table
                     const lines = data.content.split('\n').filter(l => l.trim());
                     if (lines.length > 0) {
                         const headers = lines[0].split(',');
@@ -20875,6 +28030,8 @@ function previewFile(filePath) {
                 } else {
                     content.innerHTML = `<pre class="text-xs text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed">${escapeHtml(data.content)}</pre>`;
                 }
+                // Opened via "New file" — drop straight into edit mode.
+                if (opts.edit && _editState.editable) toggleFileEdit();
             } else if (data.type === 'too_large') {
                 content.innerHTML = `<div class="text-center text-gray-400 py-12">
                     <p class="mb-3">File is too large to preview (${formatBytes(data.size)})</p>
@@ -20893,13 +28050,165 @@ function previewFile(filePath) {
         });
 }
 
+function toggleFileEdit() {
+    if (!_editState.editable || _editState.editing) return;
+    _editState.editing = true;
+    _setEditBtns(true, true);
+    const content = document.getElementById('preview-content');
+    if (!content) return;
+    content.innerHTML = `<textarea id="file-editor" spellcheck="false" class="w-full font-mono text-xs p-3 rounded border border-slate-600 resize-none" style="min-height:60vh;height:100%;background:#0b1220;color:#e5e7eb;caret-color:#fbbf24;outline:none;color-scheme:dark;tab-size:4;white-space:pre;overflow:auto"></textarea>`;
+    const ta = document.getElementById('file-editor');
+    if (ta) {
+        ta.value = _editState.original;
+        ta.focus();
+    }
+}
+
+function cancelFileEdit() {
+    if (!_editState.editing) return;
+    _editState.editing = false;
+    _setEditBtns(false, _editState.editable);
+    const content = document.getElementById('preview-content');
+    if (content) {
+        content.innerHTML = `<pre class="text-xs text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed">${escapeHtml(_editState.original)}</pre>`;
+    }
+}
+
+async function saveFileEdit() {
+    const ta = document.getElementById('file-editor');
+    const statusEl = document.getElementById('preview-save-status');
+    if (!ta || !_editState.path) return;
+    const newContent = ta.value;
+    try {
+        if (statusEl) { statusEl.textContent = 'Saving…'; statusEl.classList.remove('hidden'); }
+        const r = await networkAwareFetch('/api/files/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: _editState.path, content: newContent })
+        }).then(r => r.json());
+        if (r.success) {
+            _editState.original = newContent;
+            _editState.editing = false;
+            _setEditBtns(false, true);
+            const content = document.getElementById('preview-content');
+            if (content) {
+                content.innerHTML = `<pre class="text-xs text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed">${escapeHtml(newContent)}</pre>`;
+            }
+            if (statusEl) { statusEl.textContent = 'Saved'; statusEl.classList.remove('hidden'); }
+            setTimeout(() => { if (statusEl) statusEl.classList.add('hidden'); }, 3000);
+        } else {
+            if (statusEl) { statusEl.textContent = r.error || 'Save failed'; statusEl.className = 'text-xs text-red-400'; statusEl.classList.remove('hidden'); }
+        }
+    } catch (e) {
+        if (statusEl) { statusEl.textContent = e.message; statusEl.className = 'text-xs text-red-400'; statusEl.classList.remove('hidden'); }
+    }
+}
+
 function closeFilePreview() {
+    _editState.editing = false;
+    _editState.editable = false;
     const modal = document.getElementById('file-preview-modal');
     if (modal) { modal.classList.add('hidden'); modal.classList.remove('flex'); }
 }
 
-// Close preview on backdrop click or Escape key
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeFilePreview(); });
+// Render an image into a preview pane with a full-screen affordance: click the
+// image (or the ⛶ button) to open it in the dedicated full-screen viewer.
+function renderPreviewImage(content, src, name) {
+    content.innerHTML = `<div class="relative flex items-center justify-center h-full p-4">
+        <img src="${src}" alt="${escapeHtml(name)}" title="Click to view full screen"
+            onclick="openImageFullscreen(this.src, this.alt)"
+            class="max-w-full max-h-full object-contain rounded cursor-zoom-in">
+        <button onclick="openImageFullscreen(this.previousElementSibling.src, this.previousElementSibling.alt)"
+            class="absolute top-2 right-2 flex items-center gap-1 bg-black/50 hover:bg-black/70 text-white text-xs px-2 py-1 rounded transition-colors">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-5v4m0-4h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+            </svg>
+            Full screen
+        </button>
+    </div>`;
+}
+
+// Render a PDF inline via an iframe pointed at the (same-origin) download
+// endpoint with inline disposition — the browser's built-in PDF viewer handles
+// paging/zoom. A data: URI would be blocked by the CSP, hence the URL form.
+function renderPreviewPdf(content, url, name) {
+    content.innerHTML = `<iframe src="${url}" title="${escapeHtml(name)}"
+        class="w-full rounded bg-white" style="height:78vh;border:0"></iframe>`;
+}
+
+// Render a video inline via a <video> element pointed at the (same-origin)
+// download endpoint with inline disposition — the browser streams it with
+// range requests so scrubbing works. Codec support varies (mp4/H.264 and webm
+// are universal; mov/avi/mkv/wmv depend on the OS codecs), so on a decode/load
+// failure we swap in a Download button instead of a broken player.
+function renderPreviewVideo(content, url, name, mime, filePath) {
+    content.innerHTML = `<div class="flex items-center justify-center h-full p-2">
+        <video id="preview-video-el" controls playsinline preload="metadata"
+            class="max-w-full rounded bg-black" style="max-height:78vh">
+            <source src="${url}" type="${escapeAttr(mime || '')}">
+            Your browser can't play this video.
+        </video>
+    </div>`;
+    const vid = content.querySelector('#preview-video-el');
+    if (vid) {
+        vid.addEventListener('error', () => {
+            content.innerHTML = `<div class="text-center text-gray-400 py-12">
+                <p class="mb-1">This browser can't play <span class="text-gray-300">${escapeHtml(name)}</span>.</p>
+                <p class="text-sm mb-3">The format/codec (${escapeHtml(mime || 'unknown')}) isn't supported for in-browser playback.</p>
+                <button onclick="downloadFile('${escapeAttr(filePath)}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm">Download</button>
+            </div>`;
+        });
+    }
+}
+
+// Full-screen image viewer — uses the native Fullscreen API when available and
+// falls back to a fixed full-viewport overlay otherwise. The overlay allows
+// scroll/pinch-zoom on the image on touch devices.
+function openImageFullscreen(src, alt) {
+    const ov = document.getElementById('image-fullscreen-overlay');
+    const img = document.getElementById('image-fullscreen-img');
+    if (!ov || !img) return;
+    img.src = src;
+    img.alt = alt || '';
+    ov.classList.remove('hidden');
+    ov.classList.add('flex');
+    if (ov.requestFullscreen) ov.requestFullscreen().catch(() => {});
+}
+
+function closeImageFullscreen() {
+    const ov = document.getElementById('image-fullscreen-overlay');
+    if (!ov) return;
+    ov.classList.add('hidden');
+    ov.classList.remove('flex');
+    const img = document.getElementById('image-fullscreen-img');
+    if (img) img.src = '';
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+}
+
+// Close the full-screen viewer first (if open), otherwise the preview modal.
+document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    const ov = document.getElementById('image-fullscreen-overlay');
+    if (ov && !ov.classList.contains('hidden')) { closeImageFullscreen(); return; }
+    closeFilePreview();
+});
+// Tap anywhere — including the image — closes the viewer. The image covers
+// almost the whole overlay on phones (and there is no Esc key there), so a
+// backdrop-only close left no reliable way out.
+document.getElementById('image-fullscreen-overlay')?.addEventListener('click', function() {
+    closeImageFullscreen();
+});
+// If the user leaves native fullscreen (e.g. via Esc handled by the browser),
+// keep our overlay state in sync.
+document.addEventListener('fullscreenchange', () => {
+    const ov = document.getElementById('image-fullscreen-overlay');
+    if (!document.fullscreenElement && ov && !ov.classList.contains('hidden')) {
+        ov.classList.add('hidden');
+        ov.classList.remove('flex');
+        const img = document.getElementById('image-fullscreen-img');
+        if (img) img.src = '';
+    }
+});
 document.getElementById('file-preview-modal')?.addEventListener('click', function(e) {
     if (e.target === this) closeFilePreview();
 });
@@ -20922,6 +28231,7 @@ function deleteFile(filePath) {
             })
             .then(response => response.json())
             .then(data => {
+                fileOperationInProgress = false;   // clear before refreshFiles()
                 if (data.success) {
                     showFileSuccess(`Deleted ${fileName}`);
                     refreshFiles();
@@ -20941,51 +28251,1512 @@ function deleteFile(filePath) {
 }
 
 function uploadFile() {
-    // Create file input
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.multiple = true;
-    
-    input.onchange = function(event) {
-        const files = event.target.files;
-        if (files.length === 0) return;
-        
+    // iOS-safe picker (see pickFiles) — a detached <input> never fires 'change'
+    // on iPhone, which is why uploading from iPhone used to do nothing.
+    pickFiles({ multiple: true }, function (files) {
+        if (!files || files.length === 0) return;
+
         const formData = new FormData();
-        
-        // Add all selected files
         for (let file of files) {
             formData.append('file', file);
         }
-        
-        // Set upload path (default to uploads)
-        formData.append('path', '/uploads');
-        
+
+        // Upload into the folder currently being browsed when it's a real
+        // folder; otherwise default to /uploads.
+        const target = isRealDir(currentDirectory) ? currentDirectory : '/uploads';
+        formData.append('path', target);
+
+        let totalBytes = 0;
+        for (let file of files) totalBytes += file.size || 0;
+        const label = files.length === 1 ? files[0].name : `${files.length} files`;
+        const progress = createUploadProgressToast(`Uploading ${label}`);
+
         fileOperationInProgress = true;
-        showFileLoading('Uploading files...');
-        
-        networkAwareFetch('/api/files/upload', {
-            method: 'POST',
-            body: formData
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                showFileSuccess(`Uploaded ${files.length} file(s)`);
+
+        // XMLHttpRequest (not fetch) — fetch can't report upload progress, and
+        // seeing the bytes climb is the whole point here. resolveNetworkAwareEndpoint
+        // keeps the same network-context routing networkAwareFetch would apply.
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', resolveNetworkAwareEndpoint('/api/files/upload'), true);
+
+        xhr.upload.onprogress = function (e) {
+            // e.total is the encoded body size (a bit larger than the raw file
+            // bytes because of the multipart envelope); fall back to our own sum
+            // if the browser can't compute it.
+            progress.setProgress(e.loaded, e.lengthComputable ? e.total : totalBytes);
+        };
+
+        // Body fully sent but the server is still writing to disk — switch to an
+        // indeterminate "finishing" state until the JSON response lands.
+        xhr.upload.onload = function () {
+            progress.finishing('Saving on device…');
+        };
+
+        xhr.onload = function () {
+            // Clear the busy flag BEFORE refreshing — loadFiles() bails out while
+            // it's set, which otherwise leaves the new file invisible until a
+            // manual page refresh.
+            fileOperationInProgress = false;
+            let data = {};
+            try { data = JSON.parse(xhr.responseText); } catch (_) { /* non-JSON */ }
+            if (xhr.status >= 200 && xhr.status < 300 && data.success) {
+                progress.finish(true, `Uploaded ${files.length} file(s)`);
+                if (!isRealDir(currentDirectory)) currentDirectory = target;
                 refreshFiles();
             } else {
-                showFileError(`Upload failed: ${data.error}`);
+                const msg = (data && data.error) ? data.error : `HTTP ${xhr.status}`;
+                progress.finish(false, `Upload failed: ${msg}`);
+            }
+        };
+
+        xhr.onerror = function () {
+            fileOperationInProgress = false;
+            progress.finish(false, 'Upload error: network failure');
+        };
+
+        xhr.send(formData);
+    });
+}
+
+// Create a new text file in the current folder, then open it in the editor.
+function newTextFile() {
+    if (!isRealDir(currentDirectory)) {
+        showFileError('Open a folder first (e.g. Uploads), then create a file');
+        return;
+    }
+    const name = (prompt('New file name (include an extension, e.g. notes.txt):', 'notes.txt') || '').trim();
+    if (!name) return;
+    if (name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) {
+        showFileError('Name cannot contain / or \\');
+        return;
+    }
+    networkAwareFetch('/api/files/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: currentDirectory, name })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.success) {
+            showFileSuccess(`Created "${d.name}"`);
+            refreshFiles();
+            // Jump straight into the inline editor for the new (empty) file.
+            previewFile(d.path, { edit: true });
+        } else {
+            showFileError(d.error || 'Could not create file');
+        }
+    })
+    .catch(err => showFileError(err.message));
+}
+
+// Create a subfolder in the current folder.
+function newFolder() {
+    if (!isRealDir(currentDirectory)) {
+        showFileError('Open a folder first, then create a subfolder');
+        return;
+    }
+    const name = (prompt('New folder name:') || '').trim();
+    if (!name) return;
+    networkAwareFetch('/api/files/mkdir', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: currentDirectory, name })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.success) { showFileSuccess(`Created folder "${d.name}"`); refreshFiles(); }
+        else showFileError(d.error || 'Could not create folder');
+    })
+    .catch(err => showFileError(err.message));
+}
+
+// ── Vault (password-protected encrypted vault) ───────────────────────────────
+// The Vault stores files encrypted at rest (AES-256-GCM, key derived from the
+// password). It must be unlocked with the password for the current server
+// session before anything can be listed, viewed, downloaded or added.
+
+function openSafe() {
+    const modal = document.getElementById('safe-modal');
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    refreshSafe();
+}
+
+function closeSafe() {
+    const modal = document.getElementById('safe-modal');
+    if (modal) { modal.classList.add('hidden'); modal.classList.remove('flex'); }
+}
+
+// Header "Vault" button: unlock/set-up when locked, lock when unlocked. Its label
+// and colour reflect the current state, refreshed via updateSafeHeaderButton().
+function toggleSafeLock() {
+    networkAwareFetch('/api/safe/status')
+        .then(r => r.json())
+        .then(s => {
+            if (s && s.success && s.configured && s.unlocked) lockSafe();
+            else openSafe();   // setup (not configured) or unlock (locked)
+        })
+        .catch(() => openSafe());
+}
+
+// Upload-to-Vault header button: go straight to the file picker if already
+// unlocked, otherwise open the modal so the user can set up / unlock first.
+function uploadOrOpenSafe() {
+    networkAwareFetch('/api/safe/status')
+        .then(r => r.json())
+        .then(s => {
+            if (s && s.success && s.configured && s.unlocked) uploadToSafe();
+            else openSafe();
+        })
+        .catch(() => openSafe());
+}
+
+// Keep the header Vault button's label/style in sync with lock state.
+function updateSafeHeaderButton() {
+    const btn = document.getElementById('safe-toggle-btn');
+    const label = document.getElementById('safe-toggle-label');
+    if (!btn || !label) return;
+    const amber = ['bg-amber-600', 'hover:bg-amber-700'];
+    const green = ['bg-green-700', 'hover:bg-green-800'];
+    const setColour = on => { btn.classList.remove(...amber, ...green); btn.classList.add(...on); };
+    networkAwareFetch('/api/safe/status')
+        .then(r => r.json())
+        .then(s => {
+            if (!s || !s.success || !s.configured) { label.textContent = 'Set up Vault'; setColour(amber); }
+            else if (s.unlocked) { label.textContent = 'Lock Vault'; setColour(green); }
+            else { label.textContent = 'Unlock Vault'; setColour(amber); }
+        })
+        .catch(() => { label.textContent = 'Vault'; setColour(amber); });
+}
+
+// Fetch current state and render the matching view.
+function refreshSafe() {
+    const body = document.getElementById('safe-body');
+    if (body) {
+        body.innerHTML = `<div class="text-center text-gray-400 py-12">
+            <svg class="w-8 h-8 inline animate-spin mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+            </svg><p>Loading Vault…</p></div>`;
+    }
+    networkAwareFetch('/api/safe/status')
+        .then(r => r.json())
+        .then(s => {
+            if (!s.success) { renderSafeError(s.error || 'Failed to read Vault status'); return; }
+            if (!s.configured) { renderSafeSetup(s); }
+            else if (!s.unlocked) { renderSafeUnlock(s); }
+            else { renderSafeBrowser(s); }
+        })
+        .catch(err => renderSafeError(err.message));
+}
+
+function renderSafeError(msg) {
+    setSafeBadge('', '');
+    document.getElementById('safe-lock-btn')?.classList.add('hidden');
+    const body = document.getElementById('safe-body');
+    if (body) body.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(msg)}</p>`;
+}
+
+function setSafeBadge(text, cls) {
+    const badge = document.getElementById('safe-status-badge');
+    if (!badge) return;
+    if (!text) { badge.classList.add('hidden'); return; }
+    badge.textContent = text;
+    badge.className = `text-xs px-2 py-0.5 rounded ${cls}`;
+    badge.classList.remove('hidden');
+}
+
+// State 1 — not configured: pick a size + password to create the Vault.
+function renderSafeSetup(s) {
+    setSafeBadge('Not set up', 'bg-slate-700 text-gray-300');
+    document.getElementById('safe-lock-btn')?.classList.add('hidden');
+    const minMB = Math.round((s.min_size_bytes || 8 * 1048576) / 1048576);
+    // Cap the picker at whatever is realistically free on the card.
+    const freeMB = s.disk_free_bytes ? Math.floor(s.disk_free_bytes / 1048576) - 32 : null;
+    const maxMB = Math.min(
+        Math.round((s.max_size_bytes || 65536 * 1048576) / 1048576),
+        freeMB && freeMB > minMB ? freeMB : Math.round((s.max_size_bytes || 65536 * 1048576) / 1048576)
+    );
+    const defMB = Math.min(Math.max(minMB, 256), maxMB);
+    const step = 8;   // fine 8 MB steps (so round values like 1000 MB land exactly)
+    const freeLabel = s.disk_free_bytes ? formatBytes(s.disk_free_bytes) : 'unknown';
+    const body = document.getElementById('safe-body');
+    body.innerHTML = `
+        <div class="max-w-lg mx-auto space-y-5">
+            <div class="text-sm text-gray-300 bg-slate-800/60 border border-slate-700 rounded-lg p-3">
+                The Vault encrypts every file with your password (AES-256). Choose how much
+                storage to reserve for it below. <span class="text-amber-300">If you forget the
+                password there is no recovery — the files cannot be decrypted.</span>
+            </div>
+            <div>
+                <div class="flex items-center justify-between mb-1">
+                    <label class="block text-sm font-medium">Vault size</label>
+                    <span id="safe-size-readout" class="text-sm font-semibold text-amber-300"></span>
+                </div>
+                <input id="safe-size-range" type="range" min="${minMB}" max="${maxMB}" step="${step}" value="${defMB}"
+                    data-min="${minMB}" data-max="${maxMB}"
+                    oninput="onVaultSliderInput()" class="w-full accent-amber-500">
+                <p class="text-xs text-gray-500 mt-1">Free on disk: ${freeLabel} · max ${formatVaultSize(maxMB)}</p>
+            </div>
+            <div>
+                <label class="block text-sm font-medium mb-1">Password</label>
+                <input id="safe-pw1" type="password" autocomplete="new-password"
+                    class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500">
+            </div>
+            <div>
+                <label class="block text-sm font-medium mb-1">Confirm password</label>
+                <input id="safe-pw2" type="password" autocomplete="new-password"
+                    onkeydown="if(event.key==='Enter')submitSafeSetup()"
+                    class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500">
+            </div>
+            <div id="safe-setup-msg" class="text-sm text-red-400 hidden"></div>
+            <button onclick="submitSafeSetup()" class="w-full bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg transition-colors font-medium">Create Vault</button>
+        </div>`;
+    onVaultSliderInput();   // populate the size readout
+}
+
+// Format a size in MB for display: MB below 1000, GB from 1000 up (so 1000 MB
+// reads as "1 GB", 1500 as "1.5 GB").
+function formatVaultSize(mb) {
+    if (mb < 1000) return mb + ' MB';
+    const gb = mb / 1000;
+    return (gb % 1 === 0 ? gb : gb.toFixed(1)) + ' GB';
+}
+
+// Update the readout as the slider moves.
+function onVaultSliderInput() {
+    const range = document.getElementById('safe-size-range');
+    const out = document.getElementById('safe-size-readout');
+    if (range && out) out.textContent = formatVaultSize(parseInt(range.value, 10) || 0);
+}
+
+function submitSafeSetup() {
+    const range = document.getElementById('safe-size-range');
+    const sizeMb = parseInt(range.value, 10) || 0;
+    const maxMb = parseInt(range.getAttribute('data-max'), 10) || Infinity;
+    const minMb = parseInt(range.getAttribute('data-min'), 10) || 8;
+    const pw1 = document.getElementById('safe-pw1').value;
+    const pw2 = document.getElementById('safe-pw2').value;
+    const msg = document.getElementById('safe-setup-msg');
+    const showMsg = t => { msg.textContent = t; msg.classList.remove('hidden'); };
+    if (!pw1 || pw1.length < 6) return showMsg('Password must be at least 6 characters.');
+    if (pw1 !== pw2) return showMsg('Passwords do not match.');
+    if (!sizeMb || sizeMb < minMb) return showMsg(`Please choose a size of at least ${formatBytes(minMb * 1048576)}.`);
+    if (sizeMb > maxMb) return showMsg(`Size is larger than the ${formatBytes(maxMb * 1048576)} available.`);
+    msg.classList.add('hidden');
+    networkAwareFetch('/api/safe/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw1, size_mb: sizeMb })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.success) { showFileSuccess('Vault created and unlocked'); afterSafeChange(); }
+        else showMsg(d.error || 'Failed to create Vault');
+    })
+    .catch(err => showMsg(err.message));
+}
+
+// State 2 — configured but locked: ask for the password.
+function renderSafeUnlock(s) {
+    setSafeBadge('Locked', 'bg-red-900/60 text-red-300');
+    document.getElementById('safe-lock-btn')?.classList.add('hidden');
+    const sizeLabel = s.size_limit_bytes ? formatBytes(s.size_limit_bytes) : '';
+    const body = document.getElementById('safe-body');
+    body.innerHTML = `
+        <div class="max-w-md mx-auto space-y-5 py-6">
+            <div class="text-center">
+                <svg class="w-12 h-12 mx-auto text-amber-400 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
+                </svg>
+                <p class="text-gray-300">The Vault is locked${sizeLabel ? ` · ${sizeLabel} reserved` : ''}.</p>
+            </div>
+            <div>
+                <label class="block text-sm font-medium mb-1">Password</label>
+                <input id="safe-unlock-pw" type="password" autocomplete="current-password"
+                    onkeydown="if(event.key==='Enter')submitSafeUnlock()"
+                    class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500">
+            </div>
+            <div id="safe-unlock-msg" class="text-sm text-red-400 hidden"></div>
+            <button onclick="submitSafeUnlock()" class="w-full bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg transition-colors font-medium">Unlock</button>
+
+            <!-- Danger zone: permanently delete the Vault (password required). -->
+            <div class="pt-4 mt-2 border-t border-slate-700">
+                <button id="safe-destroy-toggle" onclick="toggleSafeDestroy(true)" class="w-full text-sm text-red-400 hover:text-red-300 py-2 rounded-lg transition-colors">Delete Vault &amp; erase all files…</button>
+                <div id="safe-destroy-confirm" class="hidden mt-2 p-3 bg-red-900/20 border border-red-800/50 rounded-lg space-y-3">
+                    <p class="text-sm text-red-200">This permanently erases the Vault and <strong>every encrypted file inside it</strong>. It cannot be undone. Enter your password above, then confirm.</p>
+                    <div class="flex gap-2">
+                        <button onclick="destroySafe()" class="flex-1 bg-red-600 hover:bg-red-700 text-white px-3 py-2 rounded-lg text-sm font-medium">Permanently delete</button>
+                        <button onclick="toggleSafeDestroy(false)" class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-2 rounded-lg text-sm">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+    setTimeout(() => document.getElementById('safe-unlock-pw')?.focus(), 50);
+}
+
+function toggleSafeDestroy(show) {
+    document.getElementById('safe-destroy-confirm')?.classList.toggle('hidden', !show);
+    document.getElementById('safe-destroy-toggle')?.classList.toggle('hidden', show);
+}
+
+// Permanently erase the Vault. Requires the correct password (verified server
+// side) plus the explicit confirm click above.
+function destroySafe() {
+    const pwEl = document.getElementById('safe-unlock-pw');
+    const msg = document.getElementById('safe-unlock-msg');
+    const pw = pwEl ? pwEl.value : '';
+    const showMsg = t => { if (msg) { msg.textContent = t; msg.classList.remove('hidden'); } };
+    if (!pw) { showMsg('Enter your password above first, then confirm deletion.'); pwEl?.focus(); return; }
+    networkAwareFetch('/api/safe/destroy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.success) {
+            showFileSuccess('Vault deleted');
+            if (currentDirectory === SAFE_VDIR) { currentDirectory = '/'; loadFiles('/'); }
+            afterSafeChange();   // status → not configured → setup view
+        } else {
+            showMsg(d.error || 'Delete failed');
+        }
+    })
+    .catch(err => showMsg(err.message));
+}
+
+function submitSafeUnlock() {
+    const pw = document.getElementById('safe-unlock-pw').value;
+    const msg = document.getElementById('safe-unlock-msg');
+    networkAwareFetch('/api/safe/unlock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.success) { afterSafeChange(); }
+        else { msg.textContent = d.error || 'Unlock failed'; msg.classList.remove('hidden'); }
+    })
+    .catch(err => { msg.textContent = err.message; msg.classList.remove('hidden'); });
+}
+
+function lockSafe() {
+    networkAwareFetch('/api/safe/lock', { method: 'POST' })
+        .then(r => r.json())
+        .then(() => { showFileSuccess('Vault locked'); afterSafeChange(); })
+        .catch(err => showFileError(err.message));
+}
+
+// State 3 — unlocked: usage summary + actions. The actual file/folder browsing
+// happens in the main Files pane (loadSafeIntoBrowser), so there is only one
+// folder browser to maintain.
+function renderSafeBrowser(s) {
+    setSafeBadge('Unlocked', 'bg-green-900/60 text-green-300');
+    document.getElementById('safe-lock-btn')?.classList.remove('hidden');
+    const used = s.used_bytes || 0;
+    const limit = s.size_limit_bytes || 1;
+    const pct = Math.min(100, Math.round((used / limit) * 100));
+    const body = document.getElementById('safe-body');
+    body.innerHTML = `
+        <div class="space-y-4">
+            <div>
+                <div class="flex justify-between text-xs text-gray-400 mb-1">
+                    <span>${formatBytes(used)} used of ${formatBytes(limit)}</span>
+                    <span>${pct}%</span>
+                </div>
+                <div class="w-full bg-slate-700 rounded-full h-2">
+                    <div class="bg-amber-500 h-2 rounded-full" style="width:${pct}%"></div>
+                </div>
+            </div>
+            <div class="text-sm text-gray-300">${s.file_count || 0} file(s)${s.folder_count ? ` · ${s.folder_count} folder(s)` : ''} stored, encrypted.</div>
+            <div class="flex flex-wrap gap-2">
+                <button onclick="browseSafeFromModal()" class="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg text-sm transition-colors">Browse files</button>
+                <button onclick="uploadToSafe()" class="bg-amber-700 hover:bg-amber-800 text-white px-4 py-2 rounded-lg text-sm transition-colors">+ Add files</button>
+                <button onclick="lockSafe()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm transition-colors">Lock</button>
+            </div>
+            <p class="text-xs text-gray-500">The unlocked Vault also appears as a 🔒 folder in Directories — click it to browse, create subfolders and upload.</p>
+        </div>`;
+}
+
+// From the modal, jump to browsing the Vault root in the main Files pane.
+function browseSafeFromModal() {
+    closeSafe();
+    currentSafeDir = '';
+    currentDirectory = SAFE_VDIR;
+    loadSafeIntoBrowser();
+}
+
+// Enter the Vault from Directories (always at the root).
+function openSafeRoot() {
+    currentSafeDir = '';
+    currentDirectory = SAFE_VDIR;
+    loadSafeIntoBrowser();
+}
+
+// Navigate to a subfolder within the Vault.
+function openSafeDir(dir) {
+    currentSafeDir = dir || '';
+    loadSafeIntoBrowser();
+}
+
+// Render the unlocked Vault (folder `currentSafeDir`) into the main Files pane,
+// with folder navigation, a breadcrumb, and per-item actions. Honors the shared
+// search box and sort control. Falls back to the normal browser if the Vault
+// locked in the meantime.
+function loadSafeIntoBrowser() {
+    currentDirectory = SAFE_VDIR;
+    updateCurrentPath(currentSafeDir ? `🔒 Vault/${currentSafeDir}` : '🔒 Vault');
+    const fileList = document.getElementById('file-list');
+    if (!fileList) return;
+    fileList.innerHTML = '<p class="text-gray-400 p-4">Loading Vault…</p>';
+    networkAwareFetch(`/api/safe/list?dir=${encodeURIComponent(currentSafeDir)}`)
+        .then(r => r.json())
+        .then(d => {
+            if (d.locked) {
+                showFileError('Vault locked — unlock it again');
+                currentDirectory = '/';
+                displayDirectoryTree();
+                loadFiles('/');
+                return;
+            }
+            if (!d.success) { fileList.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(d.error || 'Failed to list Vault')}</p>`; return; }
+
+            // Breadcrumb (Vault / seg / seg), each segment clickable.
+            const segs = currentSafeDir ? currentSafeDir.split('/') : [];
+            let acc = '';
+            const crumbs = [`<span onclick="navVault('')" class="cursor-pointer hover:text-amber-200">🔒 Vault</span>`];
+            segs.forEach(seg => {
+                acc = acc ? acc + '/' + seg : seg;
+                crumbs.push(`<span onclick="navVault('${escapeAttr(acc)}')" class="cursor-pointer hover:text-amber-200">${escapeHtml(seg)}</span>`);
+            });
+
+            const header = `
+                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 mb-1 bg-amber-900/20 border border-amber-700/40 rounded-lg">
+                    <span class="text-sm text-amber-200 truncate">${crumbs.join(' <span class="text-amber-600/60">/</span> ')}</span>
+                    <div class="flex items-center gap-2 flex-shrink-0">
+                        <button onclick="newSafeFolder()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors whitespace-nowrap">+ New folder</button>
+                        <button onclick="uploadToSafe()" class="bg-amber-600 hover:bg-amber-700 text-white text-xs px-2.5 py-1.5 rounded transition-colors whitespace-nowrap">⬆ Add files</button>
+                        <button onclick="lockSafe()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors">Lock</button>
+                    </div>
+                </div>`;
+
+            let rows = '';
+            // Up / parent row.
+            if (currentSafeDir) {
+                const parent = currentSafeDir.split('/').slice(0, -1).join('/');
+                rows += `
+                <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors" onclick="navVault('${escapeAttr(parent)}')">
+                    <svg class="w-5 h-5 mr-3 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                    <span class="text-blue-400">.. (Up)</span>
+                </div>`;
+            }
+
+            // Subfolders (filtered by search).
+            let folders = d.folders.slice();
+            if (currentFileSearch) folders = folders.filter(f => f.name.toLowerCase().includes(currentFileSearch));
+            folders.forEach(f => {
+                rows += `
+                <div class="flex items-center justify-between gap-2 p-3 hover:bg-slate-700 rounded-lg transition-colors">
+                    <div class="flex items-center cursor-pointer flex-1 min-w-0" onclick="navVault('${escapeAttr(f.path)}')">
+                        <svg class="w-5 h-5 mr-3 flex-shrink-0 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path></svg>
+                        <div class="font-medium truncate">${escapeHtml(f.name)}</div>
+                    </div>
+                    <div class="flex space-x-2 flex-shrink-0">
+                        <button onclick="moveVaultFolder('${escapeAttr(f.path)}','${escapeAttr(f.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Move folder">${ICON_MOVE}</button>
+                        <button onclick="renameSafeFolder('${escapeAttr(f.path)}','${escapeAttr(f.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Rename folder">${ICON_RENAME}</button>
+                        <button onclick="deleteSafeFolder('${escapeAttr(f.path)}','${escapeAttr(f.name)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded" title="Delete folder">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                        </button>
+                    </div>
+                </div>`;
+            });
+
+            // Files (filtered + sorted).
+            let files = d.files.slice();
+            if (currentFileSearch) files = files.filter(f => f.name.toLowerCase().includes(currentFileSearch));
+            files.sort((a, b) => {
+                if (currentFileSort === 'date') return (b.modified || 0) - (a.modified || 0);
+                if (currentFileSort === 'size') return (b.size || 0) - (a.size || 0);
+                return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+            });
+            files.forEach(f => {
+                const date = f.modified ? new Date(f.modified * 1000).toLocaleDateString() : '';
+                rows += `
+                <div class="flex items-center justify-between gap-2 p-3 hover:bg-slate-700 rounded-lg transition-colors">
+                    <div class="flex items-center cursor-pointer flex-1 min-w-0" onclick="previewSafeFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')">
+                        <svg class="w-5 h-5 mr-3 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                        <div class="flex-1 min-w-0">
+                            <div class="font-medium truncate">${escapeHtml(f.name)}</div>
+                            <div class="text-sm text-gray-400">${formatBytes(f.size)}${date ? ' • ' + date : ''}</div>
+                        </div>
+                    </div>
+                    <div class="flex space-x-2 flex-shrink-0">
+                        <button onclick="downloadSafeFile('${escapeAttr(f.id)}')" class="p-2 text-blue-400 hover:bg-slate-600 rounded" title="Download">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-4-4m4 4l4-4m6 4H6"></path></svg>
+                        </button>
+                        <button onclick="sendVaultFile(event,'${escapeAttr(f.id)}','${escapeAttr(f.name)}')" class="p-2 text-sky-400 hover:bg-slate-600 rounded" title="Send to unit (decrypts)">${ICON_SEND}</button>
+                        <button onclick="moveVaultFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Move to folder">${ICON_MOVE}</button>
+                        <button onclick="renameSafeFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Rename">${ICON_RENAME}</button>
+                        <button onclick="deleteSafeFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded" title="Delete">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                        </button>
+                    </div>
+                </div>`;
+            });
+
+            if (!rows) {
+                fileList.innerHTML = header + (currentFileSearch
+                    ? `<p class="text-gray-400 p-4">No items match "<span class="text-white">${escapeHtml(currentFileSearch)}</span>"</p>`
+                    : `<p class="text-gray-400 p-6 text-center">This folder is empty. Use “Add files” or “New folder”.</p>`);
+                return;
+            }
+            fileList.innerHTML = header + '<div class="space-y-2">' + rows + '</div>';
+        })
+        .catch(err => { fileList.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(err.message)}</p>`; });
+}
+
+// Create a subfolder inside the current Vault folder.
+function newSafeFolder() {
+    const name = (prompt('New folder name:') || '').trim();
+    if (!name) return;
+    networkAwareFetch('/api/safe/mkdir', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dir: currentSafeDir, name })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.locked) { showFileError('Vault locked — unlock again'); afterSafeChange(); return; }
+        if (d.success) { showFileSuccess(`Created folder "${name}"`); afterSafeChange(); }
+        else showFileError(d.error || 'Could not create folder');
+    })
+    .catch(err => showFileError(err.message));
+}
+
+// Delete a Vault subfolder and everything inside it.
+function deleteSafeFolder(path, name) {
+    showFileConfirmModal('Delete folder',
+        `Permanently delete the folder "${name}" and all files inside it? This cannot be undone.`,
+        () => {
+            networkAwareFetch('/api/safe/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ folder: path })
+            })
+            .then(r => r.json())
+            .then(d => {
+                closeFileModal();
+                if (d.locked) { afterSafeChange(); return; }
+                if (d.success) { showFileSuccess(`Deleted folder "${name}"`); afterSafeChange(); }
+                else showFileError(d.error || 'Delete failed');
+            })
+            .catch(err => { closeFileModal(); showFileError(err.message); });
+        });
+}
+
+// After any change to the Vault (add/delete/lock/unlock), refresh whichever
+// views are currently showing it: the modal, the directory-pane browser, and
+// the Directories list (so the Vault row appears/disappears with lock state).
+function afterSafeChange() {
+    const modal = document.getElementById('safe-modal');
+    if (modal && !modal.classList.contains('hidden')) refreshSafe();
+    displayDirectoryTree();
+    updateSafeHeaderButton();
+    if (currentDirectory === SAFE_VDIR) loadSafeIntoBrowser();
+}
+
+function uploadToSafe() {
+    pickFiles({ multiple: true }, function (files) {
+        if (!files.length) return;
+        const formData = new FormData();
+        for (let file of files) formData.append('file', file);
+        formData.append('dir', currentSafeDir);   // store into the current folder
+        showFileLoading('Encrypting & storing…');
+        networkAwareFetch('/api/safe/upload', { method: 'POST', body: formData })
+            .then(r => r.json())
+            .then(d => {
+                if (d.locked) { showFileError('Vault locked — unlock again'); afterSafeChange(); return; }
+                if (d.success) { showFileSuccess(`Stored ${d.stored} file(s) in Vault`); afterSafeChange(); }
+                else showFileError(d.error || 'Upload failed');
+            })
+            .catch(err => showFileError(err.message));
+    });
+}
+
+function downloadSafeFile(id) {
+    const url = resolveNetworkAwareEndpoint(`/api/safe/download?id=${encodeURIComponent(id)}`);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = '';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+function deleteSafeFile(id, name) {
+    showFileConfirmModal('Delete from Vault',
+        `Permanently delete "${name}" from the Vault? This cannot be undone.`,
+        () => {
+            networkAwareFetch('/api/safe/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id })
+            })
+            .then(r => r.json())
+            .then(d => {
+                closeFileModal();
+                if (d.locked) { afterSafeChange(); return; }
+                if (d.success) { showFileSuccess(`Deleted ${name}`); afterSafeChange(); }
+                else showFileError(d.error || 'Delete failed');
+            })
+            .catch(err => { closeFileModal(); showFileError(err.message); });
+        });
+}
+
+// Reuse the standard file-preview modal, fed from the decrypted Vault payload.
+function previewSafeFile(id, name) {
+    const modal = document.getElementById('file-preview-modal');
+    const content = document.getElementById('preview-content');
+    const filename = document.getElementById('preview-filename');
+    const truncBadge = document.getElementById('preview-truncated-badge');
+    const dlBtn = document.getElementById('preview-download-btn');
+    if (!modal) return;
+    filename.textContent = name;
+    truncBadge.classList.add('hidden');
+    content.innerHTML = `<div class="text-center text-gray-400 py-12"><p>Decrypting preview…</p></div>`;
+    dlBtn.onclick = () => downloadSafeFile(id);
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    networkAwareFetch(`/api/safe/preview?id=${encodeURIComponent(id)}`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.locked) { closeFilePreview(); refreshSafe(); return; }
+            if (data.error) { content.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(data.error)}</p>`; return; }
+            if (data.type === 'image') {
+                renderPreviewImage(content, `data:${data.mime};base64,${data.data}`, name);
+            } else if (data.type === 'pdf') {
+                renderPreviewPdf(content, resolveNetworkAwareEndpoint(`/api/safe/download?id=${encodeURIComponent(id)}&inline=1`), name);
+            } else if (data.type === 'text') {
+                if (data.truncated) truncBadge.classList.remove('hidden');
+                content.innerHTML = `<pre class="text-xs text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed">${escapeHtml(data.content)}</pre>`;
+            } else {
+                content.innerHTML = `<div class="text-center text-gray-400 py-12">
+                    <p class="mb-1">Cannot preview this file type (${escapeHtml(data.mime || 'unknown')})</p>
+                    <p class="text-sm mb-3">Size: ${formatBytes(data.size)}</p>
+                    <button onclick="downloadSafeFile('${escapeAttr(id)}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm">Download</button>
+                </div>`;
             }
         })
-        .catch(error => {
-            showFileError(`Upload error: ${error.message}`);
-        })
-        .finally(() => {
-            fileOperationInProgress = false;
-        });
-    };
-    
-    input.click();
+        .catch(err => { content.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(err.message)}</p>`; });
 }
+
+// Close Vault on backdrop click.
+document.getElementById('safe-modal')?.addEventListener('click', function(e) {
+    if (e.target === this) closeSafe();
+});
+
+// ── Mesh File Transfer ──────────────────────────────────────────────────────
+let _xferPollTimer = null;
+
+// Toggle the Ragnar Mesh sub-views (Overview / File Transfer / Mesh Share).
+function showMeshView(view) {
+    const views = { overview: 'mesh-view-overview', transfer: 'mesh-view-transfer', share: 'mesh-view-share', cyd: 'mesh-view-cyd' };
+    const navs = { overview: 'mesh-nav-overview', transfer: 'mesh-nav-transfer', share: 'mesh-nav-share', cyd: 'mesh-nav-cyd' };
+    Object.entries(views).forEach(([k, id]) => document.getElementById(id)?.classList.toggle('hidden', k !== view));
+    Object.entries(navs).forEach(([k, id]) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const active = k === view;
+        el.classList.toggle('bg-Ragnar-600', active);
+        el.classList.toggle('text-white', active);
+        el.classList.toggle('bg-slate-700', !active);
+        el.classList.toggle('text-gray-300', !active);
+    });
+    if (view === 'transfer') { xferLoadUnits(); xferRefresh(); _xferStartPolling(); }
+    else _xferStopPolling();
+    if (view === 'share') loadMeshShare();
+    if (view === 'cyd') { loadCydNodes(); loadCydTokens(); }
+}
+
+// ── CYD hybrid nodes ─────────────────────────────────────────────────────────
+function _cydAgo(sec) {
+    if (sec === null || sec === undefined) return 'never';
+    if (sec < 60) return sec + 's ago';
+    if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+    return Math.floor(sec / 3600) + 'h ago';
+}
+
+function loadCydNodes() {
+    const box = document.getElementById('cyd-nodes-list');
+    if (!box) return;
+    networkAwareFetch('/api/cyd/nodes').then(r => r.json()).then(d => {
+        // USB-serial bridge state (for a node cabled to this Pi)
+        const s = (d && d.serial) || {};
+        const cb = document.getElementById('cyd-serial-toggle');
+        if (cb) cb.checked = !!s.enabled;
+        const pin = document.getElementById('cyd-serial-port');
+        if (pin && document.activeElement !== pin) pin.value = s.configured_port || '';
+        const ss = document.getElementById('cyd-serial-status');
+        if (ss) {
+            ss.textContent = !s.enabled ? 'off'
+                : (s.connected ? ('linked · ' + (s.port || '')) : (s.error || 'waiting for device'));
+            ss.className = 'text-xs ' + (s.enabled && s.connected ? 'text-green-400' : 'text-gray-500');
+        }
+        const nodes = (d && d.nodes) || [];
+        if (!nodes.length) {
+            box.innerHTML = '<p class="text-gray-500 text-sm p-4">No CYD nodes have reported in yet. Flash a node with a device token and point it at this unit.</p>';
+            return;
+        }
+        box.innerHTML = nodes.map(n => {
+            const c = n.counts || {};
+            const stale = n.stale;
+            const dot = stale ? 'bg-gray-500' : 'bg-green-500';
+            const acts = (n.recent_actions || []).slice(-3).map(a =>
+                `<span class="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-gray-300">${escapeHtml(a.action)}${a.status ? ' · ' + escapeHtml(a.status) : ''}</span>`).join(' ');
+            return `<div class="p-4">
+                <div class="flex items-center justify-between gap-2 flex-wrap mb-2">
+                    <div class="flex items-center gap-2 min-w-0">
+                        <span class="w-2 h-2 rounded-full ${dot} flex-shrink-0"></span>
+                        <span class="font-semibold truncate">${escapeHtml(n.name || 'cyd-node')}</span>
+                        <span class="text-xs text-gray-500">${escapeHtml(n.ip || '')}</span>
+                    </div>
+                    <span class="text-xs ${stale ? 'text-gray-500' : 'text-green-400'}">${_cydAgo(n.age_sec)}</span>
+                </div>
+                <div class="grid grid-cols-3 gap-2 text-center">
+                    ${[['beacons','Beacons'],['bssids','APs'],['probes','Probes'],['deauths','Deauth'],['ble_adv','BLE'],['frames','Frames']].map(([k,lbl]) =>
+                        `<div class="bg-slate-900/40 rounded-lg py-1.5"><div class="text-base font-bold ${k==='deauths'&&(c[k]||0)>0?'text-red-400':''}">${c[k]||0}</div><div class="text-xs text-gray-500 uppercase">${lbl}</div></div>`).join('')}
+                </div>
+                ${acts ? `<div class="flex flex-wrap gap-1 mt-2">${acts}</div>` : ''}
+            </div>`;
+        }).join('');
+    }).catch(() => { box.innerHTML = '<p class="text-red-400 text-sm p-4">Failed to load CYD nodes.</p>'; });
+}
+
+function loadCydTokens() {
+    const box = document.getElementById('cyd-tokens-list');
+    if (!box) return;
+    networkAwareFetch('/api/cyd/tokens').then(r => r.json()).then(d => {
+        const toks = (d && d.tokens) || [];
+        if (!toks.length) { box.innerHTML = '<p class="text-gray-500 text-sm p-4">No tokens issued.</p>'; return; }
+        box.innerHTML = toks.map(t => `<div class="flex items-center justify-between gap-2 p-3">
+            <div class="min-w-0">
+                <div class="font-semibold truncate">${escapeHtml(t.name || 'cyd-node')}</div>
+                <code class="text-xs text-gray-500 font-mono">${escapeHtml(t.preview || '')}</code>
+            </div>
+            <button onclick="cydRevokeToken('${escapeAttr(t.id)}')" class="bg-slate-700 hover:bg-red-700 text-white px-3 py-1.5 rounded-lg text-sm transition-colors flex-shrink-0">Revoke</button>
+        </div>`).join('');
+    }).catch(() => { box.innerHTML = '<p class="text-red-400 text-sm p-4">Failed to load tokens.</p>'; });
+}
+
+function cydGenerateToken() {
+    const nameEl = document.getElementById('cyd-token-name');
+    const name = (nameEl && nameEl.value || '').trim() || 'cyd-node';
+    networkAwareFetch('/api/cyd/token/generate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+    }).then(r => r.json()).then(d => {
+        if (d && d.success && d.token) {
+            const wrap = document.getElementById('cyd-new-token');
+            const val = document.getElementById('cyd-new-token-value');
+            if (val) val.textContent = d.token;
+            if (wrap) wrap.classList.remove('hidden');
+            if (nameEl) nameEl.value = '';
+            loadCydTokens();
+        } else {
+            showNotification('Token generation failed', 'error');
+        }
+    }).catch(() => { showNotification('Token generation failed', 'error'); });
+}
+
+function cydRevokeToken(id) {
+    if (!confirm('Revoke this CYD device token? The node using it will stop being accepted.')) return;
+    networkAwareFetch('/api/cyd/token/revoke', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+    }).then(r => r.json()).then(() => loadCydTokens())
+      .catch(() => { showNotification('Revoke failed', 'error'); });
+}
+
+function cydToggleSerial(on) {
+    networkAwareFetch('/api/cyd/serial/toggle', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !!on })
+    }).then(r => r.json()).then(() => loadCydNodes())
+      .catch(() => { showNotification('Serial bridge toggle failed', 'error'); });
+}
+
+window.loadCydNodes = loadCydNodes;
+window.loadCydTokens = loadCydTokens;
+window.cydGenerateToken = cydGenerateToken;
+window.cydRevokeToken = cydRevokeToken;
+function cydSaveSerialPort() {
+    const pin = document.getElementById('cyd-serial-port');
+    const port = (pin && pin.value || '').trim();
+    networkAwareFetch('/api/cyd/serial/port', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ port })
+    }).then(r => r.json()).then(d => {
+        if (d && d.success === false) { showNotification(d.error || 'Invalid port', 'error'); return; }
+        showNotification(port ? ('Serial port set to ' + port) : 'Serial port set to auto-detect', 'success');
+        loadCydNodes();
+    }).catch(() => { showNotification('Set serial port failed', 'error'); });
+}
+
+window.cydToggleSerial = cydToggleSerial;
+window.cydSaveSerialPort = cydSaveSerialPort;
+function _xferStartPolling() { _xferStopPolling(); _xferPollTimer = setInterval(xferRefresh, 2000); }
+function _xferStopPolling() { if (_xferPollTimer) { clearInterval(_xferPollTimer); _xferPollTimer = null; } }
+function xferRefresh() { loadXferTransfers(); loadXferInbox(); }
+
+// Populate the destination dropdown + the units strip from the mesh roster.
+function xferLoadUnits() {
+    networkAwareFetch('/api/mesh/status').then(r => r.json()).then(s => {
+        const peers = (s && s.peers) || [];
+        // Share-only guests aren't roster units, but a mesh unit can send files
+        // TO them — so list them as recipients too, marked "(guest)".
+        const guests = ((s && s.share_guests) || []).map(g => ({
+            id: g.id, viking_name: g.label || g.short_name || g.id,
+            label: g.label, online: g.online, is_guest: true }));
+        const all = peers.concat(guests);
+        const sel = document.getElementById('xfer-dest');
+        const chips = document.getElementById('xfer-units');
+        const online = all.filter(p => p.online);
+        const rname = p => (p.viking_name || p.label || p.id) + (p.is_guest ? ' (guest)' : (p.unit_id ? ' #' + p.unit_id : ''));
+        if (sel) {
+            sel.innerHTML = online.length
+                ? online.map(p => `<option value="${escapeAttr(p.id)}">${escapeHtml(rname(p))}</option>`).join('')
+                : '<option value="">No online units</option>';
+        }
+        if (chips) {
+            chips.innerHTML = '<span class="text-sm text-gray-400 mr-1">Units:</span>' + (all.length
+                ? all.map(p => `<span class="inline-flex items-center gap-1.5 bg-slate-800 border ${p.is_guest ? 'border-sky-700' : 'border-slate-600'} rounded-full px-3 py-1 text-sm ${p.online ? '' : 'opacity-50'}"><span class="w-2 h-2 rounded-full ${p.online ? 'bg-green-400' : 'bg-slate-500'}"></span>${escapeHtml(p.viking_name || p.label || p.id)}${p.is_guest ? ' <span class="text-xs text-sky-400">guest</span>' : (p.unit_id ? ' <span class="text-xs text-slate-500">#' + p.unit_id + '</span>' : '')}${p.online ? '' : ' <span class="text-xs text-slate-500">(offline)</span>'}</span>`).join(' ')
+                : '<span class="text-sm text-gray-500">No peers in the mesh yet.</span>');
+        }
+    }).catch(() => {});
+}
+
+function loadXferTransfers() {
+    const el = document.getElementById('xfer-list');
+    if (!el) return;
+    networkAwareFetch('/api/mesh/transfers').then(r => r.json()).then(d => {
+        const items = (d && d.transfers) || [];
+        if (!items.length) { el.innerHTML = '<p class="text-gray-500 text-sm py-2">No transfers yet.</p>'; return; }
+        el.innerHTML = items.map(t => {
+            let right, bar = '', extra = '';
+            if (t.state === 'delivered') right = '<span class="text-green-400 text-xs whitespace-nowrap">✓ delivered</span>';
+            else if (t.state === 'failed') {
+                right = '<span class="text-red-400 text-xs whitespace-nowrap">✗ failed</span>';
+                if (t.error) extra = `<div class="text-xs text-red-400/80 mt-0.5 break-words">${escapeHtml(t.error)}</div>`;
+            } else { right = `<span class="text-sky-300 text-xs">${t.pct || 0}%</span>`; bar = `<div class="w-full bg-slate-700 rounded-full h-1.5 mt-1"><div class="bg-sky-500 h-1.5 rounded-full" style="width:${t.pct || 0}%"></div></div>`; }
+            return `<div class="py-2 border-b border-slate-700/50"><div class="flex justify-between text-sm gap-2"><span class="truncate">${escapeHtml(t.name)} <span class="text-gray-500">→</span> <b>${escapeHtml(t.dest)}</b></span>${right}</div>${bar}${extra}</div>`;
+        }).join('');
+    }).catch(() => {});
+}
+
+let _xferInboxSig = null;   // signature of the last rendered inbox
+function loadXferInbox() {
+    const el = document.getElementById('xfer-inbox');
+    // Fetch the inbox and the Vault lock state together so the "Vault" save
+    // option reflects reality: only unlocked Vaults accept files.
+    Promise.all([
+        networkAwareFetch('/api/mesh/inbox').then(r => r.json()).catch(() => ({})),
+        networkAwareFetch('/api/safe/status').then(r => r.json()).catch(() => ({})),
+    ]).then(([d, vault]) => {
+        const items = (d && d.items) || [];
+        // Sync the "accept incoming" toggle + badges.
+        const tgl = document.getElementById('xfer-receive-toggle');
+        if (tgl && d) tgl.checked = !!d.receive_enabled;
+        const setBadge = (id, n) => { const b = document.getElementById(id); if (b) { b.textContent = n; b.classList.toggle('hidden', !n); } };
+        setBadge('xfer-inbox-count', items.length);
+        setBadge('mesh-inbox-badge', items.length);
+        setFilesNavFlag(items.length);   // keep the Files nav flag in sync
+        if (!el) return;
+        // Only rebuild the list when it actually changed — the 2s poll otherwise
+        // destroys the destination <select> mid-interaction (you couldn't pick
+        // Vault because the dropdown was wiped before you clicked it).
+        const sig = JSON.stringify({
+            u: !!(vault && vault.unlocked), c: !!(vault && vault.configured),
+            items: items.map(m => [m.id, m.name, m.size]),
+        });
+        if (sig === _xferInboxSig && el.childElementCount > 0) return;
+        _xferInboxSig = sig;
+        if (!items.length) { el.innerHTML = '<p class="text-gray-500 text-sm py-2">Inbox is empty.</p>'; return; }
+        // Vault option: enabled only when the Vault is unlocked; shown disabled
+        // (with why) when locked; omitted entirely if no Vault is set up.
+        const vaultOpt = (vault && vault.configured)
+            ? (vault.unlocked
+                ? '<option value="vault">Vault</option>'
+                : '<option value="vault" disabled>Vault (locked — unlock in Files)</option>')
+            : '';
+        el.innerHTML = items.map(m => `
+            <div class="py-2 border-b border-slate-700/50">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0"><div class="text-sm truncate">${escapeHtml(m.name)}</div>
+                        <div class="text-xs text-gray-500">${formatBytes(m.size)} · from ${escapeHtml(m.sender)}</div></div>
+                    <div class="flex items-center gap-1 flex-shrink-0">
+                        <select id="dest-${escapeAttr(m.id)}" class="bg-slate-900 border border-slate-700 rounded px-1.5 py-1 text-xs">
+                            <option value="/uploads">Uploads</option>
+                            <option value="/backups">Backups</option>
+                            ${vaultOpt}
+                        </select>
+                        <button onclick="xferInboxSave('${escapeAttr(m.id)}')" class="bg-green-700 hover:bg-green-800 text-white text-xs px-2 py-1 rounded">Save</button>
+                        <button onclick="xferInboxDiscard('${escapeAttr(m.id)}','${escapeAttr(m.name)}')" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2 py-1 rounded">Discard</button>
+                    </div>
+                </div>
+            </div>`).join('');
+    }).catch(() => {});
+}
+
+function xferInboxSave(id) {
+    const dest = document.getElementById('dest-' + id)?.value || '/uploads';
+    networkAwareFetch('/api/mesh/inbox/save', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, dest })
+    }).then(r => r.json()).then(d => {
+        if (d.success) { showFileSuccess('Saved to ' + (dest === 'vault' ? 'Vault' : dest)); xferRefresh(); }
+        else showFileError(d.error || 'Save failed');
+    }).catch(e => showFileError(e.message));
+}
+function xferInboxDiscard(id, name) {
+    showFileConfirmModal('Discard file', `Discard "${name}" from the inbox? This cannot be undone.`, () => {
+        networkAwareFetch('/api/mesh/inbox/discard', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id })
+        }).then(r => r.json()).then(() => { closeFileModal(); showFileSuccess('Discarded'); xferRefresh(); })
+          .catch(e => { closeFileModal(); showFileError(e.message); });
+    });
+}
+function xferSetReceive(on) {
+    networkAwareFetch('/api/mesh/files/config', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ receive: on })
+    }).then(r => r.json()).then(() => showFileSuccess(on ? 'Now accepting transfers' : 'Not accepting transfers'))
+      .catch(e => showFileError(e.message));
+}
+
+// ── Mesh Share — a folder every unit publishes to the whole mesh ─────────────
+function loadMeshShare() {
+    const el = document.getElementById('mesh-share-list');
+    if (!el) return;
+    networkAwareFetch('/api/mesh/share').then(r => r.json()).then(d => {
+        const items = (d && d.items) || [];
+        // A share-only guest hosts nobody: hide the host-only tooling (the
+        // guest-read toggle, "Outside your mesh" tokens/remotes/join panel) and
+        // don't even fetch their data. It only sends files to its host.
+        const shareOnly = !!(d && d.share_only);
+        const readRow = document.getElementById('share-guest-read-row');
+        if (readRow) readRow.classList.toggle('hidden', shareOnly);
+        const outside = document.getElementById('mesh-share-outside-panel');
+        if (outside) outside.classList.toggle('hidden', shareOnly);
+        if (!shareOnly) { loadRemoteShares(); loadShareTokens(); }
+        const gt = document.getElementById('share-guest-read-toggle');
+        if (gt) gt.checked = !!(d && d.guest_read);
+        // Viewing Mesh Share clears the "new shared files" part of the Files flag.
+        markSharedSeen(items.filter(i => !i.is_local).length);
+        if (!items.length) { el.innerHTML = '<p class="text-gray-500 text-sm p-4">Nothing shared yet. Use “Share files” to publish a file to the mesh.</p>'; return; }
+        el.innerHTML = items.map(it => {
+            const action = it.is_local
+                ? `<button onclick="shareUnshare('${escapeAttr(it.name)}')" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors">Unshare</button>`
+                : `<button onclick="openShareDest('${escapeAttr(it.name)}','${escapeAttr(it.owner_id)}')" class="bg-sky-600 hover:bg-sky-700 text-white text-xs px-2.5 py-1.5 rounded transition-colors">Fetch</button>`;
+            return `<div class="flex items-center justify-between gap-2 p-3">
+                <div class="flex items-center min-w-0">
+                    <svg class="w-5 h-5 mr-3 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                    <div class="min-w-0"><div class="text-sm truncate">${escapeHtml(it.name)}</div>
+                        <div class="text-xs text-gray-500">${formatBytes(it.size)} · owner <span class="text-gray-300">${escapeHtml(it.owner)}</span>${it.is_local ? ' <span class="text-sky-300">(you)</span>' : ''}</div></div>
+                </div>
+                <div class="flex-shrink-0">${action}</div></div>`;
+        }).join('');
+    }).catch(e => { el.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+
+function setShareGuestRead(on) {
+    networkAwareFetch('/api/mesh/files/config', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ share_read: !!on })
+    }).then(r => r.json()).then(d => {
+        showNotification(on ? 'Share-guests can now browse & fetch this folder'
+                             : 'Share-guests are send-only again', 'success');
+    }).catch(e => { showNotification('Could not update share access: ' + e.message, 'error'); });
+}
+
+// ---- Outside-mesh sharing: remote-share targets (send TO) -------------------
+
+// Collapsed by default — only the heading/description show until expanded. Keeps
+// the common case (nothing to configure) quiet while the tools stay one click away.
+function toggleOutsideMesh() {
+    const body = document.getElementById('mesh-share-outside-body');
+    const chev = document.getElementById('mesh-share-outside-chevron');
+    if (!body) return;
+    const open = body.classList.toggle('hidden') === false;
+    if (chev) chev.style.transform = open ? 'rotate(180deg)' : '';
+}
+
+function loadRemoteShares() {
+    const el = document.getElementById('remote-shares-list');
+    if (!el) return;
+    networkAwareFetch('/api/mesh/remote-shares').then(r => r.json()).then(d => {
+        const rows = (d && d.remotes) || [];
+        if (!rows.length) { el.innerHTML = '<p class="text-gray-500 text-sm p-4">No remote shares yet. Add one with a name, their Tailscale address and the token they gave you.</p>'; return; }
+        el.innerHTML = rows.map(r => `<div class="flex items-center justify-between gap-2 p-3">
+            <div class="min-w-0">
+                <div class="text-sm truncate">${escapeHtml(r.name)}</div>
+                <div class="text-xs text-gray-500 truncate font-mono">${escapeHtml(r.address)}</div>
+            </div>
+            <div class="flex-shrink-0 flex gap-2">
+                <button onclick="sendToRemote('${escapeAttr(r.id)}','${escapeAttr(r.name)}')" class="bg-sky-600 hover:bg-sky-700 text-white text-xs px-2.5 py-1.5 rounded transition-colors">Send file</button>
+                <button onclick="removeRemoteShare('${escapeAttr(r.id)}','${escapeAttr(r.name)}')" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors">Remove</button>
+            </div></div>`).join('');
+    }).catch(e => { el.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+
+function openRemoteShareModal() {
+    ['rs-name', 'rs-address', 'rs-token'].forEach(id => { const i = document.getElementById(id); if (i) i.value = ''; });
+    const m = document.getElementById('remote-share-modal');
+    if (m) { m.classList.remove('hidden'); m.classList.add('flex'); }
+}
+
+function closeRemoteShareModal() {
+    const m = document.getElementById('remote-share-modal');
+    if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+}
+
+function saveRemoteShare() {
+    const name = (document.getElementById('rs-name') || {}).value || '';
+    const address = (document.getElementById('rs-address') || {}).value || '';
+    const token = (document.getElementById('rs-token') || {}).value || '';
+    if (!name.trim() || !address.trim() || !token.trim()) {
+        showNotification('Name, address and token are all required', 'error'); return;
+    }
+    networkAwareFetch('/api/mesh/remote-shares', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim(), address: address.trim(), token: token.trim() })
+    }).then(r => r.json()).then(d => {
+        if (!d.success) { showNotification(d.error || 'Could not add remote share', 'error'); return; }
+        closeRemoteShareModal();
+        showNotification('Remote share added', 'success');
+        loadRemoteShares();
+    }).catch(e => showNotification('Could not add remote share: ' + e.message, 'error'));
+}
+
+function removeRemoteShare(id, name) {
+    showFileConfirmModal('Remove remote share', `Stop sharing with “${name}”? Files already sent are unaffected.`, function () {
+        networkAwareFetch('/api/mesh/remote-shares/' + encodeURIComponent(id), { method: 'DELETE' })
+            .then(r => r.json()).then(d => {
+                if (!d.success) { showNotification(d.error || 'Could not remove', 'error'); return; }
+                showNotification('Remote share removed', 'success');
+                loadRemoteShares();
+            }).catch(e => showNotification('Could not remove: ' + e.message, 'error'));
+    });
+}
+
+function sendToRemote(id, name) {
+    pickFiles({}, function (files) {
+        if (!files.length) return;
+        const fd = new FormData();
+        fd.append('file', files[0]);
+        showFileLoading(`Sending to ${name}…`);
+        networkAwareFetch('/api/mesh/remote-shares/' + encodeURIComponent(id) + '/send', { method: 'POST', body: fd })
+            .then(r => r.json()).then(d => {
+                if (!d.success) { showNotification(d.error || 'Send failed', 'error'); return; }
+                showNotification(`Sending to ${name} — watch Transfers for progress`, 'success');
+                if (typeof loadXferTransfers === 'function') loadXferTransfers();
+            }).catch(e => { showNotification('Send failed: ' + e.message, 'error'); });
+    });
+}
+
+// ---- Outside-mesh sharing: share tokens (let someone send TO me) ------------
+
+function loadShareTokens() {
+    const el = document.getElementById('share-tokens-list');
+    if (!el) return;
+    networkAwareFetch('/api/mesh/share/tokens').then(r => r.json()).then(d => {
+        const rows = (d && d.tokens) || [];
+        if (!rows.length) { el.innerHTML = '<p class="text-gray-500 text-sm p-4">No tokens issued. Create one to let an outside person send files to this unit.</p>'; return; }
+        el.innerHTML = rows.map(t => `<div class="flex items-center justify-between gap-2 p-3">
+            <div class="min-w-0">
+                <div class="text-sm truncate">${escapeHtml(t.label || 'Unnamed')}</div>
+                <div class="text-xs text-gray-500 font-mono truncate">${escapeHtml(t.preview)}${t.created ? ' · ' + escapeHtml(String(t.created).replace('T', ' ').slice(0, 16)) : ''}</div>
+            </div>
+            <button onclick="revokeShareToken('${escapeAttr(t.id)}','${escapeAttr(t.label || 'this token')}')" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded flex-shrink-0 transition-colors">Revoke</button>
+            </div>`).join('');
+    }).catch(e => { el.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+
+function createShareToken() {
+    const label = prompt('Name this token (who is it for?) — optional:', '') || '';
+    networkAwareFetch('/api/mesh/share/tokens', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: label.trim() })
+    }).then(r => r.json()).then(d => {
+        if (!d.success || !d.token) { showNotification((d && d.error) || 'Could not create token', 'error'); return; }
+        const v = document.getElementById('share-token-reveal-value');
+        if (v) v.textContent = d.token.token;
+        const m = document.getElementById('share-token-reveal-modal');
+        if (m) { m.classList.remove('hidden'); m.classList.add('flex'); }
+        loadShareTokens();
+    }).catch(e => showNotification('Could not create token: ' + e.message, 'error'));
+}
+
+function copyShareToken() {
+    const v = document.getElementById('share-token-reveal-value');
+    if (!v) return;
+    // Route through copyToClipboard: a plain-HTTP Ragnar (http://100.x:8000) is
+    // not a secure context, so navigator.clipboard is undefined — the execCommand
+    // textarea fallback is what actually copies there.
+    copyToClipboard(v.textContent || '');
+}
+
+function closeShareTokenReveal() {
+    const m = document.getElementById('share-token-reveal-modal');
+    if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+}
+
+// ---- Join a tailnet as a share-only guest (no terminal) --------------------
+
+function openShareJoinModal() {
+    ['sj-authkey', 'sj-hostname', 'sj-mesh-suffix'].forEach(id => { const i = document.getElementById(id); if (i) i.value = ''; });
+    const st = document.getElementById('sj-status');
+    if (st) { st.classList.add('hidden'); st.textContent = ''; }
+    const m = document.getElementById('share-join-modal');
+    if (m) { m.classList.remove('hidden'); m.classList.add('flex'); }
+}
+
+function closeShareJoinModal() {
+    const m = document.getElementById('share-join-modal');
+    if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+}
+
+function shareJoinTailnet() {
+    const key = (document.getElementById('sj-authkey') || {}).value || '';
+    const hostname = (document.getElementById('sj-hostname') || {}).value || '';
+    const meshSuffix = (document.getElementById('sj-mesh-suffix') || {}).value || '';
+    const st = document.getElementById('sj-status');
+    const btn = document.getElementById('sj-join-btn');
+    if (!key.trim()) { showNotification('Paste the auth key first', 'error'); return; }
+    if (st) { st.className = 'text-sm mb-3 text-gray-400'; st.textContent = 'Joining the tailnet…'; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Joining…'; }
+    networkAwareFetch('/api/mesh/join', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            auth_key: key.trim(),
+            hostname: hostname.trim(),
+            // Join share-only, scoped to the host's mesh: the server advertises
+            // the paired share tag (tag:ragnar-share[-<suffix>]) for this mesh.
+            share_only: true,
+            mesh_suffix: meshSuffix.trim(),
+            enable_ssh: false,
+            accept_routes: false,
+            switch_tailnet: true
+        })
+    }).then(r => r.json()).then(d => {
+        if (btn) { btn.disabled = false; btn.textContent = 'Join'; }
+        if (!d.success) {
+            if (st) { st.className = 'text-sm mb-3 text-red-400'; st.textContent = d.message || 'Join failed'; }
+            return;
+        }
+        if (st) { st.className = 'text-sm mb-3 text-emerald-400'; st.textContent = 'Joined — this unit is now share-only on that tailnet.'; }
+        showNotification('Joined the tailnet as share-only', 'success');
+        setTimeout(closeShareJoinModal, 1500);
+    }).catch(e => {
+        if (btn) { btn.disabled = false; btn.textContent = 'Join'; }
+        if (st) { st.className = 'text-sm mb-3 text-red-400'; st.textContent = 'Join failed: ' + e.message; }
+    });
+}
+
+function revokeShareToken(id, label) {
+    showFileConfirmModal('Revoke share token', `Revoke “${label}”? Whoever holds it can no longer send you files.`, function () {
+        networkAwareFetch('/api/mesh/share/tokens/' + encodeURIComponent(id), { method: 'DELETE' })
+            .then(r => r.json()).then(d => {
+                if (!d.success) { showNotification(d.error || 'Could not revoke', 'error'); return; }
+                showNotification('Token revoked', 'success');
+                loadShareTokens();
+            }).catch(e => showNotification('Could not revoke: ' + e.message, 'error'));
+    });
+}
+
+function shareUploadFiles() {
+    pickFiles({ multiple: true }, function (files) {
+        if (!files.length) return;
+        const fd = new FormData();
+        for (const f of files) fd.append('file', f);
+        showFileLoading('Publishing to Mesh Share…');
+        networkAwareFetch('/api/mesh/share/add', { method: 'POST', body: fd })
+            .then(r => r.json())
+            .then(d => { if (d.success) { showFileSuccess(`Shared ${d.stored || 1} file(s)`); loadMeshShare(); } else showFileError(d.error || 'Share failed'); })
+            .catch(e => showFileError(e.message));
+    });
+}
+
+function shareUnshare(name) {
+    showFileConfirmModal('Unshare file', `Stop sharing “${name}” with the mesh? (the file itself is not deleted)`, () => {
+        networkAwareFetch('/api/mesh/share/remove', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name })
+        }).then(r => r.json()).then(() => { closeFileModal(); showFileSuccess('Unshared'); loadMeshShare(); })
+          .catch(e => { closeFileModal(); showFileError(e.message); });
+    });
+}
+
+// Fetch destination picker — navigate Uploads/Backups/Vault, then "Save here".
+let _shareDest = null;   // { name, owner_id, dir, history }
+function openShareDest(name, ownerId) {
+    _shareDest = { name: name, owner_id: ownerId, dir: '/', history: [] };
+    document.getElementById('share-dest-title').textContent = `Save “${name}” to…`;
+    const m = document.getElementById('share-dest-modal');
+    m.classList.remove('hidden'); m.classList.add('flex');
+    shareDestLoad('/');
+}
+function closeShareDest() {
+    const m = document.getElementById('share-dest-modal');
+    if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+    _shareDest = null;
+}
+function shareDestBack() { if (_shareDest && _shareDest.history.length) shareDestLoad(_shareDest.history.pop(), true); }
+function _shareDestRow(navPath, name, tint) {
+    return `<div class="flex items-center p-2.5 hover:bg-slate-700 rounded-lg cursor-pointer" onclick="shareDestLoad('${escapeAttr(navPath)}')">
+        <svg class="w-5 h-5 mr-3 flex-shrink-0 ${tint || 'text-yellow-400'}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path></svg>
+        <span class="truncate flex-1">${escapeHtml(name)}</span>
+        <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg></div>`;
+}
+function shareDestLoad(dir, isBack) {
+    if (!_shareDest) return;
+    if (!isBack && dir !== _shareDest.dir) _shareDest.history.push(_shareDest.dir);
+    _shareDest.dir = dir;
+    const list = document.getElementById('share-dest-list');
+    const pathEl = document.getElementById('share-dest-path');
+    const hereBtn = document.getElementById('share-dest-here');
+    if (!list) return;
+    list.innerHTML = '<p class="text-gray-400 p-4">Loading…</p>';
+
+    if (dir.indexOf('vault:') === 0) {
+        const vdir = dir.slice(6);
+        pathEl.textContent = '🔒 Vault' + (vdir ? '/' + vdir : '');
+        hereBtn.classList.remove('hidden');
+        networkAwareFetch('/api/safe/list?dir=' + encodeURIComponent(vdir)).then(r => r.json()).then(d => {
+            if (!d.success) { list.innerHTML = '<p class="text-amber-300 p-4">Vault locked.</p>'; return; }
+            const rows = (d.folders || []).map(f => _shareDestRow('vault:' + f.path, f.name, 'text-amber-400')).join('');
+            list.innerHTML = rows ? '<div class="space-y-1">' + rows + '</div>' : '<p class="text-gray-500 p-4">No subfolders.</p>';
+        }).catch(e => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+        return;
+    }
+
+    if (dir === '/') {
+        pathEl.textContent = 'Choose a folder';
+        hereBtn.classList.add('hidden');   // the root itself isn't a destination
+        networkAwareFetch('/api/safe/status').then(r => r.json()).catch(() => ({})).then(st => {
+            let rows = _shareDestRow('/uploads', 'Uploads', 'text-blue-400') + _shareDestRow('/backups', 'Backups', 'text-blue-400');
+            if (st && st.success && st.configured && st.unlocked) rows += _shareDestRow('vault:', '🔒 Vault', 'text-amber-400');
+            list.innerHTML = '<div class="space-y-1">' + rows + '</div>';
+        });
+        return;
+    }
+
+    pathEl.textContent = dir;
+    hereBtn.classList.remove('hidden');
+    networkAwareFetch('/api/files/list?path=' + encodeURIComponent(dir)).then(r => r.json()).then(files => {
+        const dirs = (Array.isArray(files) ? files : []).filter(f => f.is_directory)
+            .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+        list.innerHTML = dirs.length ? '<div class="space-y-1">' + dirs.map(f => _shareDestRow(f.path, f.name)).join('') + '</div>' : '<p class="text-gray-500 p-4">No subfolders here.</p>';
+    }).catch(e => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+function shareDoFetch() {
+    if (!_shareDest) return;
+    const dir = _shareDest.dir;
+    const dest = (dir.indexOf('vault:') === 0) ? (dir === 'vault:' ? 'vault' : dir) : dir;
+    showFileLoading('Fetching ' + _shareDest.name + '…');
+    networkAwareFetch('/api/mesh/share/fetch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: _shareDest.name, owner_id: _shareDest.owner_id, dest: dest })
+    }).then(r => r.json()).then(d => {
+        if (d.success) { showFileSuccess('Saved ' + _shareDest.name); closeShareDest(); }
+        else showFileError(d.error || 'Fetch failed');
+    }).catch(e => showFileError(e.message));
+}
+document.getElementById('share-dest-modal')?.addEventListener('click', function (e) { if (e.target === this) closeShareDest(); });
+
+// Drag-drop / browse a file from the operator's computer to send to a peer.
+function xferPickComputerFile() {
+    const target = document.getElementById('xfer-dest')?.value;
+    if (!target) { showFileError('Pick an online destination unit first'); return; }
+    pickFiles({}, function (files) { if (files.length) _xferUploadAndSend(files[0], target); });
+}
+function _xferUploadAndSend(file, target) {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('target_id', target);
+    showFileLoading('Uploading & sending ' + file.name + '…');
+    networkAwareFetch('/api/mesh/files/send', { method: 'POST', body: fd })
+        .then(r => r.json())
+        .then(d => { if (d.success) { showFileSuccess('Sending ' + file.name + ' → ' + (d.dest || 'unit')); xferRefresh(); } else showFileError(d.error || 'Send failed'); })
+        .catch(e => showFileError(e.message));
+}
+// Wire the drop zone.
+(function () {
+    const dz = () => document.getElementById('xfer-drop');
+    document.addEventListener('dragover', e => { if (dz() && dz().contains(e.target)) { e.preventDefault(); dz().classList.add('border-sky-500'); } });
+    document.addEventListener('dragleave', e => { if (dz() && dz().contains(e.target)) dz().classList.remove('border-sky-500'); });
+    document.addEventListener('drop', e => {
+        const zone = dz();
+        if (!zone || !zone.contains(e.target)) return;
+        e.preventDefault(); zone.classList.remove('border-sky-500');
+        const target = document.getElementById('xfer-dest')?.value;
+        if (!target) { showFileError('Pick an online destination unit first'); return; }
+        for (const f of e.dataTransfer.files) _xferUploadAndSend(f, target);
+    });
+})();
+
+// ── Pick a file already on THIS unit and send it to a peer ───────────────────
+let _xferPickPath = '/';
+let _xferPickHistory = [];
+function openXferPicker() {
+    const dest = document.getElementById('xfer-dest');
+    if (!dest || !dest.value) { showFileError('Pick an online destination unit first'); return; }
+    const destLabel = document.getElementById('xfer-pick-dest');
+    if (destLabel) destLabel.textContent = dest.options[dest.selectedIndex]?.text || 'unit';
+    const m = document.getElementById('xfer-pick-modal');
+    m.classList.remove('hidden'); m.classList.add('flex');
+    _xferPickHistory = [];
+    xferPickerLoad('/');
+}
+function closeXferPicker() {
+    const m = document.getElementById('xfer-pick-modal');
+    if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+}
+function xferPickerBack() {
+    if (_xferPickHistory.length) xferPickerLoad(_xferPickHistory.pop(), true);
+}
+// Row builders for the picker (folder, filesystem file, vault file).
+function _xferFolderRow(navPath, name, tint) {
+    return `<div class="flex items-center p-2.5 hover:bg-slate-700 rounded-lg cursor-pointer" onclick="xferPickerLoad('${escapeAttr(navPath)}')">
+        <svg class="w-5 h-5 mr-3 flex-shrink-0 ${tint || 'text-yellow-400'}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path></svg>
+        <span class="truncate">${escapeHtml(name)}</span></div>`;
+}
+function _xferFileRow(name, sizeLabel, sendCall) {
+    return `<div class="flex items-center justify-between gap-2 p-2.5 hover:bg-slate-700 rounded-lg">
+        <div class="flex items-center min-w-0"><svg class="w-5 h-5 mr-3 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+        <div class="min-w-0"><div class="truncate">${escapeHtml(name)}</div><div class="text-xs text-gray-500">${sizeLabel}</div></div></div>
+        <button onclick="${sendCall}" class="bg-sky-600 hover:bg-sky-700 text-white text-xs px-3 py-1.5 rounded flex-shrink-0">Send</button></div>`;
+}
+
+function xferPickerLoad(path, isBack) {
+    if (!isBack && path !== _xferPickPath) _xferPickHistory.push(_xferPickPath);
+    _xferPickPath = path;
+    const pathEl = document.getElementById('xfer-pick-path');
+    const list = document.getElementById('xfer-pick-list');
+    if (!list) return;
+    list.innerHTML = '<p class="text-gray-400 p-4">Loading…</p>';
+
+    // Vault sub-tree (only reachable when the Vault is unlocked). Paths are
+    // 'vault:' + dir; files send via source:'vault' (decrypt-on-send).
+    if (path.indexOf('vault:') === 0) {
+        const dir = path.slice(6);
+        if (pathEl) pathEl.textContent = '🔒 Vault' + (dir ? '/' + dir : '');
+        networkAwareFetch('/api/safe/list?dir=' + encodeURIComponent(dir))
+            .then(r => r.json())
+            .then(d => {
+                if (d.locked || !d.success) { list.innerHTML = '<p class="text-amber-300 p-4">The Vault is locked — unlock it in the Files tab.</p>'; return; }
+                let rows = (d.folders || []).map(f => _xferFolderRow('vault:' + f.path, f.name, 'text-amber-400')).join('');
+                rows += (d.files || []).slice().sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()))
+                    .map(f => _xferFileRow(f.name, formatBytes(f.size), `xferSendVault('${escapeAttr(f.id)}','${escapeAttr(f.name)}')`)).join('');
+                list.innerHTML = rows ? '<div class="space-y-1">' + rows + '</div>' : '<p class="text-gray-500 p-4">This folder is empty.</p>';
+            })
+            .catch(e => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+        return;
+    }
+
+    if (pathEl) pathEl.textContent = path;
+    // The filesystem browser. At the root, also offer the Vault when unlocked.
+    const listFs = networkAwareFetch('/api/files/list?path=' + encodeURIComponent(path)).then(r => r.json()).catch(() => []);
+    const status = (path === '/')
+        ? networkAwareFetch('/api/safe/status').then(r => r.json()).catch(() => ({}))
+        : Promise.resolve({});
+    Promise.all([listFs, status]).then(([files, st]) => {
+        files = Array.isArray(files) ? files.slice() : [];
+        files.sort((a, b) => (a.is_directory === b.is_directory)
+            ? a.name.toLowerCase().localeCompare(b.name.toLowerCase())
+            : (a.is_directory ? -1 : 1));
+        let rows = '';
+        if (path === '/' && st && st.success && st.configured && st.unlocked) {
+            rows += _xferFolderRow('vault:', '🔒 Vault', 'text-amber-400');
+        }
+        rows += files.map(f => f.is_directory
+            ? _xferFolderRow(f.path, f.name)
+            : _xferFileRow(f.name, formatBytes(f.size), `xferSendPath('${escapeAttr(f.path)}','${escapeAttr(f.name)}')`)
+        ).join('');
+        list.innerHTML = rows ? '<div class="space-y-1">' + rows + '</div>' : '<p class="text-gray-500 p-4">This folder is empty.</p>';
+    }).catch(e => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+function xferSendVault(id, name) {
+    const target = document.getElementById('xfer-dest')?.value;
+    if (!target) { showFileError('Pick a destination unit'); return; }
+    networkAwareFetch('/api/mesh/files/send', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_id: target, source: 'vault', vault_id: id })
+    }).then(r => r.json()).then(d => {
+        if (d.success) { showFileSuccess('Sending ' + name + ' → ' + (d.dest || 'unit')); closeXferPicker(); xferRefresh(); }
+        else showFileError(d.error || 'Send failed');
+    }).catch(e => showFileError(e.message));
+}
+function xferSendPath(path, name) {
+    const target = document.getElementById('xfer-dest')?.value;
+    if (!target) { showFileError('Pick a destination unit'); return; }
+    networkAwareFetch('/api/mesh/files/send', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_id: target, source: 'path', path })
+    }).then(r => r.json()).then(d => {
+        if (d.success) { showFileSuccess('Sending ' + name + ' → ' + (d.dest || 'unit')); closeXferPicker(); xferRefresh(); }
+        else showFileError(d.error || 'Send failed');
+    }).catch(e => showFileError(e.message));
+}
+document.getElementById('xfer-pick-modal')?.addEventListener('click', function (e) {
+    if (e.target === this) closeXferPicker();
+});
+
+// ── "Send to unit" menu, used by the per-row Send action in the Files tab ────
+function closeSendMenu() { document.getElementById('send-unit-menu')?.remove(); }
+function openSendMenu(evt, payload) {
+    evt.stopPropagation();
+    closeSendMenu();
+    networkAwareFetch('/api/mesh/status').then(r => r.json()).then(s => {
+        const units = ((s && s.peers) || []).filter(p => p.online);
+        const menu = document.createElement('div');
+        menu.id = 'send-unit-menu';
+        menu.className = 'fixed z-50 w-60 rounded-lg shadow-2xl p-1 border border-slate-600';
+        menu.style.background = '#1e293b';
+        menu.style.top = (evt.clientY + 8) + 'px';
+        menu.style.left = Math.min(evt.clientX, window.innerWidth - 260) + 'px';
+        const head = document.createElement('div');
+        head.className = 'px-3 py-1.5 text-xs text-gray-400 border-b border-slate-700 mb-1';
+        head.textContent = payload.name ? `Send “${payload.name}” to…` : 'Send to…';
+        menu.appendChild(head);
+        if (!units.length) {
+            const none = document.createElement('div');
+            none.className = 'px-3 py-2 text-sm text-gray-500';
+            none.textContent = (s && s.enabled) ? 'No online units' : 'Mesh is not enabled';
+            menu.appendChild(none);
+        } else {
+            units.forEach(p => {
+                const row = document.createElement('div');
+                row.className = 'flex items-center gap-2 px-3 py-2 rounded hover:bg-slate-700 cursor-pointer';
+                row.innerHTML = `<span class="w-2 h-2 rounded-full bg-green-400"></span><span class="text-sm">${escapeHtml(p.viking_name || p.id)}</span>${p.unit_id ? `<span class="text-xs text-slate-500">#${p.unit_id}</span>` : ''}`;
+                row.addEventListener('click', () => { closeSendMenu(); doSendToUnit(p.id, payload); });
+                menu.appendChild(row);
+            });
+        }
+        document.body.appendChild(menu);
+        setTimeout(() => document.addEventListener('click', closeSendMenu, { once: true }), 0);
+    }).catch(e => showFileError(e.message));
+}
+function doSendToUnit(unitId, payload) {
+    const body = Object.assign({ target_id: unitId }, payload.send);
+    networkAwareFetch('/api/mesh/files/send', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    }).then(r => r.json())
+      .then(d => { if (d.success) showFileSuccess('Sending ' + (payload.name || 'file') + ' → ' + (d.dest || 'unit')); else showFileError(d.error || 'Send failed'); })
+      .catch(e => showFileError(e.message));
+}
+// Convenience wrappers for the two row types.
+function sendFsFile(evt, path, name) { openSendMenu(evt, { name, send: { source: 'path', path } }); }
+function sendVaultFile(evt, id, name) { openSendMenu(evt, { name, send: { source: 'vault', vault_id: id } }); }
 
 function clearFiles() {
     showFileConfirmModal(
@@ -21020,6 +29791,7 @@ function clearFiles() {
             })
             .then(response => response.json())
             .then(data => {
+                fileOperationInProgress = false;   // clear before refreshFiles()
                 if (data.success) {
                     showFileSuccess(data.message);
                     refreshFiles();
@@ -21040,6 +29812,7 @@ function clearFiles() {
 
 function refreshFiles() {
     displayDirectoryTree();
+    updateSafeHeaderButton();
     loadFiles(currentDirectory);
 }
 
@@ -21055,6 +29828,62 @@ function showFileLoading(message) {
     showNotification(message, 'info');
 }
 
+// A live upload-progress card (bottom-right) driven by XHR upload events. Only
+// one exists at a time. Colours are inline hex (slate/blue/green/red) so it
+// doesn't depend on Tailwind arbitrary-value classes being in the prebuilt CSS.
+// Returns handles the caller drives: setProgress during upload, finishing() once
+// the body is sent, finish(ok, msg) on completion (auto-dismisses).
+function createUploadProgressToast(title) {
+    const existing = document.getElementById('upload-progress-toast');
+    if (existing) existing.remove();
+
+    const toast = document.createElement('div');
+    toast.id = 'upload-progress-toast';
+    toast.className = 'fixed bottom-4 right-4 z-50 p-4 rounded-lg bg-slate-800 border border-slate-600 shadow-lg text-white';
+    toast.style.width = '20rem';
+    toast.style.maxWidth = '90vw';
+    toast.innerHTML = `
+        <div class="flex items-center justify-between mb-2 gap-2">
+            <span class="text-sm font-medium truncate">${escapeHtml(title)}</span>
+            <span id="upl-pct" class="text-xs text-gray-300 flex-shrink-0">0%</span>
+        </div>
+        <div class="w-full rounded overflow-hidden" style="height:8px;background:#334155">
+            <div id="upl-bar" style="height:100%;width:0%;background:#3b82f6;transition:width .15s ease"></div>
+        </div>
+        <div id="upl-detail" class="mt-1 text-xs text-gray-400">Preparing…</div>`;
+    document.body.appendChild(toast);
+
+    const bar = toast.querySelector('#upl-bar');
+    const pctEl = toast.querySelector('#upl-pct');
+    const detailEl = toast.querySelector('#upl-detail');
+
+    return {
+        setProgress(loaded, total) {
+            if (total > 0) {
+                const pct = Math.min(100, Math.round((loaded / total) * 100));
+                bar.style.width = pct + '%';
+                pctEl.textContent = pct + '%';
+                detailEl.textContent = `${formatBytes(loaded)} of ${formatBytes(total)}`;
+            } else {
+                detailEl.textContent = `${formatBytes(loaded)} uploaded`;
+            }
+        },
+        finishing(text) {
+            bar.style.width = '100%';
+            pctEl.textContent = '100%';
+            detailEl.textContent = text || 'Finishing…';
+        },
+        finish(ok, text) {
+            bar.style.width = '100%';
+            bar.style.background = ok ? '#22c55e' : '#ef4444';
+            pctEl.textContent = ok ? '100%' : '';
+            if (text) detailEl.textContent = text;
+            setTimeout(() => { if (toast.parentElement) toast.remove(); }, ok ? 1500 : 5000);
+        },
+        remove() { if (toast.parentElement) toast.remove(); }
+    };
+}
+
 function showFileConfirmModal(title, content, onConfirm) {
     const modal = document.getElementById('file-operations-modal');
     const modalTitle = document.getElementById('modal-title');
@@ -21062,7 +29891,13 @@ function showFileConfirmModal(title, content, onConfirm) {
     const confirmBtn = document.getElementById('modal-confirm');
     
     if (!modal || !modalTitle || !modalContent || !confirmBtn) return;
-    
+
+    // The dialog is authored inside #files-tab. When triggered from another tab
+    // (e.g. the mesh Inbox's Discard, or Mesh Share's Unshare) that tab is
+    // display:none, so the dialog can't render — it only appears once you switch
+    // to Files. Reparent it to <body> so it shows regardless of the active tab.
+    if (modal.parentElement !== document.body) document.body.appendChild(modal);
+
     modalTitle.textContent = title;
     modalContent.innerHTML = content;
     
@@ -21070,8 +29905,14 @@ function showFileConfirmModal(title, content, onConfirm) {
     const newConfirmBtn = confirmBtn.cloneNode(true);
     confirmBtn.parentNode.replaceChild(newConfirmBtn, confirmBtn);
     
-    // Add new listener
-    newConfirmBtn.addEventListener('click', onConfirm);
+    // Add new listener. Dismiss the dialog immediately on confirm — the work in
+    // onConfirm runs async (fetch + .then), so waiting on it would leave the modal
+    // up until the request returns. Some callbacks also call closeFileModal() in
+    // their .then; that's now a harmless no-op.
+    newConfirmBtn.addEventListener('click', function () {
+        closeFileModal();
+        onConfirm();
+    });
     
     modal.classList.remove('hidden');
     modal.classList.add('flex');
@@ -21129,18 +29970,572 @@ let currentProcessSort = 'cpu';
 function loadSystemData() {
     fetchSystemStatus();
     fetchNetworkStats();
-    
+    fetchPowerDetail();
+    fetchFanStatus();
+    fetchCardputerHardware();
+    fetchCameraStatus();
+
     // Auto-refresh every 5 seconds when on system tab
     if (systemMonitoringInterval) {
         clearInterval(systemMonitoringInterval);
     }
-    
+
     systemMonitoringInterval = setInterval(() => {
         if (currentTab === 'system') {
             fetchSystemStatus();
             fetchNetworkStats();
+            fetchPowerDetail();
+            if (!_fan.busy) fetchFanStatus();
+            if (_cz.supported !== false) fetchCardputerHardware();
         }
     }, 5000);
+}
+
+// System tab's Power card + detail panel. /api/power is cached ~15s server-side,
+// so polling it on the 5s system loop is mostly cache hits. Reuses the same
+// detail builder as the dashboard badge modal.
+function fetchPowerDetail() {
+    networkAwareFetch('/api/power')
+        .then(response => response.json())
+        .then(data => { if (!data || !data.error) updatePowerSystemView(data); })
+        .catch(error => console.error('Error fetching power detail:', error));
+}
+
+// ---- CardputerZero hardware + camera (System tab) --------------------------
+// Both panels stay hidden unless the backend reports the hardware, so other
+// boards never see them. The hardware scan runs server-side in the background;
+// the 5 s system loop just reads its last result.
+const _cz = { supported: null, taskRunning: false };
+const _cam = { live: false, busy: false };
+
+function _czEsc(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function fetchCardputerHardware(refresh) {
+    networkAwareFetch('/api/cardputer/hardware' + (refresh ? '?refresh=1' : ''))
+        .then(r => r.json())
+        .then(d => updateCardputerHardwareView(d))
+        .catch(e => console.error('Error fetching CardputerZero hardware:', e));
+}
+
+function rescanCardputerHardware() {
+    const btn = document.getElementById('cz-rescan');
+    if (btn) btn.disabled = true;
+    fetchCardputerHardware(true);
+}
+
+function _czRow(label, value, cls) {
+    return `<div class="pw-row"><span>${_czEsc(label)}</span><span class="${cls || ''}">${_czEsc(value)}</span></div>`;
+}
+
+function _czFix(action, label, hint) {
+    const off = _cz.taskRunning ? ' disabled' : '';
+    return `<div class="cz-fix"><button class="pw-btn pw-btn-primary" onclick="runCardputerAction('${action}')"${off}>${_czEsc(label)}</button>`
+        + `<span class="pw-muted">${_czEsc(hint)}</span></div>`;
+}
+
+function runCardputerAction(action) {
+    _cz.taskRunning = true;
+    networkAwareFetch('/api/cardputer/action', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }) })
+        .then(r => r.json())
+        .then(() => fetchCardputerHardware(false))
+        .catch(e => { _cz.taskRunning = false; console.error('CardputerZero action failed:', e); });
+}
+
+function updateCardputerHardwareView(d) {
+    const panel = document.getElementById('cz-panel');
+    _cz.supported = !!(d && d.supported);
+    if (!panel) return;
+    if (!_cz.supported) { panel.classList.add('hidden'); return; }
+    panel.classList.remove('hidden');
+    const btn = document.getElementById('cz-rescan');
+    if (btn) btn.disabled = !!d.scanning;
+
+    const rows = [];
+    if (d.pending) {
+        rows.push(_czRow('Cap', 'Scanning…', 'pw-muted'));
+    } else {
+        rows.push(_czRow('Cap power (5 V)', d.ext5v === true ? 'On' : d.ext5v === false ? 'Off' : 'Not available',
+            d.ext5v === true ? 'pw-ok' : 'pw-muted'));
+        if (d.grove5v != null) rows.push(_czRow('Grove port (5 V)', d.grove5v ? 'On' : 'Off', d.grove5v ? 'pw-ok' : 'pw-muted'));
+        rows.push(_czRow('Cap', d.cap_name || 'None detected', d.cap_name ? 'pw-ok' : 'pw-muted'));
+        (d.radios || []).forEach(r => rows.push(_czRow('Radio', r)));
+        if (d.gnss) {
+            let text, cls = 'pw-ok';
+            const g = d.gps;
+            if (d.gnss.console_conflict) {
+                text = 'A serial login prompt is using the port'; cls = 'pw-bad';
+            } else if (g && g.connected) {
+                text = g.has_fix ? `Fix, ${g.satellites || 0} satellites` : 'Connected, waiting for a fix';
+            } else if (d.gnss.in_use) {
+                text = 'In use by GPS';
+            } else if (d.gnss.sentences > 0) {
+                text = `Receiving on ${d.gnss.port}`;
+            } else {
+                text = 'Silent'; cls = 'pw-bad';
+            }
+            rows.push(_czRow('GNSS', text, cls));
+            if (d.gnss.console_conflict) {
+                rows.push(_czFix('gnss', 'Free the port for GPS',
+                    'Stops the serial login prompt now and removes the serial console from cmdline.txt (a backup is kept). GPS then works for wardriving.'));
+            }
+        }
+        if (d.lora) {
+            const l = d.lora;
+            rows.push(_czRow('Meshtastic', l.active ? 'Running on this device' : l.configured ? 'Set up, not running' : 'Not set up',
+                l.active ? 'pw-ok' : 'pw-muted'));
+            if (l.active) {
+                rows.push('<div class="pw-muted">The LoRa Cap is a Meshtastic node of its own. Open Mesh Nodes and connect: it is found at 127.0.0.1.</div>');
+            } else {
+                rows.push(_czFix('lora', l.configured ? 'Set up again' : 'Set up Meshtastic',
+                    'Installs meshtasticd, the Meshtastic firmware for Linux. It drives the LoRa radio directly, so no separate Meshtastic board is needed. Needs internet; takes a few minutes.'));
+            }
+        }
+        if (d.cap === 'subghz_nfc' && d.nfc_spi === false) {
+            rows.push(_czRow('NFC', 'Needs an overlay', 'pw-muted'));
+            rows.push('<div class="pw-muted">Add <code>dtoverlay=spi0-spidev2-gpio22-overlay</code> to /boot/firmware/config.txt and reboot.</div>');
+        }
+        const cam = d.camera || {};
+        rows.push(_czRow('Camera', cam.present ? `${cam.model || 'Detected'} ${cam.modes || ''}`.trim() : 'Not detected',
+            cam.present ? 'pw-ok' : 'pw-bad'));
+        if (!cam.present && cam.reason) {
+            rows.push(`<div class="pw-muted">${_czEsc(cam.reason.charAt(0).toUpperCase() + cam.reason.slice(1))}.</div>`);
+            if (cam.code === 'overlay' || cam.code === 'tools') {
+                rows.push(_czFix('camera', 'Set up the camera',
+                    'Installs the camera tools and enables the camera in config.txt (a backup is kept). Restart the CardputerZero afterwards.'));
+            } else if (cam.fix) {
+                rows.push(`<div class="pw-muted"><code>${_czEsc(cam.fix)}</code></div>`);
+            }
+        }
+        const t = d.task;
+        if (t && t.name) {
+            const state = t.running ? `${t.label}…` : (t.ok ? `${t.label}: done` : `${t.label}: failed`);
+            rows.push(`<div class="${t.running ? 'pw-muted' : t.ok ? 'pw-ok' : 'pw-bad'}" style="margin-top:8px">${_czEsc(state)}</div>`);
+            if (!t.running && t.log) rows.push(`<pre class="cz-log">${_czEsc(t.log)}</pre>`);
+        }
+    }
+    _cz.taskRunning = !!(d.task && d.task.running);
+    const summary = document.getElementById('cz-summary');
+    if (summary) summary.innerHTML = rows.join('');
+
+    const header = document.getElementById('cz-header');
+    if (header && Array.isArray(d.header)) {
+        header.innerHTML = d.header.map(p => {
+            const power = p.gpio == null;
+            const state = power ? '' : (p.function || '?') + (p.level == null ? '' : (p.level ? ' hi' : ' lo'));
+            const cls = power ? 'pwr' : (p.level ? 'hi' : '');
+            return `<div class="cz-pin ${cls}" title="${_czEsc(p.role)}"><b>${_czEsc(p.label)}</b><span>${_czEsc(state || p.role)}</span></div>`;
+        }).join('');
+    }
+}
+
+function fetchCameraStatus() {
+    networkAwareFetch('/api/camera/status')
+        .then(r => r.json())
+        .then(d => updateCameraView(d))
+        .catch(e => console.error('Error fetching camera status:', e));
+}
+
+function _cameraNote(text, bad) {
+    const note = document.getElementById('camera-note');
+    if (!note) return;
+    note.textContent = text || '';
+    note.className = bad ? 'pw-bad' : 'pw-muted';
+}
+
+function _renderCameraPhotos(photos) {
+    const section = document.getElementById('camera-photos-section');
+    const grid = document.getElementById('camera-photos');
+    if (!section || !grid) return;
+    photos = photos || [];
+    section.classList.toggle('hidden', photos.length === 0);
+    grid.innerHTML = photos.map(p => {
+        const url = '/api/camera/photo/' + encodeURIComponent(p.name);
+        return `<div class="cam-photo"><a href="${url}" target="_blank" rel="noopener"><img loading="lazy" src="${url}" alt="${_czEsc(p.name)}"></a>` +
+            `<button title="Delete" aria-label="Delete photo" onclick="deleteCameraPhoto('${_czEsc(p.name)}')">✕</button></div>`;
+    }).join('');
+}
+
+function updateCameraView(d) {
+    const panel = document.getElementById('camera-panel');
+    if (!panel) return;
+    if (!d || !d.supported) {
+        panel.classList.add('hidden');
+        if (_cam.live) toggleCameraLive();
+        return;
+    }
+    panel.classList.remove('hidden');
+    const model = document.getElementById('camera-model');
+    if (model) model.textContent = [d.model, d.modes].filter(Boolean).join(' · ');
+    if (d.error && !_cam.busy && !d.recording) _cameraNote(d.error, true);
+    _cam.rotation = d.rotation || 0;
+    _renderCameraPhotos(d.photos);
+    _renderCameraVideos(d.videos, d.converting, d.recording && d.recording.name);
+    _setCameraRecording(d.recording);
+}
+
+function _camSize(bytes) {
+    return bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(bytes / 1024)) + ' kB';
+}
+
+function _renderCameraVideos(videos, converting, recordingName) {
+    const section = document.getElementById('camera-videos-section');
+    const list = document.getElementById('camera-videos');
+    if (!section || !list) return;
+    videos = videos || [];
+    converting = converting || [];
+    section.classList.toggle('hidden', videos.length === 0);
+    // Rebuilding the list would stop a video that is playing.
+    const key = JSON.stringify([videos.map(v => v.name), converting, recordingName || '']);
+    if (key === _cam.videoKey) return;
+    _cam.videoKey = key;
+    list.innerHTML = videos.map(v => {
+        const url = '/api/camera/video/' + encodeURIComponent(v.name);
+        const name = _czEsc(v.name);
+        const busy = converting.indexOf(v.name) >= 0;
+        const mp4 = v.name.endsWith('.mp4');
+        const live = v.name === recordingName;
+        const state = live ? ' · recording…' : busy ? ' · converting to MP4…' : (mp4 ? '' : ' · AVI (download to play)');
+        return `<div class="cam-video">` +
+            (mp4 ? `<video controls playsinline preload="none" src="${url}"></video>` : '') +
+            `<span class="cam-video-name">${name}${live ? '' : ' · ' + _camSize(v.size)}${state}</span>` +
+            `<a class="pw-btn" href="${url}?download=1">Download</a>` +
+            `<button class="pw-btn" aria-label="Delete video" onclick="deleteCameraVideo('${name}')">Delete</button></div>`;
+    }).join('');
+}
+
+function _setCameraRecording(rec) {
+    const btn = document.getElementById('camera-record-btn');
+    _cam.recording = rec ? { since: Date.now() - (rec.seconds || 0) * 1000 } : null;
+    if (btn) {
+        btn.textContent = rec ? 'Stop recording' : 'Record video';
+        btn.classList.toggle('cam-rec', !!rec);
+    }
+    if (rec && !_cam.recTimer) {
+        _cam.recTimer = setInterval(_cameraRecTick, 1000);
+        _cameraRecTick();
+    } else if (!rec && _cam.recTimer) {
+        clearInterval(_cam.recTimer);
+        _cam.recTimer = null;
+    }
+}
+
+function _cameraRecTick() {
+    if (!_cam.recording) return;
+    const s = Math.max(0, Math.round((Date.now() - _cam.recording.since) / 1000));
+    _cameraNote('● Recording ' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'), true);
+}
+
+function toggleCameraRecording() {
+    const btn = document.getElementById('camera-record-btn');
+    if (_cam.busy) return;
+    const stopping = !!_cam.recording;
+    _cam.busy = true;
+    if (btn) btn.disabled = true;
+    networkAwareFetch('/api/camera/record', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: stopping ? 'stop' : 'start' })
+    })
+        .then(r => r.json())
+        .then(d => {
+            if (!d || !d.success) { _cameraNote((d && d.error) || 'Recording failed', true); return; }
+            _setCameraRecording(d.recording);
+            if (stopping) {
+                const v = d.video || {};
+                _cameraNote(v.name ? 'Saved ' + v.name + (v.note ? ' (' + v.note + ')' : '') : (v.note || 'Nothing was recorded'), !v.name);
+                _renderCameraVideos(d.videos, d.converting);
+            }
+        })
+        .catch(e => _cameraNote(String(e), true))
+        .finally(() => { _cam.busy = false; if (btn) btn.disabled = false; });
+}
+
+function deleteCameraVideo(name) {
+    networkAwareFetch('/api/camera/video/' + encodeURIComponent(name), { method: 'DELETE' })
+        .then(r => r.json())
+        .then(d => {
+            if (d && d.success) fetchCameraStatus();
+            else _cameraNote((d && d.error) || 'Could not delete the video', true);
+        })
+        .catch(e => console.error('Error deleting video:', e));
+}
+
+function openCameraFolder() {
+    showTab('files');
+    // After the tab's own first listing of '/', so that one cannot land on top.
+    setTimeout(() => loadFiles('/camera'), 400);
+}
+
+function flipCamera() {
+    networkAwareFetch('/api/camera/settings', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rotation: _cam.rotation === 180 ? 0 : 180 })
+    })
+        .then(r => r.json())
+        .then(d => {
+            if (d && d.success) { _cam.rotation = d.rotation; _cameraNote('Picture turned. New photos and videos use it.'); }
+            else _cameraNote((d && d.error) || 'Could not turn the picture', true);
+        })
+        .catch(e => _cameraNote(String(e), true));
+}
+
+function toggleCameraLive() {
+    const img = document.getElementById('camera-live');
+    const btn = document.getElementById('camera-live-btn');
+    if (!img) return;
+    _cam.live = !_cam.live;
+    if (_cam.live) {
+        // A fresh query string each time, or the browser reuses a dead stream.
+        img.src = '/api/camera/stream?t=' + Date.now();
+        img.classList.remove('hidden');
+        img.onerror = () => { if (_cam.live) { _cameraNote('The live view stopped.', true); toggleCameraLive(); } };
+        _cameraNote('');
+    } else {
+        // Dropping the src closes the connection, which lets the camera stop.
+        img.onerror = null;
+        img.removeAttribute('src');
+        img.classList.add('hidden');
+    }
+    if (btn) btn.textContent = _cam.live ? 'Stop live view' : 'Live view';
+}
+
+function takeCameraPhoto() {
+    const btn = document.getElementById('camera-photo-btn');
+    if (_cam.busy) return;
+    _cam.busy = true;
+    if (btn) btn.disabled = true;
+    _cameraNote('Taking photo…');
+    networkAwareFetch('/api/camera/photo', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+            if (d && d.success) {
+                _cameraNote('Saved ' + d.name);
+                _renderCameraPhotos(d.photos);
+            } else {
+                _cameraNote((d && d.error) || 'Photo failed', true);
+            }
+        })
+        .catch(e => _cameraNote(String(e), true))
+        .finally(() => { _cam.busy = false; if (btn) btn.disabled = false; });
+}
+
+function deleteCameraPhoto(name) {
+    networkAwareFetch('/api/camera/photo/' + encodeURIComponent(name), { method: 'DELETE' })
+        .then(r => r.json())
+        .then(d => { if (d && d.success) _renderCameraPhotos(d.photos); })
+        .catch(e => console.error('Error deleting photo:', e));
+}
+
+// ---- Cooling fan (System tab) ---------------------------------------------
+// /api/fan is a handful of sysfs reads, cheap enough for the 5 s system loop.
+// The curve inputs are only rebuilt when the trip values change, so a poll
+// never overwrites a number the user is typing.
+const _fan = { busy: false, curveKey: null, mode: null };
+
+function fetchFanStatus() {
+    networkAwareFetch('/api/fan')
+        .then(r => r.json())
+        .then(d => updateFanView(d))
+        .catch(e => console.error('Error fetching fan status:', e));
+}
+
+function _fanPresence(d) {
+    if (d.connected === true) return { short: 'Connected', cls: 'pw-ok' };
+    if (d.connected === false) return { short: 'Not detected', cls: 'pw-bad' };
+    return { short: d.has_tach ? 'Idle' : 'Unknown', cls: 'pw-muted' };
+}
+
+function updateFanView(d) {
+    const card = document.getElementById('fan-card');
+    const panel = document.getElementById('fan-panel');
+    if (!d || !d.supported) {
+        [card, panel].forEach(el => el && el.classList.add('hidden'));
+        return;
+    }
+    const p = _fanPresence(d);
+    const pct = d.percent != null ? d.percent : 0;
+
+    if (card) {
+        card.classList.remove('hidden');
+        const st = document.getElementById('fan-card-status');
+        const det = document.getElementById('fan-card-details');
+        const bar = document.getElementById('fan-card-progress');
+        if (st) {
+            st.textContent = d.rpm ? `${d.rpm} rpm` : p.short;
+            st.className = 'sys-stat-value ' + (d.rpm ? '' : p.cls);
+        }
+        if (det) det.textContent = `${pct} % · ${d.mode === 'manual' ? 'manual' : 'auto'}`;
+        if (bar) bar.style.width = pct + '%';
+    }
+    if (!panel) return;
+    panel.classList.remove('hidden');
+    const drv = document.getElementById('fan-driver');
+    if (drv) drv.textContent = d.driver || '';
+
+    // Live values
+    const tiles = [
+        ['Fan', p.short, p.cls],
+        ['Speed', d.has_tach ? `${d.rpm || 0} rpm` : 'n/a', ''],
+        ['Duty', `${pct} %`, ''],
+    ];
+    if (d.state != null && d.max_state) tiles.push(['Step', `${d.state} / ${d.max_state}`, '']);
+    if (d.temp_c != null) tiles.push(['SoC temp', `${d.temp_c} °C`, d.temp_c >= 80 ? 'pw-bad' : d.temp_c >= 70 ? 'pw-warn' : '']);
+    if (d.max_rpm) tiles.push(['Max rpm', `${d.max_rpm}`, '']);
+    if (d.health_percent != null) tiles.push(['Health', `${d.health_percent} %`, d.health_percent < 70 ? 'pw-warn' : 'pw-ok']);
+    let html = `<div class="pw-tiles">${tiles.map(([l, v, c]) =>
+        `<div class="pw-tile"><div class="pw-tile-label">${l}</div><div class="pw-tile-value ${c}">${escapeHtml(v)}</div></div>`).join('')}</div>`;
+    html += `<div class="pw-muted">${escapeHtml(d.connected_reason || '')}</div>`;
+    if (d.last_failsafe) {
+        html += `<div class="pw-warn" style="font-size:13px;margin-top:6px">${escapeHtml(d.last_failsafe.reason)}</div>`;
+    }
+    const live = document.getElementById('fan-live');
+    if (live) live.innerHTML = html;
+
+    // Control
+    const autoBtn = document.getElementById('fan-mode-auto');
+    const manBtn = document.getElementById('fan-mode-manual');
+    const manual = d.mode === 'manual';
+    _fan.mode = d.mode;
+    if (autoBtn) autoBtn.classList.toggle('fan-on', !manual);
+    if (manBtn) manBtn.classList.toggle('fan-on', manual);
+    [autoBtn, manBtn].forEach(b => { if (b) b.disabled = !d.can_control || _fan.busy; });
+    const slider = document.getElementById('fan-speed');
+    if (slider && manual && d.manual && document.activeElement !== slider) {
+        slider.value = d.manual.percent;
+        document.getElementById('fan-speed-val').textContent = d.manual.percent + ' %';
+    }
+    const testBtn = document.getElementById('fan-test-btn');
+    if (testBtn) { testBtn.disabled = !d.has_tach || _fan.busy; }
+    const note = document.getElementById('fan-control-note');
+    if (note) {
+        note.textContent = manual
+            ? `Manual: fixed at ${d.manual ? d.manual.percent : pct} %. Returns to automatic at ${d.failsafe_c} °C and on reboot.`
+            : 'Automatic: the kernel steps the fan along the curve below. Pick a speed and press Manual to override.';
+    }
+
+    // Curve
+    const sec = document.getElementById('fan-curve-section');
+    const trips = d.trips || [];
+    if (sec) sec.classList.toggle('hidden', !trips.length);
+    const key = JSON.stringify(trips.map(t => t.temp_c));
+    const box = document.getElementById('fan-curve');
+    if (box && key !== _fan.curveKey) {
+        _fan.curveKey = key;
+        box.innerHTML = trips.map((t, i) => `
+            <div class="fan-step" data-step="${i}">
+                <div class="pw-tile-label">Step ${i + 1}${t.percent != null ? ' → ' + t.percent + ' %' : ''}</div>
+                <input type="number" inputmode="decimal" min="30" max="85" step="0.5" value="${t.temp_c}"
+                       ${d.curve_writable ? '' : 'disabled'} aria-label="Step ${i + 1} temperature °C">
+                <div class="pw-muted">°C${t.hyst_c ? ' · off at −' + t.hyst_c : ''}</div>
+            </div>`).join('');
+    }
+    if (box) trips.forEach((t, i) => {
+        const el = box.querySelector(`[data-step="${i}"]`);
+        if (el) el.classList.toggle('fan-step-on', !!t.active);
+    });
+    const persist = document.getElementById('fan-curve-persist');
+    if (persist) {
+        persist.disabled = !d.can_persist;
+        persist.parentElement.title = d.can_persist ? 'Writes dtparam=fan_tempN to config.txt (backup kept)' : 'Pi 5 fan header only';
+        if (!persist.dataset.touched) persist.checked = !!d.persisted_curve;
+    }
+}
+
+async function _fanPost(url, body, okMsg) {
+    _fan.busy = true;
+    try {
+        const res = await postAPI(url, body);
+        if (res && res.success) {
+            if (okMsg) showNotification(okMsg, 'success');
+            _fan.curveKey = null;
+            updateFanView(res);
+        } else {
+            showNotification((res && res.error) || 'Fan request failed', 'error');
+        }
+        return res;
+    } catch (e) {
+        showNotification('Fan: ' + (e.message || e), 'error');
+    } finally {
+        _fan.busy = false;
+        fetchFanStatus();
+    }
+}
+
+function setFanAuto() {
+    return _fanPost('/api/fan/mode', { mode: 'auto' }, 'Fan back on automatic control');
+}
+
+function setFanManual() {
+    const percent = Number((document.getElementById('fan-speed') || {}).value || 50);
+    return _fanPost('/api/fan/mode', { mode: 'manual', percent }, `Fan fixed at ${percent} %`);
+}
+
+async function runFanSpinTest() {
+    const btn = document.getElementById('fan-test-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Spinning…'; }
+    const res = await _fanPost('/api/fan/test', {});
+    if (btn) btn.textContent = 'Spin test';
+    if (res && res.success && res.spin_test) {
+        const st = res.spin_test;
+        showNotification(st.connected ? `Fan OK — ${st.rpm} rpm at full speed` : 'No fan detected: 0 rpm at full speed',
+                         st.connected ? 'success' : 'error');
+    }
+}
+
+function saveFanCurve() {
+    const temps = Array.from(document.querySelectorAll('#fan-curve input')).map(el => Number(el.value));
+    const persistEl = document.getElementById('fan-curve-persist');
+    const persist = !!(persistEl && persistEl.checked && !persistEl.disabled);
+    return _fanPost('/api/fan/curve', { temps, persist },
+                    persist ? 'Fan curve applied and saved to config.txt' : 'Fan curve applied (until reboot)');
+}
+
+function resetFanCurve() {
+    const persistEl = document.getElementById('fan-curve-persist');
+    if (persistEl) { persistEl.checked = false; delete persistEl.dataset.touched; }
+    return _fanPost('/api/fan/curve', { reset: true }, 'Fan curve reset to defaults');
+}
+
+document.addEventListener('change', e => {
+    if (!e.target) return;
+    if (e.target.id === 'fan-curve-persist') e.target.dataset.touched = '1';
+    // Already manual: releasing the slider applies the new speed directly.
+    if (e.target.id === 'fan-speed' && _fan.mode === 'manual') setFanManual();
+});
+
+function updatePowerSystemView(d) {
+    const card = document.getElementById('power-card');
+    const panel = document.getElementById('power-detail-panel');
+    const testPanel = document.getElementById('power-test-panel');
+    if (!d || d.supported === false) {
+        // Off-Pi (no vcgencmd): nothing meaningful to show.
+        [card, panel, testPanel].forEach(el => el && el.classList.add('hidden'));
+        return;
+    }
+    const v = _powerVerdict(d);
+    const statusEl = document.getElementById('power-card-status');
+    const detailEl = document.getElementById('power-card-details');
+    if (card) card.classList.remove('hidden');
+    if (statusEl) { statusEl.textContent = v.short; statusEl.className = 'sys-stat-value ' + v.cls; }
+    if (detailEl) {
+        const inV = _pwInputVolts(d);
+        const bits = [];
+        if (inV != null) bits.push(inV.toFixed(2) + ' V in');
+        if (d.pmic && d.pmic.total_watts != null) bits.push(d.pmic.total_watts + ' W');
+        detailEl.textContent = bits.join(' · ') || ' ';
+    }
+    if (panel) {
+        panel.classList.remove('hidden');
+        const body = document.getElementById('power-detail-body');
+        if (body) body.innerHTML = buildPowerDetailHtml(d, { actions: true });
+    }
+    if (testPanel) {
+        testPanel.classList.remove('hidden');
+        if (!_powerTest.loaded) fetchPowerTestStatus();
+    }
 }
 
 function fetchSystemStatus() {
@@ -21184,8 +30579,11 @@ function updateSystemOverview(data) {
     const cpuProgress = document.getElementById('cpu-progress');
     
     if (cpuUsage) cpuUsage.textContent = `${data.cpu.percent}%`;
-    if (cpuDetails) cpuDetails.textContent = `${data.cpu.count} cores`;
-    if (cpuProgress) cpuProgress.style.width = `${data.cpu.percent}%`;
+    if (cpuDetails) {
+        const mhz = data.cpu.frequency && data.cpu.frequency.current;
+        cpuDetails.textContent = `${data.cpu.count} cores` + (mhz ? ` · ${(mhz / 1000).toFixed(1)} GHz` : '');
+    }
+    _sysBar(cpuProgress, data.cpu.percent);
     
     // Memory
     const memoryUsage = document.getElementById('memory-usage');
@@ -21194,7 +30592,7 @@ function updateSystemOverview(data) {
     
     if (memoryUsage) memoryUsage.textContent = `${data.memory.percent}%`;
     if (memoryDetails) memoryDetails.textContent = `${data.memory.used_formatted} / ${data.memory.total_formatted}`;
-    if (memoryProgress) memoryProgress.style.width = `${data.memory.percent}%`;
+    _sysBar(memoryProgress, data.memory.percent);
 
     // Swap (if reported)
     if (data.swap) {
@@ -21205,7 +30603,7 @@ function updateSystemOverview(data) {
 
         if (swapUsage) swapUsage.textContent = `${swapPercent}%`;
         if (swapDetails) swapDetails.textContent = `${data.swap.used_formatted} / ${data.swap.total_formatted}`;
-        if (swapProgress) swapProgress.style.width = `${swapPercent}%`;
+        _sysBar(swapProgress, swapPercent);
     }
     
     // Disk
@@ -21215,9 +30613,9 @@ function updateSystemOverview(data) {
     
     if (diskUsage) diskUsage.textContent = `${data.disk.percent}%`;
     if (diskDetails) diskDetails.textContent = `${data.disk.used_formatted} / ${data.disk.total_formatted}`;
-    if (diskProgress) diskProgress.style.width = `${data.disk.percent}%`;
+    _sysBar(diskProgress, data.disk.percent);
     
-    // Battery (PiSugar - only shown when connected)
+    // Battery (PiSugar or Waveshare UPS HAT - only shown when connected)
     const batteryCard = document.getElementById('battery-card');
     if (batteryCard) {
         if (data.battery) {
@@ -21227,7 +30625,6 @@ function updateSystemOverview(data) {
             const batteryUsage = document.getElementById('battery-usage');
             const batteryDetails = document.getElementById('battery-details');
             const batteryProgress = document.getElementById('battery-progress');
-            const batteryIcon = document.getElementById('battery-icon');
 
             if (batteryUsage) batteryUsage.textContent = `${lvl}%`;
             if (batteryDetails) {
@@ -21237,12 +30634,7 @@ function updateSystemOverview(data) {
             }
             if (batteryProgress) {
                 batteryProgress.style.width = `${lvl}%`;
-                batteryProgress.className = 'h-2 rounded-full transition-all duration-300 ' +
-                    (lvl <= 20 ? 'bg-red-500' : lvl <= 50 ? 'bg-yellow-500' : 'bg-emerald-500');
-            }
-            if (batteryIcon) {
-                batteryIcon.className = 'w-5 h-5 ' +
-                    (lvl <= 20 ? 'text-red-400' : lvl <= 50 ? 'text-yellow-400' : 'text-emerald-400');
+                batteryProgress.style.background = lvl <= 20 ? '#ef4444' : lvl <= 50 ? '#eab308' : '#10b981';
             }
         } else {
             batteryCard.classList.add('hidden');
@@ -21252,6 +30644,19 @@ function updateSystemOverview(data) {
     // Uptime
     const uptimeDisplay = document.getElementById('uptime-display');
     if (uptimeDisplay) uptimeDisplay.textContent = data.uptime.formatted;
+    const uptimeDetails = document.getElementById('uptime-details');
+    if (uptimeDetails && data.uptime.seconds != null) {
+        const since = new Date(Date.now() - data.uptime.seconds * 1000);
+        uptimeDetails.textContent = 'since ' + since.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+    }
+}
+
+// Stat-card bar: blue normally, amber past 75 %, red past 90 %.
+function _sysBar(el, pct) {
+    if (!el) return;
+    const p = Math.max(0, Math.min(100, Number(pct) || 0));
+    el.style.width = p + '%';
+    el.style.background = p >= 90 ? '#ef4444' : p >= 75 ? '#f59e0b' : '#3b82f6';
 }
 
 function updateProcessList(processes) {
@@ -21269,14 +30674,14 @@ function updateProcessList(processes) {
         const memoryPercent = (proc.memory_percent || 0).toFixed(1);
         
         html += `
-            <div class="flex items-center justify-between p-2 bg-slate-800 rounded text-sm">
-                <div class="flex-1 truncate">
-                    <span class="font-medium">${proc.name}</span>
-                    <span class="text-gray-400 ml-2">PID: ${proc.pid}</span>
+            <div class="flex items-center justify-between gap-3 p-2 bg-slate-800 rounded text-sm">
+                <div class="flex-1 min-w-0 truncate" title="PID ${escapeHtml(String(proc.pid))}">
+                    <span class="font-medium">${escapeHtml(String(proc.name || ''))}</span>
+                    <span class="text-gray-500 text-xs">${escapeHtml(String(proc.pid))}</span>
                 </div>
-                <div class="flex space-x-3 text-xs">
-                    <span class="text-blue-400">${cpuPercent}% CPU</span>
-                    <span class="text-green-400">${memoryPercent}% MEM</span>
+                <div class="flex gap-3 text-xs whitespace-nowrap" style="font-variant-numeric:tabular-nums">
+                    <span class="text-blue-400">CPU ${cpuPercent}%</span>
+                    <span class="text-green-400">MEM ${memoryPercent}%</span>
                 </div>
             </div>
         `;
@@ -21302,14 +30707,16 @@ function updateNetworkInterfaces(interfaces) {
         html += `
             <div class="border border-gray-700 rounded p-3">
                 <div class="flex items-center justify-between mb-2">
-                    <span class="font-medium">${iface.name}</span>
+                    <span class="font-medium">${escapeHtml(iface.name)}</span>
                     <span class="${statusColor} text-xs">${statusText}</span>
                 </div>
                 <div class="text-xs text-gray-400 space-y-1">
                     ${iface.speed > 0 ? `<div>Speed: ${iface.speed} Mbps</div>` : ''}
-                    ${iface.addresses.map(addr => 
-                        `<div>${addr.address} (${addr.family})</div>`
-                    ).join('')}
+                    ${iface.addresses.map(addr => {
+                        // psutil family numbers: 2 = IPv4, 10 = IPv6, 17 = MAC (AF_PACKET)
+                        const fam = { 2: 'IPv4', 10: 'IPv6', 17: 'MAC' }[addr.family] || String(addr.family);
+                        return `<div class="break-all"><span class="text-gray-500">${fam}</span> ${escapeHtml(addr.address)}</div>`;
+                    }).join('')}
                 </div>
             </div>
         `;
@@ -21326,18 +30733,17 @@ function updateNetworkStats(data) {
     
     // Connection summary
     html += `
-        <div class="bg-slate-800 rounded p-3">
-            <h4 class="font-medium mb-2">Connections</h4>
+        <div class="bg-slate-800 rounded p-3 min-w-0">
+            <h4 class="font-medium mb-2 text-sm">Connections</h4>
             <div class="text-2xl font-bold text-blue-400">${data.total_connections}</div>
-            <div class="text-xs text-gray-400">Total active</div>
         </div>
     `;
     
     // Interface statistics
     Object.entries(data.interfaces).slice(0, 4).forEach(([name, stats]) => {
         html += `
-            <div class="bg-slate-800 rounded p-3">
-                <h4 class="font-medium mb-2">${name}</h4>
+            <div class="bg-slate-800 rounded p-3 min-w-0">
+                <h4 class="font-medium mb-2 text-sm truncate" title="${escapeHtml(name)}">${escapeHtml(name)}</h4>
                 <div class="text-xs space-y-1">
                     <div class="flex justify-between">
                         <span class="text-gray-400">Sent:</span>
@@ -21376,6 +30782,9 @@ function formatSensorName(sensor) {
         'wifi': 'Wi-Fi',
         'pch': 'Chipset',
         'bat': 'Battery',
+        'rp1_adc': 'RP1',
+        'mt7921': 'USB Wi-Fi',
+        'mt7925': 'USB Wi-Fi',
     };
 
     const lower = sensor.toLowerCase().replace(/[_\-\s]+\d*$/, '').replace(/[_\-\s]+/g, '_');
@@ -21392,31 +30801,22 @@ function formatSensorName(sensor) {
 }
 
 function updateTemperatureDisplay(temperatures) {
-    const tempSection = document.getElementById('temperature-section');
-    const tempDisplay = document.getElementById('temperature-display');
-    
-    if (!tempSection || !tempDisplay) return;
-    
-    if (Object.keys(temperatures).length === 0) {
-        tempSection.classList.add('hidden');
-        return;
+    const valEl = document.getElementById('temp-usage');
+    const subEl = document.getElementById('temp-details');
+    if (!valEl) return;
+    const entries = Object.entries(temperatures || {});
+    if (!entries.length) { valEl.textContent = '--'; if (subEl) subEl.textContent = 'No sensors'; return; }
+    // Lead with the CPU sensor; list the rest underneath.
+    const cpuIdx = Math.max(0, entries.findIndex(([n]) => formatSensorName(n) === 'CPU'));
+    const [, cpuT] = entries[cpuIdx];
+    valEl.textContent = `${cpuT.toFixed(1)} °C`;
+    valEl.className = 'sys-stat-value ' + (cpuT >= 80 ? 'pw-bad' : cpuT >= 70 ? 'pw-warn' : '');
+    if (subEl) {
+        const rest = entries.filter((_, i) => i !== cpuIdx)
+            .map(([n, t]) => `${formatSensorName(n)} ${Math.round(t)}°`);
+        subEl.textContent = rest.length ? rest.join(' · ') : formatSensorName(entries[cpuIdx][0]);
+        subEl.title = subEl.textContent;
     }
-    
-    tempSection.classList.remove('hidden');
-    
-    let html = '';
-    Object.entries(temperatures).forEach(([sensor, temp]) => {
-        const tempColor = temp > 70 ? 'text-red-400' : temp > 50 ? 'text-yellow-400' : 'text-green-400';
-        
-        html += `
-            <div class="bg-slate-800 rounded p-3">
-                <h4 class="font-medium mb-1 text-sm">${formatSensorName(sensor)}</h4>
-                <div class="text-xl font-bold ${tempColor}">${temp.toFixed(1)}°C</div>
-            </div>
-        `;
-    });
-    
-    tempDisplay.innerHTML = html;
 }
 
 function sortProcesses(sortBy) {
@@ -21447,7 +30847,689 @@ function sortProcesses(sortBy) {
 function refreshSystemStatus() {
     fetchSystemStatus();
     fetchNetworkStats();
+    fetchPowerDetail();
+    fetchEdition();
     showSystemSuccess('System status refreshed');
+}
+
+// ── Ulfberht edition ("hidden switch") ──────────────────────────────────────
+// Reveals the System-tab edition card only on the security-distro base; on a
+// standard Raspberry Pi OS build the card stays hidden and nothing changes.
+let ulfArsenalSel = new Set();
+const _ULF_CHIP_OFF = 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12)';
+const _ULF_CHIP_ON = 'background:rgba(220,38,38,0.25);border:1px solid rgba(220,38,38,0.6)';
+function _ulfToolChip(t, selectable) {
+    const chip = document.createElement(selectable ? 'button' : 'span');
+    chip.className = 'ulf-chip text-xs px-2 py-0.5 rounded' + (selectable ? ' cursor-pointer' : '');
+    chip.style.cssText = _ULF_CHIP_OFF;
+    chip.title = (t.category || '') + ' · ' + (t.path || '');
+    chip.textContent = t.name || t.bin;
+    if (selectable) {
+        chip.type = 'button';
+        chip.dataset.bin = t.bin || '';
+        if (ulfArsenalSel.has(chip.dataset.bin)) chip.style.cssText = _ULF_CHIP_ON;
+        chip.onclick = () => ulfArsenalToggle(chip);
+    }
+    return chip;
+}
+function ulfArsenalToggle(chip) {
+    const bin = chip.dataset.bin; if (!bin) return;
+    if (ulfArsenalSel.has(bin)) { ulfArsenalSel.delete(bin); chip.style.cssText = _ULF_CHIP_OFF; }
+    else { ulfArsenalSel.add(bin); chip.style.cssText = _ULF_CHIP_ON; }
+    const c = document.getElementById('ulf-arsenal-sel-count'); if (c) c.textContent = ulfArsenalSel.size;
+}
+function ulfArsenalClearSel() {
+    ulfArsenalSel.clear();
+    document.querySelectorAll('#ulf-arsenal-tools .ulf-chip').forEach(ch => ch.style.cssText = _ULF_CHIP_OFF);
+    const c = document.getElementById('ulf-arsenal-sel-count'); if (c) c.textContent = '0';
+    const m = document.getElementById('ulf-arsenal-build-msg'); if (m) m.textContent = '';
+}
+// Build = GENERATE the playbook (server-side, not saved) and open it in the
+// editor below. Saving happens from the editor (ulfArsenalSaveEdited).
+function ulfArsenalBuild() {
+    const msg = document.getElementById('ulf-arsenal-build-msg');
+    const name = ((document.getElementById('ulf-arsenal-name') || {}).value || '').trim();
+    if (!ulfArsenalSel.size) { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Select at least one tool.'; } return; }
+    if (!name) { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Enter a playbook name.'; } return; }
+    if (msg) { msg.style.color = '#9ca3af'; msg.textContent = 'Generating…'; }
+    fetch('/api/ulfberht/playbooks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name, tools: [...ulfArsenalSel], preview: true }) })
+        .then(r => r.json()).then(d => {
+            if (d.success && d.spec) {
+                const ed = document.getElementById('ulf-arsenal-editor');
+                if (ed) ed.value = JSON.stringify(d.spec, null, 2);
+                const wrap = document.getElementById('ulf-arsenal-editor-wrap');
+                if (wrap) wrap.classList.remove('hidden');
+                if (msg) { msg.style.color = '#9ca3af'; msg.textContent = 'Generated — edit below, then Save.'; }
+                const sm = document.getElementById('ulf-arsenal-save-msg'); if (sm) sm.textContent = '';
+                if (ed) ed.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            } else if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || 'Build failed'; }
+        }).catch(e => { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Failed: ' + e; } });
+}
+
+function ulfArsenalCancelEdit() {
+    const wrap = document.getElementById('ulf-arsenal-editor-wrap'); if (wrap) wrap.classList.add('hidden');
+    const sm = document.getElementById('ulf-arsenal-save-msg'); if (sm) sm.textContent = '';
+}
+
+function ulfArsenalSaveEdited() {
+    const sm = document.getElementById('ulf-arsenal-save-msg');
+    const ed = document.getElementById('ulf-arsenal-editor');
+    const nameInput = ((document.getElementById('ulf-arsenal-name') || {}).value || '').trim();
+    let spec;
+    try { spec = JSON.parse((ed || {}).value || ''); }
+    catch (e) { if (sm) { sm.style.color = '#f87171'; sm.textContent = 'Invalid JSON: ' + e.message; } return; }
+    if (sm) { sm.style.color = '#9ca3af'; sm.textContent = 'Saving…'; }
+    fetch('/api/ulfberht/playbooks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: (spec && spec.name) || nameInput, playbook: spec }) })
+        .then(r => r.json()).then(d => {
+            if (d.success) {
+                if (sm) { sm.style.color = d.warning ? '#fbbf24' : '#4ade80';
+                    sm.textContent = d.warning ? ('Saved, but will not run until fixed: ' + d.warning)
+                        : ('Saved “' + (d.file || nameInput) + '” — now in the Engagements tab.'); }
+                if (!d.warning) { ulfArsenalCancelEdit(); ulfArsenalClearSel(); }
+                if (typeof ulfLoadPlaybooks === 'function') ulfLoadPlaybooks();
+            } else if (sm) { sm.style.color = '#f87171'; sm.textContent = d.error || 'Save failed'; }
+        }).catch(e => { if (sm) { sm.style.color = '#f87171'; sm.textContent = 'Failed: ' + e; } });
+}
+
+// Generate with AI: ask the server to build a copy-paste prompt (schema +
+// selected tools + the operator's instruction). No AI call here — the operator
+// pastes it into their own AI and pastes the JSON reply into the editor to Save.
+// Primary path: Ragnar calls the configured AI (Settings -> AI) and returns a
+// finished, validated playbook ready to Save. Falls back to the copy-paste
+// prompt only when no AI endpoint is configured.
+function ulfArsenalAiGenerate() {
+    const msg = document.getElementById('ulf-arsenal-ai-msg');
+    const btn = document.getElementById('ulf-arsenal-ai-gen-btn');
+    const instr = ((document.getElementById('ulf-arsenal-ai-instr') || {}).value || '').trim();
+    const name = ((document.getElementById('ulf-arsenal-name') || {}).value || '').trim();
+    if (!instr && !ulfArsenalSel.size) {
+        if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Describe what you want, or select at least one tool.'; }
+        return;
+    }
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+    if (msg) { msg.style.color = '#9ca3af'; msg.textContent = 'Generating with AI… (a local model can take a while)'; }
+    const done = () => { if (btn) { btn.disabled = false; btn.style.opacity = ''; } };
+    fetch('/api/ulfberht/playbooks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ai_generate: true, name: name, tools: [...ulfArsenalSel], instruction: instr }) })
+        .then(r => r.json()).then(d => {
+            done();
+            const ed = document.getElementById('ulf-arsenal-editor');
+            const ew = document.getElementById('ulf-arsenal-editor-wrap');
+            const lbl = document.getElementById('ulf-arsenal-editor-label');
+            if (d.success && d.spec) {
+                if (ed) ed.value = JSON.stringify(d.spec, null, 2);
+                if (lbl) lbl.innerHTML = '<b>AI-generated playbook</b> — review, then Save to Engagements (or Cancel):';
+                if (ew) ew.classList.remove('hidden');
+                const w = document.getElementById('ulf-arsenal-ai-wrap'); if (w) w.classList.add('hidden');
+                if (msg) { msg.style.color = '#4ade80'; msg.textContent = 'Generated “' + _esc(d.spec.name || '') + '” (' + (d.spec.steps || []).length + ' steps). Save it below.'; }
+                if (ed) ed.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            } else if (d.no_ai && d.prompt) {
+                // No AI configured — fall back to the copy-paste prompt.
+                const box = document.getElementById('ulf-arsenal-ai-prompt'); if (box) box.value = d.prompt;
+                const w = document.getElementById('ulf-arsenal-ai-wrap'); if (w) w.classList.remove('hidden');
+                if (ed && !ed.value.trim() && ew) { ew.classList.remove('hidden'); }
+                if (msg) { msg.style.color = '#fbbf24'; msg.textContent = 'No AI configured in Settings → AI — copy this prompt into your own AI, paste the JSON below, Save.'; }
+            } else if (d.raw) {
+                // AI replied but it wasn't a valid playbook — show it so it can be fixed.
+                if (ed) ed.value = d.raw;
+                if (lbl) lbl.textContent = "The AI's reply wasn't valid — fix the JSON and Save:";
+                if (ew) ew.classList.remove('hidden');
+                if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || 'Invalid AI reply'; }
+            } else if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || 'Generation failed'; }
+        }).catch(e => { done(); if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Failed: ' + e; } });
+}
+
+function ulfArsenalAiPrompt() {
+    const msg = document.getElementById('ulf-arsenal-ai-msg');
+    const instr = ((document.getElementById('ulf-arsenal-ai-instr') || {}).value || '').trim();
+    const name = ((document.getElementById('ulf-arsenal-name') || {}).value || '').trim();
+    if (!instr && !ulfArsenalSel.size) {
+        if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Describe what you want, or select at least one tool.'; }
+        return;
+    }
+    if (msg) { msg.style.color = '#9ca3af'; msg.textContent = 'Building prompt…'; }
+    fetch('/api/ulfberht/playbooks', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ai_prompt: true, name: name, tools: [...ulfArsenalSel], instruction: instr }) })
+        .then(r => r.json()).then(d => {
+            if (d.success && d.prompt) {
+                const box = document.getElementById('ulf-arsenal-ai-prompt');
+                if (box) box.value = d.prompt;
+                const wrap = document.getElementById('ulf-arsenal-ai-wrap');
+                if (wrap) wrap.classList.remove('hidden');
+                // Reveal the editor (empty) so the operator can paste the AI's JSON and Save.
+                const ed = document.getElementById('ulf-arsenal-editor');
+                if (ed && !ed.value.trim()) ed.value = '';
+                const ew = document.getElementById('ulf-arsenal-editor-wrap');
+                if (ew) ew.classList.remove('hidden');
+                if (msg) { msg.style.color = '#9ca3af'; msg.textContent = 'Prompt ready — copy it into your AI, paste the JSON below, Save.'; }
+                if (box) box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            } else if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || 'Could not build prompt'; }
+        }).catch(e => { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Failed: ' + e; } });
+}
+
+function ulfArsenalAiCopy() {
+    const box = document.getElementById('ulf-arsenal-ai-prompt');
+    const msg = document.getElementById('ulf-arsenal-ai-msg');
+    if (!box || !box.value) return;
+    const done = () => { if (msg) { msg.style.color = '#4ade80'; msg.textContent = 'Copied to clipboard.'; } };
+    const fallback = () => {   // clipboard API blocked (http / iframe) → select + execCommand
+        box.removeAttribute('readonly'); box.focus(); box.select();
+        try { document.execCommand('copy'); done(); }
+        catch (e) { if (msg) { msg.style.color = '#fbbf24'; msg.textContent = 'Select the text and copy manually.'; } }
+        box.setAttribute('readonly', 'readonly');
+        window.getSelection && window.getSelection().removeAllRanges();
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(box.value).then(done).catch(fallback);
+    } else { fallback(); }
+}
+let ulfEnabled = false;
+function fetchEdition(refresh) {
+    fetch('/api/edition' + (refresh ? '?refresh=1' : ''))
+        .then(r => r.ok ? r.json() : null)
+        .then(d => {
+            const on = d && (d.is_ulfberht || d.is_security_distro);
+            if (!on) return;  // standard build / stock Kali: everything stays hidden
+            ulfEnabled = true;
+            const card = document.getElementById('edition-card');
+            if (card) {
+                const nameEl = document.getElementById('edition-name');
+                if (nameEl && d.edition_name) nameEl.textContent = d.edition_name;
+                const baseEl = document.getElementById('edition-base');
+                if (baseEl) baseEl.textContent = d.base_pretty || '';
+                const nx = document.getElementById('edition-nexmon');
+                if (nx) nx.innerHTML = (d.nexmon && d.nexmon.available)
+                    ? '<span style="color:#4ade80">●</span> Nexmon ready — onboard Wi-Fi monitor mode &amp; frame injection available'
+                    : '<span style="color:#9ca3af">○</span> Nexmon not detected — use a USB adapter for monitor mode';
+                const tc = document.getElementById('edition-tool-count');
+                if (tc) tc.textContent = (d.tool_count || 0);
+                const tools = document.getElementById('edition-tools');
+                if (tools) {
+                    tools.innerHTML = '';
+                    (d.tools || []).forEach(t => tools.appendChild(_ulfToolChip(t)));
+                    if (!(d.tools || []).length) tools.innerHTML = '<span class="text-xs text-gray-500">none detected on PATH</span>';
+                }
+                card.classList.remove('hidden');
+            }
+            // Reveal the Engagements nav buttons (desktop + mobile)
+            document.querySelectorAll('.ulfberht-nav-btn').forEach(b => b.classList.remove('hidden'));
+            // Arsenal in the Pentest tab
+            const ars = document.getElementById('ulf-arsenal');
+            if (ars) {
+                const ac = document.getElementById('ulf-arsenal-count');
+                if (ac) ac.textContent = (d.tool_count || 0);
+                const at = document.getElementById('ulf-arsenal-tools');
+                if (at) {
+                    at.innerHTML = '';
+                    (d.tools || []).forEach(t => at.appendChild(_ulfToolChip(t, true)));
+                    if (!(d.tools || []).length) at.innerHTML = '<span class="text-xs text-gray-500">none detected on PATH</span>';
+                }
+                ars.classList.remove('hidden');
+            }
+            ulfLoadPlaybooks();
+            ulfLoadExtras();
+        })
+        .catch(() => { /* standard build / offline: ignore */ });
+}
+document.addEventListener('DOMContentLoaded', fetchEdition);
+
+// ── Ulfberht arsenal extras (on-demand recon/OSINT + WPA-Enterprise install) ─
+let _ulfExtrasPoll = null;
+let _ulfExtrasOpened = false;
+function ulfToggleExtras() {
+    const body = document.getElementById('ulf-extras-body');
+    const chev = document.getElementById('ulf-extras-chevron');
+    if (!body) return;
+    const open = body.classList.toggle('hidden') === false;
+    if (chev) chev.style.transform = open ? 'rotate(90deg)' : '';
+    if (open && !_ulfExtrasOpened) { _ulfExtrasOpened = true; ulfLoadExtras(); }
+}
+function _ulfRenderExtras(d) {
+    const card = document.getElementById('ulf-extras-card');
+    if (!d || d.enabled === false) { if (card) card.classList.add('hidden'); return; }
+    if (card) card.classList.remove('hidden');
+    const cnt = document.getElementById('ulf-extras-count');
+    if (cnt) cnt.textContent = '(' + (d.present || 0) + '/' + (d.total || 0) + ' installed)';
+    const list = document.getElementById('ulf-extras-list');
+    if (list) {
+        list.innerHTML = '';
+        (d.extras || []).forEach(t => {
+            const chip = document.createElement('span');
+            chip.className = 'ulf-chip text-xs px-2 py-0.5 rounded';
+            chip.style.cssText = t.present
+                ? 'background:rgba(22,163,74,0.2);border:1px solid rgba(22,163,74,0.5)'
+                : 'background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12)';
+            chip.title = (t.category || '') + (t.present ? ' · installed' : ' · not installed');
+            chip.textContent = (t.present ? '✓ ' : '○ ') + (t.name || t.bin);
+            list.appendChild(chip);
+        });
+    }
+    const btn = document.getElementById('ulf-extras-install-btn');
+    if (btn) {
+        const allIn = (d.total || 0) > 0 && (d.present || 0) >= (d.total || 0);
+        btn.classList.toggle('hidden', allIn || !!d.installing);
+        btn.disabled = !!d.installing;
+    }
+}
+function ulfLoadExtras() {
+    fetch('/api/ulfberht/extras').then(r => r.json()).then(d => {
+        _ulfRenderExtras(d);
+        if (d && d.installing) ulfStartExtrasPoll();  // an install is already running
+    }).catch(() => {});
+}
+function ulfInstallExtras() {
+    const msg = document.getElementById('ulf-extras-msg');
+    const btn = document.getElementById('ulf-extras-install-btn');
+    if (btn) { btn.disabled = true; btn.classList.add('hidden'); }
+    if (msg) { msg.textContent = ''; }
+    const prog = document.getElementById('ulf-extras-progress');
+    const logEl = document.getElementById('ulf-extras-log');
+    if (logEl) logEl.textContent = '';
+    if (prog) prog.classList.remove('hidden');
+    fetch('/api/ulfberht/extras/install', { method: 'POST' })
+        .then(r => r.json()).then(d => {
+            if (!d.success) {
+                if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || 'Install failed to start.'; }
+                if (prog) prog.classList.add('hidden');
+                ulfLoadExtras();
+                return;
+            }
+            if (!d.installing) {   // already all installed
+                if (msg) { msg.style.color = '#4ade80'; msg.textContent = d.message || 'All extras already installed.'; }
+                if (prog) prog.classList.add('hidden');
+                ulfLoadExtras();
+                return;
+            }
+            ulfStartExtrasPoll();
+        }).catch(() => {
+            if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Install request failed.'; }
+            if (prog) prog.classList.add('hidden');
+        });
+}
+function ulfStartExtrasPoll() {
+    if (_ulfExtrasPoll) return;
+    const prog = document.getElementById('ulf-extras-progress');
+    if (prog) prog.classList.remove('hidden');
+    _ulfExtrasPoll = setInterval(ulfPollExtras, 2000);
+    ulfPollExtras();
+}
+function ulfPollExtras() {
+    fetch('/api/ulfberht/extras/install-log').then(r => r.json()).then(d => {
+        if (!d.success) return;
+        const logEl = document.getElementById('ulf-extras-log');
+        if (logEl && typeof d.log === 'string') { logEl.textContent = d.log; logEl.scrollTop = logEl.scrollHeight; }
+        const st = document.getElementById('ulf-extras-status');
+        if (st) st.textContent = (d.present || 0) + '/' + (d.total || 0) + ' present';
+        _ulfRenderExtras(d);
+        if (!d.installing) {
+            clearInterval(_ulfExtrasPoll); _ulfExtrasPoll = null;
+            const msg = document.getElementById('ulf-extras-msg');
+            const done = (d.total || 0) > 0 && (d.present || 0) >= (d.total || 0);
+            if (msg) {
+                msg.style.color = done ? '#4ade80' : '#fbbf24';
+                msg.textContent = done
+                    ? '✓ All extras installed. Arsenal updated.'
+                    : '⚠ ' + (d.present || 0) + '/' + (d.total || 0) + ' installed — some packages weren’t available on this base (see log).';
+            }
+            fetchEdition(true);   // refresh the Pentest-tab arsenal with the new tools
+        }
+    }).catch(() => {});
+}
+
+// ── Ulfberht Engagements (marker-gated workflow engine) ─────────────────────
+let ulfPlaybooks = [];
+let ulfCurrentRun = null;
+let ulfPollTimer = null;
+let ulfRuns = [];
+
+let ulfCatalog = null;
+
+function ulfLoadPlaybooks() {
+    fetch('/api/ulfberht/playbooks').then(r => r.json()).then(d => {
+        if (!d.enabled) return;
+        ulfPlaybooks = d.playbooks || [];
+        ulfCatalog = d.catalog || ulfCatalog;
+        ulfRuns = d.runs || [];
+        ulfRenderHistory();
+        const sel = document.getElementById('ulf-playbook');
+        if (sel) {
+            const prev = sel.value;
+            sel.innerHTML = '';
+            ulfPlaybooks.filter(p => p.valid !== false).forEach(p => {
+                const o = document.createElement('option');
+                o.value = p.id;
+                o.textContent = p.name + (p.source === 'user' ? ' (custom)' : '');
+                sel.appendChild(o);
+            });
+            if (prev && ulfPlaybooks.some(p => p.id === prev && p.valid !== false)) sel.value = prev;
+            ulfPlaybookDesc();
+        }
+        ulfRenderLibrary();
+    }).catch(() => {});
+}
+
+function ulfToggleLibrary() {
+    const body = document.getElementById('ulf-library-body');
+    const chev = document.getElementById('ulf-lib-chevron');
+    if (!body) return;
+    const collapsed = body.classList.toggle('hidden');   // true => now hidden
+    if (chev) chev.style.transform = collapsed ? '' : 'rotate(90deg)';
+}
+
+function ulfRenderLibrary() {
+    const lib = document.getElementById('ulf-library');
+    const cnt = document.getElementById('ulf-lib-count');
+    if (!lib) return;
+    lib.innerHTML = '';
+    if (cnt) cnt.textContent = '· ' + ulfPlaybooks.length + ' playbook(s)';
+    ulfPlaybooks.forEach(p => {
+        const card = document.createElement('div');
+        card.className = 'p-3 rounded text-xs';
+        card.style.cssText = 'background:rgba(255,255,255,0.04);border:1px solid ' +
+            (p.valid === false ? 'rgba(248,113,113,0.5)' : 'rgba(255,255,255,0.10)');
+        const badge = p.source === 'builtin'
+            ? '<span class="px-1.5 py-0.5 rounded" style="background:rgba(96,165,250,0.18);color:#93c5fd">built-in</span>'
+            : '<span class="px-1.5 py-0.5 rounded" style="background:rgba(220,38,38,0.18);color:#fca5a5">custom</span>';
+        const phases = (p.phases || []).map(ph => '<span class="px-1 rounded" style="background:rgba(255,255,255,0.06)">' + _esc(ph) + '</span>').join(' ');
+        let body = '<div class="flex items-center justify-between gap-2"><b>' + _esc(p.name) + '</b>' + badge + '</div>' +
+            '<div class="text-gray-400 mt-1">' + _esc(p.description || '') + '</div>';
+        if (p.valid === false) {
+            body += '<div class="mt-1" style="color:#f87171">⚠ ' + _esc(p.error || 'invalid') + '</div>';
+        } else {
+            body += '<div class="mt-2 flex flex-wrap gap-1">' + phases + '</div>' +
+                '<div class="text-gray-500 mt-1">' + (p.steps || []).length + ' step(s)' +
+                (p.active_steps ? ' · ' + p.active_steps + ' active' : '') + '</div>';
+        }
+        body += '<div class="mt-2 flex gap-2">';
+        if (p.valid !== false) body += '<button onclick="ulfUsePlaybook(\'' + _esc(p.id) + '\')" class="bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded">Use</button>';
+        if (p.source === 'user') body += '<button onclick="ulfDeletePlaybook(\'' + _esc(p.id) + '\')" class="px-2 py-1 rounded" style="background:rgba(220,38,38,0.25);color:#fca5a5">Delete</button>';
+        body += '</div>';
+        card.innerHTML = body;
+        lib.appendChild(card);
+    });
+}
+
+function ulfUsePlaybook(id) {
+    const sel = document.getElementById('ulf-playbook');
+    if (sel) { sel.value = id; ulfPlaybookDesc(); }
+    const sc = document.getElementById('ulf-scope'); if (sc) { sc.focus(); sc.scrollIntoView({behavior:'smooth', block:'center'}); }
+}
+
+function ulfPlaybookDesc() {
+    const sel = document.getElementById('ulf-playbook');
+    const desc = document.getElementById('ulf-playbook-desc');
+    if (!sel || !desc) return;
+    const p = ulfPlaybooks.find(x => x.id === sel.value);
+    if (!p) { desc.textContent = ''; return; }
+    // Wireless playbooks take a monitor interface, not an IP scope — toggle the inputs.
+    const sw = document.getElementById('ulf-scope-wrap'), ww = document.getElementById('ulf-wireless-wrap');
+    if (sw && ww) { sw.classList.toggle('hidden', !!p.wireless); ww.classList.toggle('hidden', !p.wireless); }
+    const steps = (p.steps || []).map(s => s.phase + '/' + s.action + (s.active ? '*' : '')).join('  →  ');
+    desc.innerHTML = _esc(p.description || '') + '<br><span class="text-gray-600">' + _esc(steps) +
+        (p.active_steps ? '   ·   * = active step (runs when active assessment is on)' : '') + '</span>';
+}
+
+function ulfUploadPlaybook(input) {
+    const msg = document.getElementById('ulf-upload-msg');
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+        let obj;
+        try { obj = JSON.parse(reader.result); }
+        catch (e) { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Not valid JSON: ' + e.message; } input.value = ''; return; }
+        fetch('/api/ulfberht/playbooks', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name: file.name, playbook: obj})
+        }).then(r => r.json()).then(d => {
+            if (msg) {
+                if (d.success) { msg.style.color = d.warning ? '#fbbf24' : '#4ade80';
+                    msg.textContent = d.warning ? ('Saved, but will not run until fixed: ' + d.warning) : ('Saved ' + (d.file || file.name)); }
+                else { msg.style.color = '#f87171'; msg.textContent = d.error || 'Upload failed'; }
+            }
+            ulfLoadPlaybooks();
+        }).catch(e => { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Failed: ' + e; } });
+        input.value = '';
+    };
+    reader.readAsText(file);
+}
+
+function ulfDeletePlaybook(id) {
+    if (!confirm('Delete custom playbook "' + id + '"? (removes it from the engagement_playbooks folder)')) return;
+    fetch('/api/ulfberht/playbooks/' + encodeURIComponent(id), {method: 'DELETE'})
+        .then(r => r.json()).then(() => ulfLoadPlaybooks()).catch(() => {});
+}
+
+function ulfShowHelp() {
+    const pre = document.getElementById('ulf-help');
+    if (!pre) return;
+    if (!pre.classList.contains('hidden')) { pre.classList.add('hidden'); return; }
+    const cat = ulfCatalog || {};
+    const example = {
+        id: 'my-playbook', name: 'My Playbook', description: 'What this engagement does',
+        steps: [
+            {phase: 'discovery', action: 'nmap', params: {ports: 'top-100', service_version: true}},
+            {phase: 'diagnostics', action: 'posture'},
+            {phase: 'assessment', action: 'command', params: {tool: 'nikto', args: ['-host', '{web_urls}'], per_target: true}, active: true},
+            {phase: 'reporting', action: 'report'}
+        ]
+    };
+    let t = 'PLAYBOOK FORMAT (.json)\n\n' + JSON.stringify(example, null, 2) + '\n\n';
+    t += 'ACTIONS: ' + (cat.actions || []).map(a => a.action).join(', ') + '\n\n';
+    t += 'ALLOWLISTED TOOLS (command action): ' + (cat.tools || []).join(', ') + '\n\n';
+    t += 'ACTIVE TOOLS (run only with active assessment on): ' + (cat.active_tools || []).join(', ') + '\n\n';
+    t += 'PLACEHOLDERS: ' + (cat.placeholders || []).join(', ') + '\n\n';
+    t += 'Steps marked "active": true (and assessment actions) run only with active testing enabled.\n';
+    t += 'command args are validated: allowlisted tool only, no shell metacharacters, argv (never a shell).';
+    pre.textContent = t;
+    pre.classList.remove('hidden');
+}
+
+let ulfScopeTargets = null;   // set when a targets file is loaded
+function ulfLoadTargetsFile(input) {
+    const st = document.getElementById('ulf-scope-file-status');
+    const f = input.files && input.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+        // one target per line; strip blank lines and # comments
+        const lines = String(reader.result || '').split(/\r?\n/)
+            .map(l => l.replace(/#.*$/, '').trim()).filter(l => l.length);
+        if (!lines.length) { if (st) { st.style.color = '#f87171'; st.textContent = 'No targets found in file.'; } ulfScopeTargets = null; return; }
+        ulfScopeTargets = lines;
+        const sc = document.getElementById('ulf-scope');
+        if (sc) { sc.value = ''; sc.disabled = true; sc.placeholder = lines.length + ' targets from ' + f.name; }
+        if (st) { st.style.color = '#4ade80'; st.innerHTML = lines.length + ' targets from <b>' + _esc(f.name) + '</b> · <a onclick="ulfClearTargetsFile()" class="underline cursor-pointer">clear</a>'; }
+    };
+    reader.readAsText(f);
+}
+function ulfClearTargetsFile() {
+    ulfScopeTargets = null;
+    const sc = document.getElementById('ulf-scope'); if (sc) { sc.disabled = false; sc.placeholder = '192.168.1.0/24'; }
+    const st = document.getElementById('ulf-scope-file-status'); if (st) st.textContent = '';
+    const fi = document.getElementById('ulf-scope-file'); if (fi) fi.value = '';
+}
+
+function ulfStartRun() {
+    const pb = (document.getElementById('ulf-playbook') || {}).value;
+    const scope = ((document.getElementById('ulf-scope') || {}).value || '').trim();
+    const active = (document.getElementById('ulf-active') || {}).checked;
+    const msg = document.getElementById('ulf-run-msg');
+    const body = { playbook: pb, enable_active: active };
+    const sel = ulfPlaybooks.find(x => x.id === pb);
+    if (sel && sel.wireless) {
+        // Wireless engagement — monitor interface instead of an IP scope.
+        const iface = ((document.getElementById('ulf-iface') || {}).value || '').trim();
+        if (!iface) {
+            if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Enter a monitor interface (e.g. wlan1mon).'; }
+            return;
+        }
+        body.iface = iface;
+        const bssid = ((document.getElementById('ulf-bssid') || {}).value || '').trim();
+        const channel = ((document.getElementById('ulf-channel') || {}).value || '').trim();
+        if (bssid) body.bssid = bssid;
+        if (channel) body.channel = channel;
+    } else if (ulfScopeTargets && ulfScopeTargets.length) {
+        body.targets = ulfScopeTargets;
+    } else if (scope) {
+        body.scope = scope;
+    } else {
+        if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Enter a scope (IP / CIDR / host) or load a targets file.'; }
+        return;
+    }
+    if (msg) { msg.style.color = '#9ca3af'; msg.textContent = 'Starting…'; }
+    fetch('/api/ulfberht/run', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body)
+    }).then(r => r.json()).then(d => {
+        if (d.error) { if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error; } return; }
+        ulfCurrentRun = d.run_id;
+        if (msg) { msg.style.color = '#9ca3af'; msg.textContent = d.active_blocked
+            ? 'Started (active phase skipped — enable attacks in settings to run it).' : 'Started.'; }
+        document.getElementById('ulf-run-panel').classList.remove('hidden');
+        document.getElementById('ulf-run-id').textContent = d.run_id;
+        const pre = document.getElementById('ulf-report'); if (pre) pre.classList.add('hidden');
+        if (ulfPollTimer) clearTimeout(ulfPollTimer);
+        ulfPoll();
+    }).catch(e => { if (msg) { msg.style.color = '#f87171'; msg.textContent = 'Failed: ' + e; } });
+}
+
+function ulfPoll() {
+    if (!ulfCurrentRun) return;
+    fetch('/api/ulfberht/run/' + ulfCurrentRun).then(r => r.json()).then(d => {
+        if (d.error) return;
+        ulfRenderRun(d);
+        if (d.status === 'running') { ulfPollTimer = setTimeout(ulfPoll, 2500); }
+        else { ulfLoadPlaybooks(); }   // run finished → refresh persisted history
+    }).catch(() => { ulfPollTimer = setTimeout(ulfPoll, 4000); });
+}
+
+function ulfRenderRun(d) {
+    const st = document.getElementById('ulf-run-status');
+    if (st) {
+        const color = d.status === 'completed' ? '#4ade80' : (d.status === 'failed' ? '#f87171' : '#fbbf24');
+        st.innerHTML = '<span style="color:' + color + '">' + d.status + '</span>' + (d.phase ? ' · ' + d.phase : '');
+    }
+    const ph = document.getElementById('ulf-phases');
+    if (ph) {
+        ph.innerHTML = '';
+        ['discovery','diagnostics','assessment','reporting'].forEach(p => {
+            const done = (d.phases_done || []).includes(p);
+            const cur = d.phase === p && d.status === 'running';
+            const sp = document.createElement('span');
+            sp.className = 'px-2 py-0.5 rounded';
+            sp.style.cssText = 'border:1px solid ' + (done ? 'rgba(74,222,128,0.5)' : (cur ? 'rgba(251,191,36,0.6)' : 'rgba(255,255,255,0.12)'));
+            sp.textContent = (done ? '✓ ' : (cur ? '… ' : '')) + p;
+            ph.appendChild(sp);
+        });
+    }
+    // Live run log — plain text that grows as the run progresses. Stays pinned
+    // to the newest line unless the operator has scrolled up to read back.
+    const lg = document.getElementById('ulf-run-log');
+    if (lg) {
+        const lines = d.log || [];
+        if (lines.length) {
+            const atBottom = (lg.scrollHeight - lg.scrollTop - lg.clientHeight) < 24;
+            lg.textContent = lines.join('\n');
+            lg.classList.remove('hidden');
+            if (atBottom) lg.scrollTop = lg.scrollHeight;
+        } else {
+            lg.textContent = '';
+            lg.classList.add('hidden');
+        }
+    }
+    const fc = document.getElementById('ulf-finding-count');
+    if (fc) fc.textContent = (d.findings || []).length;
+    const fl = document.getElementById('ulf-findings');
+    if (fl) {
+        fl.innerHTML = '';
+        (d.findings || []).forEach(f => {
+            const col = {critical:'#f87171', high:'#f87171', medium:'#fbbf24', low:'#60a5fa', info:'#9ca3af'}[f.severity] || '#9ca3af';
+            const row = document.createElement('div');
+            row.className = 'text-xs p-2 rounded';
+            row.style.cssText = 'background:rgba(255,255,255,0.04)';
+            row.innerHTML = '<span style="color:' + col + '">[' + String(f.severity||'').toUpperCase() + ']</span> <b>' +
+                _esc(f.title) + '</b> — ' + _esc(f.host) + '<br><span class="text-gray-400">' +
+                _esc(f.detail) + (f.ref ? ' · ' + _esc(f.ref) : '') + '</span>' +
+                (f.remediation ? '<br><span style="color:#4ade80">↳ Fix: ' + _esc(f.remediation) + '</span>' : '');
+            fl.appendChild(row);
+        });
+        if (!(d.findings||[]).length) fl.innerHTML = '<span class="text-xs text-gray-500">no findings yet…</span>';
+    }
+    if (d.status === 'completed' || d.status === 'failed') {
+        const id = d.id;
+        const show = (elid, href) => {
+            const el = document.getElementById(elid);
+            if (!el) return;
+            if (href) el.href = href;
+            el.classList.remove('hidden');
+        };
+        show('ulf-report-html', '/api/ulfberht/report/' + id + '?format=html');
+        show('ulf-report-dl-html', '/api/ulfberht/report/' + id + '?format=html&download=1');
+        show('ulf-report-btn', null);
+        show('ulf-report-dl', '/api/ulfberht/report/' + id + '?download=1');
+    }
+}
+
+function ulfToggleHistory() {
+    const body = document.getElementById('ulf-history-body');
+    const chev = document.getElementById('ulf-hist-chevron');
+    if (!body) return;
+    const collapsed = body.classList.toggle('hidden');   // true => now hidden
+    if (chev) chev.style.transform = collapsed ? '' : 'rotate(90deg)';
+}
+
+function ulfRenderHistory() {
+    const list = document.getElementById('ulf-history');
+    const cnt = document.getElementById('ulf-hist-count');
+    if (cnt) cnt.textContent = '· ' + ulfRuns.length + ' run(s)';
+    if (!list) return;
+    list.innerHTML = '';
+    if (!ulfRuns.length) { list.innerHTML = '<span class="text-xs text-gray-500">No engagements yet.</span>'; return; }
+    ulfRuns.forEach(r => {
+        const col = r.status === 'completed' ? '#4ade80' : (r.status === 'failed' ? '#f87171' : '#fbbf24');
+        const when = r.started ? new Date(r.started * 1000).toLocaleString() : '';
+        const row = document.createElement('div');
+        row.className = 'flex items-center justify-between gap-2 text-xs p-2 rounded cursor-pointer hover:bg-slate-700';
+        row.style.cssText = 'background:rgba(255,255,255,0.04)';
+        row.onclick = () => ulfOpenRun(r.id);
+        row.innerHTML = '<span><b>' + _esc(r.playbook_name || r.id) + '</b> · ' + _esc(r.scope || '') +
+            '</span><span class="text-gray-400">' + _esc(when) +
+            ' · <span style="color:' + col + '">' + _esc(r.status || '') + '</span></span>';
+        list.appendChild(row);
+    });
+}
+
+function ulfOpenRun(id) {
+    if (!id) return;
+    if (ulfPollTimer) clearTimeout(ulfPollTimer);
+    ulfCurrentRun = id;
+    const panel = document.getElementById('ulf-run-panel'); if (panel) panel.classList.remove('hidden');
+    const idEl = document.getElementById('ulf-run-id'); if (idEl) idEl.textContent = id;
+    const pre = document.getElementById('ulf-report'); if (pre) pre.classList.add('hidden');
+    ['ulf-report-html','ulf-report-dl-html','ulf-report-btn','ulf-report-dl'].forEach(e => {
+        const el = document.getElementById(e); if (el) el.classList.add('hidden');
+    });
+    fetch('/api/ulfberht/run/' + id).then(r => r.json()).then(d => {
+        if (d.error) return;
+        ulfRenderRun(d);
+        if (d.status === 'running') ulfPoll();   // still live → resume polling
+    }).catch(() => {});
+    if (panel) panel.scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function _esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+
+function ulfLoadReport() {
+    if (!ulfCurrentRun) return;
+    fetch('/api/ulfberht/report/' + ulfCurrentRun).then(r => r.json()).then(d => {
+        const pre = document.getElementById('ulf-report');
+        if (pre && d.report_md) { pre.textContent = d.report_md; pre.classList.remove('hidden'); }
+    }).catch(() => {});
 }
 
 function showSystemSuccess(message) {
@@ -21839,6 +31921,63 @@ window.uploadFile = uploadFile;
 window.clearFiles = clearFiles;
 window.refreshFiles = refreshFiles;
 window.closeFileModal = closeFileModal;
+window.openSafe = openSafe;
+window.closeSafe = closeSafe;
+window.refreshSafe = refreshSafe;
+window.submitSafeSetup = submitSafeSetup;
+window.submitSafeUnlock = submitSafeUnlock;
+window.lockSafe = lockSafe;
+window.uploadToSafe = uploadToSafe;
+window.downloadSafeFile = downloadSafeFile;
+window.deleteSafeFile = deleteSafeFile;
+window.previewSafeFile = previewSafeFile;
+window.openImageFullscreen = openImageFullscreen;
+window.closeImageFullscreen = closeImageFullscreen;
+window.toggleSafeLock = toggleSafeLock;
+window.uploadOrOpenSafe = uploadOrOpenSafe;
+window.updateSafeHeaderButton = updateSafeHeaderButton;
+window.newFolder = newFolder;
+window.openSafeRoot = openSafeRoot;
+window.openSafeDir = openSafeDir;
+window.newSafeFolder = newSafeFolder;
+window.deleteSafeFolder = deleteSafeFolder;
+window.browseSafeFromModal = browseSafeFromModal;
+window.toggleSafeDestroy = toggleSafeDestroy;
+window.destroySafe = destroySafe;
+window.onVaultSliderInput = onVaultSliderInput;
+window.fileGoBack = fileGoBack;
+window.fileGoUp = fileGoUp;
+window.renameFsEntry = renameFsEntry;
+window.renameSafeFile = renameSafeFile;
+window.renameSafeFolder = renameSafeFolder;
+window.showMeshView = showMeshView;
+window.loadMeshShare = loadMeshShare;
+window.shareUploadFiles = shareUploadFiles;
+window.shareUnshare = shareUnshare;
+window.openShareDest = openShareDest;
+window.closeShareDest = closeShareDest;
+window.shareDestBack = shareDestBack;
+window.shareDestLoad = shareDestLoad;
+window.shareDoFetch = shareDoFetch;
+window.xferPickComputerFile = xferPickComputerFile;
+window.xferSetReceive = xferSetReceive;
+window.xferInboxSave = xferInboxSave;
+window.xferInboxDiscard = xferInboxDiscard;
+window.sendFsFile = sendFsFile;
+window.sendVaultFile = sendVaultFile;
+window.moveFsEntry = moveFsEntry;
+window.moveVaultFile = moveVaultFile;
+window.moveVaultFolder = moveVaultFolder;
+window.moveModalLoad = moveModalLoad;
+window.moveModalBack = moveModalBack;
+window.closeMoveModal = closeMoveModal;
+window.doMove = doMove;
+window.openXferPicker = openXferPicker;
+window.closeXferPicker = closeXferPicker;
+window.xferPickerBack = xferPickerBack;
+window.xferPickerLoad = xferPickerLoad;
+window.xferSendPath = xferSendPath;
+window.xferSendVault = xferSendVault;
 window.openLootFile = openLootFile;
 
 // System Monitoring Functions
@@ -21959,6 +32098,79 @@ async function loadThreatIntelData() {
     }
 }
 
+// --- Distro revision-aware CVE enrichment (issue #1051) ----------------------
+// Each finding may carry a distro tracker tag. Colours are inline on purpose:
+// the Tailwind build is pruned and most "/20" tints are not in it.
+const DISTRO_BADGES = {
+    'distro-fixed':        { label: 'Distro fixed',  bg: 'rgba(34,197,94,0.18)',  fg: '#86efac' },
+    'distro-not-affected': { label: 'Not affected',  bg: 'rgba(34,197,94,0.18)',  fg: '#86efac' },
+    'distro-deferred':     { label: 'Fix deferred',  bg: 'rgba(245,158,11,0.18)', fg: '#fcd34d' },
+    'distro-open':         { label: 'Distro: open',  bg: 'rgba(239,68,68,0.20)',  fg: '#fca5a5' },
+    'exploit-ref':         { label: 'Exploit ref',   bg: 'rgba(148,163,184,0.18)', fg: '#cbd5e1' }
+};
+const vulnDetailRegistry = {};
+
+function distroEsc(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function distroBadgesHtml(vuln) {
+    let html = '';
+    if (vuln.kev) {
+        html += '<span class="px-2 py-0.5 rounded text-xs font-semibold" style="background:#b91c1c;color:#fff" title="In the CISA Known Exploited Vulnerabilities catalogue">CISA KEV</span>';
+    }
+    const badge = DISTRO_BADGES[vuln.distro_status];
+    if (badge) {
+        const note = vuln.distro && vuln.distro.note ? distroEsc(vuln.distro.note) : '';
+        html += `<span class="px-2 py-0.5 rounded text-xs font-semibold" style="background:${badge.bg};color:${badge.fg}" title="${note}">${badge.label}</span>`;
+    }
+    return html;
+}
+
+function renderGroupedVulnRow(vuln) {
+    const severityColors = { 'critical': 'red', 'high': 'orange', 'medium': 'yellow', 'low': 'blue' };
+    const color = severityColors[vuln.severity] || 'gray';
+    const vulnText = vuln.vulnerability.length > 100 ?
+        vuln.vulnerability.substring(0, 100) + '...' :
+        vuln.vulnerability;
+    vulnDetailRegistry[vuln.id] = vuln;
+    const note = vuln.distro && vuln.distro.note && DISTRO_BADGES[vuln.distro_status]
+        ? `<div class="text-xs text-slate-400 mt-1 break-words">${distroEsc(vuln.distro.note)}</div>` : '';
+    return `
+        <div class="bg-slate-800/30 rounded p-3 hover:bg-slate-800/50 transition-colors">
+            <div class="flex items-start justify-between">
+                <div class="flex-1 min-w-0">
+                    <div class="flex flex-wrap items-center gap-2 mb-1">
+                        <span class="bg-${color}-500/20 text-${color}-300 px-2 py-0.5 rounded text-xs font-semibold uppercase">${vuln.severity}</span>
+                        ${distroBadgesHtml(vuln)}
+                        <span class="text-slate-400 text-xs">${vuln.service}:${vuln.port}</span>
+                    </div>
+                    <div class="text-sm text-white font-mono break-all">${vulnText}</div>
+                    ${note}
+                </div>
+                <button onclick="showVulnerabilityDetailsById('${distroEsc(vuln.id)}')"
+                        class="ml-2 text-Ragnar-400 hover:text-Ragnar-300 text-xs">
+                    Details
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+function showVulnerabilityDetailsById(id) {
+    const vuln = vulnDetailRegistry[id];
+    if (vuln) showVulnerabilityDetails(vuln);
+}
+
+function toggleSuppressedVulns(hostId) {
+    const list = document.getElementById(`${hostId}-suppressed`);
+    const btn = document.getElementById(`${hostId}-suppressed-toggle`);
+    if (!list || !btn) return;
+    const hidden = list.classList.toggle('hidden');
+    btn.textContent = (hidden ? 'Show ' : 'Hide ') + btn.getAttribute('data-label');
+}
+
 // Display grouped vulnerabilities by host
 function displayGroupedVulnerabilities(data) {
     const container = document.getElementById('grouped-vulnerabilities-container');
@@ -22002,14 +32214,29 @@ function displayGroupedVulnerabilities(data) {
     
     // Build HTML for each host group
     let html = '';
+    const totalSuppressed = data.total_suppressed || 0;
+    if (totalSuppressed > 0) {
+        html += `
+            <div class="glass rounded-lg p-4 text-sm text-slate-300" style="border-left:3px solid #22c55e">
+                <span class="font-semibold" style="color:#86efac">${totalSuppressed} finding${totalSuppressed === 1 ? '' : 's'} hidden</span>
+                — already fixed by the distro, not affecting its package, or exploit references that name no CVE.
+                They are tagged, not deleted: open a host's details to review them.
+            </div>
+        `;
+    }
     data.grouped_vulnerabilities.forEach((hostData, index) => {
         const severityCounts = hostData.severity_counts;
         const vulnCount = hostData.total_vulnerabilities;
+        const suppressedCount = hostData.suppressed_count || 0;
+        const visibleVulns = hostData.vulnerabilities.filter(v => !v.suppressed);
+        const suppressedVulns = hostData.vulnerabilities.filter(v => v.suppressed);
         
         // Determine risk level color
         let riskColor = 'blue';
         let riskLabel = 'Low Risk';
-        if (severityCounts.critical > 0) {
+        if (vulnCount === 0 && suppressedCount > 0) {
+            riskLabel = 'No Open Findings';
+        } else if (severityCounts.critical > 0) {
             riskColor = 'red';
             riskLabel = 'Critical Risk';
         } else if (severityCounts.high > 5) {
@@ -22034,7 +32261,7 @@ function displayGroupedVulnerabilities(data) {
                             <h3 class="text-2xl font-bold text-white">${hostData.ip}</h3>
                             <p class="text-sm text-slate-400">
                                 <span class="bg-${riskColor}-500/20 text-${riskColor}-300 px-2 py-1 rounded text-xs font-semibold">${riskLabel}</span>
-                                <span class="ml-2">${vulnCount} Vulnerabilities Found</span>
+                                <span class="ml-2">${vulnCount} Vulnerabilities Found${suppressedCount > 0 ? ` · ${suppressedCount} suppressed` : ''}</span>
                             </p>
                         </div>
                     </div>
@@ -22079,39 +32306,20 @@ function displayGroupedVulnerabilities(data) {
                 <!-- Detailed Vulnerabilities (Initially Hidden) -->
                 <div id="host-${index}-details" class="hidden mt-4">
                     <div class="border-t border-slate-700 pt-4">
-                        <h4 class="text-lg font-semibold mb-3 text-white">All Vulnerabilities (${vulnCount})</h4>
+                        <h4 class="text-lg font-semibold mb-3 text-white">${suppressedCount > 0 ? 'Open Findings' : 'All Vulnerabilities'} (${vulnCount})</h4>
                         <div class="space-y-2 max-h-96 overflow-y-auto scrollbar-thin">
-                            ${hostData.vulnerabilities.map(vuln => {
-                                const severityColors = {
-                                    'critical': 'red',
-                                    'high': 'orange',
-                                    'medium': 'yellow',
-                                    'low': 'blue'
-                                };
-                                const color = severityColors[vuln.severity] || 'gray';
-                                const vulnText = vuln.vulnerability.length > 100 ? 
-                                    vuln.vulnerability.substring(0, 100) + '...' : 
-                                    vuln.vulnerability;
-                                
-                                return `
-                                    <div class="bg-slate-800/30 rounded p-3 hover:bg-slate-800/50 transition-colors">
-                                        <div class="flex items-start justify-between">
-                                            <div class="flex-1">
-                                                <div class="flex items-center space-x-2 mb-1">
-                                                    <span class="bg-${color}-500/20 text-${color}-300 px-2 py-0.5 rounded text-xs font-semibold uppercase">${vuln.severity}</span>
-                                                    <span class="text-slate-400 text-xs">${vuln.service}:${vuln.port}</span>
-                                                </div>
-                                                <div class="text-sm text-white font-mono">${vulnText}</div>
-                                            </div>
-                                            <button onclick='showVulnerabilityDetails(${JSON.stringify(vuln).replace(/'/g, "\\'")})' 
-                                                    class="ml-2 text-Ragnar-400 hover:text-Ragnar-300 text-xs">
-                                                Details
-                                            </button>
-                                        </div>
-                                    </div>
-                                `;
-                            }).join('')}
+                            ${visibleVulns.length ? visibleVulns.map(renderGroupedVulnRow).join('')
+                                : '<div class="text-sm text-slate-400">No open findings on this host.</div>'}
                         </div>
+                        ${suppressedCount > 0 ? `
+                        <div class="mt-4">
+                            <button id="host-${index}-suppressed-toggle" data-label="${suppressedCount} suppressed (distro-fixed / not affected / exploit refs)"
+                                    onclick="toggleSuppressedVulns('host-${index}')"
+                                    class="text-sm text-Ragnar-400 hover:text-Ragnar-300 text-left">Show ${suppressedCount} suppressed (distro-fixed / not affected / exploit refs)</button>
+                            <div id="host-${index}-suppressed" class="hidden space-y-2 max-h-96 overflow-y-auto scrollbar-thin mt-2 opacity-60">
+                                ${suppressedVulns.map(renderGroupedVulnRow).join('')}
+                            </div>
+                        </div>` : ''}
                     </div>
                 </div>
             </div>
@@ -22227,6 +32435,23 @@ function showVulnerabilityDetails(vuln) {
                 <div class="text-sm text-slate-400 mb-1">Status</div>
                 <div class="text-white capitalize">${vuln.status}</div>
             </div>
+
+            ${vuln.distro ? `
+            <div class="bg-slate-800/50 rounded-lg p-4">
+                <div class="text-sm text-slate-400 mb-2">Distro Security Tracker</div>
+                <div class="flex flex-wrap items-center gap-2 mb-2">${distroBadgesHtml(vuln) || '<span class="text-slate-300 text-sm">Unverified</span>'}</div>
+                ${vuln.distro.note ? `<div class="text-white text-sm break-words mb-2">${distroEsc(vuln.distro.note)}</div>` : ''}
+                <div class="text-xs text-slate-400 break-all">
+                    ${[['Distro', [vuln.distro.distro, vuln.distro.release].filter(Boolean).join(' / ')],
+                       ['Package', vuln.distro.package],
+                       ['Host version', vuln.distro.host_version],
+                       ['Fixed in', vuln.distro.fixed_version],
+                       ['Checked', vuln.distro.checked]]
+                        .filter(row => row[1])
+                        .map(row => `<div>${row[0]}: <span class="text-slate-300 font-mono">${distroEsc(row[1])}</span></div>`).join('')}
+                </div>
+                ${vuln.distro.tracker_url && /^https:\/\//.test(vuln.distro.tracker_url) ? `<a href="${distroEsc(vuln.distro.tracker_url)}" target="_blank" rel="noopener noreferrer" class="text-blue-400 hover:text-blue-300 text-sm underline">View on the distro tracker</a>` : ''}
+            </div>` : ''}
         </div>
     `;
     
@@ -22387,7 +32612,7 @@ function updateEnrichedFindingsTable(findings) {
                             <p>Threat intelligence enrichment requires vulnerability discoveries first.</p>
                             <p class="text-cyan-400">📋 Steps to generate threat intelligence:</p>
                             <ol class="text-left text-xs space-y-1 mt-2">
-                                <li>1. Wait for network discovery to complete (${document.getElementById('target-count')?.textContent || '0'} hosts found)</li>
+                                <li>1. Wait for network discovery to complete (${escapeHtml(document.getElementById('target-count')?.textContent || '0')} hosts found)</li>
                                 <li>2. Run vulnerability scans on discovered hosts</li>
                                 <li>3. Threat intelligence will enrich discovered vulnerabilities</li>
                             </ol>
@@ -22672,12 +32897,41 @@ let aiInsightsCache = {
     ttl: 3600000 // 1 hour in milliseconds
 };
 
-// Load AI status and insights
-async function loadAIInsights() {
+// The server computes insights in the background and returns status:'computing'
+// until the first run lands, so the page polls rather than blocking on the slow
+// generation (which is what timed out on Pi Zeros). This tracks that poll.
+let _aiInsightsPoll = { timer: null, attempts: 0, max: 50 }; // ~50 × 6s ≈ 5 min
+function _aiClearPoll() { if (_aiInsightsPoll.timer) { clearTimeout(_aiInsightsPoll.timer); _aiInsightsPoll.timer = null; } }
+function _aiSchedulePoll() {
+    _aiClearPoll();
+    if (_aiInsightsPoll.attempts >= _aiInsightsPoll.max) {
+        // Budget exhausted — don't sit on "Analyzing…" forever; surface a retry.
+        const errHtml = '<span class="text-amber-400">Still working — the AI service is taking longer than usual.</span> '
+            + '<button onclick="refreshAIInsights()" class="ml-1 underline text-purple-300 hover:text-purple-200">Check again</button>';
+        ['ai-network-summary', 'ai-vuln-summary', 'ai-weakness-summary'].forEach(id => {
+            const el = document.getElementById(id); if (el) el.innerHTML = errHtml;
+        });
+        return;
+    }
+    _aiInsightsPoll.attempts++;
+    _aiInsightsPoll.timer = setTimeout(() => loadAIInsights(), 6000);
+}
+// Friendly "still working" state for the first run (no prior result to show).
+function _aiShowComputing() {
+    const msg = '<span class="text-purple-300">Analyzing…</span> '
+        + '<span class="text-gray-500 text-xs">first run can take up to a minute on small boards.</span>';
+    ['ai-network-summary', 'ai-vuln-summary', 'ai-weakness-summary'].forEach(id => {
+        const el = document.getElementById(id); if (el) el.innerHTML = msg;
+    });
+}
+
+// Load AI status and insights. `force` re-runs the server-side generation
+// (used by the Refresh button) and bypasses the client cache.
+async function loadAIInsights(force = false) {
     try {
         // Check client-side cache first
         const now = Date.now();
-        if (aiInsightsCache.data && aiInsightsCache.timestamp) {
+        if (!force && aiInsightsCache.data && aiInsightsCache.timestamp) {
             const age = now - aiInsightsCache.timestamp;
             if (age < aiInsightsCache.ttl) {
                 // Use cached data - don't make API call
@@ -22686,7 +32940,7 @@ async function loadAIInsights() {
                 return;
             }
         }
-        
+
         // First check AI status
     const statusResponse = await networkAwareFetch('/api/ai/status');
         const status = await statusResponse.json();
@@ -22698,37 +32952,325 @@ async function loadAIInsights() {
             // Show configuration message
             if (aiSection) aiSection.style.display = 'none';
             if (aiNotConfigured) aiNotConfigured.style.display = 'block';
+            updateRagnarChatAvailability(false, status);
             // Clear cache
             aiInsightsCache.data = null;
             aiInsightsCache.timestamp = null;
             return;
         }
-        
+
         // Show AI insights section
         if (aiSection) aiSection.style.display = 'block';
         if (aiNotConfigured) aiNotConfigured.style.display = 'none';
+        updateRagnarChatAvailability(true, status);
         
-        // Update model name
+        // Update model name — adapt the heading and the footer to whichever
+        // model is actually configured (self-hosted tag or OpenAI). When the
+        // self-hosted endpoint has dropped and we're running on the cloud
+        // fallback, make that visible rather than showing a model that isn't
+        // answering.
+        const fallback = Boolean(status.fallback_active);
+        const shownModel = status.model || 'AI';
+        const headingModel = document.getElementById('ai-insights-model');
+        if (headingModel) {
+            headingModel.textContent = fallback ? `${shownModel} → OpenAI fallback` : shownModel;
+        }
         const modelName = document.getElementById('ai-model-name');
         if (modelName && status.model) {
-            modelName.textContent = status.model;
+            modelName.textContent = fallback ? `${shownModel} (OpenAI fallback active)` : shownModel;
+            modelName.className = fallback
+                ? 'text-amber-400 font-semibold'
+                : 'text-purple-400 font-semibold';
         }
         
-        // Load comprehensive insights
-        console.log('Fetching fresh AI insights from server...');
-    const insightsResponse = await networkAwareFetch('/api/ai/insights');
-        const insights = await insightsResponse.json();
-        
-        // Cache the insights
+        // Fetch insights. The server computes them in the BACKGROUND and answers
+        // immediately, so this request is quick — a short timeout is right, and a
+        // real timeout now means a genuine connectivity problem, not slow AI.
+        console.log('Fetching AI insights from server...');
+        if (force) { _aiInsightsPoll.attempts = 0; _aiShowComputing(); }
+
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 20000);
+        let insights;
+        try {
+            const url = '/api/ai/insights' + (force ? '?refresh=1' : '');
+            const insightsResponse = await networkAwareFetch(url, { signal: ctrl.signal });
+            if (!insightsResponse.ok) throw new Error(`HTTP ${insightsResponse.status}`);
+            insights = await insightsResponse.json();
+        } finally {
+            clearTimeout(timer);
+        }
+
+        if (insights.status === 'computing') {
+            // First run (or a forced refresh) is still generating server-side.
+            // Show any prior result meanwhile, else a friendly "Analyzing…", and
+            // keep polling until the completed result lands. Don't cache this.
+            const hasData = !!(insights.network_summary || insights.vulnerability_analysis
+                || insights.weakness_analysis || insights.posture_analysis);
+            if (hasData) displayAIInsights(insights);
+            else _aiShowComputing();
+            _aiSchedulePoll();
+            return;
+        }
+
+        // Completed result — stop polling, cache and display it. If some analyses
+        // failed (rate-limited on a shared key, etc.), keep the cache short so it
+        // retries soon instead of showing a half-empty card for the full hour.
+        _aiClearPoll();
+        _aiInsightsPoll.attempts = 0;
         aiInsightsCache.data = insights;
         aiInsightsCache.timestamp = now;
-        
+        aiInsightsCache.ttl = (insights.failed && insights.failed.length) ? 120000 : 3600000;
+
         displayAIInsights(insights);
-        
+
     } catch (error) {
         console.error('Error loading AI insights:', error);
-        // Silently fail - don't disrupt the dashboard if AI is unavailable
+        _aiClearPoll();
+        // Don't leave the card stuck on a loading spinner — show what happened
+        // on every section and offer a retry. Cache stays empty so the next
+        // load tries again.
+        aiInsightsCache.data = null;
+        aiInsightsCache.timestamp = null;
+        const why = error && error.name === 'AbortError'
+            ? 'The AI service did not respond.'
+            : 'Could not reach the AI service.';
+        const errHtml = '<span class="text-amber-400">' + _esc(why) + '</span> '
+            + '<button onclick="refreshAIInsights()" class="ml-1 underline text-purple-300 hover:text-purple-200">Retry</button>';
+        ['ai-network-summary', 'ai-vuln-summary', 'ai-weakness-summary'].forEach(id => {
+            const el = document.getElementById(id); if (el) el.innerHTML = errHtml;
+        });
     }
+}
+
+// ============================================================================
+// RAGNAR CHAT ASSISTANT (dashboard)
+// A conversational assistant that answers from the docs/ folder and can take
+// real actions (start scans, read results) via /api/ai/chat. Shown only when
+// AI is enabled + configured; gated by updateRagnarChatAvailability(), called
+// from the AI status check in loadAIInsights().
+// ============================================================================
+let _ragnarChatHistory = [];   // [{role:'user'|'assistant', content}]
+let _ragnarChatBusy = false;
+let _ragnarChatGreeted = false;
+
+// Show/hide the floating chat launcher based on AI status, and reflect the
+// active model in the panel header.
+let ragnarChatAiReady = false;   // AI is enabled and configured
+let ragnarChatAllowed = true;    // Config: "Show chat assistant"
+
+function updateRagnarChatAvailability(available, status) {
+    ragnarChatAiReady = available;
+    if (status && typeof status.chat_enabled === 'boolean') {
+        ragnarChatAllowed = status.chat_enabled;
+    }
+    const root = document.getElementById('ragnar-chat');
+    if (!root) return;
+    if (available && ragnarChatAllowed) {
+        root.style.display = 'block';
+        const modelEl = document.getElementById('ragnar-chat-model');
+        if (modelEl && status) {
+            const fb = Boolean(status.fallback_active);
+            const m = status.model || 'AI';
+            modelEl.textContent = fb ? (m + ' → OpenAI fallback') : m;
+        }
+    } else {
+        root.style.display = 'none';
+        // Also close the panel if it was open.
+        const panel = document.getElementById('ragnar-chat-panel');
+        if (panel) panel.style.display = 'none';
+    }
+}
+
+function toggleRagnarChat() {
+    const panel = document.getElementById('ragnar-chat-panel');
+    const fab = document.getElementById('ragnar-chat-fab');
+    if (!panel) return;
+    const open = panel.style.display !== 'none' && panel.style.display !== '';
+    if (open) {
+        panel.style.display = 'none';
+        if (fab) fab.style.display = 'flex';
+    } else {
+        panel.style.display = 'flex';
+        if (fab) fab.style.display = 'none';
+        if (!_ragnarChatGreeted) {
+            _ragnarChatGreeted = true;
+            _appendRagnarChat('assistant',
+                "Hi — I'm Ragnar. Ask me how a feature works, or tell me to do "
+                + "something like “scan the network”, “deep scan 192.168.1.20”, "
+                + "or “show me the latest vulnerabilities”. You approve each action before it runs.",
+                []);
+        }
+        const input = document.getElementById('ragnar-chat-input');
+        if (input) setTimeout(() => input.focus(), 50);
+    }
+}
+
+function clearRagnarChat() {
+    _ragnarChatHistory = [];
+    _ragnarChatGreeted = false;
+    const log = document.getElementById('ragnar-chat-log');
+    if (log) log.innerHTML = '';
+    _ragnarChatGreeted = true;
+    _appendRagnarChat('assistant', "New chat. What can I do for you?", []);
+}
+
+// Render one message bubble. `actions` (assistant only) is an array of
+// {tool, ok, summary} run during that turn, shown as small chips.
+function _appendRagnarChat(role, text, actions) {
+    const log = document.getElementById('ragnar-chat-log');
+    if (!log) return null;
+    const isUser = role === 'user';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;flex-direction:column;max-width:88%;'
+        + (isUser ? 'align-self:flex-end;align-items:flex-end;' : 'align-self:flex-start;align-items:flex-start;');
+
+    if (Array.isArray(actions) && actions.length) {
+        const chips = document.createElement('div');
+        chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;margin-bottom:5px;';
+        actions.forEach(a => {
+            const chip = document.createElement('span');
+            const ok = a && a.ok;
+            chip.textContent = (a && a.summary) ? a.summary : (a && a.tool) || 'action';
+            chip.style.cssText = 'font-size:11px;padding:2px 8px;border-radius:999px;'
+                + (ok ? 'background:rgba(16,185,129,.16);color:#6ee7b7;border:1px solid rgba(16,185,129,.35);'
+                      : 'background:rgba(239,68,68,.16);color:#fca5a5;border:1px solid rgba(239,68,68,.35);');
+            chips.appendChild(chip);
+        });
+        row.appendChild(chips);
+    }
+
+    const bubble = document.createElement('div');
+    bubble.style.cssText = 'padding:9px 12px;border-radius:12px;white-space:pre-wrap;word-break:break-word;'
+        + (isUser
+            ? 'background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;border-bottom-right-radius:4px;'
+            : 'background:rgba(30,41,59,.92);color:#e2e8f0;border:1px solid rgba(148,163,184,.16);border-bottom-left-radius:4px;');
+    if (isUser) bubble.setAttribute('translate', 'no');
+    bubble.innerHTML = _ragnarChatFormat(text);
+    row.appendChild(bubble);
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+    return bubble;
+}
+
+// Minimal, safe markdown-ish formatting: escape first, then **bold**, `code`,
+// and newlines are preserved by white-space:pre-wrap on the bubble.
+function _ragnarChatFormat(text) {
+    let s = _esc(String(text == null ? '' : text));
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/`([^`]+)`/g, '<code style="background:rgba(148,163,184,.18);padding:1px 4px;border-radius:4px;">$1</code>');
+    return s;
+}
+
+function _ragnarChatTyping(on) {
+    const log = document.getElementById('ragnar-chat-log');
+    if (!log) return;
+    let el = document.getElementById('ragnar-chat-typing');
+    if (on) {
+        if (el) return;
+        el = document.createElement('div');
+        el.id = 'ragnar-chat-typing';
+        el.style.cssText = 'align-self:flex-start;color:#94a3b8;font-size:12px;font-style:italic;padding:4px 6px;';
+        el.textContent = 'Ragnar is thinking…';
+        log.appendChild(el);
+        log.scrollTop = log.scrollHeight;
+    } else if (el) {
+        el.remove();
+    }
+}
+
+// Send one request and render the answer.
+async function _ragnarChatRequest(url, body) {
+    const input = document.getElementById('ragnar-chat-input');
+    const sendBtn = document.getElementById('ragnar-chat-send');
+    _ragnarChatBusy = true;
+    if (sendBtn) { sendBtn.disabled = true; sendBtn.style.opacity = '0.6'; }
+    _ragnarChatTyping(true);
+
+    try {
+        const resp = await networkAwareFetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        const data = await resp.json().catch(() => ({}));
+        _ragnarChatTyping(false);
+
+        if (!resp.ok || !data.success) {
+            const err = (data && data.error) ? data.error : ('Request failed (HTTP ' + resp.status + ')');
+            _appendRagnarChat('assistant', '⚠️ ' + err, []);
+        } else {
+            const reply = data.reply || '(no response)';
+            _appendRagnarChat('assistant', reply, data.actions || []);
+            _ragnarChatHistory.push({ role: 'assistant', content: reply });
+            if (data.pending) _ragnarChatAskToRun(data.pending);
+        }
+    } catch (e) {
+        _ragnarChatTyping(false);
+        _appendRagnarChat('assistant', '⚠️ Could not reach the assistant: ' + (e.message || String(e)), []);
+    } finally {
+        _ragnarChatBusy = false;
+        if (sendBtn) { sendBtn.disabled = false; sendBtn.style.opacity = '1'; }
+        if (input) input.focus();
+    }
+}
+
+// Actions wait here for the operator. The label comes from the server, not the model.
+function _ragnarChatAskToRun(pending) {
+    const log = document.getElementById('ragnar-chat-log');
+    if (!log || !pending || !pending.id) return;
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;align-self:flex-start;';
+
+    const button = (text, approve, background) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = text;
+        btn.style.cssText = 'min-height:36px;padding:6px 16px;border:none;border-radius:10px;color:#fff;'
+            + 'font-weight:600;font-size:13px;cursor:pointer;background:' + background + ';';
+        btn.onclick = () => {
+            if (_ragnarChatBusy) return;
+            row.remove();
+            _appendRagnarChat('user', btn.textContent, []);
+            _ragnarChatRequest('/api/ai/chat/confirm', { id: pending.id, approve });
+        };
+        return btn;
+    };
+    row.appendChild(button('Run', true, 'linear-gradient(135deg,#7c3aed,#4f46e5)'));
+    row.appendChild(button('Cancel', false, 'rgba(71,85,105,.9)'));
+    log.appendChild(row);
+    log.scrollTop = log.scrollHeight;
+}
+
+async function sendRagnarChat(event) {
+    if (event) event.preventDefault();
+    if (_ragnarChatBusy) return false;
+    const input = document.getElementById('ragnar-chat-input');
+    if (!input) return false;
+    const message = input.value.trim();
+    if (!message) return false;
+
+    input.value = '';
+    _appendRagnarChat('user', message, []);
+    // Send prior turns (excluding this message) as context.
+    const history = _ragnarChatHistory.slice(-12);
+    _ragnarChatHistory.push({ role: 'user', content: message });
+    await _ragnarChatRequest('/api/ai/chat', { message, history });
+    return false;
+}
+
+// True when the server attempted this analysis but it came back empty (a
+// failure/rate-limit), as opposed to a section that had nothing to report.
+function _aiFieldFailed(insights, key) {
+    return Array.isArray(insights.failed) && insights.failed.includes(key);
+}
+
+// Inline "temporarily unavailable + retry" used for a failed analysis so a
+// rate-limited section shows a clear, actionable state instead of a permanent
+// "Analyzing…" that looks like it's still working.
+function _aiUnavailableHtml() {
+    return '<span class="text-amber-400">Temporarily unavailable.</span> '
+        + '<button onclick="refreshAIInsights()" class="ml-1 underline text-purple-300 hover:text-purple-200">Retry</button>';
 }
 
 // Display AI insights (separated for reuse with cache)
@@ -22737,7 +33279,9 @@ function displayAIInsights(insights) {
         // Update network summary
         const networkSummary = document.getElementById('ai-network-summary');
         if (networkSummary) {
-            networkSummary.innerHTML = formatAIText(insights.network_summary || 'Analyzing network...');
+            if (insights.network_summary) networkSummary.innerHTML = formatAIText(insights.network_summary);
+            else networkSummary.innerHTML = _aiFieldFailed(insights, 'network_summary')
+                ? _aiUnavailableHtml() : formatAIText('Analyzing network...');
         }
         
         // Update vulnerability analysis with summary/details split
@@ -22761,7 +33305,8 @@ function displayAIInsights(insights) {
                 
                 if (vulnSection) vulnSection.style.display = 'block';
             } else {
-                vulnSummary.textContent = 'No vulnerabilities detected';
+                if (_aiFieldFailed(insights, 'vulnerability_analysis')) vulnSummary.innerHTML = _aiUnavailableHtml();
+                else vulnSummary.textContent = 'No vulnerabilities detected';
                 vulnDetails.innerHTML = '';
                 if (vulnToggle) vulnToggle.style.display = 'none';
                 if (vulnSection) vulnSection.style.display = 'block';
@@ -22789,7 +33334,8 @@ function displayAIInsights(insights) {
                 
                 if (weaknessSection) weaknessSection.style.display = 'block';
             } else {
-                weaknessSummary.textContent = 'Analyzing network topology...';
+                if (_aiFieldFailed(insights, 'weakness_analysis')) weaknessSummary.innerHTML = _aiUnavailableHtml();
+                else weaknessSummary.textContent = 'No attack paths identified';
                 weaknessDetails.innerHTML = '';
                 if (weaknessToggle) weaknessToggle.style.display = 'none';
                 if (weaknessSection) weaknessSection.style.display = 'block';
@@ -22836,26 +33382,20 @@ function displayAIInsights(insights) {
 // Refresh AI insights (force refresh, clear both client and server cache)
 async function refreshAIInsights() {
     try {
-        // Clear client-side cache
+        // Clear client-side cache and stop any in-flight poll.
         aiInsightsCache.data = null;
         aiInsightsCache.timestamp = null;
-        
-        // Clear server-side cache
-    await networkAwareFetch('/api/ai/clear-cache', { method: 'POST' });
-        
-        // Show loading state
-        const networkSummary = document.getElementById('ai-network-summary');
-        const vulnSummary = document.getElementById('ai-vuln-summary');
-        const weaknessSummary = document.getElementById('ai-weakness-summary');
-        
-        if (networkSummary) networkSummary.textContent = 'Generating new AI analysis...';
-        if (vulnSummary) vulnSummary.textContent = 'Analyzing vulnerabilities...';
-        if (weaknessSummary) weaknessSummary.textContent = 'Identifying network weaknesses...';
-        
-        // Reload insights (will fetch fresh data since cache is cleared)
-        await loadAIInsights();
-        
-        showNotification('AI insights refreshed successfully', 'success');
+        _aiClearPoll();
+        _aiInsightsPoll.attempts = 0;
+
+        // Clear the server-side per-call cache too.
+        await networkAwareFetch('/api/ai/clear-cache', { method: 'POST' });
+
+        // Kick off a forced server-side recompute; loadAIInsights(true) shows the
+        // "Analyzing…" state and polls until the fresh result lands.
+        await loadAIInsights(true);
+
+        showNotification('Refreshing AI insights…', 'success');
     } catch (error) {
         console.error('Error refreshing AI insights:', error);
         showNotification('Failed to refresh AI insights', 'error');
@@ -22987,8 +33527,9 @@ async function checkServerCapabilities() {
                 console.log('[ServerMode]   - Full capabilities:', data.capabilities);
             }
             
-            // Re-measure the nav: we just changed which buttons are visible,
-            // and that decides desktop bar vs hamburger.
+            // Re-evaluate the nav mode (desktop bar wraps / hamburger). This is
+            // driven purely by window width, but re-running is harmless and keeps
+            // things in sync if buttons appeared while resizing.
             if (window._updateNavMode) window._updateNavMode();
             return data;
         } else if (!data.success) {
@@ -24780,6 +35321,13 @@ function updateWardrivingUI(status) {
     // session count from companions before the first DB stats roll-up.
     updateElement('wd-zigbee-count', String(stats.zigbee_devices || status.zigbee_count || 0));
 
+    // Aircraft (ADS-B) — unique aircraft heard this UTC day (climbs as the radar
+    // sees new ones); sub-line shows how many are overhead now, or that the
+    // radar is off (ADS-B needs an RTL-SDR running the radar).
+    const adsbLive = status.adsb || {};
+    updateElement('wd-adsb-live-count', String(adsbLive.today || 0));
+    updateElement('wd-adsb-live-sub', adsbLive.running ? `${adsbLive.live || 0} overhead` : 'radar off');
+
     // Interfaces
     const ifInfo = document.getElementById('wd-interfaces-info');
     if (status.interfaces && status.interfaces.length > 0) {
@@ -24832,6 +35380,19 @@ function _wdFetchDiagExtra(force) {
         })
         .catch(() => { /* panel degrades to the status-only groups */ })
         .finally(() => { _wdDiagExtraBusy = false; });
+}
+
+// "position, time (NTP), almanac 31 SV · 2m ago" — what gps_assist pre-loaded
+// at start, plus when orbit data was last saved for the next cold start.
+function _wdAssist(gps) {
+    const parts = [];
+    if (gps.assist && (gps.assist.items || []).length) {
+        parts.push(`${gps.assist.items.join(', ')} · ${_wdAge(gps.assist.at)}`);
+    }
+    if (gps.aid_saved) {
+        parts.push(`saved alm ${gps.aid_saved.alm} / eph ${gps.aid_saved.eph} SV ${_wdAge(gps.aid_saved.at)}`);
+    }
+    return parts.length ? parts.join(' · ') : null;
 }
 
 function _wdHas(v) { return v !== undefined && v !== null && v !== ''; }
@@ -24928,6 +35489,21 @@ function wdOpenSkyView() {
 }
 window.wdOpenSkyView = wdOpenSkyView;
 
+async function openWardrivingStarEgg() {
+    if (!window.RagnarSkyView) return;
+    let liveGps = null;
+    try {
+        const res = await fetch('/api/wardriving/gps/enable', { method: 'POST', cache: 'no-store' });
+        const data = res.ok ? await res.json() : null;
+        liveGps = data && data.gps ? data.gps : null;
+    } catch (e) {
+        console.warn('[Wardriving] GPS-only enable failed:', e);
+    }
+    const gps = (_wdDiagExtra && _wdDiagExtra.gps) || {};
+    window.RagnarSkyView.open({ sky: (liveGps && liveGps.sky) || gps.sky || [], status: liveGps || gps.status || {}, enhanced: true });
+}
+window.openWardrivingStarEgg = openWardrivingStarEgg;
+
 function _wdDiagGroup(title, rows) {
     const kept = rows.filter(r => _wdHas(r[1]));
     if (!kept.length) return '';
@@ -25005,6 +35581,10 @@ function renderWardrivingDiagnostics(status) {
         ['Searching for', _wdHas(gps.searching_seconds)
             ? `${_wdDur(gps.searching_seconds)} (no fix yet)` : null,
             gps.searching_seconds > 120 ? 'warn' : null],
+        ['Assisted start', _wdAssist(gps)],
+        ['Clock from GPS', gps.clock_set
+            ? (gps.clock_set.changed ? `set ${gps.clock_set.delta > 0 ? '+' : ''}${gps.clock_set.delta}s · ${_wdAge(gps.clock_set.at)}`
+                                     : 'clock already correct') : null],
         ['GPS error', gps.error, 'warn']
     ]));
 
@@ -25616,15 +36196,14 @@ async function loadWardrivingOnBootState() {
     } catch (e) { /* silent */ }
 }
 
-// ---- Bluetooth provisioning (mobile-app discovery) ----
-// Advertises a BLE GATT service so the Ragnar mobile app can find this box and
-// read its IP. Off by default (shares the adapter with the BLE overlay
-// scanner). See ble_provisioning.py + docs/ble_provisioning.md.
-function _bleProvStatusText(d) {
-    if (!d.enabled) return 'Disabled.';
-    if (d.autostopped) return 'Provisioned — advertising stopped to free the radio. Tap Re-advertise for another device.';
-    if (d.running) return 'Advertising as ' + (d.name || 'Ragnar') + (d.active_adapter ? ' on ' + d.active_adapter : '') + '.';
-    if (d.error) return 'Enabled, but not advertising: ' + d.error + (d.hint ? ' — ' + d.hint : '');
+// ---- Ragnar Mobile over Bluetooth ----
+// Advertises a BLE service the mobile app finds and talks to (the Bluetooth
+// link). Off by default (shares the adapter with the BLE overlay scanner).
+// See ble_peripheral.py, ble_link.py + docs/bluetooth.md.
+function _bleStatusText(d) {
+    if (!d.enabled) return 'Off.';
+    if (d.running) return '● On — the app finds this box as ' + (d.name || 'Ragnar') + (d.active_adapter && (d.adapters || []).length > 1 ? ' (' + d.active_adapter + ')' : '') + '.';
+    if (d.error) return 'On, but not advertising: ' + d.error + (d.hint ? ' — ' + d.hint : '');
     // Still registering with BlueZ — slow boards can take a while. Anything
     // else with no error is a state we have not heard back about yet.
     if (d.starting) return 'Starting — registering with BlueZ…';
@@ -25634,32 +36213,30 @@ function _bleProvStatusText(d) {
 // Poll until the peripheral settles. Registration on a slow board (Pi Zero 2 W)
 // can outlast the request that started it, and a single follow-up read then
 // caught it mid-start and left "Enabling…" on screen permanently.
-function _bleProvPollUntilSettled(tries) {
+function _blePollUntilSettled(tries) {
     tries = (typeof tries === 'number') ? tries : 8;
     if (tries <= 0) return;
     setTimeout(async () => {
         let d = null;
         try {
-            const res = await fetch('/api/ble/provisioning');
+            const res = await fetch('/api/ble/status');
             d = await res.json();
         } catch (e) { /* transient; keep trying */ }
-        await loadBleProvisioning();
+        await loadBle();
         // Keep going only while it is still coming up.
         if (d && d.enabled && !d.running && !d.error) {
-            _bleProvPollUntilSettled(tries - 1);
+            _blePollUntilSettled(tries - 1);
         }
     }, 1500);
 }
 
-async function loadBleProvisioning() {
+async function loadBle() {
     try {
-        const res = await fetch('/api/ble/provisioning');
+        const res = await fetch('/api/ble/status');
         const d = await res.json();
-        const cb = document.getElementById('ble-provisioning-enabled');
+        const cb = document.getElementById('ble-enabled');
         if (cb) cb.checked = !!d.enabled;
-        const asCb = document.getElementById('ble-provisioning-autostop');
-        if (asCb) asCb.checked = !!d.autostop;
-        const sel = document.getElementById('ble-provisioning-adapter');
+        const sel = document.getElementById('ble-adapter');
         if (sel) {
             // Rebuild options: Auto + each controller, tagging the built-in one.
             const current = d.adapter || '';
@@ -25672,12 +36249,29 @@ async function loadBleProvisioning() {
             });
             sel.value = current;
         }
-        // Show the Re-advertise button only once it has auto-stopped.
-        const rebtn = document.getElementById('ble-provisioning-readvertise');
-        if (rebtn) rebtn.classList.toggle('hidden', !(d.enabled && d.autostopped));
+        // One radio = nothing to choose; keep the card to a single switch.
+        const selWrap = document.getElementById('ble-adapter-wrap');
+        if (selWrap) selWrap.classList.toggle('hidden', (d.adapters || []).length < 2);
+        // The link code and who is on the link.
+        const link = d.link || {};
+        const lcw = document.getElementById('ble-link-code-wrap');
+        if (lcw) lcw.classList.toggle('hidden', !link.code);
+        const lc = document.getElementById('ble-link-code');
+        if (lc && link.code) lc.textContent = link.code.slice(0, 4) + ' ' + link.code.slice(4);
+        const ls = document.getElementById('ble-link-status');
+        if (ls) {
+            const bits = [];
+            if (link.locked_for) bits.push('Locked for ' + link.locked_for + ' s after wrong codes');
+            else if (link.connected) bits.push('● ' + link.connected + (link.connected === 1 ? ' phone' : ' phones') + ' connected');
+            else bits.push('Ready for a phone');
+            if (link.requests) bits.push(link.requests + ' requests · ' + Math.round((link.bytes_out || 0) / 1024) + ' kB sent');
+            ls.textContent = bits.join(' · ');
+        }
+        const ll = document.getElementById('ble-link-login');
+        if (ll) ll.classList.toggle('hidden', !!link.login);
         // Under-voltage warning: running BLE + a USB radio on a weak PSU can
         // reset the whole Pi. Surface it so a "crash" reads as power, not code.
-        const pw = document.getElementById('ble-provisioning-power');
+        const pw = document.getElementById('ble-power');
         if (pw) {
             if (d.power && d.power.message) {
                 pw.textContent = '⚠ ' + d.power.message;
@@ -25686,61 +36280,71 @@ async function loadBleProvisioning() {
                 pw.classList.add('hidden');
             }
         }
-        const st = document.getElementById('ble-provisioning-status');
-        if (st) st.textContent = _bleProvStatusText(d);
+        const st = document.getElementById('ble-status');
+        if (st) st.textContent = _bleStatusText(d);
     } catch (e) { /* silent */ }
 }
 
-async function setBleProvisioningAutostop(cb) {
-    const enabled = !!(document.getElementById('ble-provisioning-enabled') || {}).checked;
+async function newBleLinkCode() {
+    if (!confirm('Make a new link code? Phones that used the old one will ask for the new one.')) return;
+    const enabled = !!(document.getElementById('ble-enabled') || {}).checked;
     try {
-        await postAPI('/api/ble/provisioning/toggle', { enabled, autostop: !!cb.checked });
-        addConsoleMessage('Auto-stop after provisioning ' + (cb.checked ? 'on' : 'off'), 'success');
-        setTimeout(loadBleProvisioning, 600);
+        await postAPI('/api/ble/toggle', { enabled, new_link_code: true });
+        addConsoleMessage('New Bluetooth link code', 'success');
+        setTimeout(loadBle, 400);
     } catch (e) {
-        console.error('[BLE] autostop set error:', e);
-        addConsoleMessage('Failed to set auto-stop', 'error');
-        cb.checked = !cb.checked;
+        console.error('[BLE] new code error:', e);
+        addConsoleMessage('Failed to make a new code', 'error');
     }
 }
 
-async function readvertiseBle() {
-    try {
-        await postAPI('/api/ble/provisioning/toggle', { enabled: true });
-        addConsoleMessage('Re-advertising over Bluetooth', 'success');
-        setTimeout(loadBleProvisioning, 600);
-    } catch (e) {
-        console.error('[BLE] re-advertise error:', e);
-        addConsoleMessage('Failed to re-advertise', 'error');
-    }
-}
-
-async function toggleBleProvisioning(checkbox) {
+async function toggleBle(checkbox) {
     const enabled = !!checkbox.checked;
-    const st = document.getElementById('ble-provisioning-status');
+    const st = document.getElementById('ble-status');
     if (st) st.textContent = enabled ? 'Enabling…' : 'Disabling…';
     try {
-        const res = await postAPI('/api/ble/provisioning/toggle', { enabled });
-        addConsoleMessage('Bluetooth provisioning ' + (enabled ? 'enabled' : 'disabled'), 'success');
-        if (res && st) st.textContent = _bleProvStatusText(Object.assign({ enabled: enabled }, res));
+        const res = await postAPI('/api/ble/toggle', { enabled });
+        addConsoleMessage('App over Bluetooth ' + (enabled ? 'on' : 'off'), 'success');
+        if (res && st) st.textContent = _bleStatusText(Object.assign({ enabled: enabled }, res));
+        // A toggle answer carries no adapter list; the reload below fills it in.
         // Re-read for the active adapter / advertised name once settled.
-        setTimeout(loadBleProvisioning, 600);
+        setTimeout(loadBle, 600);
         // Keep watching while it is still registering.
-        if (enabled && res && !res.running) _bleProvPollUntilSettled();
+        if (enabled && res && !res.running) _blePollUntilSettled();
     } catch (e) {
-        console.error('[BLE] provisioning toggle error:', e);
-        addConsoleMessage('Failed to update Bluetooth provisioning', 'error');
+        console.error('[BLE] toggle error:', e);
+        addConsoleMessage('Failed to change Bluetooth', 'error');
         checkbox.checked = !enabled;
-        if (st) st.textContent = 'Failed to update.';
+        if (st) st.textContent = await _bleFailureText(e);
     }
 }
 
-async function setBleProvisioningAdapter(sel) {
-    const enabled = !!(document.getElementById('ble-provisioning-enabled') || {}).checked;
+// Why the switch did not take. An update puts the new page on disk minutes
+// before the service restarts into the new code, so the page can be asking a
+// Ragnar that is still finishing that update.
+async function _bleFailureText(err) {
     try {
-        await postAPI('/api/ble/provisioning/toggle', { enabled, adapter: sel.value });
+        const u = await fetchAPI('/api/system/update-status');
+        const pu = (u && u.post_update) || {};
+        if ((u && u.update_in_progress) || pu.state === 'running') {
+            return 'Ragnar is finishing an update' + (pu.step ? ' (' + pu.step + ')' : '') +
+                ' and restarts when it is done. Switch this on after the restart.';
+        }
+    } catch (_) { /* fall through to the plain reason */ }
+    const status = err && (err.status || (err.response && err.response.status));
+    if (status === 404 || status === 405) {
+        return 'This page is newer than the running Ragnar. Press Restart Service under Config → System Management, then switch this on.';
+    }
+    const why = err && err.message ? String(err.message) : '';
+    return why ? 'Bluetooth did not change: ' + why : 'Bluetooth did not change. Try again.';
+}
+
+async function setBleAdapter(sel) {
+    const enabled = !!(document.getElementById('ble-enabled') || {}).checked;
+    try {
+        await postAPI('/api/ble/toggle', { enabled, adapter: sel.value });
         addConsoleMessage('Bluetooth adapter set to ' + (sel.value || 'auto'), 'success');
-        setTimeout(loadBleProvisioning, 600);
+        setTimeout(loadBle, 600);
     } catch (e) {
         console.error('[BLE] adapter set error:', e);
         addConsoleMessage('Failed to set Bluetooth adapter', 'error');
@@ -25748,8 +36352,7 @@ async function setBleProvisioningAdapter(sel) {
 }
 
 // GPS backfill is gated: the map "Backfill GPS" button stays hidden until the
-// user opts in here. Backfilled positions are estimates (not WDGWARS-legal) and
-// are excluded from WiGLE export, so this defaults off.
+// user opts in here. Defaults off.
 function applyWardrivingBackfillVisibility(allow) {
     const btn = document.getElementById('wd-map-backfill-btn');
     if (btn) btn.classList.toggle('hidden', !allow);
@@ -25763,7 +36366,7 @@ async function toggleWardrivingBackfill() {
         await postAPI('/api/config', { wardriving_allow_backfill: enabled });
         applyWardrivingBackfillVisibility(enabled);
         addConsoleMessage(
-            'GPS backfill ' + (enabled ? 'enabled — backfilled data is excluded from WiGLE export' : 'disabled'),
+            'GPS backfill ' + (enabled ? 'enabled' : 'disabled'),
             enabled ? 'warning' : 'info'
         );
     } catch (e) {
@@ -25879,11 +36482,15 @@ async function loadKioskState() {
         const url = document.getElementById('kiosk-url');
         const rot = document.getElementById('kiosk-rotation');
         const cur = document.getElementById('kiosk-hide-cursor');
+        const hand = document.getElementById('kiosk-handheld');
+        const scale = document.getElementById('kiosk-scale');
         const cfgPanel = document.getElementById('kiosk-config');
         if (enabledCb) enabledCb.checked = !!data.enabled;
         if (url && data.url) url.value = data.url;
         if (rot) rot.value = String(data.rotation ?? 0);
         if (cur) cur.checked = !!data.hide_cursor;
+        if (hand) hand.checked = !!data.handheld;
+        if (scale && data.scale != null) scale.value = String(data.scale);
         if (cfgPanel) cfgPanel.classList.toggle('hidden', !data.enabled);
         _setKioskBadge(data.service_state || 'unknown');
     } catch (e) {
@@ -25895,7 +36502,7 @@ async function onKioskEnabledToggled(cb) {
     const enabled = !!cb.checked;
     const cfgPanel = document.getElementById('kiosk-config');
     if (cfgPanel) cfgPanel.classList.toggle('hidden', !enabled);
-    _setKioskMessage(enabled ? 'Installing kiosk…' : 'Removing kiosk…', 'info');
+    _setKioskMessage(enabled ? 'Starting kiosk…' : 'Turning kiosk off…', 'info');
     _setKioskBadge(enabled ? 'activating' : 'deactivating');
     try {
         const res = await fetch('/api/config', {
@@ -25924,10 +36531,19 @@ function onKioskSettingChanged() {
         const url = document.getElementById('kiosk-url');
         const rot = document.getElementById('kiosk-rotation');
         const cur = document.getElementById('kiosk-hide-cursor');
+        const hand = document.getElementById('kiosk-handheld');
+        const scaleEl = document.getElementById('kiosk-scale');
+        // Clamp scale to the range the wrapper accepts; fall back to native 1.0.
+        let scaleVal = scaleEl ? parseFloat(scaleEl.value) : 1.0;
+        if (!isFinite(scaleVal)) scaleVal = 1.0;
+        scaleVal = Math.min(3.0, Math.max(0.5, scaleVal));
+        if (scaleEl) scaleEl.value = String(scaleVal);
         const payload = {
             kiosk_url: url ? url.value : 'http://localhost:8000',
             kiosk_rotation: rot ? parseInt(rot.value, 10) || 0 : 0,
             kiosk_hide_cursor: cur ? !!cur.checked : true,
+            kiosk_handheld: hand ? !!hand.checked : false,
+            kiosk_scale: scaleVal,
         };
         try {
             const res = await fetch('/api/config', {
@@ -25983,6 +36599,11 @@ function _pollKioskStatusUntilStable(expectEnabled, maxAttempts = 12) {
                     if (data.mode === 'autostart') return data.installed === true;
                     return false;
                 } else {
+                    // "Off" now leaves a service kiosk installed-but-disabled, so
+                    // success is the service going inactive — not the unit being
+                    // deleted. Autostart mode still drops its entry, so there mode
+                    // flips to not_installed.
+                    if (data.mode === 'service') return data.service_state === 'inactive';
                     return data.installed === false || data.mode === 'not_installed';
                 }
             })();
@@ -25996,6 +36617,7 @@ function _pollKioskStatusUntilStable(expectEnabled, maxAttempts = 12) {
                 const label = {
                     installing: 'Installing the kiosk (fetching chromium) — this can take several minutes…',
                     removing: 'Removing the kiosk…',
+                    stopping: 'Turning the kiosk off…',
                     restarting: 'Restarting the kiosk…',
                     starting: 'Starting the kiosk…'
                 }[data.phase] || 'Working…';
@@ -26017,7 +36639,7 @@ function _pollKioskStatusUntilStable(expectEnabled, maxAttempts = 12) {
             if (isStableSuccess) {
                 let msg;
                 if (!expectEnabled) {
-                    msg = 'Kiosk removed.';
+                    msg = 'Kiosk turned off.';
                 } else if (data.mode === 'autostart') {
                     msg = data.service_state === 'active'
                         ? 'Kiosk is running on the display.'
@@ -26194,6 +36816,38 @@ async function importWigleCsv() {
     }
 }
 
+// Pull a Piglet's SD-card CSVs over USB and import each drive as a session.
+async function syncPiglet() {
+    const el = document.getElementById('wd-piglet-sync-status');
+    const show = (text, cls) => { if (el) { el.textContent = text; el.className = 'text-xs break-words ' + cls; } };
+    try {
+        show('Starting…', 'text-blue-400');
+        const res = await fetch('/api/wardriving/piglet/sync', { method: 'POST' });
+        const start = await res.json();
+        if (start.error) { show(start.error, 'text-red-400'); return; }
+        for (let i = 0; i < 600; i++) {                 // up to ~20 min for a big card
+            await new Promise(r => setTimeout(r, 2000));
+            const st = await (await fetch('/api/wardriving/piglet/sync')).json();
+            if (st.state === 'running' || st.state === 'queued') {
+                show(`Syncing on ${st.port || 'USB'}…`, 'text-blue-400');
+                continue;
+            }
+            if (st.state === 'error') { show(st.error || 'Sync failed', 'text-red-400'); return; }
+            if (st.state === 'done') {
+                const n = (st.imported || []).length;
+                const errs = (st.errors || []).length;
+                show(`${st.piglet ? 'Piglet ' + st.piglet.fw + ': ' : ''}${n} drive(s) imported, ${st.skipped || 0} skipped`
+                     + (errs ? `, ${errs} error(s): ${st.errors[0]}` : ''), errs ? 'text-yellow-400' : 'text-green-400');
+                loadWardrivingData();
+                return;
+            }
+        }
+        show('Still running — check back later', 'text-yellow-400');
+    } catch (e) {
+        show('Sync failed: ' + e.message, 'text-red-400');
+    }
+}
+
 async function detectSerialPort() {
     const portInput = document.getElementById('wd-serial-port');
     const statusEl = document.getElementById('wd-serial-status');
@@ -26218,7 +36872,7 @@ async function toggleSerialListener() {
     const portInput = document.getElementById('wd-serial-port');
     const statusEl = document.getElementById('wd-serial-status');
     const btn = document.getElementById('wd-serial-btn');
-    const isConnected = statusEl && statusEl.textContent === 'Connected';
+    const isConnected = statusEl && _i18nText(statusEl) === 'Connected';
 
     try {
         if (isConnected) {
@@ -26637,6 +37291,7 @@ async function _loadWardrivingCameras() {
 function renderWardrivingSessions(sessions) {
     const container = document.getElementById('wd-sessions-list');
     if (!container) return;
+    loadWardriveUploadConfig();
     if (!sessions || sessions.length === 0) {
         container.innerHTML = '<p class="text-gray-500 text-sm">No previous sessions.</p>';
         return;
@@ -26656,13 +37311,502 @@ function renderWardrivingSessions(sessions) {
                 <span class="text-xs text-gray-500">${s.total_networks || 0} networks</span>
                 ${isActive ? '<span class="text-xs text-cyan-400">● viewing</span>' : ''}
             </div>
-            <div class="flex gap-3 shrink-0">
-                <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=report" target="_blank" rel="noopener" class="text-xs text-emerald-400 hover:text-emerald-300 whitespace-nowrap font-semibold" onclick="event.stopPropagation()">Report</a>
-                <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=wigle" class="text-xs text-cyan-400 hover:text-cyan-300 whitespace-nowrap" onclick="event.stopPropagation()">WiGLE CSV</a>
-                <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=kml" class="text-xs text-purple-400 hover:text-purple-300 whitespace-nowrap" onclick="event.stopPropagation()">KML</a>
+            <div class="flex flex-col md:flex-row md:items-center gap-y-1 gap-x-3 w-full md:w-auto">
+                <div class="flex flex-wrap gap-x-3 gap-y-1">
+                    <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=report" target="_blank" rel="noopener" class="text-xs py-1 text-emerald-400 hover:text-emerald-300 whitespace-nowrap font-semibold" onclick="event.stopPropagation()">Report</a>
+                    <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=wigle" class="text-xs py-1 text-cyan-400 hover:text-cyan-300 whitespace-nowrap" onclick="event.stopPropagation()">WiGLE CSV</a>
+                    <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=kml" class="text-xs py-1 text-purple-400 hover:text-purple-300 whitespace-nowrap" onclick="event.stopPropagation()">KML</a>
+                </div>
+                <div class="flex flex-wrap gap-x-3 gap-y-1">
+                    <button onclick="event.stopPropagation(); uploadWardriveSession('${s.session_id}','wdgwars')" class="text-xs py-1 text-fuchsia-400 hover:text-fuchsia-300 whitespace-nowrap font-semibold" title="Upload this session to WDGWars">↑ WDGWars</button>
+                    <button onclick="event.stopPropagation(); uploadWardriveSession('${s.session_id}','wigle')" class="text-xs py-1 text-cyan-400 hover:text-cyan-300 whitespace-nowrap" title="Upload this session to WiGLE">↑ WiGLE</button>
+                    <button onclick="event.stopPropagation(); uploadWardriveSession('${s.session_id}','wardrift')" class="text-xs py-1 text-amber-400 whitespace-nowrap" title="Upload this session to Wardrift">↑ Wardrift</button>
+                </div>
             </div>
         </div>`;
     }).join('');
+}
+
+// ============================================================================
+// WARDRIVE UPLOADS -> WDGWars / WiGLE
+// Backend: GET/POST /api/wardriving/upload-config  and  POST /api/wardriving/upload/<id>
+// ============================================================================
+async function loadWardriveUploadConfig() {
+    let d;
+    try {
+        d = await (await fetch('/api/wardriving/upload-config')).json();
+    } catch (e) { return; }
+    const badge = document.getElementById('wd-upload-cfg-status');
+    if (badge) {
+        if (d.wdgwars_configured) {
+            badge.textContent = 'Key ready';
+            badge.className = 'text-xs px-2 py-0.5 rounded-full bg-emerald-900/60 text-emerald-300';
+        } else {
+            badge.textContent = 'Key not set';
+            badge.className = 'text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400';
+        }
+    }
+    const ws = document.getElementById('wd-wigle-cfg-status');
+    if (ws) {
+        ws.textContent = d.wigle_configured ? '✓ configured' : 'Not set';
+        ws.className = 'text-xs ' + (d.wigle_configured ? 'text-emerald-400' : 'text-gray-500');
+    }
+    _renderAutoUpload(d);
+    _renderWardriftConfig(d);
+    loadWardriftMesh();
+    loadAdsbWardrift();
+}
+
+// ---- Aircraft (ADS-B) -> Wardrift Aircraft Watch (same backend as the radar page's card)
+let _adsbWardriftBusy = false;
+
+function _adsbWardriftRender(d) {
+    const badge = document.getElementById('wd-adsb-badge');
+    const today = document.getElementById('wd-adsb-today');
+    const upBtn = document.getElementById('wd-adsb-upload-btn');
+    const auto = document.getElementById('wd-adsb-auto');
+    const iv = document.getElementById('wd-adsb-interval');
+    const last = document.getElementById('wd-adsb-last');
+    const push = document.getElementById('wd-adsb-pushnote');
+    const n = d.today_aircraft || 0;
+    if (badge) {
+        if (!d.signed_in) { badge.textContent = 'sign in above'; badge.className = 'text-xs px-2 py-0.5 rounded-full bg-gray-700 text-gray-400'; }
+        else { badge.textContent = (d.username || 'ready'); badge.className = 'text-xs px-2 py-0.5 rounded-full bg-amber-900/60 text-amber-300'; }
+    }
+    if (today) today.textContent = n ? `${n} aircraft today${n < 10 ? ' (' + n + '/10)' : ''}` : 'no aircraft logged yet today';
+    if (upBtn) { upBtn.disabled = !d.signed_in || n === 0 || _adsbWardriftBusy; upBtn.style.opacity = upBtn.disabled ? 0.5 : 1; }
+    if (auto) auto.checked = !!d.auto;
+    if (iv) iv.value = String(d.interval_min || 30);
+    const astart = document.getElementById('wd-adsb-autostart');
+    if (astart) astart.checked = !!d.autostart;
+    if (push) push.textContent = d.pushover_ready === 'off' ? '· Pushover is off in Settings'
+        : d.pushover_ready === 'missing' ? '· set up Pushover for alerts' : '';
+    if (last) {
+        const rec = (d.days || []).find(x => x.day === d.today) || (d.days || [])[0];
+        if (rec && rec.state) {
+            const icon = { ok: ['✓', 'text-emerald-400'], processing: ['…', 'text-amber-300'], failed: ['✕', 'text-red-400'], skipped: ['–', 'text-gray-500'], unknown: ['?', 'text-gray-400'] }[rec.state] || ['·', 'text-gray-400'];
+            const txt = rec.state === 'ok' ? (rec.exp ? `uploaded, +${rec.exp} XP` : 'uploaded')
+                : rec.state === 'processing' ? 'Wardrift is processing…'
+                : rec.state === 'skipped' ? 'nothing to upload' : (rec.message || rec.state);
+            last.innerHTML = `<span class="${icon[1]}">${icon[0]}</span> ${escapeHtml(rec.day)}: ${escapeHtml(txt)}`;
+        } else last.textContent = '';
+    }
+}
+
+async function loadAdsbWardrift() {
+    try {
+        const r = await fetch('/api/adsb/wardrift');
+        const d = await r.json();
+        if (!d.error) _adsbWardriftRender(d);
+    } catch (e) { /* radar/SDR may be absent — leave the card idle */ }
+}
+
+async function saveAdsbWardrift() {
+    try {
+        const r = await fetch('/api/adsb/wardrift', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ auto: !!document.getElementById('wd-adsb-auto')?.checked,
+                                   interval_min: parseInt(document.getElementById('wd-adsb-interval')?.value || '30', 10),
+                                   autostart: !!document.getElementById('wd-adsb-autostart')?.checked })
+        });
+        const d = await r.json();
+        if (!d.error) _adsbWardriftRender(d);
+    } catch (e) { /* ignore */ }
+}
+
+async function uploadAdsbWardrift() {
+    if (_adsbWardriftBusy) return;
+    _adsbWardriftBusy = true;
+    const msg = document.getElementById('wd-adsb-msg');
+    if (msg) { msg.textContent = 'Uploading…'; msg.className = 'text-xs mt-1 text-amber-300'; }
+    try {
+        const r = await fetch('/api/adsb/wardrift/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const d = await r.json();
+        _adsbWardriftBusy = false;
+        if (msg) {
+            if (d.success) { msg.textContent = d.duplicate ? '✓ Already on Wardrift' : `✓ Sent ${d.count || 0} aircraft — Wardrift is processing`; msg.className = 'text-xs mt-1 text-emerald-400'; }
+            else { msg.textContent = '✕ ' + (d.error || 'Upload failed'); msg.className = 'text-xs mt-1 text-red-400'; }
+            msg.classList.remove('hidden');
+        }
+        loadAdsbWardrift();
+    } catch (e) {
+        _adsbWardriftBusy = false;
+        if (msg) { msg.textContent = '✕ ' + e.message; msg.className = 'text-xs mt-1 text-red-400'; msg.classList.remove('hidden'); }
+    }
+}
+
+// ---- Wardrift mesh node: Ragnar reports a Meshtastic node (USB or WiFi) to /v1/ingest/mesh
+let _wdmFormFilled = false, _wdmTimer = null;
+
+function _wdmConnChanged() {
+    const wifi = document.getElementById('wd-wdm-conn')?.value === 'wifi';
+    document.getElementById('wd-wdm-port')?.classList.toggle('hidden', wifi);
+    document.getElementById('wd-wdm-host')?.classList.toggle('hidden', !wifi);
+}
+
+function _wdmAgo(ts) {
+    if (!ts) return 'never';
+    const s = Math.max(0, Math.round(Date.now() / 1000 - ts));
+    return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`;
+}
+
+async function loadWardriftMesh(fillForm) {
+    let d;
+    try {
+        const r = await fetch('/api/wardriving/wardrift/mesh');
+        d = await r.json();
+        if (!r.ok) return;
+    } catch (e) { return; }
+    // Not available yet: greyed out with a "Coming soon" badge.
+    const live = d.available !== false;
+    const body = document.getElementById('wd-wdm-body');
+    if (body) {
+        ['opacity-50', 'pointer-events-none', 'select-none'].forEach(c => body.classList.toggle(c, !live));
+        body.setAttribute('aria-disabled', String(!live));
+        body.querySelectorAll('input, select, button').forEach(el => { el.disabled = !live; });
+    }
+    if (!live) {
+        const b = document.getElementById('wd-wdm-badge');
+        if (b) { b.textContent = 'Coming soon'; b.className = 'text-xs px-2 py-0.5 rounded-full bg-sky-900/60 text-sky-300'; }
+        clearTimeout(_wdmTimer);
+        return;
+    }
+    const st = d.status || {};
+    const badge = document.getElementById('wd-wdm-badge');
+    if (badge) {
+        const map = {
+            connected: ['Reporting', 'bg-emerald-900/60 text-emerald-300'],
+            connecting: ['Connecting…', 'bg-amber-900/60 text-amber-300'],
+            error: ['Problem', 'bg-red-900/60 text-red-300'],
+            'no key': ['Key missing', 'bg-amber-900/60 text-amber-300'],
+        };
+        const [txt, cls] = d.enabled ? (map[st.state] || ['Starting…', 'bg-gray-700 text-gray-400']) : ['Off', 'bg-gray-700 text-gray-400'];
+        badge.textContent = txt;
+        badge.className = 'text-xs px-2 py-0.5 rounded-full ' + cls;
+    }
+    // Port list refreshes every time (plug/unplug), keeping the current choice.
+    const portSel = document.getElementById('wd-wdm-port');
+    if (portSel) {
+        const keep = _wdmFormFilled ? portSel.value : (d.port || '');
+        portSel.innerHTML = '<option value="">Auto-detect port</option>' + (d.ports || []).map(p =>
+            `<option value="${escapeHtml(p.port)}"${p.usable ? '' : ' disabled'}>${escapeHtml(p.port)}${p.note ? ' — ' + escapeHtml(p.note) : ''}</option>`).join('');
+        if (keep && ![...portSel.options].some(o => o.value === keep)) {
+            portSel.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(keep)}">${escapeHtml(keep)} — not present</option>`);
+        }
+        portSel.value = keep;
+    }
+    // Only fill the form once (or after a save) so polling never clobbers typing.
+    if (!_wdmFormFilled || fillForm) {
+        _wdmFormFilled = true;
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+        set('wd-wdm-conn', d.conn || 'usb');
+        set('wd-wdm-host', d.host || '');
+        set('wd-wdm-interval', String(d.interval || 300));
+        const en = document.getElementById('wd-wdm-enabled'); if (en) en.checked = !!d.enabled;
+        const key = document.getElementById('wd-wdm-key');
+        if (key) key.placeholder = d.key_configured ? 'Node key saved — paste to replace' : 'Node API key (wdk_…)';
+        _wdmConnChanged();
+    }
+    const nodeEl = document.getElementById('wd-wdm-node');
+    if (nodeEl) {
+        const n = d.node, l = d.link || {}, tot = st.totals || {};
+        const parts = [];
+        if (l.connected) {
+            const via = l.host ? `WiFi ${l.host}` : `USB ${l.port || ''}`;
+            const name = n && (n.long_name || n.node_id) ? `${n.long_name || n.node_id}${n.hw_model ? ' (' + n.hw_model + ')' : ''}` : 'Meshtastic node';
+            parts.push(`<span class="text-emerald-400">●</span> ${escapeHtml(name)} via ${escapeHtml(via)}${l.owner && l.owner !== 'wardrift' ? ' · shared with RF Waterfall' : ''}`);
+            if (n) {
+                const bits = [];
+                if (n.battery_level != null) bits.push(`battery ${n.battery_level}%`);
+                if (n.channel_utilization != null) bits.push(`ch util ${Number(n.channel_utilization).toFixed(1)}%`);
+                if (n.num_online_nodes != null) bits.push(`${n.num_online_nodes} node${n.num_online_nodes === 1 ? '' : 's'} heard`);
+                if (bits.length) parts.push(escapeHtml(bits.join(' · ')));
+            }
+        }
+        if (d.enabled) {
+            parts.push(`Last report: ${_wdmAgo(st.last_report_at)}${st.last_ok === false ? ' (failed)' : ''}` +
+                (d.next_report_in != null ? ` · next in ${d.next_report_in}s` : '') +
+                (tot.reports ? ` · ${tot.reports} sent, +${tot.exp || 0} XP, +${tot.currency || 0} currency` : ''));
+        }
+        nodeEl.innerHTML = parts.join('<br>');
+    }
+    const msg = document.getElementById('wd-wdm-msg');
+    if (msg && !msg.dataset.sticky) {
+        msg.textContent = d.enabled && st.error ? st.error : '';
+        msg.className = 'text-xs mt-1 text-red-400';
+    }
+    // Keep the status live while the card is on screen.
+    clearTimeout(_wdmTimer);
+    if (document.getElementById('wd-wdm-badge')?.offsetParent) _wdmTimer = setTimeout(() => loadWardriftMesh(), 10000);
+}
+
+async function saveWardriftMesh(reportNow) {
+    const g = id => document.getElementById(id);
+    const body = {
+        conn: g('wd-wdm-conn')?.value || 'usb',
+        port: g('wd-wdm-port')?.value || '',
+        host: (g('wd-wdm-host')?.value || '').trim(),
+        interval: parseInt(g('wd-wdm-interval')?.value || '300', 10),
+        enabled: !!g('wd-wdm-enabled')?.checked,
+    };
+    const key = (g('wd-wdm-key')?.value || '').trim();
+    if (key) body.key = key;
+    if (reportNow) { body.report_now = true; body.enabled = true; }
+    const msg = g('wd-wdm-msg');
+    try {
+        const r = await fetch('/api/wardriving/wardrift/mesh', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+        if (g('wd-wdm-key')) g('wd-wdm-key').value = '';
+        if (msg) {
+            msg.textContent = reportNow ? 'Reporting now…' : 'Saved.';
+            msg.className = 'text-xs mt-1 text-emerald-400';
+            msg.dataset.sticky = '1';
+            setTimeout(() => { delete msg.dataset.sticky; }, 4000);
+        }
+        loadWardriftMesh(true);
+    } catch (e) {
+        if (msg) { msg.textContent = 'Save failed: ' + e.message; msg.className = 'text-xs mt-1 text-red-400'; }
+    }
+}
+
+// ---- Wardrift (wardrift.net): session sign-in -> route uploads + stats; API key -> signal ingest
+function _renderWardriftConfig(d) {
+    const badge = document.getElementById('wd-wardrift-status');
+    if (badge) {
+        let txt = 'Not set', cls = 'bg-gray-700 text-gray-400';
+        if (d.wardrift_signed_in) { txt = '✓ ' + (d.wardrift_username || 'signed in'); cls = 'bg-emerald-900/60 text-emerald-300'; }
+        else if (d.wardrift_key_configured) { txt = 'API key ready'; cls = 'bg-amber-900/60 text-amber-300'; }
+        badge.textContent = txt;
+        badge.className = 'text-xs px-2 py-0.5 rounded-full ' + cls;
+    }
+    document.getElementById('wd-wardrift-signin')?.classList.toggle('hidden', !!d.wardrift_signed_in);
+    document.getElementById('wd-wardrift-signin-btn')?.classList.toggle('hidden', !!d.wardrift_signed_in);
+    document.getElementById('wd-wardrift-signout-btn')?.classList.toggle('hidden', !d.wardrift_signed_in);
+    const pub = document.getElementById('wd-wardrift-public');
+    if (pub) pub.checked = !!d.wardrift_public_route;
+    const stats = document.getElementById('wd-wardrift-stats');
+    if (!d.wardrift_signed_in) { stats?.classList.add('hidden'); return; }
+    loadWardriftStats();
+}
+
+function _wardriftMsg(msg, ok) {
+    const out = document.getElementById('wd-wardrift-result');
+    if (!out) return;
+    out.textContent = msg;
+    out.className = 'text-xs mt-2 ' + (ok ? 'text-emerald-400' : 'text-red-400');
+}
+
+async function loadWardriftStats() {
+    const box = document.getElementById('wd-wardrift-stats');
+    if (!box) return;
+    try {
+        const r = await fetch('/api/wardriving/wardrift/dashboard');
+        const d = await r.json();
+        if (!r.ok) {
+            box.classList.add('hidden');
+            if (d.expired) _wardriftMsg('Wardrift session expired — sign in again.', false);
+            return;
+        }
+        const ch = (d.characters || [])[0] || {};
+        const life = (d.wardrive && d.wardrive.lifetime) || {};
+        const tile = (label, val) => `<div class="bg-slate-700/50 rounded px-2 py-1.5 min-w-0"><div class="text-gray-500 text-xs truncate">${escapeHtml(label)}</div><div class="text-white text-sm font-semibold truncate">${escapeHtml(String(val))}</div></div>`;
+        box.innerHTML = [
+            tile(ch.name ? `${ch.name} · Lv` : 'Level', ch.level ?? '—'),
+            tile('EXP to next', ch.exp_to_next_level ?? '—'),
+            tile('Currency', ch.currency ?? '—'),
+            tile('Routes · APs', `${life.routes_logged ?? 0} · ${life.access_points_discovered ?? 0}`),
+        ].join('');
+        box.classList.remove('hidden');
+    } catch (e) { box.classList.add('hidden'); }
+}
+
+async function wardriftSignIn() {
+    const u = document.getElementById('wd-wardrift-user')?.value.trim();
+    const pw = document.getElementById('wd-wardrift-pass');
+    if (!u || !pw?.value) { _wardriftMsg('Enter username and password.', false); return; }
+    try {
+        const r = await fetch('/api/wardriving/wardrift/signin', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: u, password: pw.value })
+        });
+        const d = await r.json().catch(() => ({}));
+        pw.value = '';
+        if (!r.ok || !d.success) { _wardriftMsg('Sign-in failed: ' + (d.error || ('HTTP ' + r.status)), false); return; }
+        _wardriftMsg('Signed in to Wardrift.', true);
+        loadWardriveUploadConfig();
+    } catch (e) { _wardriftMsg('Sign-in error: ' + e.message, false); }
+}
+
+async function wardriftSignOut() {
+    try {
+        await fetch('/api/wardriving/wardrift/signout', { method: 'POST' });
+        _wardriftMsg('Signed out.', true);
+        loadWardriveUploadConfig();
+    } catch (e) { _wardriftMsg('Sign-out error: ' + e.message, false); }
+}
+
+async function saveWardriftKey() {
+    const el = document.getElementById('wd-wardrift-key');
+    const key = el?.value.trim();
+    if (!key) { _wardriftMsg('Paste your Wardrift API key first.', false); return; }
+    try {
+        await _postUploadConfig({ wardrift_api_key: key });
+        el.value = '';
+        _wardriftMsg('Wardrift API key saved.', true);
+        loadWardriveUploadConfig();
+    } catch (e) { _wardriftMsg('Save failed: ' + e.message, false); }
+}
+
+async function saveWardriftPublic() {
+    const on = !!document.getElementById('wd-wardrift-public')?.checked;
+    try { await _postUploadConfig({ wardrift_public_route: on }); }
+    catch (e) { _wardriftMsg('Save failed: ' + e.message, false); }
+}
+
+function _wdUploadCfgMsg(msg, ok) {
+    const out = document.getElementById('wd-upload-cfg-result');
+    if (!out) return;
+    out.textContent = msg;
+    out.className = 'text-xs mt-2 ' + (ok ? 'text-emerald-400' : 'text-red-400');
+    out.classList.remove('hidden');
+}
+
+async function _postUploadConfig(body) {
+    const r = await fetch('/api/wardriving/upload-config', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    return d;
+}
+
+async function saveWdgUploadKey() {
+    const wdg = document.getElementById('wd-wdg-key')?.value.trim();
+    if (!wdg) { _wdUploadCfgMsg('Enter your WDGWars key first.', false); return; }
+    try {
+        await _postUploadConfig({ wdg_key: wdg });
+        _wdUploadCfgMsg('WDGWars key saved.', true);
+        const el = document.getElementById('wd-wdg-key'); if (el) el.value = '';
+        loadWardriveUploadConfig();
+    } catch (e) { _wdUploadCfgMsg('Save failed: ' + e.message, false); }
+}
+
+async function saveWigleUploadCreds() {
+    const wn = document.getElementById('wd-wigle-name')?.value.trim();
+    const wt = document.getElementById('wd-wigle-token')?.value.trim();
+    const ws = document.getElementById('wd-wigle-cfg-status');
+    const body = {};
+    if (wn) body.wigle_api_name = wn;
+    if (wt) body.wigle_api_token = wt;
+    if (Object.keys(body).length === 0) { if (ws) { ws.textContent = 'Enter name + token first'; ws.className = 'text-xs text-red-400'; } return; }
+    try {
+        await _postUploadConfig(body);
+        ['wd-wigle-name', 'wd-wigle-token'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+        loadWardriveUploadConfig();
+    } catch (e) { if (ws) { ws.textContent = 'Save failed'; ws.className = 'text-xs text-red-400'; } }
+}
+
+// ---- Auto-upload card: one switch + a checkbox per service + recent outcomes
+const _AU_TARGETS = ['wigle', 'wdgwars', 'wardrift'];
+let _auTimer = null;
+
+function _renderAutoUpload(d) {
+    const cb = document.getElementById('wd-auto-upload');
+    if (cb) cb.checked = !!d.auto_upload;
+    const picked = d.auto_upload_targets || [];
+    const ready = {
+        wigle: d.wigle_configured,
+        wdgwars: d.wdgwars_configured,
+        wardrift: d.wardrift_signed_in || d.wardrift_key_configured,
+    };
+    _AU_TARGETS.forEach(t => {
+        const box = document.getElementById('wd-au-' + t);
+        if (box) box.checked = picked.includes(t);
+        const note = document.getElementById(`wd-au-${t}-note`);
+        if (note) note.textContent = ready[t] ? '' : '(not set up)';
+    });
+    const po = document.getElementById('wd-au-pushover');
+    if (po) po.checked = !!d.notify_pushover;
+    const poNote = document.getElementById('wd-au-pushover-note');
+    if (poNote) poNote.textContent = { missing: '(set up Pushover or Slack in Settings → Push Notifications)',
+                                       off: '(Push notifications are switched off in Settings → Push Notifications)' }[d.pushover_ready] || '';
+    const st = document.getElementById('wd-auto-upload-status');
+    if (st) {
+        const missing = picked.filter(t => !ready[t]).map(t => ({ wigle: 'WiGLE', wdgwars: 'WDGWars', wardrift: 'Wardrift' })[t]);
+        st.textContent = (d.auto_upload ? 'On' : 'Off') + (d.pending ? ` · ${d.pending} drive${d.pending === 1 ? '' : 's'} queued` : '') +
+            (d.auto_upload && missing.length ? ` · set up ${missing.join(', ')} below first` : '');
+        st.className = 'text-xs mt-2 ' + (d.auto_upload && missing.length ? 'text-amber-400' : 'text-gray-500');
+    }
+    const recent = d.recent || [];
+    const wrap = document.getElementById('wd-au-recent');
+    const list = document.getElementById('wd-au-recent-list');
+    if (wrap && list) {
+        wrap.classList.toggle('hidden', !recent.length);
+        const icon = { ok: ['✓', 'text-emerald-400'], failed: ['✕', 'text-red-400'], processing: ['…', 'text-amber-300'],
+                       skipped: ['–', 'text-gray-500'], unknown: ['?', 'text-gray-400'] };
+        list.innerHTML = recent.map(r => `<div class="min-w-0"><span class="font-mono text-gray-300">${escapeHtml(r.session_id)}</span> ` +
+            r.results.map(x => {
+                const [ic, cls] = icon[x.state] || ['·', 'text-gray-400'];
+                return `<span class="${cls} break-words">${ic} ${escapeHtml(x.name)}${x.message ? ': ' + escapeHtml(x.message) : ''}</span>`;
+            }).join('<span class="text-gray-600"> · </span>') + '</div>').join('');
+    }
+    // While Wardrift is still judging an upload, keep the list fresh.
+    clearTimeout(_auTimer);
+    const busy = recent.some(r => r.results.some(x => x.state === 'processing')) || d.pending;
+    if (busy && document.getElementById('wd-au-recent')?.offsetParent) _auTimer = setTimeout(loadWardriveUploadConfig, 15000);
+}
+
+async function saveAutoUpload() {
+    const on = !!document.getElementById('wd-auto-upload')?.checked;
+    const targets = _AU_TARGETS.filter(t => document.getElementById('wd-au-' + t)?.checked);
+    const st = document.getElementById('wd-auto-upload-status');
+    if (on && !targets.length) {
+        if (st) { st.textContent = 'Tick at least one service'; st.className = 'text-xs mt-2 text-red-400'; }
+        return;
+    }
+    try {
+        const body = { auto_upload: on, notify_pushover: !!document.getElementById('wd-au-pushover')?.checked };
+        if (targets.length) body.auto_upload_targets = targets;
+        await _postUploadConfig(body);
+        loadWardriveUploadConfig();
+    } catch (e) { if (st) { st.textContent = 'Save failed: ' + e.message; st.className = 'text-xs mt-2 text-red-400'; } }
+}
+
+async function uploadWardriveSession(sessionId, target) {
+    const name = { wdgwars: 'WDGWars', wigle: 'WiGLE', wardrift: 'Wardrift' }[target] || target;
+    if (!confirm(`Upload session "${sessionId}" to ${name}?`)) return;
+    try {
+        const r = await fetch('/api/wardriving/upload/' + encodeURIComponent(sessionId), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target })
+        });
+        const d = await r.json();
+        if (r.ok && d.success) {
+            const res = (d.results && d.results[target]) || {};
+            const resp = res.response || {};
+            let extra;
+            if (target === 'wardrift') {
+                extra = res.duplicate ? '\nWardrift already has this file — an earlier upload may still be processing. Check your routes on wardrift.net.'
+                    : (res.mode === 'route' ? '\nWardrift is processing it — the result appears under Auto-upload → Recent uploads.'
+                       : `\n+${resp.awarded_exp || 0} EXP, +${resp.awarded_currency || 0} currency (${resp.batches} batches)`);
+            } else {
+                const tid = resp.transid || resp.id;
+                extra = tid ? `\nTransID: ${tid}` : '\nQueued for processing.';
+            }
+            alert(`✓ Sent ${d.located} located networks to ${name}.` + extra);
+            loadWardriveUploadConfig();
+        } else if (r.status === 422) {
+            alert('No GPS-located networks in this session yet — do a drive with a fix first (or the export has no coordinates).');
+        } else {
+            const res = (d.results && d.results[target]) || {};
+            const reason = res.error || (res.response && (res.response.error || res.response.message)) || d.error || ('HTTP ' + r.status);
+            alert(`${name} upload failed: ${reason}`);
+        }
+    } catch (e) {
+        alert(`${name} upload error: ${e.message}`);
+    }
 }
 
 function selectWardrivingSession(sessionId) {
@@ -27253,9 +38397,12 @@ function updateActiveScans(scans, options = {}) {
                      onclick="toggleAdvVulnScanFindings('${scanId}')">
                     <div class="flex items-start justify-between gap-3">
                         <div>
-                            <div class="text-sm font-semibold text-white flex items-center gap-1.5">
+                            <div class="text-sm font-semibold text-white flex items-center gap-1.5 flex-wrap">
                                 ${escapeHtml(formatScanType(scan.scan_type))}
                                 ${scan.delegated_to ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-cyan-900/60 text-cyan-300 font-medium">🛰️ ${escapeHtml(scan.delegated_to)}</span>` : ''}
+                                ${scan.egress_iface ? (scan.egress_tunneled
+                                    ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-900/60 text-emerald-300 font-medium" title="Reached the target over the Tailscale tunnel (${escapeHtml(scan.egress_iface)})">🔒 tunneled</span>`
+                                    : `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-700 text-gray-300 font-medium" title="Reached the target directly over ${escapeHtml(scan.egress_iface)}, not the tunnel">↗ ${escapeHtml(scan.egress_iface)}</span>`) : ''}
                             </div>
                             <div class="text-xs text-gray-400 mt-1">${escapeHtml(scan.target || 'Unknown target')}</div>
                         </div>
@@ -28118,20 +39265,27 @@ function formatDuration(seconds) {
     return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
 }
 
-async function copyToClipboard(text) {
+async function copyToClipboard(text, { silent = false } = {}) {
+    // Works on a plain-HTTP Ragnar too: navigator.clipboard only exists in a
+    // secure context (HTTPS/localhost), so fall back to execCommand('copy').
+    let ok = true;
     try {
         await navigator.clipboard.writeText(text);
-        showNotification('Copied to clipboard', 'success');
     } catch (err) {
-        // Fallback for older browsers
         const textarea = document.createElement('textarea');
         textarea.value = text;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.top = '-1000px';
+        textarea.style.opacity = '0';
         document.body.appendChild(textarea);
+        textarea.focus();
         textarea.select();
-        document.execCommand('copy');
+        try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
         document.body.removeChild(textarea);
-        showNotification('Copied to clipboard', 'success');
     }
+    if (!silent) showNotification(ok ? 'Copied to clipboard' : 'Copy failed', ok ? 'success' : 'error');
+    return ok;
 }
 
 let advVulnScanMode = 'web';
@@ -28423,6 +39577,7 @@ async function startReconScan() {
     }
 
     const recon_types = [];
+    if (document.getElementById('recon-ports')?.checked) recon_types.push('port_scan');
     if (document.getElementById('recon-tls')?.checked) recon_types.push('tls_audit');
     if (document.getElementById('recon-dns')?.checked) recon_types.push('dns_passive');
     if (document.getElementById('recon-content')?.checked) recon_types.push('content_discovery');
@@ -28486,6 +39641,7 @@ function renderReconProgress(scan) {
     const container = document.getElementById('recon-progress');
     if (!container) return;
     const labels = {
+        port_scan: 'Port discovery',
         tls_audit: 'TLS audit',
         dns_passive: 'DNS subdomain enum',
         content_discovery: 'Content discovery',
@@ -28536,8 +39692,26 @@ async function loadReconHandoffOptions() {
 }
 
 function renderReconHandoff(data) {
+    const portsEl = document.getElementById('recon-ports-list');
     const subsEl = document.getElementById('recon-subdomains-list');
     const pathsEl = document.getElementById('recon-paths-list');
+    if (portsEl) {
+        if (!data.ports?.length) {
+            portsEl.innerHTML = '<p class="text-xs text-gray-500">No open web ports discovered (or port discovery not run).</p>';
+        } else {
+            // Pre-check 80/443; leave non-standard ports for the operator to opt in.
+            portsEl.innerHTML = '<p class="text-xs text-gray-400 mb-1">Open ports — pick which to scan:</p>' + data.ports.map(p => {
+                const std = (p.port === 80 || p.port === 443);
+                return `
+                <label class="flex items-center gap-2 px-2 py-1 hover:bg-slate-700/50 rounded text-xs cursor-pointer">
+                    <input type="checkbox" class="recon-port-cb" value="${escapeHtml(p.url)}" ${std ? 'checked' : ''}>
+                    <span class="text-gray-200 flex-1">${escapeHtml(p.url)}</span>
+                    <span class="px-1.5 py-0.5 rounded ${p.scheme === 'https' ? 'bg-emerald-900/60 text-emerald-300' : 'bg-slate-700 text-gray-300'}">${escapeHtml(p.scheme)}</span>
+                    <span class="text-gray-500">:${p.port}</span>
+                </label>`;
+            }).join('');
+        }
+    }
     if (subsEl) {
         if (!data.subdomains?.length) {
             subsEl.innerHTML = '<p class="text-xs text-gray-500">No additional subdomains discovered.</p>';
@@ -28572,6 +39746,7 @@ async function handoffReconToZap(force) {
     if (!reconScanId) return;
     const subdomains = Array.from(document.querySelectorAll('.recon-subdomain-cb:checked')).map(cb => cb.value);
     const paths = Array.from(document.querySelectorAll('.recon-path-cb:checked')).map(cb => cb.value);
+    const ports = Array.from(document.querySelectorAll('.recon-port-cb:checked')).map(cb => cb.value);
 
     const scannerSelect = document.getElementById('adv-vuln-scanner');
     const scan_type = scannerSelect ? scannerSelect.value : 'zap_full';
@@ -28580,7 +39755,7 @@ async function handoffReconToZap(force) {
         const response = await fetch(`/api/recon/scan/${reconScanId}/handoff`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ subdomains, paths, scan_type, force: !!force }),
+            body: JSON.stringify({ subdomains, paths, ports, scan_type, force: !!force }),
         });
         const data = await response.json();
         if (!data.success) {
@@ -30068,7 +41243,7 @@ function meshNodeBanner(unit, isSelf, ctx) {
             <button onclick="meshOpenNode('${nodeId}')"
                     class="flex-shrink-0 bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-xs px-4 py-1.5 rounded transition-colors">Open</button>
         </div>
-        <div class="flex items-center gap-6 mt-3 pt-3 border-t border-slate-700/40">
+        <div class="flex items-center flex-wrap gap-x-6 gap-y-2 mt-3 pt-3 border-t border-slate-700/40">
             <div><div class="text-[9px] uppercase tracking-wider text-gray-500">Status</div>
                  <div class="text-xs ${st.reachable ? 'text-green-300' : 'text-gray-400'}">${escapeHtml(st.label)}</div></div>
             <div><div class="text-[9px] uppercase tracking-wider text-gray-500">Alerts</div>
@@ -30096,6 +41271,7 @@ const _MESH_FEATURE_TITLE = {
     integrity: 'Network Integrity Monitor',
     watchtower: 'Watchtower',
     vulnerabilities: 'Vulnerabilities',
+    capture: 'Packet Capture',
 };
 
 function _meshSevBadge(sev) {
@@ -30240,6 +41416,431 @@ function _meshControlBar(id, feature, unit) {
     </div>`;
 }
 
+// Tailnet path summary for a peer, straight from the status payload (no probe):
+// a direct WireGuard path vs. a DERP relay, plus the node's tailnet addresses.
+// This is the "how am I reaching this unit" half of "see the jumps".
+function _meshPathLine(unit) {
+    const ips = (unit.ips && unit.ips.length) ? unit.ips : (unit.ip ? [unit.ip] : []);
+    const ipStr = ips.map(escapeHtml).join(', ');
+    let path;
+    if (unit.direct) path = '<span class="text-green-300">Direct connection</span>';
+    else if (unit.relay) path = `<span class="text-amber-300">Relayed via DERP</span> <span class="text-gray-500">(${escapeHtml(unit.relay)})</span>`;
+    else path = '<span class="text-gray-400">Path not yet known</span>';
+    return `<span class="text-xs text-gray-400">Tailnet path: ${path}${ipStr ? ` · <span class="font-mono">${ipStr}</span>` : ''}</span>`;
+}
+
+// The per-node Actions bar: live network probes from THIS unit to the peer. Only
+// shown for a reachable peer with an address (an unreachable one gets Trace +
+// Diagnose on its banner instead, so the page never carries two output boxes).
+function _meshActionsBar(unit) {
+    if (!unit.ip) return '';
+    const ip = escapeHtml(unit.ip);
+    const port = _meshNodePort();
+    return `<div class="glass rounded-lg p-4 mb-3">
+        <div class="flex items-center justify-between gap-2 mb-3 flex-wrap">
+            <h4 class="font-semibold">Actions</h4>
+            ${_meshPathLine(unit)}
+        </div>
+        <div class="flex flex-wrap gap-2">
+            <button onclick="meshProbe('${ip}','trace',this)"
+                    class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-xs px-3 py-1.5 rounded transition-colors">Trace route</button>
+            <button onclick="meshProbe('${ip}','ping',this)"
+                    class="bg-slate-700 hover:bg-slate-600 text-gray-200 text-xs px-3 py-1.5 rounded transition-colors">Ping</button>
+            <button onclick="meshDiagnose('${ip}', ${port}, this)"
+                    class="bg-slate-700 hover:bg-slate-600 text-gray-200 text-xs px-3 py-1.5 rounded transition-colors">Diagnose</button>
+            <button onclick="meshCopyText('${ip}',this)"
+                    class="bg-slate-700 hover:bg-slate-600 text-gray-200 text-xs px-3 py-1.5 rounded transition-colors">Copy IP</button>
+        </div>
+        <div class="mesh-diag-out mt-3"></div>
+        <div class="mesh-probe-out mt-3"></div>
+    </div>`;
+}
+
+// Draw a traceroute result as a hop list — the "jumps" between this unit and the
+// peer. A relayed tailnet path or a dead hop shows up plainly here.
+// The last probe/diagnose results, kept so the on-page "Download" can save the
+// same data the box is showing as a text report (no re-run, no server round-trip).
+let _meshProbeResult = null;   // last trace/ping shown in .mesh-probe-out
+let _meshDiagResult = null;    // last diagnose shown in .mesh-diag-out
+
+function _meshSafeName(s) {
+    return String(s || 'result').replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 48) || 'result';
+}
+function _meshStamp() {
+    return new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+}
+// Trigger a client-side text download. This runs in the real Ragnar web app (not
+// a sandboxed artifact), so a Blob + <a download> saves straight to the browser.
+function _meshDownloadText(filename, text) {
+    try {
+        const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = filename; a.style.display = 'none';
+        document.body.appendChild(a); a.click();
+        setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 500);
+    } catch (e) {
+        if (typeof showNotification === 'function') showNotification('Download failed: ' + e, 'error');
+    }
+}
+
+function _meshTraceReport(d) {
+    const n = d.hop_count != null ? d.hop_count : (d.hops || []).filter(h => h.ip).length;
+    const lines = ['Ragnar mesh — traceroute',
+        'Target: ' + (d.target || ''),
+        'Generated: ' + new Date().toISOString(),
+        'Hops: ' + n, '',
+        'HOP  ADDRESS'.padEnd(46) + 'RTT'];
+    (d.hops || []).forEach(h => {
+        const ip = h.ip || '* no reply';
+        const rtt = h.rtt_ms != null ? h.rtt_ms.toFixed(1) + ' ms' : '';
+        lines.push(String(h.hop).padEnd(5) + ip.padEnd(41) + rtt);
+    });
+    if (d.raw) lines.push('', '--- raw ---', d.raw);
+    return lines.join('\n') + '\n';
+}
+function _meshPingReport(d) {
+    const lines = ['Ragnar mesh — ping',
+        'Target: ' + (d.target || ''),
+        'Generated: ' + new Date().toISOString(), ''];
+    if (d.received != null) lines.push(`${d.received}/${d.transmitted} replies, ${d.loss_pct}% loss`);
+    if (d.rtt_avg != null) lines.push(`rtt min/avg/max = ${d.rtt_min}/${d.rtt_avg}/${d.rtt_max} ms`);
+    if (d.raw) lines.push('', '--- raw ---', d.raw);
+    return lines.join('\n') + '\n';
+}
+function _meshDiagReport(r, url) {
+    const lines = ['Ragnar mesh — connection diagnose',
+        'Target: ' + (r.url || url || ''),
+        'Generated: ' + new Date().toISOString(), '',
+        'Category: ' + (r.category || ''),
+        'Status: ' + (r.status != null ? r.status : '—'),
+        'Detail: ' + (r.hint || '')];
+    if (r.error) lines.push('Error: ' + r.error);
+    return lines.join('\n') + '\n';
+}
+
+function meshProbeDownload() {
+    const p = _meshProbeResult;
+    if (!p) return;
+    const text = p.kind === 'ping' ? _meshPingReport(p.data) : _meshTraceReport(p.data);
+    _meshDownloadText(`${p.kind}_${_meshSafeName(p.data.target || p.ip)}_${_meshStamp()}.txt`, text);
+}
+window.meshProbeDownload = meshProbeDownload;
+
+function meshDiagDownload() {
+    const p = _meshDiagResult;
+    if (!p) return;
+    _meshDownloadText(`diagnose_${_meshSafeName(p.ip)}_${_meshStamp()}.txt`, _meshDiagReport(p.result, p.url));
+}
+window.meshDiagDownload = meshDiagDownload;
+
+// Small inline "Download" link used in each result header.
+function _meshDownloadLink(fn) {
+    return `<button onclick="${fn}" class="ml-auto text-[11px] text-cyan-400 hover:text-cyan-300 underline flex-shrink-0">⬇ Download</button>`;
+}
+
+function _meshRenderTrace(d) {
+    const hops = d.hops || [];
+    if (!hops.length) {
+        return `<div class="text-sm text-amber-200 border border-amber-800 rounded-lg p-3 bg-amber-950/30">
+            <div class="flex items-center gap-2 mb-1 flex-wrap"><span>No hops returned.</span>${_meshDownloadLink('meshProbeDownload()')}</div>
+            ${d.raw ? `<pre class="mt-1 text-[11px] font-mono text-amber-100/80 whitespace-pre-wrap overflow-x-auto">${escapeHtml(d.raw)}</pre>` : ''}</div>`;
+    }
+    const rows = hops.map(h => `
+        <div class="flex items-center gap-3 py-1 border-b border-slate-800/60 text-xs">
+            <span class="w-6 text-right text-gray-500 font-mono">${h.hop}</span>
+            <span class="flex-1 font-mono ${h.ip ? 'text-gray-100' : 'text-gray-600'}">${h.ip ? escapeHtml(h.ip) : '* no reply'}</span>
+            <span class="text-gray-400 font-mono">${h.rtt_ms != null ? h.rtt_ms.toFixed(1) + ' ms' : ''}</span>
+        </div>`).join('');
+    const n = d.hop_count != null ? d.hop_count : hops.filter(h => h.ip).length;
+    const hopBadge = n <= 1 ? 'border-green-800 text-green-300 bg-green-950/30' : 'border-slate-700 text-gray-300';
+    return `<div class="text-sm border border-slate-700 rounded-lg p-3 bg-slate-900/50">
+        <div class="flex items-center gap-2 mb-2 flex-wrap">
+            <span class="font-semibold">Route to <span class="font-mono">${escapeHtml(d.target)}</span></span>
+            <span class="text-[11px] px-2 py-0.5 rounded border ${hopBadge}">${n} hop${n === 1 ? '' : 's'}</span>
+            ${_meshDownloadLink('meshProbeDownload()')}
+        </div>
+        ${rows}
+    </div>`;
+}
+
+function _meshRenderPing(d) {
+    const loss = d.loss_pct;
+    const ok = typeof loss === 'number' && loss < 100;
+    const tone = ok ? 'border-green-800 bg-green-950/30 text-green-200'
+                    : 'border-amber-800 bg-amber-950/30 text-amber-100';
+    return `<div class="text-sm border rounded-lg p-3 ${tone}">
+        <div class="flex items-center gap-2 mb-1">
+            <span class="w-2.5 h-2.5 rounded-full ${ok ? 'bg-green-400' : 'bg-amber-400'}"></span>
+            <span class="font-semibold">Ping <span class="font-mono">${escapeHtml(d.target)}</span></span>
+            ${_meshDownloadLink('meshProbeDownload()')}
+        </div>
+        <div class="opacity-90 text-xs">
+            ${d.received != null ? `${d.received}/${d.transmitted} replies · ${loss}% loss` : 'No summary parsed.'}
+            ${d.rtt_avg != null ? ` · avg ${d.rtt_avg} ms (min ${d.rtt_min} / max ${d.rtt_max})` : ''}
+        </div>
+    </div>`;
+}
+
+// Run a traceroute/ping from this unit to a peer. The target is validated
+// server-side against the known mesh roster, so this only passes an address the
+// status payload already gave us. Output lands in the nearest .mesh-probe-out.
+async function meshProbe(ip, kind, btn) {
+    const host = btn && (btn.closest('.glass') || btn.closest('.rounded-lg'));
+    const box = (host && host.querySelector('.mesh-probe-out')) || document.querySelector('.mesh-probe-out');
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = kind === 'ping' ? 'Pinging…' : 'Tracing…'; }
+    if (box) box.innerHTML = `<div class="text-sm text-gray-400">${kind === 'ping' ? 'Pinging' : 'Tracing route to'}
+        <span class="font-mono">${escapeHtml(ip)}</span> from this unit…</div>`;
+    const res = await _meshApi('/api/mesh/probe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ip, kind })
+    });
+    const d = res.data || {};
+    if (!res.ok || !d.success) {
+        const msg = d.error || res.error || ('HTTP ' + res.status);
+        if (box) box.innerHTML = `<div class="text-sm text-red-300 border border-red-800 rounded-lg p-3 bg-red-950/30">${escapeHtml(msg)}</div>`;
+    } else if (box) {
+        _meshProbeResult = { kind, ip, data: d };   // for the result's Download link
+        box.innerHTML = kind === 'ping' ? _meshRenderPing(d) : _meshRenderTrace(d);
+    }
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+}
+window.meshProbe = meshProbe;
+
+// Copy a short string (an IP) to the clipboard, with a graceful fallback for
+// browsers/contexts where navigator.clipboard is unavailable.
+function meshCopyText(text, btn) {
+    const done = () => {
+        if (!btn) return;
+        const o = btn.textContent; btn.textContent = 'Copied';
+        setTimeout(() => { btn.textContent = o; }, 1200);
+    };
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done).catch(done);
+        } else {
+            const ta = document.createElement('textarea');
+            ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta); ta.select();
+            try { document.execCommand('copy'); } catch (e) {}
+            document.body.removeChild(ta); done();
+        }
+    } catch (e) { done(); }
+}
+window.meshCopyText = meshCopyText;
+
+// ── Live packet capture section (node page) ─────────────────────────────────
+// Unlike the Traffic Analyzer (stats only), this starts a bounded tcpdump-to-pcap
+// on the unit and lets the operator download the .pcap, pulled over the tailnet.
+function _meshCaptureSection(id, unit) {
+    const c = ((unit.findings || {}).features || {}).capture || {};
+    const inner = (!c.available)
+        ? `<p class="text-sm text-gray-500">${escapeHtml(c.reason || 'Packet capture is unavailable on this unit.')}</p>`
+        : _meshCaptureBody(id, c);
+    return `<div class="glass rounded-lg p-4 mb-3">
+        <h4 class="font-semibold mb-2">${escapeHtml(_MESH_FEATURE_TITLE.capture)}</h4>
+        ${inner}
+    </div>`;
+}
+
+function _meshCaptureBody(id, c) {
+    const ifaces = c.interfaces || [];
+    const def = c.default_interface || (ifaces[0] || '');
+    const lim = c.limits || {};
+    const maxS = lim.max_seconds || 300;
+    const maxMB = Math.round((lim.max_bytes || 0) / 1048576);
+    const opts = ifaces.length
+        ? ifaces.map(n => `<option value="${escapeHtml(n)}"${n === def ? ' selected' : ''}>${escapeHtml(n)}</option>`).join('')
+        : '<option value="">(no interfaces)</option>';
+    const running = !!c.running;
+    const btn = running
+        ? `<button onclick="meshCaptureCancel('${id}','${escapeHtml(c.active_id || '')}',this)"
+                   class="bg-red-600/80 hover:bg-red-600 text-white text-xs px-4 py-1.5 rounded transition-colors">Stop capture</button>`
+        : `<button onclick="meshCaptureStart('${id}',this)"
+                   class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-xs px-4 py-1.5 rounded transition-colors">Start capture</button>`;
+    const controls = `
+      <div class="flex flex-wrap items-end gap-2 mb-2">
+        <label class="text-[11px] text-gray-400">Interface
+          <select id="cap-iface" class="block mt-0.5 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm">${opts}</select></label>
+        <label class="text-[11px] text-gray-400">Seconds
+          <input id="cap-seconds" type="number" min="1" max="${maxS}" value="60" class="block mt-0.5 w-20 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm"></label>
+        <label class="text-[11px] text-gray-400">Max packets
+          <input id="cap-packets" type="number" min="0" placeholder="∞" class="block mt-0.5 w-24 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm"></label>
+        <label class="text-[11px] text-gray-400 flex-1" style="min-width:10rem">Filter (BPF, optional)
+          <input id="cap-filter" type="text" placeholder="e.g. tcp port 443" class="block mt-0.5 w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm font-mono"></label>
+        ${btn}
+      </div>
+      <p class="text-[10px] text-gray-500 mb-2">Bounded capture — stops at the time or packet limit${maxMB ? `, and never exceeds ${maxMB} MB / ${maxS}s` : ''}. The .pcap streams back over the tailnet.</p>
+      <div id="cap-out" class="mb-2"></div>`;
+    return controls + _meshCaptureList(id, c.recent || []);
+}
+
+// Which captures are expanded inline, cid -> last view payload. Kept so a
+// background mesh refresh re-renders the list with open panels still open (and
+// their already-fetched packets intact), instead of collapsing them.
+let _meshCaptureOpen = {};
+
+function _meshCaptureList(id, recent) {
+    if (!recent.length) return '<p class="text-xs text-gray-500">No captures yet on this unit.</p>';
+    const rows = recent.map(r => {
+        const st = r.state || '';
+        const stCls = st === 'running' ? 'text-amber-300'
+            : st === 'error' ? 'text-red-300'
+            : st === 'done' ? 'text-green-300' : 'text-gray-400';
+        const hasFile = (st === 'done' || st === 'canceled') && r.bytes > 0;
+        const open = hasFile && Object.prototype.hasOwnProperty.call(_meshCaptureOpen, r.id);
+        const actions = hasFile
+            ? `<button onclick="meshCaptureView('${id}','${escapeHtml(r.id)}',this)" class="text-cyan-400 hover:text-cyan-300 underline whitespace-nowrap">${open ? '▾ Hide' : '▸ View'}</button>
+               <button onclick="meshCaptureDownload('${id}','${escapeHtml(r.id)}')" class="text-cyan-400 hover:text-cyan-300 underline">Download</button>`
+            : (st === 'running' ? '<span class="text-amber-300">capturing…</span>' : '<span class="text-gray-600">—</span>');
+        // Collapsible detail lives on the row itself, so the packets expand in
+        // place (phone-friendly) and open panels survive a background re-render.
+        const detail = `<div id="cap-detail-${escapeHtml(r.id)}" class="${open ? 'mt-2' : 'hidden'}">${open ? _meshRenderCaptureView(_meshCaptureOpen[r.id], id, r.id) : ''}</div>`;
+        return `<div class="py-1 border-b border-slate-800/60">
+            <div class="flex items-center justify-between gap-3 text-xs">
+              <div class="min-w-0">
+                <span class="font-mono text-gray-200">${escapeHtml(r.interface || '')}</span>
+                <span class="${stCls}">${escapeHtml(st)}</span>
+                <span class="text-gray-500">${r.packets || 0} pkts · ${escapeHtml(r.bytes_human || '0 B')} · ${r.elapsed || 0}s</span>
+                ${r.filter ? `<span class="text-gray-600 font-mono">[${escapeHtml(r.filter)}]</span>` : ''}
+                ${r.error ? `<span class="text-red-400 break-words">${escapeHtml(r.error)}</span>` : ''}
+              </div>
+              <div class="flex-shrink-0 flex gap-3">${actions}</div>
+            </div>
+            ${detail}
+        </div>`;
+    }).join('');
+    return `<div class="text-[10px] uppercase tracking-wider text-gray-500 mb-1">Recent captures</div>${rows}`;
+}
+
+async function meshCaptureStart(nodeId, btn) {
+    const g = id => document.getElementById(id);
+    const body = {
+        node_id: nodeId,
+        interface: (g('cap-iface') || {}).value || '',
+        seconds: parseInt((g('cap-seconds') || {}).value || '60', 10) || 60,
+        max_packets: parseInt((g('cap-packets') || {}).value || '0', 10) || 0,
+        filter: ((g('cap-filter') || {}).value || '').trim(),
+    };
+    const out = g('cap-out');
+    if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+    const res = await _meshApi('/api/mesh/peer-capture/start', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+    const d = res.data || {};
+    if (!res.ok || !d.success) {
+        if (out) out.innerHTML = `<div class="text-sm text-red-300 border border-red-800 rounded-lg p-3 bg-red-950/30">${escapeHtml(d.error || res.error || 'Capture failed to start')}</div>`;
+        if (btn) { btn.disabled = false; btn.textContent = 'Start capture'; }
+        return;
+    }
+    _meshCapturePollStart(nodeId, d.id || (d.capture || {}).id);
+}
+window.meshCaptureStart = meshCaptureStart;
+
+let _meshCapturePoll = null;
+function _meshCapturePollStart(nodeId, cid) {
+    if (_meshCapturePoll) { clearInterval(_meshCapturePoll); _meshCapturePoll = null; }
+    const out = document.getElementById('cap-out');
+    if (out) out.innerHTML = `<div class="text-sm text-amber-200">Capturing <span class="font-mono">${escapeHtml(cid || '')}</span>…</div>`;
+    let tries = 0;
+    _meshCapturePoll = setInterval(async () => {
+        tries++;
+        const res = await _meshApi(`/api/mesh/peer-capture/status?node_id=${encodeURIComponent(nodeId)}&id=${encodeURIComponent(cid)}`);
+        const cap = (res.data || {}).capture || null;
+        const box = document.getElementById('cap-out');
+        if (cap && box) {
+            box.innerHTML = `<div class="text-sm ${cap.state === 'running' ? 'text-amber-200' : 'text-gray-300'}">Capture ${escapeHtml(cap.state)} — ${cap.packets || 0} pkts · ${escapeHtml(cap.bytes_human || '0 B')} · ${cap.elapsed || 0}s${cap.error ? ` · <span class="text-red-400">${escapeHtml(cap.error)}</span>` : ''}</div>`;
+        }
+        if ((cap && cap.state !== 'running') || tries > 180) {
+            clearInterval(_meshCapturePoll); _meshCapturePoll = null;
+            refreshMesh(true);   // repopulate the recent list + reset the Start button
+        }
+    }, 2000);
+}
+
+async function meshCaptureCancel(nodeId, cid, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Stopping…'; }
+    await _meshApi('/api/mesh/peer-capture/cancel', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ node_id: nodeId, id: cid })
+    });
+    if (_meshCapturePoll) { clearInterval(_meshCapturePoll); _meshCapturePoll = null; }
+    setTimeout(() => refreshMesh(true), 800);
+}
+window.meshCaptureCancel = meshCaptureCancel;
+
+function meshCaptureDownload(nodeId, cid) {
+    window.open(`/api/mesh/peer-capture/download?node_id=${encodeURIComponent(nodeId)}&id=${encodeURIComponent(cid)}`, '_blank');
+}
+window.meshCaptureDownload = meshCaptureDownload;
+
+// Decode a finished capture and show its packets on screen (not only download):
+// the hub reads the .pcap with tcpdump -nr over the tailnet and returns a packet
+// list + a small summary, rendered into the capture row's own collapsible box.
+const _MESH_PROTO_CLS = {
+    TCP: 'bg-sky-600/30 text-sky-200 border-sky-700',
+    UDP: 'bg-violet-600/30 text-violet-200 border-violet-700',
+    ICMP: 'bg-amber-600/30 text-amber-200 border-amber-700',
+    ICMPv6: 'bg-amber-600/30 text-amber-200 border-amber-700',
+    ARP: 'bg-emerald-600/30 text-emerald-200 border-emerald-700',
+    IPv6: 'bg-teal-600/30 text-teal-200 border-teal-700',
+    Other: 'bg-slate-600/30 text-slate-200 border-slate-600',
+};
+
+function _meshRenderCaptureView(d, nodeId, cid) {
+    const closeBtn = `<button onclick="meshCaptureView('${nodeId}','${cid}')" class="ml-auto text-[11px] text-gray-400 hover:text-white">✕ Close</button>`;
+    if (!d || !d.success) {
+        return `<div class="text-sm text-red-300 border border-red-800 rounded-lg p-3 bg-red-950/30">
+            <div class="flex items-center gap-2"><span>${escapeHtml((d && d.error) || 'Could not read the capture.')}</span>${closeBtn}</div></div>`;
+    }
+    const protos = d.protocols || {};
+    const chips = Object.keys(protos).sort((a, b) => protos[b] - protos[a]).map(p =>
+        `<span class="text-[10px] px-1.5 py-0.5 rounded border ${_MESH_PROTO_CLS[p] || _MESH_PROTO_CLS.Other}">${escapeHtml(p)} ${protos[p]}</span>`).join(' ');
+    const top = (d.top_src || []).map(([ip, n]) =>
+        `<span class="font-mono text-gray-300">${escapeHtml(ip)}</span><span class="text-gray-500"> ×${n}</span>`).join(' · ');
+    const lines = (d.lines || []).map(l => escapeHtml(l)).join('\n');
+    const countLbl = d.truncated
+        ? `showing first ${d.shown} of ${d.total} packets`
+        : `${d.shown} packet${d.shown === 1 ? '' : 's'}`;
+    const unit = (typeof _meshFindNode === 'function') ? _meshFindNode(nodeId) : null;
+    const uname = unit ? meshUnitTitle(unit) : '';
+    return `<div class="border border-slate-700 rounded-lg bg-slate-900/50 p-3">
+        <div class="flex items-center gap-2 mb-2 flex-wrap">
+            <span class="font-semibold text-sm">Packets${uname ? ' · ' + escapeHtml(uname) : ''}</span>
+            <span class="text-[11px] text-gray-400">${escapeHtml(countLbl)} · ${escapeHtml(d.bytes_human || '')}</span>
+            ${closeBtn}
+        </div>
+        ${chips ? `<div class="flex flex-wrap gap-1 mb-2">${chips}</div>` : ''}
+        ${top ? `<div class="text-[11px] text-gray-500 mb-2">Top sources: ${top}</div>` : ''}
+        <pre class="text-[11px] font-mono text-gray-200 bg-slate-950/60 border border-slate-800 rounded p-2 overflow-auto" style="max-height:20rem; white-space:pre">${lines || '(no packets)'}</pre>
+    </div>`;
+}
+
+// Toggle a capture's inline collapsible view. Open → fetch + render the packets
+// into the row's own detail box; already open → collapse. The open set is kept in
+// _meshCaptureOpen so a background refresh keeps it expanded.
+async function meshCaptureView(nodeId, cid, btn) {
+    let detail = document.getElementById('cap-detail-' + cid);
+    if (Object.prototype.hasOwnProperty.call(_meshCaptureOpen, cid)) {
+        delete _meshCaptureOpen[cid];
+        if (detail) { detail.classList.add('hidden'); detail.classList.remove('mt-2'); detail.innerHTML = ''; }
+        if (btn) btn.textContent = '▸ View';
+        return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = 'Reading…'; }
+    if (detail) { detail.classList.remove('hidden'); detail.classList.add('mt-2'); detail.innerHTML = '<div class="text-xs text-gray-400">Decoding capture…</div>'; }
+    const res = await _meshApi(`/api/mesh/peer-capture/view?node_id=${encodeURIComponent(nodeId)}&id=${encodeURIComponent(cid)}`);
+    const d = res.data || { success: false, error: res.error || ('HTTP ' + res.status) };
+    _meshCaptureOpen[cid] = d;
+    detail = document.getElementById('cap-detail-' + cid);
+    if (detail) { detail.classList.remove('hidden'); detail.classList.add('mt-2'); detail.innerHTML = _meshRenderCaptureView(d, nodeId, cid); }
+    if (btn) { btn.disabled = false; btn.textContent = '▾ Hide'; }
+}
+window.meshCaptureView = meshCaptureView;
+
 // Render the node page for one unit into #mesh-node-detail.
 function _meshRenderNodeDetail(id) {
     const el = document.getElementById('mesh-node-detail');
@@ -30289,11 +41890,28 @@ function _meshRenderNodeDetail(id) {
             <p class="text-sm text-gray-300">This node is not answering right now
                 (<span class="text-amber-300">${escapeHtml(st.label)}</span>) — its data below may be stale or empty.
                 Run a probe from <strong>this</strong> unit to find out why.</p>
-            ${diagIp ? `<button onclick="meshDiagnose('${diagIp}', ${_meshNodePort()}, this)"
-                    class="mt-3 bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-sm px-4 py-2 rounded transition-colors">Diagnose connection</button>
-                <div class="mesh-diag-out mt-3"></div>` : ''}
+            ${diagIp ? `<div class="flex flex-wrap gap-2 mt-3">
+                    <button onclick="meshDiagnose('${diagIp}', ${_meshNodePort()}, this)"
+                        class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-sm px-4 py-2 rounded transition-colors">Diagnose connection</button>
+                    <button onclick="meshProbe('${diagIp}','trace',this)"
+                        class="bg-slate-700 hover:bg-slate-600 text-gray-200 text-sm px-4 py-2 rounded transition-colors">Trace route</button>
+                    <button onclick="meshProbe('${diagIp}','ping',this)"
+                        class="bg-slate-700 hover:bg-slate-600 text-gray-200 text-sm px-4 py-2 rounded transition-colors">Ping</button>
+                </div>
+                <div class="text-xs text-gray-500 mt-2">${_meshPathLine(unit)}</div>
+                <div class="mesh-diag-out mt-3"></div>
+                <div class="mesh-probe-out mt-3"></div>` : ''}
         </div>`;
     }
+
+    // Live probes from this unit to the peer. For an unreachable node the same
+    // buttons live on its banner (above), so this bar is reachable-only to keep
+    // exactly one probe output box on the page at a time.
+    const actionsBar = (!isSelf && st.reachable) ? _meshActionsBar(unit) : '';
+
+    // Packet capture works on this unit or any reachable peer (an unreachable
+    // one can't capture), driven through the operator capture relay.
+    const captureSection = (isSelf || st.reachable) ? _meshCaptureSection(id, unit) : '';
 
     const featureSections = ['traffic', 'threats', 'integrity', 'watchtower'].map(f => `
         <div class="glass rounded-lg p-4 mb-3">
@@ -30324,6 +41942,8 @@ function _meshRenderNodeDetail(id) {
             </div>
         </div>
         ${overview}
+        ${actionsBar}
+        ${captureSection}
         ${featureSections}
         ${vulnSection}`;
 }
@@ -30342,6 +41962,7 @@ function _meshApplyMeshView() {
 
 function meshOpenNode(id) {
     _meshOpenNodeId = id;
+    _meshCaptureOpen = {};   // fresh node → no stale expanded capture views
     _meshRenderNodeDetail(id);
     _meshApplyMeshView();
     try { window.scrollTo(0, 0); } catch (e) {}
@@ -30476,18 +42097,152 @@ function renderMeshHealth(h) {
     // Condition chips: only surfaced when non-zero, so a healthy mesh is quiet.
     const chipsEl = document.getElementById('mesh-health-chips');
     if (chipsEl) {
-        const chip = (n, label, tone) => n
-            ? `<span class="text-[11px] px-2 py-0.5 rounded border ${tone}">${n} ${label}</span>` : '';
+        // `names` (optional) lists the offending units; when present we name
+        // them inline instead of only counting, and hang the full list off a
+        // tooltip so a large mesh still stays to one line.
+        const chip = (n, label, tone, names) => {
+            if (!n) return '';
+            let text = `${n} ${label}`;
+            let title = '';
+            if (Array.isArray(names) && names.length) {
+                const shown = names.slice(0, 3).map(escapeHtml);
+                let suffix = shown.join(', ');
+                if (names.length > 3) suffix += ` +${names.length - 3} more`;
+                text += `: ${suffix}`;
+                title = ` title="${escapeHtml(names.join(', '))}"`;
+            }
+            return `<span class="text-[11px] px-2 py-0.5 rounded border ${tone}"${title}>${text}</span>`;
+        };
         const amber = 'bg-amber-600/20 text-amber-300 border-amber-800';
         const red = 'bg-red-600/20 text-red-300 border-red-800';
         const slate = 'bg-slate-600/20 text-gray-300 border-slate-600';
         const green = 'bg-green-700/20 text-green-300 border-green-800';
         chipsEl.innerHTML = [
-            chip(h.undervoltage, 'undervoltage', red),
+            chip(h.undervoltage, 'undervoltage', red, h.undervoltage_nodes),
             chip(h.key_issues, 'key expiring', amber),
             chip(h.not_polled, 'not polled yet', slate),
             chip(h.published, 'published', green),
         ].filter(Boolean).join('');
+    }
+}
+
+// ── Mesh node list: filter + sort ───────────────────────────────────────────
+// Client-side only: it works over _meshLastData (already pulled server-side), so
+// filtering/sorting a fleet never costs a round-trip and stays instant on a Pi
+// Zero. Self is never filtered out — it is shown in its own card above the list.
+const _meshFilter = { search: '', status: 'all', sort: 'name' };
+const _MESH_SEV_RANK_JS = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
+
+// Worst severity a node is carrying (its own Watchtower + incident worst),
+// mirroring the server-side rollup so the sort agrees with the health summary.
+function _meshNodeWorstRank(unit) {
+    const h = unit.health || {};
+    let r = -1;
+    [(h.watchtower || {}).worst, (h.incidents || {}).worst].forEach(s => {
+        if (s && (_MESH_SEV_RANK_JS[s] ?? -1) > r) r = _MESH_SEV_RANK_JS[s];
+    });
+    return r;
+}
+
+// Same "needs attention" test the Mesh Health card counts with: unreachable,
+// offline, key warning/expired, undervoltage, or a high/critical finding.
+function _meshNodeNeedsAttention(unit, st) {
+    const h = unit.health || {};
+    const keyBad = ['warn', 'critical', 'expired'].includes(unit.key_state);
+    const under = !!((h.power || {}).undervoltage);
+    const offline = !unit.online && !st.reachable;
+    return (st.polled && !st.reachable) || offline || keyBad || under
+        || _meshNodeWorstRank(unit) >= _MESH_SEV_RANK_JS.high;
+}
+
+// Which status bucket a node is in, in the same language as the health summary.
+function _meshNodeBucket(st) {
+    if (st.reachable) return 'online';
+    if (!st.polled) return 'notpolled';
+    return 'unreachable';
+}
+
+function _meshNodeMatchesSearch(unit, q) {
+    if (!q) return true;
+    const hay = [
+        meshUnitTitle(unit), unit.label, unit.short_name, unit.hostname, unit.ip,
+        unit.unit_id ? 'unit ' + unit.unit_id : '',
+        unit.unit_id ? 'unit ' + String(unit.unit_id).padStart(2, '0') : '',
+        unit.unit_id ? String(unit.unit_id).padStart(2, '0') : '',
+        ...(unit.ips || [])
+    ].filter(Boolean).join(' ').toLowerCase();
+    return hay.includes(q);
+}
+
+function meshOnFilterChange() {
+    const g = id => document.getElementById(id);
+    _meshFilter.search = ((g('mesh-filter-search') || {}).value || '').trim().toLowerCase();
+    _meshFilter.status = (g('mesh-filter-status') || {}).value || 'all';
+    _meshFilter.sort = (g('mesh-filter-sort') || {}).value || 'name';
+    if (_meshLastData) _meshRenderPeerList(_meshLastData);
+}
+window.meshOnFilterChange = meshOnFilterChange;
+
+function meshResetFilters() {
+    _meshFilter.search = ''; _meshFilter.status = 'all'; _meshFilter.sort = 'name';
+    const set = (id, v) => { const e = document.getElementById(id); if (e) e.value = v; };
+    set('mesh-filter-search', ''); set('mesh-filter-status', 'all'); set('mesh-filter-sort', 'name');
+    if (_meshLastData) _meshRenderPeerList(_meshLastData);
+}
+window.meshResetFilters = meshResetFilters;
+
+// Render the (filtered, sorted) peer list. Split out of renderMesh so the filter
+// controls can re-run it over the last payload without a re-poll.
+function _meshRenderPeerList(data) {
+    const cards = document.getElementById('mesh-peer-cards');
+    if (!cards) return;
+    const bar = document.getElementById('mesh-filter-bar');
+    const count = document.getElementById('mesh-filter-count');
+    const cardCtx = { enabled: data.enabled, meshTag: data.mesh_tag, nodePort: data.node_port };
+    const all = (data.peers || []).filter(p => p.is_ragnar);
+
+    // The filter bar only earns its space once there is more than one peer.
+    if (bar) bar.classList.toggle('hidden', all.length < 2);
+
+    if (!all.length) {
+        cards.innerHTML = `<p class="text-sm text-gray-500">
+            No other Ragnar units on this tailnet yet. A unit joins the mesh by carrying the
+            <code class="text-gray-400">${escapeHtml(data.mesh_tag || 'tag:ragnar-mesh')}</code> tag.
+        </p>`;
+        if (count) count.textContent = '';
+        return;
+    }
+
+    const f = _meshFilter;
+    const shown = all.filter(unit => {
+        const st = _meshNodeStatus(unit, false);
+        if (!_meshNodeMatchesSearch(unit, f.search)) return false;
+        if (f.status === 'all') return true;
+        if (f.status === 'attention') return _meshNodeNeedsAttention(unit, st);
+        return _meshNodeBucket(st) === f.status;
+    });
+
+    const byName = (a, b) => meshUnitTitle(a).toLowerCase().localeCompare(meshUnitTitle(b).toLowerCase());
+    shown.sort((a, b) => {
+        switch (f.sort) {
+            case 'unit': return ((a.unit_id || 999) - (b.unit_id || 999)) || byName(a, b);
+            case 'severity': return (_meshNodeWorstRank(b) - _meshNodeWorstRank(a)) || byName(a, b);
+            case 'alerts': return ((((b.health || {}).watchtower || {}).total) || 0)
+                - ((((a.health || {}).watchtower || {}).total) || 0) || byName(a, b);
+            case 'cpu': return (((b.health || {}).cpu_percent) || 0)
+                - (((a.health || {}).cpu_percent) || 0) || byName(a, b);
+            default: return byName(a, b);
+        }
+    });
+
+    cards.innerHTML = shown.length
+        ? shown.map(p => meshNodeBanner(p, false, cardCtx)).join('')
+        : `<p class="text-sm text-gray-500">No nodes match the current filter.
+           <button onclick="meshResetFilters()" class="text-cyan-400 hover:text-cyan-300 underline">Clear</button></p>`;
+    if (count) {
+        count.textContent = shown.length === all.length
+            ? `${all.length} node${all.length === 1 ? '' : 's'}`
+            : `Showing ${shown.length} of ${all.length}`;
     }
 }
 
@@ -30513,6 +42268,8 @@ function renderMesh(data) {
         pillText = 'Tailscale not installed';
     } else if (!joined) {
         pillText = data.backend_state || 'Not connected';
+    } else if (data.self_share_tagged) {
+        pillText = 'Share-only · on tailnet';
     } else if (!data.self_tagged) {
         pillText = 'On tailnet · not in mesh';
     } else {
@@ -30541,6 +42298,14 @@ function renderMesh(data) {
         if (vikingField && !vikingField.value && data.viking_name) {
             vikingField.value = data.viking_name;
         }
+        // Prefill the mesh name from whatever this box is already scoped to, so
+        // a re-join keeps it on the same mesh unless the operator changes it.
+        const suffixField = document.getElementById('mesh-suffix-input');
+        if (suffixField && !suffixField.value && data.mesh_suffix) {
+            suffixField.value = data.mesh_suffix;
+        }
+        // Load the roster so the dice and the gender hint work before join too.
+        meshLoadVikingNames().then(() => meshOnJoinVikingInput());
     }
 
     // A page load that lands mid-install should resume the progress view rather
@@ -30549,12 +42314,31 @@ function renderMesh(data) {
         meshPollInstall();
     }
 
+    // A share-only guest is not a mesh member: it must not see the peer roster,
+    // the fleet summary, or mesh controls — only that it is a share-only guest.
+    const shareOnly = !!data.self_share_tagged;
     selfWrap.classList.toggle('hidden', !data.self);
-    peersWrap.classList.toggle('hidden', !joined);
-    controls.classList.toggle('hidden', !joined);
-    summary.classList.toggle('hidden', !joined);
+    peersWrap.classList.toggle('hidden', !joined || shareOnly);
+    controls.classList.toggle('hidden', !joined || shareOnly);
+    summary.classList.toggle('hidden', !joined || shareOnly);
     const piWrap = document.getElementById('mesh-piconnect-wrap');
-    if (piWrap) piWrap.classList.toggle('hidden', !joined);
+    if (piWrap) piWrap.classList.toggle('hidden', !joined || shareOnly);
+
+    // Fill the post-join identity editor from what this unit currently reports,
+    // but never yank a field out from under someone mid-edit.
+    if (joined) {
+        const setIfIdle = (id, val) => {
+            const el = document.getElementById(id);
+            if (el && document.activeElement !== el) el.value = val;
+        };
+        setIfIdle('mesh-ident-unit-id', data.unit_id ? String(data.unit_id) : '');
+        setIfIdle('mesh-ident-label', data.site_label || '');
+        setIfIdle('mesh-ident-viking', data.viking_name || '');
+        setIfIdle('mesh-ident-gender', data.viking_gender || '');
+        // Load the name roster (once) so the gender hint can tell known names
+        // from custom ones, then refresh the hint for whatever is in the box.
+        meshLoadVikingNames().then(() => meshOnVikingInput());
+    }
     // Fleet update only makes sense once this unit is actually in the mesh, so it
     // can reach and relay to peers — same gate as the controls above.
     const updateWrap = document.getElementById('mesh-update-wrap');
@@ -30576,8 +42360,24 @@ function renderMesh(data) {
             `can happen — rename one in Config → Ragnar Mesh.`));
     });
     if (data.summary?.unnumbered_units) {
+        const named = (data.summary.unnumbered_names || []).map(u =>
+            u.is_self ? '<strong>This unit</strong>'
+                      : `<strong>${escapeHtml(u.name)}</strong>`);
+        const who = named.length
+            ? ` (${named.join(', ')})`
+            : '';
+        const n = data.summary.unnumbered_units;
+        const hasSelf = (data.summary.unnumbered_names || []).some(u => u.is_self);
+        const where = hasSelf
+            ? `Set this unit's number under <em>This unit's mesh controls → This unit's identity</em> below. `
+            : ``;
+        const peers = (data.summary.unnumbered_names || []).some(u => !u.is_self)
+            ? `A peer's number lives on that box — open its own Ragnar Mesh tab to set it. `
+            : ``;
         notes.push(meshWarning(
-            `${data.summary.unnumbered_units} reachable unit(s) have no unit number assigned.`));
+            `${n} reachable unit${n === 1 ? '' : 's'}${who} ` +
+            `${n === 1 ? 'has' : 'have'} no unit number assigned, so reports can't name ` +
+            `${n === 1 ? 'it' : 'them'} by number. ${where}${peers}`));
     }
     if (data.self && data.self.key_state && data.self.key_state !== 'ok') {
         notes.push(meshWarning(`This unit: ${escapeHtml(data.self.key_message || '')}`,
@@ -30586,10 +42386,43 @@ function renderMesh(data) {
 
     const tagCode = escapeHtml(data.mesh_tag || 'tag:ragnar-mesh');
 
+    // Second-factor posture. Armed: peers must prove a shared secret on top of
+    // the tag, so a mis-set tagOwners on a shared tailnet is no longer a breach.
+    // Not armed on a separate mesh: nudge — that is exactly the multi-tenant
+    // case where a forged tag would otherwise be accepted.
+    // Bottom-of-page mesh-secret footer. The secret is never shown, so an armed
+    // mesh gets no callout here — only the nudge when a separate mesh has none.
+    const secretFooter = document.getElementById('mesh-secret-footer');
+    if (secretFooter) {
+        if (inMesh && !data.mesh_secret_set && data.mesh_suffix) {
+            secretFooter.innerHTML = meshWarning(
+                `<strong>This separate mesh has no secret set.</strong> On a shared Tailscale account, arming a ` +
+                `mesh secret stops a mis-tagged box from being trusted. Use <em>Leave the mesh</em>, then re-join ` +
+                `with a secret (tick <em>Generate</em> on the first unit, and import the downloaded secret on the rest).`, 'warn');
+        } else {
+            secretFooter.innerHTML = '';
+        }
+    }
+
     // The #1 "they sense each other but don't share data" cause: this unit is
     // on the tailnet but was never tagged into the mesh. An interactive
     // `tailscale up` login never applies a tag, and the whole mesh keys off it.
-    if (joined && data.self && !data.self_tagged) {
+    if (joined && data.self && data.self_share_tagged) {
+        // A deliberate share-only join (tag:ragnar-share, no mesh tag). This is
+        // the intended state for scenario 2B — the box is here to send/receive
+        // files, not to join the mesh — so explain it, don't flag it as broken.
+        const shareTag = escapeHtml(data.share_tag || 'tag:ragnar-share');
+        notes.push(meshWarning(
+            `<strong>This unit is a share-only guest on this tailnet.</strong> ` +
+            `It carries <code>${shareTag}</code>, not the mesh tag, so it is not part of the ` +
+            `mesh: it publishes no reports and reads none. It can only send files to ` +
+            `(and, if the host allows, fetch shared files from) the units that host it — nothing else. ` +
+            `<br>To turn it into a full mesh unit instead, add <code>${tagCode}</code> in the ` +
+            `Tailscale admin console (<em>Machines → this device → ⋯ → Edit ACL tags</em>).` +
+            `<br><button onclick="meshLeaveShare()" class="mt-3 inline-block bg-slate-700 hover:bg-slate-600 ` +
+            `text-white text-xs px-3 py-1.5 rounded transition-colors">← Leave share-mesh</button>`,
+            'info'));
+    } else if (joined && data.self && !data.self_tagged) {
         notes.push(meshWarning(
             `<strong>This unit is on the tailnet, but not in the mesh.</strong> ` +
             `It carries no <code>${tagCode}</code> tag, so Ragnar won't treat it as a mesh ` +
@@ -30650,16 +42483,7 @@ function renderMesh(data) {
         document.getElementById('mesh-self-card').innerHTML = meshNodeBanner(data.self, true, cardCtx);
     }
 
-    const ragnarPeers = (data.peers || []).filter(p => p.is_ragnar);
-    const cards = document.getElementById('mesh-peer-cards');
-    if (!ragnarPeers.length) {
-        cards.innerHTML = `<p class="text-sm text-gray-500">
-            No other Ragnar units on this tailnet yet. A unit joins the mesh by carrying the
-            <code class="text-gray-400">${escapeHtml(data.mesh_tag || 'tag:ragnar-mesh')}</code> tag.
-        </p>`;
-    } else {
-        cards.innerHTML = ragnarPeers.map(p => meshNodeBanner(p, false, cardCtx)).join('');
-    }
+    _meshRenderPeerList(data);
 
     renderPiConnect(data.pi_connect || {});
     renderHttpsNote(data);
@@ -30818,8 +42642,8 @@ function renderPiConnect(pc) {
         dot = 'bg-amber-400';
         headline = 'Running, not signed in';
         detail = `The service is on but no account is linked, so you can't reach this unit ` +
-                 `through it yet. Run <code class="text-gray-400">rpi-connect signin</code>${asUser} ` +
-                 `and open the link it prints to finish. Until then it is not a usable fallback.`;
+                 `through it yet. Paste an auth key below to finish signing in${asUser}. ` +
+                 `Until then it is not a usable fallback.`;
     } else {
         // Off on THIS unit. It is per-unit and per-user: signing in on another
         // Pi does nothing here. The linger note is the common headless gotcha —
@@ -30828,11 +42652,31 @@ function renderPiConnect(pc) {
         const lingerUser = pc.user || 'pi';
         headline = 'Installed but off (this unit)';
         detail = `Pi Connect isn't running for <code class="text-gray-400">${escapeHtml(lingerUser)}</code> ` +
-                 `on this unit — it is per-unit, so signing in on another Pi doesn't count. On this box, ` +
-                 `as that user: <code class="text-gray-400">rpi-connect on</code>, ` +
-                 `<code class="text-gray-400">rpi-connect signin</code> (open the link), and ` +
-                 `<code class="text-gray-400">sudo loginctl enable-linger ${escapeHtml(lingerUser)}</code> ` +
-                 `so it survives logout and reboot. Until then it is not a usable fallback.`;
+                 `on this unit — it is per-unit, so signing in on another Pi doesn't count. Paste an auth ` +
+                 `key below to sign in: it turns the service on and enables linger (so it survives logout ` +
+                 `and reboot) for you. Until then it is not a usable fallback.`;
+    }
+
+    // Interactive controls: sign in with an auth key (rpi-connect 2.12+,
+    // non-interactive) straight from here — no terminal. Only when installed.
+    let controls = '';
+    if (pc.installed && pc.signed_in) {
+        controls = `<div class="mt-3">
+            <button onclick="piConnectSignout()" class="bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm">Sign out</button>
+        </div>`;
+    } else if (pc.installed) {
+        controls = `<div class="mt-3 space-y-2">
+            <label class="block text-xs text-gray-400">Auth key
+                <span class="text-gray-600">— generate one at
+                    <a href="https://connect.raspberrypi.com" target="_blank" rel="noopener" class="text-Ragnar-400 hover:underline">connect.raspberrypi.com</a>
+                    (your account → Auth keys), then paste it here. No browser device-flow, no terminal.</span>
+            </label>
+            <div class="flex flex-wrap gap-2">
+                <input id="piconnect-authkey" type="password" autocomplete="off" spellcheck="false" placeholder="paste Raspberry Pi Connect auth key"
+                       class="flex-1 min-w-0 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                <button onclick="piConnectSignin()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Sign in</button>
+            </div>
+        </div>`;
     }
 
     el.innerHTML = `<div class="flex items-start justify-between gap-3">
@@ -30843,8 +42687,49 @@ function renderPiConnect(pc) {
                 </div>
                 <p class="text-xs text-gray-400 mt-2">${detail}</p>
                 ${pc.detail ? `<p class="text-[11px] text-gray-600 mt-1 font-mono truncate">${escapeHtml(pc.detail)}</p>` : ''}
+                ${controls}
             </div>
         </div>`;
+}
+
+// Sign in to Raspberry Pi Connect non-interactively with an auth key generated
+// at connect.raspberrypi.com. The backend enables linger + the per-user service
+// so it works headless; the key is sent once and never stored client-side.
+async function piConnectSignin() {
+    const inp = document.getElementById('piconnect-authkey');
+    const key = inp && inp.value ? inp.value.trim() : '';
+    if (!key) { showNotification('Paste a Raspberry Pi Connect auth key first', 'info'); return; }
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    if (btn) { btn.disabled = true; btn.textContent = 'Signing in…'; }
+    try {
+        const d = await postAPI('/api/mesh/pi-connect/signin', { auth_key: key });
+        if (d && d.success) {
+            if (inp) inp.value = '';
+            showNotification('Signed in to Raspberry Pi Connect', 'success');
+            refreshMesh(true);
+        } else {
+            showNotification('Pi Connect sign-in failed: ' + ((d && d.message) || 'unknown error'), 'error');
+        }
+    } catch (e) {
+        showNotification('Pi Connect sign-in failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Sign in'; }
+    }
+}
+
+async function piConnectSignout() {
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    if (btn) { btn.disabled = true; btn.textContent = 'Signing out…'; }
+    try {
+        const d = await postAPI('/api/mesh/pi-connect/signout', {});
+        showNotification(d && d.success ? 'Signed out of Raspberry Pi Connect'
+                                        : 'Sign-out failed', (d && d.success) ? 'success' : 'error');
+        refreshMesh(true);
+    } catch (e) {
+        showNotification('Sign-out failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Sign out'; }
+    }
 }
 
 async function refreshMesh(force) {
@@ -30855,6 +42740,7 @@ async function refreshMesh(force) {
         const data = await resp.json();
         renderMesh(data);
         applyHeaderBrand(data);
+        meshMaybeLoadOsUpdates(data);
     } catch (err) {
         console.warn('Mesh refresh failed:', err);
     } finally {
@@ -30986,6 +42872,67 @@ async function meshPollInstall() {
     tick();
 }
 
+// Stream a freshly generated mesh secret straight to a downloaded file — the
+// operator's primary copy. Filename carries the mesh so a multi-mesh operator
+// can tell the files apart.
+function meshDownloadSecret(secret, suffix) {
+    try {
+        const clean = String(suffix || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+        const name = 'ragnar-mesh-secret' + (clean ? '-' + clean : '') + '.txt';
+        const blob = new Blob([secret + '\n'], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+        /* best-effort; the copy field in the modal is the fallback */
+    }
+}
+
+// One-time modal shown the moment a secret is generated: the file downloads
+// automatically AND the value is here to copy in case the download failed. It
+// blocks on <body> so a background refresh can't wipe it; the page only advances
+// to joined mode when the operator presses Done (onDone runs the refresh). This
+// is the ONLY time the secret is ever shown — there is no way to see it again.
+function meshShowGeneratedSecret(secret, suffix, onDone) {
+    document.getElementById('mesh-secret-modal')?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'mesh-secret-modal';
+    overlay.className = 'fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 p-4';
+    overlay.innerHTML = `
+        <div class="bg-slate-800 border border-amber-600/60 rounded-xl max-w-lg w-full p-5 shadow-2xl">
+            <div class="text-xs uppercase tracking-wider text-amber-400 mb-2">Mesh secret — saved to a file just now, shown here only once</div>
+            <div id="mesh-secret-modal-value" class="font-mono text-sm text-gray-100 break-all select-all bg-slate-900 border border-slate-700 rounded-lg px-3 py-2"></div>
+            <p class="text-[11px] text-gray-400 mt-2">A file download started automatically — that's your copy. If it didn't, use <strong>Copy</strong> here. Paste this into the <strong>Mesh secret</strong> field when you join the other units. It cannot be shown again: lose it and you Leave + re-join to mint a new one.</p>
+            <div class="flex items-center gap-2 mt-4">
+                <button id="mesh-secret-modal-copy" class="bg-cyan-600 hover:bg-cyan-500 text-white text-sm px-4 py-2 rounded-lg transition-colors">Copy</button>
+                <button id="mesh-secret-modal-dl" class="bg-slate-700 hover:bg-slate-600 text-white text-sm px-4 py-2 rounded-lg transition-colors">Download again</button>
+                <button id="mesh-secret-modal-done" class="ml-auto bg-emerald-600 hover:bg-emerald-500 text-white text-sm px-4 py-2 rounded-lg transition-colors">Done</button>
+            </div>
+        </div>`;
+    overlay.querySelector('#mesh-secret-modal-value').textContent = secret;
+    document.body.appendChild(overlay);
+
+    // Fire the download immediately, alongside showing the modal.
+    meshDownloadSecret(secret, suffix);
+
+    overlay.querySelector('#mesh-secret-modal-dl').onclick = () => meshDownloadSecret(secret, suffix);
+    overlay.querySelector('#mesh-secret-modal-copy').onclick = (e) => {
+        // copyToClipboard has the execCommand fallback needed on plain-HTTP
+        // (non-secure-context) Ragnars where navigator.clipboard is undefined.
+        copyToClipboard(secret);
+        e.target.textContent = 'Copied ✓';
+    };
+    overlay.querySelector('#mesh-secret-modal-done').onclick = () => {
+        overlay.remove();
+        if (typeof onDone === 'function') onDone();
+    };
+}
+
 async function meshJoin() {
     const btn = document.getElementById('mesh-join-btn');
     const out = document.getElementById('mesh-join-result');
@@ -30993,11 +42940,22 @@ async function meshJoin() {
     const unitId = parseInt(document.getElementById('mesh-unit-id-input').value, 10);
     const label = document.getElementById('mesh-label-input').value.trim();
     const viking = document.getElementById('mesh-viking-input').value.trim();
+    const gender = document.getElementById('mesh-viking-gender').value;
+    const meshSuffix = (document.getElementById('mesh-suffix-input') || {}).value || '';
+    const meshSecret = (document.getElementById('mesh-secret-input') || {}).value || '';
+    const genSecret = !!(document.getElementById('mesh-secret-generate') || {}).checked;
     const routes = document.getElementById('mesh-routes-input').value
         .split(',').map(r => r.trim()).filter(Boolean);
 
     if (!authKey) {
         out.innerHTML = '<span class="text-red-400">An auth key is required.</span>';
+        return;
+    }
+    // A custom name has no built-in gender, so require the operator to pick one.
+    await meshLoadVikingNames();
+    if (viking && meshNameIsKnown(viking) === false && !gender) {
+        out.innerHTML = '<span class="text-amber-400">Pick Male or Female for this custom name.</span>';
+        document.getElementById('mesh-viking-gender').focus();
         return;
     }
     btn.disabled = true;
@@ -31010,6 +42968,8 @@ async function meshJoin() {
         if (Number.isInteger(unitId) && unitId > 0) cfg.mesh_unit_id = unitId;
         if (label) cfg.mesh_site_label = label;
         if (viking) cfg.mesh_viking_name = viking;
+        // '' lets the server derive gender from a known name; else it's pinned.
+        cfg.mesh_viking_gender = gender;
         if (Object.keys(cfg).length) {
             await fetch('/api/config', {
                 method: 'POST',
@@ -31024,6 +42984,13 @@ async function meshJoin() {
             body: JSON.stringify({
                 auth_key: authKey,
                 hostname: label ? label.toLowerCase().replace(/[^a-z0-9-]+/g, '-') : '',
+                // '' joins the main mesh; a name puts this box in a separate,
+                // isolated mesh (tag:ragnar-mesh-<name>) on the same tailnet.
+                mesh_suffix: meshSuffix.trim(),
+                // Opt-in second factor over the tag. Generate mints a new one
+                // (shown once below); otherwise the pasted secret is stored.
+                generate_secret: genSecret,
+                mesh_secret: genSecret ? '' : meshSecret.trim(),
                 advertise_routes: routes,
                 enable_ssh: document.getElementById('mesh-ssh-input').checked
             })
@@ -31034,13 +43001,167 @@ async function meshJoin() {
             : `<span class="text-red-400">${escapeHtml(data.message || 'Join failed.')}</span>`;
         if (data.success) {
             document.getElementById('mesh-authkey-input').value = '';
+            document.getElementById('mesh-secret-input').value = '';
+            // Restore the default (generate a fresh secret) for the next join.
+            document.getElementById('mesh-secret-generate').checked = true;
             showNotification('This unit joined the mesh', 'success');
-            await refreshMesh(true);
+            // A freshly generated secret comes back exactly once. Show the modal
+            // (which also fires the download) and DEFER the refresh into joined
+            // mode until the operator presses Done — so the copy field can't be
+            // yanked away mid-copy. With no secret, refresh straight away.
+            if (data.mesh_secret) {
+                meshShowGeneratedSecret(data.mesh_secret, meshSuffix.trim(),
+                    () => refreshMesh(true));
+            } else {
+                await refreshMesh(true);
+            }
         }
     } catch (err) {
         out.innerHTML = `<span class="text-red-400">${escapeHtml(String(err))}</span>`;
     } finally {
         btn.disabled = false;
+    }
+}
+
+// The canonical Viking roster, fetched once from the server so the browser
+// never hard-codes it. Powers the dice roll and the known-vs-custom gender rule.
+let _meshVikingNames = null;
+async function meshLoadVikingNames() {
+    if (_meshVikingNames) return _meshVikingNames;
+    try {
+        const r = await fetch('/api/mesh/viking-names');
+        const d = await r.json();
+        if (d.success) {
+            _meshVikingNames = {
+                names: d.names || [],
+                female: new Set(d.female || []),
+                epithets: d.epithets || [],
+            };
+        }
+    } catch (_) { /* offline / no mesh module — dice + auto-gender just idle */ }
+    return _meshVikingNames;
+}
+
+// null = roster not loaded yet (can't judge); true/false = known/custom.
+function meshNameIsKnown(name) {
+    if (!_meshVikingNames) return null;
+    const first = (name || '').trim().split(/\s+/)[0];
+    return !!first && _meshVikingNames.names.includes(first);
+}
+
+function meshNameIsFemale(name) {
+    if (!_meshVikingNames) return false;
+    const first = (name || '').trim().split(/\s+/)[0];
+    return _meshVikingNames.female.has(first);
+}
+
+async function meshRollName() {
+    const list = await meshLoadVikingNames();
+    if (!list || !list.names.length) return;
+    const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+    document.getElementById('mesh-ident-viking').value =
+        `${pick(list.names)} ${pick(list.epithets)}`;
+    // A rolled name is always from the known roster, so its gender derives
+    // itself — reset the override back to Auto.
+    document.getElementById('mesh-ident-gender').value = '';
+    meshOnVikingInput();
+}
+
+// Keep the gender hint honest as the name is typed: a known name derives its own
+// gender; a custom one must be told which portrait to wear.
+function meshOnVikingInput() {
+    const hint = document.getElementById('mesh-ident-gender-hint');
+    if (!hint) return;
+    const name = document.getElementById('mesh-ident-viking').value;
+    const known = meshNameIsKnown(name);
+    if (!name.trim() || known === null) {
+        hint.textContent = 'Known names set this automatically.';
+        hint.className = 'text-[11px] text-gray-500 mt-1';
+    } else if (known) {
+        hint.textContent =
+            `Known name — portrait derives automatically (${meshNameIsFemale(name) ? 'female' : 'male'}).`;
+        hint.className = 'text-[11px] text-gray-500 mt-1';
+    } else {
+        hint.textContent = 'Custom name — choose Male or Female for the portrait.';
+        hint.className = 'text-[11px] text-amber-400 mt-1';
+    }
+}
+
+// The onboarding join form carries the same name/gender pair as the identity
+// editor, so it gets the same dice and known-vs-custom hint.
+async function meshRollJoinName() {
+    const list = await meshLoadVikingNames();
+    if (!list || !list.names.length) return;
+    const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+    document.getElementById('mesh-viking-input').value =
+        `${pick(list.names)} ${pick(list.epithets)}`;
+    document.getElementById('mesh-viking-gender').value = '';
+    meshOnJoinVikingInput();
+}
+
+function meshOnJoinVikingInput() {
+    const hint = document.getElementById('mesh-join-gender-hint');
+    if (!hint) return;
+    const name = document.getElementById('mesh-viking-input').value;
+    const known = meshNameIsKnown(name);
+    if (!name.trim() || known === null) {
+        hint.textContent = 'Known names set this automatically.';
+        hint.className = 'text-[11px] text-gray-500 mt-1';
+    } else if (known) {
+        hint.textContent =
+            `Known name — portrait derives automatically (${meshNameIsFemale(name) ? 'female' : 'male'}).`;
+        hint.className = 'text-[11px] text-gray-500 mt-1';
+    } else {
+        hint.textContent = 'Custom name — choose Male or Female for the portrait.';
+        hint.className = 'text-[11px] text-amber-400 mt-1';
+    }
+}
+
+async function meshSaveIdentity(btn) {
+    const out = document.getElementById('mesh-ident-result');
+    const unitId = parseInt(document.getElementById('mesh-ident-unit-id').value, 10);
+    const label = document.getElementById('mesh-ident-label').value.trim();
+    const viking = document.getElementById('mesh-ident-viking').value.trim();
+    const gender = document.getElementById('mesh-ident-gender').value;
+
+    // A custom name carries no built-in gender, so the portrait would be a
+    // coin toss unless the operator picks one — require it before saving.
+    await meshLoadVikingNames();
+    if (viking && meshNameIsKnown(viking) === false && !gender) {
+        out.textContent = 'Pick Male or Female for this custom name.';
+        out.className = 'text-sm text-amber-400';
+        document.getElementById('mesh-ident-gender').focus();
+        return;
+    }
+
+    const cfg = {};
+    // Unit 0 is the "unassigned" sentinel, so an empty box clears the number.
+    cfg.mesh_unit_id = (Number.isInteger(unitId) && unitId > 0) ? unitId : 0;
+    cfg.mesh_site_label = label;
+    // '' lets the server derive gender from a known name; 'male'/'female' pins it.
+    cfg.mesh_viking_gender = gender;
+    if (viking) cfg.mesh_viking_name = viking;
+
+    if (btn) btn.disabled = true;
+    out.textContent = 'Saving…';
+    out.className = 'text-sm text-gray-400';
+    try {
+        const resp = await fetch('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(cfg)
+        });
+        const data = await resp.json();
+        if (data.success === false) throw new Error(data.message || 'Save failed.');
+        out.textContent = 'Saved.';
+        out.className = 'text-sm text-green-400';
+        showNotification('Mesh identity saved', 'success');
+        await refreshMesh(true);
+    } catch (err) {
+        out.textContent = String(err.message || err);
+        out.className = 'text-sm text-red-400';
+    } finally {
+        if (btn) btn.disabled = false;
     }
 }
 
@@ -31104,6 +43225,16 @@ function meshLeave() {
         return;
     }
     return meshPost('/api/mesh/leave', {}, 'Logged out.');
+}
+
+// Leave a share-only tailnet (scenario 2B). Same logout, but worded for a guest:
+// it stops sharing with the host and can then rejoin its own mesh.
+function meshLeaveShare() {
+    if (!confirm('Leave this share-mesh? This unit logs out of the host\'s tailnet, ' +
+                 'stops sharing files with it, and can then rejoin your own mesh.')) {
+        return;
+    }
+    return meshPost('/api/mesh/leave', {}, 'Left the share-mesh.');
 }
 
 // Turn on data sharing (the mesh_enabled master switch) in one click. This is
@@ -31171,12 +43302,14 @@ async function meshDiagnose(ip, port, btn) {
         const tone = good
             ? 'border-green-800 bg-green-950/30 text-green-200'
             : 'border-amber-800 bg-amber-950/30 text-amber-100';
+        _meshDiagResult = { ip, port, url: r.url || url, result: r };   // for Download
         if (box) {
             box.innerHTML = `<div class="text-sm border rounded-lg p-3 ${tone}">
                 <div class="flex items-center gap-2 mb-1">
                     <span class="w-2.5 h-2.5 rounded-full ${good ? 'bg-green-400' : 'bg-amber-400'}"></span>
                     <span class="font-semibold">${escapeHtml(meta[0])}</span>
                     ${r.status ? `<span class="text-[11px] opacity-70">HTTP ${escapeHtml(String(r.status))}</span>` : ''}
+                    ${_meshDownloadLink('meshDiagDownload()')}
                 </div>
                 <div class="opacity-90">${escapeHtml(r.hint || meta[1] || r.error || 'No detail.')}</div>
                 <div class="mt-2 text-[11px] font-mono opacity-60">probed ${escapeHtml(r.url || url)}${r.error ? ' · ' + escapeHtml(r.error) : ''}</div>
@@ -31255,8 +43388,344 @@ window.meshCloseSetupHelp = meshCloseSetupHelp;
 
 window.refreshMesh = refreshMesh;
 window.meshJoin = meshJoin;
+window.meshSaveIdentity = meshSaveIdentity;
+window.meshRollName = meshRollName;
+window.meshOnVikingInput = meshOnVikingInput;
+window.meshRollJoinName = meshRollJoinName;
+window.meshOnJoinVikingInput = meshOnJoinVikingInput;
 window.meshInstall = meshInstall;
 window.meshServe = meshServe;
 window.meshLeave = meshLeave;
+window.meshLeaveShare = meshLeaveShare;
 window.meshEnable = meshEnable;
 window.meshDiagnose = meshDiagnose;
+
+// ==========================================================================
+// Assets tab — Asset Inventory + SIEM outbound forwarding
+// ==========================================================================
+let _assetsState = { assets: [], summary: {}, recent: [] };
+let _siemState = { enabled: false, min_severity: 'high', targets: [], watchtower_enabled: false };
+
+async function loadAssetsData() {
+    await Promise.all([loadAssetInventory(), loadSiemConfig()]);
+}
+
+async function loadAssetInventory() {
+    try {
+        const d = await fetchAPI('/api/inventory');
+        _assetsState = { assets: d.assets || [], summary: d.summary || {}, recent: d.recent_events || [] };
+        const t = document.getElementById('asset-enabled-toggle');
+        if (t) t.checked = !!d.enabled;
+        renderAssetsSummary(d.summary || {});
+        renderAssetsTable(d.assets || []);
+        renderAssetsRecent(d.recent_events || []);
+    } catch (e) {
+        const b = document.getElementById('assets-table-body');
+        if (b) b.innerHTML = '<tr><td colspan="9" class="py-6 text-center text-red-400">Failed to load inventory</td></tr>';
+    }
+}
+
+function _assetTile(label, value, cls) {
+    return '<div class="bg-slate-800/60 rounded-lg p-3 text-center">' +
+        '<div class="text-2xl font-bold ' + (cls || '') + '">' + value + '</div>' +
+        '<div class="text-xs text-gray-400">' + label + '</div></div>';
+}
+
+function renderAssetsSummary(s) {
+    const el = document.getElementById('assets-summary');
+    if (!el) return;
+    el.innerHTML = [
+        _assetTile('Total assets', s.total || 0, ''),
+        _assetTile('Authorized', s.authorized || 0, 'text-green-400'),
+        _assetTile('Unauthorized', s.unauthorized || 0, 'text-red-400'),
+        _assetTile('Unclassified', s.unclassified || 0, 'text-amber-400'),
+        _assetTile('With threats', s.with_threats || 0, 'text-red-400'),
+        _assetTile('Offline', s.offline || 0, 'text-gray-400'),
+        _assetTile('Ignored', s.muted || 0, 'text-slate-400')
+    ].join('');
+}
+
+function renderAssetsTable(assets) {
+    const b = document.getElementById('assets-table-body');
+    if (!b) return;
+    if (!assets.length) {
+        b.innerHTML = '<tr><td colspan="9" class="py-6 text-center text-gray-500">No assets yet. Run a network scan first.</td></tr>';
+        return;
+    }
+    b.innerHTML = assets.map(function (a) {
+        const mac = a.mac;
+        const thr = (a.threats || []);
+        const threats = thr.length
+            ? '<span title="' + escapeHtml(thr.map(function (t) { return t.name; }).join(', ')) + (a.muted ? ' (ignored)' : '') + '" class="ml-1 ' + (a.muted ? 'text-slate-500 line-through' : 'text-red-400') + '">&#9888;' + thr.length + '</span>'
+            : '';
+        const muteBtn = '<button onclick="assetSetMuted(\'' + mac + '\', ' + (a.muted ? 'false' : 'true') + ')" ' +
+            'class="px-2 py-0.5 rounded text-xs border ' + (a.muted
+                ? 'border-amber-500 text-amber-300 bg-amber-500/10'
+                : 'border-slate-600 text-slate-300 hover:bg-slate-700') + '" ' +
+            'title="' + (a.muted
+                ? 'Warnings from this device are ignored — click to re-enable alerts'
+                : 'Permanently ignore all warnings from this device') + '">' +
+            (a.muted ? '&#128277; Ignored' : '&#128276; Ignore') + '</button>';
+        const authSel = '<select onchange="assetSetAuth(\'' + mac + '\', this.value)" class="bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-xs">' +
+            '<option value=""' + (a.authorized === null ? ' selected' : '') + '>&mdash;</option>' +
+            '<option value="yes"' + (a.authorized === true ? ' selected' : '') + '>yes</option>' +
+            '<option value="no"' + (a.authorized === false ? ' selected' : '') + '>no</option></select>';
+        const critSel = '<select onchange="assetSetCrit(\'' + mac + '\', this.value)" class="bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-xs">' +
+            ['none', 'low', 'medium', 'high', 'critical'].map(function (c) {
+                return '<option value="' + c + '"' + ((a.criticality || 'none') === c ? ' selected' : '') + '>' + c + '</option>';
+            }).join('') + '</select>';
+        const name = escapeHtml(a.label || a.hostname || '(unknown)');
+        const statusCls = (a.status === 'alive') ? 'text-green-400' : (a.status === 'lost' ? 'text-red-400' : 'text-amber-400');
+        const ports = (a.ports || []);
+        return '<tr class="border-b border-slate-800 hover:bg-slate-800/40' + (a.muted ? ' opacity-60' : '') + '">' +
+            '<td class="py-2 pr-3 asset-cell-device">' + name + threats + '<div class="text-xs text-gray-500">' + escapeHtml(mac) + (a.pseudo_mac ? '<span title="MAC inferred from IP (no observed hardware address)" class="ml-1 text-slate-600">~</span>' : '') + '</div></td>' +
+            '<td class="py-2 pr-3" data-label="IP">' + escapeHtml(a.ip || '') + '</td>' +
+            '<td class="py-2 pr-3" data-label="Type">' + escapeHtml(a.device_label || a.device_type || '') + '</td>' +
+            '<td class="py-2 pr-3 sm:max-w-[160px] sm:truncate" data-label="Vendor" title="' + escapeHtml(a.vendor || '') + '">' + escapeHtml(a.vendor || '') + '</td>' +
+            '<td class="py-2 pr-3 text-xs" data-label="Ports">' + ports.slice(0, 8).join(', ') + (ports.length > 8 ? '&hellip;' : '') + '</td>' +
+            '<td class="py-2 pr-3 ' + statusCls + '" data-label="Status">' + escapeHtml(a.status || '') + '</td>' +
+            '<td class="py-2 pr-3" data-label="Authorized">' + authSel + '</td>' +
+            '<td class="py-2 pr-3" data-label="Criticality">' + critSel + '</td>' +
+            '<td class="py-2 pr-3" data-label="Ignore">' + muteBtn + '</td></tr>';
+    }).join('');
+}
+
+const _assetSevColor = { critical: 'text-red-400', high: 'text-orange-400', medium: 'text-amber-400', low: 'text-slate-300', info: 'text-gray-400' };
+
+function renderAssetsRecent(events) {
+    const el = document.getElementById('assets-recent');
+    if (!el) return;
+    if (!events.length) {
+        el.innerHTML = '<div class="text-gray-500">No recorded changes yet.</div>';
+        return;
+    }
+    el.innerHTML = events.map(function (e) {
+        const sev = (e.severity || 'info');
+        const t = e.iso ? String(e.iso).replace('T', ' ').slice(0, 19) : '';
+        return '<div class="flex gap-2"><span class="text-gray-500 shrink-0">' + t + '</span>' +
+            '<span class="' + (_assetSevColor[sev] || '') + ' shrink-0 uppercase text-xs w-16">' + sev + '</span>' +
+            '<span>' + escapeHtml(e.summary || e.code || '') + '</span></div>';
+    }).join('');
+}
+
+async function assetSetMeta(mac, fields, msg) {
+    try {
+        await postAPI('/api/inventory/meta', Object.assign({ mac: mac }, fields));
+        addConsoleMessage(msg || ('Asset ' + mac + ' updated'), 'success');
+        return true;
+    } catch (e) {
+        addConsoleMessage('Failed to update ' + mac, 'error');
+        return false;
+    }
+}
+function assetSetAuth(mac, v) { assetSetMeta(mac, { authorized: v === '' ? null : (v === 'yes') }); }
+function assetSetCrit(mac, v) { assetSetMeta(mac, { criticality: v }); }
+async function assetSetMuted(mac, on) {
+    const ok = await assetSetMeta(mac, { muted: !!on }, on
+        ? 'Warnings from ' + mac + ' are now ignored'
+        : 'Warnings from ' + mac + ' re-enabled');
+    if (ok) await loadAssetInventory();   // reflect dimming + summary counts immediately
+}
+
+async function assetsToggleEnabled(on) {
+    try {
+        await postAPI('/api/inventory/config', { enabled: !!on });
+        addConsoleMessage('Asset auto-monitor ' + (on ? 'enabled' : 'disabled'), 'success');
+    } catch (e) {
+        addConsoleMessage('Failed to change asset monitor', 'error');
+    }
+}
+
+async function assetsScanNow() {
+    try {
+        const d = await postAPI('/api/inventory/scan', {});
+        const n = (d.events || []).length;
+        addConsoleMessage(d.baseline ? 'Baseline captured (' + d.tracked + ' assets)' : (n + ' change event(s) detected'), 'success');
+        await loadAssetInventory();
+    } catch (e) {
+        addConsoleMessage('Asset scan failed', 'error');
+    }
+}
+
+// ---- SIEM ----------------------------------------------------------------
+
+const _SIEM_FIELDS = {
+    syslog: [
+        { k: 'host', label: 'Host', ph: 'siem.example.com' },
+        { k: 'port', label: 'Port', ph: '514' },
+        { k: 'protocol', label: 'Protocol', opts: ['udp', 'tcp'] },
+        { k: 'format', label: 'Format', opts: ['cef', 'leef', 'plain'] },
+        { k: 'rfc', label: 'Framing', opts: ['5424', '3164'] },
+        { k: 'tls', label: 'TLS (tcp)', type: 'checkbox' }
+    ],
+    splunk_hec: [
+        { k: 'url', label: 'HEC URL', ph: 'https://splunk:8088/services/collector' },
+        { k: 'token', label: 'Token', ph: 'env:RAGNAR_SPLUNK_HEC or value' },
+        { k: 'index', label: 'Index (optional)', ph: 'main' },
+        { k: 'sourcetype', label: 'Sourcetype', ph: 'ragnar:alert' }
+    ],
+    elastic: [
+        { k: 'url', label: 'Base URL', ph: 'https://es:9200' },
+        { k: 'index', label: 'Index', ph: 'ragnar-alerts' },
+        { k: 'username', label: 'Username (optional)', ph: 'elastic' },
+        { k: 'password', label: 'Password / api_key', ph: 'env:RAGNAR_ES_PW or value' }
+    ],
+    webhook: [{ k: 'url', label: 'Webhook URL', ph: 'https://…' }],
+    slack: [{ k: 'url', label: 'Slack/Teams webhook URL', ph: 'https://hooks.slack.com/…' }]
+};
+
+async function loadSiemConfig() {
+    try {
+        const d = await fetchAPI('/api/siem');
+        _siemState.enabled = !!d.enabled;
+        _siemState.min_severity = d.min_severity || 'high';
+        _siemState.watchtower_enabled = !!d.watchtower_enabled;
+        const t = document.getElementById('siem-enabled-toggle');
+        if (t) t.checked = _siemState.enabled;
+        const ms = document.getElementById('siem-min-severity');
+        if (ms) ms.value = _siemState.min_severity;
+        const warn = document.getElementById('siem-watchtower-warn');
+        if (warn) warn.classList.toggle('hidden', !(_siemState.enabled && !_siemState.watchtower_enabled));
+        renderSiemTargets(d.targets || [], d.last || {});
+        siemRenderNewFields();
+    } catch (e) { /* ignore */ }
+}
+
+function renderSiemTargets(described, last) {
+    const el = document.getElementById('siem-targets');
+    if (!el) return;
+    if (!described.length) {
+        el.innerHTML = '<div class="text-gray-500 text-sm">No targets configured yet.</div>';
+        return;
+    }
+    el.innerHTML = described.map(function (t, i) {
+        const cfg = t.config || {};
+        const bits = Object.keys(cfg).filter(function (k) {
+            return ['type', 'name', 'enabled'].indexOf(k) === -1 && cfg[k] !== '' && cfg[k] != null;
+        }).map(function (k) { return k + '=' + cfg[k]; }).join('  ');
+        return '<div class="flex items-center justify-between bg-slate-800/60 rounded-lg px-3 py-2">' +
+            '<div class="min-w-0"><span class="font-semibold">' + escapeHtml(t.name || t.type) + '</span>' +
+            '<span class="ml-2 text-xs px-2 py-0.5 rounded bg-slate-700">' + escapeHtml(t.type) + '</span>' +
+            '<div class="text-xs text-gray-400 truncate">' + escapeHtml(bits) + '</div></div>' +
+            '<div class="flex gap-2 shrink-0"><button onclick="siemTestOne(' + i + ')" class="text-xs bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded">Test</button>' +
+            '<button onclick="siemRemoveTarget(' + i + ')" class="text-xs bg-red-700 hover:bg-red-600 px-2 py-1 rounded">Remove</button></div></div>';
+    }).join('');
+}
+
+function siemRenderNewFields() {
+    const type = document.getElementById('siem-new-type');
+    const wrap = document.getElementById('siem-new-fields');
+    if (!type || !wrap) return;
+    const fields = _SIEM_FIELDS[type.value] || [];
+    wrap.innerHTML = fields.map(function (f) {
+        const id = 'siem-nf-' + f.k;
+        if (f.type === 'checkbox') {
+            return '<label class="text-sm text-gray-300 flex items-center gap-2 mt-5"><input type="checkbox" id="' + id + '" class="w-4 h-4">' + f.label + '</label>';
+        }
+        if (f.opts) {
+            return '<label class="text-sm text-gray-300">' + f.label +
+                '<select id="' + id + '" class="w-full mt-1 bg-slate-800 border border-slate-600 rounded px-2 py-1">' +
+                f.opts.map(function (o) { return '<option value="' + o + '">' + o + '</option>'; }).join('') + '</select></label>';
+        }
+        return '<label class="text-sm text-gray-300">' + f.label +
+            '<input id="' + id + '" type="text" placeholder="' + (f.ph || '') + '" class="w-full mt-1 bg-slate-800 border border-slate-600 rounded px-2 py-1"></label>';
+    }).join('');
+}
+
+function _siemCollectNewTarget() {
+    const type = document.getElementById('siem-new-type').value;
+    const name = (document.getElementById('siem-new-name').value || '').trim();
+    const tgt = { type: type };
+    if (name) tgt.name = name;
+    (_SIEM_FIELDS[type] || []).forEach(function (f) {
+        const el = document.getElementById('siem-nf-' + f.k);
+        if (!el) return;
+        if (f.type === 'checkbox') { tgt[f.k] = el.checked; return; }
+        const v = (el.value || '').trim();
+        if (v !== '') tgt[f.k] = (f.k === 'port') ? parseInt(v, 10) : v;
+    });
+    return tgt;
+}
+
+async function siemAddTarget() {
+    const tgt = _siemCollectNewTarget();
+    try {
+        await postAPI('/api/siem/targets/add', { target: tgt });
+        addConsoleMessage('SIEM target added', 'success');
+        await loadSiemConfig();
+    } catch (e) {
+        addConsoleMessage('Failed to add target: ' + (e.message || e), 'error');
+    }
+}
+
+async function siemRemoveTarget(index) {
+    try {
+        await postAPI('/api/siem/targets/remove', { index: index });
+        addConsoleMessage('SIEM target removed', 'success');
+        await loadSiemConfig();
+    } catch (e) {
+        addConsoleMessage('Failed to remove target', 'error');
+    }
+}
+
+async function siemToggleEnabled(on) {
+    try {
+        await postAPI('/api/siem/config', { enabled: !!on });
+        _siemState.enabled = !!on;
+        const warn = document.getElementById('siem-watchtower-warn');
+        if (warn) warn.classList.toggle('hidden', !(_siemState.enabled && !_siemState.watchtower_enabled));
+        addConsoleMessage('SIEM forwarding ' + (on ? 'enabled' : 'disabled'), 'success');
+    } catch (e) {
+        addConsoleMessage('Failed to toggle SIEM', 'error');
+    }
+}
+
+async function siemSetMinSeverity(v) {
+    try {
+        await postAPI('/api/siem/config', { min_severity: v });
+        addConsoleMessage('SIEM min severity: ' + v, 'success');
+    } catch (e) { /* ignore */ }
+}
+
+function _siemReportTest(results) {
+    if (!Array.isArray(results) || !results.length) { addConsoleMessage('No target tested', 'error'); return; }
+    results.forEach(function (r) {
+        if (r.error) addConsoleMessage('SIEM ' + (r.target || r.type) + ': ' + r.error, 'error');
+        else addConsoleMessage('SIEM ' + (r.target || r.type) + ': delivered ' + r.sent, 'success');
+    });
+}
+
+async function siemTestAll() {
+    try {
+        const d = await postAPI('/api/siem/test', {});
+        _siemReportTest(d.results);
+    } catch (e) {
+        addConsoleMessage('SIEM test failed: ' + (e.message || e), 'error');
+    }
+}
+
+async function siemTestOne(index) {
+    // Test a stored target: the server resolves its (possibly env-backed) secret.
+    try {
+        const d = await postAPI('/api/siem/test', { index: index });
+        _siemReportTest(d.results);
+    } catch (e) {
+        addConsoleMessage('SIEM test failed', 'error');
+    }
+}
+
+if (typeof window !== 'undefined') {
+    window.loadAssetsData = loadAssetsData;
+    window.assetsToggleEnabled = assetsToggleEnabled;
+    window.assetsScanNow = assetsScanNow;
+    window.assetSetAuth = assetSetAuth;
+    window.assetSetCrit = assetSetCrit;
+    window.assetSetMuted = assetSetMuted;
+    window.siemToggleEnabled = siemToggleEnabled;
+    window.siemSetMinSeverity = siemSetMinSeverity;
+    window.siemRenderNewFields = siemRenderNewFields;
+    window.siemAddTarget = siemAddTarget;
+    window.siemRemoveTarget = siemRemoveTarget;
+    window.siemTestAll = siemTestAll;
+    window.siemTestOne = siemTestOne;
+}

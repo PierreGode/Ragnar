@@ -52,7 +52,13 @@ hardware — see above). Ragnar then:
 2. Starts the kiosk immediately (no reboot needed) and arranges for it to launch
    on every boot.
 
-Disable the toggle to stop and remove it.
+Disable the toggle to turn the kiosk **off**. This does *not* uninstall it:
+in service mode it stops and disables `ragnar-kiosk.service` (and switches the
+display back to the tty1 console) but leaves the unit, wrapper and config on
+disk, so turning it back on is an instant start with no reinstall. Autostart
+mode just drops its per-user `.desktop` entry so it no longer launches on login.
+To fully remove it (and optionally purge the apt packages), run
+`sudo scripts/uninstall_kiosk.sh` (add `--purge` for the packages).
 
 ## The two modes (auto-detected)
 
@@ -63,6 +69,23 @@ Disable the toggle to stop and remove it.
 
 The default URL is `http://localhost:8000`; rotation and cursor-hiding are read
 live from the app config, so changing them only requires the kiosk to relaunch.
+
+## Login bypass & Tailscale publishing
+
+The on-screen browser skips the login so the dashboard is usable without a
+keyboard. That bypass is **scoped to the local kiosk by a secret token**
+(`data/kiosk_token`, generated at install, world-readable but never leaving the
+box): the wrapper adds `?kiosk_token=…` to the URL and the server sets a cookie
+from it. A request that merely arrives on loopback is **not** enough.
+
+This is what lets kiosk mode and **Tailscale HTTPS publishing** (`tailscale
+serve`) run at the same time. `serve` proxies every tailnet visitor through
+`127.0.0.1`, so if the bypass trusted all loopback it would have handed the full
+UI to the tailnet with no login — which is why publishing used to be refused
+while kiosk was on. Now a tailnet visitor reaches loopback too but can't hold
+the token, so they still have to log in, and publishing with kiosk on is allowed.
+Keep the kiosk URL on `localhost` (the default) so the token never travels the
+tailnet.
 
 ## Supported boards
 
@@ -107,6 +130,45 @@ On-screen keyboard by session type:
 
 The keyboard packages are installed best-effort at kiosk install/update time and
 never block the install if unavailable.
+
+## Handheld decks — escape hatch & scaling (Hackberry Pi CM5)
+
+The kiosk runs Chromium in hard `--kiosk` (locked full-screen). On a normal HDMI
+appliance with a full keyboard that is fine — Alt+F4 gets you out. But on a
+handheld like the **Hackberry Pi CM5**, whose BlackBerry keyboard has no obvious
+Ctrl/F-keys, `--kiosk` would trap you in the dashboard with no way back to the
+desktop. Two knobs make the kiosk usable there:
+
+**Escape hatch** — a floating touch **✕ button** (bottom-right by default) plus a
+global **Ctrl+Alt+Q** hotkey, both of which close the kiosk: in autostart mode
+they kill the kiosk browser (returning to the desktop); in service mode they stop
+`ragnar-kiosk.service` (via a scoped, `visudo`-validated sudoers rule limited to
+that one `systemctl stop`). The ✕ button is drawn by `python3-tk` and floats over
+the full-screen browser; the hotkey uses `xbindkeys` (X sessions only — the
+button is the reliable escape under Wayland/XWayland). Both deps are installed
+best-effort at kiosk install/update time.
+
+- `RAGNAR_KIOSK_EXIT=on|off|auto` — show the escape hatch (default `auto`: on
+  when a touchscreen is present, off on a plain HDMI + keyboard appliance).
+- `RAGNAR_KIOSK_EXIT_CORNER=ne|nw|se|sw` — which corner the ✕ sits in
+  (default `se`, clear of Ragnar's top-right menu).
+
+**Small-screen scaling** — the CM5's square 4" 720×720 panel packs the dashboard
+tightly at native scale. Bump Chromium's device scale factor for bigger text and
+touch targets:
+
+- `RAGNAR_KIOSK_SCALE=1.0–1.5` — Chromium `--force-device-scale-factor` (unset =
+  native, the unchanged default).
+
+**From the UI:** the kiosk card in **Config → On-screen Display** has a
+**Handheld deck (Hackberry CM5)** toggle and a **Display scale** field. Turning
+the toggle on forces the escape hatch on and applies the scale (saved to
+`/api/config`, picked up on the kiosk's next launch) — no env editing needed. The
+environment variables above still override the saved values at launch, so set
+them on the systemd unit (`Environment=…` in service mode) or export them in the
+desktop session (autostart mode) when you want a per-box override. Existing kiosk
+installs pick up the escape hatch on a plain `git pull` + update — no re-install
+needed.
 
 ## Troubleshooting
 
@@ -230,3 +292,63 @@ sudo apt-get install xserver-xorg-legacy
 (Fresh installs pull this in automatically.) After fixing the root cause, clear
 the failure counter with `sudo systemctl reset-failed ragnar-kiosk` and start it
 again.
+
+On a **Lite image (e.g. Ragnar OS)** the other common cause is the kiosk user
+not being in the graphics/input/console groups. A non-root Xorg has to open the
+GPU (`/dev/dri/card*`, needs **video**/**render**), the virtual terminal (needs
+**tty**) and input devices (needs **input**) itself; on a desktop Pi OS the
+default `pi` user already has these, but a Lite service user (e.g. `ragnar`)
+does not, so Xorg dies with *"no screens found"* and the unit crash-loops.
+`install_kiosk.sh` now adds the kiosk user to `video,render,input,tty` (and
+`kiosk_doctor.sh` reports any that are missing). To heal an existing install,
+re-run `sudo scripts/install_kiosk.sh`, then
+`sudo systemctl reset-failed ragnar-kiosk && sudo systemctl restart ragnar-kiosk`.
+
+**Pi 5 (Lite): `no screens found`, or the Xorg log shows `modeset(G0)` /
+`FBIOPUTCMAP` / a `dixRegisterPrivateKey` abort.** A Pi 5 exposes two DRM
+devices — **vc4** (KMS, drives HDMI/DSI, has the outputs) and **v3d** (render
+only, no outputs). Bare Xorg on a Lite image hit three things that a desktop
+image (which runs the kiosk under its own Wayland session) never does:
+
+- Xorg picked **v3d as the primary GPU** → `modeset(G0)` and `no screens found`.
+- The legacy **fbdev** driver got co-loaded and collided with modesetting,
+  aborting the server (`FBIOPUTCMAP` on `vc4drmfb` / `dixRegisterPrivateKey`).
+- The service started Xorg on **tty7 while the tty1 autologin held the active
+  VT**, so logind handed Xorg a *paused* DRM fd and KMS never came up.
+
+`install_kiosk.sh` now fixes all three: it writes
+`/etc/X11/xorg.conf.d/99-ragnar-kiosk.conf` forcing **vc4 + modesetting as the
+primary GPU**, adds `chvt` to the unit so the kiosk's VT is the active console
+before Xorg starts, and (separately) installs **Chromium specifically** — the
+wrapper's flags are Chromium-only, so a box that only had `firefox-esr` used to
+launch it, get bad flags and exit. A plain update re-runs the installer for
+already-installed kiosks, so these reach existing boxes too.
+
+**Blank screen, Chromium exits immediately, `.Xauthority` / `.cache/openbox`
+"Permission denied" in the wrapper log.** The kiosk user could not write its own
+home — some images create `/home/<user>` root-owned. `install_kiosk.sh` and
+`ragnar-firstboot.sh` now `chown` the home to the user; to fix by hand:
+`sudo chown -R <user>:<user> /home/<user>`.
+
+**Turning the kiosk OFF leaves a black screen with no way back to the CLI (even
+after a reboot).** The kiosk runs Xorg on **tty7** and switches the active
+console there. Stopping it used to leave the display on that now-dead VT — a
+black screen — and the uninstaller removed the tty1 autologin without making
+sure a login console was left behind. On a Ragnar OS image that ships
+`getty@tty1` masked (so only the kiosk draws the screen), that meant no console
+even after a reboot. Fixed: the kiosk unit now `chvt 1`s back to the console
+when it stops (`ExecStopPost`), and the uninstaller re-enables/starts
+`getty@tty1` and switches to it, so disabling the kiosk drops straight back to
+the RagnarOS CLI. A plain update also runs `systemctl unmask`/`enable
+getty@tty1` as a safety net. To recover a box that is already black:
+
+```
+# over SSH, or from any other machine via the web UI's Update button:
+sudo systemctl unmask getty@tty1.service
+sudo systemctl enable --now getty@tty1.service
+sudo chvt 1
+```
+
+With the kiosk **running**, the way to the console is the escape hatch
+(**Ctrl+Alt+Q**, or the on-screen ✕ on a touchscreen): it stops the service,
+which now `chvt`s back to tty1 for you.

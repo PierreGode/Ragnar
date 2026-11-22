@@ -1,287 +1,438 @@
-"""SNMP poller — per-interface and per-group multicast state read from the
-switch's management address, tied back to the IGMP census.
+"""SNMP poller -- per-interface and per-group multicast data-plane visibility
+from the switch, cross-referenced against igmpwatch's own IGMP census.
 
-Out-of-band, not segment traffic: it polls the switch over SNMP, sends nothing on
-the mirrored segment, transmits no IGMP, and joins no group — so it never becomes
-the recon signature the packet detectors watch for. Credentialed network I/O, so
-it is disabled by default. Transport shells out to net-snmp (`snmpbulkwalk`) — no
-fragile Python SNMP dependency; absent binary / unreachable switch degrade to a
-silent no-op. The evaluation logic is pure and injected-snapshot driven. There is
-deliberately no packet-transmit path here (the self-test asserts no socket import).
+Why this exists
+---------------
+The sysfs data-plane sampler (dataplane.py) sees only the mirror port's
+aggregate multicast rate -- it cannot attribute a flood to a group or an egress
+port. The switch already keeps that per-group / per-interface state; this module
+reads it over SNMP and ties it back to the same ``State`` group census the
+packet detectors build.
+
+Passive-doctrine note
+---------------------
+SNMP polling is *out-of-band management-plane* I/O to the switch's management
+address. It sends **nothing** on the mirrored segment, transmits no IGMP, joins
+no group, and never becomes the reconnaissance signature the packet detectors
+look for. It is therefore consistent with the passive doctrine, but it is still
+network I/O that needs credentials and a reachable management IP, so it is
+**disabled by default** and must be turned on explicitly.
+
+Transport is pluggable. The default client shells out to net-snmp
+(``snmpbulkwalk``) so there is no fragile Python SNMP dependency on the Pi; if
+the binary or the MIB is absent the poller degrades to a silent no-op. The
+evaluation logic is pure (``evaluate()``), so the self-test drives it with
+injected snapshots -- no switch, no snmp binary, no root.
+
+Default OIDs
+------------
+Per-interface multicast (IF-MIB ifXTable, 64-bit high-capacity counters):
+  ifName              1.3.6.1.2.1.31.1.1.1.1
+  ifHCInMulticastPkts 1.3.6.1.2.1.31.1.1.1.2
+  ifHCOutMulticastPkts 1.3.6.1.2.1.31.1.1.1.4
+Per-group membership (IGMP-STD-MIB igmpCacheTable, indexed by group+ifIndex):
+  igmpCacheLastReporter 1.3.6.1.2.1.85.1.2.1.4   (index = <group-ipv4>.<ifIndex>)
+
+L2-only snooping switches vary in which MIB they populate; every OID here is
+config-overridable so the operator can point ``group_table_oid`` at a vendor
+table (e.g. a dot1q / CISCO-IGMP-SNOOPING equivalent) that still encodes the
+group address in the index.
 """
+from __future__ import annotations
 
-import shutil
 import subprocess
-import threading
+import sys
 import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set
 
-from .alert import Alert
-from .state import is_link_local, BENIGN_GROUPS
+from .detectors import Alert
+from .models import DEFAULT_BENIGN_GROUPS, Severity, in_local_control
 
-DEFAULTS = {
-    'enable': False,
-    'host': None,
-    'community': 'public',
-    'interval': 30.0,
-    'iface_mcast_storm_pps': 1000.0,
-    'monitor_ifaces': [],          # ifIndex whitelist ([] = all)
-    'census_not_forwarded': False,  # opt-in LOW rule
-    'cache_capabilities': True,
-    'capability_strikes': 3,
-    'capability_ttl': 3600.0,
-    'oids': {},                    # overrides
-}
-
-OIDS = {
-    'ifName': '1.3.6.1.2.1.31.1.1.1.1',
-    'ifHCInMulticastPkts': '1.3.6.1.2.1.31.1.1.1.2',
-    'ifHCOutMulticastPkts': '1.3.6.1.2.1.31.1.1.1.4',
-    'igmpCacheLastReporter': '1.3.6.1.2.1.85.1.2.1.4',
-}
+OID_IF_NAME = "1.3.6.1.2.1.31.1.1.1.1"
+OID_IF_IN_MCAST = "1.3.6.1.2.1.31.1.1.1.2"
+OID_IF_OUT_MCAST = "1.3.6.1.2.1.31.1.1.1.4"
+OID_IGMP_CACHE = "1.3.6.1.2.1.85.1.2.1.4"   # igmpCacheLastReporter
 
 
-def have_snmp():
-    return shutil.which('snmpbulkwalk') is not None
+# ---------------------------------------------------------------------------
+# transport
+# ---------------------------------------------------------------------------
+class NetSnmpClient:
+    """Walks OIDs by shelling out to net-snmp's ``snmpbulkwalk``.
 
+    Returns a dict of {index_suffix: value_str} for a walk, or None if the
+    query could not be completed (binary missing, timeout, auth failure, MIB
+    unsupported). Never raises to the caller.
+    """
 
-def bulkwalk(host, community, oid, timeout=8):
-    """Return {index_suffix: value} for an OID subtree, or None on any failure
-    (missing binary, unreachable host, error) — never raises."""
-    if not have_snmp() or not host:
-        return None
-    try:
-        r = subprocess.run(
-            ['snmpbulkwalk', '-v2c', '-c', community, '-On', '-Oq', '-t', '2', '-r', '1',
-             host, oid],
-            capture_output=True, text=True, timeout=timeout)
-    except (subprocess.TimeoutExpired, OSError):
-        return None
-    if r.returncode != 0 or not r.stdout.strip():
-        return None
-    out = {}
-    prefix = '.' + oid + '.'
-    for line in r.stdout.splitlines():
-        line = line.strip()
-        if not line or ' ' not in line:
-            continue
-        name, _, val = line.partition(' ')
-        if name.startswith(prefix):
-            out[name[len(prefix):]] = val.strip()
-        elif name.startswith(oid + '.'):
-            out[name[len(oid) + 1:]] = val.strip()
-    return out
+    def __init__(self, cfg_snmp: dict):
+        self.c = cfg_snmp
+        self._binary_missing = False
 
+    def _argv(self, oid: str) -> List[str]:
+        c = self.c
+        prog = "snmpbulkwalk"
+        if c.get("snmp_bin_dir"):
+            prog = c["snmp_bin_dir"].rstrip("/") + "/" + prog
+        argv = [prog, "-Oqn", "-t", str(c.get("timeout", 2)),
+                "-r", str(c.get("retries", 1))]
+        ver = str(c.get("version", "2c"))
+        if ver in ("1", "2c"):
+            argv += ["-v", ver, "-c", c.get("community", "public")]
+        else:  # v3
+            level = c.get("v3_level", "authPriv")
+            argv += ["-v", "3", "-l", level, "-u", c.get("v3_user", "")]
+            if level in ("authNoPriv", "authPriv"):
+                argv += ["-a", c.get("v3_auth_protocol", "SHA"),
+                         "-A", c.get("v3_auth_key", "")]
+            if level == "authPriv":
+                argv += ["-x", c.get("v3_priv_protocol", "AES"),
+                         "-X", c.get("v3_priv_key", "")]
+        target = f"{c['host']}:{c.get('port', 161)}"
+        argv += [target, oid]
+        return argv
 
-# -- pure evaluation ---------------------------------------------------------
-def evaluate_ifaces(prev, cur, dt, cfg=None):
-    """Per-interface multicast pps from ifXTable deltas. prev/cur are
-    {ifIndex: {'in': n, 'out': n}}. Returns alerts."""
-    c = dict(DEFAULTS)
-    c.update(cfg or {})
-    if not prev or not cur or dt <= 0:
-        return []
-    monitor = set(str(i) for i in (c.get('monitor_ifaces') or []))
-    out = []
-    for idx, cv in cur.items():
-        if monitor and idx not in monitor:
-            continue
-        pv = prev.get(idx)
-        if not pv:
-            continue
-        for direction in ('in', 'out'):
-            d = cv.get(direction, 0) - pv.get(direction, 0)
-            if d < 0:                              # counter reset/wrap
+    def walk(self, oid: str) -> Optional[Dict[str, str]]:
+        if self._binary_missing or not self.c.get("host"):
+            return None
+        try:
+            proc = subprocess.run(
+                self._argv(oid), capture_output=True, text=True,
+                timeout=self.c.get("timeout", 2) * (self.c.get("retries", 1) + 2) + 5,
+            )
+        except FileNotFoundError:
+            if not self._binary_missing:
+                sys.stderr.write("[snmp] snmpbulkwalk not found; install net-snmp "
+                                 "or disable snmp. SNMP polling off.\n")
+            self._binary_missing = True
+            return None
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        if proc.returncode != 0:
+            return None
+        out: Dict[str, str] = {}
+        base = "." + oid if not oid.startswith(".") else oid
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if not line:
                 continue
-            pps = d / dt
-            if pps >= c['iface_mcast_storm_pps']:
-                out.append(Alert('snmp', 'iface_mcast_storm', 'HIGH',
-                                 'ifIndex {} {}-multicast {:.0f} pps'.format(idx, direction, pps),
-                                 identity='if{}'.format(idx)))
-    return out
-
-
-def evaluate_groups(switch_groups, census_groups, cfg=None, learned=True):
-    """Cross-reference the switch group table against the IGMP census.
-    switch_groups: iterable of group IPs the switch is forwarding.
-    census_groups: set of groups igmpwatch saw a join for."""
-    c = dict(DEFAULTS)
-    c.update(cfg or {})
-    out = []
-    sw = set(switch_groups or [])
-    census = set(census_groups or [])
-    for g in sorted(sw):
-        if is_link_local(g) or g in BENIGN_GROUPS:
-            continue
-        if g not in census:
-            out.append(Alert('snmp', 'unsubscribed_forwarding', 'HIGH',
-                             'switch forwards {} with no join seen on the monitored port'.format(g),
-                             group=g))
-    if c.get('census_not_forwarded') and learned and sw:
-        for g in sorted(census):
-            if is_link_local(g) or g in BENIGN_GROUPS:
+            parts = line.split(None, 1)
+            if len(parts) != 2:
                 continue
-            if g not in sw:
-                out.append(Alert('snmp', 'census_not_forwarded', 'LOW',
-                                 'join seen for {} but switch group table omits it'.format(g),
-                                 group=g))
-    return out
+            raw_oid, value = parts[0], parts[1].strip().strip('"')
+            if raw_oid.startswith(base + "."):
+                suffix = raw_oid[len(base) + 1:]
+            elif raw_oid.startswith(oid + "."):
+                suffix = raw_oid[len(oid) + 1:]
+            else:
+                continue
+            out[suffix] = value
+        return out
 
 
-class CapabilityCache:
-    """Per-switch verdict on whether the group table is answered, with strikes +
-    TTL. Backed by a get/set store (storage layer) so verdicts survive restarts.
-    Strikes: N consecutive reachable-but-empty walks required before marking
-    unsupported. Unreachable never records a verdict. TTL forces re-check."""
-
-    def __init__(self, store=None, strikes=3, ttl=3600.0):
-        self.store = store            # {get(host)->rec, set(host, rec)} or None
-        self.strikes = int(strikes)
-        self.ttl = float(ttl)
-        self._mem = {}
-
-    def _get(self, host):
-        if self.store:
-            return self.store.get(host)
-        return self._mem.get(host)
-
-    def _set(self, host, rec):
-        if self.store:
-            self.store.set(host, rec)
-        else:
-            self._mem[host] = rec
-
-    def supported(self, host, now=None):
-        """Should we walk the group table for this host now?"""
-        now = now if now is not None else time.time()
-        rec = self._get(host)
-        if not rec:
-            return True
-        if now - rec.get('ts', 0) >= self.ttl:
-            return True                            # re-check after TTL
-        return rec.get('supported', True)
-
-    def record_walk(self, host, reachable, nonempty, now=None):
-        """Update the verdict from one walk. reachable=False records nothing."""
-        now = now if now is not None else time.time()
-        if not reachable:
-            return
-        rec = self._get(host) or {'supported': True, 'strikes': 0, 'ts': now}
-        if nonempty:
-            rec = {'supported': True, 'strikes': 0, 'ts': now}
-        else:
-            strikes = rec.get('strikes', 0) + 1
-            rec = {'supported': strikes < self.strikes, 'strikes': strikes, 'ts': now}
-        self._set(host, rec)
-
-    def seed(self, host, supported, now=None):
-        """A deliberate --snmp-probe verdict is authoritative (no strikes)."""
-        now = now if now is not None else time.time()
-        self._set(host, {'supported': bool(supported), 'strikes': 0, 'ts': now})
+# ---------------------------------------------------------------------------
+# snapshot model
+# ---------------------------------------------------------------------------
+@dataclass
+class IfaceCounters:
+    ifindex: str
+    name: str
+    in_mcast: int
+    out_mcast: int
 
 
-def probe(host, community, cfg=None):
-    """One-shot capability probe: which target OIDs answer + a sample. No root,
-    no capture iface. Returns a dict; seeds nothing itself (caller seeds cache)."""
-    c = dict(DEFAULTS)
-    c.update(cfg or {})
-    oids = dict(OIDS)
-    oids.update(c.get('oids') or {})
-    result = {'host': host, 'have_snmp': have_snmp(), 'oids': {}}
-    for name, oid in oids.items():
-        table = bulkwalk(host, community, oid)
-        result['oids'][name] = {
-            'reachable': table is not None,
-            'rows': (len(table) if table else 0),
-            'sample': (dict(list(table.items())[:2]) if table else {}),
-        }
-    grp = result['oids'].get('igmpCacheLastReporter', {})
-    result['group_table_supported'] = bool(grp.get('reachable') and grp.get('rows'))
-    return result
+@dataclass
+class SnmpSnapshot:
+    ifaces: Dict[str, IfaceCounters] = field(default_factory=dict)
+    # group-ip -> {"ifindices": set(str), "reporter": Optional[str]}
+    groups: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    group_table_supported: bool = False
+    group_walk_skipped: bool = False
 
 
-def _group_from_index(idx):
-    """igmpCacheEntry index is <group>.<ifIndex>; the group is the first 4 dotted
-    octets of the numeric OID suffix."""
-    parts = idx.split('.')
-    if len(parts) >= 4:
-        return '.'.join(parts[:4])
-    return None
-
-
-class SnmpPoller(threading.Thread):
-    """Own thread; SNMP round-trip happens outside the pipeline lock, only the
-    census snapshot + emit are locked (by the emit callback). Reads ifXTable and
-    (capability-permitting) igmpCacheTable, cross-references the census."""
-
-    def __init__(self, state, emit, cfg, storage=None, stop_event=None):
-        super().__init__(daemon=True, name='igmpwatch-snmp')
-        self.state = state
-        self.emit = emit
-        self.cfg = dict(DEFAULTS)
-        self.cfg.update(cfg or {})
-        self.oids = dict(OIDS)
-        self.oids.update(self.cfg.get('oids') or {})
-        self._stop = stop_event or threading.Event()
-        store = storage if (storage and self.cfg.get('cache_capabilities')) else None
-        self.cache = CapabilityCache(store, self.cfg['capability_strikes'],
-                                     self.cfg['capability_ttl'])
-        self._prev_if = None
-        self._last = None
-        self.walks_skipped = 0
-
-    def _read_ifaces(self):
-        host, comm = self.cfg['host'], self.cfg['community']
-        inb = bulkwalk(host, comm, self.oids['ifHCInMulticastPkts'])
-        outb = bulkwalk(host, comm, self.oids['ifHCOutMulticastPkts'])
-        if inb is None and outb is None:
-            return None
-        cur = {}
-        for idx, v in (inb or {}).items():
-            cur.setdefault(idx, {})['in'] = _int(v)
-        for idx, v in (outb or {}).items():
-            cur.setdefault(idx, {})['out'] = _int(v)
-        return cur
-
-    def _read_groups(self, now):
-        host, comm = self.cfg['host'], self.cfg['community']
-        if not self.cache.supported(host, now):
-            self.walks_skipped += 1
-            return None
-        table = bulkwalk(host, comm, self.oids['igmpCacheLastReporter'])
-        reachable = table is not None
-        nonempty = bool(table)
-        self.cache.record_walk(host, reachable, nonempty, now)
-        if not table:
-            return None
-        return {g for g in (_group_from_index(i) for i in table) if g}
-
-    def run(self):
-        self._last = time.time()
-        while not self._stop.is_set():
-            self._stop.wait(self.cfg['interval'])
-            if self._stop.is_set():
-                break
-            now = time.time()
-            dt = now - self._last
-            cur_if = self._read_ifaces()
-            if cur_if is not None:
-                for a in evaluate_ifaces(self._prev_if, cur_if, dt, self.cfg):
-                    self.emit(a)
-                self._prev_if = cur_if
-            sw_groups = self._read_groups(now)
-            if sw_groups is not None:
-                census = self.state.data_groups()
-                for a in evaluate_groups(sw_groups, census, self.cfg):
-                    self.emit(a)
-            self._last = now
-
-    def stop(self):
-        self._stop.set()
-
-
-def _int(v):
+def _to_int(s: str) -> Optional[int]:
     try:
-        return int(str(v).split()[-1])
+        return int(s.strip().split()[0])
     except (ValueError, IndexError):
-        return 0
+        return None
 
+
+# ---------------------------------------------------------------------------
+# capability cache -- remember which walks a given switch actually answers
+# ---------------------------------------------------------------------------
+class CapabilityCache:
+    """Per-switch memory of whether the group table is worth walking.
+
+    L2-only platforms often populate ifXTable but return an empty
+    igmpCacheTable (no SVI in the VLAN / not the elected querier). Walking it
+    every cycle is a wasted SNMP round-trip. This cache records the verdict and
+    lets the poller skip that walk -- but never permanently: a ``ttl`` forces a
+    periodic re-check so a switch that later gains an SVI or wins the querier
+    election is picked back up automatically.
+
+    An empty walk is not trusted on first sight; ``strikes`` consecutive
+    reachable-but-empty results are required before a platform is marked
+    unsupported. An *unreachable* walk is never a strike -- that's a transport
+    problem, not a capability verdict.
+    """
+
+    def __init__(self, storage, ttl: float = 3600.0, strikes: int = 3):
+        self.storage = storage
+        self.ttl = ttl
+        self.strikes = strikes
+
+    def group_walk_allowed(self, host: str, now: float) -> bool:
+        if self.storage is None or not host:
+            return True
+        rec = self.storage.get_snmp_capability(host)
+        if not rec or rec.get("group_table") is None:
+            return True
+        if rec["group_table"] == 1:
+            return True
+        # known-empty: only re-check once the TTL has elapsed
+        return (now - (rec.get("checked_at") or 0.0)) >= self.ttl
+
+    def record_group_result(self, host: str, now: float,
+                            rows: Optional[int], source: str = "poll") -> None:
+        """rows: >0 supported, 0 reachable-but-empty, None unreachable."""
+        if self.storage is None or not host or rows is None:
+            return
+        rec = self.storage.get_snmp_capability(host) or {}
+        prev_strikes = rec.get("strikes") or 0
+        if rows > 0:
+            self.storage.upsert_snmp_capability(host, 1, rows, 0, source, now)
+            return
+        strikes = prev_strikes + 1
+        verdict = 0 if strikes >= self.strikes else None
+        self.storage.upsert_snmp_capability(host, verdict, 0, strikes, source, now)
+
+    def verdict(self, host: str) -> Optional[dict]:
+        if self.storage is None or not host:
+            return None
+        return self.storage.get_snmp_capability(host)
+
+
+def collect_snapshot(client, cfg_snmp: dict, caps: "CapabilityCache | None" = None,
+                     now: Optional[float] = None) -> Optional[SnmpSnapshot]:
+    """Gather one SNMP snapshot. Returns None if the switch is unreachable."""
+    names = client.walk(cfg_snmp.get("if_name_oid", OID_IF_NAME))
+    if names is None:
+        return None   # unreachable / no transport -> caller no-ops this cycle
+    ins = client.walk(cfg_snmp.get("if_in_mcast_oid", OID_IF_IN_MCAST)) or {}
+    outs = client.walk(cfg_snmp.get("if_out_mcast_oid", OID_IF_OUT_MCAST)) or {}
+
+    snap = SnmpSnapshot()
+    for ifindex, name in names.items():
+        i = _to_int(ins.get(ifindex, ""))
+        o = _to_int(outs.get(ifindex, ""))
+        snap.ifaces[ifindex] = IfaceCounters(
+            ifindex=ifindex, name=name,
+            in_mcast=i if i is not None else 0,
+            out_mcast=o if o is not None else 0,
+        )
+
+    host = cfg_snmp.get("host", "")
+    now = now if now is not None else time.time()
+
+    # Skip the group walk entirely on platforms already known to answer it
+    # empty (re-checked periodically via the cache TTL).
+    if caps is not None and not caps.group_walk_allowed(host, now):
+        snap.group_walk_skipped = True
+        return snap
+
+    grp = client.walk(cfg_snmp.get("group_table_oid", OID_IGMP_CACHE))
+    if caps is not None:
+        caps.record_group_result(host, now,
+                                 None if grp is None else len(grp), "poll")
+    if grp is not None:
+        snap.group_table_supported = True
+        for suffix, reporter in grp.items():
+            octs = suffix.split(".")
+            if len(octs) < 4:
+                continue
+            group = ".".join(octs[:4])
+            ifidx = octs[4] if len(octs) > 4 else None
+            g = snap.groups.setdefault(group, {"ifindices": set(), "reporter": None})
+            if ifidx:
+                g["ifindices"].add(ifidx)
+            if reporter and reporter not in ("0.0.0.0", ""):
+                g["reporter"] = reporter
+    return snap
+
+
+# ---------------------------------------------------------------------------
+# evaluation (pure)
+# ---------------------------------------------------------------------------
+@dataclass
+class _IfSample:
+    in_mcast: int
+    out_mcast: int
+
+
+class SnmpPoller:
+    def __init__(self, cfg: dict):
+        s = cfg["snmp"]
+        self.c = s
+        self._last_ts: Optional[float] = None
+        self._last_if: Dict[str, _IfSample] = {}
+        benign = set(DEFAULT_BENIGN_GROUPS) | set(
+            cfg.get("policy", {}).get("benign_groups", []) or [])
+        self._benign = benign
+        watch = s.get("monitor_ifaces") or []
+        self._watch = {str(x) for x in watch}
+
+    def _watched(self, ifc: IfaceCounters) -> bool:
+        if not self._watch:
+            return True
+        return ifc.ifindex in self._watch or ifc.name in self._watch
+
+    def evaluate(self, now: float, snap: Optional[SnmpSnapshot],
+                 active_groups: Set[str], known_groups: Set[str],
+                 learning: bool) -> List[Alert]:
+        if snap is None:
+            return []
+        out: List[Alert] = []
+
+        # -- per-interface multicast rate ----------------------------------
+        prev_ts, self._last_ts = self._last_ts, now
+        prev_if, cur_if = self._last_if, {}
+        for ifindex, ifc in snap.ifaces.items():
+            cur_if[ifindex] = _IfSample(ifc.in_mcast, ifc.out_mcast)
+        self._last_if = cur_if
+
+        if prev_ts is not None and now - prev_ts > 0:
+            dt = now - prev_ts
+            thr = self.c["iface_mcast_pps"]
+            for ifindex, ifc in snap.ifaces.items():
+                if not self._watched(ifc):
+                    continue
+                prev = prev_if.get(ifindex)
+                if prev is None:
+                    continue
+                d_in = ifc.in_mcast - prev.in_mcast
+                d_out = ifc.out_mcast - prev.out_mcast
+                if d_in < 0 or d_out < 0:      # counter reset/wrap -> skip
+                    continue
+                in_pps = d_in / dt
+                out_pps = d_out / dt
+                if max(in_pps, out_pps) > thr:
+                    out.append(Alert(
+                        rule="snmp.iface_mcast_storm",
+                        severity=Severity.HIGH,
+                        detail={"ifindex": ifindex, "ifname": ifc.name,
+                                "in_mcast_pps": round(in_pps, 1),
+                                "out_mcast_pps": round(out_pps, 1),
+                                "threshold": thr, "window_s": round(dt, 2)},
+                    ))
+
+        # -- per-group cross-reference vs igmpwatch census -----------------
+        if self.c.get("cross_reference", True) and snap.group_table_supported:
+            for group, info in snap.groups.items():
+                if in_local_control(group) or group in self._benign:
+                    continue
+                if (self.c.get("flag_unsubscribed_forwarding", True)
+                        and group not in known_groups):
+                    out.append(Alert(
+                        rule="snmp.unsubscribed_forwarding",
+                        severity=Severity.HIGH,
+                        detail={"note": "switch forwards a group igmpwatch never "
+                                        "saw an IGMP join for",
+                                "ifindices": sorted(info.get("ifindices", [])),
+                                "last_reporter": info.get("reporter")},
+                        group=group, host_ip=info.get("reporter"),
+                    ))
+            if (self.c.get("flag_census_not_forwarded", False) and not learning):
+                switch_groups = set(snap.groups)
+                for group in active_groups:
+                    if group in self._benign or in_local_control(group):
+                        continue
+                    if group not in switch_groups:
+                        out.append(Alert(
+                            rule="snmp.census_not_forwarded",
+                            severity=Severity.LOW,
+                            detail={"note": "igmpwatch saw a join the switch's "
+                                            "group table does not list"},
+                            group=group,
+                        ))
+        return out
+
+
+# ---------------------------------------------------------------------------
+# platform probe -- "which of my target OIDs does this switch answer?"
+# ---------------------------------------------------------------------------
+def probe(client, cfg_snmp: dict) -> List[Dict[str, Any]]:
+    """Walk each target OID once and report responsiveness + a small sample.
+
+    Returns a list of {name, oid, reachable, rows, sample:[(suffix,value)...]}
+    so an operator can validate a platform in one shot before relying on the
+    cross-reference. Pure w.r.t. formatting; ``client`` does the I/O.
+    """
+    targets = [
+        ("ifName", cfg_snmp.get("if_name_oid", OID_IF_NAME), False),
+        ("ifHCInMulticastPkts", cfg_snmp.get("if_in_mcast_oid", OID_IF_IN_MCAST), False),
+        ("ifHCOutMulticastPkts", cfg_snmp.get("if_out_mcast_oid", OID_IF_OUT_MCAST), False),
+        ("igmpCache (group table)", cfg_snmp.get("group_table_oid", OID_IGMP_CACHE), True),
+    ]
+    report: List[Dict[str, Any]] = []
+    for name, oid, is_group in targets:
+        res = client.walk(oid)
+        row: Dict[str, Any] = {"name": name, "oid": oid, "is_group": is_group}
+        if res is None:
+            row.update(reachable=False, rows=0, sample=[])
+        else:
+            row.update(reachable=True, rows=len(res),
+                       sample=list(res.items())[:3])
+        report.append(row)
+    return report
+
+
+def _fmt_group_suffix(suffix: str) -> str:
+    octs = suffix.split(".")
+    if len(octs) >= 4:
+        group = ".".join(octs[:4])
+        ifidx = octs[4] if len(octs) > 4 else "?"
+        return f"{group}@if{ifidx}"
+    return suffix
+
+
+def format_probe(report: List[Dict[str, Any]], cfg_snmp: dict) -> str:
+    host = cfg_snmp.get("host", "?")
+    ver = cfg_snmp.get("version", "2c")
+    lines = [f"igmpwatch SNMP probe -> {host} (v{ver})"]
+    any_reach = False
+    for r in report:
+        tag = " ok " if r["reachable"] else "MISS"
+        if r["reachable"]:
+            any_reach = True
+        sample = ""
+        if r["sample"]:
+            if r["is_group"]:
+                pairs = [f"{_fmt_group_suffix(k)}={v}" for k, v in r["sample"]]
+            else:
+                pairs = [f"{k}={v}" for k, v in r["sample"]]
+            sample = "  e.g. " + ", ".join(pairs)
+        lines.append(f"  [{tag}] {r['name']:<24} {r['oid']:<26} "
+                     f"{r['rows']:>4} rows{sample}")
+
+    by = {r["name"]: r for r in report}
+    grp = next((r for r in report if r["is_group"]), None)
+    iface_ok = any(by[n]["reachable"] and by[n]["rows"] > 0
+                   for n in ("ifHCInMulticastPkts", "ifHCOutMulticastPkts")
+                   if n in by)
+    if not any_reach:
+        summary = ("Summary: no response. Check host, credentials, version, "
+                   "and that the mgmt IP is reachable / SNMP is enabled.")
+    elif grp and grp["reachable"] and grp["rows"] > 0:
+        summary = ("Summary: per-interface counters + group table both present "
+                   "-> full cross-reference available.")
+    elif iface_ok:
+        summary = ("Summary: per-interface counters present, group table empty "
+                   "-> per-port storm detection works; group cross-reference "
+                   "unavailable on this platform (try a vendor group_table_oid, "
+                   "or rely on the iface + sysfs tiers).")
+    else:
+        summary = ("Summary: partial response -> verify the OID overrides for "
+                   "this platform.")
+    lines.append(summary)
+    return "\n".join(lines)

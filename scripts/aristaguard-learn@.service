@@ -1,0 +1,60 @@
+[Unit]
+Description=Arista Switch and Router Guard - baseline capture on %i (detect, emit nothing)
+Documentation=file:/usr/local/share/ragnar/aristaguard.README.md
+BindsTo=sys-subsystem-net-devices-%i.device
+After=sys-subsystem-net-devices-%i.device
+Conflicts=aristaguard@%i.service
+
+[Service]
+Type=oneshot
+User=ragnar
+Group=ragnar
+
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+EnvironmentFile=-/etc/ragnar/aristaguard.conf
+ExecStart=/usr/local/bin/aristaguard.py --iface "%i" --learn --timeout "${ARISTAGUARD_LEARN_SECONDS}" --config "${ARISTAGUARD_CONFIG}"
+
+# RuntimeMaxSec= is SILENTLY IGNORED under Type=oneshot. TimeoutStartSec= is
+# the real knob there, and it defaults to infinity - so a learn run with no
+# timeout would hang forever. This bit ndpwatch; it is not a style choice.
+TimeoutStartSec=900
+
+StandardOutput=append:/var/log/ragnar/aristaguard-learn-%i.jsonl
+StandardError=journal
+
+ConfigurationDirectory=ragnar
+LogsDirectory=ragnar
+StateDirectory=ragnar
+# ProtectSystem=strict would kill the baseline dump without this.
+ReadWritePaths=/var/lib/ragnar
+
+RestrictAddressFamilies=AF_PACKET AF_NETLINK AF_UNIX
+IPAddressDeny=any
+SocketBindDeny=any
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @mount @swap @reboot
+SystemCallArchitectures=native
+UMask=0027
+
+MemoryMax=192M
+TasksMax=16

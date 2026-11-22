@@ -60,21 +60,123 @@ def _which(name):
 
 _HACKRF_INFO = _which("hackrf_info")
 _HACKRF_SWEEP = _which("hackrf_sweep")
+_HACKRF_TRANSFER = _which("hackrf_transfer")
+
+# TX pilot-tone state (used only by transmit_tone / tx_tone_stop, below). The
+# HackRF transmits a single CW carrier the TCXO-less ESP-SDR locks onto to trim
+# its crystal — see transmit_tone().
+_TX_PROC = None
+_TX_FILE = None
 
 # Named bands (MHz). Wi-Fi 6 GHz is within HackRF's range but its edges vary by
 # region; 2.4 and 5 cover the common troubleshooting cases.
 BANDS = {
+    # HF / sub-GHz band scopes. The HackRF reaches 1 MHz-6 GHz, so it can sweep
+    # everything the RTL-SDR can (mirrors rtl_sdr.RTL_BANDS) -- except the bottom
+    # of the AM band, which sits below HackRF's 1 MHz floor (clamped here).
+    "am":  (1.0, 1.71),        # AM / medium-wave (only the top is above 1 MHz)
+    "sw":  (3.0, 24.0),        # shortwave HF broadcast
+    "fm":  (88.0, 108.0),      # FM broadcast
+    "air": (108.0, 137.0),     # VHF airband (AM voice)
+    "27":  (26.9, 27.5),       # CB / 27 MHz RC
+    "40":  (40.0, 41.0),       # 40 MHz RC / toys
+    "315": (313.5, 316.5),     # US keyfobs / TPMS / garage & gate remotes
+    "433": (433.05, 434.79),   # EU 433 ISM
+    "868": (863.0, 870.0),     # EU 868 SRD
+    "915": (902.0, 928.0),     # US 915 ISM
     "2.4": (2400, 2500),
     "5":   (5150, 5895),
     "6":   (5925, 6425),
 }
 
-_GRID_BINS = 256          # display columns per frame (band binned into this many)
-_RING_FRAMES = 300        # rolling history of sweep frames kept in memory
+# hackrf_sweep needs a window at least a couple of int-MHz wide (it captures
+# ~20 MHz per tune and wants max>min after MHz truncation). Narrow band scopes
+# (AM/27/40) and 1-2 MHz zoom spans get symmetrically widened to this for the
+# sweep command; the display still bins to the requested [lo, hi].
+_MIN_SWEEP_MHZ = 2.0
+
+
+def sweep_cmd(lo, hi, lna, vga, amp=False, antenna=False, bin_hz=None, bins=None):
+    """hackrf_sweep argv for [lo,hi] MHz (pure, selftested).
+
+    ``bin_hz`` (resolution bandwidth) defaults to finer than a display column so
+    a narrow zoom has no floor streaks; an explicit value is clamped to
+    hackrf_sweep's 2445 Hz - 5 MHz. ``amp`` enables the RX RF amplifier (+~11 dB,
+    for weak signals — overloads on strong ones); ``antenna`` powers the antenna
+    port (bias, 3.3 V) for an active antenna / LNA.
+    """
+    bins = bins or _GRID_BINS
+    if bin_hz:
+        bin_hz = max(2445, min(5_000_000, int(bin_hz)))
+    else:
+        span_hz = (hi - lo) * 1_000_000
+        bin_hz = int(span_hz / (bins * 2)) or _BIN_WIDTH_HZ
+        bin_hz = max(2500, min(_BIN_WIDTH_HZ, bin_hz))
+    cmd = [_HACKRF_SWEEP, "-f", "%d:%d" % (int(lo), int(hi) + 1),
+           "-w", str(bin_hz), "-l", str(lna), "-g", str(vga)]
+    if amp:
+        cmd += ["-a", "1"]
+    if antenna:
+        cmd += ["-p", "1"]
+    return cmd, bin_hz
+
+
+def _widen_span(lo, hi):
+    """Widen a too-narrow [lo, hi] MHz window symmetrically to _MIN_SWEEP_MHZ.
+
+    Below ~_GRID_BINS * (hackrf_sweep's ~2.5 kHz FFT floor) ~= 1.3 MHz, a span
+    can't feed every display column, so narrow requests (small zoom, a manual
+    tune, a 0.45 MHz mesh overlay) are widened. Pure so selftest can exercise it.
+    """
+    if hi - lo < _MIN_SWEEP_MHZ:
+        c = (lo + hi) / 2.0
+        lo = max(1.0, c - _MIN_SWEEP_MHZ / 2.0)
+        hi = min(7250.0, lo + _MIN_SWEEP_MHZ)
+    return lo, hi
+
+_GRID_BINS = 512          # display columns per frame (band binned into this many)
+_RING_FRAMES = 600        # rolling history of sweep frames kept in memory
 _FLOOR_DBM = -120         # sentinel for a bucket no sweep bin landed in
-_BIN_WIDTH_HZ = 250000    # hackrf_sweep FFT resolution (250 kHz -> fast sweeps)
+# FFT resolution must stay finer than one display column or some columns get no
+# raw bin and paint a permanent floor streak. 512 columns over the 100 MHz 2.4
+# band is ~195 kHz/column, so 150 kHz keeps every column fed (~667 raw bins ->
+# 512 buckets) while sweeps stay fast enough for the steady cadence below.
+_BIN_WIDTH_HZ = 150000    # hackrf_sweep FFT resolution (finer than a display column)
 _DEFAULT_LNA = 24         # HackRF LNA gain (0-40, 8 dB steps)
 _DEFAULT_VGA = 20         # HackRF VGA/baseband gain (0-62, 2 dB steps)
+# hackrf_sweep finishes a full band far faster (and far more irregularly) than a
+# waterfall wants to scroll: for a 100 MHz band it can complete 20-30 sweeps a
+# second, then briefly stall on a USB hiccup or a retune. Emitting every raw
+# sweep as its own row makes the display lurch — a burst of rows jumps in at
+# once, then it freezes with nothing new. Instead we time-integrate raw sweeps
+# (max-hold) into rows produced at a fixed cadence, the way a real spectrum-
+# analyzer waterfall dwells. That yields a smooth, steady scroll and, as a
+# bonus, each row now catches bursty transmitters that fired between frames.
+# 20 rows/s matches the feel of the RTL-SDR's IQ engine (~16/s); the 2.4 GHz band
+# completes a sweep every ~17 ms, so each row still max-holds ~3 sweeps.
+_DISPLAY_HZ = 20          # waterfall rows emitted per second (steady scroll rate)
+_DISPLAY_INTERVAL = 1.0 / _DISPLAY_HZ
+
+
+def _dwell_tick(next_push, now, interval=None):
+    """Row scheduler for one completed sweep (pure, selftested).
+
+    Returns ``(push, stamp, next_push)``. Rows sit on a fixed grid of
+    ``interval`` seconds, so the average rate is exactly ``_DISPLAY_HZ``.
+    Timing each wait from the moment of the previous push instead lost up to
+    one whole sweep per row (measured 9.2 rows/s at a nominal 10). Each row is
+    stamped with its grid time — at most one sweep earlier than the sweep that
+    completed it — so the page, which plays rows back at their own timestamps,
+    scrolls at an even cadence. When sweeps are slower than the grid (a wide
+    5/6 GHz span) every sweep becomes a row, stamped when it completed, and
+    the grid restarts from there rather than bursting to catch up.
+    """
+    interval = _DISPLAY_INTERVAL if interval is None else interval
+    if now < next_push:
+        return False, None, next_push
+    if now - next_push < interval:          # on the grid
+        return True, next_push, next_push + interval
+    return True, now, now + interval        # behind the grid: one row now, re-anchor
 
 
 # --------------------------------------------------------------------------
@@ -177,6 +279,22 @@ def parse_sweep_line(line):
     return hz_low, hz_high, bin_hz, dbs
 
 
+def _merge_max(accum, frame):
+    """Fold ``frame`` into ``accum`` in place (bucket-wise max), returning accum.
+
+    This is the time-integration of the waterfall dwell: every raw sweep that
+    lands inside one display interval keeps the strongest reading per bucket, so
+    a short burst between frames still paints a row instead of being dropped.
+    Passing ``accum=None`` starts a fresh dwell from a copy of ``frame``.
+    """
+    if accum is None:
+        return list(frame)
+    for i, v in enumerate(frame):
+        if v > accum[i]:
+            accum[i] = v
+    return accum
+
+
 class _FrameBuilder:
     """Accumulate ascending sweep rows into fixed-width power frames.
 
@@ -217,12 +335,23 @@ class _FrameBuilder:
             self._reset()
         self._last_low = hz_low
         for i, db in enumerate(dbs):
-            center = hz_low + (i + 0.5) * bin_hz
-            b = self._bucket(center)
-            if b is not None:
+            # Fill every display column this raw FFT bin covers, not just the one
+            # its centre lands in. On a narrow span the raw bins (>=2500 Hz, the
+            # hackrf_sweep FFT floor) are wider than a column, so centre-only
+            # bucketing would skip columns and paint floor streaks; on a wide
+            # span both edges map to one column, so this stays a single fill.
+            lo_edge = max(hz_low + i * bin_hz, self.lo)
+            hi_edge = min(hz_low + (i + 1) * bin_hz, self.hi)
+            if hi_edge <= lo_edge:
+                continue                    # this bin lies outside [lo, hi]
+            b0 = self._bucket(lo_edge)
+            b1 = self._bucket(hi_edge - 1)
+            if b0 is None or b1 is None:
+                continue
+            for b in range(b0, b1 + 1):
                 if db > self.grid[b]:
                     self.grid[b] = db
-                self._filled = True
+            self._filled = True
         return frame
 
 
@@ -245,27 +374,67 @@ class SweepCapture:
         self._error = None
         self._lna = _DEFAULT_LNA
         self._vga = _DEFAULT_VGA
+        self._stderr_tail = None   # last stderr line, kept for exit diagnostics
+        self._detect_cache = None  # last good detect(), reused while streaming
+        self._sig = None           # (label, lo, hi) — restart only on a real change
+        self._lo_mhz = None        # active sweep range (band OR custom zoom span)
+        self._hi_mhz = None
 
     # -- lifecycle ---------------------------------------------------------
-    def start(self, band="2.4", lna=None, vga=None):
-        band = band if band in BANDS else "2.4"
+    def start(self, band="2.4", lna=None, vga=None, lo_mhz=None, hi_mhz=None,
+              amp=None, antenna=None, bin_hz=None):
+        # A custom [lo_mhz, hi_mhz] span (the page's zoom, a manual tune, or a
+        # mesh/LoRa overlay) overrides the named band when both edges are sane:
+        # >=0.1 MHz wide, inside 1-7250 MHz. Narrow spans (e.g. a 0.45 MHz
+        # Meshtastic-EU868 overlay) are widened below to a usable window.
+        custom = None
+        try:
+            if lo_mhz is not None and hi_mhz is not None:
+                lo_mhz, hi_mhz = float(lo_mhz), float(hi_mhz)
+                if hi_mhz - lo_mhz >= 0.1 and lo_mhz >= 1 and hi_mhz <= 7250:
+                    custom = (lo_mhz, hi_mhz)
+        except (TypeError, ValueError):
+            custom = None
+        if custom:
+            label, lo, hi = "zoom", custom[0], custom[1]
+        else:
+            band = band if band in BANDS else "2.4"
+            label, (lo, hi) = band, BANDS[band]
+        # Widen a too-narrow window so hackrf_sweep gets a sane range and every
+        # display column receives a raw FFT bin (no floor streaks). Widens BOTH
+        # sweep and display together -- the frame's band_mhz reports [lo, hi], so
+        # the page's ruler matches what's actually drawn.
+        lo, hi = _widen_span(lo, hi)
+        lna_v = _clamp(lna, 0, 40, _DEFAULT_LNA)
+        lna_v -= lna_v % 8                                  # hackrf LNA: 8 dB steps
+        vga_v = _clamp(vga, 0, 62, _DEFAULT_VGA)
+        vga_v -= vga_v % 2                                  # VGA: 2 dB steps
+        amp_v = str(amp).lower() in ("1", "true", "on", "yes")
+        ant_v = str(antenna).lower() in ("1", "true", "on", "yes")
+        try:
+            bin_v = int(float(bin_hz)) if bin_hz not in (None, "", "auto", 0, "0") else None
+        except (TypeError, ValueError):
+            bin_v = None
+        sig = (label, round(lo, 3), round(hi, 3), lna_v, vga_v, amp_v, ant_v, bin_v)
         with self._lock:
             if self._thread and self._thread.is_alive():
-                if band == self._band:
-                    return {"ok": True, "already": True, "band": band}
-                self._stop_locked()   # band change: restart cleanly
+                if sig == self._sig:
+                    return {"ok": True, "already": True, "band": label}
+                self._stop_locked()   # band / zoom change: restart cleanly
             self._stop.clear()
             self._frames = []
             self._seq = 0
             self._maxhold = [_FLOOR_DBM] * _GRID_BINS
-            self._band = band
+            self._band = label
+            self._sig = sig
+            self._lo_mhz, self._hi_mhz = lo, hi
             self._error = None
-            self._lna = _clamp(lna, 0, 40, _DEFAULT_LNA)
-            self._vga = _clamp(vga, 0, 62, _DEFAULT_VGA)
-            self._thread = threading.Thread(target=self._run_loop, args=(band,),
+            self._lna, self._vga = lna_v, vga_v
+            self._amp, self._antenna, self._bin_req = amp_v, ant_v, bin_v
+            self._thread = threading.Thread(target=self._run_loop, args=(lo, hi),
                                             daemon=True, name="hackrf-sweep")
             self._thread.start()
-        return {"ok": True, "band": band}
+        return {"ok": True, "band": label, "range_mhz": [lo, hi]}
 
     def stop(self):
         with self._lock:
@@ -287,12 +456,16 @@ class SweepCapture:
         self._band = None
 
     # -- capture thread ----------------------------------------------------
-    def _run_loop(self, band):
-        lo, hi = BANDS[band]
-        builder = _FrameBuilder(lo, hi)
-        cmd = [_HACKRF_SWEEP, "-f", "%d:%d" % (lo, hi),
-               "-w", str(_BIN_WIDTH_HZ), "-l", str(self._lna),
-               "-g", str(self._vga)]
+    def _run_loop(self, lo, hi):
+        # Keep the FFT bin finer than a display column so a narrow zoom span
+        # doesn't leave floor-streak gaps; clamp to hackrf_sweep's sane range.
+        builder = _FrameBuilder(lo, hi)           # [lo, hi] already widened in start()
+        # +1 on the top edge so hackrf_sweep always sees max > min after MHz
+        # truncation (the span is >= _MIN_SWEEP_MHZ, so this never inverts).
+        cmd, bin_hz = sweep_cmd(lo, hi, self._lna, self._vga, getattr(self, "_amp", False),
+                                getattr(self, "_antenna", False), getattr(self, "_bin_req", None))
+        self._rbw = bin_hz
+        self._stderr_tail = None
         try:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                           stderr=subprocess.PIPE, text=True,
@@ -300,6 +473,28 @@ class SweepCapture:
         except Exception as exc:
             self._error = "failed to launch hackrf_sweep: %s" % exc
             return
+        # hackrf_sweep prints a stats line to stderr every second. If we only
+        # read stdout, that stderr pipe (64 KB) fills over a long session and
+        # hackrf_sweep blocks writing to it — the stream stalls mid-run. Drain
+        # stderr continuously on its own thread, keeping the last line so an
+        # early-exit reason is still reportable.
+        def _drain_stderr(pipe):
+            try:
+                for eline in pipe:
+                    eline = eline.strip()
+                    if eline:
+                        self._stderr_tail = eline[:200]
+            except Exception:  # pragma: no cover - pipe closed on teardown
+                pass
+        serr_thread = threading.Thread(target=_drain_stderr,
+                                       args=(self._proc.stderr,),
+                                       daemon=True, name="hackrf-stderr")
+        serr_thread.start()
+        # Coalesce however many raw sweeps arrive into one display row every
+        # _DISPLAY_INTERVAL seconds, so the waterfall scrolls at a steady rate
+        # no matter how fast (or how burstily) hackrf_sweep retunes the band.
+        accum = None
+        next_push = time.time() + _DISPLAY_INTERVAL
         try:
             for line in self._proc.stdout:
                 if self._stop.is_set():
@@ -308,22 +503,30 @@ class SweepCapture:
                 if not parsed:
                     continue
                 frame = builder.add(*parsed)
-                if frame is not None:
-                    self._push_frame(frame)
+                if frame is None:
+                    continue
+                accum = _merge_max(accum, frame)
+                push, stamp, next_push = _dwell_tick(next_push, time.time())
+                if push:
+                    self._push_frame(accum, ts=stamp)
+                    accum = None
         except Exception as exc:  # pragma: no cover - defensive
             self._error = str(exc)
         finally:
             # Surface a device error hackrf_sweep printed to stderr on early exit.
-            if self._proc and self._proc.poll() not in (None, 0) and not self._error:
-                err = (self._proc.stderr.read() if self._proc.stderr else "") or ""
-                if err.strip():
-                    self._error = err.strip().splitlines()[-1][:200]
+            # The drain thread already has it; give it a moment to catch the last
+            # line the process wrote as it died.
+            serr_thread.join(timeout=1)
+            if (self._proc and self._proc.poll() not in (None, 0)
+                    and not self._error and self._stderr_tail):
+                self._error = self._stderr_tail
 
-    def _push_frame(self, grid):
+    def _push_frame(self, grid, ts=None):
         ints = [int(round(v)) for v in grid]
         with self._lock:
             self._seq += 1
-            self._frames.append({"seq": self._seq, "ts": time.time(),
+            self._frames.append({"seq": self._seq,
+                                 "ts": time.time() if ts is None else ts,
                                  "power": ints})
             if len(self._frames) > _RING_FRAMES:
                 self._frames = self._frames[-_RING_FRAMES:]
@@ -339,8 +542,10 @@ class SweepCapture:
             return {"running": running, "band": self._band,
                     "frames_buffered": len(self._frames), "seq": self._seq,
                     "bins": _GRID_BINS, "lna": self._lna, "vga": self._vga,
+                    "amp": getattr(self, "_amp", False), "antenna": getattr(self, "_antenna", False),
+                    "bin_hz": getattr(self, "_bin_req", None), "rbw_hz": getattr(self, "_rbw", None),
                     "error": self._error,
-                    "band_mhz": BANDS.get(self._band) if self._band else None,
+                    "band_mhz": [self._lo_mhz, self._hi_mhz] if self._lo_mhz else None,
                     "floor_dbm": _FLOOR_DBM}
 
     def get_frames(self, since=0):
@@ -351,8 +556,9 @@ class SweepCapture:
         with self._lock:
             new = [f for f in self._frames if f["seq"] > since]
             return {"frames": new, "seq": self._seq, "band": self._band,
-                    "band_mhz": BANDS.get(self._band) if self._band else None,
+                    "band_mhz": [self._lo_mhz, self._hi_mhz] if self._lo_mhz else None,
                     "bins": _GRID_BINS, "floor_dbm": _FLOOR_DBM,
+                    "rbw_hz": getattr(self, "_rbw", None),
                     "max_hold": list(self._maxhold) if self._maxhold else None,
                     "running": bool(self._thread and self._thread.is_alive()),
                     "error": self._error}
@@ -369,11 +575,14 @@ def _clamp(v, lo, hi, default):
 _capture = SweepCapture()
 
 
-def start(band="2.4", lna=None, vga=None):
+def start(band="2.4", lna=None, vga=None, lo_mhz=None, hi_mhz=None,
+          amp=None, antenna=None, bin_hz=None):
     d = detect()
     if not d.get("available"):
         return {"ok": False, "error": d.get("error", "no SDR")}
-    return _capture.start(band, lna=lna, vga=vga)
+    _capture._detect_cache = d
+    return _capture.start(band, lna=lna, vga=vga, lo_mhz=lo_mhz, hi_mhz=hi_mhz,
+                          amp=amp, antenna=antenna, bin_hz=bin_hz)
 
 
 def stop():
@@ -382,12 +591,137 @@ def stop():
 
 def status():
     st = _capture.status()
-    st["detect"] = detect()
+    if st.get("running"):
+        # A sweep already holds the HackRF over USB. Calling detect() here runs
+        # hackrf_info, which opens the *same* device concurrently and knocks the
+        # streaming sweep offline within seconds — the "dies after ~7s" bug, hit
+        # whenever the UI's 15s status poll landed mid-capture. While streaming,
+        # report availability from the last known-good probe instead of touching
+        # the bus.
+        d = dict(_capture._detect_cache or {})
+        d.update({"available": True, "tools_installed": True,
+                  "device_present": True, "streaming": True})
+        d.setdefault("bands", sorted(BANDS.keys()))
+        st["detect"] = d
+    else:
+        st["detect"] = detect()
     return st
 
 
 def get_frames(since=0):
     return _capture.get_frames(since)
+
+
+# --------------------------------------------------------------------------
+# TX pilot tone — transmit a single CW carrier so the TCXO-less ESP-SDR can
+# cross-calibrate its crystal against the HackRF's accurate reference. The
+# HackRF tunes to ``rf_hz - offset_hz`` and we feed it an interleaved cs8 IQ
+# buffer of a complex sinusoid at ``+offset_hz``, so the emitted carrier sits
+# exactly at ``rf_hz`` while the LO stays clear of the DC/LO-leakage spike. A
+# short buffer is looped with ``-R``. Very low power, meant for a receiver a
+# few cm away — not a transmitter for anything over the air.
+# --------------------------------------------------------------------------
+
+def tone_iq_cs8(offset_hz, fs_hz, dur_s=0.25, amp=100):
+    """Interleaved signed-8-bit IQ (bytes) of a complex tone at ``offset_hz``.
+
+    The buffer holds a whole number of cycles so looping it is phase-seamless.
+    Pure — selftested without hardware."""
+    import numpy as np
+    n = max(64, int(fs_hz * dur_s))
+    cycles = max(1, int(round(offset_hz * n / float(fs_hz))))   # integer cycles → seamless loop
+    k = 2.0 * np.pi * cycles / n
+    t = np.arange(n)
+    a = max(1, min(127, int(amp)))
+    i = np.clip(np.round(np.cos(k * t) * a), -127, 127).astype(np.int8)
+    q = np.clip(np.round(np.sin(k * t) * a), -127, 127).astype(np.int8)
+    iq = np.empty(2 * n, dtype=np.int8)
+    iq[0::2] = i
+    iq[1::2] = q
+    return iq.tobytes(), int(round(cycles * fs_hz / float(n)))   # (bytes, actual emitted offset Hz)
+
+
+def transmit_tone(rf_hz, offset_hz=2_000_000, fs_hz=8_000_000, tx_vga=30, amp=False):
+    """Start transmitting a CW tone at ``rf_hz`` (loops until tx_tone_stop()).
+
+    Frees the device from any running RX sweep first. ``tx_vga`` is the TX VGA
+    gain 0..47 dB (kept modest — the ESP is centimetres away); ``amp`` enables
+    the +~11 dB PA (off by default). Returns {ok, ...} or {ok:False, error}.
+    """
+    global _TX_PROC, _TX_FILE
+    if _run([_HACKRF_TRANSFER, "-h"])[0] == 127 and not os.path.exists(_HACKRF_TRANSFER):
+        return {"ok": False, "error": "hackrf_transfer not installed (apt install hackrf)"}
+    d = detect()
+    if not d.get("available"):
+        return {"ok": False, "error": d.get("error", "no HackRF")}
+    tx_tone_stop()                      # clear any previous tone
+    stop()                              # a running sweep holds the device — free it
+    import tempfile
+    rf_hz = int(rf_hz)
+    lo = int(rf_hz - offset_hz)
+    try:
+        iq, emitted_off = tone_iq_cs8(offset_hz, fs_hz)
+        fd, path = tempfile.mkstemp(suffix=".cs8", prefix="esp_tone_")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(iq)
+    except Exception as exc:            # pragma: no cover - defensive
+        return {"ok": False, "error": "could not build the tone buffer: %s" % exc}
+    txv = max(0, min(47, int(tx_vga)))
+    args = [_HACKRF_TRANSFER, "-t", path, "-f", str(lo), "-s", str(int(fs_hz)),
+            "-x", str(txv), "-a", "1" if amp else "0", "-R"]
+    try:
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True)
+    except Exception as exc:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return {"ok": False, "error": "failed to launch hackrf_transfer: %s" % exc}
+    time.sleep(0.4)                     # catch an immediate failure (device busy / bad args)
+    if proc.poll() is not None:
+        err = ""
+        try:
+            err = (proc.stderr.read() or "").strip()[:200]
+        except Exception:
+            pass
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return {"ok": False, "error": "hackrf_transfer exited immediately: %s" % (err or "unknown")}
+    _TX_PROC = proc
+    _TX_FILE = path
+    return {"ok": True, "rf_hz": rf_hz, "lo_hz": lo, "offset_hz": int(emitted_off),
+            "fs_hz": int(fs_hz), "tx_vga": txv, "amp": bool(amp)}
+
+
+def tx_tone_stop():
+    """Stop the pilot tone and clean up its buffer. Safe to call when idle."""
+    global _TX_PROC, _TX_FILE
+    p = _TX_PROC
+    if p is not None:
+        try:
+            p.terminate()
+            try:
+                p.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        except Exception:               # pragma: no cover - defensive
+            pass
+    _TX_PROC = None
+    if _TX_FILE:
+        try:
+            os.unlink(_TX_FILE)
+        except OSError:
+            pass
+        _TX_FILE = None
+    return {"ok": True}
+
+
+def tx_active():
+    """True while a pilot tone is transmitting."""
+    return _TX_PROC is not None and _TX_PROC.poll() is None
 
 
 # --------------------------------------------------------------------------
@@ -458,6 +792,25 @@ def selftest():
     check("frame: bucket out of band ignored", fb2._bucket(2_600_000_000) is None)
     check("frame: bucket at band low = 0", fb2._bucket(2_400_000_000) == 0)
 
+    # --- TX pilot-tone IQ buffer (pure; no device) ---
+    try:
+        import numpy as _np
+        raw, emitted = tone_iq_cs8(2_000_000, 8_000_000, dur_s=0.05)
+        buf = _np.frombuffer(raw, dtype=_np.int8)
+        check("tone: interleaved IQ is 2 int8 per sample", len(buf) % 2 == 0 and len(buf) > 0)
+        iqc = buf[0::2].astype(_np.float32) + 1j * buf[1::2].astype(_np.float32)
+        # the dominant FFT bin must sit at the requested +2 MHz of 8 MS/s
+        sp = _np.fft.fftshift(_np.abs(_np.fft.fft(iqc)))
+        fb = _np.fft.fftshift(_np.fft.fftfreq(len(iqc), 1.0 / 8_000_000))
+        peak_hz = float(fb[int(_np.argmax(sp))])
+        check("tone: spectral peak at +2 MHz offset", abs(peak_hz - 2_000_000) < 60_000,
+              "%.0f Hz" % peak_hz)
+        check("tone: emitted offset within 1%% of requested", abs(emitted - 2_000_000) < 20_000,
+              "%d Hz" % emitted)
+        check("tone: amplitude within int8 range", int(buf.max()) <= 127 and int(buf.min()) >= -127)
+    except Exception as _exc:   # pragma: no cover - numpy always present in app
+        check("tone: IQ buffer generation", False, str(_exc))
+
     # --- hackrf_info parser ---
     info = parse_hackrf_info(
         "hackrf_info version: 2024.02.1\nBoard ID Number: 2 (HackRF One)\n"
@@ -465,6 +818,15 @@ def selftest():
     check("info: serial parsed", info["serial"] == "0000abcd12345678", str(info))
     check("info: board parsed", info["board"] == "HackRF One", str(info["board"]))
     check("info: firmware parsed", "2024.02.1" in (info["firmware"] or ""))
+    # sweep command: gains, amp / antenna power, resolution override
+    c, bw = sweep_cmd(2400, 2500, 24, 20)
+    check("cmd: default has gains, no amp/antenna power",
+          c[c.index("-l") + 1] == "24" and c[c.index("-g") + 1] == "20" and "-a" not in c and "-p" not in c)
+    c, bw = sweep_cmd(2400, 2500, 32, 40, amp=True, antenna=True, bin_hz=100000)
+    check("cmd: amp + antenna power + explicit RBW", "-a" in c and "-p" in c and bw == 100000)
+    check("cmd: RBW clamped to hackrf_sweep range", sweep_cmd(2400, 2500, 0, 0, bin_hz=5)[1] == 2445)
+    check("cmd: auto RBW finer than a display column",
+          sweep_cmd(433, 435, 24, 20)[1] <= (2e6 / _GRID_BINS))
 
     # --- max-hold accumulation ---
     cap = SweepCapture()
@@ -479,8 +841,84 @@ def selftest():
     check("frames: since-filter returns only newer", len(fr["frames"]) == 1
           and fr["frames"][0]["seq"] == 2)
 
+    # --- display-dwell coalescing (max-hold across sweeps in one frame) ---
+    acc = _merge_max(None, [-90, -90, -90])
+    check("coalesce: None seed copies the frame",
+          acc == [-90, -90, -90] and acc is not None)
+    acc = _merge_max(acc, [-90, -30, -90])
+    acc = _merge_max(acc, [-40, -95, -90])
+    check("coalesce: keeps the per-bucket peak across sweeps",
+          acc == [-40, -30, -90], str(acc))
+
+    # --- row scheduler: exact rate on a fast band, one row per slow sweep ---
+    def _sim(period, secs, interval=0.05):
+        t, nxt, stamps, comp = 1000.0, 1000.0 + interval, [], []
+        while t < 1000.0 + secs:
+            t += period
+            push, stamp, nxt = _dwell_tick(nxt, t, interval)
+            if push:
+                stamps.append(stamp); comp.append(t)
+        return stamps, comp
+    st, cp = _sim(0.0166, 10.0)            # 2.4 GHz band: a sweep every ~16.6 ms
+    gaps = [round(b - a, 6) for a, b in zip(st, st[1:])]
+    check("dwell: fast band emits exactly 20 rows/s", 198 <= len(st) <= 200, str(len(st)))
+    check("dwell: fast-band rows evenly stamped", set(gaps) == {0.05}, str(sorted(set(gaps))[:5]))
+    check("dwell: stamp within one sweep of the sweep that completed it",
+          all(0 <= c - s < 0.0166 + 1e-9 for s, c in zip(st, cp)))
+    st, cp = _sim(0.12, 3.0)               # wide 5/6 GHz span: slower than the grid
+    check("dwell: slow sweeps give one row each, stamped at completion, no burst",
+          len(st) == len(cp) == 25 and st == cp, str(len(st)))
+    check("dwell: no row before the grid tick", _dwell_tick(10.0, 9.99, 0.05)[0] is False)
+
+    # --- status() must not re-probe the HackRF while a sweep is streaming ---
+    # Opening hackrf_info over USB during a live sweep knocks it offline a few
+    # seconds in; status() must report availability from cache instead. Fake a
+    # running capture and assert detect() is never called.
+    import sys as _sys
+    _mod = _sys.modules[__name__]
+    _saved_status, _saved_detect = _capture.status, _mod.detect
+    _probe_calls = []
+    _capture._detect_cache = {"board": "HackRF One"}
+    _capture.status = lambda: {"running": True, "band": "2.4", "error": None}
+    _mod.detect = lambda *a, **k: (_probe_calls.append(1) or {"available": False})
+    try:
+        _st = status()
+        check("status: no HackRF re-probe while streaming",
+              not _probe_calls and _st["detect"].get("streaming") is True
+              and _st["detect"].get("available") is True, str(_st["detect"]))
+    finally:
+        _capture.status, _mod.detect = _saved_status, _saved_detect
+        _capture._detect_cache = None
+
     # --- band table ---
     check("bands: 2.4 and 5 present", "2.4" in BANDS and "5" in BANDS)
+    check("bands: sub-GHz scopes mirrored from RTL (fm/air/433/915)",
+          all(b in BANDS for b in ("am", "sw", "fm", "air", "27", "40",
+                                   "315", "433", "868", "915")))
+    check("bands: AM clamped to HackRF's 1 MHz floor", BANDS["am"][0] >= 1.0)
+
+    # --- narrow-span widening (mesh overlays / manual tune) ---
+    _wlo, _whi = _widen_span(869.3, 869.75)     # 0.45 MHz Meshtastic-EU868
+    check("widen: narrow span grown to >= min sweep",
+          _whi - _wlo >= _MIN_SWEEP_MHZ - 1e-9 and _wlo >= 1.0)
+    check("widen: wide span left untouched", _widen_span(2400.0, 2500.0) == (2400.0, 2500.0))
+    check("widen: stays above the 1 MHz floor", _widen_span(1.0, 1.71)[0] >= 1.0)
+
+    # --- no floor streaks: a widened narrow span fills every display column ---
+    _fb = _FrameBuilder(100.0, 102.0)           # 2 MHz display window
+    _bw = 2500                                  # hackrf_sweep FFT floor (Hz/bin)
+    _segs = [(95_000_000, 100_000_000), (100_000_000, 105_000_000)]  # 2 lines/sweep
+    def _sweep():
+        _f = None
+        for _slo, _shi in _segs:
+            _r = _fb.add(_slo, _shi, _bw, [-50.0] * ((_shi - _slo) // _bw))
+            if _r is not None:
+                _f = _r
+        return _f
+    _sweep()                                    # first sweep fills the grid
+    _frame = _sweep()                           # wrap completes + returns frame 1
+    check("fill: widened narrow span leaves no floor-streak columns",
+          _frame is not None and all(v > _FLOOR_DBM for v in _frame))
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,

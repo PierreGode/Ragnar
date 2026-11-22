@@ -65,6 +65,160 @@ LOCALAPI_HOST = 'local-tailscaled.sock'
 # Default tag every Ragnar mesh node carries. Overridable via config so an
 # operator running Ragnar inside a larger tailnet can scope it to their own tag.
 DEFAULT_MESH_TAG = 'tag:ragnar-mesh'
+DEFAULT_SHARE_TAG = 'tag:ragnar-share'
+
+# One tailnet can hold several *completely separate* Ragnar meshes, told apart
+# only by their tag. The default mesh is tag:ragnar-mesh; a second, isolated
+# mesh is tag:ragnar-mesh-2, and so on. Separation is real because every trust
+# check (caller_is_mesh_peer) and every peer scan filters on the exact tag, so a
+# node tagged ragnar-mesh-2 is invisible to — and rejected by — a ragnar-mesh
+# node even though they share a coordination server.
+_MESH_TAG_PREFIX = 'tag:ragnar-mesh'
+_SHARE_TAG_PREFIX = 'tag:ragnar-share'
+
+
+def normalize_mesh_suffix(suffix):
+    """Sanitise an operator-supplied mesh suffix to a DNS-label-safe fragment.
+
+    The suffix becomes part of a Tailscale tag, which is a DNS label, so it is
+    lowercased and reduced to [a-z0-9-]. An operator who pastes the whole thing
+    ("ragnar-mesh-2", "tag:ragnar-mesh-2") gets the same result as typing "2".
+    Returns '' for anything empty — i.e. the default mesh.
+    """
+    s = (str(suffix) if suffix is not None else '').strip().lower()
+    for p in ('tag:ragnar-mesh-', 'ragnar-mesh-', 'tag:ragnar-mesh', 'ragnar-mesh'):
+        if s.startswith(p):
+            s = s[len(p):]
+            break
+    s = re.sub(r'[^a-z0-9-]+', '-', s).strip('-')
+    return s[:32]
+
+
+def mesh_tag_for_suffix(suffix):
+    """The mesh tag for a suffix. Blank suffix ⇒ the default mesh tag."""
+    s = normalize_mesh_suffix(suffix)
+    return f'{_MESH_TAG_PREFIX}-{s}' if s else DEFAULT_MESH_TAG
+
+
+def suffix_of_mesh_tag(mesh_tag):
+    """Inverse of mesh_tag_for_suffix: the suffix a mesh tag carries ('' = default)."""
+    tag = (mesh_tag or '').strip()
+    prefix = _MESH_TAG_PREFIX + '-'
+    return tag[len(prefix):] if tag.startswith(prefix) else ''
+
+
+def share_tag_for_mesh_tag(mesh_tag):
+    """The share-guest tag paired with a mesh tag, so guests stay mesh-scoped.
+
+    ragnar-mesh ⇒ ragnar-share, ragnar-mesh-2 ⇒ ragnar-share-2. A fully custom
+    mesh tag with no recognised prefix falls back to the default share tag.
+    """
+    s = suffix_of_mesh_tag(mesh_tag)
+    return f'{_SHARE_TAG_PREFIX}-{s}' if s else DEFAULT_SHARE_TAG
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mesh secret: a per-mesh pre-shared key, defence-in-depth over the tag
+# ─────────────────────────────────────────────────────────────────────────────
+# The Tailscale tag says "this node is in mesh X". On a *shared* tailnet that is
+# only as trustworthy as the ACL's tagOwners: a misconfiguration (or an operator
+# with console access) could tag a hostile box into another customer's mesh, and
+# the tag check alone would then accept it. The mesh secret closes that gap.
+#
+# Every legitimate member of a mesh holds the same secret. A peer proves it on
+# each request with an HMAC over method+path+timestamp — never the raw secret, so
+# a connecting attacker cannot harvest it. A re-tagged node forges the tag but
+# has no secret, so it can produce no valid proof and is rejected. Membership now
+# needs BOTH the tag AND the secret; one ACL slip is no longer a breach.
+#
+# It is deliberately opt-in: enforced only when a mesh has a secret set, so an
+# existing single-mesh deployment with no secret behaves exactly as before. It
+# does NOT replace locking tagOwners — it is the safety net so a single misconfig
+# is not fatal. And it is a shared secret: whoever can already read files off a
+# member box has it, but they would already own that box.
+MESH_PROOF_HEADER = 'X-Ragnar-Mesh-Proof'
+MESH_TS_HEADER = 'X-Ragnar-Mesh-Ts'
+# Tolerated age/clock-skew for a proof. The tunnel is WireGuard-encrypted, so an
+# off-path attacker cannot capture a proof to replay; a short window bounds the
+# on-path (already-a-member) case without demanding tight clock sync across a
+# field fleet.
+MESH_PROOF_WINDOW = 300
+
+# Set by the host app to expose THIS unit's mesh secret to the outbound helpers
+# without threading it through every call site. A callable returning the current
+# secret (or ''), so it always reflects live config. Unset ⇒ no proof is sent,
+# which is correct for a mesh that has no secret.
+_SECRET_PROVIDER = None
+
+
+def set_secret_provider(provider):
+    """Register a callable returning THIS unit's mesh secret (or '')."""
+    global _SECRET_PROVIDER
+    _SECRET_PROVIDER = provider
+
+
+def _local_secret():
+    if _SECRET_PROVIDER is None:
+        return ''
+    try:
+        return str(_SECRET_PROVIDER() or '').strip()
+    except Exception:
+        return ''
+
+
+def generate_mesh_secret():
+    """Mint a strong, URL-safe mesh secret. Prefixed so it is recognisable."""
+    import secrets
+    return 'rms_' + secrets.token_urlsafe(32)
+
+
+def _proof_message(method, path, ts):
+    # Sign the path WITHOUT its query string, so it matches Flask's request.path
+    # on the receiving side (poll paths like /api/mesh/findings?limit=40 carry a
+    # query the server never sees in request.path).
+    bare = (path or '').split('?', 1)[0]
+    return f'{(method or "GET").upper()}\n{bare}\n{int(ts)}'.encode('utf-8')
+
+
+def mesh_proof(secret, method, path, ts):
+    """HMAC-SHA256 hex proof that the caller holds `secret` for this request."""
+    import hashlib
+    import hmac
+    return hmac.new(str(secret).encode('utf-8'),
+                    _proof_message(method, path, ts), hashlib.sha256).hexdigest()
+
+
+def verify_mesh_proof(secret, method, path, ts, proof, window=MESH_PROOF_WINDOW):
+    """True when `proof` is a fresh, valid HMAC for this request under `secret`.
+
+    Fails closed on anything missing or malformed, on a stale/future timestamp
+    outside `window`, or on an HMAC mismatch (constant-time compared).
+    """
+    import hmac
+    if not secret or not proof or ts in (None, ''):
+        return False
+    try:
+        ts = int(ts)
+    except (TypeError, ValueError):
+        return False
+    if abs(int(time.time()) - ts) > window:
+        return False
+    expected = mesh_proof(secret, method, path, ts)
+    return hmac.compare_digest(expected, str(proof))
+
+
+def auth_headers(method, path):
+    """Proof headers for an outbound peer request; empty dict when no secret.
+
+    Reads THIS unit's secret from the registered provider, so an opt-out mesh
+    (no secret) sends nothing extra and old peers are unaffected.
+    """
+    secret = _local_secret()
+    if not secret:
+        return {}
+    ts = int(time.time())
+    return {MESH_TS_HEADER: str(ts), MESH_PROOF_HEADER: mesh_proof(secret, method, path, ts)}
+
 
 # Port a peer Ragnar serves its web API on. Mesh polling assumes the mesh is
 # homogeneous; a node on a different port can be overridden per-node in config.
@@ -83,24 +237,65 @@ DEFAULT_NODE_PORT = 8000
 # would collide inside a mesh of a dozen units often enough to be annoying —
 # 48 x 24 gives 1,152 combinations, which pushes a first collision out past any
 # mesh anyone is going to run.
-VIKING_NAMES = (
+# Given names for the auto-derived Viking identity. Overwhelmingly drawn from
+# real Viking-age history and the Icelandic sagas — kings and jarls (Guthrum,
+# Gorm, Horik, Ragnvald, Sigtrygg), explorers (Leif, Thorfinn, Ingvar), and
+# saga figures (Egil, Skallagrim, Kjartan, Njal, Flosi) — with a few
+# legendary/mythic names kept for flavour. Men first, women second; the split
+# point is tracked by VIKING_FEMALE_NAMES below, so keep the two in step.
+VIKING_MALE_NAMES = (
     'Ragnar', 'Bjorn', 'Ivar', 'Ubbe', 'Sigurd', 'Halfdan', 'Floki', 'Rollo',
     'Erik', 'Leif', 'Harald', 'Gunnar', 'Knut', 'Olaf', 'Sven', 'Torstein',
     'Ulf', 'Arne', 'Egil', 'Hakon', 'Vali', 'Orm', 'Trygve', 'Steinar',
+    # Historical kings, jarls and Great Heathen Army leaders
+    'Guthrum', 'Hastein', 'Eystein', 'Ottar', 'Horik', 'Gorm', 'Sigtrygg',
+    'Magnus', 'Ragnvald', 'Godfred', 'Anlaf', 'Onund', 'Hemming', 'Styrbjorn',
+    # Explorers and settlers
+    'Thorfinn', 'Thorvald', 'Ingvar', 'Ketil', 'Ohthere', 'Naddod',
+    # Jomsvikings and warriors
+    'Palnatoki', 'Sigvaldi', 'Bui', 'Vagn', 'Toki', 'Thorkell', 'Thorgils',
+    # Saga figures (Egils, Laxdaela, Njals, Eyrbyggja)
+    'Skallagrim', 'Kveldulf', 'Thorolf', 'Snorri', 'Njal', 'Grim', 'Kjartan',
+    'Bolli', 'Hrut', 'Skarphedin', 'Kari', 'Flosi', 'Hoskuld', 'Gizur',
+    'Asgeir', 'Bard', 'Brand', 'Finn', 'Frodi', 'Geir', 'Hallvard', 'Hrafn',
+    'Ingjald', 'Ospak', 'Ozur', 'Thorgeir', 'Thorir', 'Thormod', 'Vestein',
+)
+
+VIKING_FEMALE_NAMES_ORDERED = (
     'Lagertha', 'Astrid', 'Freydis', 'Sigrid', 'Thora', 'Yrsa', 'Ingrid',
     'Brynhild', 'Gudrun', 'Helga', 'Revna', 'Solveig', 'Torvi', 'Aslaug',
     'Randvi', 'Sigyn', 'Hilda', 'Runa', 'Eira', 'Frida', 'Idunn', 'Kara',
     'Nanna', 'Signy',
+    # Historical queens and noblewomen
+    'Gunnhild', 'Thyra', 'Estrid', 'Gyda', 'Ragnhild', 'Asa', 'Aud', 'Unn',
+    # Saga women (Laxdaela, Njals, Egils, Eyrbyggja)
+    'Thorgerd', 'Bergthora', 'Hallgerd', 'Melkorka', 'Thurid', 'Vigdis',
+    'Thordis', 'Halldora', 'Katla', 'Groa', 'Steinunn', 'Thorunn', 'Jorunn',
+    'Ingibjorg', 'Herdis', 'Alfhild', 'Bodil', 'Ragna', 'Svanhild', 'Gerd',
+    'Hild', 'Grima', 'Ylva', 'Olof',
 )
+
+VIKING_NAMES = VIKING_MALE_NAMES + VIKING_FEMALE_NAMES_ORDERED
 
 # The women's names within VIKING_NAMES — used to pick the matching header
 # portrait (a unit renamed to a shieldmaiden shows the female Ragnar image).
-VIKING_FEMALE_NAMES = frozenset({
-    'Lagertha', 'Astrid', 'Freydis', 'Sigrid', 'Thora', 'Yrsa', 'Ingrid',
-    'Brynhild', 'Gudrun', 'Helga', 'Revna', 'Solveig', 'Torvi', 'Aslaug',
-    'Randvi', 'Sigyn', 'Hilda', 'Runa', 'Eira', 'Frida', 'Idunn', 'Kara',
-    'Nanna', 'Signy',
-})
+VIKING_FEMALE_NAMES = frozenset(VIKING_FEMALE_NAMES_ORDERED)
+
+# The ORIGINAL 48-name / 24-epithet pool, frozen exactly as it was. The
+# auto-derived name (derive_viking_name) draws only from this so that no box
+# already running Ragnar is renamed when the pool above grows: derivation is
+# `hash % pool_size`, so changing the pool size would remap every seed. The
+# larger VIKING_NAMES/VIKING_EPITHETS above are for the dice roll and manual
+# choice — variety on demand, without disturbing anyone's inherited name. Do
+# not reorder or resize these two; that is exactly what would rename units.
+VIKING_NAMES_LEGACY = VIKING_MALE_NAMES[:24] + VIKING_FEMALE_NAMES_ORDERED[:24]
+VIKING_EPITHETS_LEGACY = (
+    'Ironside', 'the Boneless', 'Forkbeard', 'Bluetooth', 'the Red',
+    'the Black', 'Longbeard', 'the Stout', 'the Fearless', 'Hardrada',
+    'the Wanderer', 'Snake-eye', 'the Wise', 'Stormborn', 'the Silent',
+    'Shieldbreaker', 'the Far-travelled', 'Frostbeard', 'the Keen',
+    'Wolfsbane', 'the Unyielding', 'Seafarer', 'the Watchful', 'Ravenwing',
+)
 
 
 def is_female_viking(name):
@@ -111,12 +306,23 @@ def is_female_viking(name):
     return name.strip().split(' ', 1)[0] in VIKING_FEMALE_NAMES
 
 
+# Bynames appended after the given name. Mostly genuine Viking-age epithets
+# recorded in the chronicles and sagas — Ironside (Bjorn), the Boneless (Ivar),
+# Forkbeard (Sven), Bluetooth (Harald), Fairhair, Bloodaxe (Erik), Flatnose
+# (Ketil), the Deep-minded (Aud), Barefoot (Magnus), the Lucky (Leif),
+# Skull-splitter (Thorfinn) — with a handful of flavour ones retained.
 VIKING_EPITHETS = (
     'Ironside', 'the Boneless', 'Forkbeard', 'Bluetooth', 'the Red',
     'the Black', 'Longbeard', 'the Stout', 'the Fearless', 'Hardrada',
-    'the Wanderer', 'Snake-eye', 'the Wise', 'Stormborn', 'the Silent',
-    'Shieldbreaker', 'the Far-travelled', 'Frostbeard', 'the Keen',
-    'Wolfsbane', 'the Unyielding', 'Seafarer', 'the Watchful', 'Ravenwing',
+    'the Wanderer', 'Snake-eye', 'the Wise', 'the Silent', 'the Keen',
+    'the Far-travelled', 'the Unyielding', 'Seafarer', 'the Watchful',
+    'Shieldbreaker', 'Wolfsbane', 'Stormborn', 'Frostbeard', 'Ravenwing',
+    # Attested historical bynames
+    'Fairhair', 'Bloodaxe', 'the Good', 'the Great', 'the Old', 'Flatnose',
+    'the Deep-minded', 'the Strong', 'Barefoot', 'the Tall', 'Longsword',
+    'the Holy', 'the Mighty', 'Skull-splitter', 'the Lucky', 'the Peaceable',
+    'the Proud', 'Half-troll', 'the Sharp', 'Longshanks', 'Crowbone',
+    'the Generous', 'Bare-legs', 'the Quarrelsome',
 )
 
 
@@ -153,6 +359,12 @@ def derive_viking_name(seed=None):
 
     Same seed always yields the same name — a unit that is reinstalled comes
     back as itself rather than as a stranger.
+
+    Draws from the FROZEN legacy pool (VIKING_*_LEGACY), not the larger roster,
+    on purpose: the mapping is `hash % pool_size`, so growing the pool would
+    remap every seed and rename boxes that never chose a name. Keeping the auto
+    default on the original pool means no existing unit is ever renamed; the
+    bigger historic roster is offered through the dice and manual selection.
     """
     import hashlib
     if seed is None:
@@ -161,8 +373,8 @@ def derive_viking_name(seed=None):
     # Two independent slices so the given name and the epithet vary
     # independently; deriving both from one number would correlate them and
     # collapse the effective range back towards 48.
-    name = VIKING_NAMES[int.from_bytes(digest[0:4], 'big') % len(VIKING_NAMES)]
-    epithet = VIKING_EPITHETS[int.from_bytes(digest[4:8], 'big') % len(VIKING_EPITHETS)]
+    name = VIKING_NAMES_LEGACY[int.from_bytes(digest[0:4], 'big') % len(VIKING_NAMES_LEGACY)]
+    epithet = VIKING_EPITHETS_LEGACY[int.from_bytes(digest[4:8], 'big') % len(VIKING_EPITHETS_LEGACY)]
     return f'{name} {epithet}'
 
 
@@ -173,9 +385,10 @@ def derive_viking_name(seed=None):
 # transport, different credentials. That independence is the whole value — if a
 # tailnet is misconfigured, a key expires or tailscaled will not start, Pi
 # Connect is still a way to reach a box that would otherwise need a site visit.
-# Ragnar only ever *reports* its state; enabling it is the operator's call and
-# `rpi-connect` requires an interactive browser sign-in that cannot be automated
-# from here anyway.
+# Ragnar reports its state and can sign in for you: rpi-connect 2.12+ accepts a
+# non-interactive `signin -auth-key` (a bearer key you generate at
+# connect.raspberrypi.com), so pi_connect_signin() does it from the web UI — no
+# browser device-flow, no terminal. Enabling it is still the operator's call.
 
 def _parse_pi_connect(out):
     """Parse `rpi-connect status` text into running/signed_in flags.
@@ -289,6 +502,105 @@ def pi_connect_status():
         except (KeyError, ImportError):
             result['user'] = f'uid {best["uid"]}'
     return result
+
+
+# An auth key is a bearer secret; keep the shape check permissive but bounded so
+# we never shell-inject or log a megabyte. Never echo the key itself anywhere.
+_PI_CONNECT_KEY_RE = re.compile(r'^[A-Za-z0-9._\-]{8,512}$')
+
+
+def _pi_connect_signin_user():
+    """pwd entry of the user to sign Raspberry Pi Connect in as.
+
+    Prefer a user that already has a login session; otherwise the box's primary
+    'ragnar' user (then 'pi'). With linger enabled a headless box can still run
+    the per-user Connect service, so a signed-in session is not required first.
+    """
+    import pwd
+    for uid in _pi_connect_login_uids():
+        try:
+            return pwd.getpwuid(uid)
+        except KeyError:
+            continue
+    for name in ('ragnar', 'pi'):
+        try:
+            return pwd.getpwnam(name)
+        except KeyError:
+            continue
+    return None
+
+
+def _rpc_user_cmd(exe, pw, *args):
+    """rpi-connect <args> run inside user `pw`'s session (as root via sudo)."""
+    runtime = f'/run/user/{pw.pw_uid}'
+    return ['sudo', '-n', f'-u#{pw.pw_uid}', 'env',
+            f'XDG_RUNTIME_DIR={runtime}',
+            f'DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus',
+            exe, *args]
+
+
+def pi_connect_signin(auth_key):
+    """Sign in to Raspberry Pi Connect non-interactively with an auth key.
+
+    rpi-connect 2.12+ accepts `signin -auth-key <key>` — a bearer key generated
+    at https://connect.raspberrypi.com — so the whole thing is doable from the
+    web UI with no browser device-flow and no terminal. We enable linger and
+    turn the per-user service on first so it works on a headless box, then sign
+    in. The key is a secret: it is passed as a bare argv (never a shell) and is
+    never logged or returned. Returns {'ok', 'signed_in', 'user'/'error'}.
+    """
+    exe = shutil.which('rpi-connect')
+    if not exe:
+        return {'ok': False, 'error': 'Raspberry Pi Connect is not installed on this node.'}
+    key = (auth_key or '').strip()
+    if not _PI_CONNECT_KEY_RE.match(key):
+        return {'ok': False, 'error': 'That does not look like a Raspberry Pi Connect auth key.'}
+
+    pw = _pi_connect_signin_user()
+    if not pw:
+        return {'ok': False, 'error': 'No local user to sign Connect in as.'}
+
+    # Linger lets the per-user Connect service persist with nobody logged in.
+    subprocess.run(['loginctl', 'enable-linger', pw.pw_name],
+                   capture_output=True, timeout=10)
+    # Wait briefly for the user manager to create /run/user/<uid>.
+    runtime = f'/run/user/{pw.pw_uid}'
+    for _ in range(10):
+        if os.path.isdir(runtime):
+            break
+        time.sleep(0.5)
+
+    # Enable + start Connect for that user, then sign in with the key.
+    subprocess.run(_rpc_user_cmd(exe, pw, 'on'), capture_output=True, timeout=25)
+    try:
+        proc = subprocess.run(_rpc_user_cmd(exe, pw, 'signin', '-auth-key', key),
+                              capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {'ok': False, 'error': f'Sign-in command failed: {type(e).__name__}.'}
+
+    invalidate_cache()
+    st = pi_connect_status()
+    if st.get('signed_in'):
+        return {'ok': True, 'signed_in': True, 'user': pw.pw_name,
+                'detail': 'Signed in to Raspberry Pi Connect.'}
+    # Surface the tool's own message, but scrub anything that echoes the key.
+    msg = ((proc.stderr or proc.stdout or '').strip()
+           or 'Sign-in did not complete. Check the auth key and try again.')
+    msg = msg.replace(key, '<key>')
+    return {'ok': False, 'signed_in': False, 'error': msg[:300]}
+
+
+def pi_connect_signout():
+    """Sign out of Raspberry Pi Connect for whichever user is signed in."""
+    exe = shutil.which('rpi-connect')
+    if not exe:
+        return {'ok': False, 'error': 'Raspberry Pi Connect is not installed.'}
+    pw = _pi_connect_signin_user()
+    if not pw:
+        return {'ok': False, 'error': 'No local user to sign out.'}
+    subprocess.run(_rpc_user_cmd(exe, pw, 'signout'), capture_output=True, timeout=25)
+    invalidate_cache()
+    return {'ok': True, 'signed_in': False, 'detail': 'Signed out of Raspberry Pi Connect.'}
 
 # `tailscale status` is cheap but not free, and the UI polls. 5s is short enough
 # that an operator clicking Refresh sees current truth, long enough that a busy
@@ -699,17 +1011,26 @@ def _valid_auth_key(key):
 
 
 def join(auth_key, hostname='', tags=None, advertise_routes=None,
-         enable_ssh=True, accept_routes=False, accept_dns=True, timeout=90):
+         enable_ssh=True, accept_routes=False, accept_dns=True, timeout=90,
+         logout_first=False):
     """Join this node to a tailnet with a pre-authorized key.
 
     This is the unattended-deploy path: everything a remote node needs is
     supplied up front so a technician who plugs the box in never sees a login
     prompt. Returns (ok, message).
+
+    `logout_first` switches tailnets: a node already logged into tailnet A
+    cannot re-`up` straight onto tailnet B, so log out first. Harmless when the
+    node is on no tailnet (logout is then a no-op).
     """
     if not installed():
         return False, 'Tailscale is not installed on this node.'
     if not _valid_auth_key(auth_key):
         return False, 'That does not look like a Tailscale auth key (expected tskey-...).'
+
+    if logout_first:
+        _run(['logout'], timeout=30)  # best-effort; a no-op if already logged out
+        invalidate_cache()
 
     args = ['up', '--authkey', auth_key, '--reset']
     if hostname:
@@ -1009,7 +1330,9 @@ def poll_peer(node, port=DEFAULT_NODE_PORT, timeout=6, path='/api/mesh/unit'):
     try:
         import urllib.error
         import urllib.request
-        req = urllib.request.Request(url, headers={'User-Agent': 'Ragnar-Mesh'})
+        headers = {'User-Agent': 'Ragnar-Mesh'}
+        headers.update(auth_headers('GET', path))
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status != 200:
                 return {'reachable': False, 'error': f'HTTP {resp.status}'}
@@ -1020,7 +1343,7 @@ def poll_peer(node, port=DEFAULT_NODE_PORT, timeout=6, path='/api/mesh/unit'):
         # 401 is worth distinguishing: the node is alive and Ragnar answered,
         # we just are not tagged into its mesh (or it cannot see our tag).
         if exc.code == 401:
-            return {'reachable': False, 'error': 'not authorized by peer — check the mesh tag'}
+            return {'reachable': False, 'error': 'not authorized by peer — check the mesh tag (and secret, if this mesh uses one)'}
         return {'reachable': False, 'error': f'HTTP {exc.code}'}
     except Exception as exc:  # socket errors, timeouts, bad JSON
         return {'reachable': False, 'error': type(exc).__name__}
@@ -1056,7 +1379,9 @@ def diagnose_peer(ip, port=DEFAULT_NODE_PORT, timeout=6, path='/api/mesh/unit',
     import urllib.error
     import urllib.request
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Ragnar-Mesh-Diagnose'})
+        headers = {'User-Agent': 'Ragnar-Mesh-Diagnose'}
+        headers.update(auth_headers('GET', path))
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             result['status'] = getattr(resp, 'status', None) or resp.getcode()
             body = resp.read(65536)
@@ -1081,7 +1406,8 @@ def diagnose_peer(ip, port=DEFAULT_NODE_PORT, timeout=6, path='/api/mesh/unit',
                           hint=('The peer answered but rejected this unit. It has login enabled and '
                                 'did not recognize this unit as a tagged mesh peer. Confirm THIS '
                                 f'unit carries {mesh_tag} (the peer authorizes the *caller* by tag), '
-                                'and that tailscaled is running on the peer so it can identify it.'))
+                                'that tailscaled is running on the peer so it can identify it, and — '
+                                'if this mesh uses a secret — that both units share the SAME mesh secret.'))
         else:
             result.update(category='http', error=f'HTTP {exc.code}',
                           hint=f'The peer returned HTTP {exc.code}.')
@@ -1188,9 +1514,9 @@ def post_peer(node, path, payload, port=DEFAULT_NODE_PORT, timeout=20):
     try:
         import urllib.error
         import urllib.request
-        req = urllib.request.Request(
-            url, data=body, method='POST',
-            headers={'User-Agent': 'Ragnar-Mesh', 'Content-Type': 'application/json'})
+        headers = {'User-Agent': 'Ragnar-Mesh', 'Content-Type': 'application/json'}
+        headers.update(auth_headers('POST', path))
+        req = urllib.request.Request(url, data=body, method='POST', headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             reply = json.loads(resp.read().decode('utf-8'))
         reply['reachable'] = True
@@ -1198,7 +1524,7 @@ def post_peer(node, path, payload, port=DEFAULT_NODE_PORT, timeout=20):
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
             return {'reachable': False, 'success': False,
-                    'error': 'not authorized by peer — check the mesh tag'}
+                    'error': 'not authorized by peer — check the mesh tag (and secret, if this mesh uses one)'}
         try:
             reply = json.loads(exc.read().decode('utf-8'))
             reply.setdefault('success', False)
@@ -1228,9 +1554,9 @@ def command_peer(node, feature, action, port=DEFAULT_NODE_PORT, timeout=15):
     try:
         import urllib.error
         import urllib.request
-        req = urllib.request.Request(
-            url, data=body, method='POST',
-            headers={'User-Agent': 'Ragnar-Mesh', 'Content-Type': 'application/json'})
+        headers = {'User-Agent': 'Ragnar-Mesh', 'Content-Type': 'application/json'}
+        headers.update(auth_headers('POST', '/api/mesh/control'))
+        req = urllib.request.Request(url, data=body, method='POST', headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode('utf-8'))
         payload['reachable'] = True
@@ -1238,7 +1564,7 @@ def command_peer(node, feature, action, port=DEFAULT_NODE_PORT, timeout=15):
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
             return {'reachable': False, 'success': False,
-                    'error': 'not authorized by peer — check the mesh tag'}
+                    'error': 'not authorized by peer — check the mesh tag (and secret, if this mesh uses one)'}
         try:
             payload = json.loads(exc.read().decode('utf-8'))
             payload.setdefault('success', False)
@@ -1365,6 +1691,28 @@ def _self_test():
     check('name pools are collision-free',
           len(set(VIKING_NAMES)) == len(VIKING_NAMES)
           and len(set(VIKING_EPITHETS)) == len(VIKING_EPITHETS))
+    check('female names are all in the given-name pool',
+          VIKING_FEMALE_NAMES <= set(VIKING_NAMES))
+    check('no name is both a man\'s and a woman\'s',
+          not (set(VIKING_MALE_NAMES) & VIKING_FEMALE_NAMES))
+    check(f'pool is large (got {len(VIKING_NAMES)} names x {len(VIKING_EPITHETS)} epithets)',
+          len(VIKING_NAMES) >= 100 and len(VIKING_EPITHETS) >= 40)
+    # The auto default must stay frozen so growing the pool never renames a box.
+    check('legacy pool is unchanged in size (48 x 24)',
+          len(VIKING_NAMES_LEGACY) == 48 and len(VIKING_EPITHETS_LEGACY) == 24)
+    check('legacy pool is a subset of the full roster',
+          set(VIKING_NAMES_LEGACY) <= set(VIKING_NAMES)
+          and set(VIKING_EPITHETS_LEGACY) <= set(VIKING_EPITHETS))
+    # Golden values: derive_viking_name must return exactly what it did before
+    # the roster was expanded. If these change, existing units get renamed.
+    _GOLDEN = {
+        'seed-a': 'Knut Stormborn',
+        'seed-b': 'Erik Ravenwing',
+        'machine-id-1': 'Astrid Forkbeard',
+        'abc123': 'Revna Bluetooth',
+    }
+    check('auto-derived names are unchanged (no box renamed)',
+          all(derive_viking_name(s) == want for s, want in _GOLDEN.items()))
 
     print('pi connect')
     pc = pi_connect_status()

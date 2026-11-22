@@ -115,6 +115,10 @@ cd /home/ragnar/Ragnar
 sudo ./scripts/install_sensing.sh
 ```
 
+The **Sensing backend** card (Config → RuSense) manages this without a shell:
+**Install/Reinstall**, **Build from source**, **Restart** (a quick service bounce —
+e.g. after changing env overrides or to re-bind the UDP receiver), and **Uninstall**.
+
 This installs and starts `ragnar-sensing.service`:
 
 - On **Raspberry Pi (arm64)** it installs the prebuilt binary at `bin/sensing-server`.
@@ -124,9 +128,88 @@ This installs and starts `ragnar-sensing.service`:
 Default ports: HTTP `3000`, WebSocket `3100`, UDP CSI ingest `5005`. The service is
 idempotent — safe to re-run.
 
+> The UDP CSI receiver binds `0.0.0.0` so the ESP32 nodes on your LAN can reach it
+> — newer sensing-server builds default that socket to loopback-only and would
+> otherwise drop LAN frames. To restrict it, set `SENSING_UDP_ALLOW="192.168.1.0/24"`
+> (comma-separated CIDRs) before running the installer, or `SENSING_UDP_BIND=127.0.0.1`
+> to accept loopback only.
+
 > By default the sensing API (`/api/v1/*`) is unauthenticated and bound to localhost,
 > reached only through Ragnar's web proxy. If you expose it directly, set
 > `RUVIEW_API_TOKEN=<token>` to enforce bearer auth.
+
+### Observatory position tracking (multi-node)
+
+The Observatory's moving figure is a **coarse activity centroid**, not precise
+tracking. With **≥2 nodes** whose positions you've told the server, the blob drifts
+toward whichever node is currently flaring most *relative to its own baseline* (so a
+persistently-noisy node can't hog it, and a quiet node still registers when you
+approach). Configure it at install time:
+
+```bash
+SENSING_NODE_POSITIONS="x,y,z;x,y,z;x,y,z" sudo ./scripts/install_sensing.sh
+```
+
+Positions are in **metres**, ordered by **ascending node_id** (node 1 first), with the
+room centred on the origin. `SENSING_LOCALIZE_POWER` (default `2`) sharpens the pull
+toward a single node (higher = snappier but jumpier). Both are stored in a systemd
+drop-in (`ragnar-sensing.service.d/node-positions.conf`) that survives reinstalls, so
+you can retune live with `systemctl edit`/`daemon-reload`.
+
+> **Honest limit:** a moving person perturbs *every* WiFi link, so this is
+> proximity-by-activity, **not** calibrated (x, z) triangulation. Expect the blob to
+> drift toward the right region, not pinpoint you. Precise localization would need true
+> multistatic RTI, which single-link CSI can't provide.
+
+**In-view Observatory controls (keyboard):**
+
+| Key | Action |
+|---|---|
+| `1`–`9` | Record a **fingerprint** on a 3×3 floor grid, numpad-style — `1/2/3` = near wall (node 1 / center / node 3), `4/5/6` = middle row, `7/8/9` = far wall (`8` = node 2). Stand on the cell and move a little for ~6 s. With ≥2 points the blob switches from the centroid to per-room fingerprint matching (k-NN on the live motion pattern; the learned mapping beats the centroid for rooms where the busiest link isn't the nearest node — the more cells you record, the sharper it gets). |
+| `X` | Clear fingerprints (back to the activity centroid). |
+| `H` | Hide / show the pose skeletons (the mist blob + field stay). |
+
+Fingerprints are stored **server-side** on Ragnar (via `/api/config`, key
+`rusense_observatory_fingerprints`), so a calibration done on one machine is shared with
+every browser; localStorage is only an offline cache seeded from the server at load. The
+live feed can carry phantom tracker duplicates near center; the Observatory collapses them
+to a single blob at the best position estimate.
+
+### Per-node proximity calibration (Nodes tab)
+
+The Observatory's `1`–`9` fingerprinting calibrates a whole room from fixed floor
+cells. The **Nodes** tab adds a simpler, per-node companion for the same idea: a
+**Calibrate** button on every node row. Press it, walk to that node, and **move
+around** — a large bar **fills and turns green** the closer you are.
+
+The proximity signal is the same one the Observatory localizer uses: each node's
+live `motion_band_power` measured against its **own slowly-learned quiet floor**
+(an asymmetric EMA that rises slowly and falls fast, so a node that always reads
+hot doesn't win by default). With **≥2 nodes streaming** the bar shows the selected
+node's **share** of total activity; with a single node it auto-scales that node's
+activity to its own running peak. A cyan tick marks the **best (peak) proximity**
+seen so you can find and hold the sweet spot.
+
+The panel also shows the **full live output** for the node — raw motion band power,
+the learned baseline, activity above floor, its share, peak proximity and RSSI —
+plus a mini bar per **other** node so you can watch this node win as you approach.
+**Record calibration** samples ~15 s (stand at the node and keep moving the whole
+time) and saves a reference snapshot server-side (`/api/config`, key
+`rusense_node_calibration`, keyed by `node_id`); **Reset baseline** forgets the
+learned quiet floors and relearns them.
+
+Each saved calibration carries a **quality %** — the fraction of the recording
+that was in the **green (close) zone** (proximity ≥ 60 %). A recording where you
+stood right at the node the whole time scores high; one where you drifted away
+scores low. The saved value is **permanent** in Ragnar's config until the next
+recording overwrites it, and the node's row shows a **✓ NN%** *Calibrated* badge
+(green ≥ 60 %, amber ≥ 30 %, red below) with its Calibrate button relabelled
+**Recalibrate**. The badge and the live green % during recording let you judge and
+redo a poor calibration.
+
+> **Honest limits.** WiFi CSI proximity is **near-field** — a moving body perturbs
+> every link, so the bar is sharpest right beside a node and fuzzier mid-room. It's
+> relative guidance for placement and sanity-checking, not survey-grade ranging.
 
 ---
 
@@ -142,7 +225,8 @@ Open Ragnar's dashboard at `http://<ragnar-ip>:8000` and use the RuSense tabs:
    signal-field heatmap for the monitored space.
 3. **Nodes** — provisioned CSI nodes appear here once they start streaming (confirm
    frames-per-second is climbing). Shows each node's custom name, status, RSSI,
-   motion and last-seen. Name your nodes in the Settings tab.
+   motion and last-seen. Name your nodes in the Settings tab. Each row has a
+   **Calibrate** button (see **Per-node proximity calibration** below).
 4. **Training** — the **Record → Train → Active** loop. Record CSI while you act out
    labelled scenarios (empty room, one person, two people, walking, sitting…), then
    train a lightweight on-device adaptive classifier tuned to *your* space. The same
@@ -150,6 +234,15 @@ Open Ragnar's dashboard at `http://<ragnar-ip>:8000` and use the RuSense tabs:
    containers and LoRA profiles).
 5. **Settings** — configure **push notifications** for sensing events (see below),
    the **geofence**, and your **node names / positions** (Observatory → Room & Nodes).
+
+> **Demo vs. live.** The **Observatory** 3D view falls back to a built-in demo
+> reel whenever no real sensing node is streaming (no ESP32 connected, or the
+> server is running synthetic `--source auto`/`simulated` data). In that state it
+> shows an amber **"DEMO — no node connected"** flag and labels the placeholder
+> node **demo** — it never wears your configured node name (e.g. "s3"). The flag
+> clears and real node names return the instant a live frame arrives from an
+> `esp32`/`wifi` source. Data Source (Demo Generator / Live WebSocket) is set in
+> **Settings → Observatory**.
 
 ---
 
@@ -236,8 +329,8 @@ threshold 1, 60 s cooldown).
 > a model retunes this within ~30 s — no setting to change. For best accuracy, keep a
 > trained model active (see [Training](#two-training-paths)).
 
-Alerts reuse Ragnar's existing **Pushover** account: set your **User Key** and **API
-Token** once under the main dashboard's **Config → Pushover Notifications**, then enable
+Alerts reuse Ragnar's existing push channels (**Pushover** and/or **Slack**): set them
+up once under the main dashboard's **Config → Push Notifications**, then enable
 the RuSense triggers in the Settings tab. Use **Send test notification** to confirm
 delivery. (Config keys: `rusense_notify_*` in `shared.py`.)
 

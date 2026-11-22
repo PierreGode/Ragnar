@@ -23,12 +23,17 @@ be logged into renders the mesh; so would any other.
 - [Fleet security findings](#fleet-security-findings)
   - [Mesh Health card](#mesh-health-card)
   - [Mesh Nodes list and the node page](#mesh-nodes-list-and-the-node-page)
+    - [Live packet capture (PCAP)](#live-packet-capture-pcap)
+    - [Filtering and sorting the list](#filtering-and-sorting-the-list)
+    - [Node actions: path, trace route, ping](#node-actions-path-trace-route-ping)
 - [Unit identity — the Viking army](#unit-identity--the-viking-army)
 - [Tailscale console: one-time setup](#tailscale-console-one-time-setup)
+- [Separate meshes on one tailnet](#separate-meshes-on-one-tailnet)
 - [Deploying a unit](#deploying-a-unit)
   - [Path 1 — during imaging (unattended)](#path-1--during-imaging-unattended)
   - [Path 2 — during install](#path-2--during-install)
   - [Path 3 — later, from the web UI](#path-3--later-from-the-web-ui)
+  - [Keeping Tailscale up to date](#keeping-tailscale-up-to-date)
 - [Reaching the whole far-side LAN](#reaching-the-whole-far-side-lan)
 - [Backup access when Ragnar itself is wedged](#backup-access-when-ragnar-itself-is-wedged)
 - [The Ragnar Mobile app](#the-ragnar-mobile-app)
@@ -102,6 +107,43 @@ approaches:
 
 ---
 
+## Mesh gateway (reach the fleet through one unit)
+
+The mobile app normally reaches units over Tailscale — the phone is on the
+tailnet, so switching units just repoints at another peer's `100.x` address.
+But when the phone reaches a unit **directly** — over
+[Bluetooth](bluetooth.md), or a plain LAN IP — the
+phone is *not* on the tailnet and cannot dial a peer's `100.x`. So the
+directly-connected unit acts as a **gateway**: it is on the tailnet, so it
+relays the app's requests to any other unit and returns the reply. The phone
+talks only to that one box (one Wi-Fi hop); the box reaches the fleet over
+Tailscale. Because the app is pure REST, a plain HTTP relay covers all of it.
+
+- **App:** in hub mode, picking another unit sets a relay *target* instead of
+  changing the address; every request then carries `X-Ragnar-Target: <peer node
+  id>`. The fleet roster (`/api/mesh/status`) is never relayed, so the switcher
+  always lists the fleet from the connected box.
+- **Box (hub):** `_maybe_mesh_gateway()` resolves the target against the peer
+  roster (so it can only relay to a known mesh unit — no SSRF), forwards the
+  request with `mesh_manager.auth_headers` + an `X-Ragnar-Proxy` marker, and
+  relays the response.
+- **Box (target):** accepts a relayed request for **any** endpoint only when it
+  carries `X-Ragnar-Proxy` **and** a valid mesh-secret proof from a verified
+  peer. This is a deliberate expansion of the normally-scoped peer role (which
+  allows only reads + a few writes), so it is **gated behind the mesh secret** —
+  set one (see [the mesh secret](#hardening-a-shared-tailnet-the-mesh-secret))
+  to enable it. Tailnet-tag trust alone never opens the full relay.
+
+The web dashboard uses the same gateway for the
+[Device Console](serial-console.md): pick another unit in the card and its
+read-only serial console (a switch or firewall cabled to that Ragnar) streams
+through this unit — full view and control. Without a mesh secret, a unit can still
+**share its console view-only**: its operator ticks *Share with mesh* on that unit,
+and peers read the output on tag trust through a dedicated `/api/mesh/` route.
+Sharing is off by default and per unit.
+
+---
+
 ## Unit identity — the Viking army
 
 Units are **individuals, not clones**. A mesh of boxes all called `raspberry` is
@@ -136,12 +178,61 @@ back to the Pi's CPU serial and then the hostname), so:
   comes back as itself, not as a stranger
 - the derivation is pure and offline; nothing is looked up or registered
 
-48 given names × 24 epithets = 1,152 combinations. Override with
-`mesh_viking_name` if you would rather choose:
+In the web UI (Ragnar Mesh → *This unit's identity*) a 🎲 rolls a fresh random
+name from the full historic roster — 136 given names × 48 epithets = 6,528
+combinations, drawn from real Viking-age history and the Icelandic sagas (kings
+and jarls, explorers, saga figures) — and a custom name lets you pick the
+portrait gender explicitly.
+
+The **auto-derived** default name (the one a box is born with) deliberately
+draws from the original, frozen 48 × 24 pool, *not* the larger roster. Because
+derivation is `hash % pool_size`, growing the pool would remap every seed and
+rename boxes that never chose a name — so the default pool is held constant and
+the extra names are offered only on demand via the dice. Growing the roster
+therefore renames nobody.
+
+Override from the shell with `mesh_viking_name` if you would rather choose:
 
 ```sh
 python3 -c "import mesh_manager; print(mesh_manager.derive_viking_name())"
 ```
+
+### The shieldmaiden shows on the panel, not just the web
+
+Gender isn't only a web-UI portrait swap. When a mesh unit carries a woman's
+Viking name (or you pin `mesh_viking_gender = female`), the **e-paper / LCD
+character changes too**: instead of the default frames it draws the shieldmaiden
+art from `resources/images/status/woman/`.
+
+- Every status draws a **random** frame from the eight shieldmaiden portraits.
+  While the unit is **idle** it also draws from ten expression variants of the
+  calm portraits (eyes closed in a smile, a blink, a wink), the same way the
+  default viking has extra idle frames.
+- To pin specific frames to a specific status, add an entry to
+  `SharedData.WOMAN_STATUS_IMAGES` (`shared.py`), which is empty by default.
+- The frames are **78×78, 1-bit**, the same footprint as the default frames,
+  so no screen layout changes. They are head-and-shoulders portraits rendered
+  from detailed colour illustrations by `scripts/gen_female_frames.py`, which
+  crops to the face, brightens, dithers and keeps the ink outlines solid — a
+  whole-body illustration shrunk to 78 px on a 1-bit panel is just noise. The
+  portrait crops it works from are in `resources/images/status/woman/src/`;
+  re-tune the look with the constants at the top of the script and re-run it.
+- **Every screen that shows the viking follows suit**: the e-paper main screen,
+  the compact LCD/TFT layouts, the 1.44" wardriving pages (including the gold
+  viking page on the colour theme) and the round GC9A01, which tints the
+  shieldmaiden with the configured mascot colour just like the default
+  character.
+- On the colour 1.44" LCD HAT she is drawn in **full colour** from the twin
+  frames in `resources/images/status/woman/color/` (see
+  [Display Controls](DISPLAY_CONTROLS.md#colour)).
+- Changing the name or `mesh_viking_gender` takes effect on the next animation
+  frame, with no restart. An explicit `mesh_viking_gender = female` shows the
+  shieldmaiden on the panel even with the mesh off; a gender derived from the
+  name applies only while the mesh is on.
+- Gender is resolved from the **same source of truth as the fleet portrait**
+  (`is_female_viking` / `mesh_viking_gender`), so what a unit shows on its own
+  screen matches how it appears in every peer's mesh list. A male or
+  non-mesh unit is unaffected and keeps the default frames.
 
 ### Clashes are detected, not prevented
 
@@ -235,6 +326,115 @@ hand), it will be **untagged** — fix it in **Machines → the device → the �
 
 ---
 
+## Separate meshes on one tailnet
+
+One Tailscale account can host **several completely separate Ragnar meshes** at
+once. They are told apart only by their tag:
+
+| Mesh | Mesh tag | Share-guest tag |
+|---|---|---|
+| **Main** (the default) | `tag:ragnar-mesh` | `tag:ragnar-share` |
+| A second, isolated mesh | `tag:ragnar-mesh-2` | `tag:ragnar-share-2` |
+| Named however you like | `tag:ragnar-mesh-lab` | `tag:ragnar-share-lab` |
+
+The separation is real, not cosmetic. Every trust check
+(`caller_is_mesh_peer`) and every peer scan filters on the **exact** tag, so a
+unit tagged `tag:ragnar-mesh-2` is invisible to — and rejected by — a
+`tag:ragnar-mesh` unit even though they share a coordination server. A unit
+publishes to and reads from **only** the mesh whose tag it carries. The share
+tag is derived from the mesh tag automatically, so a share-only guest of
+`ragnar-mesh-2` carries `ragnar-share-2` and can never reach a host on a
+different mesh that happens to share the tailnet.
+
+**When you'd want this:** separate customers or sites that must never see each
+other's findings; a `lab` mesh for testing kept apart from `prod`; a managed-
+service operator running several independent fleets from one Tailscale account.
+
+**The "mesh name" is just a suffix.** Leave it blank and you get the main mesh —
+nothing changes and you can ignore this whole section. Give a short name (`2`,
+`lab`, `jersey`) and the unit joins `tag:ragnar-mesh-<name>` instead. The name
+is lowercased and reduced to a DNS label (`[a-z0-9-]`), so `Lab 1` becomes
+`lab-1`; pasting the whole `tag:ragnar-mesh-2` or `ragnar-mesh-2` also works.
+
+### Console setup for an extra mesh
+
+Each mesh tag is a **separate tag you must own** in the ACL, exactly like the
+default one. Add every mesh (and its paired share tag) under `tagOwners`:
+
+```jsonc
+{
+  "tagOwners": {
+    "tag:ragnar-mesh":    ["autogroup:admin"],
+    "tag:ragnar-share":   ["autogroup:admin"],
+    "tag:ragnar-mesh-2":  ["autogroup:admin"],
+    "tag:ragnar-share-2": ["autogroup:admin"]
+  }
+}
+```
+
+Then generate a tagged auth key carrying `tag:ragnar-mesh-2` for units that
+belong to that mesh, and keep the `grants`/`acls` rules scoped **within** each
+tag (`src` and `dst` both `tag:ragnar-mesh-2`) so the two meshes stay isolated
+at the network layer too, not only in Ragnar.
+
+### How to set the mesh name
+
+- **Web UI (Join form):** the **Mesh name** field. Blank = main mesh.
+- **Installer (interactive):** the installer asks for a mesh name after the site
+  label.
+- **Unattended / boot config:** set `RAGNAR_MESH_SUFFIX="2"` (friendly form) or
+  `RAGNAR_MESH_TAG="tag:ragnar-mesh-2"` (explicit full tag). The explicit tag
+  wins if both are set.
+
+A unit records the mesh it joined in its `mesh_tag` config, so a later re-join
+from the web UI keeps it on the same mesh unless you change the field.
+
+### Hardening a shared tailnet: the mesh secret
+
+The tag says "this node is in mesh X". On a **shared** tailnet that is only as
+trustworthy as your ACL's `tagOwners`: a misconfiguration — or anyone with
+console/admin access to the account — could tag a hostile box into another
+customer's mesh, and the tag check alone would then accept it. The **mesh
+secret** closes that gap.
+
+It is a per-mesh pre-shared key. Every legitimate unit of one mesh holds the
+same secret; each request carries an HMAC proof of it (never the raw secret, so
+a connecting attacker cannot harvest it). A box that merely forged the tag has
+no secret, produces no valid proof, and is **rejected**. Membership now needs
+**both** the tag **and** the secret — one ACL slip is no longer a breach.
+
+- **Opt-in.** Enforced only when a mesh has a secret set. A mesh with no secret
+  behaves exactly as before, so nothing breaks on update.
+- **It does not replace locking `tagOwners`** — it is the safety net so a single
+  misconfiguration is not fatal. Keep doing both.
+- **It is a shared secret.** Whoever can already read files off a member box has
+  it — but they would already own that box.
+
+**Arm it:**
+
+- **Web UI (Join form):** the **Mesh secret** field. On the *first* unit of a new
+  mesh, tick **Generate** — the moment the unit joins, Ragnar mints a strong
+  secret, **downloads it as a file**, and shows it **once** in a dialog with a
+  **Copy** button (in case the download failed). Press **Done** to continue. That
+  is the **only** time it is ever shown — it **cannot be retrieved** afterwards.
+  Paste the value into the **Mesh secret** field when you join every other unit
+  of that mesh. Lost it? **Leave** and re-join to mint a new one.
+- **Unattended / boot config:** set `RAGNAR_MESH_SECRET="rms_…"` (the same value
+  on every unit of the mesh).
+
+**Moving a unit to another mesh** is deliberately a re-provision, not a silent
+edit: **Leave the mesh** (this logs the unit out of the tailnet — it stays
+installed and drops its old secret), then **Join** the new mesh with its own
+auth key *and* its own secret. Editing the tag in the Tailscale console alone
+does **not** move a unit cleanly.
+
+> **Genuinely separate customers?** The strongest isolation is still a separate
+> Tailscale account per customer — one account is one administrative trust
+> boundary. Tags + a mesh secret segment *within* one account and are solid
+> defence-in-depth, but they cannot undo an admin who can retag from the console.
+
+---
+
 ## Deploying a unit
 
 Three paths, all landing in the same place. Pick by how much access you have to
@@ -256,6 +456,11 @@ RAGNAR_MESH_AUTHKEY="tskey-auth-xxxxxxxxxxxxxxxxxxxx"
 RAGNAR_MESH_UNIT_ID="2"
 RAGNAR_MESH_LABEL="Jersey DC"
 RAGNAR_MESH_ROUTES="10.20.0.0/24"
+# Optional — place this box in a separate mesh (see "Separate meshes on one
+# tailnet"). Blank/omitted = the main mesh. The key's tag must match.
+# RAGNAR_MESH_SUFFIX="2"
+# Optional — arm the mesh secret (same value on every unit of the mesh).
+# RAGNAR_MESH_SECRET="rms_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 ```
 
 The unit names itself; there is no name to supply here.
@@ -294,8 +499,11 @@ Open the **Ragnar Mesh** tab. It is a two-step funnel:
    appears it moves you straight to step 2. (Prefer the shell?
    `curl -fsSL https://tailscale.com/install.sh | sh`, then reload the tab.)
 2. **Join mesh.** Enter unit number, site label, auth key and any LAN subnets to
-   advertise. Joining sets `mesh_enabled`, which is what makes every subsequent
-   `update_ragnar.sh` keep Tailscale installed and current.
+   advertise. Leave **Mesh name** blank for the main mesh, or name a
+   [separate mesh](#separate-meshes-on-one-tailnet). Joining sets `mesh_enabled`,
+   which is what makes every subsequent `update_ragnar.sh` keep Tailscale
+   installed. Upgrading it to a newer release is a separate step; see
+   [Keeping Tailscale up to date](#keeping-tailscale-up-to-date).
 
 ### Why `update` does not install Tailscale by itself
 
@@ -305,7 +513,30 @@ installs it only once a unit has opted in — an auth key in the environment, a
 purpose: a security tool should not silently add an outbound mesh dependency to
 every box on every update. So on a fresh unit that has never touched the mesh,
 "I ran update and Tailscale still isn't there" is expected — use the **Install
-Tailscale** button (or join once), and updates maintain it from then on.
+Tailscale** button (or join once), and updates keep it installed from then on.
+
+### Keeping Tailscale up to date
+
+Tailscale is installed from its own apt repository (`pkgs.tailscale.com`), so new
+releases arrive like any other OS package. When the Tailscale admin console shows
+**Update available** for a unit:
+
+- **Ragnar Mesh tab:** a *Tailscale update available* banner shows the installed
+  and new version, with an **Update Tailscale** button.
+- **Config → System → OS Packages:** the same **Update Tailscale only** button,
+  next to **Upgrade All** for the rest of the system.
+
+Both run `apt-get install --only-upgrade tailscale` in the background
+(`ragnar-os-update` unit). `tailscaled` restarts at the end: a browser reaching the
+unit over the tailnet drops for a few seconds and reconnects, and the unit rejoins
+the mesh by itself. Node keys, tags and the mesh name are untouched. The banner
+only appears once apt knows about the new version, so press **Check for Updates**
+on the OS Packages card if the console shows an update the unit doesn't. Details:
+[Operating-system packages (apt)](updates.md#operating-system-packages-apt).
+
+`update_ragnar.sh` does **not** upgrade Tailscale, and neither does the Ragnar
+**Update System** button. Those move Ragnar's code; the client stays at whatever
+version is installed until you upgrade it here or with `sudo apt upgrade`.
 
 ---
 
@@ -370,18 +601,32 @@ when:
 - `tailscaled` will not start after an update
 - you are debugging Tailscale itself
 
-Ragnar reports its state on the Mesh tab — installed, signed in, and therefore
-actually usable — but never enables it. Signing in requires an interactive
-browser flow that cannot be automated from the unit, and enabling a second
-remote-access path is an operator's decision, not a program's.
+Ragnar reports its state on the Mesh tab and can **sign you in from there** — no
+terminal. Paste a Raspberry Pi Connect **auth key** (generate one at
+[connect.raspberrypi.com](https://connect.raspberrypi.com) → your account → Auth
+keys) into the field under the Pi Connect card and click **Sign in**. Ragnar
+enables linger, turns the per-user service on, and runs `rpi-connect signin
+-auth-key …` (rpi-connect 2.12+) for the right login user — so it works on a
+headless box with nobody logged in. The key is sent once and never stored or
+logged. Enabling a second remote-access path is still your call, not automatic.
 
-Run these **as your login user (e.g. `pi`), not as root** — Connect is a
-per-user service:
+**Ragnar installs the `rpi-connect` binary for you** (`scripts/install_pi_connect.sh`,
+run by the installer and on every update) so the Mesh tab can sign in — you only
+supply the account. On Raspberry Pi OS it comes from the Pi apt repo; on the
+Kali/Ulfberht base, where that repo isn't present (and its SHA1-signed key is
+rejected by modern apt), Ragnar downloads the `rpi-connect-lite` `.deb` straight
+from the archive and verifies its SHA256 before installing — no third-party repo
+is added. It's ARM-only and a no-op on x86 (e.g. a WSL box). Sign-in stays your
+call, not automatic.
+
+Prefer the command line? Run these **as your login user (e.g. `pi`/`ragnar`),
+not as root** — Connect is a per-user service:
 
 ```sh
-sudo apt install rpi-connect
-rpi-connect on          # starts the per-user service
-rpi-connect signin      # open the link it prints to link your account
+sudo apt install rpi-connect        # Raspberry Pi OS; on Kali Ragnar already installed it
+rpi-connect on                       # starts the per-user service
+rpi-connect signin                   # interactive: open the link it prints
+rpi-connect signin -auth-key <KEY>   # or non-interactive, with a key
 rpi-connect status
 ```
 
@@ -471,7 +716,7 @@ The gate is deliberately narrow:
 
 | Property | Rule |
 |---|---|
-| Methods | Any `GET` for reads, plus a short **exact-path** write allowlist: `POST /api/mesh/control`, the scan-delegation writes, and `POST /api/mesh/update` |
+| Methods | Any `GET` for reads, plus a short **exact-path** write allowlist: `POST /api/mesh/control`, the scan-delegation writes, the packet-capture writes (`/api/mesh/capture/start`, `cancel/<id>`), and `POST /api/mesh/update` |
 | Paths | `/api/mesh/*` for reads; each write is matched by **exact path** so `join`/`leave`/`serve`/`peer-control`/`update-all` stay session-only. The other ~290 routes stay session-gated |
 | Identity | Must carry `mesh_tag` (default `tag:ragnar-mesh`) |
 | Source | Must be a real tailnet address (100.64/10 or `fd7a:115c:a1e0::/48`) |
@@ -726,6 +971,271 @@ live running state. The command is relayed server-side over the tailnet; see
 unit can drive any other — the trust boundary is the mesh tag, so the way to
 keep a unit from being actuated remotely is simply not to tag it into the mesh.
 
+#### Live packet capture (PCAP)
+
+The node page also runs a **bounded packet capture** on a unit and streams the
+`.pcap` back to you — the real frames for Wireshark, next to the Traffic
+Analyzer's live stats (which only reads tcpdump as text and writes no file). Pick
+an **interface** (the list comes from that unit's own NICs), a **duration**, an
+optional **packet cap** and an optional **BPF filter** (`tcp port 443`, `host
+10.0.0.5`, …), and press **Start capture**. Progress (packets / bytes / elapsed)
+updates live; when it finishes, each capture offers **View** and **Download**.
+**View** expands a **collapsible box inline on that capture's row** (▸ View / ▾
+Hide) — so the packets open in place and the page never navigates away, which
+keeps it usable on a phone. The hub decodes the `.pcap` with `tcpdump -nr` over
+the tailnet and shows a **packet list** with a summary header (packets shown / of
+total, a per-protocol tally, and the top source addresses), so you can eyeball
+what was on the wire without leaving the page. Open panels survive the background
+mesh refresh (the fetched packets are cached per row), and **Download** pulls the
+raw file for Wireshark. Both are **named after the Ragnar unit** — the view header
+reads *Packets · <Viking name>* and the saved file is `<Viking-name>_<id>.pcap`
+(falling back to the site label or Tailscale short name).
+
+Every capture is **strictly bounded** (`pcap_capture.py`): it stops on the first
+of its time limit, packet count, or a hard byte ceiling (defaults 5 min / 100 MB
+/ one capture at a time), so a remote start can never run away with a peer's disk
+or CPU. Captures are retained briefly on the capturing unit (oldest pruned) so
+they can be re-fetched.
+
+It follows the same model as scan delegation: a *worker* layer on each unit
+(`POST /api/mesh/capture/start`, `cancel/<id>`; peer-readable
+`GET …/status/<id>`, `/list`, `/view/<id>`, `/download/<id>`) with the two writes
+on the exact-path peer allowlist, and an *operator* layer the browser talks to
+(`/api/mesh/peer-capture/*`, session-only) that relays to the chosen unit and —
+for a peer — streams the `.pcap` back (or relays the decoded view) over the
+tailnet (WireGuard). Because start is a tagged-peer write, the trust boundary is
+again the mesh tag: a unit you do not want captured from is one you do not tag
+into the mesh.
+
+#### Filtering and sorting the list
+
+Once there is more than one peer, a toolbar sits above the list (it stays hidden
+for a single node, where filtering earns nothing):
+
+- **Search** — matches a node's name, unit number (`3`, `03`, or `unit 03`), site
+  label, hostname, and any of its tailnet IPs.
+- **Status** — *All*, *Online*, *Needs attention*, *Unreachable*, or *Not polled*.
+  "Needs attention" uses the same test as the **Mesh Health** summary: unreachable,
+  offline, a node-key warning/expiry, undervoltage, or a high/critical finding.
+- **Sort** — by name, unit number, worst **severity**, open **alerts**, or **CPU**.
+
+All of it runs in the browser over the roster already polled server-side, so
+filtering and sorting a large fleet costs **no round-trip** and stays instant on a
+Pi Zero. A *Showing X of Y* counter tracks the result, and **Reset** clears it.
+Your own unit is never filtered out — it keeps its own card above the list.
+
+#### Node actions: path, trace route, ping
+
+The node page has an **Actions** bar that probes the peer **from the unit you are
+looking at** (the same server-side-origin model as everything else here, so it
+works however you reached this UI):
+
+- **Tailnet path** — shown inline from the already-polled data (no probe): whether
+  the link to this peer is a **direct** WireGuard path or **relayed via a DERP**
+  relay (with the relay region), plus the node's tailnet addresses. This is the
+  quick "am I going direct or bouncing through a relay?" read.
+- **Trace route** — runs `traceroute` from this unit to the peer and draws the
+  **hops** ("the jumps"): hop number, address, and RTT, with a hop-count badge.
+  On the tailnet a healthy peer is usually **1 hop** (direct); more hops, or a
+  dead hop (`* no reply`), show where the path actually goes.
+- **Ping** — a 4-probe reachability check with loss and min/avg/max RTT.
+- **Diagnose** / **Copy IP** — the existing connection classifier (down / filtered
+  / auth / wrong-service), and a one-click copy of the tailnet address.
+
+For an **unreachable** node the same **Trace route** and **Ping** buttons appear
+next to **Diagnose** on its banner, so you can see exactly where the path dies.
+
+Every **Trace route**, **Ping** and **Diagnose** result shows on the page *and*
+carries a **⬇ Download** link that saves the same result as a plain-text report
+(the parsed summary plus, for trace/ping, the raw `traceroute`/`ping` output).
+It is built client-side from the result already in the browser — no re-run and no
+server round-trip — so you can attach a probe to a ticket without retyping it.
+
+The probe endpoint is `POST /api/mesh/probe` (`{ip, kind: "trace"|"ping"}`),
+session-gated like the other operator actions. The target is **pinned to the known
+mesh roster** server-side — a probe only runs against an address this unit already
+knows as self or a tagged peer — so the route is a fleet tool, not a general
+traceroute box that could be pointed at arbitrary hosts.
+
+## File transfer
+
+The **Ragnar Mesh → File Transfer** sub-tab moves files between units. Transport
+reuses the mesh channel — plain HTTP to a peer's `http://[tailnet-ip]:8000`, which
+Tailscale already wraps in **WireGuard**, so nothing is added to encrypt the wire.
+Authorization is the same **WireGuard-identity + mesh-tag** check as every other
+peer call: the receiver's `POST /api/mesh/files/push` is exact-path allowlisted for
+tagged peers and does nothing but write into a **quarantined inbox** — never a live
+folder. A unit can refuse incoming files entirely (**Accept incoming** toggle /
+`mesh_file_receive`).
+
+Flow:
+
+- **Send** — pick a destination unit, then either drag-and-drop a file from your
+  computer, **browse this unit's own files** (“Send a file from this unit” opens a
+  picker over Uploads/Backups and the scan/loot folders), or use the **Send**
+  (paper-plane) action on any row in the **Files** tab. Files already on the unit
+  stream straight to the peer; a file dropped from your machine is staged on the
+  unit first. Sends run in the background with live progress.
+- **Vault files** can be sent too: an unlocked Vault decrypts the file on send. Note
+  it then exists as plaintext on the receiving unit's disk (the link itself stays
+  WireGuard-encrypted) until the operator files it.
+- **Receive** — arrivals land in the unit's **Inbox** (under `data/mesh_inbox/`,
+  gitignored). The receiving operator picks where each file goes — an Uploads/Backups
+  folder, or the Vault — with **Save**, or drops it with **Discard**. Nothing is
+  auto-filed. A badge appears on the **Inbox** entry in the Files-tab Directories
+  list and on the File Transfer sub-tab.
+
+Endpoints: `POST /api/mesh/files/push` (receiver), `POST /api/mesh/files/send`
+(operator), `GET /api/mesh/transfers`, `GET /api/mesh/inbox`,
+`POST /api/mesh/inbox/{save,discard}`, `POST /api/mesh/files/config`. Per-file size
+ceiling is 4 GB.
+
+## Mesh Share
+
+> **Detailed guide:** [mesh-share.md](mesh-share.md) covers the full picture —
+> the Mesh Share folder, direct transfers, and all three ways to share with
+> someone **outside** your mesh (tag-guest, share-only Join, and token +
+> node-share/Funnel), with step-by-step "who does what".
+
+The **Ragnar Mesh → Mesh Share** sub-tab is a folder every unit publishes to the
+whole mesh. It is **not** a central store: each unit serves its own shared list
+(`data/mesh_share/`), and the catalog is assembled on demand by asking every online
+peer for theirs. Each entry shows the **filename** and its **owner** (the Viking
+name of the unit that actually holds the file).
+
+- **Share files** — publish file(s) from your computer to this unit's shared folder;
+  they immediately appear mesh-wide with you as the owner.
+- **Fetch** — pull any peer's shared file **directly from its owner** (peer-to-peer
+  over Tailscale) and save it into a folder you pick — an Uploads/Backups folder or
+  the Vault. The file only leaves the owner when someone fetches it.
+- **Unshare** — stop publishing one of your own files (the file itself is not
+  deleted).
+
+The listing (`GET /api/mesh/share/local`) and the file stream
+(`GET /api/mesh/share/download`) are plain reads, so they use the mesh's existing
+WireGuard-identity + tag authorization; publishing, fetching and unsharing are
+operator-only (`POST /api/mesh/share/{add,remove,fetch}`), and `GET /api/mesh/share`
+is the aggregate catalog.
+
+### Share-only guest access (`tag:ragnar-share`)
+
+Sometimes you want to let **one outside person** send files to your Ragnar —
+without making them a full mesh unit, without them seeing your other Ragnars, and
+without any other action or view. That is what the **share-guest** role is for.
+
+A share-guest is a device that joins **your** tailnet carrying the tag
+`tag:ragnar-share` (not `tag:ragnar-mesh`). Ragnar recognises that tag and grants
+it exactly one capability by default:
+
+- **Send files to you** — `POST /api/mesh/files/push` (lands in your quarantined
+  inbox, same as any mesh transfer; you still choose where each file is saved).
+
+Everything else — the dashboard, scan control, node lists, findings, config, even
+the *list* of what is in your Mesh Share — is denied. The guest does not appear as
+a Ragnar in your mesh, and cannot enumerate your other units.
+
+Optionally, you can let share-guests also **browse and fetch** your Mesh Share
+folder (read-only): toggle **"Let share-guests browse & fetch this folder"** in
+**Ragnar Mesh → Mesh Share**. Off by default (send-only). This flips
+`mesh_share_guest_read`, which opens *only* `GET /api/mesh/share/local` and
+`GET /api/mesh/share/download` to the guest tag — never the operator write routes.
+
+#### One tailnet, two tags
+
+The guest joins the **same tailnet as your Ragnar** — there is no second Tailscale
+network. Tailscale can only bind one node to one tailnet at a time, so this works
+cleanly when the guest is a plain Tailscale client (a phone or laptop with the app
++ a browser), not a second Ragnar that is already meshed elsewhere. The wall
+between "guest" and "unit" is the **tag + ACL**, not a separate network.
+
+#### Setup — the owner mints a tagged auth key
+
+1. In the Tailscale admin console, allow the tag and scope it to *only* your
+   Ragnar's web port:
+
+   ```jsonc
+   {
+     "tagOwners": {
+       "tag:ragnar-mesh":  ["autogroup:admin"],
+       "tag:ragnar-share": ["autogroup:admin"]
+     },
+     "acls": [
+       // your units talk to each other (unchanged)
+       { "action": "accept", "src": ["tag:ragnar-mesh"],
+         "dst": ["tag:ragnar-mesh:8000"] },
+       // a share-guest may reach ONLY this one Ragnar, ONLY on :8000.
+       // Pin dst to your receiving unit's tag or IP — never tag:ragnar-mesh,
+       // or the guest could reach every unit.
+       { "action": "accept", "src": ["tag:ragnar-share"],
+         "dst": ["tag:ragnar-mesh:8000"] }
+     ]
+   }
+   ```
+
+   Tighten `dst` to a single host (e.g. the unit's Tailscale IP `100.x.y.z:8000`)
+   if you do not want the guest reachable to every `tag:ragnar-mesh` unit.
+
+2. Generate a **pre-authorized, tagged** auth key (Settings → Keys → Generate auth
+   key → *Tags:* `tag:ragnar-share`). Hand that key to the guest.
+
+3. The guest joins your tailnet with it:
+
+   ```bash
+   tailscale up --authkey=tskey-auth-... --advertise-tags=tag:ragnar-share
+   ```
+
+   …then opens `http://<your-ragnar-tailscale-ip>:8000` and sends you files. They
+   see only your one unit's send surface — nothing else.
+
+The share tag Ragnar trusts defaults to the one paired with this unit's mesh —
+`tag:ragnar-share` on the main mesh, `tag:ragnar-share-2` on `ragnar-mesh-2`
+(see [Separate meshes on one tailnet](#separate-meshes-on-one-tailnet)), so
+guests stay confined to the mesh they joined. Override it explicitly with
+`mesh_share_tag` in config if you need a different tag. Revoking access is one
+click in the Tailscale console — disable the key or the guest's node.
+
+### Share tokens & remote shares (Ragnar ↔ Ragnar, across tailnets)
+
+The tag model above needs the sender to live on **your** tailnet. When both sides
+already run their own separate mesh — two Ragnars in different orgs — a node can't
+join a second tailnet, so tag identity can't carry. For that case Ragnar adds a
+**share token**: a secret the receiver issues and the sender presents as an HTTP
+`Authorization: Bearer` header. Auth is the token, not the tailnet, so it works
+over Tailscale **node-sharing** or **Funnel** between separate tailnets. A valid
+token grants exactly one thing — `POST /api/mesh/files/push` into the inbox — and
+honours the same `mesh_file_receive` off-switch. Both sides drive it entirely from
+**Ragnar Mesh → Mesh Share → Outside your mesh**; no Tailscale-console step.
+
+**To let someone send to you** (you are the receiver):
+
+1. **Share tokens → + New token**, name it for the person. The full token
+   (`rgnr-share-…`) is shown **once** — copy it. The list afterwards shows only a
+   masked preview; lost tokens are revoked, not recovered.
+2. Give them that token plus this unit's Tailscale address (`100.x.y.z:8000`, or a
+   MagicDNS name / Funnel URL if the two of you are on different tailnets).
+3. **Revoke** removes the row and the token stops working immediately.
+
+**To send to a remote** (you are the sender):
+
+1. **Remote shares → + Add remote share**: a **name**, their **address**, and the
+   **token** they gave you.
+2. Each saved remote gets a **Send file** button; transfers show up in the normal
+   **Transfers** list with SHA-256 integrity checking, same as a mesh send.
+
+Reaching a remote on a *different* tailnet still needs a network path — share that
+one Ragnar node to the other tailnet (Tailscale **node-sharing**), or expose
+`:8000` with **Funnel**. Same-tailnet remotes just work. Config keys:
+`mesh_share_tokens` (issued tokens, secret) and `mesh_remote_shares` (saved
+targets, holds their tokens) — both live only in this unit's config, never synced.
+
+| Route | Who | What |
+|---|---|---|
+| `POST /api/mesh/files/push` | share-guest **or** valid token | drop one file in the inbox |
+| `GET /api/mesh/share/{local,download}` | share-guest, if `mesh_share_guest_read` | browse/fetch Mesh Share |
+| `GET/POST/DELETE /api/mesh/share/tokens` | operator | issue/list(masked)/revoke tokens |
+| `GET/POST/DELETE /api/mesh/remote-shares[/…]` | operator | manage send targets |
+| `POST /api/mesh/remote-shares/<id>/send` | operator | send a file to a saved remote |
+
 ## Cross-site incident correlation
 
 Each unit pulls its peers' Watchtower alerts and folds them into its **own**
@@ -762,7 +1272,8 @@ Config tab → **Ragnar Mesh (Tailscale)**, or `config/shared_config.json`.
 |---|---|---|
 | `mesh_tab_enabled` | `true` | Show the Ragnar Mesh **tab** in the UI. Cosmetic only — hiding it never joins/leaves the mesh. Toggle in Config → Ragnar Mesh. |
 | `mesh_enabled` | `false` | Master switch. Off means no peer polling at all. |
-| `mesh_tag` | `tag:ragnar-mesh` | Authorization boundary for unit-to-unit calls. |
+| `mesh_tag` | `tag:ragnar-mesh` | Authorization boundary for unit-to-unit calls — and which mesh this unit belongs to. Suffixed tags (`tag:ragnar-mesh-2`) select a [separate mesh](#separate-meshes-on-one-tailnet). Set via the Join form's **Mesh name**, not usually by hand. |
+| `mesh_secret` | `""` | Opt-in **second factor over the tag** (see [Hardening a shared tailnet](#hardening-a-shared-tailnet-the-mesh-secret)). All units of one mesh share it; peers must prove it in addition to the tag. Blank = tag-only. Set via the Join form's **Mesh secret**; cleared on **Leave**. A generated secret is **downloaded once** at join and shown once in a dialog, then never retrievable through the UI (status exposes only a "set" boolean). |
 | `mesh_unit_id` | `0` | This unit's number. `0` = unassigned. |
 | `mesh_viking_name` | `""` | This unit's name. Blank = derive from the machine itself. |
 | `mesh_site_label` | `""` | Where the box physically is ("Jersey DC"). |
@@ -771,10 +1282,17 @@ Config tab → **Ragnar Mesh (Tailscale)**, or `config/shared_config.json`.
 | `mesh_poll_timeout` | `6` | Per-peer HTTP timeout. Kept short so one dead unit cannot stall the view. |
 | `mesh_aggregate_alerts` | `true` | Pull peers' alerts into the local incident engine. |
 | `mesh_alert_limit` | `50` | Max alerts pulled per peer per poll. |
+| `mesh_share_tag` | derived from `mesh_tag` | Tailscale tag trusted for **share-only guests** (send files to this unit, nothing else). Defaults to the share tag paired with this unit's mesh (`tag:ragnar-share`, or `tag:ragnar-share-2` on `ragnar-mesh-2`); set explicitly only to override. |
+| `mesh_share_guest_read` | `false` | Also let share-guests browse & fetch the Mesh Share folder (read-only). Off = send-only. |
+| `mesh_share_tokens` | `[]` | Secret **share tokens** this unit issued; a remote presents one (Bearer) to push into the inbox. Managed from the UI. |
+| `mesh_remote_shares` | `[]` | Saved outbound **remote-share** targets (name + address + their token) this unit can send files to. |
 
 Environment variables (imaging / unattended):
 `RAGNAR_MESH_AUTHKEY`, `RAGNAR_MESH_UNIT_ID`, `RAGNAR_MESH_LABEL`,
-`RAGNAR_MESH_ROUTES`, `RAGNAR_MESH_HOSTNAME`, `RAGNAR_MESH_TAG`.
+`RAGNAR_MESH_ROUTES`, `RAGNAR_MESH_HOSTNAME`, `RAGNAR_MESH_TAG`,
+`RAGNAR_MESH_SUFFIX` (friendly form of the mesh tag — `2` ⇒ `tag:ragnar-mesh-2`;
+`RAGNAR_MESH_TAG` wins if both are set), `RAGNAR_MESH_SECRET` (the opt-in mesh
+secret — set the same value on every unit of the mesh).
 
 ### CLI
 

@@ -1,0 +1,66 @@
+# Ragnar dellguard — baseline learn run, one instance per monitored interface:
+#   sudo systemctl start dellguard-learn@eth1.service
+# Emits NOTHING. Characterises the segment, writes the per-device egress baseline,
+# then exits. Run this BEFORE enabling dellguard@ (the two Conflict so an alerting
+# window never runs against a baseline that is still being written).
+[Unit]
+Description=Ragnar dellguard baseline learn run on %I
+Documentation=file:///home/ragnar/Ragnar/docs/nettools.md
+After=network-pre.target
+Wants=network-pre.target
+Conflicts=dellguard@%i.service
+
+[Service]
+Type=oneshot
+User=ragnar
+Group=ragnar
+StateDirectory=ragnar
+StateDirectoryMode=0750
+
+Environment=DELLGUARD_CONFIG=/etc/ragnar/dellguard.conf
+Environment=DELLGUARD_BASELINE=/var/lib/ragnar/dellguard.baseline.json
+# The default sufficiency gate wants 24h of observation. A shorter run still writes a
+# baseline; it is marked thin and downgrades every finding derived from it (DG-302),
+# which is the intended behaviour rather than a failure.
+Environment=DELLGUARD_LEARN_SECONDS=86400
+
+ExecStart=/usr/bin/python3 /home/ragnar/Ragnar/python/dellguard.py --learn --iface "%I" --config "${DELLGUARD_CONFIG}" --baseline "${DELLGUARD_BASELINE}" --timeout "${DELLGUARD_LEARN_SECONDS}"
+
+# RuntimeMaxSec is SILENTLY IGNORED under Type=oneshot, so the bound must be
+# TimeoutStartSec, and it must exceed DELLGUARD_LEARN_SECONDS with margin or systemd
+# kills the run just before it writes the baseline it spent a day collecting.
+TimeoutStartSec=87300
+
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+RestrictAddressFamilies=AF_PACKET AF_NETLINK AF_UNIX
+IPAddressDeny=any
+SocketBindDeny=any
+# RestrictNetworkInterfaces deliberately ABSENT — see the sensor unit's note.
+
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+UMask=0077
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryDenyWriteExecute=no
+MemoryMax=192M
+TasksMax=32

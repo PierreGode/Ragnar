@@ -25,13 +25,17 @@ fi
 rm -f "$SERVICE_FILE"
 rm -f "$WRAPPER_DST"
 rm -f "$AUTOLOGIN_DROPIN"
+rm -f /etc/sudoers.d/ragnar-kiosk
 
 if [[ -d "$(dirname "$AUTOLOGIN_DROPIN")" ]]; then
     rmdir --ignore-fail-on-non-empty "$(dirname "$AUTOLOGIN_DROPIN")" || true
 fi
 
-# Try to kill any running kiosk chromium (autostart mode users).
+# Try to kill any running kiosk chromium (autostart mode users) + the escape-hatch
+# button/hotkey we may have launched alongside it.
 pkill -f 'ragnar-kiosk-chromium' 2>/dev/null || true
+pkill -f 'ragnar_kiosk_exit_button\.py' 2>/dev/null || true
+pkill -f 'ragnar-kiosk-xbk' 2>/dev/null || true
 
 # Autostart entries — scan every regular user's home for the .desktop file.
 getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 {print $6}' | while read -r home; do
@@ -42,6 +46,19 @@ getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 {print $6}' | while read -r ho
 done
 
 systemctl daemon-reload || true
+
+# Restore the physical console. The kiosk ran Xorg on tty7 and switched the
+# active VT there; tearing it down leaves the display on that now-dead VT (a
+# black screen) with no way back to the CLI. Worse, some Ragnar OS images ship
+# getty@tty1 masked/disabled so ONLY the kiosk draws the screen — then even a
+# reboot comes up black. So make sure a real login console exists on tty1 and
+# switch the display back to it. All steps are no-ops on a box that was already
+# fine (tty1 getty is enabled by default), so this is safe to always run.
+systemctl unmask getty@tty1.service 2>/dev/null || true
+systemctl enable getty@tty1.service 2>/dev/null || true
+systemctl restart getty@tty1.service 2>/dev/null || true
+command -v chvt >/dev/null 2>&1 && chvt 1 2>/dev/null || true
+echo "[kiosk-uninstall] console restored on tty1"
 
 if [[ "$PURGE" -eq 1 ]]; then
     DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge \

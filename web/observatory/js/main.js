@@ -17,7 +17,8 @@ import { PostProcessing } from './post-processing.js';
 import { FigurePool, SKELETON_PAIRS } from './figure-pool.js';
 import { PoseSystem } from './pose-system.js';
 import { ScenarioProps } from './scenario-props.js';
-import { HudController, DEFAULTS, SETTINGS_VERSION, PRESETS, SCENARIO_NAMES, seedObsFromServerConfig } from './hud-controller.js?v=20260702-bkpresence';
+import { Fingerprinter } from './fingerprint.js';
+import { HudController, DEFAULTS, SETTINGS_VERSION, PRESETS, SCENARIO_NAMES, seedObsFromServerConfig } from './hud-controller.js?v=20260815-fsbtn';
 
 // ---- Palette ----
 const C = {
@@ -117,6 +118,23 @@ class Observatory {
     this._poseSystem = new PoseSystem();
     this._figurePool = new FigurePool(this._scene, this.settings, this._poseSystem);
     this._scenarioProps = new ScenarioProps(this._scene);
+    // Fingerprint positioning: learns per-spot motion signatures for THIS room.
+    // Calibration reference points (scene coords, matching the server node geometry).
+    this._fp = new Fingerprinter();
+    // Up to 9 calibration points laid out numpad-style on the floor (stand on the
+    // cell, press the matching number). Rows: 1-2-3 = near wall (node1/node3),
+    // 4-5-6 = middle, 7-8-9 = far wall (node2). Columns: left / center / right.
+    this._fpPoints = {
+      '1': { pos: [-4, 0, -3.5], name: 'front-left (node 1)' },
+      '2': { pos: [0, 0, -3.5], name: 'front-center' },
+      '3': { pos: [4, 0, -3.5], name: 'front-right (node 3)' },
+      '4': { pos: [-4, 0, 0], name: 'mid-left' },
+      '5': { pos: [0, 0, 0], name: 'center' },
+      '6': { pos: [4, 0, 0], name: 'mid-right' },
+      '7': { pos: [-4, 0, 3.5], name: 'back-left' },
+      '8': { pos: [0, 0, 3.5], name: 'back-center (node 2)' },
+      '9': { pos: [4, 0, 3.5], name: 'back-right' },
+    };
     this._buildDotMatrixMist();
     this._buildParticleTrail();
     this._buildWifiWaves();
@@ -304,8 +322,19 @@ class Observatory {
   }
 
   _nodeLabel(id) {
+    // While the view is running on simulated demo data (no real node streaming),
+    // the marker is not a real sensor — never dress it in a configured node name
+    // like "s3". Label it plainly so the demo is unmistakable.
+    if (this._isDemo) return 'demo';
     const t = this.settings.nodeLabels && this.settings.nodeLabels[id];
     return (t && String(t).trim()) ? String(t) : `Node ${id}`;
+  }
+
+  // Show/hide the on-screen DEMO flag. Visible whenever the view is running on
+  // simulated demo data (no real sensing node has streamed a live frame).
+  _updateDemoFlag(isDemo) {
+    const el = document.getElementById('demo-flag');
+    if (el) el.classList.toggle('demo-flag--hidden', !isDemo);
   }
 
   _makeNodeMarker(id, idx, total) {
@@ -573,12 +602,57 @@ class Observatory {
           document.getElementById('fps-counter').style.display = this._showFps ? 'block' : 'none';
           break;
         case 's': this._hud.toggleSettings(); break;
+        case 'h':
+          // Hide/show the pose skeletons (the mist blob + field stay). The
+          // synthetic COCO skeletons are the twitchy part; hiding them leaves
+          // the calmer activity blob.
+          this._showFigures = this._showFigures === false;
+          if (!this._showFigures) this._figurePool.hideAll();
+          break;
+        case '1': case '2': case '3':
+        case '4': case '5': case '6':
+        case '7': case '8': case '9':
+          // Calibrate a fingerprint: stand on the numpad cell and press the key.
+          this._recordFingerprint(e.key);
+          break;
+        case 'x':
+          this._fp.clear();
+          this._fpFlash('Fingerprints cleared — blob back to activity centroid.');
+          break;
         case ' ':
           e.preventDefault();
           this._demoData.paused = !this._demoData.paused;
           break;
       }
     });
+  }
+
+  // ---- Fingerprint calibration ----
+
+  _recordFingerprint(key) {
+    const ref = this._fpPoints[key];
+    if (!ref || this._fp.recording) return;
+    const secs = 6;
+    this._fp.startRecording(ref.pos);
+    this._fpFlash(`Recording fingerprint at ${ref.name} — stand there and move a little (${secs}s)…`);
+    setTimeout(() => {
+      const res = this._fp.finishRecording();
+      if (res) {
+        this._fpFlash(`Saved ${ref.name} (${res.samples} samples) · ${this._fp.count} point(s) calibrated`);
+      } else {
+        this._fpFlash(`Not enough motion for ${ref.name} — retry while moving at the spot.`);
+      }
+    }, secs * 1000);
+  }
+
+  _fpFlash(msg) {
+    const el = document.getElementById('scenario-description');
+    if (el) {
+      el.textContent = msg;
+      clearTimeout(this._fpFlashTimer);
+      this._fpFlashTimer = setTimeout(() => { el.textContent = ''; }, 4500);
+    }
+    console.log('[Observatory/fingerprint]', msg);
   }
 
   // ---- Settings / HUD methods delegated to HudController ----
@@ -612,13 +686,22 @@ class Observatory {
       this.settings.wsUrl = wsUrl;
       this._connectWS(wsUrl);
     }
-    // Probe sensing server health on same origin, then common ports
+    // Probe sensing server health on same origin, then common ports.
+    // The cross-port candidates (:8765/:3000) are only tried when we're NOT
+    // already connecting over the same-origin /ws/sensing proxy: they are a
+    // different origin, so under the dashboard's CSP (connect-src 'self') the
+    // fetch is blocked anyway, and when dataSource==='ws' we're already live
+    // via the proxy, so probing them just spams CSP violations for no gain.
     const host = window.location.hostname || 'localhost';
     const candidates = [
-      window.location.origin,                   // same origin (e.g. :3000)
-      `http://${host}:8765`,                     // default WS port
-      `http://${host}:3000`,                     // default HTTP port
+      window.location.origin,                   // same origin (proxied sensing)
     ];
+    if (this.settings.dataSource !== 'ws') {
+      candidates.push(
+        `http://${host}:8765`,                   // standalone sensing WS port
+        `http://${host}:3000`,                   // standalone sensing HTTP port
+      );
+    }
     // Deduplicate
     const unique = [...new Set(candidates)];
 
@@ -703,13 +786,33 @@ class Observatory {
     const dt = Math.min(this._clock.getDelta(), 0.1);
     const elapsed = this._clock.getElapsedTime();
 
-    // Data source
-    if (this.settings.dataSource === 'ws' && this._liveData) {
+    // Data source. Render a live frame when we have one; otherwise the built-in
+    // demo generator. Kept separate from `_isDemo` below so a server-simulated
+    // frame still renders while being honestly flagged as demo.
+    const hasLive = this.settings.dataSource === 'ws' && this._liveData;
+    if (hasLive) {
       this._currentData = this._liveData;
     } else {
       this._currentData = this._demoData.update(dt);
     }
     let data = this._currentData;
+
+    // Demo state drives the on-screen DEMO flag and the node marker label, so
+    // the view can never masquerade a simulation as a real sensor. It's demo
+    // unless a live frame is in hand from a *real* source (esp32/wifi). A frame
+    // the server tags "simulated" (no hardware, e.g. --source auto) still counts
+    // as demo. An absent source field is assumed real (matches sensing.service).
+    const liveSrc = hasLive ? this._liveData.source : null;
+    const isDemo = !hasLive || liveSrc === 'simulated' || liveSrc === 'simulate';
+
+    // React to a demo<->live transition: toggle the flag and force the node
+    // markers to relabel (a real node may reuse a demo node_id, so the id-set
+    // change-detector in _syncNodes can't be relied on to trigger the relabel).
+    if (isDemo !== this._isDemo) {
+      this._isDemo = isDemo;
+      this._updateDemoFlag(isDemo);
+      try { this._syncNodes(this._connIds ? [...this._connIds] : [], true); } catch {}
+    }
 
     // Authoritative presence gate: the 3D scene draws people straight from the
     // engine's persons/estimated_persons/motion_level, which a freshly over-fit
@@ -739,12 +842,30 @@ class Observatory {
       ? new Set(data.nodes.map(n => n.node_id))
       : null;
 
+    // Fingerprint positioning: feed the live per-node signature, and once the
+    // room is calibrated (>=2 fingerprints) override the primary person's
+    // position with the learned k-NN estimate. Live data + present only.
+    if (hasLive) {
+      this._fp.feed(data.node_features || []);
+      if (data.persons && data.persons.length &&
+          data.classification && data.classification.presence) {
+        // The live feed often carries several phantom tracker duplicates parked
+        // near centre — they read as a permanent "centre blob". Collapse to ONE
+        // blob at the best position estimate: fingerprint match if the room is
+        // calibrated (>=2 points), else the server's activity centroid.
+        const loc = (this._fp.count >= 2 ? this._fp.locate() : null) || data.persons[0].position;
+        const p0 = Object.assign({}, data.persons[0], { position: loc });
+        data = Object.assign({}, data, { persons: [p0], estimated_persons: 1 });
+      }
+    }
+
     // Updates (guarded: a single updater throwing on an unexpected live-data
     // shape must not abort the frame — otherwise controls/render below are
     // skipped and the page freezes).
     try {
       this._nebula.update(dt, elapsed);
-      this._figurePool.update(data, elapsed);
+      if (this._showFigures === false) this._figurePool.hideAll();
+      else this._figurePool.update(data, elapsed);
       this._scenarioProps.update(data, this._demoData.currentScenario);
       this._updateDotMatrixMist(data, elapsed);
       this._updateParticleTrail(data, dt, elapsed);
@@ -969,9 +1090,13 @@ class Observatory {
 // localStorage. Falls back to the localStorage seed in the constructor if the
 // config endpoint is unreachable.
 (async () => {
+  let cfg = null;
   try {
     const res = await fetch('/api/config');
-    if (res.ok) seedObsFromServerConfig(await res.json());
+    if (res.ok) { cfg = await res.json(); seedObsFromServerConfig(cfg); }
   } catch { /* offline — constructor's localStorage seed still applies */ }
-  new Observatory();
+  const obs = new Observatory();
+  // Seed fingerprints from the shared server config so calibration is available
+  // on every browser (localStorage is only an offline cache).
+  if (cfg) { try { obs._fp.seedFromServer(cfg); } catch { /* non-fatal */ } }
 })();

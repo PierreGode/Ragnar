@@ -1,0 +1,11 @@
+REM macOS host recon — opens Terminal via Spotlight and prints system info.
+REM Authorized testing only.
+DELAY 1000
+GUI SPACE
+DELAY 600
+STRING Terminal
+DELAY 800
+ENTER
+DELAY 1500
+STRING whoami; hostname; sw_vers; ifconfig | grep "inet "
+ENTER

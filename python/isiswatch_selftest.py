@@ -379,6 +379,35 @@ def run(verbose=True):
                 lan_iih('0000.0000.0003')])
     h.ck('multiple systems tracked', w.snapshot()['system_count'] == 3)
 
+    # ---- PDU-Length bounding (Ethernet-padding regression) ----------------
+    # An LSP with a *correct* PDU Length field; the frame is then padded to the
+    # 60-byte Ethernet minimum. The TLV walk must stop at the PDU Length, not
+    # parse the trailing zeros as type=0 TLVs (the cdpwatch-class false positive).
+    def _lsp_with_plen(sysid, tlvs=b''):
+        pdu = lsp(sysid, tlvs=tlvs)
+        return pdu[:8] + struct.pack('!H', len(pdu)) + pdu[10:]   # PDU Length @ body[0:2]
+
+    pdu = _lsp_with_plen('0000.0000.0001', tlvs=area_tlv(['490001']))
+    fr = frame(pdu)
+    fr_pad = fr + b'\x00' * max(0, 60 - len(fr))                  # kernel min-frame pad
+    p = iw.parse_isis_frame(fr_pad)
+    h.ck('pad: no spurious type-0 TLVs', p and 0 not in p['tlv_types'])
+    h.ck('pad: area TLV still parsed', p and p['areas'] == ['490001'])
+    h.ck('pad: not flagged malformed', p and p['malformed'] is None)
+    h.ck('pad: zero pad is benign (no non-zero trailer)', p and not p['trailing_nonzero'])
+
+    # Non-zero bytes past the PDU end are smuggled data, not a malformed PDU.
+    p = iw.parse_isis_frame(fr + b'\xde\xad\xbe\xef')
+    h.ck('smuggle: flagged trailing_nonzero', p and p['trailing_nonzero'])
+    h.ck('smuggle: not malformed', p and p['malformed'] is None)
+    w = iw.IsisWatch()
+    w.observe(p, 0.0)
+    h.ck('smuggle: ISIS-TRAILING-DATA raised', 'ISIS-TRAILING-DATA' in _codes(w))
+    w = iw.IsisWatch()
+    w.observe(iw.parse_isis_frame(fr_pad), 0.0)
+    h.ck('pad: ISIS-TRAILING-DATA quiet on zero pad',
+         'ISIS-TRAILING-DATA' not in _codes(w))
+
     total = h.n
     passed = total - h.fail
     print('isiswatch self-test: {}/{} {}'.format(

@@ -1,38 +1,112 @@
-# igmpwatch configuration. All keys optional; unset keys use built-in defaults.
-iface: eth0
-mode: learn                 # learn | enforce
-dedup_window: 60            # seconds to collapse repeat alerts
-db: /var/lib/igmpwatch/igmpwatch.db
+# igmpwatch configuration -- passive IGMP snooping security monitor
+# All keys are optional; anything omitted falls back to built-in defaults.
 
-detectors:
-  window_s: 10
-  multicast_storm_count: 100
-  report_storm_count: 40
-  query_storm_count: 10
-  leave_storm_count: 30
-  flap_count: 6
-  group_scan_count: 20
-  querier_contention_sources: 3
-  learn_window_s: 180
-  sensitive_groups: []      # e.g. ['239.10.0.0', '232.1.1.1'] — any unlisted join alerts
-  allowlist: {}             # e.g. {'aa:bb:cc:dd:ee:ff': ['239.1.1.1']}
-  ssm_allowed: {}           # e.g. {'232.1.1.1': ['10.0.0.1']}
+interface: eth0                    # SPAN/mirror destination NIC (RX-only)
+db_path: /var/lib/igmpwatch/igmpwatch.db
+log_path: /var/log/igmpwatch/events.jsonl
+membership_timeout: 300            # s before an un-refreshed join ages out
+learning_period: 180              # s to baseline querier + membership before enforcing
+
+# Protocol-conformance posture (not CVEs): non-conformant behaviour that
+# weakens the multicast security model, from legacy gear or deliberate downgrade.
+posture:
+  flag_ssm_version_mismatch: true   # IGMPW-P01 / RFC 4604 - pre-v3 membership in SSM range
+
+# Passive detection of documented CVE trigger shapes. A hit means a packet
+# matching the published malformation crossed the segment -- NOT that the target
+# is unpatched or that exploitation succeeded. Each rule runs on BOTH families.
+cve:
+  flag_invalid_record_type: true    # IGMPW-001 / CVE-2025-50681 (7.5)  igmpproxy
+  flag_query_source_overrun: true   # IGMPW-002 / CVE-2026-53275 (8.8)  Linux MLD UAF
+  flag_fragmented_membership: true  # IGMPW-003 / CVE-2019-5608  (9.8)  FreeBSD MLDv2
+
+mld:
+  enable: true        # also decode IPv6 MLD (ICMPv6) alongside IGMP
+
+capture_filter: ""    # optional BPF override; empty = auto (ip proto 2 [+ icmp6])
+
+flood:
+  window: 10                       # sliding-window seconds
+  report_rate: 40                  # reports / source / window
+  leave_rate: 30                   # leaves / source / window
+  query_rate: 8                    # queries / source / window
+  global_rate: 300                 # total IGMP msgs / window (segment-wide storm)
+  flap_transitions: 8              # join<->leave toggles / (host,group) / window
+
+anomaly:
+  require_router_alert: true       # flag v2/v3 queries missing IP Router Alert
+  require_ttl_1: true              # IGMP must be TTL 1 (link-local)
+  flag_downgrade: true             # v1/v2 query after v3 established (SSM bypass)
+
+recon:
+  scan_distinct_groups: 6          # group-specific queries to N groups...
+  scan_window: 15                  # ...within this many seconds -> scan
+  alert_nonquerier_query: true     # general query from a non-elected querier
+
+policy:
+  mode: learn                      # learn | enforce
+  allow_link_local: true           # 224.0.0.0/24 joins (mDNS/LLMNR/etc) are normal
+  flag_unknown_group: true         # first-seen group -> INFO (baseline)
+
+  benign_groups: []                # extra always-allowed groups
+  # groups where ANY unlisted join is alerted, even in learn mode:
+  sensitive_groups: []
+  #   - 239.100.0.0/24             # e.g. IPTV / market-data / OT feed
+
+  allow: []                        # host -> permitted groups allowlist
+  #   - mac: "aa:bb:cc:*"          # MAC prefix (wildcard) or exact
+  #     groups: ["239.10.0.0/16", "224.0.0.251"]
+  #   - ip: "10.20.30.40"
+  #     groups: ["232.1.0.0/16"]
+
+  ssm_source_allow: []             # optional allowed SSM (232/8) source CIDRs
+  #   - 198.51.100.0/24
+
+alerting:
+  cooldown: 60                     # s to suppress duplicate (rule,host,group)
+  min_severity: LOW                # INFO | LOW | MEDIUM | HIGH | CRITICAL
+  stdout: true
 
 dataplane:
-  interval: 5
-  mcast_storm_pps: 1000
-  mcast_ratio: 0.6
-  mcast_ratio_floor_pps: 100
-  flood_no_members_pps: 50
+  enable: true                     # sample NIC counters, cross-ref vs joined groups
+  interval: 5                      # s between /sys/class/net/<iface>/statistics reads
+  mcast_pps: 2000                  # received multicast pps over this -> storm (HIGH)
+  mcast_pps_floor: 150             # multicast pps while NO data groups joined -> flood
+  members_floor: 1                 # "no members" = fewer than this many active data groups
+  rx_drop_pps: 100                 # rx_dropped delta/s over this -> capture loss (MED)
+  mcast_ratio: 0.9                 # multicast fraction of rx over this -> alert (MED)
+  ratio_min_pps: 500               # only evaluate the ratio above this total rx pps
 
+# Out-of-band management-plane poll of the ACCESS SWITCH for per-interface and
+# per-group multicast state. Not segment traffic: sends nothing on the mirror,
+# no IGMP, no joins. Off by default -- needs creds + a reachable mgmt IP.
 snmp:
-  enable: false             # OFF by default (credentialed, out-of-band)
-  host: null                # switch management IP
-  community: public
-  interval: 30
-  iface_mcast_storm_pps: 1000
-  monitor_ifaces: []        # ifIndex whitelist ([] = all)
-  census_not_forwarded: false
-  cache_capabilities: true
-  capability_strikes: 3
-  capability_ttl: 3600
+  enable: false
+  host: ""                         # switch management IP / hostname
+  port: 161
+  version: "2c"                    # "1" | "2c" | "3"
+  community: public                # v1/v2c
+  # v3 (used when version: "3"):
+  v3_user: ""
+  v3_level: authPriv               # noAuthNoPriv | authNoPriv | authPriv
+  v3_auth_protocol: SHA
+  v3_auth_key: ""
+  v3_priv_protocol: AES
+  v3_priv_key: ""
+  timeout: 2
+  retries: 1
+  interval: 30                     # s between polls (heavier than sysfs)
+  snmp_bin_dir: ""                 # optional dir holding snmpbulkwalk
+  iface_mcast_pps: 3000            # per-interface in/out multicast pps -> storm (HIGH)
+  monitor_ifaces: []               # optional ifName/ifIndex whitelist (empty = all)
+  cross_reference: true            # compare switch group table vs igmpwatch census
+  cache_capabilities: true         # remember which walks each switch answers
+  capability_ttl: 3600             # s before re-checking a "known empty" group table
+  capability_strikes: 3            # consecutive empty walks before marking unsupported
+  flag_unsubscribed_forwarding: true   # switch forwards a group we never saw join (HIGH)
+  flag_census_not_forwarded: false     # we saw a join the switch doesn't list (noisier)
+  # OID overrides for non-standard / L2-only platforms:
+  # if_name_oid: 1.3.6.1.2.1.31.1.1.1.1
+  # if_in_mcast_oid: 1.3.6.1.2.1.31.1.1.1.2
+  # if_out_mcast_oid: 1.3.6.1.2.1.31.1.1.1.4
+  # group_table_oid: 1.3.6.1.2.1.85.1.2.1.4

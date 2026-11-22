@@ -39,6 +39,7 @@ own. It consumes the same Watchtower-normalized stream and produces *incidents*.
 | `ipv6_mitm` | rogue RA / NA-spoof **+** DNS or TLS interception | critical |
 | `rogue_first_hop` | rogue DHCP / RA **+** DNS hijack or redirect | critical |
 | `routing_hijack` | OSPF/EIGRP/IS-IS/BGP injection | high |
+| `halehound_multitool` | a HaleHound-class ESP32 CYD multitool verdict (`HH-CONFIRM`/`HH-LIKELY`/`HH-POSSIBLE`) — itself a multi-domain fusion of Wi-Fi/LAN/BLE signals (see [WiFi Defense → HaleHound](wifi-defense.md#halehound-cyd-correlation)) | critical |
 
 A named match raises the incident's **confidence** and **severity** above any
 single alert — a lone `medium` deauth is noise, but a deauth that shares a BSSID

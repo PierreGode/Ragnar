@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=fff)
 ![Status](https://img.shields.io/badge/Status-Development-blue.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Discord](https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/78Ybx52dU)
+[![Discord](https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/vbwx3j89T)
 
 <table>
   <tr>
@@ -14,10 +14,12 @@
   </tr>
 </table>
 
-Ragnar is a fork of the awesome [Bjorn](https://github.com/infinition/Bjorn) project — a Tamagotchi-like autonomous network scanning, vulnerability assessment, and offensive security tool. It runs on a **Raspberry Pi** with a 2.13-inch e-Paper HAT, as a **headless server** on Debian-based systems (AMD64/ARM/ARM64) with Ethernet-first connectivity, or on the **WiFi Pineapple Pager** with full-color LCD display. On servers with 8GB+ RAM, Ragnar unlocks advanced capabilities including enhanced vulnerability scanning and parallel scanning.
+Ragnar is a fork of the awesome [Bjorn](https://github.com/infinition/Bjorn) project — a Tamagotchi-like autonomous network scanning, vulnerability assessment, and offensive security tool. It runs on a **Raspberry Pi** with a 2.13-inch e-Paper HAT, on the **M5Stack CardputerZero** (a Pi CM0 with a built-in 1.9" LCD and keyboard), as a **headless server** on Debian-based systems (AMD64/ARM/ARM64) with Ethernet-first connectivity, or on the **WiFi Pineapple Pager** with full-color LCD display. On servers with 8GB+ RAM, Ragnar unlocks advanced capabilities including enhanced vulnerability scanning and parallel scanning.
 
 > [!IMPORTANT]
 > **For educational and authorized testing purposes only.**
+
+This README is a map, not a manual — each feature gets a couple of sentences and a link to its full guide in [`docs/`](docs). Start with the [documentation index](docs/README.md) if you'd rather browse.
 
 ---
 
@@ -26,75 +28,79 @@ Ragnar is a fork of the awesome [Bjorn](https://github.com/infinition/Bjorn) pro
 ```bash
 wget https://raw.githubusercontent.com/PierreGode/Ragnar/main/install_ragnar.sh
 sudo chmod +x install_ragnar.sh && sudo ./install_ragnar.sh
-# On Raspberry Pi: choose between e-Paper HAT, server/headless, or Pineapple Pager deployment.
-# On other hardware: choose between server install or Pineapple Pager deployment.
+# On Raspberry Pi: choose e-Paper HAT, TFT LCD, server/headless, Pineapple Pager, or Docker container.
+# On other hardware: choose server install, Pineapple Pager, or Docker container.
 # It may take a while as many packages and modules will be installed. Reboot when it finishes.
 ```
 
-For detailed information see the [Install Guide](docs/INSTALL.md). To get the box onto a network — including moving it somewhere new — see [Ragnar AP Mode](docs/RagnarAP.md). See [Release Notes](docs/RELEASE_NOTES.md) for what's new. Keeping a box current — from the web UI or the terminal, and what to do when an update complains — is covered in [Updating Ragnar](docs/updates.md).
+Prefer containers? Run the headless web UI on any Linux host with `docker compose up -d --build`, then open **http://<host-ip>:8000**. Pi-only hardware (e-Paper, GPS, SDR, Wi-Fi monitor mode) isn't available in a container — see the [Docker Guide](docs/DOCKER.md).
+
+Don't want to run the installer at all? Flash **[Ragnar OS](docs/ragnar-os.md)** — a prebuilt Raspberry Pi image with Ragnar already installed and enabled. Write it with Raspberry Pi Imager, boot, open the web UI. For an offensive/red-team build with onboard-Wi-Fi monitor mode and the full toolset, flash **[Ragnar OS Ulfberht](docs/ragnar-os-ulfberht.md)** (built on a Kali ARM base). For the M5Stack CardputerZero there is [its own image](docs/ragnar-os.md#the-cardputerzero-image), with the screen and keyboard working from the first boot.
+
+More: [Install Guide](docs/INSTALL.md) · [Ragnar OS image](docs/ragnar-os.md) · [Ragnar OS Ulfberht](docs/ragnar-os-ulfberht.md) · [Releasing OS images](docs/releasing-os-images.md) · [AP Mode / getting on a network](docs/RagnarAP.md) · [Updating Ragnar](docs/updates.md) · [Releases (per-PR log)](docs/releases.md) · [Release Notes](docs/RELEASE_NOTES.md).
 
 ---
 
 ## 🌐 Web Interface
 
-Access Ragnar's dashboard at `http://<ragnar-ip>:8000`
+Access Ragnar's dashboard at `http://<ragnar-ip>:8000` — real-time discovery and vulnerability scanning, a multi-source threat-intel dashboard, file management, system monitoring, and hardware profile auto-detection (Pi Zero 2W, Pi 4, Pi 5).
 
-- Real-time network discovery and vulnerability scanning
-- Multi-source threat intelligence dashboard
-- File management with image gallery
-- System monitoring and configuration
-- Hardware profile auto-detection (Pi Zero 2W, Pi 4, Pi 5)
+**WiFi Configuration Portal** — when Ragnar can't reach a known network it raises a hotspot: connect to WiFi `Ragnar` (password `ragnarconnect`), open `http://192.168.4.1:8000`, and enter your credentials via the mobile-friendly portal. It supports scanning with signal strength, hidden-SSID entry, known-network management, and one-tap reconnection, then exits AP mode once configured. (The web UI is down during a wardrive with no AP or WiFi connection.)
 
-**WiFi Configuration Portal** — When Ragnar can't connect to a known network, it creates a WiFi hotspot:
-1. Connect to WiFi network `Ragnar` (password: `ragnarconnect`)
-2. Navigate to `http://192.168.4.1:8000`
-3. Configure your WiFi credentials via the mobile-friendly interface
-4. Ragnar will automatically retry known WiFi after some time if the AP is unused
-5. Once configured, Ragnar exits AP mode and connects to your network
-
-The portal supports network scanning with signal strength, manual entry for hidden SSIDs, known network management, and one-tap reconnection.
-
-web will be down during wardrive without ap or wifi connection.
-
-
+---
 
 ## 🌟 Features
 
-- **Ragnar Mesh — a Viking army, not a box** — Links Ragnar units over [Tailscale](https://tailscale.com) so every one of them is reachable by a stable private address regardless of NAT, CGNAT or the firewall in front of it. **There is no controller**: every unit publishes its own report and reads its peers', so there is no master to configure and no collector whose failure blinds the rest. Units are individuals — each is **born with a Viking name** derived from its own machine identity (`Bjorn Ironside`, `Freydis Ravenwing`), keeps that name across reinstalls, and carries an operator-assigned unit number, so incidents are discussed by name instead of by IP. The Mesh tab shows what the Tailscale console cannot: per-unit CPU/memory/disk, uptime, **undervoltage** (the classic remote-Pi killer), worst current alert severity, open incidents, and a **degraded** state for the case that matters most — the unit answers WireGuard but Ragnar itself is down, which is the difference between restarting a service and flying someone to site. Alerts are pulled from every peer into each unit's own [incident engine](docs/incident-correlation.md), scoped so site-local addresses never fuse on coincidence while a public IP or MAC seen at two sites correctly becomes **one** cross-site campaign. Peer-to-peer API calls are authenticated by **WireGuard identity, not a shared secret** — no token to mint, ship, rotate or leak — and are `GET`-only, tag-gated and fail-closed. Deploy unattended by dropping a pre-authorized key on the boot partition (the technician plugs in power and ethernet, nothing else), during install, or later from the web UI; subnet-route advertisement turns a unit into a way into the whole far-side LAN, and **Tailscale SSH** plus **Raspberry Pi Connect** give two independent ways back in when the web UI is wedged. For bringing several units up the same way, the **Fleet Config** card (*Config tab*) exports one unit's settings to a JSON file and imports them on the rest — the same switches turned on everywhere, with secrets and per-unit state stripped and display/hardware keys applied only when you opt in. **Full details in the [Ragnar Mesh Guide](docs/mesh.md).**
+Every feature below has a full guide in [`docs/`](docs). Short version here, details behind the link.
 
-- **RuSense — Camera-Free Surveillance** — Turns ordinary 2.4 GHz WiFi into a no-camera sensor: ESP32 nodes read Channel State Information (CSI) to report presence, motion, people-count, and — with a trained model — coarse pose and resting vital signs (breathing / heart rate). Works in the dark and through walls, with security & health modes, a calibration wizard, browser flashing, and a multi-node offline mesh. See [RuSense](#-rusense--camera-free-surveillance)
+### Core scanning & offense
+- **Network scanning, vulnerability assessment & attacks** — the autonomous scan-and-act loop : host/port discovery (with a per-host **Ignore** blacklist), an **IP Range Scan** that sweeps a CIDR or start-end range and lists the live hosts (DNS/NetBIOS name, MAC + vendor, response time; Angry IP Scanner style), Nmap-based vulnerability assessment. Every nmap run is logged. See [Scanning & Actions](docs/scanning-and-attacks.md).
+- **Distro-aware CVE check** — opt-in: reads the Debian/Ubuntu patch level from the service banner (`OpenSSH 9.2p1 Debian 2+deb12u10`) and checks the distro security tracker, so CVEs the distro already fixed are tagged and hidden instead of burying the ones that are really open. See [Scanning & Actions](docs/scanning-and-attacks.md#distro-aware-cve-check-debian--ubuntu).
+- **Advanced vulnerability scanning** — the **Adv Scan** tab: Nuclei, Nikto, SQLMap, WhatWeb and Nmap vuln scripts run on any board with `nmap`; OWASP ZAP and parallel scanning need 8GB+ RAM. RAM-gated scanners are **delegated to a capable mesh peer** instead of dead-ending. See [Advanced Vulnerability Scanning](docs/adv-scan.md).
+- **Multi-source threat intelligence** — real-time fusion from CISA KEV, NVD CVE, AlienVault OTX, and MITRE, used to prioritize findings. See [Scanning & Actions](docs/scanning-and-attacks.md#multi-source-threat-intelligence).
+- **AI-powered analysis** — security summaries, vulnerability prioritization and remediation advice, with support for **self-hosted / OpenAI-compatible** endpoints (Ollama, LocalAI, vLLM, LM Studio) so inference can stay on your hardware. Includes a **dashboard chat assistant** that answers from `docs/`, reads your results, and starts scans once you approve them. See [AI Integration](docs/AI_INTEGRATION.md).
+- **Four languages** — the web UI and every AI answer in English, Spanish, French or German, switched live from Config > System. See [Languages](docs/i18n.md).
+- **Traffic analysis** — live `tcpdump` capture with top-talkers, protocol mix, DNS logging, and detection of port scans, DNS tunnelling and C2 beacons; also drives passive host discovery. Detection-only; runs on any board (Pi Zero 2W included). See [Traffic Analysis](docs/traffic-analysis.md).
 
-- **Home Assistant integration** — A [HACS](https://hacs.xyz/) custom integration (shipped in-repo under `custom_components/ragnar/`) that surfaces a unit's **RuSense presence / people-count / vitals**, **Watchtower security alerts + incidents**, **Wi-Fi / Ethernet connectivity**, and **Ragnar Mesh fleet health** as native Home Assistant entities — occupancy, safety, connectivity and problem `binary_sensor`s, `sensor`s for heart/breathing rate, connected SSID, reachable mesh nodes and alert/incident/vulnerability counts, and an `event` entity that fires per new security alert — so Ragnar can drive HA automations (presence-triggered lighting, phone push on an evil-twin alert, a nudge when a mesh node drops) and dashboards. It is a read-only **local-polling** client against Ragnar's existing web API; auth reuses Ragnar's session-cookie login (or none, on an open unit). A config-flow UI handles setup. See [Home Assistant integration](docs/homeassistant.md)
-  
-- **Authority Verification Across the Stack** — A built-in engine for verifying authority at every layer — is the claimed root bridge / default gateway / DNS resolver / DHCP server / routing neighbour / name responder / SMB server genuine, or an impostor? — plus a network engineer's toolbox, in the web UI across three tabs. **Diagnostics:** ping, traceroute, MTR, WHOIS, internet speed test, DNS Doctor, ARP-poisoning / MITM detection, MAC Watch, Path-MTU / black-hole probe, captive-portal check, iperf3 throughput, Live Flow Telemetry, PTP-timing detection, and **IPv6 RA Guard** (audits + one-click hardens the host's IPv6 first-hop settings — ICMPv6-redirect and rogue-RA-preference exposure) — plus an opt-in **Network Integrity Monitor** that reruns the DNS-poison / ARP-spoof / rogue-DHCP / RA-Guard checks on a schedule and, with **extended monitoring**, round-robins the entire passive-scanner suite (STP/DTP/CDP/VTP/FHRP/OSPF/EIGRP/IS-IS/BGP/SMB/Relay/LDAP/IGMP/IPv6/NDP/ICMP/NTP/SNMP/Cert/TLS) through the background poller, Pushover-alerting on any regression — capture-based scanners default to a **link-up wired port** (pinnable per config), so a sensor plugged into a switch but managed over WiFi watches the cable, not `wlan0`. A **[Watchtower](docs/watchtower.md)** pane then unifies the deep *standalone* watcher daemons (arp_guard · ndpwatch · wifiwatch · certwatch · snmpwatch · isiswatch · igmpwatch) — tailing each one's JSON-lines log into a single normalized, deduped feed with one Pushover path. **Switch & L2/L3:** LLDP/CDP/EDP/FDP/SONMP switch discovery with PoE, ARP host scan, DHCP Guardian (with an inline DHCP-snooping mode), L2 link health, plus a **detection-only passive security-scanner suite spanning L2→L7** — **IGMP · IPv6 First-Hop · NDP (IPv6 neighbor-cache poisoning) · NTP · ICMP · SNMP · STP/BPDU · DTP · CDP (Cisco Discovery flood/spoof/leak) · VTP (VTP-bomb / VLAN-DB wipe) · SMB (SMBv1 + LLMNR/NBT-NS/mDNS poisoning + Kerberos downgrade/roasting) · Relay/Coercion (NTLM relay + PetitPotam/PrinterBug/DFSCoerce) · LDAP (Active Directory — cleartext binds, StartTLS strip, enumeration, filter injection, CLDAP reflection) · FHRP (HSRP/VRRP/CARP + GLBP AVG *and* AVF forwarder-plane hijack) · EIGRP · IS-IS · OSPF · BGP** Watch and a **receive-only BGP collector + path-asymmetry** correlator — a **TLS Watch** passive TLS/QUIC handshake observer (JA4/JA4_r + JA3/JA3S fingerprints, SNI/ALPN, SNI↔cert mismatch, QUIC v1/v2 Initial recovery), the active **Cert Watch** certificate/hygiene checker (plus a passive, standalone **[certwatch](docs/certwatch.md)** that triages observed X.509 certs off a tap/SPAN — expiry, name-mismatch, weak-sig/key — and inventories TLS 1.3 flows whose cert is encrypted), a PCAP analyzer, and Locate Port. Every scanner learns a baseline, ships a CLI, and self-tests (Scapy / local-handshake end-to-end). **Interfaces:** link speed/duplex/auto-neg, DHCP-vs-static + VLAN, DNS/gateway identity, per-interface public-IP / ISP-ASN lookup, and a VPN-egress check. Missing CLI tools install with one click. Co-authored by [Solarflere](https://www.instagram.com/solarflere). **Full details in the [Authority Verification Guide](docs/nettools.md).**
+### Network defense & authority verification
+- **Authority Verification across the stack** — is the claimed root bridge / gateway / DNS resolver / DHCP server / routing neighbour / SMB server genuine or an impostor? A network engineer's toolbox (Diagnostics — every module sorted by OSI layer, L7 to L1 — and Interfaces) plus a **detection-only passive watcher suite spanning L2→L7** (STP/DTP/CDP/VTP/MRP/LACP/BFD/PTP/SR-MPLS/IPsec-IKE/DNS-Watch/FHRP/OSPF/EIGRP/IS-IS/BGP/SMB/Relay/RPC/LDAP/SSH/Telnet/IGMP-MLD/NDP/ICMP/NTP/SNMP/TLS/Cert — most dual-stack IPv4+IPv6, with cross-protocol D(HE)at / SWEET32 crypto-attack coverage), passive vendor CVE guards (Cisco, Juniper, Arista, Comware, MikroTik, Aruba, APC / Schneider NMC Ripple20, Vertiv Liebert power cards, and a Dell OS10 daemon), a scheduled Network Integrity Monitor, and IPv6 RA Guard. Co-authored by [Solarflere](https://www.instagram.com/solarflere). Full details in the [Authority Verification Guide](docs/nettools.md); how each module is tested for accuracy is in [Testing Tiers](docs/testing-tiers.md).
+- **Watchtower** — unifies the standalone watcher daemons into one normalized, deduped alert feed with a single push-notification path. See [Watchtower](docs/watchtower.md).
+- **Push Notifications** — alerts delivered via **Pushover** and/or **Slack** (incoming webhook). See [Push Notifications](docs/push-notifications.md).
+- **Asset Inventory & SIEM forwarding** — turns the flat hosts table into a change-aware inventory (new device / IP move / OUI change / offline, with owner/criticality/authorized tags and rogue-device signatures), lets you permanently **ignore** noisy devices, and ships every alert to syslog/CEF/LEEF, Splunk HEC, Elasticsearch/OpenSearch, or a JSON/Slack webhook. Host liveness unions an `arp-scan` sweep on the LAN interface (wired or wireless) with the kernel neighbour table, so a single missed broadcast never flaps the whole target list Offline. See [Asset Inventory](docs/asset-inventory.md) and [SIEM Forwarding](docs/siem.md).
+- **Incident correlation** — fuses the alert stream into named cross-site attack-chain incidents. See [Incident Correlation](docs/incident-correlation.md).
 
+### Wireless & RF
+- **WiFi Spectrum Analyzer** — a passive tri-band (2.4/5/6 GHz, up to Wi-Fi 7) RF troubleshooter: interactive spectrum graph, per-AP inspector, interference/DFS flags, coverage rings, a walk-around heatmap, printable survey report, plus Bluetooth, Zigbee and BLE Watch (nRF-sniffer advertising + clone/spoof/flood flags) overlays and a HackRF true-RF waterfall. See [WiFi Analyzer](docs/wifi-analyzer.md) and the [RoomScan](docs/roomscan.md) floor-plan tracer.
+- **Sub-GHz RF instrument (RTL-SDR / HackRF / ESP-SDR)** — a real spectrum analyser in the browser: real-time IQ waterfall with adjustable display range, wheel/drag zoom, markers with Δ and peak search, band-plan labels and signal identification, dBm calibration, noise-print subtraction, limit lines with pass/fail alerts into Watchtower, unattended band surveys with reports, RSSI direction finding across mesh units, mesh/LPWAN band overlays (Z-Wave, Meshtastic, MeshCore, LoRaWAN, Wi-Fi HaLow, Zigbee Suzi), CSV/SigMF export and a listen bar (FM/NFM/AM/SSB/CW). An [ESP-SDR](https://espargos.net/espsdr/) node — any ESP32 flashed with the ESP-SDR firmware — adds a third live panel over USB (on-chip FFT spectra, ~2.2–2.7 GHz on an ESP32-S3), no dedicated SDR hardware needed; its TCXO-less crystal is trimmed by having a nearby HackRF briefly transmit a known pilot tone the ESP locks onto (sub-ppm, spur-proof). See [RF Waterfall](docs/rf-waterfall.md), the [capability guide](docs/rf-waterfall-guide.md) and [SDR / Sub-GHz](docs/sdr-subghz.md). Detectors (peak/RMS/avg), the RTL-SDR centre spike hidden by offset tuning, overload and image checks, mask-triggered capture with a pre-trigger buffer, ACPR/spur/harmonic measurements, geotagged SigMF recordings, an on-box [Signal Analyzer](docs/rf-waterfall.md#signal-analyzer-on-box-sigmf-analysis) that opens any recording for spectrogram/measurement/demod/decode plus a whole-capture **Spectrum Survey** (occupancy heatmap + a measured carrier inventory with duty cycle, burst count, SNR and CSV/annotation export), and the whole instrument is scriptable over HTTP ([API](docs/rf-api.md)). A self-healing watcher recovers a stuck or silent dongle by power-cycling its USB port and resuming the sweep, and says so plainly when the dongle, cable or port is at fault.
+- **Meshtastic mesh** — read a USB Meshtastic node (node DB, positions, messages, send over LoRa) and/or the public MQTT Internet feed with no node, on a node list and a full-screen map; a Region picker narrows the MQTT feed to one region (EU, US, ANZ, …) or a custom topic. The node list filters/sorts the roster and each node has actions — message it, focus it on the map, and **trace route** to see the LoRa hops (the jumps) with per-link SNR. See [SDR / Sub-GHz](docs/sdr-subghz.md).
+- **WiFi Defense (802.11 WIDS)** — passive wireless intrusion detection: deauth/disassoc & beacon floods, rogue APs / evil twins, KARMA/MANA, Wi-Fi Pineapple / PineAP-family rogue APs (Mark VII/Enterprise/Pager), and a client-isolation observer, with a printable WIDS incident report. The continuous monitor is receive-only; an opt-in PineAP active-probe test is the one action that transmits, and only when you run it. Its daemon sibling [wifiwatch](docs/wifiwatch.md) extends this to the WPA handshake layer (PMKID, downgrade, PNL leakage). See [WiFi Defense](docs/wifi-defense.md).
+- **BLE Watch (Bluetooth Low Energy monitor)** — the BLE counterpart to the WIDS: passive, detection-only, driven by an external nRF51 / nRF52 sniffer (Adafruit Bluefruit LE Sniffer, nRF52840 dongle), found by the firmware answering on the port, so a look-alike Bluefruit LE *Friend*, or an nRF52840 dongle still on Nordic's Connectivity firmware, is named with the fix rather than silently ignored. Live capture uses the bundled Nordic nRF Sniffer extcap, so there is nothing extra to install. Flags advertising-layer impersonation (device & beacon clones, two radios sharing one address), beacon spoofing and GATT service masquerade, advertising floods and BLE-spam tooling (Flipper / "Sour Apple" / Fast-Pair / Swift-Pair), and the connection-layer abuse the sniffer can see when it follows a link (CONNECT_IND races, version swaps, Just-Works pairing downgrade, forced re-pair). Device-gated in the web UI; HIGH/CRITICAL findings reach Watchtower. See [blewatch](docs/blewatch.md).
+- **Wardriving with GPS recovery** — logs WiFi/BLE/cell with GPS positions, exports WiGLE CSV / KML and a printable A–F security-graded survey, uploads sessions (manually or automatically once back online) to WiGLE, WDGWars and [Wardrift](https://wardrift.net), and backfills missing positions with speed-aware interpolation. No GPS receiver? The [Ragnar Mobile](https://github.com/PierreGode/Ragnarmobile) app can feed the [phone's GPS](docs/wardriving.md#phone-gps-ragnar-mobile-app) to the unit during a drive. Battery-less u-blox pucks get an [assisted start](docs/wardriving.md#assisted-start-position--time--orbit-pre-load) (last-known position, NTP time and their own saved almanac/ephemeris) so a cold boot fixes like a warm one. Solo drives on a Piglet come in over USB: plug it in and every finished drive on its SD card is [pulled and imported as a session](docs/wardriving.md#usb-sync-of-solo-drives-piglet-v260) (Piglet firmware v2.60+). Includes a deep [Diagnostics panel](docs/diagnostics.md) (radios/power/GPS sky view + [Starview observatory](docs/diagnostics.md#ragnar-starview--the-observatory-mode)), [cellular modem](docs/cell.md) capture, and a [power badge](docs/power.md) — the System tab adds a load **power test** and a one-click fix for the Pi 5's 600 mA USB current cap (also applied by the installer on Pi 5). The System tab also shows the [cooling fan](docs/fan.md) — connected or not, rpm, duty, curve step — with manual speed control, a spin test and an editable fan curve. The [ADS-B radar](docs/wardriving.md#ads-b--wardrift-aircraft-watch) can likewise feed Wardrift's **Aircraft Watch** — Ragnar logs the unique aircraft heard each UTC day and uploads them (manually or automatically) for aircraft influence and XP. See [Wardriving](docs/wardriving.md).
 
-- **WiFi Spectrum Analyzer** — A passive, tri-band (2.4/5/6 GHz) Wi-Fi RF troubleshooter in the web UI (**Network → WiFi Analyzer**), a software take on the [Ekahau Sidekick](https://www.ekahau.com/products/sidekick/). **Strictly passive** — it only listens for beacons (`iw scan -u passive`) and never transmits a probe to any AP. Labels every generation up to **Wi-Fi 7 (802.11be)** — EHT/Multi-Link IEs are recognised from their raw extension IDs (with 320 MHz width from the EHT Operation element), since `iw` itself can't decode them in scan results yet. A big center spectrum graph with two views — **Bar** (bar per AP, width = channel width, height = RSSI) and **Cone/Dome** (the classic filled bell-curve per AP) — shows every BSS with RSSI, channel + width, SSID, security and AP-advertised channel utilisation. The graph is **interactive**: hover a signal to identify it (SSID/BSSID/vendor/RSSI/security tooltip) with a live channel·frequency·level cursor readout, click it to inspect. **⛶ Full screen** opens a survey console that gives the whole viewport to a large hit-testable spectrum, the sortable AP list, and an **inspector showing every field the survey holds** for the selected AP — radio detail (frequency/centre freq, generation, PHY mode, spatial streams, max PHY rate, Tx power, country, DFS), load & timing (channel utilisation, stations, beacon interval, DTIM, last beacon), full security (PMF, 802.1X, WPS, 802.11k/v/r, findings), RSSI history and the modelled coverage rings — plus interference, since-last-scan changes, live BT/Zigbee device lists, clickable band chips and keyboard shortcuts (`↑↓` walk the list, `s` scan, `b`/`d` view, `a/2/5/6` band, `Esc` exit). Flags **co-/adjacent-channel interference** with 1/6/11 recommendations, shades **DFS/radar** channels (read live from the radio), estimates an AP's **coverage radius** (log-distance path-loss rings), and builds a **walk-around coverage heatmap** (floorplan + IDW interpolation on a true-to-scale square plan with **metre rulers, adjustable floor size and zoom/pan** — from a 10 m² room to a 300+ m² office). A **📶 Bluetooth overlay** puts nearby **Bluetooth Classic + BLE** activity on the same 2.4 GHz axis — the BLE advertising channels (37/38/39 at 2402/2426/2480 MHz) drawn as markers in the Wi-Fi 1/6/11 gaps, a band-wide "hopping activity" strip, and a device table (RSSI, BLE/Classic, vendor, class-of-device) with an estimated per-channel BT interference level. **Receive-only** discovery over BlueZ (works on the onboard radio *or* the Alfa's built-in BT 5.2); it's a device-activity estimate, not a measured RF sweep. A **🐝 Zigbee overlay** puts nearby **Zigbee / Thread / 802.15.4** activity on the same 2.4 GHz axis via an on-demand sniff from a **HuginnESP companion** (ESP32-C5) — channel markers (Z11–Z26 at 2405–2480 MHz), a device table (address, proto, PAN ID, vendor, RSSI, clickable to highlight), and per-Wi-Fi-channel pressure; **no wardriving needed**, and the toggle greys out until a Huginn is on USB. For **measured** RF, a **📈 Waterfall view** adds a true-RF spectrum + scrolling waterfall from a **HackRF SDR** (`hackrf_sweep`) — a live spectrum line with max-hold over a time×frequency×power heatmap, Wi-Fi/BT markers overlaid, catching non-Wi-Fi interferers (microwaves, cameras, jammers) nothing else sees; **receive-only**, and the button stays **greyed out until Ragnar actually detects a HackRF** (RTL-SDR can't reach 2.4/5 GHz). Bands are detected per-radio; tuned for the **Alfa AWUS036AXM** (Wi-Fi 6E, `mt7921u`) on a Pi Zero 2 W. A one-click **📄 Report** button turns the current scan into a printable **spectrum & channel survey** (HTML → PDF): an RF-congestion verdict (CLEAR/MODERATE/CONGESTED), per-band recommended channels and width advice, a per-channel congestion histogram, co-/adjacent-channel interference counts, and network + strongest-AP tables — the site-survey deliverable an Ekahau/Acrylic workflow produces, generated on-device. See [WiFi Analyzer Guide](docs/wifi-analyzer.md)
+### Sensing & smart home
+- **RuSense — camera-free surveillance** — ESP32 nodes read WiFi Channel State Information (CSI) to report presence, motion, people-count, and (with a trained model) coarse pose and resting vital signs — in the dark, through walls, no images. Browser flashing, calibration wizard, offline mesh. Powered by [RuView](https://github.com/ruvnet/ruview) (ruvnet). See [RuSense](docs/rusense.md).
+- **Home Assistant integration** — a HACS custom integration (in-repo under `custom_components/ragnar/`) surfacing RuSense presence/vitals, Watchtower alerts + incidents, connectivity, and mesh fleet health as native HA entities. Read-only local polling. See [Home Assistant](docs/homeassistant.md).
 
-- **WiFi Defense (802.11 WIDS)** — A passive **wireless intrusion-detection** monitor in its own web-UI tab. Listens on a **monitor-mode** adapter for 802.11 management frames and flags **deauth/disassoc floods** (the classic Wi-Fi DoS), **beacon floods** (fake-AP storms), **rogue APs / evil twins** (a known SSID from an untrusted BSSID, against a trusted baseline), and **KARMA/MANA** rogue APs (one BSSID answering many SSIDs). **Receive-only** — it never transmits a frame or deauths back. Monitor mode is set up with plain `iw` (a separate `ragmon0` vif where the driver allows, keeping your link up; else a mode switch) — **no aircrack-ng dependency**; Scapy captures with optional channel-hopping. Shows a CLEAR/WARNING/UNDER-ATTACK banner, a card per detection with attacker/BSSID detail, and an AP inventory — every flagged BSSID (and AP-table row) is clickable and **pivots into the WiFi Spectrum Analyzer**, where the rogue is pre-selected and marked with a red ⚠ WIDS locator in the spectrum until dismissed. Includes a passive **client-isolation observer**: from cleartext 802.11 headers alone it audits whether an AP or mesh actually enforces client isolation (guest/IoT WLANs) — flagging APs seen relaying client-to-client traffic (OPEN), silently filtering it (ISOLATING), plus mesh-wide **cross-node forwarding**. A standalone daemon-shaped sibling, **[wifiwatch](docs/wifiwatch.md)**, extends the same passive stance to the **WPA client/handshake layer** — **PMKID harvesting**, **forced 4-way-handshake capture** (deauth-and-capture), **WPA3→WPA2 downgrade** / SAE-strip evil twins, and **PNL leakage** (your own devices broadcasting saved SSIDs — the raw material for KARMA attacks). Needs a monitor-capable adapter (e.g. the Alfa AWUS036AXM). A one-click **📄 Report** button exports the latest capture as a printable **WIDS incident report** (HTML → PDF): a CLEAR/WARNING/CRITICAL threat verdict, a colour-coded detections table (deauth/beacon-flood/evil-twin/KARMA with detail), airspace posture (SSID/BSSID counts, randomized-MAC LA-ratio vs threshold), and the AP inventory — a shareable evidence artifact no Windows Wi-Fi analyzer produces. See [WiFi Defense Guide](docs/wifi-defense.md)
+### Mesh & fleet
+- **Device Console** — plug a USB console cable into a Ragnar and a switch, router or firewall console port, and the dashboard streams what the device prints: boot banners with the exact firmware version, ROMMON, crash dumps and console logging. Read-only by default (`O_RDONLY`); enable **Allow write** to send commands or run pre-made **console scripts** (reboot, monitor logs, show version, configure VLANs, interface status — install more from the shared [RagnarScripts](docs/ragnarscripts.md) library, or add your own JSON scripts with the console card's **Upload** button or via Files > console_scripts). Passive auto-baud, port reserved from every other component — and it works across the mesh, so you can watch a console cabled to a Ragnar in another rack. See [Device Console](docs/serial-console.md).
+- **Ragnar Mesh — a Viking army, not a box** — links units over [Tailscale](https://tailscale.com) with **no controller**: each unit is born with a Viking name, publishes its own report and reads its peers', and is reachable by a stable private address through any NAT. The Mesh tab shows per-unit health, undervoltage, worst alert and a "degraded" state — filter/search/sort the fleet and, on a unit's node page, see the tailnet path (direct vs. DERP relay), run a live **trace route** or **ping**, and start a **bounded packet capture** whose `.pcap` streams back over the tailnet for Wireshark; peer API calls are authenticated by WireGuard identity (no shared secret). Includes Fleet Config export/import and unit-to-unit **file transfer**. When a Tailscale release is out, the Mesh tab offers **Update Tailscale** for the unit ([Keeping Tailscale up to date](docs/mesh.md#keeping-tailscale-up-to-date)). See the [Ragnar Mesh Guide](docs/mesh.md) and [Mesh Share & File Transfer](docs/mesh-share.md).
 
-- **Wardriving with GPS recovery** — Logs WiFi networks, BLE devices, and cell towers with GPS positions while driving. Exports to WiGLE CSV / KML, plus a one-click **printable Wi-Fi survey report** (HTML → PDF) with an A–F security-posture grade, per-scheme encryption breakdown, band/channel distribution, an open-and-WEP "networks of concern" list, camera flags, per-adapter antenna coverage and GPS coverage — the site-survey deliverable a Windows analyzer like Acrylic produces, generated automatically on-device with no laptop. Most wardrivers log observations with GPS-at-scan-time and discard the rest; Ragnar logs a GPS breadcrumb track during the session and runs a post-pass that backfills missing positions for any observation seen within 5 minutes of a real GPS point. The interpolation is speed-aware — when endpoint speeds differ (slowing for a tunnel, accelerating out the far side), it uses constant-acceleration math instead of constant-velocity, shifting positions toward whichever endpoint the device actually spent more time near. A deep, read-only **[Diagnostics panel](docs/diagnostics.md)** (radios / power / GPS constellations + a live azimuth-elevation **GPS sky view** — expandable to a fullscreen planetarium with a real **starfield** behind the satellites — / feed-stall correlation) sits at the bottom of the tab, and cell-tower capture works with any **[ModemManager-supported cellular modem](docs/cell.md)**. See [Wardriving Guide](docs/wardriving.md)
-    
-- **Network Scanning** — Identifies live hosts and open ports
-- **Vulnerability Assessment** — Scans using Nmap and other tools
-- **Multi-Source Threat Intelligence** — Real-time fusion from CISA KEV, NVD CVE, AlienVault OTX, and MITRE ATT&CK
-- **AI-Powered Analysis** — GPT-5.4 Nano integration for security summaries, vulnerability prioritization, and remediation advice. See [AI Integration Guide](docs/AI_INTEGRATION.md)
-- **System Attacks** — Brute-force attacks on FTP, SSH, SMB, RDP, Telnet, SQL
-- **File Stealing** — Extracts data from vulnerable services
-- **Traffic Analysis** — Live `tcpdump` capture in its own web-UI tab: per-host bandwidth and top talkers, connection tracking, protocol mix, DNS logging, and detection of **port scans**, **DNS tunnelling** and **C2 beacons** (interval/size-regularity scoring). Also drives **passive host discovery** — firewalled hosts that never answer a scan still land in the hosts DB. **Detection-only**, it never sends a packet. Needs only `tcpdump`, so it runs on **any board**, Pi Zero included (measured: 0.4% of one Pi 5 core and 18MB RSS at ~90 pkt/s); only the optional `tshark` JA3/IRC sidecars need a bigger board. See [Traffic Analysis](docs/traffic-analysis.md)
-- **Advanced Vulnerability Scanning** — The **Adv Scan** tab runs on **any board** that has `nmap`: Nuclei, Nikto, SQLMap, WhatWeb, Nmap vuln scripts and CVE correlation. **OWASP ZAP** is the one exception — its Java daemon needs a server-class Ragnar (**8GB+ RAM**), so it greys out on smaller boards while the rest of the tab stays usable. Parallel scanning is likewise an 8GB+ feature. **Nuclei is gated at 900MB RAM** (ZAP at 8GB) — they load heavy template/Java engines that OOM a 512MB Pi Zero 2 W, so they **grey out** below their floor (a 1GB Pi 3 runs Nuclei fine) and the lighter scanners still work on the Zero. Instead of a dead end, a gated scanner is **enabled when any mesh unit can run it** — the scan is then **transparently delegated** to that unit and its live progress + findings relay back into the Zero's normal scan view. The operator just picks the scanner and scans as usual; a small "🛰️ Mesh ready — Nuclei → ylva" flag shows which peer is handling it. If the mesh only has a Nuclei-capable unit, ZAP simply stays greyed out. Discovery/auto-pick/relay ride the existing Tailscale peer-identity auth. (Needs 2+ units; single-unit boards just see the normal grey-out.) From 900MB up nuclei **auto-tunes to the board's RAM** — lower concurrency, a capped Go heap and high/critical templates on 1-2GB boards, full tilt on big ones — and on constrained boards it **refuses to start when free RAM is already too low** (reporting how much is free) rather than risk a lock-up. If the kernel memory cgroup is enabled it also wraps nuclei in a **hard memory cap** (`systemd-run`, swap off); enable it on a Pi with `cgroup_enable=memory cgroup_memory=1` in `/boot/firmware/cmdline.txt` + reboot. See [Server Mode](#-server-mode-advanced-features-8gb-ram)
-- **LAN-First Connectivity** — Prefers Ethernet when present, manages WiFi as fallback
-- **Smart WiFi Management** — Auto-connects to known networks, falls back to AP mode, captive portal for configuration
-- **E-Paper Display** — Real-time status showing targets, vulnerabilities, credentials, and network info
-- **Color TFT / OLED Displays** — GC9A01 1.28" round TFT, ST7735S 1.44" LCD HAT (128×128, with 3 keys + 5-way joystick), generic 3.5" SPI TFT (ILI9486/ILI9488, 320×480), and SSD1306 0.96" OLED. Selectable under Display settings. The 3.5" TFT shows the standard character dashboard scaled up to 320×480; see [3.5" SPI TFT setup](docs/DISPLAY_CONTROLS.md#35-spi-tft-ili9486--ili9488) for wiring and per-board tuning. The 1.44" HAT's joystick and keys drive [On-Screen Network Diagnostic Mode](docs/nettools.md#-on-screen-network-diagnostic-mode) as a standalone field tester (**KEY1** toggles it on/off). While wardriving, the same joystick pages a carousel of six wardriving screens (stats, live map, GPS detail, a polar GPS sky view, session totals, and a full-screen viking) with the keys mapped to Wi-Fi reconnect and the phone-access AP. Full key/joystick mappings for every HAT are in the [Display Buttons & Joystick Reference](docs/DISPLAY_CONTROLS.md).
-- **On-Screen Kiosk (Ragnar Pi server only)** — Drives an attached HDMI/DSI screen as a fullscreen Chromium dashboard, auto-installed and relaunched on every boot (systemd unit on Pi OS Lite, XDG autostart inside an existing desktop session), with touchscreen and on-screen-keyboard detection. Chromium needs roughly 1GB resident, so the kiosk requires a Ragnar Pi server (**2GB+ RAM, 2+ cores**) — on a 512MB Pi Zero 2 W it would swap the whole box to a crawl, so the card is hidden and the installer refuses. See [Kiosk Mode](docs/kiosk.md)
-- **MAX7219 LED Matrix Display** — Cascaded 8×8 LED panel arrays (4-panel 32×8 or 8-panel 64×8). Scrolls SSID, IP, targets, and status. SPI-connected: DIN→GPIO10, CS→GPIO8, CLK→GPIO11.
-- **WiFi Pineapple Pager** — Full-color LCD display with button controls, LED indicators, and auto-dim. See [Pager section](#-wifi-pineapple-pager)
-- **Hardware-Bound Authentication** — Optional login with full database encryption at rest. See [Security & Authentication](docs/SECURITY.md)
-- **PiSugar 3 Button** — Physical button to swap between Ragnar and Pwnagotchi modes
-- **Web Terminal** — Optional interactive shell (xterm.js ↔ PTY over Socket.IO) in the dashboard, so you can manage the Pi without SSH. Runs as the non-root `ragnar` user in the Ragnar folder (`sudo` available), **off by default**, and gated by login — enable it in Config → Web Terminal only on trusted networks.
-- **Kill Switch** — Built-in endpoint (`/api/kill`) to wipe all databases, logs, and data. See [Kill Switch](docs/KILL_SWITCH.md)
-- **Comprehensive Logging** — All nmap commands and results logged to `data/logs/nmap.log`
+### Hardware, displays & interfaces
+- **Displays** — 2.13" e-Paper HAT; color TFT/OLED (GC9A01 1.28" round, ST7735S 1.44" HAT with keys + joystick, 3.5" SPI TFT ILI9486/9488, SSD1306 OLED); and MAX7219 8×8 LED matrix arrays. The 1.44" HAT's joystick drives [On-Screen Network Diagnostic Mode](docs/nettools.md#-on-screen-network-diagnostic-mode) and a wardriving carousel. Full mappings: [Display Buttons & Joystick Reference](docs/DISPLAY_CONTROLS.md).
+- **On-Screen Kiosk** (Pi server only) — drives an attached HDMI/DSI screen as a fullscreen Chromium dashboard, with a handheld escape hatch (Hackberry Pi CM5). Needs 2GB+ RAM. See [Kiosk Mode](docs/kiosk.md).
+- **WiFi Pineapple Pager** — deploy Ragnar to the Pager as a native payload with a full-color LCD, buttons and LED status. Based on **brAinphreAk**'s [PagerBjorn / Loki](https://github.com/pineapple-pager-projects/pineapple_pager_loki). See [Pager Guide](docs/pager.md).
+- **PiSugar 3 button** — physical button to swap between Ragnar and Pwnagotchi modes (see below).
+- **Battery percentage on screen** — PiSugar, or a Waveshare UPS HAT (C) on a Pi Zero (auto-detected over I2C, nothing to install). See [UPS HAT](docs/ups-hat.md).
+- **M5Stack CardputerZero** — colour 320×170 screen with the Viking or shieldmaiden, built-in battery percentage, `F` `X` `Z` `C` arrow-key paging, the camera (photos and video, in the browser or on its own screen with the `P` key), and Cap modules (GNSS, LoRa as a Meshtastic node, CC1101 sub-GHz sweep). See [M5Stack CardputerZero](docs/M5StackCardputerZero.md).
+
+### Platform, safety & storage
+- **LAN-first connectivity & smart WiFi** — prefers Ethernet when present, manages WiFi as fallback, auto-connects to known networks and falls back to AP mode with a captive portal.
+- **Cellular uplink fallback** — plug a USB-tethered hotspot (Orbic Speed, MiFi, Nighthawk…), a phone or an LTE modem into a Ragnar and it becomes a backup internet path. No extra drivers are needed. Heartbeats through each uplink to several public targets detect a WAN that's dead upstream, not just a lost link. Failback waits for several consecutive good heartbeats, so a flapping WAN doesn't bounce it. It is never scanned, and push alerts cover both failover and restore (with the outage window), so a leave-behind unit stays reachable over the mesh. See [Cellular Uplink Fallback](docs/cellular-uplink.md).
+- **Hardware-bound authentication** — optional login with full database encryption at rest. See [Security & Authentication](docs/SECURITY.md).
+- **Vault — encrypted file store** — a password-protected, AES-256-GCM store in the **Files** tab (contents *and* index are ciphertext on disk; scrypt-derived key; auto-locks; no recovery). See [Vault](docs/vault.md).
+- **File manager & in-browser editor** — the **Files** tab is a full file manager: create text files (with the extension you choose), create folders, and move, rename or delete files and folders freely across every tree (Uploads, Backups, the script libraries and the per-network loot/scan/log folders). Open any text file (JSON, Python, shell, YAML, config, etc.) and edit it directly from the dashboard — changes save back to disk, so you can tweak console scripts, configs and scan results without SSH. Uploads work from phones too, including iPhone/iPad. See [Files](docs/files.md).
+- **Web Terminal** — optional in-dashboard shell (xterm.js ↔ PTY over Socket.IO) as the non-root `ragnar` user; off by default and login-gated — enable only on trusted networks.
+- **Kill Switch** — `/api/kill` wipes all databases, logs and data. See [Kill Switch](docs/KILL_SWITCH.md).
 
 <p align="center">
   <img width="150" height="300" alt="image" src="https://github.com/user-attachments/assets/463d32c7-f6ca-447c-b62b-f18f2429b2b2" />
@@ -106,7 +112,7 @@ web will be down during wardrive without ap or wifi connection.
 
 ## 📌 Supported Platforms & Prerequisites
 
-### Raspberry Pi (Zero W / W2 / 4 / 5)
+### Raspberry Pi (Zero W2 / 3B(+) / 4 / 5)
 
 - 64-bit Raspberry Pi OS (Debian Trixie, kernel 6.12+)
 - Username and hostname set to `ragnar`
@@ -117,106 +123,53 @@ web will be down during wardrive without ap or wifi connection.
 
 #### Ragnar Gen 2 — reference build
 
-The compact, self-contained reference node: a headless Pi Zero 2 W with an
-on-board status display, wired networking, and a Wi-Fi 6E monitor-mode radio.
-In collaboration with [Solarflere](https://www.instagram.com/solarflere?igsh=MXR6bjMyMmRzZzE4dg==).
+The compact, self-contained reference node: a headless Pi Zero 2 W with an on-board status display, wired networking, and a Wi-Fi 6E monitor-mode radio. In collaboration with [Solarflere](https://www.instagram.com/solarflere?igsh=MXR6bjMyMmRzZzE4dg==) — **Raspberry Pi Zero 2 W** + **Waveshare 1.44" LCD Display HAT** (ST7735S) + **Waveshare Ethernet/USB HAT** + **Alfa AWUS036AXM** (Wi-Fi 6E, `mt7921u`). See [Gen 2 Hardware Requirements](docs/hardware-gen2.md) for the full BOM, assembly, and setup notes.
 
-- **Raspberry Pi Zero 2 W** — main compute
-- **Waveshare 1.44" LCD Display HAT** (ST7735S, 3 keys + joystick) — on-device display + controls
-- **Waveshare Ethernet/USB HAT** — wired uplink + USB-A for the dongle
-- **Alfa AWUS036AXM** (Wi-Fi 6E, `mt7921u`) — tri-band scan/monitor radio
-
-See [Gen 2 Hardware Requirements](docs/hardware-gen2.md) for the full BOM, assembly, and setup notes.
-
-### Debian-Based Server / Headless
+### Debian-based server / headless
 
 - Debian 11+ or Ubuntu 20.04+ (AMD64, ARM64, or ARMv7)
 - Minimum: 2GB RAM, 2 CPU cores, 10GB free disk
-- Recommended: 8GB+ RAM for the heaviest features — **OWASP ZAP** and parallel scanning. The rest of the Adv Scan tab (Nuclei, Nikto, SQLMap, WhatWeb, Nmap) and Traffic Analysis run on any board; the CLI scanners just need `nmap`, and Traffic Analysis needs only `tcpdump`
+- Recommended: 8GB+ RAM for the heaviest features (OWASP ZAP and parallel scanning). The rest of the Adv Scan tab and Traffic Analysis run on any board — the CLI scanners just need `nmap`, Traffic Analysis needs only `tcpdump`.
 
 ### WiFi Pineapple Pager
 
-- Firmware 1.0.7+
-- PAGERCTL payload installed (provides libpagerctl.so)
-- SSH access from your workstation
-- Python3 + nmap (auto-installed on first run)
-- MIPS-compiled Python libraries bundled in `pager_lib/` (or sourced from PAGERCTL payload)
+Firmware 1.0.7+, PAGERCTL payload, SSH access, Python3 + nmap. See [Pager Guide](docs/pager.md).
+
+### Hackberry Pi CM5 (community port)
+
+A community wrapper runs Ragnar in headless/server mode on the [Hackberry Pi CM5](https://github.com/ZitaoTech/HackberryPiCM5) handheld cyberdeck — a 720×720 touch panel with a BlackBerry-style keyboard. It installs Ragnar **unmodified** (vendored as a dependency), adds a touch dashboard and keyboard control panel, and keeps everything off system Python via an isolated virtualenv. See [**DezusAZ/ragnar-cyberdeck**](https://github.com/DezusAZ/ragnar-cyberdeck).
+
+### Flipper One (feasibility / planned)
+
+The [Flipper One](https://docs.flipper.net/one/how-to-join) is an ARM64 Linux multi-tool — the same class of `aarch64` host Ragnar already supports, so the **headless / web-UI** configuration looks highly feasible with little core change. Still a community-development project with no shipping hardware to validate against yet. See the [Flipper One feasibility & porting notes](docs/flipper-one.md).
 
 ---
 
 ## 🔨 Installation Details
 
-The installer auto-detects your platform and configures everything:
-
-- **Distro detection** — Supports apt, dnf, pacman, zypper
-- **Architecture support** — AMD64, ARM64, ARMv7, ARMv8
-- **Profiles** — Pi + e-Paper, Server/Headless, WiFi Pineapple Pager
-- **Automatic advanced tools** — Systems with 8GB+ RAM get advanced features installed automatically
-- **Smart resource management** — Pi Zero W/W2 automatically skip resource-intensive tools
-- **ARM optimizations** — Uses PiWheels on ARM, retries mirrors, skips Pi-only steps on other hardware
-
-For the full installation walkthrough see [Install Guide](docs/INSTALL.md). For updating an existing box, see [Updating Ragnar](docs/updates.md).
+The installer auto-detects your platform and configures everything — distro detection (apt/dnf/pacman/zypper), architecture support (AMD64/ARM64/ARMv7/ARMv8), install profiles (Pi + e-Paper, Server/Headless, Pineapple Pager, Docker), automatic advanced tools on 8GB+ boards, and smart resource management that skips heavy tools on a Pi Zero 2W. Full walkthrough: [Install Guide](docs/INSTALL.md); updating an existing box: [Updating Ragnar](docs/updates.md). OS packages (kernel, security fixes, Tailscale) update from **Config → System → OS Packages**: check, **Upgrade All** or **Update Tailscale only**, run in the background so a Tailscale or Wi-Fi restart can't cut the upgrade off, and never removing a package ([details](docs/updates.md#operating-system-packages-apt)). Installed headless and added a screen later (e.g. the 1.44" LCD HAT)? Run `sudo ./installhead.sh` to pick and enable it — see [Adding a screen to a headless install](docs/INSTALL.md#adding-a-screen-to-a-headless-install-installheadsh).
 
 ---
 
 ## 🖥️ Server Mode: Advanced Features (8GB+ RAM)
 
-When deployed on systems with 8GB+ RAM, Ragnar automatically unlocks advanced security capabilities.
+On 8GB+ systems Ragnar automatically unlocks OWASP ZAP and parallel scanning. The rest of the Adv Scan tab (Nuclei, Nikto, SQLMap, WhatWeb, Nmap vuln scripts) and Traffic Analysis run on any board — see [Advanced Vulnerability Scanning](docs/adv-scan.md) for the full breakdown of what runs where, RAM gating, and mesh delegation. Fresh 8GB+ installs get the advanced tools automatically; on an existing box:
 
-> **The Adv Scan tab is no longer 8GB-only.** The CLI scanners — Nuclei, Nikto,
-> SQLMap, WhatWeb and Nmap vuln scripts — are light enough to run on any board
-> that has `nmap`, so the tab shows up everywhere. **OWASP ZAP** is the sole
-> exception: its Java daemon holds ~1GB+ resident, so it stays gated at **8GB+
-> RAM** and greys out below that while the rest of the tab keeps working.
-> Parallel scanning is also an 8GB+ feature.
-
-> **Traffic Analysis is not one of them either.** It is a `tcpdump` pipe, not
-> OpenVAS-class work, so it has its own much lower gate and runs on any board
-> with `tcpdump` installed — see [Traffic Analysis](docs/traffic-analysis.md).
-> Only its optional `tshark` JA3/IRC sidecars need a 4GB-class board.
-
-> **Fresh installs:** The main installer detects 8GB+ RAM and installs advanced tools automatically.
->
-> **Existing installs:** Run the advanced tools installer separately:
-> ```bash
-> cd /home/ragnar/Ragnar
-> sudo ./scripts/install_advanced_tools.sh
-> sudo systemctl restart ragnar
-> ```
-
-### Advanced Vulnerability Scanning
-- **OWASP ZAP** *(8GB+ RAM)* — Spider + AJAX spider + active scan with automatic browser detection; greys out on smaller boards
-- **Authenticated scanning** — 8 auth types: form-based, HTTP Basic, OAuth2, Bearer Token, API Key, Cookie, Script-based
-- **Nuclei** — 5000+ vulnerability templates from ProjectDiscovery; if the binary isn't present the scanner card shows a **⤓ Install** button that fetches the right build for your board (templates download automatically after)
-- **Nikto** — Comprehensive web server assessment
-- **SQLMap** — Automated SQL injection detection
-- **Parallel scanning** — Multi-threaded for faster results
-- **CVE correlation** — Automatic correlation with NVD, CISA KEV, and threat feeds
-- **Live progress** — Real-time log panel and animated progress bar
-- **Web and API modes** — Scan web apps or API endpoints with OpenAPI spec import
-
-### What Gets Installed
-- **Traffic tools**: tcpdump, tshark, ngrep, iftop, nethogs
-- **Vulnerability scanners**: Nuclei, Nikto, SQLMap, WhatWeb
-- **Web app security**: OWASP ZAP (requires Java)
-- **Nmap scripts**: vulners.nse, vulscan database
-
-Ragnar auto-detects available tools and enables corresponding features in the web interface.
+```bash
+cd /home/ragnar/Ragnar
+sudo ./scripts/install_advanced_tools.sh
+sudo systemctl restart ragnar
+```
 
 ---
 
 ## 📡 RuSense — Camera-Free Surveillance
 
-RuSense turns ordinary 2.4 GHz WiFi into a **no-camera surveillance** system for home,
-office, and anywhere a lens is unwelcome. ESP32 sensor nodes read **WiFi Channel State
-Information (CSI)** — the tiny distortions a moving body imprints on radio waves — and a
-bundled sensing engine reports **presence, motion, people-count**, and (with a trained
-model) **coarse pose and resting vital signs**. No images are ever captured; it works in
-the dark and through walls.
+RuSense turns ordinary 2.4 GHz WiFi into a **no-camera surveillance** system. ESP32 nodes read WiFi Channel State Information (CSI) — the tiny distortions a moving body imprints on radio waves — and a bundled engine reports presence, motion, people-count, and (with a trained model) coarse pose and resting vital signs. No images are ever captured; it works in the dark and through walls.
 
-- **Flash a sensor node from your browser** — no toolchain needed: **[RuSense Flasher](https://pierregode.github.io/Ragnar/)** (ESP32-S3 DevKitC / Seeed XIAO ESP32S3 & Plus / AMOLED / C6, Chrome/Edge).
+- **Flash a node from your browser** — no toolchain: **[RuSense Flasher](https://pierregode.github.io/Ragnar/)** (ESP32-S3 DevKitC / Seeed XIAO ESP32S3 & Plus / AMOLED / C6, Chrome/Edge).
 - **Install the backend:** `sudo ./scripts/install_sensing.sh` (runs as `ragnar-sensing.service`).
-- **View it** under the RuSense tabs in the web dashboard at `http://<ragnar-ip>:8000`.
+- **View it** under the RuSense tabs at `http://<ragnar-ip>:8000`.
 
 Powered by [RuView](https://github.com/ruvnet/ruview) (by ruvnet). Full details: **[RuSense Guide](docs/rusense.md)**.
 
@@ -224,90 +177,13 @@ Powered by [RuView](https://github.com/ruvnet/ruview) (by ruvnet). Full details:
 
 ## 🐝 Ragnar + Pwnagotchi Side by Side
 
-A bundled helper script plus dashboard controls make swapping between Ragnar and Pwnagotchi painless:
-
-1. Run the installer:
-   ```bash
-   cd /home/ragnar/Ragnar
-   sudo ./scripts/install_pwnagotchi.sh
-   ```
-   The script clones [pwnagotchiworking](https://github.com/PierreGode/pwnagotchiworking) into `/opt/pwnagotchi`, installs dependencies, writes `/etc/pwnagotchi/config.toml`, and drops a disabled `pwnagotchi.service`. Re-running is fast — it skips already-installed packages.
-
-2. Open the web UI → **Config** tab → **Pwnagotchi Bridge** → click **Switch to Pwnagotchi**.
-
-**Requirements:**
-- USB WiFi adapter (wlan1) with monitor mode support
-- Waveshare 2.13" e-Paper HAT V4 for the pwnagotchi face display
-
-**Pwnagotchi web UI:** `http://<same-ip>:8080` (credentials: `ragnar` / `ragnar`)
-
-**What the installer configures:**
-- Monitor mode scripts (`/usr/bin/monstart`, `/usr/bin/monstop`)
-- e-Paper display type (`waveshare213_v4`) and rotation
-- Web UI on port 8080, Pwngrid disabled
-- RSA keys, log directories, bettercap integration
-
-**Swapping via PiSugar 3 button:**
-
-| Button Action | While Ragnar is running | While Pwnagotchi is running |
-|---------------|------------------------|---------------------------|
-| Single tap | Toggle manual mode | — |
-| Double tap | Switch to Pwnagotchi | Switch to Ragnar |
-| Long press | Switch to Pwnagotchi | Switch to Ragnar |
-
-A 10-second cooldown prevents accidental double triggers. If PiSugar is not connected, the listener is silently disabled.
-
-**Static IP recommended:** When switching modes, WiFi may briefly reconnect with a different DHCP IP. Set a static IP:
-
-```bash
-sudo nmcli con mod "YOUR_WIFI_SSID" ipv4.method manual \
-  ipv4.addresses "192.168.1.211/24" \
-  ipv4.gateway "192.168.1.1" \
-  ipv4.dns "192.168.1.1"
-sudo nmcli con up "YOUR_WIFI_SSID"
-```
-
-Or set a DHCP reservation on your router. This only affects wlan0 — the monitor interface (wlan1/mon0) is not changed.
-
-**Service recovery:** If Ragnar doesn't start after a reboot:
-```bash
-sudo /home/ragnar/Ragnar/scripts/fix_services.sh
-```
+A bundled helper (`sudo ./scripts/install_pwnagotchi.sh`) plus dashboard controls make swapping between Ragnar and Pwnagotchi painless — the script clones [pwnagotchiworking](https://github.com/PierreGode/pwnagotchiworking), installs dependencies, and drops a disabled `pwnagotchi.service`. Switch from the web UI (**Config → Pwnagotchi Bridge**), the PiSugar 3 button, or a reboot-recovery script. Pwnagotchi web UI: `http://<same-ip>:8080` (`ragnar`/`ragnar`). Needs a monitor-mode USB adapter (wlan1) and a Waveshare 2.13" e-Paper HAT V4. Full setup, config, mode-switching and troubleshooting: **[Pwnagotchi Bridge Guide](docs/PWNAGOTCHI.md)**.
 
 ---
 
 ## 🍍 WiFi Pineapple Pager
 
-> **Attribution:** The WiFi Pineapple Pager port of Ragnar is based on the original work of **brAinphreAk** — the developer who first ported Bjorn to the Pineapple Pager as [PagerBjorn / Loki](https://github.com/pineapple-pager-projects/pineapple_pager_loki). The pager adaptation layer (display system, hardware control wrapper, MIPS-compiled binaries and libraries) originated in that project. Full credit and thanks to brAinphreAk for making pager hardware support possible.
-
-Ragnar can be deployed to the WiFi Pineapple Pager as a native payload with full-color LCD display, button controls, and LED status indicators.
-
-**Features on Pager:**
-- Full-color 480x222 LCD with Viking-themed status display
-- Physical button controls (navigate menus, pause/resume, adjust brightness)
-- LED indicators (blue=idle, cyan=scanning, red=brute force, yellow=stealing)
-- Graphical startup menu with interface selection and Web UI toggle
-- Auto-dim for battery saving and payload handoff support
-
-**Installation:**
-
-Option A — From the main installer (select option 3):
-```bash
-sudo ./install_ragnar.sh
-# Choose: 3. Install on WiFi Pineapple Pager
-```
-
-Option B — Direct deployment:
-```bash
-./scripts/install_pineapple_pager.sh [pager-ip]
-```
-
-**Usage:**
-1. Launch from Pager menu: **Reconnaissance > PagerRagnar**
-2. Press **GREEN** to confirm the splash screen
-3. Select network interface and toggle Web UI on/off
-4. Press **GREEN** on "Start Ragnar" to begin scanning
-5. Press **RED** while running to open the pause menu
+Ragnar deploys to the WiFi Pineapple Pager as a native payload with a full-color 480×222 LCD, button controls and LED status indicators. The pager port is based on the original work of **brAinphreAk** ([PagerBjorn / Loki](https://github.com/pineapple-pager-projects/pineapple_pager_loki)) — full credit and thanks for making pager hardware support possible. Install it from the main installer (option 3) or `./scripts/install_pineapple_pager.sh [pager-ip]`. Full prerequisites, features and usage: **[Pager Guide](docs/pager.md)**.
 
 ---
 
@@ -332,8 +208,11 @@ Ragnar is built on the shoulders of great work by others:
 |---|---|---|
 | [Bjorn](https://github.com/infinition/Bjorn) | infinition | Original project that Ragnar is forked from |
 | [PagerBjorn / Loki](https://github.com/pineapple-pager-projects/pineapple_pager_loki) | [brAinphreAk](https://github.com/brainphreak) | WiFi Pineapple Pager adaptation layer — display system, hardware control wrapper (`pagerctl.py`), pager menu UI, and all MIPS-compiled binaries and libraries |
+| [Pwnagotchi](https://github.com/jayofelony/pwnagotchi) | jayofelony | side by side Ragnar Pwnagotchi install with swap function |
 | [RuView](https://github.com/ruvnet/ruview) | ruvnet | WiFi-CSI sensing engine and ESP32 CSI-node firmware behind [RuSense](docs/rusense.md) — camera-free presence, motion, people-count, pose and vital-sign sensing. Ragnar vendors bins from the [PierreGode/RuView](https://github.com/PierreGode/RuView) fork |
-| — | [Solarflere](https://www.instagram.com/solarflere) | Co-author of the [Authority Verification](docs/nettools.md) suite (Diagnostics, Switch & L2/L3, Interfaces) |
+| Networking and more | [Solarflere](https://www.instagram.com/solarflere) | Co-author of the [Authority Verification](docs/nettools.md) suite (Diagnostics by OSI layer, Interfaces) |
+
+> **[CREDITS.md](docs/CREDITS.md)** — Solarflere identified and curated the CVE corpus behind Ragnar's passive detection suite — **386 CVEs detected** from the wire, 455 named (CVE-1999-0113 → CVE-2026-102019). See the full writeup and numbers there, and the **[CVE Index](docs/CVE.md)** for every CVE with its detector and status.
 
 ---
 

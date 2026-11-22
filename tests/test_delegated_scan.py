@@ -56,9 +56,12 @@ def _wait(s, scan_id, want, tries=300):
 def test_delegated_scan_relays_and_ingests_findings():
     s = _scanner()
     script = [
-        {"status": "running", "progress_percent": 30, "findings_count": 0},
-        {"status": "running", "progress_percent": 80, "findings_count": 1},
-        {"status": "completed", "progress_percent": 100, "findings_count": 1},
+        {"status": "running", "progress_percent": 30, "findings_count": 0,
+         "egress_iface": "tailscale0", "egress_tunneled": True},
+        {"status": "running", "progress_percent": 80, "findings_count": 1,
+         "egress_iface": "tailscale0", "egress_tunneled": True},
+        {"status": "completed", "progress_percent": 100, "findings_count": 1,
+         "egress_iface": "tailscale0", "egress_tunneled": True},
     ]
     io = _peer_io(script, [{"severity": "high", "title": "x", "finding_id": "f1"}])
     scan_id = s.start_delegated_scan("http://t", ScanType.NUCLEI, "harald", io)
@@ -70,6 +73,9 @@ def test_delegated_scan_relays_and_ingests_findings():
     p = _wait(s, scan_id, "completed")
     assert p.status == "completed"
     assert p.progress_percent == 100
+    # The peer's egress (tunnelled via tailscale0) is mirrored to the cockpit,
+    # so the operator can confirm the delegated scan went through the tunnel.
+    assert p.egress_iface == "tailscale0" and p.egress_tunneled is True
     # Remote findings were pulled into normal scan_results.
     assert len(s.scan_results[scan_id]) == 1
     # Delegated tracking is cleaned up when done.

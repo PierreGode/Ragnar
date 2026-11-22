@@ -7,5 +7,9 @@
   "stable_threshold_s": 300.0,
   "trusted_bindings": {
     "10.0.0.1": "cc:cc:cc:00:00:0f"
-  }
+  },
+  "trusted_fhrp_groups": [
+    {"protocol": "hsrp", "group": 1, "virtual_ip": "10.0.0.1", "virtual_mac": "00:00:0c:07:ac:01"},
+    {"protocol": "vrrp", "group": 5, "virtual_ip": "10.0.0.2", "virtual_mac": "00:00:5e:00:01:05"}
+  ]
 }

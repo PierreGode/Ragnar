@@ -16,11 +16,13 @@ Server-mode only (mirrors advanced_vuln_scanner.py).
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import re
 import shutil
 import socket
+import ssl
 import subprocess
 import threading
 import time
@@ -75,6 +77,15 @@ class ReconType(Enum):
     TLS_AUDIT = "tls_audit"
     DNS_PASSIVE = "dns_passive"
     CONTENT_DISCOVERY = "content_discovery"
+    PORT_SCAN = "port_scan"
+
+
+# Common web/management ports probed by PORT_SCAN. Deliberately web-biased: the
+# recon feeds ZAP, so we look for HTTP(S) services, not a full nmap sweep.
+COMMON_WEB_PORTS = (
+    80, 443, 8080, 8443, 8000, 8008, 8081, 8181, 8888, 3000, 5000, 5001,
+    9000, 9090, 8090, 4443, 7443, 9443, 2083, 2087, 10000, 8834, 4433,
+)
 
 
 @dataclass
@@ -219,11 +230,17 @@ class ReconEngine:
         if tls_result:
             tls_findings = [f.to_dict() for f in tls_result.findings]
 
+        ports: List[Dict[str, Any]] = []
+        port_result = state.results.get(ReconType.PORT_SCAN)
+        if port_result and port_result.status in ("ok", "partial"):
+            ports = port_result.artifacts.get("ports", [])
+
         return {
             "scan_id": scan_id,
             "target": state.target,
             "subdomains": subdomains,
             "paths": paths,
+            "ports": ports,
             "tls_findings": tls_findings,
         }
 
@@ -245,6 +262,7 @@ class ReconEngine:
             ReconType.TLS_AUDIT: self._run_tls_audit,
             ReconType.DNS_PASSIVE: self._run_dns_passive,
             ReconType.CONTENT_DISCOVERY: self._run_content_discovery,
+            ReconType.PORT_SCAN: self._run_port_scan,
         }
 
         try:
@@ -277,6 +295,71 @@ class ReconEngine:
         state.status = "completed"
         state.completed_at = datetime.now()
         self._scan_history.append(scan_id)
+
+    def _run_port_scan(self, target: str) -> ReconResult:
+        """Discover open web/management ports on the target and classify each as
+        http vs https (via a TLS handshake). The result feeds the handoff gate,
+        so the operator can point ZAP at the port(s) that are actually up instead
+        of guessing 80/443. Lightweight parallel TCP connect — no nmap needed."""
+        result = ReconResult(recon_type=ReconType.PORT_SCAN, target=target)
+        started = time.monotonic()
+        host, _ = _split_host_port(target, default_port=80)
+        try:
+            server_hostname = None if _is_ip(host) else host
+        except Exception:
+            server_hostname = host
+
+        open_ports: List[Dict[str, Any]] = []
+        lock = threading.Lock()
+
+        def probe(port: int):
+            try:
+                raw = socket.create_connection((host, port), timeout=2.5)
+            except Exception:
+                return  # closed / filtered
+            scheme = "http"
+            try:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                tls = ctx.wrap_socket(raw, server_hostname=server_hostname)
+                scheme = "https"
+                try:
+                    tls.close()
+                except Exception:
+                    pass
+            except Exception:
+                try:
+                    raw.close()
+                except Exception:
+                    pass
+            with lock:
+                open_ports.append({"port": port, "scheme": scheme,
+                                   "url": f"{scheme}://{host}:{port}"})
+
+        threads = [threading.Thread(target=probe, args=(p,), daemon=True)
+                   for p in COMMON_WEB_PORTS]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=6)
+        open_ports.sort(key=lambda p: p["port"])
+
+        result.findings = [
+            _make_finding(
+                "port_scan", host, VulnSeverity.INFO,
+                title=f"Open port {p['port']}/tcp ({p['scheme'].upper()})",
+                description=f"{p['url']} is reachable and speaks {p['scheme']}.",
+                port=p["port"], matched_at=p["url"],
+            ) for p in open_ports
+        ]
+        result.artifacts = {"host": host, "ports": open_ports,
+                            "scanned": list(COMMON_WEB_PORTS)}
+        # 'ok' when we found something; 'partial' when the sweep ran but nothing
+        # was open (still a valid, useful answer).
+        result.status = "ok" if open_ports else "partial"
+        result.duration_seconds = round(time.monotonic() - started, 2)
+        return result
 
     def _run_tls_audit(self, target: str) -> ReconResult:
         result = ReconResult(recon_type=ReconType.TLS_AUDIT, target=target)
@@ -530,6 +613,15 @@ class ReconEngine:
                     del self.active_scans[sid]
             if stale:
                 logger.info(f"Reaped {len(stale)} stale recon scans")
+
+
+def _is_ip(host: str) -> bool:
+    """True if `host` is a literal IP (so TLS SNI must be omitted for it)."""
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
 
 
 def _split_host_port(target: str, default_port: int) -> tuple[str, int]:

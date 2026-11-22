@@ -35,6 +35,7 @@ HEADLESS_VARIANT_LABEL=""
 RAGNAR_ENTRYPOINT="Ragnar.py"
 SERVER_INSTALL=false
 TFT_MODE=false
+CARDPUTER_MODE=false
 GIT_WORKS=true
 
 # Platform detection variables
@@ -48,8 +49,58 @@ PKG_PRESENT_CMD=""
 ARCH=""
 IS_ARM=false
 
+# ── Unattended / image-build mode ─────────────────────────────────────────────
+# The installer is interactive by default (menus + y/n prompts). Two flags turn
+# that off so it can run with no human at the console:
+#
+#   --unattended   Answer every prompt from environment variables instead of
+#                  reading stdin. Used by the "Ragnar OS" image build and by
+#                  anyone scripting a fresh install.
+#   --image-build  Implies --unattended, and additionally assumes we are running
+#                  inside a pi-gen/chroot while an SD-card image is being built:
+#                  never start/restart a service, never touch a running kernel
+#                  (sysctl -p), never reboot, never probe localhost. Only enable
+#                  units so they come up on the target device's first boot.
+#
+# Environment variables consulted in unattended mode (all optional):
+#   RAGNAR_PROFILE           epaper | tft | server-display | headless |
+#                            hbp0 | docker  (default: headless)
+#   RAGNAR_DISPLAY           display driver id for epaper/tft profiles, e.g.
+#                            epd2in13_V4, gc9a01, ili9486, ssd1306, lcd1602 …
+#                            (default for tft: gc9a01; for epaper: epd2in13_V4)
+#   RAGNAR_INSTALL_ALL_DISPLAYS  1 = install every display driver even on a
+#                            headless profile (so a screen can be enabled later
+#                            from Config → Display without reinstalling). The OS
+#                            image sets this.
+#   RAGNAR_INSTALL_PISUGAR   y/n  (default: n)
+#   RAGNAR_INSTALL_ADVANCED  auto | yes | no  (default: auto = RAM-gated)
+#   RAGNAR_REBOOT            y/n  (default: n)
+#   RAGNAR_MESH_AUTHKEY …    see setup_ragnar_mesh (already unattended-aware)
+UNATTENDED=false
+IMAGE_BUILD=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --unattended|--non-interactive) UNATTENDED=true ;;
+        --image-build) UNATTENDED=true; IMAGE_BUILD=true ;;
+    esac
+done
+# Allow the environment to request unattended mode too (handy from pi-gen).
+[ "${RAGNAR_UNATTENDED:-0}" = "1" ] && UNATTENDED=true
+[ "${RAGNAR_IMAGE_BUILD:-0}" = "1" ] && { UNATTENDED=true; IMAGE_BUILD=true; }
+
 if [[ "$1" == "--help" ]]; then
-    echo "Usage: sudo ./install_ragnar.sh"
+    echo "Usage: sudo ./install_ragnar.sh [--unattended|--image-build]"
+    echo ""
+    echo "  (no flag)      Interactive install with menus (default)."
+    echo "  --unattended   Answer all prompts from RAGNAR_* environment variables."
+    echo "  --image-build  Unattended, and build-safe (enable units only, never"
+    echo "                 start services or reboot). Used to bake the Ragnar OS image."
+    echo ""
+    echo "Unattended env vars: RAGNAR_PROFILE, RAGNAR_DISPLAY, RAGNAR_INSTALL_PISUGAR,"
+    echo "  RAGNAR_INSTALL_ADVANCED, RAGNAR_INSTALL_ALL_DISPLAYS, RAGNAR_REBOOT,"
+    echo "  RAGNAR_MESH_AUTHKEY (see comments at the top of this script)."
+    echo ""
     echo "Make sure you have the necessary permissions and that all dependencies are met."
     exit 0
 fi
@@ -57,7 +108,100 @@ fi
 # Function to display progress
 show_progress() {
     echo -e "${BLUE}Step $CURRENT_STEP of $TOTAL_STEPS: $1${NC}"
+    install_splash "$1" $(( CURRENT_STEP * 100 / TOTAL_STEPS ))
 }
+
+# ── "Installing Ragnar" on the CardputerZero's LCD ──────────────────────────
+# A first install takes a long time, and until Ragnar itself runs nothing
+# draws on the built-in screen: it stays blank and looks dead. ragnar_splash.py
+# draws straight to the panel and needs nothing from Ragnar but a few files, so
+# it can run from the first minute. Every step here is best effort: a failure
+# only means the screen stays blank, as it did before.
+SPLASH_STATE=""          # "" = not tried yet, "yes" = usable, "no" = give up
+SPLASH_DIR=""
+SPLASH_RAW="https://raw.githubusercontent.com/PierreGode/Ragnar/main"
+SPLASH_FILES="ragnar_splash.py m5ioe1.py resources/waveshare_epd/st7789v2.py resources/fonts/Viking.TTF resources/fonts/Arial.ttf resources/fonts/ArialB.TTF resources/images/status/IDLE/IDLE1.bmp"
+
+# The built-in screen exists on this board only: the menu choice says so, or
+# (before the menu) the board's own model string does.
+splash_board() {
+    [ "$CARDPUTER_MODE" = true ] && return 0
+    grep -aq "Compute Module 0" "${SPLASH_MODEL_FILE:-/proc/device-tree/model}" 2>/dev/null
+}
+
+splash_prepare() {
+    [ -n "$SPLASH_STATE" ] && return 0
+    # An image is built on some other machine: its screen is not ours to draw on.
+    [ "${IMAGE_BUILD:-false}" = true ] && { SPLASH_STATE="no"; return 0; }
+    splash_board || return 0                  # asked again once the menu is answered
+    SPLASH_STATE="no"
+    command -v python3 >/dev/null 2>&1 || return 0
+    # The files: this checkout, an existing install, or a small download.
+    local here
+    here="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    if [ -f "$here/ragnar_splash.py" ] && [ -f "$here/resources/waveshare_epd/st7789v2.py" ]; then
+        SPLASH_DIR="$here"
+    elif [ -f "$ragnar_PATH/ragnar_splash.py" ]; then
+        SPLASH_DIR="$ragnar_PATH"
+    else
+        SPLASH_DIR="$(mktemp -d /tmp/ragnar-splash.XXXXXX)" || return 0
+        local f
+        for f in $SPLASH_FILES; do
+            mkdir -p "$SPLASH_DIR/$(dirname "$f")"
+            # Give up at the first file that does not arrive: with no network
+            # yet, seven timeouts in a row would hold the installer up.
+            if command -v curl >/dev/null 2>&1; then
+                curl -fsSL --connect-timeout 5 --max-time 20 -o "$SPLASH_DIR/$f" "$SPLASH_RAW/$f" 2>/dev/null || break
+            else
+                wget -q -T 10 -t 1 -O "$SPLASH_DIR/$f" "$SPLASH_RAW/$f" 2>/dev/null || break
+            fi
+        done
+        [ -s "$SPLASH_DIR/ragnar_splash.py" ] && [ -s "$SPLASH_DIR/resources/waveshare_epd/st7789v2.py" ] || return 0
+    fi
+    # The panel is on SPI and its reset and backlight on I2C: switch both on
+    # now, without a reboot (the interfaces step makes it permanent later).
+    if [ -z "$SPLASH_DRY_RUN" ]; then
+        if command -v dtparam >/dev/null 2>&1; then
+            dtparam spi=on >/dev/null 2>&1 || true
+            dtparam i2c_arm=on >/dev/null 2>&1 || true
+        fi
+        modprobe i2c-dev >/dev/null 2>&1 || true
+        modprobe spidev >/dev/null 2>&1 || true
+        # A fresh Raspberry Pi OS Lite has no Pillow, and no package lists to
+        # install it from yet: fetch the lists once if the first try fails.
+        if ! python3 -c "import PIL, spidev, gpiozero, smbus2" >/dev/null 2>&1; then
+            echo "Preparing the CardputerZero screen (one moment)..."
+            local splash_pkgs="python3-pil python3-spidev python3-gpiozero python3-lgpio python3-smbus2"
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $splash_pkgs >/dev/null 2>&1 || {
+                apt-get update >/dev/null 2>&1
+                DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $splash_pkgs >/dev/null 2>&1 || true
+            }
+        fi
+    fi
+    SPLASH_STATE="yes"
+}
+
+# install_splash "what is happening" [percent]
+install_splash() {
+    splash_prepare
+    [ "$SPLASH_STATE" = "yes" ] || return 0
+    local args=(--install "$1")
+    [ -n "${2:-}" ] && args+=(--progress "$2")
+    if [ -n "$SPLASH_DRY_RUN" ]; then
+        echo "splash: $SPLASH_DIR ${args[*]}" >> "$SPLASH_DRY_RUN"
+        return 0
+    fi
+    splash_run "${args[@]}"
+}
+
+# The menu choice settles which board this is; before it, the script checks
+# the hardware itself.
+splash_run() {
+    local known=""
+    [ "$CARDPUTER_MODE" = true ] && known=1
+    RAGNAR_SPLASH_BOARD="$known" timeout 30 python3 "$SPLASH_DIR/ragnar_splash.py" "$@" >/dev/null 2>&1 || true
+}
+# ── end of the install splash ──
 
 # Logging function
 log() {
@@ -82,6 +226,13 @@ handle_error() {
     local error_message=$1
     log "ERROR" "An error occurred during: $error_message (Error code: $error_code)"
     log "ERROR" "Check the log file for details: $LOG_FILE"
+
+    # Unattended runs have no console to answer; skip the failed step and press
+    # on rather than block forever on a read that never returns.
+    if [ "$UNATTENDED" = true ]; then
+        log "WARNING" "Unattended mode — skipping failed step: $error_message"
+        return 0
+    fi
 
     echo -e "\n${RED}Would you like to:"
     echo "1. Retry this step"
@@ -182,6 +333,15 @@ clone_or_download() {
         if git clone "$repo_url" "$target_dir" 2>/dev/null; then
             return 0
         fi
+        # A corrupt tag on the remote (a force-pushed/GC'd os-v* release tag)
+        # aborts a normal clone. Retry without tags: the install never needs a
+        # tag, and a real git clone keeps updates working — a tarball fallback
+        # leaves no .git, so every later update has to reattach first.
+        log "WARNING" "git clone failed — retrying without tags (a corrupt remote tag can block it)"
+        rm -rf "$target_dir" 2>/dev/null || true
+        if git clone --no-tags "$repo_url" "$target_dir" 2>/dev/null; then
+            return 0
+        fi
         log "WARNING" "git clone failed — falling back to wget tarball download"
     fi
 
@@ -227,8 +387,24 @@ detect_platform() {
         *) IS_ARM=false ;;
     esac
 
+    # Distinguish real Raspberry Pi hardware from any other Linux host (a generic
+    # Ubuntu/Debian server, an x86 box, a VM). Only a Pi has the SPI/I2C/GPIO
+    # peripherals the display drivers, raspi-config, and the spi/gpio/i2c groups
+    # depend on — everything gated on IS_PI is a no-op / hard error elsewhere.
+    IS_PI=false
+    if grep -qi "Raspberry Pi" /proc/cpuinfo 2>/dev/null \
+       || grep -qi "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
+        IS_PI=true
+    fi
+    # Image builds run in a chroot whose /proc belongs to the build host (often
+    # an x86 CI runner), so the detection above sees the wrong machine. The
+    # target is a Pi by construction, so let the build force it on.
+    [ "${RAGNAR_FORCE_PI:-0}" = "1" ] && IS_PI=true
+
     case "$OS_ID" in
-        debian|ubuntu|raspbian)
+        debian|ubuntu|raspbian|kali)
+            # kali: the Ragnar OS "Ulfberht" edition is built on a Kali base.
+            # It is Debian-family (apt), so it shares this branch.
             PKG_MGR="apt"
             UPDATE_CMD="apt-get update -y"
             # noninteractive: packages like iperf3 ask debconf questions that
@@ -449,6 +625,11 @@ check_system_compatibility() {
     fi
     log "INFO" "Architecture detected: ${architecture} (proceeding without compatibility warnings)"
 
+    if [ "$should_ask_confirmation" = true ] && [ "$UNATTENDED" = true ]; then
+        log "WARNING" "Unattended mode — continuing despite compatibility warnings"
+        should_ask_confirmation=false
+    fi
+
     if [ "$should_ask_confirmation" = true ]; then
         echo -e "\n${YELLOW}Some system compatibility warnings were detected (see above).${NC}"
         echo -e "${YELLOW}The installation might not work as expected.${NC}"
@@ -485,6 +666,11 @@ check_internet() {
         log "WARNING" "No internet connectivity detected!"
         echo -e "${YELLOW}Internet connection is required to download Python packages.${NC}"
         echo -e "${YELLOW}Please check your network connection and try again.${NC}"
+        if [ "$UNATTENDED" = true ]; then
+            log "WARNING" "Unattended mode — continuing without verified internet connection"
+            return 0
+        fi
+
         echo -e "\nDo you want to:"
         echo "1. Continue anyway (installation may fail)"
         echo "2. Exit and fix network issues first (recommended)"
@@ -525,10 +711,8 @@ install_dependencies() {
         "nmap"
         "libopenblas-dev"
         "bluez"
-        "bluez-tools"
         "python3-dbus"
         "python3-gi"
-        "bridge-utils"
         "python3-pil"
         "libjpeg-dev"
         "zlib1g-dev"
@@ -555,6 +739,7 @@ install_dependencies() {
         "sqlite3"
         "arp-scan"
         "tcpdump"
+        "dnsutils"
         "traceroute"
         "mtr-tiny"
         "whois"
@@ -581,6 +766,10 @@ install_dependencies() {
     optional_packages=(
         "libatlas-base-dev"
         "hackrf"
+        # hackrf → hackrf_sweep for the 2.4/5/6 GHz Wi-Fi bands of the RF
+        # Waterfall (network_diagnostics.py). The RTL-SDR sub-GHz tools
+        # (rtl-sdr + rtl-433) get their own self-healing install + DVB-T
+        # blacklist block later in this script, so they're not listed here.
         "nikto"
         "sqlmap"
         "whatweb"
@@ -738,6 +927,124 @@ EOF
         log "WARNING" "rfkill not available - WiFi blocking status unknown"
     fi
 
+    # Keep ModemManager off Espressif USB serial/JTAG devices (VID 303a): the
+    # ESP-SDR node (RF Waterfall) and ESP32 GPS/wardrive nodes all enumerate as
+    # a ttyACM "USB JTAG/serial debug unit", which MM mistakes for a cellular
+    # modem and probes with AT commands + DTR/RTS toggles — that resets the chip
+    # and wedges a running SDR capture. Tag them ID_MM_DEVICE_IGNORE so MM leaves
+    # them alone (real LTE modems for the cellular-uplink feature keep working).
+    cat > /etc/udev/rules.d/99-ragnar-espsdr.rules << 'EOF'
+# Ragnar: ModemManager must not probe Espressif USB serial/JTAG devices
+# (ESP-SDR, ESP32 GPS/wardrive nodes). AT-command probing wedges them.
+SUBSYSTEM=="tty", ACTION=="add", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"
+# usb-device match too, so MM skips the whole device, not just the tty.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"
+EOF
+    chmod 644 /etc/udev/rules.d/99-ragnar-espsdr.rules
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules 2>/dev/null || true
+        udevadm trigger --subsystem-match=tty 2>/dev/null || true
+    fi
+    log "SUCCESS" "ModemManager set to ignore Espressif serial devices (ESP-SDR / ESP32 nodes)"
+
+    # RTL-SDR dongles (RTL-SDR Blog V3/V4, Nooelec NESDR, RTL-SDR.com, and any
+    # generic RTL2832U stick) drive the sub-GHz half of the RF Waterfall and the
+    # ISM decoder in rtl_sdr.py. Two things stop a freshly-plugged dongle from
+    # ever opening:
+    #   1) The kernel's DVB-T driver (dvb_usb_rtl28xxu) claims the device first,
+    #      so rtl_power / rtl_433 / rtl_test can't. Blacklist it + unload now.
+    #   2) The RTL-SDR Blog V4 uses an R828D tuner the stock distro librtlsdr
+    #      mis-tunes; it needs the RTL-SDR Blog librtlsdr fork. V3/Nooelec/
+    #      generic (R820T2) dongles work with the stock driver as-is.
+    # Self-healing: ensure the rtl-sdr + rtl-433 tools are installed here too, so
+    # this one block fully enables SDR even if the optional-package pass missed.
+    if ! command -v rtl_test >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rtl-sdr rtl-433 >/dev/null 2>&1 \
+            && log "SUCCESS" "Installed rtl-sdr + rtl-433 (RTL-SDR sub-GHz / ISM)" \
+            || log "WARNING" "Could not install rtl-sdr/rtl-433 - RTL-SDR features stay disabled until they're present"
+    fi
+    # uhubctl lets the SDR self-healer cut a USB port's 5 V for a few seconds —
+    # the software equivalent of replugging a dongle that is stuck on the bus.
+    if ! command -v uhubctl >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends uhubctl >/dev/null 2>&1 \
+            && log "SUCCESS" "Installed uhubctl (SDR self-healing: USB port power-cycle)" \
+            || log "WARNING" "Could not install uhubctl - SDR recovery falls back to a USB controller reset"
+    fi
+    if command -v rtl_test >/dev/null 2>&1 || dpkg -s rtl-sdr >/dev/null 2>&1; then
+        cat > /etc/modprobe.d/blacklist-rtl-sdr.conf << 'EOF'
+# Ragnar: keep the DVB-T kernel drivers off RTL-SDR dongles so rtl_power /
+# rtl_433 / rtl_test can claim them (RTL-SDR Blog V3/V4, Nooelec NESDR, generic).
+blacklist dvb_usb_rtl28xxu
+blacklist rtl2832
+blacklist rtl2830
+blacklist rtl2838
+EOF
+        chmod 644 /etc/modprobe.d/blacklist-rtl-sdr.conf
+        # Unload it now if bound, so a plugged-in dongle works without a reboot.
+        rmmod dvb_usb_rtl28xxu 2>/dev/null || true
+        log "SUCCESS" "Blacklisted DVB-T kernel driver so RTL-SDR dongles are usable"
+        command -v rtl_test >/dev/null 2>&1 \
+            && log "SUCCESS" "RTL-SDR tools ready (rtl_test / rtl_power / rtl_433)"
+        log "INFO" "RTL-SDR ready (Blog V3 / Nooelec / RTL-SDR.com / generic). The RTL-SDR Blog V4 (R828D tuner) additionally needs the RTL-SDR Blog librtlsdr fork - see docs/sdr-subghz.md"
+        # dump1090 powers the ADS-B radar (1090 MHz aircraft). Not in standard
+        # Debian/Pi OS apt repos, so the helper tries apt then builds it from
+        # source. Best-effort — a miss just leaves the radar disabled.
+        if ! command -v dump1090-fa >/dev/null 2>&1 && ! command -v dump1090-mutability >/dev/null 2>&1 && ! command -v dump1090 >/dev/null 2>&1; then
+            if [ -x "$ragnar_PATH/scripts/install_dump1090.sh" ] \
+               && bash "$ragnar_PATH/scripts/install_dump1090.sh" >/dev/null 2>&1; then
+                log "SUCCESS" "Installed dump1090 (ADS-B radar, 1090 MHz)"
+            else
+                log "INFO" "dump1090 not installed - ADS-B radar stays disabled (needs internet to build; use the in-app Install button later)"
+            fi
+        fi
+        # acarsdec powers the ADS-B ACARS panel (VHF ~131 MHz datalink). Not in
+        # apt either, so build from source best-effort.
+        if ! command -v acarsdec >/dev/null 2>&1; then
+            if [ -x "$ragnar_PATH/scripts/install_acarsdec.sh" ] \
+               && bash "$ragnar_PATH/scripts/install_acarsdec.sh" >/dev/null 2>&1; then
+                log "SUCCESS" "Installed acarsdec (ADS-B ACARS datalink)"
+            else
+                log "INFO" "acarsdec not installed - ACARS panel stays disabled (use the in-app Install button later)"
+            fi
+        fi
+        # dumpvdl2 (+ libacars) powers the VDL Mode 2 / ATN panel (CPDLC + ADS-C
+        # on ~136 MHz). Not in apt, so build from source best-effort.
+        if ! command -v dumpvdl2 >/dev/null 2>&1; then
+            if [ -x "$ragnar_PATH/scripts/install_dumpvdl2.sh" ] \
+               && bash "$ragnar_PATH/scripts/install_dumpvdl2.sh" >/dev/null 2>&1; then
+                log "SUCCESS" "Installed dumpvdl2 + libacars (VDL Mode 2 / ATN datalink)"
+            else
+                log "INFO" "dumpvdl2 not installed - VDL Mode 2 panel stays disabled (use the in-app Install button later)"
+            fi
+        fi
+    fi
+
+    # meshtastic Python package powers the Mesh Nodes page (real enumeration of a
+    # LoRa mesh via a USB Meshtastic companion node). Optional/best-effort.
+    if ! python3 -c "import meshtastic" >/dev/null 2>&1; then
+        if pip3 install --break-system-packages meshtastic >/dev/null 2>&1 \
+           || pip3 install meshtastic >/dev/null 2>&1; then
+            log "SUCCESS" "Installed meshtastic (Mesh Nodes companion)"
+        else
+            log "INFO" "meshtastic not installed - Mesh Nodes stays disabled (pip install meshtastic to enable)"
+        fi
+    fi
+
+    # multimon-ng powers the Pager Decode page (POCSAG/FLEX) — in the apt repos.
+    if ! command -v multimon-ng >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends multimon-ng >/dev/null 2>&1 \
+            && log "SUCCESS" "Installed multimon-ng (Pager Decode)" \
+            || log "INFO" "multimon-ng not installed - Pager Decode stays disabled (apt install multimon-ng to enable)"
+    fi
+
+    # ffmpeg lets Local Radio stream MP3 (audio/mpeg), which plays on iOS/mobile;
+    # without it the audio falls back to streaming WAV (desktop browsers only).
+    if ! command -v ffmpeg >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg >/dev/null 2>&1 \
+            && log "SUCCESS" "Installed ffmpeg (Local Radio MP3 for phones)" \
+            || log "INFO" "ffmpeg not installed - Local Radio uses WAV (desktop only; apt install ffmpeg for phone audio)"
+    fi
+
     # Configure lldpd for switch discovery (Network > Switch & L2 tab).
     # Enable decoding of CDP (Cisco), EDP (Extreme), FDP (Foundry) and SONMP
     # (Nortel) in addition to LLDP so non-LLDP switches are discovered too.
@@ -749,10 +1056,38 @@ EOF
 DAEMON_ARGS="-c -e -f -s"
 EOF
         systemctl enable lldpd 2>/dev/null || true
-        systemctl restart lldpd 2>/dev/null || true
+        [ "$IMAGE_BUILD" = true ] || systemctl restart lldpd 2>/dev/null || true
         log "SUCCESS" "Configured lldpd (LLDP/CDP/EDP/FDP/SONMP) for switch discovery"
     else
         log "WARNING" "lldpd not available - switch discovery (Switch & L2 tab) will be limited"
+    fi
+
+    # Raspberry Pi Connect (backup remote access, surfaced in the Mesh tab).
+    # Idempotent, ARM-only, never fails the install (see install_pi_connect.sh).
+    if [ -f "$ragnar_PATH/scripts/install_pi_connect.sh" ]; then
+        log "INFO" "Installing Raspberry Pi Connect (rpi-connect)..."
+        bash "$ragnar_PATH/scripts/install_pi_connect.sh" || \
+            log "WARNING" "Raspberry Pi Connect install reported a problem (optional feature)"
+    fi
+
+    # Bake the on-screen kiosk packages into the IMAGE so a capable board (>2 GiB
+    # RAM) can enable the kiosk on first boot (ragnar-firstboot.sh) with NO
+    # network. We only install the packages here; the kiosk is enabled at first
+    # boot, RAM-gated. (On a normal install the kiosk pulls these when enabled,
+    # so this bake is image-build-only.) openbox is the WM chromium --kiosk needs
+    # to go full-screen; without it the dashboard fills only part of the screen.
+    if [ "$IMAGE_BUILD" = true ]; then
+        log "INFO" "Baking on-screen kiosk packages (openbox + Xorg + Chromium) for first-boot enable..."
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            openbox xserver-xorg xinit x11-xserver-utils xserver-xorg-legacy xauth kbd \
+            matchbox-keyboard unclutter >/dev/null 2>&1 \
+            || log "WARNING" "Kiosk package bake incomplete (first-boot kiosk may need network)"
+        # Chromium package name differs: 'chromium' (Debian 13/trixie, Kali),
+        # 'chromium-browser' (older Raspberry Pi OS).
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium >/dev/null 2>&1 \
+            || DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium-browser >/dev/null 2>&1 \
+            || log "WARNING" "Chromium not baked (first-boot kiosk may need network)"
+        log "SUCCESS" "Kiosk packages baked (enabled at first boot on boards with >2 GiB RAM)"
     fi
 
     # The speedtest diagnostic probes `speedtest-cli` first, then a bare
@@ -830,6 +1165,21 @@ EOF
         echo 'dtparam=watchdog=on' >> "$boot_cfg"
         log "INFO" "Enabled hardware watchdog in $boot_cfg (applies after reboot)"
     fi
+    # --- Pi 5 USB current limit -------------------------------------------
+    # The Pi 5 firmware caps all USB ports together at 600 mA unless it sees a
+    # 5 V/5 A USB-PD supply, which almost no charger or power bank offers. A USB
+    # Wi-Fi adapter plus an SDR or GPS exceeds that and the adapter drops off
+    # USB in a reconnect loop. Raise it to 1.6 A. An existing setting (=0 or =1)
+    # is the operator's choice and is left alone. Opt out: RAGNAR_USB_MAX_CURRENT=0.
+    if [ -n "$boot_cfg" ] && grep -qaE 'Raspberry Pi 5|Raspberry Pi 500' /proc/device-tree/model 2>/dev/null; then
+        if grep -qE '^[[:space:]]*usb_max_current_enable[[:space:]]*=' "$boot_cfg"; then
+            log "INFO" "usb_max_current_enable already set in $boot_cfg; leaving it"
+        elif [ "${RAGNAR_USB_MAX_CURRENT:-1}" != "0" ]; then
+            cp "$boot_cfg" "${boot_cfg}.ragnar-$(date +%Y%m%d-%H%M%S)"
+            printf '\n[all]\n# Ragnar: Pi 5 USB current limit (600 mA default, 1.6 A when =1)\nusb_max_current_enable=1\n' >> "$boot_cfg"
+            log "INFO" "Pi 5: raised USB current limit to 1.6 A in $boot_cfg (applies after reboot)"
+        fi
+    fi
     # systemd opens /dev/watchdog and resets the box if it (or the kernel) hangs.
     sed -i '/^#\?RuntimeWatchdogSec=/d;/^#\?RebootWatchdogSec=/d' /etc/systemd/system.conf
     printf 'RuntimeWatchdogSec=15\nRebootWatchdogSec=2min\n' >> /etc/systemd/system.conf
@@ -858,7 +1208,13 @@ fs.file-max = 2097152
 kernel.pid_max = 32768
 kernel.threads-max = 65536
 EOF
-    sysctl -p
+    # No live kernel to tune inside an image-build chroot; the file is written
+    # and takes effect on the target device's first boot.
+    if [ "$IMAGE_BUILD" = true ]; then
+        log "INFO" "Image build — wrote sysctl.conf, skipping live 'sysctl -p'"
+    else
+        sysctl -p
+    fi
 
     # Ensure PAM limits are applied
     if ! grep -q "session required pam_limits.so" /etc/pam.d/common-session; then
@@ -881,6 +1237,14 @@ install_pisugar_server() {
         return 0
     fi
 
+    # The CardputerZero has its own battery and fuel gauge (read by
+    # sysfs_battery.py), so there is nothing to ask.
+    if [ "$CARDPUTER_MODE" = true ]; then
+        log "INFO" "Skipping PiSugar server install (CardputerZero has a built-in battery)"
+        echo -e "${GREEN}✓ CardputerZero: built-in battery, PiSugar not needed${NC}"
+        return 0
+    fi
+
     # Check if pisugar-server is already installed
     if command -v pisugar-server >/dev/null 2>&1 || systemctl list-unit-files pisugar-server.service >/dev/null 2>&1; then
         log "INFO" "PiSugar server is already installed"
@@ -895,7 +1259,13 @@ install_pisugar_server() {
     echo -e "${BLUE}hardware button for Ragnar. If you have a PiSugar UPS${NC}"
     echo -e "${BLUE}attached, the pisugar-server daemon is required.${NC}"
     echo ""
-    read -p "Do you have a PiSugar UPS? Install pisugar-server? (y/n): " install_pisugar
+    local install_pisugar
+    if [ "$UNATTENDED" = true ]; then
+        install_pisugar="${RAGNAR_INSTALL_PISUGAR:-n}"
+        log "INFO" "Unattended PiSugar choice: $install_pisugar"
+    else
+        read -p "Do you have a PiSugar UPS? Install pisugar-server? (y/n): " install_pisugar
+    fi
 
     if [ "$install_pisugar" != "y" ] && [ "$install_pisugar" != "Y" ]; then
         log "INFO" "User opted out of PiSugar server installation"
@@ -932,9 +1302,48 @@ configure_interfaces() {
         raspi-config nonint do_spi 0
         raspi-config nonint do_i2c 0
         check_success "Interface configuration completed"
+    elif [ "$IS_PI" = true ]; then
+        # A Pi without raspi-config (Kali base — the Ulfberht edition):
+        # ensure_pi_gpio_displays switches SPI/I2C on in config.txt instead.
+        log "INFO" "raspi-config not available on this Pi; SPI/I2C are enabled in config.txt by the display setup step"
     else
         log "WARNING" "raspi-config not available; skipping SPI/I2C configuration (non-Raspberry Pi hardware)"
     fi
+}
+
+# Everything a GPIO display needs that Raspberry Pi OS ships and other Pi
+# distros (Kali / the Ulfberht edition) do not: SPI/I2C in config.txt, the
+# spidev/smbus2/gpiozero modules, lgpio (the only gpiozero backend that works
+# on a Pi 5, built from source where unpackaged) and the gpiochip4 alias
+# gpiozero opens on a Pi 5. A no-op on Raspberry Pi OS. See
+# scripts/pi_gpio_displays.sh; update_ragnar.sh runs the same script.
+ensure_pi_gpio_displays() {
+    if [ "$IS_PI" != true ]; then
+        return 0
+    fi
+    if [ "$HEADLESS_MODE" = true ] && [ "${RAGNAR_INSTALL_ALL_DISPLAYS:-0}" != "1" ]; then
+        log "INFO" "Headless mode - skipping GPIO display platform setup"
+        return 0
+    fi
+    local script="$ragnar_PATH/scripts/pi_gpio_displays.sh"
+    if [ ! -f "$script" ]; then
+        log "WARNING" "scripts/pi_gpio_displays.sh not found - GPIO display platform setup skipped"
+        return 0
+    fi
+    log "INFO" "Preparing GPIO display support (SPI/I2C, gpiozero, lgpio, Pi 5 gpiochip alias)..."
+    local out args=()
+    [ "$IMAGE_BUILD" = true ] && args+=(--image-build)
+    out="$(RAGNAR_FORCE_PI=1 bash "$script" "${args[@]}" 2>&1)"
+    echo "$out" | grep -v '^REBOOT_REQUIRED$' | tee -a "$LOG_FILE"
+    if echo "$out" | grep -q '\[!!\]'; then
+        log "WARNING" "GPIO display setup reported problems (see above) - a GPIO screen may stay dark"
+    else
+        log "SUCCESS" "GPIO display support ready"
+    fi
+    if echo "$out" | grep -q '^REBOOT_REQUIRED$'; then
+        log "WARNING" "SPI/I2C were enabled in config.txt - the display works after the reboot"
+    fi
+    return 0
 }
 
 # Setup ragnar
@@ -1086,8 +1495,14 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         return $?
     }
     
-    # Try to install RPi.GPIO and spidev
-    if ! check_python_package "RPi.GPIO"; then
+    # RPi.GPIO + spidev drive the GPIO-attached displays, so they are only
+    # meaningful on real Raspberry Pi hardware. On a generic Ubuntu/Debian server
+    # RPi.GPIO fails to build (or installs but crashes on import, since there is
+    # no /dev/gpiomem), which showed up as alarming errors on headless installs
+    # where no display is used at all. Skip it off-Pi.
+    if [ "$IS_PI" != true ]; then
+        log "INFO" "Non-Raspberry Pi host — skipping RPi.GPIO/spidev (no GPIO displays)"
+    elif ! check_python_package "RPi.GPIO"; then
         log "INFO" "Installing RPi.GPIO and spidev..."
         pip3 install --break-system-packages RPi.GPIO==0.7.1 spidev==3.5 || {
             log "WARNING" "Failed to install RPi.GPIO or spidev, trying without version pinning..."
@@ -1140,7 +1555,7 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         ["sqlalchemy>=1.4.0"]="sqlalchemy"
         ["python-nmap>=0.7.0"]="nmap"
         ["flask>=3.0.0"]="flask"
-        ["flask-socketio>=5.3.0"]="flask_socketio"
+        ["flask-socketio>=5.6.1"]="flask_socketio"
         ["flask-cors>=4.0.0"]="flask_cors"
         ["psutil>=5.9.0"]="psutil"
         ["logger>=1.4"]="logger"
@@ -1160,6 +1575,21 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         fi
     done
     
+    # flask-socketio: the Debian/Kali apt package (python3-flask-socketio,
+    # installed above) is 5.6.0, which crashes the web terminal's /terminal
+    # Socket.IO namespace on Flask 3.1+ with "AttributeError: property 'session'
+    # of 'RequestContext' object has no setter" — the connect handler reads the
+    # session and flask-socketio 5.6.0 tries to write it back to a now-read-only
+    # property. 5.6.1 fixes it. The apt package carries no dist-info RECORD, so
+    # pip cannot upgrade it in place (the plain pip loop above skips it on a mere
+    # presence check); install 5.6.1 alongside with --ignore-installed (it lands
+    # in /usr/local, which precedes /usr/lib on the import path, so it wins).
+    if ! python3 -c 'import sys,importlib.metadata as m; v=tuple(int(x) for x in m.version("flask-socketio").split(".")[:3]); sys.exit(0 if v>=(5,6,1) else 1)' 2>/dev/null; then
+        log "INFO" "Ensuring flask-socketio >= 5.6.1 (apt ships a build that breaks the web terminal)..."
+        pip3 install --break-system-packages --ignore-installed "flask-socketio>=5.6.1" || \
+            log "WARNING" "Could not upgrade flask-socketio to >=5.6.1 — the web terminal may not work until it is."
+    fi
+
     # Install OpenAI package separately for root (since service runs as root)
     log "INFO" "Installing OpenAI package for root user..."
     sudo pip3 install --break-system-packages --ignore-installed "openai>=2.0.0" || {
@@ -1183,18 +1613,24 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
     # and vice versa (no Waveshare library). SPI and I2C are already enabled by
     # configure_interfaces. Every dependency is small; installing all of them
     # costs far less than a reinstall to change screens.
-    if [ "$HEADLESS_MODE" = true ]; then
+    if [ "$HEADLESS_MODE" = true ] && [ "${RAGNAR_INSTALL_ALL_DISPLAYS:-0}" != "1" ]; then
         log "INFO" "Headless mode - skipping display driver installation"
     else
+        [ "$HEADLESS_MODE" = true ] && log "INFO" "Headless profile, but RAGNAR_INSTALL_ALL_DISPLAYS=1 — installing every display driver so a screen can be enabled later"
         log "INFO" "Installing display driver support for all screen types..."
 
+        # Platform layer first (SPI/I2C on, gpiozero + lgpio, Pi 5 gpiochip
+        # alias) — it prefers distro packages, so the pip installs below only
+        # fill in what is still missing.
+        ensure_pi_gpio_displays
+
         # SPI transport: e-Paper, GC9A01 / ST7735S / ILI9486 3.5" / Whisplay TFT, MAX7219.
-        pip3 install spidev --break-system-packages >/dev/null 2>&1 \
+        python3 -c "import spidev" 2>/dev/null || pip3 install spidev --break-system-packages >/dev/null 2>&1 \
             && log "SUCCESS" "spidev installed (SPI displays)" \
             || log "WARNING" "spidev failed to install — SPI displays will not work"
 
         # I2C transport: SSD1306 OLED, LCD1602 character LCD.
-        pip3 install smbus2 --break-system-packages >/dev/null 2>&1 \
+        { python3 -c "import smbus2" 2>/dev/null || pip3 install smbus2 --break-system-packages >/dev/null 2>&1; } \
             && log "SUCCESS" "smbus2 installed (I2C displays)" \
             || log "WARNING" "smbus2 failed to install — I2C displays will not work"
 
@@ -1202,6 +1638,16 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         pip3 install --break-system-packages luma.led_matrix luma.core >/dev/null 2>&1 \
             && log "SUCCESS" "luma.led_matrix installed (MAX7219 LED matrix)" \
             || log "WARNING" "luma.led_matrix failed to install — MAX7219 panels will not work"
+
+        # Waveshare library — backs every epd* profile. The interactive EPD
+        # menu clones this repo; an unattended / image build never visits that
+        # menu, so fetch it here if it is missing and we actually intend to
+        # support e-Paper screens.
+        if [ ! -d "/home/$ragnar_USER/e-Paper/RaspberryPi_JetsonNano/python" ]; then
+            log "INFO" "Fetching Waveshare e-Paper library source (needed for e-Paper screens)..."
+            ( cd "/home/$ragnar_USER" && clone_or_download https://github.com/waveshareteam/e-Paper.git e-Paper main ) \
+                >/dev/null 2>&1 || log "WARNING" "Could not fetch Waveshare e-Paper source — e-Paper screens stay unavailable until it is present"
+        fi
 
         # Waveshare library — backs every epd* profile.
         if [ -d "/home/$ragnar_USER/e-Paper/RaspberryPi_JetsonNano/python" ]; then
@@ -1220,7 +1666,13 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         python3 -c "import smbus2" 2>/dev/null || unusable+=("I2C displays (smbus2)")
         python3 -c "import luma.led_matrix" 2>/dev/null || unusable+=("MAX7219 (luma.led_matrix)")
         python3 -c "from waveshare_epd import epd2in13_V4" 2>/dev/null || unusable+=("e-Paper (waveshare_epd)")
-        for drv in gc9a01 st7735s ili9486 whisplay ssd1306 lcd1602 max7219; do
+        if [ "$IS_PI" = true ]; then
+            # The e-Paper and SPI TFT drivers toggle their pins through gpiozero,
+            # which on a Pi 5 can only use the lgpio backend.
+            python3 -c "import gpiozero" 2>/dev/null || unusable+=("e-Paper / SPI TFTs (gpiozero)")
+            python3 -c "import lgpio" 2>/dev/null || unusable+=("GPIO displays on a Pi 5 (lgpio)")
+        fi
+        for drv in gc9a01 st7735s st7789v2 ili9486 whisplay ssd1306 lcd1602 max7219; do
             [ -f "$ragnar_PATH/resources/waveshare_epd/${drv}.py" ] \
                 || unusable+=("${drv} (driver file missing)")
         done
@@ -1377,8 +1829,26 @@ except Exception as e:
     print(f"ERROR validating actions.json: {e}")
 PYTHON_EOF
     
-    # Add ragnar user to necessary groups (including sudo for WiFi management)
-    usermod -a -G spi,gpio,i2c,sudo,netdev $ragnar_USER
+    # Add ragnar user to necessary groups (including sudo for WiFi management).
+    #
+    # usermod is all-or-nothing: naming a single non-existent group makes it fail
+    # and add the user to NONE of the listed groups. The spi/gpio/i2c groups only
+    # exist on Raspberry Pi OS, so on a generic Ubuntu/Debian server the old
+    # `-G spi,gpio,i2c,sudo,netdev` aborted with "group 'spi' does not exist" and
+    # the user silently never got sudo/netdev — breaking WiFi management. Add only
+    # the groups that actually exist on this host.
+    local target_groups=()
+    for grp in spi gpio i2c sudo netdev; do
+        if getent group "$grp" >/dev/null 2>&1; then
+            target_groups+=("$grp")
+        fi
+    done
+    if [ ${#target_groups[@]} -gt 0 ]; then
+        local joined_groups
+        joined_groups=$(IFS=,; echo "${target_groups[*]}")
+        usermod -a -G "$joined_groups" "$ragnar_USER"
+        log "INFO" "Added $ragnar_USER to groups: $joined_groups"
+    fi
     
     # Configure sudo for WiFi management commands without password
     log "INFO" "Configuring sudo permissions for WiFi management..."
@@ -1454,7 +1924,7 @@ EOF
             grep -qE '^SystemMaxUse=' /etc/systemd/journald.conf 2>/dev/null \
                 || echo 'SystemMaxUse=200M' >> /etc/systemd/journald.conf
         fi
-        systemctl restart systemd-journald >/dev/null 2>&1 || true
+        [ "$IMAGE_BUILD" = true ] || systemctl restart systemd-journald >/dev/null 2>&1 || true
     }
     setup_persistent_journal
 
@@ -1466,6 +1936,7 @@ After=network.target
 
 [Service]
 ExecStartPre=-/bin/bash -c '/home/ragnar/Ragnar/kill_port_8000.sh; ip link set mon0 down >/dev/null 2>&1; iw dev mon0 del >/dev/null 2>&1; systemctl stop pwnagotchi 2>/dev/null; systemctl stop bettercap 2>/dev/null; true'
+ExecStartPre=-/bin/sh -c 'rfkill unblock all >/dev/null 2>&1 || true'
 EOF
 
     if [ -n "$wipe_exec" ]; then
@@ -1473,6 +1944,16 @@ EOF
         # Must run as separate process: GPIO pins conflict if shared with Display's EPDHelper
         cat >> /etc/systemd/system/ragnar.service << EOF
 ExecStartPre=-/usr/bin/python3 -OO /home/ragnar/Ragnar/wipe_epd.py
+EOF
+    fi
+
+    if [ "$HEADLESS_MODE" = true ]; then
+        # Never initialize the EPD on headless (web-only) installs. SharedData()
+        # inits the display at import time, which seizes SPI0 + GPIO and blanks a
+        # DPI/HDMI panel on shared-pin boards (HackBerry Pi). The headless
+        # entrypoint also sets this itself; this makes it explicit in the unit.
+        cat >> /etc/systemd/system/ragnar.service << EOF
+Environment=RAGNAR_HEADLESS=1
 EOF
     fi
 
@@ -1499,30 +1980,66 @@ EOF
     
     # Enable and start NetworkManager
     systemctl enable NetworkManager
-    systemctl start NetworkManager
-    
-    # Configure NetworkManager for WiFi management priority
+    [ "$IMAGE_BUILD" = true ] || systemctl start NetworkManager
+
+    # Let NetworkManager own wlan0. The legacy wlan stack (dhcpcd, the
+    # standalone wpa_supplicant.service, hostapd, dnsmasq) is enabled by its
+    # Debian package defaults, and on a NetworkManager system every one of them
+    # fights NM for wlan0. On a live box NM has usually already won, so this is
+    # a no-op; but on a fresh image they all start at boot, hostapd/dhcpcd seize
+    # wlan0 for the AP, and the portal's hand-off to client mode leaves the
+    # interface administratively down ("wlan0 down"). Disable them so only NM
+    # drives the radio. hostapd/dnsmasq are started on demand by Ragnar's WiFi
+    # manager for AP mode, so they are only unmasked, never left enabled.
+    if systemctl list-unit-files NetworkManager.service >/dev/null 2>&1; then
+        for _unit in dhcpcd wpa_supplicant hostapd dnsmasq; do
+            [ "$IMAGE_BUILD" = true ] || systemctl stop "$_unit" 2>/dev/null || true
+            systemctl disable "$_unit" 2>/dev/null || true
+        done
+        systemctl unmask hostapd 2>/dev/null || true
+        log "INFO" "Legacy wlan services disabled — NetworkManager owns wlan0 (hostapd/dnsmasq start on demand for AP mode)"
+    fi
+
+    # Configure NetworkManager for WiFi management priority + a STABLE uplink IP.
+    # Keep this content byte-for-byte in sync with scripts/provision_network_tools.sh
+    # (the update paths re-assert the same file); tests/test_nm_uplink_stable_mac.py
+    # guards against drift and against 'preserve' ever coming back.
     cat > /etc/NetworkManager/conf.d/99-ragnar-wifi.conf << EOF
 [main]
-# Ragnar WiFi Management Configuration
+# Ragnar network management
 dns=default
 
 [device]
-# Manage WiFi devices
+# Keep the Wi-Fi radio predictable: no per-scan MAC randomisation.
 wifi.scan-rand-mac-address=no
 
 [connection]
-# WiFi connection settings
-wifi.cloned-mac-address=preserve
+# Pin Ragnar's management uplink to the burned-in hardware MAC. On the offensive
+# (Ulfberht / Red Team) edition, monitor mode, macchanger and Nexmon change an
+# interface's MAC; NetworkManager's default of 'preserve' carries that changed
+# MAC into the managed connection, so the router hands out a new DHCP lease and
+# the box's IP keeps moving — on both Wi-Fi and Ethernet. 'permanent' keeps the
+# uplink on the real MAC so the lease stays put.
+wifi.cloned-mac-address=permanent
+ethernet.cloned-mac-address=permanent
+# Key the DHCP lease on the hardware MAC (option 61) so a recreated or renamed
+# connection profile (new UUID) can't change the client-id and pull a fresh
+# lease. A per-connection cloned-mac-address still overrides this default when
+# an engagement deliberately needs a spoofed uplink.
+ipv4.dhcp-client-id=mac
 EOF
 
-    # Ensure NetworkManager manages wlan0
-    nmcli dev set wlan0 managed yes 2>/dev/null || log "WARNING" "Could not set wlan0 to managed (interface may not exist yet)"
-    
+    # Ensure NetworkManager manages wlan0 (no live interface in a chroot)
+    if [ "$IMAGE_BUILD" != true ]; then
+        nmcli dev set wlan0 managed yes 2>/dev/null || log "WARNING" "Could not set wlan0 to managed (interface may not exist yet)"
+    fi
+
     # Enable and start services
-    systemctl daemon-reload
-    systemctl enable ragnar.service
-    if systemctl start ragnar.service; then
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable ragnar.service 2>/dev/null || true
+    if [ "$IMAGE_BUILD" = true ]; then
+        log "INFO" "Image build — ragnar.service enabled; it will start on the device's first boot"
+    elif systemctl start ragnar.service; then
         log "SUCCESS" "Started ragnar.service"
     else
         log "WARNING" "Failed to start ragnar.service (it will start on next boot); check logs"
@@ -1563,11 +2080,29 @@ configure_usb_gadget() {
         return 0
     fi
 
-    # Modify cmdline.txt
-    sed -i 's/rootwait/rootwait modules-load=dwc2,g_ether/' /boot/firmware/cmdline.txt
+    # Modify cmdline.txt (idempotent — avoid appending duplicates on re-runs)
+    if ! grep -q 'modules-load=dwc2' /boot/firmware/cmdline.txt; then
+        sed -i 's/rootwait/rootwait modules-load=dwc2,g_ether/' /boot/firmware/cmdline.txt
+    fi
+
+    # Opt-in HID keyboard gadget (Rubber Ducky). OFF by default, so the plain
+    # ECM gadget — and boards such as the Cardputer — are left untouched. Enable
+    # with RAGNAR_HID_GADGET=1. This adds the dwc2 peripheral controller and
+    # drops the legacy g_ether module, which otherwise claims the UDC and blocks
+    # the composite gadget from binding (/dev/hidg0 never appears).
+    if [ "${RAGNAR_HID_GADGET:-0}" = "1" ]; then
+        log "INFO" "USB HID keyboard gadget (Rubber Ducky) enabled"
+        mkdir -p /etc/ragnar
+        touch /etc/ragnar/hid_gadget.enabled
+        if ! grep -qE '^[[:space:]]*dtoverlay=dwc2' /boot/firmware/config.txt; then
+            printf '\n[all]\n# Ragnar: dwc2 USB peripheral controller for HID gadget\ndtoverlay=dwc2,dr_mode=peripheral\n' >> /boot/firmware/config.txt
+        fi
+        sed -i 's/modules-load=dwc2,g_ether/modules-load=dwc2/g' /boot/firmware/cmdline.txt
+        echo "blacklist g_ether" > /etc/modprobe.d/ragnar-no-g_ether.conf
+    fi
 
     # Modify config.txt
-    echo "dtoverlay=dwc2" >> /boot/firmware/config.txt
+    # echo "dtoverlay=dwc2" >> /boot/firmware/config.txt
 
     # Create USB gadget script
     cat > /usr/local/bin/usb-gadget.sh << 'EOF'
@@ -1599,6 +2134,23 @@ if [ -L configs/c.1/ecm.usb0 ]; then
     rm configs/c.1/ecm.usb0
 fi
 ln -s functions/ecm.usb0 configs/c.1/
+
+# HID keyboard function (Rubber Ducky) — only when opted in. The marker file is
+# written by the installer/updater HID-gadget option (RAGNAR_HID_GADGET=1), so
+# default boxes (and the Cardputer) keep the plain ECM gadget untouched.
+if [ -f /etc/ragnar/hid_gadget.enabled ]; then
+    if [ ! -d functions/hid.usb0 ]; then
+        mkdir -p functions/hid.usb0
+        echo 1 > functions/hid.usb0/protocol
+        echo 1 > functions/hid.usb0/subclass
+        echo 8 > functions/hid.usb0/report_length
+        printf '\x05\x01\x09\x06\xa1\x01\x05\x07\x19\xe0\x29\xe7\x15\x00\x25\x01\x75\x01\x95\x08\x81\x02\x95\x01\x75\x08\x81\x03\x95\x05\x75\x01\x05\x08\x19\x01\x29\x05\x91\x02\x95\x01\x75\x03\x91\x03\x95\x06\x75\x08\x15\x00\x25\x65\x05\x07\x19\x00\x29\x65\x81\x00\xc0' > functions/hid.usb0/report_desc
+    fi
+    if [ -L configs/c.1/hid.usb0 ]; then
+        rm configs/c.1/hid.usb0
+    fi
+    ln -s functions/hid.usb0 configs/c.1/
+fi
 
 max_retries=10
 retry_count=0
@@ -1688,13 +2240,90 @@ select_headless_variant() {
     done
 }
 
+# Resolve the install profile from RAGNAR_PROFILE in unattended mode, setting
+# exactly the same globals the interactive menu cases set. Keeps the menu as the
+# single source of truth for what each profile means while letting an image
+# build (or any script) pick one without a TTY.
+resolve_profile_unattended() {
+    local profile="${RAGNAR_PROFILE:-headless}"
+    log "INFO" "Unattended install — profile: $profile"
+
+    case "$profile" in
+        epaper|epd|e-paper)
+            SERVER_INSTALL=false; HEADLESS_MODE=false; TFT_MODE=false
+            HEADLESS_VARIANT=""; HEADLESS_VARIANT_LABEL=""
+            RAGNAR_ENTRYPOINT="Ragnar.py"
+            EPD_VERSION="${RAGNAR_DISPLAY:-epd2in13_V4}"
+            ;;
+        tft|lcd)
+            SERVER_INSTALL=false; HEADLESS_MODE=false; TFT_MODE=true
+            HEADLESS_VARIANT=""; HEADLESS_VARIANT_LABEL=""
+            RAGNAR_ENTRYPOINT="Ragnar.py"
+            EPD_VERSION="${RAGNAR_DISPLAY:-gc9a01}"
+            ;;
+        cardputer|cardputerzero)
+            SERVER_INSTALL=false; HEADLESS_MODE=false; TFT_MODE=true; CARDPUTER_MODE=true
+            HEADLESS_VARIANT=""; HEADLESS_VARIANT_LABEL=""
+            RAGNAR_ENTRYPOINT="Ragnar.py"
+            EPD_VERSION="st7789v2"
+            ;;
+        server-display|display)
+            SERVER_INSTALL=true; HEADLESS_MODE=false; TFT_MODE=false
+            HEADLESS_VARIANT=""; HEADLESS_VARIANT_LABEL="Server install with display"
+            RAGNAR_ENTRYPOINT="Ragnar.py"
+            EPD_VERSION="${RAGNAR_DISPLAY:-}"
+            ;;
+        headless|server)
+            SERVER_INSTALL=true; HEADLESS_MODE=true; TFT_MODE=false
+            HEADLESS_VARIANT="server"; HEADLESS_VARIANT_LABEL="Server install"
+            RAGNAR_ENTRYPOINT="headlessRagnar.py"
+            ;;
+        hbp0|hbp0_ragnar)
+            SERVER_INSTALL=false; HEADLESS_MODE=true; TFT_MODE=false
+            HEADLESS_VARIANT="hbp0_ragnar"; HEADLESS_VARIANT_LABEL="hbp0_ragnar by DezusAZ"
+            RAGNAR_ENTRYPOINT="headlessRagnar.py"
+            ;;
+        docker)
+            log "INFO" "Unattended docker profile selected"
+            local rc=0
+            deploy_docker || rc=$?
+            clean_exit $rc
+            ;;
+        *)
+            log "WARNING" "Unknown RAGNAR_PROFILE='$profile' — falling back to headless"
+            SERVER_INSTALL=true; HEADLESS_MODE=true; TFT_MODE=false
+            HEADLESS_VARIANT="server"; HEADLESS_VARIANT_LABEL="Server install"
+            RAGNAR_ENTRYPOINT="headlessRagnar.py"
+            ;;
+    esac
+
+    log "INFO" "Resolved: entrypoint=$RAGNAR_ENTRYPOINT headless=$HEADLESS_MODE tft=$TFT_MODE display=${EPD_VERSION:-none}"
+}
+
 # Verify installation
 verify_installation() {
     log "INFO" "Verifying installation..."
-    
+
+    # In an image-build chroot nothing is running (no systemd, no network, no
+    # web server), so the "is it up?" checks below are all meaningless and would
+    # log scary warnings. Confirm the tools and Python modules are present
+    # instead, and leave the runtime verification to the device's first boot.
+    if [ "$IMAGE_BUILD" = true ]; then
+        for c in nmcli hostapd dnsmasq; do
+            command -v "$c" >/dev/null 2>&1 \
+                && log "SUCCESS" "$c present" \
+                || log "WARNING" "$c missing"
+        done
+        python3 -c "import flask, flask_socketio, psutil, netifaces" 2>/dev/null \
+            && log "SUCCESS" "Core Python modules present" \
+            || log "WARNING" "Some core Python modules missing (check the pip step)"
+        log "INFO" "Image build — skipping running-service / web-interface checks"
+        return 0
+    fi
+
     # Check WiFi management dependencies
     log "INFO" "Verifying WiFi management dependencies..."
-    
+
     # Check NetworkManager
     if systemctl is-active --quiet NetworkManager; then
         log "SUCCESS" "NetworkManager is running"
@@ -1776,6 +2405,76 @@ clean_exit() {
 }
 
 # Display the installation menu with banner
+# ── Docker deployment ────────────────────────────────────────────────────────
+# Alternative to the native install: run the headless web UI in a container.
+# Terminal action (like the Pineapple path) — it does not fall through into the
+# pip/systemd install. Full guide: docs/DOCKER.md.
+deploy_docker() {
+    log "INFO" "Docker container deployment selected"
+    local repo_dir="$ragnar_PATH"
+    if [ ! -f "$repo_dir/Dockerfile" ]; then
+        log "ERROR" "Dockerfile not found in $repo_dir — is this a full clone?"
+        return 1
+    fi
+
+    # 1. Ensure the Docker engine is present (official convenience script covers
+    #    Raspberry Pi OS, Debian and Ubuntu).
+    if ! command -v docker >/dev/null 2>&1; then
+        log "INFO" "Docker not installed — installing via get.docker.com ..."
+        if curl -fsSL https://get.docker.com | sh; then
+            log "SUCCESS" "Docker engine installed"
+        else
+            log "ERROR" "Docker install failed. Install Docker yourself, then run:"
+            log "INFO" "  cd $repo_dir && docker compose up -d --build"
+            return 1
+        fi
+    fi
+    systemctl enable --now docker >/dev/null 2>&1 || true
+
+    # 2. Pick the compose command (v2 plugin preferred, v1 fallback).
+    local compose_cmd=""
+    if docker compose version >/dev/null 2>&1; then
+        compose_cmd="docker compose"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        compose_cmd="docker-compose"
+    else
+        log "ERROR" "Docker Compose not available (need the 'docker compose' plugin)"
+        log "INFO" "Install docker-compose-plugin, then: cd $repo_dir && docker compose up -d --build"
+        return 1
+    fi
+
+    # 3. Let the invoking user drive docker without sudo next time.
+    if [ -n "${SUDO_USER:-}" ]; then
+        usermod -aG docker "$SUDO_USER" 2>/dev/null             && log "INFO" "Added $SUDO_USER to the 'docker' group (re-login to take effect)" || true
+    fi
+
+    # 4. Avoid colliding with a native ragnar.service already on :8000.
+    local web_port=8000
+    if systemctl is-active --quiet ragnar 2>/dev/null; then
+        web_port=8010
+        log "WARNING" "A native ragnar.service is active on :8000 — the container will use :$web_port"
+    fi
+
+    # 5. Build the image and start the container (host networking is set in the
+    #    compose file, so the container sees the real LAN; RAGNAR_WEB_PORT drives
+    #    the bind port). The build pulls Python/network deps and can take a while.
+    log "INFO" "Building image and starting container (this can take several minutes)..."
+    if ( cd "$repo_dir" && RAGNAR_WEB_PORT="$web_port" $compose_cmd up -d --build ); then
+        local ip
+        ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+        log "SUCCESS" "Ragnar container is up"
+        echo ""
+        echo -e "   ${GREEN}Web UI:${NC} http://${ip:-<host-ip>}:$web_port"
+        echo -e "   ${CYAN}Logs:${NC}   cd $repo_dir && $compose_cmd logs -f"
+        echo -e "   ${CYAN}Update:${NC} cd $repo_dir && git pull && $compose_cmd up -d --build"
+        echo -e "   ${YELLOW}Note:${NC} radios (Wi-Fi monitor/SDR/GPS/BT) need hardware passthrough — see docs/DOCKER.md"
+        return 0
+    else
+        log "ERROR" "docker compose failed. Inspect with: cd $repo_dir && $compose_cmd logs"
+        return 1
+    fi
+}
+
 show_install_menu() {
     local is_pi=$1
     clear
@@ -1806,10 +2505,13 @@ BANNER
         echo -e "   ${CYAN}*${YELLOW} 3)${CYAN} Server install with display                    ${NC}"
         echo -e "   ${CYAN}*${YELLOW} 4)${CYAN} Server install (headless, no display)           ${NC}"
         echo -e "   ${CYAN}*${YELLOW} 5)${CYAN} WiFi Pineapple Pager ${RED}(beta)                    ${NC}"
+        echo -e "   ${CYAN}*${YELLOW} 6)${CYAN} Docker container (headless web UI)             ${NC}"
+        echo -e "   ${CYAN}*${YELLOW} 7)${CYAN} M5Stack CardputerZero ${RED}(built-in LCD + keyboard)${NC}"
     else
         echo -e "   ${CYAN}*${YELLOW} 1)${CYAN} Server install with display                    ${NC}"
         echo -e "   ${CYAN}*${YELLOW} 2)${CYAN} Server install (headless, no display)           ${NC}"
         echo -e "   ${CYAN}*${YELLOW} 3)${CYAN} WiFi Pineapple Pager                            ${NC}"
+        echo -e "   ${CYAN}*${YELLOW} 4)${CYAN} Docker container (headless web UI)             ${NC}"
     fi
     echo ""
     echo -e "${CYAN}  ══════════════════════════════════════════════════════════${NC}"
@@ -1819,6 +2521,21 @@ BANNER
 }
 
 # Main installation process
+# Cellular uplink fallback: a USB-tethered hotspot / phone / LTE modem (rndis_host,
+# cdc_ether, cdc_ncm, ipheth, qmi_wwan, cdc_mbim — all in the stock Pi kernel)
+# must be a BACKUP path. dhcpcd/NetworkManager would otherwise give it a lower
+# route metric than Wi-Fi and silently make it the primary uplink. Installs a
+# NetworkManager conf.d drop-in + a dhcpcd hook (cellular_uplink.py install).
+setup_cellular_fallback() {
+    if [ -f "$ragnar_PATH/cellular_uplink.py" ]; then
+        if python3 "$ragnar_PATH/cellular_uplink.py" install >/dev/null 2>&1; then
+            log "INFO" "Cellular uplink fallback hooks installed"
+        else
+            log "WARNING" "Cellular uplink fallback hook install failed (the service retries at start)"
+        fi
+    fi
+}
+
 # Install Tailscale and optionally join this unit to the Ragnar mesh.
 # Three entry paths, all handled by scripts/setup_mesh.sh:
 #   * unattended  — RAGNAR_MESH_AUTHKEY set, or /boot/ragnar-mesh.conf present
@@ -1848,6 +2565,14 @@ setup_ragnar_mesh() {
     echo -e "from anywhere without port forwarding — and so the units share alerts."
     echo -e "${YELLOW}You can also do this later from the web UI (Ragnar Mesh tab).${NC}"
     echo ""
+
+    # Unattended with no provisioning data: never prompt — leave the mesh off,
+    # exactly as declining the prompt would. The web UI can join later.
+    if [ "$UNATTENDED" = true ]; then
+        log "INFO" "Unattended, no mesh key supplied — skipping Tailscale/mesh setup"
+        return 0
+    fi
+
     read -p "Install Tailscale for mesh networking now? (y/n): " mesh_choice
 
     if [[ ! "$mesh_choice" =~ ^[Yy]$ ]]; then
@@ -1868,9 +2593,14 @@ setup_ragnar_mesh() {
     if [ -n "$mesh_key" ]; then
         read -p "Unit number for this box (1-99, blank to set later): " mesh_unit
         read -p "Site label (e.g. Jersey DC, blank to skip): " mesh_label
+        echo -e "Mesh name: ${YELLOW}blank${NC} joins the main mesh. A short name (e.g. ${GREEN}2${NC} or"
+        echo -e "${GREEN}lab${NC}) puts this box in a separate, isolated mesh (tag:ragnar-mesh-<name>)"
+        echo -e "on the same Tailscale account — meshes never see or trust each other."
+        read -p "Mesh name (blank = main mesh): " mesh_suffix
         RAGNAR_MESH_AUTHKEY="$mesh_key" \
         RAGNAR_MESH_UNIT_ID="$mesh_unit" \
         RAGNAR_MESH_LABEL="$mesh_label" \
+        RAGNAR_MESH_SUFFIX="$mesh_suffix" \
             bash "$script" provision \
             || log "WARNING" "Joining the mesh failed — retry from the web UI"
     else
@@ -1895,13 +2625,18 @@ main() {
         exit 1
     fi
 
-    local is_pi=false
-    if grep -qi "Raspberry Pi" /proc/cpuinfo 2>/dev/null; then
-        is_pi=true
-    fi
+    # CardputerZero: something on the built-in screen from the first minute.
+    install_splash "Answer the questions in your terminal"
 
-    # Display menu and handle selection (loops on invalid input)
+    # IS_PI is set by detect_platform (called above); reuse it for the menu.
+    local is_pi=$IS_PI
+
+    # Unattended: pick the profile from RAGNAR_PROFILE and skip the whole menu.
     local profile_choice=""
+    if [ "$UNATTENDED" = true ]; then
+        resolve_profile_unattended
+    else
+    # Display menu and handle selection (loops on invalid input)
     while true; do
         show_install_menu "$is_pi"
         read -r profile_choice
@@ -1948,6 +2683,22 @@ main() {
                     log "INFO" "Server install (headless) selected on Raspberry Pi hardware"
                     break
                     ;;
+                7)
+                    # M5Stack CardputerZero — a Raspberry Pi CM0 (BCM2837) box,
+                    # so this is a normal Pi install pinned to its built-in 1.9"
+                    # ST7789V2 LCD + TCA8418 keyboard. TFT_MODE routes through the
+                    # SPI-display path; CARDPUTER_MODE short-circuits the panel
+                    # sub-menu to st7789v2 and prints the keyboard note.
+                    SERVER_INSTALL=false
+                    HEADLESS_MODE=false
+                    TFT_MODE=true
+                    CARDPUTER_MODE=true
+                    HEADLESS_VARIANT=""
+                    HEADLESS_VARIANT_LABEL=""
+                    RAGNAR_ENTRYPOINT="Ragnar.py"
+                    log "INFO" "M5Stack CardputerZero installation selected"
+                    break
+                    ;;
                 5)
                     log "INFO" "WiFi Pineapple Pager installation selected"
                     echo ""
@@ -1971,8 +2722,13 @@ main() {
                     fi
                     clean_exit $pager_exit_code
                     ;;
+                6)
+                    docker_exit_code=0
+                    deploy_docker || docker_exit_code=$?
+                    clean_exit $docker_exit_code
+                    ;;
                 *)
-                    echo -e "\n   ${RED}Invalid option. Please select 1, 2, 3, 4, or 5.${NC}"
+                    echo -e "\n   ${RED}Invalid option. Please select 1, 2, 3, 4, 5, 6, or 7.${NC}"
                     sleep 1
                     ;;
             esac
@@ -2015,16 +2771,24 @@ main() {
                     fi
                     clean_exit $pager_exit_code
                     ;;
+                4)
+                    docker_exit_code=0
+                    deploy_docker || docker_exit_code=$?
+                    clean_exit $docker_exit_code
+                    ;;
                 *)
-                    echo -e "\n   ${RED}Invalid option. Please select 1, 2, or 3.${NC}"
+                    echo -e "\n   ${RED}Invalid option. Please select 1, 2, 3, or 4.${NC}"
                     sleep 1
                     ;;
             esac
         fi
     done
+    fi  # end: interactive menu (skipped when UNATTENDED)
 
-    # Only attempt e-paper setup when not in server/headless profile
-    if [ "$HEADLESS_MODE" != true ]; then
+    # Only attempt e-paper setup when not in server/headless profile.
+    # In unattended mode EPD_VERSION is already set by resolve_profile_unattended,
+    # so skip the interactive display-selection prompts entirely.
+    if [ "$HEADLESS_MODE" != true ] && [ "$UNATTENDED" != true ]; then
 
         # ── TFT LCD display path ──────────────────────────────────────────────
         if [ "$TFT_MODE" = true ]; then
@@ -2032,6 +2796,20 @@ main() {
             echo -e "${YELLOW}Installing SPI dependencies for TFT display...${NC}"
             pip3 install spidev --break-system-packages >/dev/null 2>&1
             log "SUCCESS" "SPI dependencies installed for TFT display"
+
+            # M5Stack CardputerZero: display is fixed (built-in 1.9" ST7789V3),
+            # so skip the panel picker and go straight to its driver. The stock
+            # image exposes the LCD and keyboard through kernel drivers; smbus2
+            # and spidev are only for the fallback on a plain kernel.
+            if [ "$CARDPUTER_MODE" = true ]; then
+                EPD_VERSION="st7789v2"
+                pip3 install smbus2 --break-system-packages >/dev/null 2>&1
+                echo -e "${GREEN}✓ M5Stack CardputerZero: built-in 1.9\" ST7789 V3 LCD (320x170)${NC}"
+                echo -e "${CYAN}  Keyboard: F/X/Z/C or arrows navigate, Enter selects, Space/Backspace/Tab = KEY1-3.${NC}"
+                echo -e "${YELLOW}  This replaces the stock launcher on the LCD and keyboard; undo it with:${NC}"
+                echo -e "${YELLOW}  sudo $ragnar_PATH/scripts/cardputer_takeover.sh revert${NC}"
+                log "INFO" "Display selected: st7789v2 (CardputerZero)"
+            else
 
             echo -e "\n${BLUE}Select your TFT/OLED display:${NC}"
             echo "1. GC9A01      (1.28\" Round 240x240)"
@@ -2070,6 +2848,7 @@ main() {
                 echo -e "${GREEN}✓ Selected display: $EPD_VERSION${NC}"
                 log "INFO" "Display selected: $EPD_VERSION"
             fi
+            fi  # end CARDPUTER_MODE else (TFT panel picker)
 
         # ── E-Paper display path ──────────────────────────────────────────────
         else
@@ -2306,9 +3085,21 @@ except:
 
     CURRENT_STEP=8; show_progress "Configuring USB Gadget"
     configure_usb_gadget
+    setup_cellular_fallback
 
     CURRENT_STEP=9; show_progress "Setting up services"
     setup_services
+
+    # A stock CardputerZero keeps the LCD and keyboard with its own launcher.
+    if [ "$CARDPUTER_MODE" = true ] && [ "$IMAGE_BUILD" = true ]; then
+        # Building the CardputerZero image: there is no board to ask, so
+        # everything the board needs is written into the image.
+        bash "$ragnar_PATH/scripts/cardputer_hardware.sh" image
+    elif [ "$CARDPUTER_MODE" = true ]; then
+        bash "$ragnar_PATH/scripts/cardputer_takeover.sh" apply
+        # Camera tools + expansion-header checks
+        bash "$ragnar_PATH/scripts/cardputer_hardware.sh" setup
+    fi
 
     CURRENT_STEP=9; show_progress "Verifying installation"
     verify_installation
@@ -2334,8 +3125,18 @@ except:
     
     log "INFO" "System RAM: ${TOTAL_RAM_GB}GB / ${TOTAL_RAM_MB}MB (minimum: 7.5GB)"
     
-    if [ "$IS_PI_ZERO" = false ] && [ "$HAS_ENOUGH_RAM" = "1" ]; then
-        log "INFO" "System qualifies for advanced security tools (${TOTAL_RAM_GB}GB RAM, not Pi Zero)"
+    # RAGNAR_INSTALL_ADVANCED overrides the RAM gate in unattended mode:
+    #   no   → never install (image default — keeps the image small; a capable
+    #          device installs these from the web UI). Also the right choice for
+    #          an image build, where the build host's RAM is not the target's.
+    #   yes  → install regardless of the RAM gate.
+    #   auto → keep the RAM/Pi-Zero gate below (interactive default).
+    local _adv="${RAGNAR_INSTALL_ADVANCED:-auto}"
+    [ "$IMAGE_BUILD" = true ] && [ "$_adv" = "auto" ] && _adv="no"
+    if [ "$_adv" = "no" ]; then
+        log "INFO" "Advanced security tools skipped (RAGNAR_INSTALL_ADVANCED=no / image build). Install later from the web UI."
+    elif [ "$_adv" = "yes" ] || { [ "$IS_PI_ZERO" = false ] && [ "$HAS_ENOUGH_RAM" = "1" ]; }; then
+        log "INFO" "Installing advanced security tools (choice=$_adv, ${TOTAL_RAM_GB}GB RAM)"
         echo -e "\n${CYAN}═══════════════════════════════════════════════════════════════${NC}"
         echo -e "${CYAN}  Installing Advanced Security Tools${NC}"
         echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
@@ -2395,6 +3196,9 @@ except:
 
     log "SUCCESS" "ragnar installation completed!"
     log "INFO" "Please reboot your system to apply all changes."
+    if [ "$SPLASH_STATE" = "yes" ] && [ -z "$SPLASH_DRY_RUN" ]; then
+        splash_run --message "Ragnar is installed" --detail "Restart the CardputerZero to start it." --progress 100
+    fi
     echo -e "\n${GREEN}Installation completed successfully!${NC}"
     echo -e "${YELLOW}Important notes:${NC}"
     echo "1. If configuring Windows PC for USB gadget connection:"
@@ -2412,8 +3216,20 @@ except:
     echo "   sudo git pull   # Get latest updates"
     echo "   sudo systemctl restart ragnar"
 
-    read -p "Would you like to reboot now? (y/n): " reboot_now
-    if [ "$reboot_now" = "y" ]; then
+    # Never reboot while baking an image (there is no "system" to reboot — we
+    # are in a chroot). In other unattended runs, honour RAGNAR_REBOOT.
+    local reboot_now
+    if [ "$IMAGE_BUILD" = true ]; then
+        log "INFO" "Image build complete — Ragnar baked in, services enabled for first boot"
+        clean_exit 0
+    elif [ "$UNATTENDED" = true ]; then
+        reboot_now="${RAGNAR_REBOOT:-n}"
+        log "INFO" "Unattended reboot choice: $reboot_now"
+    else
+        read -p "Would you like to reboot now? (y/n): " reboot_now
+    fi
+
+    if [ "$reboot_now" = "y" ] || [ "$reboot_now" = "Y" ]; then
         if reboot; then
             log "INFO" "System reboot initiated."
         else

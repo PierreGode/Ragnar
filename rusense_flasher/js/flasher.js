@@ -232,10 +232,18 @@ window.provisionDevice = async function () {
   }
   const nodeIdRaw = ($("prov-node").value || "").trim();
   const nodeId = nodeIdRaw === "" ? 1 : parseInt(nodeIdRaw, 10);
+  // Optional fixed 2.4 GHz channel. Blank = omit the key so the node auto-detects
+  // from its AP; when set it becomes the firmware's priority-#1 channel override.
+  const channelRaw = (($("prov-channel") && $("prov-channel").value) || "").trim();
+  const channel = channelRaw === "" ? undefined : parseInt(channelRaw, 10);
   if (!ssid)     { alert("Enter your 2.4 GHz WiFi SSID."); return; }
   if (!targetIp) { alert("Enter the RuSense server IP (your Ragnar box's address)."); return; }
   if (!Number.isInteger(nodeId) || nodeId < 0 || nodeId > 255) {
     alert("Node ID must be a whole number 0-255. Give each node in the mesh a different ID.");
+    return;
+  }
+  if (channel !== undefined && (!Number.isInteger(channel) || channel < 1 || channel > 14)) {
+    alert("Channel must be a whole number 1-14 (2.4 GHz), or blank to auto-detect from the AP.");
     return;
   }
   if (typeof window.buildCsiCfgNvs !== "function") { alert("Provisioning module failed to load."); return; }
@@ -253,9 +261,10 @@ window.provisionDevice = async function () {
 
     setStatus("Building provisioning data…");
     const extAntenna = !!($("prov-ext-ant") && $("prov-ext-ant").checked);
-    const nvs = window.buildCsiCfgNvs({ ssid, password, target_ip: targetIp, target_port: targetPort, node_id: nodeId, ext_antenna: extAntenna });
+    const nvs = window.buildCsiCfgNvs({ ssid, password, target_ip: targetIp, target_port: targetPort, node_id: nodeId, channel, ext_antenna: extAntenna });
     log("Antenna   : " + (extAntenna ? "external u.FL (XIAO C6)" : "on-board"));
     log("WiFi SSID : " + ssid);
+    log("Channel   : " + (channel === undefined ? "auto (detect from AP)" : channel));
     log("Server    : " + targetIp + ":" + targetPort);
     if (strippedPort) {
       log("Note      : ':" + strippedPort + "' was stripped from the Server IP — CSI streams to UDP " +

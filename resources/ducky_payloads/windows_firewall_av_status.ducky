@@ -1,0 +1,10 @@
+REM Windows firewall + Defender/AV posture to the Desktop (defense.txt).
+REM Authorized testing only — read-only posture check, changes nothing.
+DELAY 1000
+GUI r
+DELAY 500
+STRING powershell -w hidden -nop
+ENTER
+DELAY 1000
+STRING $o="$env:USERPROFILE\Desktop\defense.txt"; Get-NetFirewallProfile | Select Name,Enabled,DefaultInboundAction,DefaultOutboundAction | Format-Table -Auto | Out-File $o; Get-MpComputerStatus | Select AMRunningMode,AntivirusEnabled,RealTimeProtectionEnabled,AntivirusSignatureLastUpdated | Format-List | Out-File -Append $o; Get-MpPreference | Select DisableRealtimeMonitoring,ExclusionPath | Out-File -Append $o
+ENTER

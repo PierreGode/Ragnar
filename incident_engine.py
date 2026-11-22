@@ -146,7 +146,10 @@ _CODE_CAT = {
     'pnl_leak': 'wifi_recon',
     'evil_twin': 'wifi_rogue_ap', 'karma_mana': 'wifi_rogue_ap',
     'beacon_flood': 'wifi_rogue_ap',
-    'deauth_flood': 'wifi_dos',
+    'deauth_flood': 'wifi_dos', 'auth_flood': 'wifi_dos',
+    # halehound_watch multitool verdict (any confidence tier).
+    'HH-CONFIRM': 'attack_multitool', 'HH-LIKELY': 'attack_multitool',
+    'HH-POSSIBLE': 'attack_multitool',
     'handshake_harvest': 'wifi_handshake', 'pmkid_harvest': 'wifi_handshake',
     'wpa_downgrade': 'wifi_downgrade', 'wpa3_transition': 'wifi_downgrade',
     # arp_guard
@@ -206,6 +209,11 @@ def categorize(alert):
 # each listed group. Most-specific (highest `rank`) matching pattern wins.
 
 PATTERNS = [
+    {'name': 'halehound_multitool',
+     'label': 'ESP32 attack multitool active (HaleHound / Marauder / Bruce-class)',
+     'technique': 'ESP32 multitool — evil-twin/auth-flood/BLE-spam + LAN recon',
+     'all_of': {'attack_multitool'},
+     'severity': 'critical', 'rank': 6},
     {'name': 'evil_twin_handshake_capture',
      'label': 'Evil-twin WPA handshake capture',
      'technique': 'Rogue AP → forced deauth → 4-way/PMKID capture',
@@ -325,6 +333,11 @@ class IncidentEngine:
         self.max_incidents = int(max_incidents)
         self._incidents = collections.OrderedDict()   # id -> Incident
         self._next_id = 1
+
+    def clear(self):
+        """Drop every correlated incident. Used when the operator clears the
+        Watchtower pane so the fused view empties alongside the raw alerts."""
+        self._incidents.clear()
 
     def _expired(self, inc, now):
         return (now - inc.last_ts) > self.window_s
@@ -524,7 +537,28 @@ def _self_test():
     ck('bridging alert fuses to one incident', len(incs) == 1)
     ck('fused incident is l2_mitm_tls', incs[0]['pattern'] == 'l2_mitm_tls')
 
+    # 6b) HaleHound multitool verdict -> attack_multitool -> named incident ---
+    ck('auth_flood -> wifi_dos',
+       'wifi_dos' in categorize(_alert('wifiwatch', ['auth_flood'], 1)))
+    ck('halehound verdict -> attack_multitool',
+       'attack_multitool' in categorize(_alert('halehound', ['HH-CONFIRM'], 1)))
+    eng = IncidentEngine()
+    inc = eng.ingest(_alert('halehound', ['HH-CONFIRM'], 650, src='ac:67:b2:00:00:01',
+                            severity='critical',
+                            title='HaleHound-class attack multitool CONFIRMED'))
+    incs = eng.incidents()
+    ck('halehound alert -> one incident', len(incs) == 1)
+    ck('halehound incident named', incs[0]['pattern'] == 'halehound_multitool')
+    ck('halehound incident critical', incs[0]['severity'] == 'critical')
+
     # 7) summary shape ------------------------------------------------------
+    eng = IncidentEngine()
+    eng.ingest(_alert('arp_guard', ['binding_flap'], 600, src='10.0.0.9',
+                      severity='critical'))
+    eng.ingest(_alert('certwatch', ['NAME_MISMATCH'], 601, server_ip='10.0.0.50',
+                      severity='critical', title='mismatch'))
+    eng.ingest(_alert('arp_guard', ['garp_subnet_poison'], 602, src='10.0.0.9',
+                      target='10.0.0.50', severity='critical'))
     s = eng.summary()
     ck('summary total', s['total'] == 1)
     ck('summary names the chain', s['named'] == 1)

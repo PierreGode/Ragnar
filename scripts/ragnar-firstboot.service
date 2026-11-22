@@ -1,0 +1,21 @@
+[Unit]
+Description=Ragnar OS first-boot finalisation (per-device setup, runs once)
+# Order before the main service so display/hostname/config are settled first.
+Before=ragnar.service
+# Mesh provisioning wants the network; don't hard-require it (offline boots must
+# still finish and disable this unit).
+Wants=network-online.target
+After=network-online.target
+# Skip entirely once the stamp exists — a cheap guard on top of self-disable.
+ConditionPathExists=!/var/lib/ragnar/firstboot.done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/ragnar/Ragnar/scripts/ragnar-firstboot.sh
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

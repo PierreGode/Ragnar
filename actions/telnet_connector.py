@@ -4,7 +4,6 @@ and logs the successful login attempts.
 """
 
 import os
-import pandas as pd
 try:
     import telnetlib
 except ImportError:
@@ -84,19 +83,12 @@ class TelnetConnector:
     """
     def __init__(self, shared_data):
         self.shared_data = shared_data
-        
-        # Read from SQLite via shared_data (no more CSV)
-        try:
-            data = shared_data.read_data()
-            self.scan = pd.DataFrame(data)
-            if "Ports" not in self.scan.columns:
-                self.scan["Ports"] = None
-            # Ensure Ports column is string type before using .str accessor
-            self.scan["Ports"] = self.scan["Ports"].astype(str)
-            self.scan = self.scan[self.scan["Ports"].str.contains("23", na=False)]
-        except Exception as e:
-            logger.warning(f"Could not read data from database: {e}")
-            self.scan = pd.DataFrame(columns=['MAC Address', 'IPs', 'Hostnames', 'Ports', 'Alive'])
+
+        # self.scan is (re)built by load_scan_file() before every use, so it is
+        # not built here. That keeps pandas off the startup path: the connector
+        # is instantiated at boot by the orchestrator, but pandas is only imported
+        # when an attack action actually runs (saves ~44 MB RSS; measured 111MB->67MB startup on this box).
+        self.scan = None
 
         self.users = open(shared_data.usersfile, "r").read().splitlines()
         self.passwords = open(shared_data.passwordsfile, "r").read().splitlines()
@@ -116,6 +108,7 @@ class TelnetConnector:
         """
         Load from SQLite database and filter for Telnet ports.
         """
+        import pandas as pd  # lazy: keeps ~44MB pandas out of RAM until an attack action runs
         try:
             data = self.shared_data.read_data()
             self.scan = pd.DataFrame(data)
@@ -218,6 +211,7 @@ class TelnetConnector:
         """
         Save the results of successful login attempts to a CSV file.
         """
+        import pandas as pd  # lazy: keeps ~44MB pandas out of RAM until an attack action runs
         df = pd.DataFrame(self.results, columns=['MAC Address', 'IP Address', 'Hostname', 'User', 'Password', 'Port'])
         df.to_csv(self.telnetfile, index=False, mode='a', header=not os.path.exists(self.telnetfile))
         self.results = []  # Reset temporary results after saving
@@ -226,6 +220,7 @@ class TelnetConnector:
         """
         Remove duplicate entries from the results file.
         """
+        import pandas as pd  # lazy: keeps ~44MB pandas out of RAM until an attack action runs
         df = pd.read_csv(self.telnetfile)
         df.drop_duplicates(inplace=True)
         df.to_csv(self.telnetfile, index=False)

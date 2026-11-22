@@ -11,7 +11,9 @@
 # them:
 #
 #   1. Imaging / unattended. Set RAGNAR_MESH_AUTHKEY (plus optionally
-#      RAGNAR_MESH_UNIT_ID, RAGNAR_MESH_LABEL, RAGNAR_MESH_ROUTES) in the
+#      RAGNAR_MESH_UNIT_ID, RAGNAR_MESH_LABEL, RAGNAR_MESH_ROUTES,
+#      RAGNAR_MESH_SUFFIX to place the box in a separate mesh, and
+#      RAGNAR_MESH_SECRET to arm the opt-in per-mesh second factor) in the
 #      environment or in /boot/ragnar-mesh.conf. The unit joins on first boot
 #      with nobody logged in — the technician plugs in power and ethernet and
 #      walks away.
@@ -27,7 +29,26 @@
 
 set -o pipefail
 
-MESH_TAG="${RAGNAR_MESH_TAG:-tag:ragnar-mesh}"
+# One tailnet can hold several *isolated* Ragnar meshes, told apart only by
+# their tag: ragnar-mesh (the default) and ragnar-mesh-<suffix> for each extra
+# one. RAGNAR_MESH_TAG is the explicit override (full tag); RAGNAR_MESH_SUFFIX is
+# the friendly form a technician sets ("2", "lab"). A node tagged ragnar-mesh-2
+# is invisible to a ragnar-mesh node even on the same account.
+if [ -n "${RAGNAR_MESH_TAG:-}" ]; then
+    MESH_TAG="$RAGNAR_MESH_TAG"
+elif [ -n "${RAGNAR_MESH_SUFFIX:-}" ]; then
+    # Tailscale tags are DNS labels: lowercase [a-z0-9-]. Tolerate a pasted full
+    # tag or "ragnar-mesh-2" as well as a bare "2".
+    _mesh_suffix="$(printf '%s' "$RAGNAR_MESH_SUFFIX" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/^tag:ragnar-mesh-?//; s/^ragnar-mesh-?//; s/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//')"
+    MESH_TAG="tag:ragnar-mesh${_mesh_suffix:+-$_mesh_suffix}"
+    # Record the resolved tag in Ragnar's config too, so the web UI and peer
+    # scans agree with what was advertised at join time.
+    export RAGNAR_MESH_TAG="$MESH_TAG"
+else
+    MESH_TAG="tag:ragnar-mesh"
+fi
 BOOT_CONF="/boot/ragnar-mesh.conf"
 BOOT_CONF_ALT="/boot/firmware/ragnar-mesh.conf"
 RAGNAR_CONFIG="${RAGNAR_CONFIG:-/home/ragnar/Ragnar/config/shared_config.json}"
@@ -159,7 +180,7 @@ join_mesh() {
 # yet; Ragnar will write its defaults and the UI can set these later.
 apply_ragnar_config() {
     [ ! -f "$RAGNAR_CONFIG" ] && return 0
-    [ -z "${RAGNAR_MESH_AUTHKEY:-}${RAGNAR_MESH_UNIT_ID:-}${RAGNAR_MESH_LABEL:-}" ] && return 0
+    [ -z "${RAGNAR_MESH_AUTHKEY:-}${RAGNAR_MESH_UNIT_ID:-}${RAGNAR_MESH_LABEL:-}${RAGNAR_MESH_SECRET:-}" ] && return 0
 
     python3 - "$RAGNAR_CONFIG" <<'PYEOF'
 import json, os, sys
@@ -196,6 +217,13 @@ if label and cfg.get('mesh_site_label') != label:
 tag = os.environ.get('RAGNAR_MESH_TAG')
 if tag and cfg.get('mesh_tag') != tag:
     cfg['mesh_tag'] = tag
+    changed = True
+
+# Opt-in mesh secret: the second factor over the tag. Every unit of one mesh
+# must carry the SAME secret, so a technician images the fleet with it set.
+secret = os.environ.get('RAGNAR_MESH_SECRET')
+if secret and cfg.get('mesh_secret') != secret:
+    cfg['mesh_secret'] = secret
     changed = True
 
 if changed:

@@ -19,7 +19,7 @@ https://www.raspberrypi.com/software/
 
 ![image](https://github.com/user-attachments/assets/e8d276be-4cb2-474d-a74d-b5b6704d22f5)
 
-I did not develop ragnar for the raspberry pi zero w2 64bits, but several feedbacks have attested that the installation worked perfectly.
+Use Raspberry Pi OS Lite (64-bit) Debian Trixie with no desktop environment. 
 
 - Raspberry Pi OS installed. 
     - Stable:
@@ -28,6 +28,7 @@ I did not develop ragnar for the raspberry pi zero w2 64bits, but several feedba
       - Debian version: Debian GNU/Linux 13 (trixie)'
 - Username and hostname set to `ragnar`.
 - 2.13-inch e-Paper HAT connected to GPIO pins.
+- **Optional:** a Waveshare UPS HAT (C) is detected automatically and its battery percentage shown on the display and the System tab, with nothing to install. See [ups-hat.md](ups-hat.md).
 - **Optional:** [PiSugar UPS](https://www.pisugar.com/) for battery power, battery monitoring, and hardware button support. The installer will prompt you to install `pisugar-server` if you have one attached. You can also install it manually later:
   ```bash
   curl http://cdn.pisugar.com/release/pisugar-power-manager.sh | sudo bash
@@ -85,6 +86,44 @@ Two steps in the install are also slow and silent, which can look like a hang on
 a Pi Zero 2 W — the pip build of `sslyze`/`cryptography`, and
 `nmap --script-updatedb`. Give them time before interrupting.
 
+#### Headless install on Ubuntu / a non-Pi server — display driver noise
+
+On a generic Ubuntu/Debian server (or any host that is not a Raspberry Pi) the
+installer skips every Pi-only display step, because there is no SPI/I2C/GPIO
+peripheral to drive a screen. Specifically, when the platform is not a Pi it:
+
+- **skips `RPi.GPIO` / `spidev`** — these only exist for GPIO-attached displays.
+  `RPi.GPIO` fails to build (or installs and then crashes on import, since there
+  is no `/dev/gpiomem`) off-Pi, which used to surface as alarming errors on
+  headless installs that never use a display at all.
+- **only adds the groups that exist** — the `spi`, `gpio`, and `i2c` groups ship
+  with Raspberry Pi OS but not with stock Ubuntu/Debian. `usermod` is
+  all-or-nothing, so naming a missing group used to abort the whole call and
+  leave the `ragnar` user out of `sudo`/`netdev` too (breaking WiFi management).
+  The installer now filters the list down to the groups present on the host.
+- **skips `raspi-config`** SPI/I2C enablement and the Waveshare e-Paper library.
+
+If you *did* pick a display profile on non-Pi hardware, the driver summary will
+honestly report the display types that will not work — that is expected, not a
+failed install.
+
+#### Boards with a built-in DPI/HDMI panel (HackBerry Pi and similar)
+
+Some Pi-based devices ship with their own DPI/HDMI screen that already owns SPI0
+and the display GPIOs (e.g. the HackBerry Pi, HyperPixel, or any
+`dtoverlay=vc4-kms-dpi` panel). Ragnar's e-Paper/TFT driver drives those same
+pins, so a **display** install would blank that panel. For these boards pick a
+**headless (web-only) profile** — `Raspberry Pi headless` or `hbp0_ragnar`
+(HackBerry Pi) — which runs `headlessRagnar.py` and never touches the display.
+
+Headless installs set `RAGNAR_HEADLESS=1` (in the entrypoint and in the systemd
+unit), which skips EPD initialization entirely. This matters because the display
+is initialized at import time: without the guard, simply importing Ragnar's
+shared state would seize SPI0 + GPIO and blank the DPI panel — regardless of
+which entrypoint launched. If a device with a DPI panel was accidentally set up
+with a display profile, `sudo bash update_ragnar.sh` repoints an already-headless
+unit and adds the guard, or re-run the installer and choose a headless profile.
+
 #### Changing your screen
 
 The installer asks which screen you have, but that is only a starting value —
@@ -97,12 +136,12 @@ without reinstalling. The choice is written to `config/shared_config.json`, whic
 is gitignored — it survives both reboots and `update_ragnar.sh`, so the screen
 you select stays selected.
 
-All 17 profiles are offered in both places:
+All 18 profiles are offered in both places:
 
 | Type | Screens |
 |---|---|
 | e-Paper | `epd2in13`, `_V2`, `_V3`, `_V4`, `epd2in13b_V4`, `epd2in7`, `epd2in7_V2`, `epd2in9_V2`, `epd3in7`, `epd4in26` |
-| TFT | `gc9a01` (1.28" round), `st7735s` (1.44" HAT + joystick), `whisplay` (1.69" PiSugar) |
+| TFT | `gc9a01` (1.28" round), `st7735s` (1.44" HAT + joystick), `st7789v2` (1.9" M5Stack CardputerZero), `whisplay` (1.69" PiSugar) |
 | OLED | `ssd1306` (0.96") |
 | Character LCD | `lcd1602` (16×2 I2C) |
 | LED matrix | `max7219_8panel`, `max7219_4panel` |
@@ -115,6 +154,66 @@ rather than resetting it.
 If the install log ends with `These display types will NOT work until fixed:`,
 that names the dependency that failed — a screen of that type will stay blank
 until it is installed.
+
+#### Adding a screen to a headless install (`installhead.sh`)
+
+The paragraph above applies to **display** installs only. A headless/server
+install ("No display") skips the display drivers, never writes `epd_type`, and
+runs `headlessRagnar.py` with `RAGNAR_HEADLESS=1` — so plugging in a screen
+later (e.g. the 1.44" LCD HAT) and picking it under **Config → Display** leaves
+it dark, and its keys/joystick do nothing. Run:
+
+```bash
+cd /home/ragnar/Ragnar
+sudo ./installhead.sh            # menu: pick your screen
+sudo ./installhead.sh st7735s    # or name it directly (any epd_type above)
+```
+
+It enables SPI (or I2C for `ssd1306`/`lcd1602`), installs that screen's
+dependencies (`spidev`/`smbus2`/`luma`, plus `gpiozero` + `lgpio` for the
+buttons and joystick), writes `epd_type` to `config/shared_config.json`, adds
+the `ragnar` user to `spi`/`gpio`/`i2c`, and repoints `ragnar.service` to
+`Ragnar.py` (dropping `RAGNAR_HEADLESS=1`, adding the `wipe_epd.py` pre-start).
+The unit is edited in place and backed up to `ragnar.service.bak`. If SPI/I2C
+had to be enabled it offers a reboot, otherwise it restarts Ragnar.
+
+`sudo ./installhead.sh headless` reverses it (back to web-only). Do **not** use
+it on boards with a built-in DPI/HDMI panel (see above) — those must stay
+headless.
+
+#### M5Stack CardputerZero
+
+> Full guide: [docs/M5StackCardputerZero.md](M5StackCardputerZero.md) — hardware,
+> the on-device screen/keyboard, M5IOE1 backlight/reset, keymap calibration, and
+> troubleshooting. The essentials are below.
+
+The [M5Stack CardputerZero](https://shop.m5stack.com/pages/m5-cardputerzero) is a
+Raspberry Pi Compute Module Zero (CM0 / BCM2837) in a pocket case with a built-in
+1.9" LCD and a 46-key keyboard — so from Ragnar's point of view it is just a
+Raspberry Pi with a screen and keys already attached. Pick **option 7** in the
+installer (`M5Stack CardputerZero`). That runs a normal Pi install pinned to the
+board's built-in display (`st7789v2`, 320×170 landscape) and wires up its keyboard.
+
+**Stock launcher.** On M5Stack's image this option replaces the APPLaunch launcher so
+Ragnar gets the LCD and keyboard, then asks for a reboot. Undo it with
+`sudo scripts/cardputer_takeover.sh revert`.
+
+**Display.** Ragnar uses the kernel's LCD framebuffer, which it finds by driver name.
+On a plain kernel without that driver it falls back to native SPI (CS on GPIO8, DC on
+GPIO25), with reset and backlight through the M5IOE1 expander at `0x4F`.
+
+**Keyboard.** `F` `X` `Z` `C` (the keys with the arrow legends) are the joystick,
+OK (Enter) is its press and opens the diagnostic screens, Esc goes back, and Space,
+Backspace and Tab stand in for the HAT's KEY1, KEY2 and KEY3 — the same controls documented in [Display Controls](DISPLAY_CONTROLS.md).
+The footer of each screen names the keys. Any key can be remapped in
+`config/cardputer_keymap.json`; unmapped keys log their code.
+
+**Screen and battery.** The screen is in colour and starts turned 180° to match how
+the panel is mounted (Backspace flips it). The built-in battery's percentage shows in
+the header and on the System tab; the installer does not ask about a PiSugar here.
+
+> The project has no CardputerZero of its own: changes follow users' reports and
+> M5Stack's published docs, and are tested against simulated hardware.
 
 ### 📶 Connecting Ragnar to a network
 
@@ -289,10 +388,8 @@ sudo apt-get update && sudo apt-get upgrade -y
   libopenjp2-7 \
   nmap \
   libopenblas-dev \
-  bluez-tools \
   bluez \
   dhcpcd5 \
-  bridge-utils \
   python3-pil
 
 

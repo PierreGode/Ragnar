@@ -45,10 +45,37 @@ severity, combined evidence) to avoid alert fatigue during a sustained attack.
    `--learn-gateway` once, on a segment you currently trust, then copy the result
    into `trusted_bindings`.
 
+## FHRP (HSRP/VRRP) awareness
+
+A redundant gateway pair legitimately moves its virtual IP between physical
+routers with a **gratuitous ARP** — the exact pattern layers 1 & 2 catch — so
+without this a normal failover looks like an attack. Handled two ways, kept
+strictly apart:
+
+- **Shape match** (`00:00:0c:07:ac:GG` HSRPv1, `00:00:0c:9f:fG:GG` HSRPv2,
+  `00:00:5e:00:01:VV` VRRP) is **informational only**. A MAC is spoofable, so a
+  MAC merely *looking* like an FHRP virtual MAC is annotated in the alert but
+  never trusted — otherwise sourcing poison traffic from that range would be a
+  trivial evasion (the same reasoning `ndpwatch` used to refuse prefix-only trust).
+- **Trust** comes only from an operator-confirmed `(virtual_ip, virtual_mac)` pair
+  in `trusted_fhrp_groups`. Then: a clean move **into** that virtual MAC is the
+  expected failover shape → de-escalated to `info` (`fhrp_transition`); a move
+  **away** from a confirmed virtual MAC is the direction a real first-hop hijack
+  takes → escalated to `critical` (`fhrp_hijack`), never suppressed; and a
+  confirmed virtual MAC announcing its own IP is not counted as a gratuitous flood.
+
+Populate `trusted_fhrp_groups` by cross-pivoting from **FHRP Watch** — it learns
+the segment's HSRP/VRRP groups, and `--suggest-fhrp` derives the pinnable pairs
+for you to **verify** before pasting them in:
+
+```bash
+python3 python/arp_guard.py --suggest-fhrp    # reads data/fhrp_watch.json
+```
+
 ## Run
 
 ```bash
-python3 python/arp_guard.py --self-test                 # 14/14, no root/Scapy
+python3 python/arp_guard.py --self-test                 # 24/24, no root/Scapy
 sudo python3 python/arp_guard.py -i eth0 --echo         # live, echo to stderr
 sudo python3 python/arp_guard.py -i eth0 --jsonl /var/log/arp-guard/alerts.jsonl
 python3 python/arp_guard.py --replay attack.pcap --echo # replay a capture (no NIC)

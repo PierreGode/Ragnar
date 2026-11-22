@@ -1,5 +1,4 @@
 import os
-import pandas as pd
 import logging
 import time
 from sqlalchemy import create_engine
@@ -51,6 +50,7 @@ class StealDataSQL:
         """
         Find all tables in all databases, excluding system databases.
         """
+        import pandas as pd  # lazy: keeps ~44MB pandas out of RAM until an attack action runs
         try:
             if self.shared_data.orchestrator_should_exit:
                 logger.info("Table search interrupted due to orchestrator exit.")
@@ -73,6 +73,7 @@ class StealDataSQL:
         """
         Download data from the table in the database to a local file.
         """
+        import pandas as pd  # lazy: keeps ~44MB pandas out of RAM until an attack action runs
         try:
             if self.shared_data.orchestrator_should_exit:
                 logger.info("Data stealing process interrupted due to orchestrator exit.")
@@ -89,6 +90,7 @@ class StealDataSQL:
         """
         Steal data from the remote SQL server.
         """
+        import pandas as pd  # lazy: keeps ~44MB pandas out of RAM until an attack action runs
         try:
             if 'success' in row.get(self.b_parent_action, ''):
                 self.shared_data.ragnarorch_status = "StealDataSQL"

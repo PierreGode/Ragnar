@@ -24,7 +24,15 @@ Plug in a USB adapter that supports monitor mode. The installer auto-detects the
 
 - Atheros AR9271 (Alfa AWUS036NHA)
 - Ralink RT5370
-- Realtek RTL8812AU (with `aircrack-ng` driver)
+- Realtek RTL8812AU (Alfa AWUS036ACH) — needs a DKMS driver; see **[RTL8812AU Driver Setup](wifi-rtl8812au.md)**
+- MediaTek MT7612U (Alfa AWUS036ACM)
+
+> ⚠️ **Test injection before relying on a MediaTek MT7921U for Pwnagotchi.** In our testing
+> (kernel 6.18) the MT7921U had excellent monitor RX and rock-solid USB, but bettercap could
+> not inject deauths through it, so it captured almost nothing — it worked well only for
+> *passive* wardriving (logging networks + GPS). Whether that's universal to the chipset or
+> specific to a driver/kernel version isn't confirmed, so verify it can actually deauth and
+> capture on your setup before counting on it.
 
 #### Option B — Onboard WiFi with Nexmon (advanced)
 
@@ -82,12 +90,21 @@ all-or-nothing:
 | launcher wrapper | `/usr/bin/pwnagotchi-launcher` present and executable |
 | pwnagotchi executable | real `pwnagotchi` binary resolvable |
 | pwnagotchi + pydrive2 import | `import pwnagotchi, pydrive2` succeeds in a clean interpreter (the launcher will start instead of exit-coding) |
+| bettercap executable | `bettercap` binary resolvable (Pwnagotchi drives it over the REST API) |
+| `bettercap.service` unit | `/etc/systemd/system/bettercap.service` present — serves the API Pwnagotchi blocks on |
+| bettercap launcher | `/usr/bin/bettercap-launcher` present and executable (brings up `mon0`, runs bettercap) |
+| monitor helpers | `/usr/bin/monstart` + `/usr/bin/monstop` present and executable (create the `mon0` monitor interface) |
 
 Each row shows ✓ / ✗. The badge reflects three states:
 
 - **Healthy** — everything present.
 - **Needs Repair** (red) — a *critical* piece is missing: the clone, service unit,
-  `config.toml`, launcher wrapper, the executable, or the **runtime import**.
+  `config.toml`, launcher wrapper, the executable, the **runtime import**, or the
+  **bettercap service layer** (bettercap binary, `bettercap.service`,
+  `bettercap-launcher`, or the `monstart`/`monstop` helpers). The bettercap rows
+  matter because Pwnagotchi does not sniff Wi-Fi itself — it drives a local
+  bettercap over its REST API and hangs forever on *"waiting for bettercap API to
+  be available ..."* if that service layer is absent.
 
 > **Why the runtime-import row exists:** the pip steps in the installer all swallow
 > their own errors so a flaky network never aborts an install. The cost was that a
@@ -209,12 +226,19 @@ Adapt the exact commands to your nexmon version and kernel.
 2. A transient systemd unit (`ragnar-to-pwnagotchi-swap`) is created via `systemd-run` to survive Ragnar's cgroup teardown
 3. The sequence runs:
    ```
-   systemctl stop ragnar.service
-   python3 -OO /home/ragnar/Ragnar/wipe_epd.py   # release GPIO/SPI
-   systemctl start bettercap.service               # API on port 8081
-   systemctl start pwnagotchi.service              # connects to bettercap
-   systemctl start ragnar-swap-button.service       # listen for swap-back
+   systemctl stop ragnar.service && {
+     python3 -OO /home/ragnar/Ragnar/wipe_epd.py || true  # release GPIO/SPI
+     systemctl start bettercap.service   || true          # API on port 8081
+     systemctl start pwnagotchi.service  || true          # connects to bettercap
+     systemctl start ragnar-swap-button.service || true   # listen for swap-back
+   }
    ```
+   Only the first start is gated on Ragnar actually stopping (so Pwnagotchi never
+   fights Ragnar for the display/GPIO); the individual starts are then best-effort
+   (`|| true`) so one failing start can't strand the box with Ragnar stopped and
+   nothing else up. `bettercap.service` runs `/usr/bin/bettercap-launcher`, which
+   brings up the `mon0` monitor interface (via `monstart`) and execs bettercap with
+   the `pwnagotchi-auto` caplet (REST + WebSocket API on `127.0.0.1:8081`).
 4. Pwnagotchi web UI becomes available at `http://<ip>:8080`
 
 ### Pwnagotchi → Ragnar
@@ -250,6 +274,21 @@ trigger the swap with the hardware button while that page is open.
    ```
 3. Ragnar cleans up leftover state on startup (removes `mon0`, stops any lingering services)
 
+### Pi 5 power button (optional)
+
+On an all-in-one Pi 5 with no e-Paper HAT or PiSugar, you can repurpose the
+board's **on-board power button** as the swap control: a single short press
+toggles Ragnar ⟷ Pwnagotchi. It runs in both modes and swaps either direction.
+
+```bash
+sudo bash scripts/install_power_button.sh
+```
+
+A short press then toggles the mode instead of powering off (long-hold ~10 s
+still hard-offs; use `sudo poweroff` for a clean shutdown). Full details,
+including the systemd-logind note for SPI-TFT kiosk builds, are in
+[POWER_BUTTON.md](POWER_BUTTON.md).
+
 ### Manual (MANU) vs Auto mode
 
 By default Pwnagotchi boots in **AUTO** mode and immediately starts hunting handshakes. To boot it **paused** in **MANU** mode instead, enable **Start in Manual mode** in the **Swap Control** card (Config tab → Pwnagotchi Bridge) *before* switching. The preference persists and applies to every subsequent Pwnagotchi launch (swap, button, or reboot) until you turn it off.
@@ -274,6 +313,71 @@ The one-shot flags are what Pwnagotchi's own web UI MANU/AUTO buttons write, so 
 
 ---
 
+## 🖥️ All-in-one SPI TFT kiosk (both modes on one screen)
+
+If you run Ragnar + Pwnagotchi as an all-in-one box (e.g. a Pi 5 with a 3.5"
+MPI3501/ILI9486 SPI TFT and ADS7846 touch), you can have the little screen mirror
+the web UI of whichever mode is active:
+
+```bash
+sudo bash scripts/install_tft35_kiosk.sh
+sudo reboot
+```
+
+The kiosk is **mode-aware**. Because Ragnar and Pwnagotchi never run at the same
+time — switching to Pwnagotchi stops `ragnar.service` (and `:8000`) and serves the
+Pwnagotchi web UI on `:8080` — a fixed-URL kiosk would show a dead page for the
+whole time you were hunting. Instead the runner (`scripts/ragnar_tft_kiosk.sh`)
+points Chromium at whichever UI answers and relaunches it when you swap:
+
+| Active mode | On-screen |
+|-------------|-----------|
+| Ragnar      | `http://localhost:8000/?kiosk=1` |
+| Pwnagotchi  | `http://localhost:8080/` |
+
+Per-mode Chromium zoom is tunable via the service environment
+(`RAGNAR_TFT_RAGNAR_SCALE`, default `0.5` for the dense dashboard;
+`RAGNAR_TFT_PWN_SCALE`, default `1.0`).
+
+### Touch calibration
+
+The panel shows up as `ADS7846 Touchscreen`. The tap position depends on the
+display **rotation** you set on the overlay (`dtoverlay=tft35a:rotate=…`), so the
+touch axes have to be transformed to match. Test a matrix live (applies instantly,
+no restart) and, once taps land where you press, persist it:
+
+```bash
+# find the device + test live (drag a finger and watch the cursor track it)
+export DISPLAY=:1   # kiosk-tft runs X on :1
+xinput set-prop "ADS7846 Touchscreen" "Coordinate Transformation Matrix" <9 values>
+```
+
+Known-good transformation matrices by rotation (portrait 320×480 is `rotate=0`):
+
+| Overlay rotate | Orientation      | `Coordinate Transformation Matrix` |
+|----------------|------------------|------------------------------------|
+| `0`            | portrait         | `1 0 0 0 1 0 0 0 1` (identity; the installer adds a small `1 0 0.003 0 1 0.048 0 0 1` offset for the MPI3501) |
+| `90`           | landscape        | `0 -1 1 1 0 0 0 0 1` (verified on a Pi 5 + MPI3501) |
+| `180`          | portrait flipped | `-1 0 1 0 -1 1 0 0 1` |
+| `270`          | landscape flipped| `0 1 0 -1 0 1 0 0 1` |
+
+To make it permanent, drop it into an `xorg.conf.d` rule (matches by product name,
+so it's independent of the `/dev/input/eventN` number):
+
+```
+# /etc/X11/xorg.conf.d/98-touch-calibration.conf
+Section "InputClass"
+    Identifier "ADS7846 touch calibration"
+    MatchProduct "ADS7846 Touchscreen"
+    Option "TransformationMatrix" "0 -1 1 1 0 0 0 0 1"
+EndSection
+```
+
+Resistive panels tap most reliably with a stylus. If you only want a status
+display, disable touch entirely with `Option "Ignore" "on"` in the same block.
+
+---
+
 ## 🌐 API Endpoints
 
 | Method | Endpoint | Description |
@@ -288,6 +392,30 @@ The one-shot flags are what Pwnagotchi's own web UI MANU/AUTO buttons write, so 
 ---
 
 ## 🔍 Troubleshooting
+
+### Pwnagotchi hangs on "waiting for bettercap API to be available ..."
+
+```bash
+sudo journalctl -u pwnagotchi -n 40 --no-pager
+# pwnagotchi-launcher[...]: [INFO] ... : waiting for bettercap API to be available ...  (loops forever)
+sudo systemctl status bettercap.service
+# Unit bettercap.service not found.   ← the service layer was never staged
+```
+
+Pwnagotchi does not sniff Wi-Fi itself — it drives a local **bettercap** over its
+REST API (`127.0.0.1:8081`) and blocks forever until that API answers. If
+`bettercap.service` is missing (an install from before this was staged on a
+from-scratch node), bettercap never starts and Pwnagotchi waits indefinitely.
+
+**Fix:** open the dashboard **Installation Check** card — the bettercap rows now
+show ✗ and a **Repair Installation** button appears. Click it (or run
+`sudo ./scripts/install_pwnagotchi.sh`). The installer creates
+`/etc/systemd/system/bettercap.service` and `/usr/bin/bettercap-launcher`
+templated to your configured monitor interface (`mon0`), then bettercap serves the
+API Pwnagotchi is waiting on. (The upstream build ships these only as pi-gen
+build-stage templates under `/opt/pwnagotchi/stage3/06-patches/files/`, and the
+stage launcher hardcodes `wlan0mon` — the Ragnar-staged launcher uses your
+`config.toml` `mon_iface` instead.)
 
 ### E-ink goes blank but Pwnagotchi never loads on port 8080
 
@@ -319,6 +447,20 @@ sudo iw dev wlan1 interface add mon0 type monitor
 | `Device or resource busy` | NetworkManager holds the interface | Add to unmanaged list (see below) |
 | Command not found | `iw` not installed | `sudo apt install iw` |
 
+### RTL8812AU (ALFA): adapter resets, few or no handshakes
+
+If you use a Realtek RTL8812AU adapter and it captures almost nothing (AP count drops to 0,
+`epoch` lines show `deauths=0`, `wlan1` keeps falling back to `type managed`), the stock
+in-kernel `rtw88_8812au` driver is likely resetting the adapter under load. Confirm with:
+
+```bash
+sudo dmesg | grep -c "idProduct=8812"   # dozens per hour = the driver is resetting the adapter
+vcgencmd get_throttled                   # 0x0 = not a power problem, so it's the driver
+```
+
+The fix is to replace it with the morrownr DKMS driver **with monitor mode enabled** (the
+non-obvious `CONFIG_WIFI_MONITOR = y` step): see **[RTL8812AU Driver Setup](wifi-rtl8812au.md)**.
+
 ### NetworkManager holds the WiFi interface
 
 ```bash
@@ -344,6 +486,19 @@ sudo nano /usr/bin/monstop              # update STA_IF = "..."
 ```
 
 ### Ragnar won't start after a bad swap
+
+If a swap left **both** modes down (`ragnar.service` `failed`, `pwnagotchi`
+`inactive`), reset the failed state and bring Ragnar back:
+
+```bash
+sudo systemctl reset-failed ragnar && sudo systemctl start ragnar
+```
+
+(The swap now starts each service best-effort so a single failing start no longer
+strands the box this way, but an older build or an unrelated failure can still
+leave it wedged.)
+
+Or run the catch-all repair:
 
 ```bash
 sudo /home/ragnar/Ragnar/scripts/fix_services.sh

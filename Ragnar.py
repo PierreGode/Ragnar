@@ -65,6 +65,49 @@ class Ragnar:
         except ImportError:
             pass
 
+        # Waveshare UPS HAT battery monitor (INA219 over I2C, auto-detected)
+        self.ups_hat_monitor = None
+        try:
+            from ups_hat import UpsHatMonitor
+            self.ups_hat_monitor = UpsHatMonitor(shared_data)
+        except Exception as e:
+            logger.debug(f"UPS HAT monitor unavailable: {e}")
+
+        # CardputerZero: power the expansion header so a plugged-in Cap (GNSS,
+        # LoRa, sub-GHz, NFC) is alive before GPS auto-detection looks for it.
+        try:
+            import cardputer_caps
+            if (shared_data.config.get('cardputer_cap_power', True)
+                    and cardputer_caps.is_cardputer_zero(shared_data.config)):
+                cardputer_caps.allow_expander(shared_data.config)
+                rail = cardputer_caps.power_on_cap()
+                logger.info(f"CardputerZero Cap power rail: "
+                            f"{'on' if rail else 'not available' if rail is None else 'off'}")
+        except Exception as e:
+            logger.debug(f"CardputerZero Cap power not set: {e}")
+
+        # CardputerZero: the Grove port's 5 V pin is switched too, and off at
+        # power-on. Turn it on so a Grove unit works when plugged in.
+        try:
+            import cardputer_caps
+            if (shared_data.config.get('cardputer_grove_power', True)
+                    and cardputer_caps.is_cardputer_zero(shared_data.config)):
+                cardputer_caps.allow_expander(shared_data.config)
+                grove = cardputer_caps.power_on_grove()
+                logger.info(f"CardputerZero Grove 5 V: "
+                            f"{'on' if grove else 'not available' if grove is None else 'off'}")
+        except Exception as e:
+            logger.debug(f"CardputerZero Grove power not set: {e}")
+
+        # Built-in fuel gauge (kernel power-supply class; the CardputerZero's
+        # BQ27220), auto-detected
+        self.builtin_battery = None
+        try:
+            from sysfs_battery import SysfsBatteryMonitor
+            self.builtin_battery = SysfsBatteryMonitor(shared_data)
+        except Exception as e:
+            logger.debug(f"Built-in battery monitor unavailable: {e}")
+
     def run(self):
         """Main loop for Ragnar. Waits for Wi-Fi connection and starts Orchestrator."""
         logger.info("=" * 70)
@@ -74,6 +117,14 @@ class Ragnar:
         # Start PiSugar button listener (if available)
         if self.pisugar_listener:
             self.pisugar_listener.start()
+
+        # Start the Waveshare UPS HAT battery monitor (idles if no HAT answers)
+        if self.ups_hat_monitor:
+            self.ups_hat_monitor.start()
+
+        # Start the built-in battery monitor (idles if the board has none)
+        if self.builtin_battery:
+            self.builtin_battery.start()
 
         # If wardriving-on-boot is enabled, kick wardriving off BEFORE the WiFi
         # manager starts. wifi_manager.start() blocks ~5s minimum (longer with
@@ -246,6 +297,10 @@ class Ragnar:
         # Stop PiSugar listener
         if self.pisugar_listener:
             self.pisugar_listener.stop()
+        if getattr(self, 'ups_hat_monitor', None):
+            self.ups_hat_monitor.stop()
+        if getattr(self, 'builtin_battery', None):
+            self.builtin_battery.stop()
 
         # Stop orchestrator
         self.stop_orchestrator()

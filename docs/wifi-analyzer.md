@@ -1,7 +1,7 @@
-# 📊 WiFi Spectrum Analyzer
+# 📊 Signal Intelligence (WiFi Spectrum Analyzer)
 
 A passive, tri-band Wi-Fi RF troubleshooter built into Ragnar's web UI —
-**Network → WiFi Analyzer** (the sub-tab after *Interfaces*). Think of it as a
+**Network → Signal Intelligence** (the sub-tab after *Interfaces*). Think of it as a
 software [Ekahau Sidekick 2](https://www.ekahau.com/products/sidekick/): the
 same survey-and-heatmap workflow a wireless engineer expects, on a Raspberry Pi
 Zero 2 W with an off-the-shelf Wi-Fi 6E dongle instead of a $4,000 instrument.
@@ -83,7 +83,12 @@ contains:
   histogram**;
 - **interference** counts (co-channel and adjacent/overlap groups);
 - **Networks** (SSID view) and **strongest access points** tables (band,
-  channel, width, signal, SNR, standard, security).
+  channel, width, signal, SNR, standard, security);
+- when the **Bluetooth** / **Zigbee** overlays are on, a **2.4 GHz coexistence**
+  section for each — device counts, per-Wi-Fi-channel pressure chips and the
+  device inventory heard during the scan;
+- when you've run **Analyze with AI** on the current scan, the **AI analysis**
+  itself, rendered inline (it also reflects the BT/Zigbee overlays it was given).
 
 The same shared report engine renders the WiFi Defense and Wardriving reports,
 so all three are one visual family. Informal — not a certified assessment.
@@ -164,14 +169,18 @@ or leaving full screen never loses your place. Actions in the inspector can
 **copy the BSSID**, **filter the list to the same SSID**, or send the AP
 straight to the coverage heatmap as its survey target.
 
-**WIDS pivot:** clicking a BSSID in a **WiFi Defense** detection (or a row of
-its AP table) lands here with that AP pre-selected and marked by a red dashed
-**⚠ WIDS** locator line + outline in the spectrum, a red *"Flagged by WiFi
-Defense"* banner above the graph, and a red **⚠ WIDS** badge on its AP-table
-row. The highlight persists across re-scans (auto-refresh keeps tracking the
-rogue's RSSI) until dismissed from the banner; if the flagged BSSID isn't heard
-in the current survey the analyzer re-scans once and the banner reports it as
-not heard.
+**WIDS pivot:** clicking a BSSID that is an actual **WiFi Defense** finding (one
+that appears *inside* a detection card) lands here with that AP pre-selected and
+marked by a red dashed **⚠ WIDS** locator line + outline in the spectrum, a red
+*"🛡 Flagged by WiFi Defense"* banner above the graph, and a red **⚠ WIDS** badge
+on its AP-table row. Clicking a **plain Access-Point row** instead (WiFi
+Defense's *seen / airtime / isolation* tables) is a neutral "inspect this one":
+the AP is selected with the normal blue highlight and a blue *"📶 Access Point
+selected"* banner — **no ⚠ WIDS marker or badge**, so a benign AP is never
+mistaken for a threat. Either way the highlight persists across re-scans
+(auto-refresh keeps tracking RSSI) until dismissed from the banner; if the
+target BSSID isn't heard in the current survey the analyzer re-scans once and
+the banner reports it as not heard.
 
 **On the device (1.44" LCD HAT):** the Bar view is also available head-less as
 the **SPECTRUM** card in on-screen Network Diagnostic mode — a per-channel
@@ -412,6 +421,41 @@ the scan briefly switches the Huginn into zigbee mode (a board without an
 802.15.4 radio answers with a "not compiled in" notice). If wardriving is
 running it owns the serial port — stop it first to sniff on demand. Receive-only.
 
+## BLE Watch overlay (via an nRF / Bluefruit LE sniffer)
+
+Tick **🛡 BLE Watch** to overlay **real BLE advertising activity** onto the
+2.4 GHz spectrum, and flag any advertiser the [BLE Watch](blewatch.md) monitor
+marks as a clone, spoof or advertising flood — right on the band picture.
+
+This is *not* the **📶 Bluetooth** overlay. That one is a BlueZ device-discovery
+estimate off the Pi's own controller. This uses the external **nRF / Bluefruit
+LE sniffer** to hear the BLE **link layer** directly — the actual advertising
+PDUs on the three primary channels (**37 = 2402 MHz, 38 = 2426 MHz, 39 = 2480
+MHz**) — so it sees devices a scan never discovers and reads their security
+posture. The two overlays can be on at once (BLE Watch markers sit beside the
+Bluetooth ones).
+
+On toggle, Ragnar runs a short ~8 s link-layer sniff (`/api/net/ble-watch?quick=1`)
+and draws the result. **The toggle stays greyed out until a sniffer is detected
+on USB** (`/api/net/ble-watch/status`, which only reads USB names — it writes
+nothing to any serial port, so it never disturbs a device). A bare CP210x bridge
+that *might* be a Bluefruit LE Sniffer stays greyed with a hint to confirm it
+from the **Diagnostics → BLE Watch** card, which does the full firmware probe.
+
+**What it draws** — a solid fuchsia bar per advertising channel (🛡37/🛡38/🛡39),
+height scaled by how busy the channel is, **turning red (⚠)** on any channel
+carrying a flagged advertiser; a **device table** (advertiser address, address
+type — public / static / random (RPA), the advertising channels it used, a
+clone/spoof/flood **status**, RSSI) — **click a row to highlight it** on the
+spectrum; and an estimated **per-Wi-Fi-channel BLE pressure** (ch 1/6/11, since
+37/38/39 fall on the three non-overlapping Wi-Fi channels).
+
+**Caveats.** The sniffer follows advertising on all three primary channels but
+one radio can follow only one data connection at a time, so connection-layer
+findings are best-effort (see [BLE Watch](blewatch.md)). The short overlay sniff
+sets `quick=1` so its findings are **not** exported as Watchtower incidents — run
+the full **Diagnostics → BLE Watch** card for that. Receive-only; never transmits.
+
 ## True-RF Waterfall (HackRF SDR)
 
 The Bar and Dome views draw the *beacon* picture (what APs announce). The
@@ -431,9 +475,19 @@ scrolling **time × frequency × power waterfall**, with your Wi-Fi channel tick
 the band selector to retune the sweep (2.4 / 5 GHz).
 
 **How it works** — `sdr_spectrum.py` runs `hackrf_sweep -f LO:HI`, parses its
-power-per-bin CSV, assembles each sweep into a fixed-width frame plus a
-cumulative max-hold, and streams frames to the browser. **Receive-only** — an
-SDR sweep never transmits.
+power-per-bin CSV, and assembles each sweep into a fixed-width frame plus a
+cumulative max-hold. `hackrf_sweep` finishes a band far faster and more
+irregularly than a waterfall should scroll (tens of sweeps a second, then a
+brief stall on a USB hiccup or retune), so rather than paint every raw sweep —
+which makes the display lurch: a burst of rows jumps in, then it freezes — the
+sweeps are **time-integrated (max-hold) into one row every ~100 ms**. That is
+how a real spectrum-analyzer waterfall dwells: the scroll is smooth and steady
+regardless of sweep speed, and each row still catches short bursts that fired
+between frames. Frames stream to the browser. Each frame is **512 frequency
+columns** and the browser keeps **600 rows** of history, so the heatmap stays
+crisp — no chunky cells — even stretched full-screen; the sweep's FFT bin width
+is held finer than a column so every column is fed real data. **Receive-only** —
+an SDR sweep never transmits.
 
 **Hardware.** Needs a **HackRF One** (1 MHz–6 GHz — covers 2.4 *and* 5 GHz).
 The cheap RTL-SDR only reaches ~1.7 GHz and **cannot** see these bands. Install
@@ -481,6 +535,8 @@ All endpoints are passive and read-only except the heatmap store.
 | `GET /api/net/zigbee/status` | HuginnESP detection (gates the Zigbee toggle) |
 | `GET /api/net/zigbee/scan?duration=&port=` | on-demand Huginn 802.15.4 sniff → channel markers + devices |
 | `GET /api/net/zigbee/selftest` | Zigbee line-parser + overlay-model self-test |
+| `GET /api/net/ble-watch/status?probe=` | nRF/Bluefruit sniffer detection (gates the 🛡 BLE Watch toggle; `probe=0` reads USB names only, writes nothing) |
+| `GET /api/net/ble-watch?seconds=&quick=` | BLE link-layer sniff → findings + a `overlay` block (advertiser roster + adv-channel markers) for the 2.4 GHz overlay |
 
 ```bash
 python3 wifi_analyzer.py interfaces
@@ -502,6 +558,10 @@ python3 sdr_spectrum.py selftest
 python3 zigbee_scan.py detect
 python3 zigbee_scan.py scan --duration 8
 python3 zigbee_scan.py selftest      # + zigbee_overlay.py selftest
+
+# BLE Watch overlay (needs an nRF / Bluefruit LE sniffer)
+python3 python/blewatch.py --list-devices      # sniffer detection (gates 🛡 BLE Watch)
+python3 python/blewatch.py --self-test          # parser + overlay-shaping self-test
 ```
 
 The Bluetooth scanner ships its own offline self-test — **28 checks** covering

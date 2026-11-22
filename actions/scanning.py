@@ -152,6 +152,18 @@ class NetworkScanner:
         self.db = get_db(currentdir=self.currentdir)
 
     @staticmethod
+    def _is_cellular_uplink(iface):
+        """True when `iface` is a USB-tethered hotspot/phone/modem that must not
+        be scanned (metered data; its LAN is just the hotspot). Opt back in
+        with cellular_allow_scan."""
+        try:
+            import cellular_uplink
+            return (cellular_uplink.is_cellular(iface)
+                    and not cellular_uplink.settings()['allow_scan'])
+        except Exception:
+            return False
+
+    @staticmethod
     def _detect_default_interface():
         """Detect the active network interface using ip route."""
         try:
@@ -165,6 +177,8 @@ class NetworkScanner:
                 if 'dev' in parts:
                     idx = parts.index('dev')
                     if idx + 1 < len(parts):
+                        if NetworkScanner._is_cellular_uplink(parts[idx + 1]):
+                            continue
                         return parts[idx + 1]
         except Exception:
             pass
@@ -179,8 +193,14 @@ class NetworkScanner:
                 parts = line.split()
                 if len(parts) >= 4 and '127.0.0.1' not in line:
                     iface = parts[1].rstrip(':')
-                    if iface != 'lo':
-                        return iface
+                    if iface == 'lo' or iface.startswith(('docker', 'br-', 'veth', 'tailscale', 'pan')):
+                        continue
+                    # usb0 from g_ether is Ragnar's own gadget link to a laptop.
+                    if '/gadget' in os.path.realpath(f'/sys/class/net/{iface}'):
+                        continue
+                    if NetworkScanner._is_cellular_uplink(iface):
+                        continue
+                    return iface
         except Exception:
             pass
         from shared import detect_wifi_interface
@@ -241,17 +261,82 @@ class NetworkScanner:
 
         return hosts
 
+    # Neighbour states that mean "this host answered ARP recently". FAILED and
+    # INCOMPLETE mean the opposite; NONE/NOARP carry no evidence either way.
+    NEIGH_ALIVE_STATES = {'REACHABLE', 'STALE', 'DELAY', 'PROBE', 'PERMANENT'}
+
+    def _read_neighbour_table(self):
+        """Return {ip: {mac, vendor}} for hosts in the kernel neighbour table."""
+        hosts = {}
+        command = ['ip', '-4', 'neigh', 'show']
+        if self.arp_scan_interface:
+            command += ['dev', self.arp_scan_interface]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+            if result.returncode != 0:
+                return hosts
+        except Exception as e:                                  # noqa: BLE001
+            self.logger.debug(f"_read_neighbour_table failed: {e}")
+            return hosts
+
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) < 2 or not self._is_valid_ip(parts[0]):
+                continue
+            if 'lladdr' not in parts:
+                continue
+            mac = parts[parts.index('lladdr') + 1].lower()
+            if not self._is_valid_mac(mac):
+                continue
+            if parts[-1].upper() not in self.NEIGH_ALIVE_STATES:
+                continue
+            hosts[parts[0]] = {'mac': mac, 'vendor': ''}
+
+        return hosts
+
+    _arp_scan_missing_logged = False
+
+    def _arp_scan_prefix(self):
+        """Command prefix for arp-scan, or None when the tool is not installed.
+
+        Boxes without arp-scan (e.g. the WiFi Pineapple Pager) still get MACs
+        from the kernel neighbour table, so a missing binary is reported once
+        and then skipped instead of raising an error on every scan cycle.
+        ``sudo`` is used only where it exists and we are not already root.
+        """
+        if shutil.which('arp-scan') is None:
+            if not NetworkScanner._arp_scan_missing_logged:
+                NetworkScanner._arp_scan_missing_logged = True
+                self.logger.warning(
+                    "arp-scan is not installed; using the neighbour table for "
+                    "MAC discovery (no vendor names). Install arp-scan for a "
+                    "full ARP sweep.")
+            return None
+        if os.geteuid() != 0 and shutil.which('sudo'):
+            return ['sudo', 'arp-scan']
+        return ['arp-scan']
+
     def run_arp_scan(self, network=None):
         """Execute arp-scan to get MAC addresses and vendor information for local network hosts."""
         if network is None:
             network = self.get_network()
-        commands = [
-            ['sudo', 'arp-scan', f'--interface={self.arp_scan_interface}', '--localnet'],
-        ]
-        if network is not None:
+        # --retry/--timeout: a single probe at arp-scan's 100ms default loses
+        # hosts behind a power-saving Wi-Fi client, and a host missing from the
+        # sweep is charged a failed ping. --ignoredups keeps duplicate replies
+        # from being parsed twice.
+        reliability_flags = ['--retry=3', '--timeout=500', '--ignoredups']
+        prefix = self._arp_scan_prefix()
+        commands = []
+        if prefix is not None:
             commands.append(
-                ['sudo', 'arp-scan',
-                 f'--interface={self.arp_scan_interface}', str(network)])
+                prefix + [f'--interface={self.arp_scan_interface}', '--localnet']
+                + reliability_flags)
+        if prefix is None:
+            pass        # no arp-scan on this box: the neighbour table below covers it
+        elif network is not None:
+            commands.append(
+                prefix + [f'--interface={self.arp_scan_interface}', str(network)]
+                + reliability_flags)
         else:
             self.logger.warning(
                 "run_arp_scan: no explicit subnet and detection failed; "
@@ -281,7 +366,26 @@ class NetworkScanner:
                 self.logger.error(f"Unexpected error running arp-scan: {e}")
                 continue
         
-        self.logger.info(f"📋 arp-scan complete: {len(all_hosts)} hosts with MAC addresses discovered")
+        # Fold in the kernel neighbour table. An arp-scan sweep is one
+        # broadcast round: over Wi-Fi it routinely sees only a fraction of the
+        # hosts that are genuinely up, and every host it misses is charged a
+        # failed ping. The neighbour table remembers every host this box has
+        # actually exchanged frames with, so it fills those gaps. arp-scan wins
+        # on conflicts because it carries the vendor string.
+        try:
+            added = 0
+            for ip, data in self._read_neighbour_table().items():
+                if ip not in all_hosts:
+                    all_hosts[ip] = data
+                    added += 1
+            if added:
+                self.logger.info(
+                    f"Neighbour table added {added} host(s) the ARP sweep missed")
+        except Exception as e:                                  # noqa: BLE001
+            self.logger.debug(f"Could not merge neighbour table: {e}")
+
+        source = "arp-scan" if commands else "neighbour table"
+        self.logger.info(f"📋 {source} complete: {len(all_hosts)} hosts with MAC addresses discovered")
         
         # Write ARP scan results to SQLite database
         try:
@@ -307,6 +411,245 @@ class NetworkScanner:
             self.logger.error(f"Failed to write ARP scan results to database: {e}")
         
         return all_hosts
+
+    # ------------------------------------------------------------------
+    # IP range host-discovery sweep (Hosts tab "IP Range Scan")
+    # ------------------------------------------------------------------
+    # A single ping/ARP round over a bounded range; no port scan. Bounded so a
+    # careless /16 never turns into a multi-hour sweep.
+    MAX_RANGE_HOSTS = 1024
+
+    def _expand_scan_range(self, target):
+        """Turn a user range into ``(nmap_targets, host_count)``.
+
+        Accepts CIDR (``192.168.1.0/24``), an explicit start-end
+        (``192.168.1.1-192.168.1.254`` or the short ``192.168.1.1-254``) or a
+        single IPv4. A CIDR is handed to nmap verbatim; a start-end is expanded
+        to an explicit address list so arbitrary (even cross-octet) ranges work.
+        Raises ``ValueError`` with a user-facing message on bad input or a range
+        larger than ``MAX_RANGE_HOSTS``.
+        """
+        if not target:
+            raise ValueError("No IP range given")
+        target = target.strip()
+        # Normalise the unicode dashes a phone keyboard likes to insert.
+        for dash in ('–', '—', '−'):
+            target = target.replace(dash, '-')
+
+        if '/' in target:
+            try:
+                net = ipaddress.ip_network(target, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"Invalid CIDR: {target}") from exc
+            if net.version != 4:
+                raise ValueError("Only IPv4 ranges are supported")
+            # /31 and /32 have no usable "hosts()"; count the addresses as-is.
+            count = (net.num_addresses - 2) if net.prefixlen <= 30 else net.num_addresses
+            count = max(count, 1)
+            if count > self.MAX_RANGE_HOSTS:
+                raise ValueError(
+                    f"Range too large ({count} hosts); the maximum is {self.MAX_RANGE_HOSTS}")
+            return [str(net)], count
+
+        if '-' in target:
+            start_s, end_s = (p.strip() for p in target.split('-', 1))
+            try:
+                start = ipaddress.IPv4Address(start_s)
+                if '.' in end_s:
+                    end = ipaddress.IPv4Address(end_s)
+                else:  # short form: 192.168.1.1-254 -> reuse the first three octets
+                    base = start_s.rsplit('.', 1)[0]
+                    end = ipaddress.IPv4Address(f"{base}.{end_s}")
+            except ValueError as exc:
+                raise ValueError(f"Invalid range: {target}") from exc
+            if int(end) < int(start):
+                raise ValueError("Range end is before its start")
+            count = int(end) - int(start) + 1
+            if count > self.MAX_RANGE_HOSTS:
+                raise ValueError(
+                    f"Range too large ({count} hosts); the maximum is {self.MAX_RANGE_HOSTS}")
+            ips = [str(ipaddress.IPv4Address(i)) for i in range(int(start), int(end) + 1)]
+            return ips, count
+
+        try:
+            ipaddress.IPv4Address(target)
+        except ValueError as exc:
+            raise ValueError(f"Invalid IP address: {target}") from exc
+        return [target], 1
+
+    def _run_nmap_xml(self, extra_args, targets, timeout):
+        """Run nmap with XML-to-stdout and return the parsed root, or ``None``.
+
+        Tries passwordless ``sudo -n`` first (needed for ARP MAC discovery and
+        the UDP NetBIOS probe), then falls back to an unprivileged run so
+        discovery still works off a non-root box -- just without MAC/vendor on
+        the local segment.
+        """
+        import shutil
+        import xml.etree.ElementTree as ET
+        nmap_bin = shutil.which('nmap') or '/usr/bin/nmap'
+        base = [nmap_bin, '-oX', '-'] + list(extra_args) + list(targets)
+        for prefix in (['sudo', '-n'], []):
+            cmd = prefix + base
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            except FileNotFoundError:
+                self.logger.error("nmap not found for range discovery")
+                return None
+            except subprocess.TimeoutExpired:
+                self.logger.warning(f"nmap range discovery timed out after {timeout}s")
+                return None
+            except Exception as exc:                                # noqa: BLE001
+                self.logger.error(f"nmap range discovery failed: {exc}")
+                return None
+            if result.stdout and result.stdout.lstrip().startswith('<?xml'):
+                try:
+                    return ET.fromstring(result.stdout)
+                except ET.ParseError as exc:
+                    self.logger.warning(f"nmap XML parse error: {exc}")
+                    return None
+            # sudo -n with no passwordless rule writes to stderr and exits
+            # non-zero; drop the sudo prefix and try again.
+            self.logger.debug(
+                f"nmap ({'sudo' if prefix else 'plain'}) produced no XML; "
+                f"stderr={result.stderr[:200] if result.stderr else ''!r}")
+        return None
+
+    def _parse_discovery_xml(self, root):
+        """Extract the up-hosts from an ``nmap -sn`` XML tree."""
+        out = []
+        for host in root.findall('host'):
+            status = host.find('status')
+            if status is None or status.get('state') != 'up':
+                continue
+            ip = mac = vendor = ''
+            for addr in host.findall('address'):
+                atype = addr.get('addrtype')
+                if atype == 'ipv4':
+                    ip = addr.get('addr', '')
+                elif atype == 'mac':
+                    mac = (addr.get('addr') or '').lower()
+                    vendor = addr.get('vendor', '') or ''
+            if not ip:
+                continue
+            hostname = ''
+            hn = host.find('hostnames')
+            if hn is not None:
+                el = hn.find('hostname')
+                if el is not None:
+                    hostname = el.get('name', '') or ''
+            response_ms = None
+            times = host.find('times')
+            if times is not None and times.get('srtt'):
+                try:  # nmap reports srtt in microseconds
+                    response_ms = round(int(times.get('srtt')) / 1000.0, 1)
+                except (TypeError, ValueError):
+                    response_ms = None
+            out.append({
+                'ip': ip, 'hostname': hostname, 'netbios': '',
+                'mac': mac, 'vendor': vendor, 'status': 'up',
+                'response_ms': response_ms,
+            })
+        return out
+
+    def _parse_nbstat_xml(self, root):
+        """Map ``ip -> NetBIOS name`` from an nbstat-script XML tree."""
+        names = {}
+        for host in root.findall('host'):
+            ip = ''
+            for addr in host.findall('address'):
+                if addr.get('addrtype') == 'ipv4':
+                    ip = addr.get('addr', '')
+                    break
+            if not ip:
+                continue
+            hs = host.find('hostscript')
+            if hs is None:
+                continue
+            for script in hs.findall('script'):
+                if script.get('id') != 'nbstat':
+                    continue
+                output = script.get('output', '') or ''
+                m = re.search(r'NetBIOS name:\s*([^,\n]+)', output)
+                if m:
+                    name = m.group(1).strip()
+                    if name and name != '<unknown>':
+                        names[ip] = name
+        return names
+
+    def discover_range(self, target, do_netbios=False, timeout=180):
+        """Fast host-discovery sweep over an IP range -- no port scan.
+
+        Returns a dict with ``success``, a ``hosts`` list (each carrying ``ip``,
+        ``hostname``, ``netbios``, ``mac``, ``vendor``, ``status`` and
+        ``response_ms``), ``count`` (hosts up), ``scanned`` (addresses probed),
+        ``privileged`` (whether MACs were resolved) and a ``message``.
+
+        Live hosts that resolve a MAC are upserted into the hosts database, so
+        the persistent Discovered Hosts table reflects the sweep too.
+        """
+        try:
+            targets, count = self._expand_scan_range(target)
+        except ValueError as exc:
+            return {'success': False, 'hosts': [], 'count': 0, 'scanned': 0,
+                    'message': str(exc), 'privileged': False}
+
+        self.logger.info(
+            f"🧭 Range discovery: target={target!r} ({count} addresses) netbios={do_netbios}")
+
+        # -sn: ping sweep only, no port scan. --host-timeout keeps one
+        # unresponsive host from stalling the whole sweep. Reverse DNS of the
+        # responsive hosts is nmap's default; gaps are filled below.
+        root = self._run_nmap_xml(['-sn', '--host-timeout', '30s'], targets, timeout)
+        if root is None:
+            return {'success': False, 'hosts': [], 'count': 0, 'scanned': count,
+                    'message': 'Host-discovery scan failed (nmap unavailable or timed out)',
+                    'privileged': False}
+
+        hosts = self._parse_discovery_xml(root)
+        privileged = any(h.get('mac') for h in hosts)
+
+        # Optional NetBIOS pass over just the live hosts (UDP/137 nbstat).
+        if do_netbios and hosts:
+            try:
+                live_ips = [h['ip'] for h in hosts]
+                nb_root = self._run_nmap_xml(
+                    ['-sU', '-p', '137', '--script', 'nbstat', '-Pn', '--host-timeout', '20s'],
+                    live_ips, timeout)
+                if nb_root is not None:
+                    nb_names = self._parse_nbstat_xml(nb_root)
+                    for h in hosts:
+                        if h['ip'] in nb_names:
+                            h['netbios'] = nb_names[h['ip']]
+            except Exception as exc:                                # noqa: BLE001
+                self.logger.debug(f"NetBIOS pass failed: {exc}")
+
+        # Fill DNS hostname gaps and persist discovered MACs to the host DB.
+        for h in hosts:
+            if not h.get('hostname'):
+                h['hostname'] = self.resolve_hostname(h['ip'])
+            mac = (h.get('mac') or '').lower().strip()
+            if mac and mac != '00:00:00:00:00:00':
+                if self.blacklistcheck and (
+                        mac in self.mac_scan_blacklist or h['ip'] in self.ip_scan_blacklist):
+                    continue
+                try:
+                    self.db.upsert_host(mac=mac, ip=h['ip'], vendor=h.get('vendor', ''))
+                    self.db.update_ping_status(mac, success=True)
+                    self.db.add_scan_history(mac, h['ip'], 'range_scan')
+                except Exception as exc:                            # noqa: BLE001
+                    self.logger.debug(f"Could not persist range host {h['ip']}: {exc}")
+
+        def _ip_key(host):
+            try:
+                return tuple(int(o) for o in host['ip'].split('.'))
+            except (ValueError, AttributeError):
+                return (0, 0, 0, 0)
+        hosts.sort(key=_ip_key)
+
+        return {'success': True, 'hosts': hosts, 'count': len(hosts), 'scanned': count,
+                'message': f"{len(hosts)} host(s) up of {count} scanned",
+                'privileged': privileged}
 
     def run_nmap_network_scan(self, network_cidr, portstart, portend, extra_ports):
 
@@ -802,8 +1145,16 @@ class NetworkScanner:
 
                 # Update all existing entries - implement 30-failed-pings rule instead of immediate death
                 max_failed_pings = self.shared_data.config.get('network_max_failed_pings', 30)
+                # A scan that found nobody at all is a broken scan (no arp-scan
+                # binary, wrong interface, no sudo) — not the entire LAN going
+                # down between two cycles. Charging every host a failed ping for
+                # it is what made the whole target list flap to offline.
+                if not alive_macs:
+                    self.logger.warning(
+                        "Scan returned 0 alive hosts — skipping failed-ping "
+                        "accounting so existing hosts keep their status")
                 for mac in netkb_entries:
-                    if mac not in alive_macs:
+                    if alive_macs and mac not in alive_macs:
                         # Host not found in current scan - increment failure count
                         current_failures = netkb_entries[mac].get('Failed_Pings', 0)
                         netkb_entries[mac]['Failed_Pings'] = current_failures + 1
@@ -964,6 +1315,20 @@ class NetworkScanner:
                 
             gws = netifaces.gateways()
             default_gateway = gws['default'][netifaces.AF_INET][1]
+            if self._is_cellular_uplink(default_gateway):
+                # Wi-Fi/Ethernet are down and the box is online through a
+                # tethered hotspot: scan a non-cellular LAN leg if one still
+                # has an address, otherwise nothing.
+                lan = self._detect_default_interface()
+                if not lan or lan not in netifaces.interfaces() \
+                        or self._is_cellular_uplink(lan) \
+                        or netifaces.AF_INET not in netifaces.ifaddresses(lan):
+                    self.logger.warning(
+                        f"Only the cellular uplink ({default_gateway}) is online — "
+                        "skipping the LAN scan (set cellular_allow_scan to override)")
+                    return None
+                self.arp_scan_interface = lan
+                default_gateway = lan
             iface = netifaces.ifaddresses(default_gateway)[netifaces.AF_INET][0]
             ip_address = iface['addr']
             netmask = iface['netmask']
@@ -1659,7 +2024,13 @@ class NetworkScanner:
             if job and getattr(job, 'ssid', None):
                 job_descriptor = f" for {job.ssid} ({self.arp_scan_interface})"
             self.logger.info(f"Starting Network Scanner{job_descriptor}")
+            if self._is_cellular_uplink(self.arp_scan_interface):
+                self.arp_scan_interface = self._detect_default_interface()
             network = self.get_network()
+            if network is None:
+                self.logger.warning("No scannable LAN network — network scan skipped")
+                self.shared_data.bjornstatustext2 = "No LAN (cellular only)"
+                return
             self.get_gateway_info()
             self.shared_data.bjornstatustext2 = str(network)
             portstart = self.shared_data.portstart

@@ -129,8 +129,7 @@ class AuthManager:
     # HARDWARE FINGERPRINT
     # =========================================================================
 
-    @staticmethod
-    def get_hardware_fingerprint() -> str:
+    def get_hardware_fingerprint(self) -> str:
         """
         Generate a deterministic hardware fingerprint from stable device identifiers.
         Uses: machine-id + CPU serial (RPi). These never change regardless of
@@ -175,14 +174,49 @@ class AuthManager:
         except (OSError, IOError):
             pass
 
-        # Fallback: hostname + platform (only if neither machine-id nor CPU serial found)
+        # Fallback (no machine-id, no CPU serial — e.g. a container whose
+        # /etc/machine-id is empty): a random ID persisted once in the data dir.
+        # We deliberately do NOT use platform.platform() here — it embeds the
+        # kernel release, and in a container the kernel is the host's, so a host
+        # kernel update would silently change the fingerprint and lock the user
+        # out (issue #1002). The persisted ID is environment-independent.
         if not components:
-            import platform
-            components.append(f"hostname:{platform.node()}")
-            components.append(f"platform:{platform.platform()}")
+            components.append(f"persistent-id:{self._get_or_create_persistent_hwid()}")
 
         fingerprint_input = '|'.join(sorted(components))
         return hashlib.sha256(fingerprint_input.encode('utf-8')).hexdigest()
+
+    def _get_or_create_persistent_hwid(self) -> str:
+        """Return a stable random ID persisted in the data dir, used only when no
+        machine-id / CPU serial is available. Created once, then never changes —
+        so the hardware fingerprint can't drift when the (host) kernel is updated.
+        """
+        path = os.path.join(self.datadir, 'hwid')
+        try:
+            with open(path, 'r') as f:
+                val = f.read().strip()
+            if val:
+                return val
+        except (OSError, IOError):
+            pass
+        val = secrets.token_hex(16)
+        try:
+            os.makedirs(self.datadir, exist_ok=True)
+            tmp = f"{path}.tmp"
+            with open(tmp, 'w') as f:
+                f.write(val)
+            os.replace(tmp, path)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+        except (OSError, IOError):
+            # Can't persist (e.g. read-only data dir): derive a deterministic,
+            # still kernel-independent value from the hostname so it is at least
+            # stable for as long as the hostname is.
+            import platform
+            return 'host:' + hashlib.sha256(platform.node().encode('utf-8')).hexdigest()
+        return val
 
     # =========================================================================
     # PASSWORD HASHING
@@ -594,12 +628,16 @@ class AuthManager:
                 if not auth_row:
                     return {'success': False, 'error': 'Invalid username or recovery code'}
 
-                hw_fingerprint = auth_row['hardware_fingerprint']
+                stored_hw = auth_row['hardware_fingerprint']
 
-                # Check hardware
+                # Recovery codes are the escape hatch for a hardware change (a new
+                # Pi, a migrated VM, a host kernel update in a container, ...), so
+                # unlike login() we do NOT hard-gate on a hardware match here. The
+                # code unwraps the key with the STORED fingerprint (that is what it
+                # was wrapped with); if the current hardware differs we rebind to
+                # it below so future logins work here. (issue #1002)
                 current_hw = self.get_hardware_fingerprint()
-                if not secrets.compare_digest(hw_fingerprint, current_hw):
-                    return {'success': False, 'error': 'Hardware mismatch', 'hw_mismatch': True}
+                rebound = not secrets.compare_digest(stored_hw, current_hw)
 
                 # Normalize recovery code (strip spaces, uppercase, ensure dash format)
                 recovery_code = recovery_code.replace(' ', '').strip().upper()
@@ -619,31 +657,47 @@ class AuthManager:
                 if not matched_row:
                     return {'success': False, 'error': 'Invalid username or recovery code'}
 
-                # Unwrap Fernet key using recovery code
-                code_wrapping = self._derive_wrapping_key(recovery_code, hw_fingerprint)
+                # Unwrap Fernet key using recovery code + the STORED fingerprint.
+                code_wrapping = self._derive_wrapping_key(recovery_code, stored_hw)
                 try:
                     fernet_key = self._unwrap_fernet_key(matched_row['encrypted_fernet_key'], code_wrapping)
                 except InvalidToken:
                     return {'success': False, 'error': 'Recovery code decryption failed'}
 
-                # Mark recovery code as used
-                cursor.execute("""
-                    UPDATE recovery_codes SET used = 1, used_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                """, (matched_row['id'],))
-
-                # Re-wrap Fernet key with new password
+                # Re-wrap the Fernet key for the new password, bound to the CURRENT
+                # hardware, and record the current fingerprint — this is the rebind.
                 new_pw_hash, new_pw_salt = self._hash_password(new_password)
-                new_wrapping = self._derive_wrapping_key(new_password, hw_fingerprint)
+                new_wrapping = self._derive_wrapping_key(new_password, current_hw)
                 new_wrapped_key = self._wrap_fernet_key(fernet_key, new_wrapping)
-
-                # Update auth record
                 cursor.execute("""
                     UPDATE auth SET password_hash = ?, password_salt = ?,
                                     encrypted_fernet_key = ?,
+                                    hardware_fingerprint = ?,
                                     updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
-                """, (new_pw_hash, new_pw_salt, new_wrapped_key, auth_row['id']))
+                """, (new_pw_hash, new_pw_salt, new_wrapped_key, current_hw, auth_row['id']))
+
+                new_codes = None
+                if rebound:
+                    # The other recovery codes are wrapped to the OLD fingerprint
+                    # and can't be re-wrapped (we don't hold their plaintext), so
+                    # issue a fresh set bound to the new hardware.
+                    new_codes = self._generate_recovery_codes()
+                    cursor.execute("DELETE FROM recovery_codes")
+                    for code in new_codes:
+                        c_hash, c_salt = self._hash_password(code)
+                        c_wrapping = self._derive_wrapping_key(code, current_hw)
+                        c_wrapped = self._wrap_fernet_key(fernet_key, c_wrapping)
+                        cursor.execute("""
+                            INSERT INTO recovery_codes (code_hash, code_salt, encrypted_fernet_key)
+                            VALUES (?, ?, ?)
+                        """, (c_hash, c_salt, c_wrapped))
+                else:
+                    # Same hardware: just consume the used code (unchanged behaviour).
+                    cursor.execute("""
+                        UPDATE recovery_codes SET used = 1, used_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    """, (matched_row['id'],))
 
                 conn.commit()
 
@@ -659,9 +713,20 @@ class AuthManager:
                 cursor.execute("SELECT COUNT(*) FROM recovery_codes WHERE used = 0")
                 remaining = cursor.fetchone()[0]
 
+                if rebound:
+                    logger.warning(f"Password recovered for '{username}' with a hardware REBIND "
+                                   f"(fingerprint changed). Issued {remaining} fresh recovery codes.")
+                    return {
+                        'success': True,
+                        'rebound': True,
+                        'message': 'Recovered and rebound to this hardware. Save your NEW recovery codes — the old ones no longer work.',
+                        'recovery_codes': new_codes,
+                        'recovery_codes_remaining': remaining
+                    }
                 logger.info(f"Password recovered for user '{username}'. {remaining} recovery codes remaining.")
                 return {
                     'success': True,
+                    'rebound': False,
                     'message': f'Password reset successful. {remaining} recovery codes remaining.',
                     'recovery_codes_remaining': remaining
                 }

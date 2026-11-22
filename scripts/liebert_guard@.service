@@ -1,0 +1,76 @@
+# Ragnar liebert_guard — passive Vertiv / Liebert power-card web-UI sensor (continuous mode).
+# OPT-IN, one instance per tapped interface. RX-only: it never transmits. The in-app
+# "Liebert Guard" card (next to APC Guard) runs the same engine on demand; this unit
+# watches continuously and streams JSON-lines findings to /var/log/ragnar/liebertguard.jsonl,
+# which Watchtower tails into the unified feed + Pushover path.
+#
+#   sudo cp scripts/liebert_guard@.service /etc/systemd/system/
+#   # optional per-interface arguments, e.g. a SPAN port or a web UI on 8080:
+#   sudo install -d /etc/ragnar/liebert_guard
+#   echo 'LG_ARGS="--promisc -p 8080"' | sudo tee /etc/ragnar/liebert_guard/eth1.env
+#   sudo systemctl daemon-reload && sudo systemctl enable --now liebert_guard@eth1
+#   tail -f /var/log/ragnar/liebertguard.jsonl     # or watch the Watchtower pane
+#
+# Adapted from the module author's unit (hardening kept):
+#   * User=ragnar instead of DynamicUser=yes: with a LogsDirectory, DynamicUser moves
+#     /var/log/ragnar under /var/log/private, breaking every other reader of that dir;
+#   * paths point at the repo checkout; ProtectHome=read-only (=yes would hide /home);
+#   * findings go to the Watchtower log (StandardOutput=append); stderr stays in the journal.
+[Unit]
+Description=Ragnar liebert_guard passive Liebert / RomPager sensor on %I
+Documentation=file:///home/ragnar/Ragnar/docs/nettools.md
+BindsTo=sys-subsystem-net-devices-%i.device
+After=sys-subsystem-net-devices-%i.device
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/ragnar/liebert_guard/%i.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /home/ragnar/Ragnar/python/liebert_guard.py -i %I $LG_ARGS
+SyslogIdentifier=liebert_guard
+Restart=on-failure
+RestartSec=5
+LogsDirectory=ragnar
+StandardOutput=append:/var/log/ragnar/liebertguard.jsonl
+StandardError=journal
+
+# The one capability a packet socket needs.
+User=ragnar
+Group=ragnar
+CapabilityBoundingSet=CAP_NET_RAW
+AmbientCapabilities=CAP_NET_RAW
+NoNewPrivileges=yes
+
+# AF_PACKET is the capture socket. AF_UNIX covers glibc's own local lookups: the throwaway socket inside
+# if_nametoindex and the name-service cache probe at start (both measured with strace on glibc 2.39).
+# IPAddressDeny=any means no IP traffic at all, whatever sockets exist.
+RestrictAddressFamilies=AF_PACKET AF_UNIX
+IPAddressDeny=any
+
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+MemoryMax=256M
+TasksMax=8
+
+[Install]
+WantedBy=multi-user.target

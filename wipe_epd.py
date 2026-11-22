@@ -55,6 +55,15 @@ def main() -> int:
         print("wipe_epd: no EPD type configured, skipping", file=sys.stderr)
         return 0
     # Non-EPD displays are managed by display.py — no wipe needed on restart
+    if epd_type == "st7789v2":
+        # CardputerZero LCD: clearing it leaves a white screen for the minute
+        # Ragnar needs to start. Show the start-up picture instead.
+        try:
+            import ragnar_splash
+            return ragnar_splash.main(["--start"])
+        except Exception as exc:
+            print(f"wipe_epd: start-up picture not shown ({exc})", file=sys.stderr)
+            return 0
     _NON_EPD_TYPES = ("max7219_4panel", "max7219_8panel", "ssd1306", "gc9a01")
     if epd_type in _NON_EPD_TYPES:
         print(f"wipe_epd: {epd_type} is not an e-paper display, skipping wipe")

@@ -1,0 +1,85 @@
+[Unit]
+Description=Arista Switch and Router Guard - passive Arista EOS CVE detector on %i
+Documentation=file:/usr/local/share/ragnar/aristaguard.README.md
+BindsTo=sys-subsystem-net-devices-%i.device
+After=sys-subsystem-net-devices-%i.device
+# A baseline must not be taken while an alerting run is live, and vice versa.
+Conflicts=aristaguard-learn@%i.service
+
+[Service]
+Type=exec
+User=ragnar
+Group=ragnar
+
+# CAP_NET_RAW  - open an AF_PACKET socket at all.
+# CAP_NET_ADMIN - required for RECEPTION, not transmit. aristaguard must see
+#   LLDP addressed to 01:80:c2:00:00:0e and EAPOL addressed to
+#   01:80:c2:00:00:03 - link-local multicast groups the host does not join -
+#   and normally runs on a SPAN port where every single frame is addressed to
+#   somebody else. Both need promiscuous mode, which needs NET_ADMIN.
+#   (ndpwatch takes CAP_NET_RAW alone because NDP multicast IS joined by the
+#   host; that is a real difference, not an inconsistency.)
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+# Every ${VAR} is QUOTED. juniperwatch shipped a unit where an unquoted empty
+# substitution word-split away and silently shifted every later argument, so
+# the module ran with the wrong flags and nobody noticed.
+EnvironmentFile=-/etc/ragnar/aristaguard.conf
+ExecStart=/usr/local/bin/aristaguard.py --iface "%i" --config "${ARISTAGUARD_CONFIG}" ${ARISTAGUARD_EXTRA_ARGS}
+
+StandardOutput=append:/var/log/ragnar/aristaguard-%i.jsonl
+StandardError=journal
+Restart=on-failure
+RestartSec=5
+
+ConfigurationDirectory=ragnar
+LogsDirectory=ragnar
+StateDirectory=ragnar
+
+# PASSIVE INVARIANT, KERNEL-ENFORCED.
+#
+# Probed empirically for scapy 2.7.0: it uses AF_NETLINK (import-time
+# interface and route discovery) and AF_PACKET (capture), and never
+# AF_INET/AF_INET6. Restricting to these three plus AF_UNIX means the process
+# cannot open an IP socket even if the code were changed to try.
+#
+# Compared as a SET by the verifier, not as a substring - cdpwatch's verifier
+# checked this line with `in` and a widened "... AF_UNIX AF_INET" passed.
+RestrictAddressFamilies=AF_PACKET AF_NETLINK AF_UNIX
+IPAddressDeny=any
+SocketBindDeny=any
+
+# PrivateUsers and PrivateNetwork are deliberately NOT set.
+# PrivateUsers=yes breaks CAP_NET_RAW in the host network namespace.
+# PrivateNetwork=yes hides the very interface being monitored.
+# These are load-bearing omissions. Do not "harden" them in.
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete @mount @swap @reboot
+SystemCallArchitectures=native
+UMask=0027
+
+# Pi Zero 2W has 512MB total.
+MemoryMax=192M
+TasksMax=16
+
+[Install]
+WantedBy=multi-user.target

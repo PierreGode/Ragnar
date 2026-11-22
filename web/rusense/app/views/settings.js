@@ -254,22 +254,24 @@ export default {
   icon: icons.settings,
 
   async mount(root) {
-    // Pull current config + Pushover key status together.
-    const [cfg, keys] = await Promise.all([
+    // Pull current config + push-channel (Pushover / Slack) status together.
+    const [cfg, keys, slack] = await Promise.all([
       fetchJSON('/api/config'),
       fetchJSON('/api/pushover/keys'),
+      fetchJSON('/api/slack/webhook'),
     ]);
     const c = cfg || {};
-    const configured = !!(keys && keys.user_key_configured && keys.api_token_configured);
+    const configured = !!(keys && keys.user_key_configured && keys.api_token_configured)
+      || !!(slack && slack.configured);
     const enabledGlobally = !!c.pushover_enabled;
     const ready = configured && enabledGlobally;
 
     const banner = ready
-      ? `<div class="rounded-lg bg-ok/15 text-ok px-3 py-2 text-sm">✓ Pushover is configured and enabled. RuSense alerts will be delivered.</div>`
+      ? `<div class="rounded-lg bg-ok/15 text-ok px-3 py-2 text-sm">✓ Push notifications are configured and enabled. RuSense alerts will be delivered.</div>`
       : `<div class="rounded-lg bg-warn/15 text-warn px-3 py-2 text-sm">
-           ⚠ Pushover ${configured ? 'is configured but disabled' : 'keys are not set'}.
-           Set your User Key and API Token under <strong>Config → Pushover Notifications</strong> in the main
-           Ragnar dashboard first — RuSense alerts use the same account.
+           ⚠ Push notifications ${configured ? 'are configured but disabled' : 'have no channel set'}.
+           Set up Pushover keys or a Slack webhook under <strong>Config → Push Notifications</strong> in the main
+           Ragnar dashboard first — RuSense alerts use the same channels.
          </div>`;
 
     root.appendChild(html`
@@ -592,7 +594,7 @@ export default {
     $('#st-test').addEventListener('click', async () => {
       const r = await req('POST', '/api/pushover/test');
       const ok = r.ok && r.data && r.data.success;
-      toast(ok ? 'Test notification sent' : ((r.data && r.data.message) || 'Test failed — check Pushover keys'),
+      toast(ok ? 'Test notification sent' : ((r.data && r.data.message) || 'Test failed — check Pushover keys / Slack webhook'),
         ok ? 'ok' : 'bad');
     });
 

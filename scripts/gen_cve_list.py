@@ -1,0 +1,521 @@
+#!/usr/bin/env python3
+"""Regenerate docs/CVE.md — the unified CVE index for Ragnar's detectors.
+
+Scans the detector code for CVE IDs, attributes each one to the detector that
+names it (by file, or by enclosing function / constant inside
+network_diagnostics.py) and classifies it:
+
+  detected   — at least one detector identifies it from traffic on the wire
+  context    — named for patch guidance / related context only (posture
+               advisories, reference tables, shared-shape context)
+  active     — an ACTIVE check in the BLE pentest action (it transmits)
+  ui         — named only in a web card's prose
+
+Run from the repo root after porting a module:  python3 scripts/gen_cve_list.py
+"""
+import collections
+import os
+import re
+import subprocess
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT = os.path.join(ROOT, 'docs', 'CVE.md')
+CVE_RE = re.compile(r'CVE-(\d{4})-(\d{4,})')
+
+# Whole-file owners.
+FILE_OWNERS = {
+    'tls_watch.py': 'TLS Watch',
+    'ssh_watch.py': 'SSH Watch',
+    'telnet_watch.py': 'Telnet Watch',
+    'telnet_watch_selftest.py': 'Telnet Watch',
+    'rpcwatch.py': 'RPC / NetLogon Watch',
+    'rdpwatch.py': 'RDP Watch',
+    'bfdwatch.py': 'BFD Watch',
+    'ptpwatch.py': 'PTP Watch',
+    'ldap_watch.py': 'LDAP Watch',
+    'lacpwatch.py': 'LACP Watch',
+    'ftpwatch.py': 'FTP Watch',
+    'smtpwatch.py': 'SMTP Watch',
+    'sr_mplswatch.py': 'SR-MPLS Watch',
+    'python/snmp_cve.py': 'SNMP Watch',
+    'python/dellguard.py': 'Dell Guard',
+    'python/dellguard_conformance.py': 'Dell Guard',
+    'python/apcguard.py': 'APC Guard',
+    'python/apcguard_selftest.py': 'APC Guard',
+    'python/apcguard_scapy_xcheck.py': 'APC Guard',
+    'python/liebert_guard.py': 'Liebert Guard',
+    'python/test_liebert_guard.py': 'Liebert Guard',
+    'python/liebert_guard_conformance.py': 'Liebert Guard',
+    'python/liebert_guard_scapy_selftest.py': 'Liebert Guard',
+    'python/aristaguard.py': 'Arista Guard',
+    'python/aristaguard_conformance.py': 'Arista Guard',
+    'python/aristaguard_scapy_xcheck.py': 'Arista Guard',
+    'python/lldpwatch.py': 'LLDP Watch',
+    'python/lldpwatch_frames.py': 'LLDP Watch',
+    'python/lldpwatch_conformance.py': 'LLDP Watch',
+    'python/lldpwatch_scapy_xcheck.py': 'LLDP Watch',
+    'python/cfmwatch.py': 'CFM Watch',
+    'python/ripwatch.py': 'RIP Watch',
+    'python/radiuswatch.py': 'RADIUS Watch',
+    'python/ssdpwatch.py': 'SSDP/UPnP Watch',
+    'python/certwatch.py': 'Cert Watch',
+    'python/certwatch_selftest.py': 'Cert Watch',
+    'python/ssdpwatch_selftest.py': 'SSDP/UPnP Watch',
+    'python/httpwatch.py': 'HTTP Watch',
+    'python/httpwatch_selftest.py': 'HTTP Watch',
+    'actions/ble_pentest.py': 'BLE Pentest (active)',
+}
+FILE_PREFIX_OWNERS = {'python/dns_doctor_passive/': 'DNS Watch',
+                      'python/modbuswatch/': 'Modbus Watch',
+                      'python/oamwatch/': 'OAM Watch',
+                      'python/oamwatch_tests/': 'OAM Watch',
+                      'python/cfmwatch_tests/': 'CFM Watch',
+                      # standalone igmpwatch package (v5) + its selftest name the same 3
+                      # IGMP/MLD CVEs the in-app do_igmp_watch detects — attribute to the
+                      # same owner so they dedupe rather than double-count under a file path.
+                      'igmpwatch/': 'IGMP / MLD Watch',
+                      'selftest.py': 'IGMP / MLD Watch'}
+# Files that only mention CVEs already owned elsewhere (labels, help text).
+MENTION_ONLY = {'webapp_modern.py', 'watchtower.py', 'web/scripts/ragnar_modern.js',
+                'web/index_modern.html'}
+
+# network_diagnostics.py: enclosing def / constant -> detector (first prefix match).
+ND_PREFIXES = [
+    ('_cli', None),
+    # Active Cert Watch (do_cert_watch) now runs the same 4 cert-bytes CVE detectors
+    # as the passive certwatch daemon (_tls_cve_findings / _tls_classify comment /
+    # _cert_selftest), so those CVE tokens attribute to Cert Watch, not this file.
+    ('_tls_c', 'Cert Watch'), ('_cert_selftest', 'Cert Watch'),
+    ('_BGP_ADVISORIES', 'BGP Path Watch'), ('_OSPF_ADVISORIES', 'OSPF Watch'),
+    ('_arista', 'Arista Guard'), ('_ARISTA', 'Arista Guard'), ('do_arista', 'Arista Guard'),
+    ('_aruba', 'Aruba Guard'), ('_ARUBA', 'Aruba Guard'),
+    ('_apc', 'APC Guard'), ('_APC', 'APC Guard'), ('do_apc', 'APC Guard'),
+    ('_liebert', 'Liebert Guard'), ('_LIEBERT', 'Liebert Guard'), ('do_liebert', 'Liebert Guard'),
+    ('_arp', 'ARP Watch'),
+    ('_cdp', 'CDP Watch'), ('_CDP', 'CDP Watch'),
+    ('_udld', 'CDP Watch'), ('_UDLD', 'CDP Watch'),
+    ('_cisco', 'Cisco Guard'), ('_CISCO', 'Cisco Guard'), ('_ikev2', 'Cisco Guard'),
+    ('_lisp', 'Cisco Guard'), ('_LISP', 'Cisco Guard'),
+    ('_twamp', 'Cisco Guard'), ('_TWAMP', 'Cisco Guard'), ('_ipsla', 'Cisco Guard'),
+    ('_dhcpv6', 'Cisco Guard'), ('_ipv6_rh0', 'Cisco Guard'), ('_vxlan', 'Cisco Guard'),
+    ('_VXLAN', 'Cisco Guard'), ('_GUARD_IP6', 'Cisco Guard'),
+    ('_juniper', 'Juniper Guard'), ('_JUNIPER', 'Juniper Guard'),
+    ('_comware', 'Comware Guard'), ('do_comware', 'Comware Guard'),
+    ('_mikrotik', 'MikroTik Guard'), ('_MIKROTIK', 'MikroTik Guard'),
+    ('_dell', 'Dell Guard'),
+    ('_IPSEC', 'IPsec / IKE Watch'), ('_ipsec', 'IPsec / IKE Watch'),
+    ('_krb', 'SMB / Kerberos Watch'), ('_KRB', 'SMB / Kerberos Watch'),
+    ('_smb', 'SMB / Kerberos Watch'), ('_SMB', 'SMB / Kerberos Watch'),
+    ('do_smb', 'SMB / Kerberos Watch'),
+    ('_ND_OPT', 'ICMP Watch'), ('_icmp', 'ICMP Watch'), ('_decode_icmp6', 'ICMP Watch'),
+    ('do_icmp', 'ICMP Watch'), ('_raguard', 'ICMP Watch'),
+    ('_NTP', 'NTP Watch'), ('_ntp', 'NTP Watch'), ('_parse_ntp', 'NTP Watch'),
+    ('_parse_autokey', 'NTP Watch'),
+    ('_EIGRP', 'EIGRP Watch'), ('_eigrp', 'EIGRP Watch'),
+    ('_isis', 'IS-IS Watch'),
+    ('_RIP', 'RIP Watch'), ('_rip', 'RIP Watch'), ('do_rip', 'RIP Watch'),
+    ('_igmp', 'IGMP / MLD Watch'), ('_parse_igmp', 'IGMP / MLD Watch'),
+    ('_decode_mld', 'IGMP / MLD Watch'),
+    ('_dhcp', 'DHCP Guardian'), ('do_dhcp', 'DHCP Guardian'),
+    ('_dns_dnssec', 'DNS Doctor (active)'), ('_dns_selftest', 'DNS Doctor (active)'),
+    ('do_dns_doctor', 'DNS Doctor (active)'), ('do_dns_watch', 'DNS Watch'),
+    ('_ssdp', 'SSDP/UPnP Watch'), ('_SSDP', 'SSDP/UPnP Watch'), ('do_ssdp', 'SSDP/UPnP Watch'),
+    ('_http', 'HTTP Watch'), ('_HTTP', 'HTTP Watch'), ('do_http', 'HTTP Watch'),
+    ('_snmp', 'SNMP Watch'),
+    ('_FTP', 'FTP Watch'), ('_ftp', 'FTP Watch'), ('do_ftp', 'FTP Watch'),
+    ('_SMTP', 'SMTP Watch'), ('_smtp', 'SMTP Watch'), ('do_smtp', 'SMTP Watch'),
+    ('_MODBUS', 'Modbus Watch'), ('_modbus', 'Modbus Watch'), ('do_modbus', 'Modbus Watch'),
+    ('_LLDP', 'LLDP Watch'), ('_lldp', 'LLDP Watch'), ('do_lldp', 'LLDP Watch'),
+    ('_OAM', 'OAM Watch'), ('_oam', 'OAM Watch'), ('do_oam', 'OAM Watch'),
+    # before Cisco Guard's ('_CFM', ...) VXLAN-NGOAM prefix, which would swallow these
+    ('_CFMW', 'CFM Watch'), ('_cfmw', 'CFM Watch'), ('do_cfm', 'CFM Watch'),
+    ('_RELAY', 'Relay / Coercion Watch'), ('_relay', 'Relay / Coercion Watch'),
+    ('_parse_relay', 'Relay / Coercion Watch'), ('do_relay', 'Relay / Coercion Watch'),
+    ('_ND_DNSSL', 'ICMP Watch'), ('_ISIS', 'IS-IS Watch'), ('_CFM', 'Cisco Guard'),
+    ('_CAPWAP', 'Cisco Guard'), ('_COMWARE', 'Comware Guard'), ('_DNS_PASSIVE', 'DNS Watch'),
+    ('_TCPDUMP_HEX_RE', 'Trailing-data / Etherleak'),
+    ('_stp_selftest', 'Trailing-data / Etherleak'), ('_apply_trailing', 'Trailing-data / Etherleak'),
+]
+# CVEs named inside a detector's finding text for comparison only — e.g. the
+# OpenSSH scp bug named as the "twin" of the netkit rcp CVE Telnet Watch detects,
+# and the Ripple20 IPv6 bug APC Guard names only to state it does not apply to APC.
+CONTEXT_CVES = {'CVE-2019-6111', 'CVE-2020-11897',
+                # cfmwatch: Huawei Y.1731 DoS (trigger never published, screening row only)
+                # and a Cisco IOS XR CFM bug rejected below the bar; both only named.
+                'CVE-2014-3223', 'CVE-2023-20233',
+                # dns_doctor_passive mdns.py "why the Avahi CVEs are absent" note: the
+                # remote crafted-packet bugs are 2006-2011, ~5.0 CVSS v2 (under the 6.5
+                # floor), not in CISA KEV -- named only to document the deliberate gap.
+                'CVE-2008-5081', 'CVE-2010-2244', 'CVE-2011-1002',
+                # RDP Watch names CVE-2005-1794 (Standard RDP Security MITM) as a
+                # posture reference on RDP-001/RDP-002 only — no CVE code is claimed,
+                # the module is posture/abuse with no detected CVEs.
+                'CVE-2005-1794'}
+# Deliberately wrong IDs inside a vendored module's own mutation-test fixtures
+# (ptpwatch v4's README bite list swaps CVE-2024-42861 for this). Never a detection.
+IGNORED_CVES = {'CVE-2024-99999',
+                'CVE-9999-0001',   # lldpwatch conformance: operator extra_families fixture
+                # lldpwatch_conformance: the four SB220 4.3 siblings, asserted NOT screened
+                'CVE-2021-34775', 'CVE-2021-34776', 'CVE-2021-34777', 'CVE-2021-34778',
+                'CVE-2019-14810',  # oamwatch xcheck comment: Arista LDP, named only as a not-this-protocol example
+                # aristaguard QUARANTINED_CVES: named in-module ONLY so they can never be
+                # silently promoted into the catalog — no advisory/CVSS confirmed, no
+                # detection rule exists, they never fire. Not part of coverage.
+                'CVE-2024-27890', 'CVE-2020-15897', 'CVE-2024-12378',
+                'CVE-2026-11704', 'CVE-2025-6188', 'CVE-2023-24548',
+                # rpcwatch v7 EVALUATED_NOT_CLAIMED: three CVEs whose titles name a
+                # service rpcwatch watches but which it deliberately does NOT claim —
+                # the two August-2021 spooler RCEs have no published mechanism to key
+                # on, and CVE-2026-50346 is a local vector (AV:L) that never crosses
+                # the wire. The conformance harness fails if any is ever claimed.
+                'CVE-2021-36936', 'CVE-2021-36947', 'CVE-2026-50346'}
+# Per-file CVEs that file only names (another detector's discipline, a corrected
+# mis-attribution), so they count as context there and never as a detection.
+FILE_CONTEXT_CVES = {
+    # httpwatch: CVE-2018-0732 is cited as TLS Watch's catalog discipline; CVE-2026-41417
+    # is named in the CVE-2026-42580 note and the self-test only to record that it was
+    # once mis-attributed to HTTP-004 and is deferred (see DEFERRED_CVES).
+    'python/httpwatch.py': {'CVE-2018-0732', 'CVE-2026-41417'},
+    'python/httpwatch_selftest.py': {'CVE-2026-41417'},
+}
+# Per-CVE owner overrides where a shared helper names another vendor's CVE.
+CVE_OWNER_OVERRIDE = {'CVE-2021-0254': 'Juniper Guard'}
+# Owners (or owner+CVE) whose mention is context/reference, not a detection.
+CONTEXT_OWNERS = {'BGP Path Watch:advisory', 'OSPF Watch:advisory', 'SR-MPLS Watch:reference',
+                  'ARP Watch'}
+
+# Curated attack / bug names. Only well-established names go here; anything not
+# listed shows the detector alone rather than a guessed label.
+NAMES = {
+    'CVE-2002-20001': 'D(HE)at', 'CVE-2022-40735': 'D(HE)at', 'CVE-2024-41996': 'D(HE)at',
+    'CVE-2003-0001': 'Etherleak',
+    'CVE-2024-38077': 'MadLicense', 'CVE-2026-54121': 'Certighost',
+    'CVE-2025-29969': 'EventLogin', 'CVE-2026-41089': 'LongLogon',
+    'CVE-2020-0601': 'CurveBall', 'CVE-2017-15361': 'ROCA',
+    'CVE-2015-8011': 'lldpd lldp_decode Management Address overflow',
+    'CVE-2022-4338': 'Open vSwitch LLDP Auto Attach integer underflow',
+    'CVE-2014-9222': 'Misfortune Cookie', 'CVE-2025-41426': 'Liebert RDU101 / IS-UNITY HTTP method overflow',
+    'CVE-2020-11896': 'Ripple20 IPv4 tunnelling RCE', 'CVE-2020-11897': 'Ripple20 IPv6 OOB write (not APC)',
+    'CVE-2020-11898': 'Ripple20 ICMPv4 heap leak', 'CVE-2020-11899': 'Ripple20 IPv6 OOB read',
+    'CVE-2020-11901': 'Ripple20 DNS resolver RCE', 'CVE-2020-11902': 'Ripple20 IPv6-in-IPv4 OOB read',
+    'CVE-1999-0113': 'rlogin -froot auth bypass', 'CVE-1999-0185': 'r-services ftp-data trust bounce',
+    'CVE-2007-0882': 'Solaris in.telnetd -f auth bypass', 'CVE-2011-4862': 'telnetd encrypt_keyid overflow',
+    'CVE-2019-6111': 'OpenSSH scp file overwrite', 'CVE-2019-7282': 'netkit rcp dot-name',
+    'CVE-2019-7283': 'netkit rcp unrequested file', 'CVE-2022-39028': 'inetutils telnetd EC/EL crash', 'CVE-2005-4436': 'EIGRP K-value / Goodbye reset',
+    'CVE-2005-4437': 'EIGRP missing authentication', 'CVE-2006-5051': 'OpenSSH signal-handler race',
+    'CVE-2008-0960': 'SNMPv3 USM HMAC truncation', 'CVE-2013-2566': 'RC4 biases',
+    'CVE-2013-5211': 'NTP monlist amplification', 'CVE-2014-0160': 'Heartbleed',
+    'CVE-2014-9295': 'NTP Autokey crypto_recv overflow', 'CVE-2015-2808': 'Bar Mitzvah (RC4)',
+    'CVE-2018-6789': 'Exim AUTH base64 overflow',
+    'CVE-2026-67276': 'MikroTrick SSH key forgery (RouterOS)', 'CVE-2026-86060': 'MikroTrick username escalation (RouterOS)',
+    'CVE-2019-10149': 'Exim ${...} expansion RCE',
+    'CVE-2019-15846': 'Exim SNI/cert-DN RCE',
+    'CVE-2019-16928': 'Exim overlong EHLO overflow',
+    'CVE-2015-3306': 'ProFTPD mod_copy pre-auth copy',
+    'CVE-2019-12815': 'ProFTPD mod_copy Limit bypass',
+    'CVE-2023-51713': 'ProFTPD make_ftp_cmd OOB read',
+    'CVE-2019-14462': 'libmodbus FC15/16 count OOB read', 'CVE-2019-14463': 'libmodbus FC15/16 count OOB read',
+    'CVE-2024-10918': 'libmodbus over-length reply', 'CVE-2021-22779': 'ModiPwn (Modicon UMAS auth bypass)',
+    'CVE-2015-4000': 'Logjam', 'CVE-2015-5434': 'MPLS VRF hopping (Comware)',
+    'CVE-2015-8087': 'MPLS VRF hopping (Huawei)', 'CVE-2015-7704': "NTP Kiss-o'-Death spoof",
+    'CVE-2015-7705': "NTP Kiss-o'-Death spoof", 'CVE-2015-7871': 'NTP crypto-NAK auth bypass',
+    'CVE-2016-2183': 'SWEET32', 'CVE-2016-8610': 'SSL Death Alert',
+    'CVE-2017-0144': 'EternalBlue', 'CVE-2017-0781': 'BlueBorne', 'CVE-2017-0782': 'BlueBorne',
+    'CVE-2017-20149': 'Chimay-Red', 'CVE-2018-0732': 'Oversized DH prime (client DoS)',
+    'CVE-2018-1111': 'DynoRoot', 'CVE-2018-14847': 'Winbox arbitrary file read',
+    'CVE-2019-5608': 'Fragmented IGMP/MLD membership', 'CVE-2020-0796': 'SMBGhost',
+    'CVE-2020-1472': 'Zerologon', 'CVE-2020-3110': 'CDPwn', 'CVE-2020-3111': 'CDPwn',
+    'CVE-2020-3118': 'CDPwn', 'CVE-2020-3119': 'CDPwn', 'CVE-2020-3120': 'CDPwn',
+    'CVE-2020-3505': 'LCDPwn (Video Surveillance 8000)', 'CVE-2020-3506': 'LCDPwn (Video Surveillance 8000)',
+    'CVE-2020-3507': 'LCDPwn (Video Surveillance 8000)', 'CVE-2020-3543': 'LCDPwn (Video Surveillance 8000)',
+    'CVE-2020-3544': 'LCDPwn (Video Surveillance 8000)', 'CVE-2021-1131': 'LCDPwn (Video Surveillance 8000)',
+    'CVE-2021-1521': 'LCDPwn (Video Surveillance 8000)', 'CVE-2021-1563': 'LCDPwn (Video Surveillance 7000)',
+    'CVE-2021-1564': 'LCDPwn (Video Surveillance 7000)', 'CVE-2021-1379': 'LCDPwn (IP Phone 68xx/78xx/88xx)',
+    'CVE-2022-20968': 'Cisco IP Phone 7800/8800 CDP stack overflow', 'CVE-2022-20824': 'Cisco NX-OS/FXOS CDP RCE',
+    'CVE-2022-20688': 'Cisco ATA 190 CDP OOB read', 'CVE-2022-20689': 'Cisco ATA 190 CDP length validation',
+    'CVE-2022-20690': 'Cisco ATA 190 CDP length validation', 'CVE-2022-20691': 'Cisco ATA 190 CDP resource exhaustion',
+    'CVE-2022-20766': 'Cisco ATA 190 CDP OOB read', 'CVE-2022-20804': 'Cisco Unified CM CDP DoS',
+    'CVE-2021-26111': 'FortiSwitch lldpmedd memory exhaustion', 'CVE-2023-41910': 'lldpd cdp_decode OOB read',
+    'CVE-2020-8616': 'NXNSAttack', 'CVE-2020-11868': 'NTP zero-origin sync block',
+    'CVE-2020-12243': 'OpenLDAP nested-filter DoS', 'CVE-2020-12695': 'CallStranger',
+    'CVE-2020-16898': 'Bad Neighbor',
+    'CVE-2020-16899': 'RA DNSSL DoS', 'CVE-2020-25583': 'RA DNSSL DoS (rtsold)',
+    'CVE-2020-25705': 'SAD DNS', 'CVE-2021-1587': 'NX-OS NGOAM DoS',
+    'CVE-2021-0254': 'Junos overlayd VXLAN RCE', 'CVE-2021-1675': 'PrintNightmare',
+    'CVE-2021-34527': 'PrintNightmare', 'CVE-2021-1678': 'Print spooler RPC relay (IRemoteWinSpool)',
+    'CVE-2021-36942': 'PetitPotam', 'CVE-2021-31166': 'HTTP.sys Accept-Encoding',
+    'CVE-2022-21907': 'HTTP.sys HTTP Trailer Support RCE', 'CVE-2021-25220': 'MaginotDNS',
+    'CVE-2015-1635': 'MS15-034 HTTP.sys Range overflow', 'CVE-2023-44487': 'HTTP/2 Rapid Reset',
+    'CVE-2022-26809': 'RPC runtime bind_ack underflow', 'CVE-2022-26925': 'PetitPotam-class LSA coercion',
+    'CVE-2022-33647': 'Kerberos RC4-MD4 downgrade', 'CVE-2022-33679': 'Kerberos RC4-MD4 downgrade',
+    'CVE-2023-48795': 'Terrapin', 'CVE-2023-50387': 'KeyTrap', 'CVE-2023-50868': 'NSEC3 CPU exhaustion',
+    'CVE-2024-3596': 'BlastRADIUS', 'CVE-2024-3661': 'TunnelVision', 'CVE-2024-6387': 'regreSSHion',
+    'CVE-2024-30388': 'LACP malformed-PDU flap', 'CVE-2024-33655': 'DNSBomb',
+    'CVE-2024-43532': 'RemoteRegistry NTLM relay', 'CVE-2024-49112': 'LDAPNightmare',
+    'CVE-2024-49113': 'LDAPNightmare', 'CVE-2025-20315': 'CAPWAP malformed header',
+    'CVE-2024-20311': 'IOS/IOS-XE LISP crafted-packet DoS', 'CVE-2025-20111': 'NX-OS health-monitor frame DoS',
+    'CVE-2011-3323': 'Quagga ospf6d IPv6 prefix DoS', 'CVE-2018-14880': 'tcpdump OSPFv3 parser over-read',
+    'CVE-2018-0466': 'Cisco IOS-XR OSPFv3 DoS', 'CVE-2013-5565': 'Cisco OSPFv3 DoS',
+    'CVE-2025-8872': 'Arista EOS OSPFv3 DoS', 'CVE-2013-0149': 'Cisco IOS OSPF LSA manipulation',
+    'CVE-2024-44070': 'FRR bgp_attr_encap Tunnel-Encap crash',
+    'CVE-2021-1368': 'UDLD port-channel RCE', 'CVE-2021-34714': 'UDLD reload DoS',
+    'CVE-2025-20154': 'TWAMP server OOB array-access reload', 'CVE-2021-34720': 'IP SLA/TWAMP socket memory exhaustion',
+    'CVE-2025-20188': 'IOS-XE WLC OOB AP-image hardcoded-JWT upload (10.0)', 'CVE-2026-20133': 'Catalyst SD-WAN Manager API flaw',
+    'CVE-2018-15439': 'SB switch default privileged account re-enabled', 'CVE-2025-20311': 'Catalyst 9000 crafted-frame egress port block',
+    'CVE-2025-20313': 'IOS-XE secure boot bypass', 'CVE-2025-20314': 'IOS-XE secure boot bypass',
+    'CVE-2025-20327': 'IE Switch Device Manager crafted-URL DoS',
+    'CVE-2023-20024': 'Cisco SB switch web-UI DoS', 'CVE-2023-20156': 'Cisco SB switch web-UI DoS',
+    'CVE-2023-20157': 'Cisco SB switch web-UI DoS', 'CVE-2023-20158': 'Cisco SB switch web-UI DoS',
+    'CVE-2023-20162': 'Cisco SB switch web-UI info disclosure',
+    'CVE-2026-20267': 'IOS XE access control (Aug-2026 wave)', 'CVE-2026-20268': 'IOS XE buffer restriction (Aug-2026 wave)',
+    'CVE-2026-20269': 'IOS XE resource lifetime (Aug-2026 wave)', 'CVE-2026-20270': 'IOS XE calc error (Aug-2026 wave)',
+    'CVE-2026-20271': 'IOS XE input validation (Aug-2026 wave)', 'CVE-2026-20272': 'IOS XE RCE (Aug-2026 wave, 9.8)',
+    'CVE-2026-20273': 'IOS XE input validation (Aug-2026 wave)',
+    'CVE-2025-20700': 'Airoha RACE', 'CVE-2025-20701': 'Airoha RACE', 'CVE-2025-20702': 'Airoha RACE',
+    'CVE-2025-22474': 'Dell OS10 SSRF', 'CVE-2025-33073': 'SMB reflective relay',
+    'CVE-2025-36911': 'WhisperPair', 'CVE-2025-38741': 'Duplicate SSH host key',
+    'CVE-2025-40778': 'Unsolicited-RR cache poisoning', 'CVE-2025-40780': 'Weak port/ID PRNG',
+    'CVE-2025-68615': 'snmptrapd overflow', 'CVE-2026-19033': 'Unsigned multi-message XFR',
+    'CVE-2026-20074': 'IS-IS multi-instance exposure', 'CVE-2026-20222': 'EIGRP update flood',
+    'CVE-2026-24061': 'inetutils telnetd auth bypass', 'CVE-2026-81642': 'DNS compression-pointer loop',
+}
+
+
+def tracked_files():
+    out = subprocess.run(['git', 'ls-files', '*.py', '*.js', '*.html'], cwd=ROOT,
+                         capture_output=True, text=True, check=True).stdout.split()
+    # Never scan this script: its NAMES table would count as a detector. And never
+    # scan the vendored BGP Pathwatch v6 passive tiers: they ship self-test-only
+    # (no live Ragnar capture adapter/route — see #959), so the parser CVEs their
+    # own test corpus names must keep the BGP/SR-MPLS watchers' intended CONTEXT
+    # (posture-advisory) classification, not be miscounted as live-detected here.
+    # Never scan tests/ either: the pytest suites name CVE ids as fixtures (made-up
+    # ones like CVE-1999-0001, and real ones used as sample data), and none of them is
+    # a detector — scanning them inflated the index by 19 ids that nothing detects.
+    return [p for p in out
+            if p != 'scripts/gen_cve_list.py'
+            and not p.startswith('python/bgp_pathwatch/')
+            and not p.startswith('tests/')
+            # The Nmap-scanner enricher looks up whatever CVE it is handed; the one id
+            # in it is a usage example, not something it detects.
+            and p != 'distro_cve.py']
+
+
+def nd_owner(name):
+    for pre, det in ND_PREFIXES:
+        if name.startswith(pre):
+            return det
+    return 'network_diagnostics'
+
+
+DEF_RE = re.compile(r'(?:def |class )(\w+)|(_[A-Z][A-Z0-9_]+)\s*=')
+
+
+def next_owners(lines):
+    """For each line index, the name of the next top-level def/constant."""
+    out, nxt = [None] * len(lines), None
+    for i in range(len(lines) - 1, -1, -1):
+        m = DEF_RE.match(lines[i])
+        if m:
+            nxt = m.group(1) or m.group(2)
+        out[i] = nxt
+    return out
+
+
+def module_docstring_end(lines):
+    """Index of the line closing the module docstring (0 if there is none)."""
+    for i, l in enumerate(lines[:5]):
+        for q in ('"""', "'''"):
+            if l.lstrip().startswith(q):
+                if l.count(q) >= 2:
+                    return i + 1
+                for j in range(i + 1, len(lines)):
+                    if q in lines[j]:
+                        return j + 1
+    return 0
+
+
+def sr_reference_span(lines):
+    """(start, end) line indexes of the CVE_REFERENCES dict literal."""
+    for i, l in enumerate(lines):
+        if l.startswith('CVE_REFERENCES'):
+            for j in range(i + 1, len(lines)):
+                if lines[j].startswith('}'):
+                    return i, j
+    return -1, -1
+
+
+DEFERRED_CVE_FILES = {'python/radiuswatch.py', 'python/httpwatch.py'}
+
+
+def deferred_span(lines):
+    """(start, end) line indexes of a module's DEFERRED_CVES dict literal (radiuswatch,
+    httpwatch). CVEs named there are triaged-and-rejected (undetectable passively, below
+    the bar, or another watcher's), so they are context, never detected."""
+    for i, l in enumerate(lines):
+        if l.startswith('DEFERRED_CVES'):
+            for j in range(i + 1, len(lines)):
+                if lines[j].startswith('}'):
+                    return i, j
+    return -1, -1
+
+
+def html_card(lines, i):
+    for j in range(i, -1, -1):
+        m = re.search(r'<h3[^>]*>([^<]+)', lines[j])
+        if m:
+            return m.group(1).strip()
+    return 'Web UI'
+
+
+def collect():
+    owners = collections.defaultdict(set)     # cve -> {(detector, status)}
+    mentions = collections.defaultdict(list)  # cve -> [line text]
+    for path in tracked_files():
+        full = os.path.join(ROOT, path)
+        try:
+            lines = open(full, encoding='utf-8', errors='replace').read().split('\n')
+        except OSError:
+            continue
+        if not any(CVE_RE.search(l) for l in lines):
+            continue
+        sr_a, sr_b = sr_reference_span(lines) if path == 'sr_mplswatch.py' else (-1, -1)
+        df_a, df_b = (deferred_span(lines) if path in DEFERRED_CVE_FILES
+                      else (-1, -1))
+        owner = None
+        nxt = next_owners(lines) if path == 'network_diagnostics.py' else []
+        doc_end = module_docstring_end(lines)
+        for i, l in enumerate(lines):
+            if path == 'network_diagnostics.py':
+                m = DEF_RE.match(l)
+                if m:
+                    owner = m.group(1) or m.group(2)
+                # A top-level comment is the banner of the NEXT definition.
+                cur = nxt[i] if l.startswith('#') else owner
+            for m in CVE_RE.finditer(l):
+                cve = m.group(0)
+                if cve in IGNORED_CVES:
+                    continue
+                mentions[cve].append(l)
+                if path in MENTION_ONLY:
+                    if path == 'web/index_modern.html':
+                        owners[cve].add((html_card(lines, i), 'ui'))
+                    continue
+                if path == 'network_diagnostics.py':
+                    det = nd_owner(cur or '')
+                    if det is None:
+                        continue
+                    status = 'context' if det in CONTEXT_OWNERS else 'detected'
+                    if cur in ('_BGP_ADVISORIES', '_OSPF_ADVISORIES'):
+                        status = 'context'
+                elif path in FILE_OWNERS:
+                    det = FILE_OWNERS[path]
+                    status = 'active' if path.startswith('actions/') else 'detected'
+                    # Module-docstring scope notes and reference tables name
+                    # CVEs without detecting them.
+                    if sr_a <= i <= sr_b or df_a <= i <= df_b or i < doc_end:
+                        status = 'context' if status == 'detected' else status
+                else:
+                    det = next((d for p, d in FILE_PREFIX_OWNERS.items()
+                                if path.startswith(p)), path)
+                    status = 'detected'
+                det = CVE_OWNER_OVERRIDE.get(cve, det)
+                if cve in CONTEXT_CVES and status == 'detected':
+                    status = 'context'
+                if cve in FILE_CONTEXT_CVES.get(path, ()) and status == 'detected':
+                    status = 'context'
+                owners[cve].add((det, status))
+    return owners, mentions
+
+
+def classify(pairs):
+    code = [(d, s) for d, s in pairs if s != 'ui']
+    if any(s == 'detected' for _, s in code):
+        return 'detected', sorted({d for d, s in code if s == 'detected'}), \
+            sorted({d for d, s in code if s == 'context'} - {d for d, s in code if s == 'detected'})
+    if any(s == 'active' for _, s in code):
+        return 'active', sorted({d for d, _ in code}), []
+    if code:
+        return 'context', sorted({d for d, _ in code}), []
+    return 'ui', sorted({d for d, _ in pairs}), []
+
+
+def main():
+    owners, mentions = collect()
+    rows = []
+    for cve, pairs in owners.items():
+        status, dets, ctx = classify(pairs)
+        y, n = CVE_RE.match(cve).groups()
+        rows.append((int(y), int(n), cve, status, dets, ctx, NAMES.get(cve, '')))
+    rows.sort()
+    counts = collections.Counter(r[3] for r in rows)
+    by_year = collections.Counter(r[0] for r in rows)
+    by_det = collections.defaultdict(list)
+    for r in rows:
+        for d in r[4]:
+            by_det[d].append(r[2])
+        for d in r[5]:
+            by_det[d].append(r[2])
+
+    status_label = {'detected': 'detected', 'context': 'context only',
+                    'active': 'active check', 'ui': 'card text only'}
+    o = []
+    w = o.append
+    w('# CVE Index')
+    w('')
+    w('Every CVE ID named anywhere in Ragnar\'s detector code, in one list: which detector')
+    w('names it and whether it is **detected** from traffic on the wire or named as '
+      '**context** only.')
+    w('The research behind these detections is credited in [CREDITS.md](CREDITS.md); how each')
+    w('detector works is in [nettools.md](nettools.md).')
+    w('')
+    w('> **Generated file.** Regenerate after porting a module:')
+    w('> `python3 scripts/gen_cve_list.py`. Do not edit by hand.')
+    w('')
+    w('## Summary')
+    w('')
+    w(f'- **{len(rows)}** distinct CVE IDs')
+    w(f'- **{counts["detected"]}** detected: a passive detector identifies the CVE\'s '
+      'signature, exposure or exploit shape from traffic already on the wire')
+    w(f'- **{counts["context"]}** context only: posture advisories and reference tables for '
+      'byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs '
+      'attached to a shared attack shape (named for patch guidance, not identified per-CVE)')
+    if counts['active']:
+        w(f'- **{counts["active"]}** active check: probed by the BLE Pentest action, which '
+          'transmits (not part of the passive suite)')
+    if counts['ui']:
+        w(f'- **{counts["ui"]}** card text only: named in a detector card\'s description as '
+          'related context, not detected')
+    w(f'- Range **{rows[0][2]}** → **{max(rows, key=lambda r: (r[0], r[1]))[2]}**')
+    w('')
+    w('| Year | CVEs |')
+    w('|---|---|')
+    for y in sorted(by_year):
+        w(f'| {y} | {by_year[y]} |')
+    w('')
+    w('## By detector')
+    w('')
+    w('| Detector | CVEs |')
+    w('|---|---|')
+    for d in sorted(by_det, key=str.lower):
+        w(f'| {d} | {len(by_det[d])} |')
+    w('')
+    w('## All CVEs')
+    w('')
+    w('*Name* is the well-known attack or bug name where one exists. *Status* is the strongest '
+      'evidence class across all detectors.')
+    w('')
+    w('| CVE | Name | Status | Detector(s) | Also named as context by |')
+    w('|---|---|---|---|---|')
+    for y, n, cve, status, dets, ctx, name in rows:
+        link = f'[{cve}](https://nvd.nist.gov/vuln/detail/{cve})'
+        w(f'| {link} | {name} | {status_label[status]} | {", ".join(dets) or "—"} | '
+          f'{", ".join(ctx) or "—"} |')
+    w('')
+    with open(OUT, 'w', encoding='utf-8') as fh:
+        fh.write('\n'.join(o))
+    print(f'wrote {OUT}: {len(rows)} CVEs', dict(counts))
+
+
+if __name__ == '__main__':
+    main()

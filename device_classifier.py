@@ -589,6 +589,17 @@ _THREAT_SIGNATURES = [
         'port_any': [1471, 8080],
     },
     {
+        'id': 'halehound_cyd',
+        'name': 'HaleHound-CYD Attack Multitool',
+        'severity': 'critical',
+        'category': 'Attack Tool',
+        'description': 'ESP32 HaleHound attack multitool — WiFi/BLE/'
+                       'SubGHz/NFC attacks, evil-twin (GARMR) captive portal, IoT '
+                       'Recon LAN scanner and credential brute-forcer',
+        'vendor_keywords': ['espressif'],
+        'hostname_keywords': ['halehound', 'garmr', 'cyd'],
+    },
+    {
         'id': 'rogue_espressif',
         'name': 'Unknown Espressif Device',
         'severity': 'low',
@@ -825,7 +836,7 @@ def _ask_ai_classify(ai_service, vendor, ports, hostname, mac):
     original_model = ai_service.model
     try:
         ai_service.model = "gpt-5.4-nano"
-        answer = ai_service._ask(system, user)
+        answer = ai_service._ask(system, user, localize=False)
     finally:
         ai_service.model = original_model
 

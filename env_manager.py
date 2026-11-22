@@ -28,8 +28,10 @@ class EnvManager:
             self.project_root = os.path.dirname(os.path.abspath(__file__))
 
         self.env_file_path = os.path.join(self.project_root, '.env')
-        logger.info(f"Project root identified as: {self.project_root}")
-        logger.info(f".env file path set to: {self.env_file_path}")
+        # EnvManager is constructed very frequently (per AI/pushover/web call), so
+        # these path lines are DEBUG-only — at INFO they flooded the log ~1/second.
+        logger.debug(f"Project root identified as: {self.project_root}")
+        logger.debug(f".env file path set to: {self.env_file_path}")
 
     # ------------------------------------------------------------------
     # Generic helpers for multi-key .env management

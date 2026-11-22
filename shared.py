@@ -125,6 +125,11 @@ DEFAULT_EPD_TYPE = "epd2in13_V4"
 DESIGN_REF_WIDTH = 122   # All layout coordinates are designed for this width
 DESIGN_REF_HEIGHT = 250  # All layout coordinates are designed for this height
 
+# Panels soldered to the board. A failed init means the panel isn't ready, never
+# that a different one is fitted, so auto-detect must not replace them: it would
+# save an e-paper driver (they "succeed" with nothing attached) over the config.
+BUILT_IN_PANELS = {"st7789v2"}
+
 # Map web UI size keys to default driver names
 SIZE_KEY_TO_DEFAULT_DRIVER = {
     "2in13":    "epd2in13_V4",
@@ -135,6 +140,7 @@ SIZE_KEY_TO_DEFAULT_DRIVER = {
     "3in5_tft": "ili9486",
     "1in28_tft": "gc9a01",
     "1in44_lcd": "st7735s",
+    "1in9_cardputer": "st7789v2",
     "1in69_tft": "whisplay",
     "0in96_oled": "ssd1306",
     "1602_lcd": "lcd1602",
@@ -191,6 +197,12 @@ DISPLAY_PROFILES = {
     # joystick). Square panel: use a square reference so the layout isn't
     # stretched; the on-screen frame/stat pages scale to fit 128x128.
     "st7735s":     {"ref_width": 128, "ref_height": 128, "default_flip": False},
+    # M5Stack CardputerZero built-in 1.9" ST7789V2, used landscape as 320x170.
+    # Landscape reference so the layout reflows to the wide panel (same "ref =
+    # panel size" approach as st7735s) instead of being stretched from portrait.
+    # mounted_flipped: the panel sits upside down relative to the image its
+    # driver shows, so the first start on it turns the screen 180 degrees.
+    "st7789v2":    {"ref_width": 320, "ref_height": 170, "default_flip": True, "mounted_flipped": True},
     # Whisplay HAT 1.69" ST7789 240x280 colour TFT LCD (ref height keeps the
     # 240:280 aspect so the layout isn't stretched: 122 * 280/240 = 142)
     "whisplay":    {"ref_width": DESIGN_REF_WIDTH, "ref_height": 142, "default_flip": False},
@@ -211,6 +223,11 @@ class SharedData:
     def __init__(self):
         # Detect Pager mode (set by pager_payload.sh before Python launch)
         self._pager_mode = os.environ.get('RAGNAR_PAGER_MODE') == '1'
+        # Detect Headless mode (set by headlessRagnar.py / systemd on web-only
+        # installs). Like Pager mode it must never initialize the EPD, which
+        # would seize SPI0 + GPIO and blank a DPI/HDMI panel on shared-pin
+        # boards (HackBerry Pi and similar).
+        self._headless_mode = os.environ.get('RAGNAR_HEADLESS') == '1'
 
         self.initialize_paths() # Initialize the paths used by the application
 
@@ -579,14 +596,26 @@ class SharedData:
             if self.storage_manager is None:
                 logger.error("Storage manager not available, cannot switch network")
                 return
+            # Durable state BEFORE activating. self.active_network_* can be a
+            # scan job's temporary context (context_registry.activate), so it
+            # is not a safe baseline for "did the network change?".
+            prev_slug = self.storage_manager.active_slug
+            prev_ssid = self.storage_manager.active_ssid
             context = self.storage_manager.activate_network(ssid)
         except Exception as exc:
             logger.error(f"Unable to activate network storage for '{ssid}': {exc}")
             return
 
-        # Skip reconfiguration if the slug did not change
-        if (context.get('slug') == self.active_network_slug and
-                context.get('ssid') == self.active_network_ssid):
+        # Skip reconfiguration if the network did not really change. Comparing
+        # against the overridable self.active_network_* here is what let a
+        # multi-interface Ethernet scan ('LAN') read as a switch away from the
+        # Wi-Fi SSID and degrade every host once per cycle (issue #818).
+        if prev_slug is not None and (context.get('slug') == prev_slug and
+                                      context.get('ssid') == prev_ssid):
+            registry = getattr(self, 'context_registry', None)
+            if registry is None or not registry.is_overridden():
+                # Keep the in-memory context aligned; no storage switch.
+                self._apply_network_context(context, configure_db=False)
             return
 
         # Mark every alive host in the OUTGOING database as degraded so
@@ -615,6 +644,7 @@ class SharedData:
         default_profile = DISPLAY_PROFILES.get(DEFAULT_EPD_TYPE, {"ref_width": 122, "ref_height": 250, "default_flip": False})
         return {
             "__title_Ragnar__": "Settings",
+            "language": "en",  # en | es | fr | de
             "manual_mode": False,
             "websrv": True,
             "web_bind_interface": "",
@@ -622,6 +652,15 @@ class SharedData:
             "debug_mode": False,
             "scan_vuln_running": True,
             "scan_vuln_no_ports": False,
+            "distro_cve_enrichment": False,  # opt-in: check Debian/Ubuntu security trackers before surfacing a CVE (issue #1051)
+            "distro_cve_cache_hours": 24,
+            "ups_hat_monitor": True,  # auto-detect a Waveshare INA219 UPS HAT (C at 0x43, B at 0x42) and show its battery % (issue #1049)
+            "builtin_battery_monitor": True,  # show a built-in fuel gauge (kernel power-supply battery; the CardputerZero's BQ27220)
+            "cardputer_cap_power": True,  # CardputerZero: switch the expansion header's 5 V rail on at start so a Cap works
+            "meshtastic_share_gps": True,  # hand Ragnar's GPS fix to the Meshtastic node running on this unit (it has no GPS of its own)
+            "camera_rotation": "auto",  # turn the camera picture: 0, 180, or "auto" (180 on the CardputerZero, whose sensor is mounted upside down)
+            "cardputer_grove_power": True,  # CardputerZero: switch the Grove port's 5 V pin on at start
+            "cardputer_free_gnss_uart": True,  # CardputerZero: with the LoRa + GNSS Cap fitted, take the serial login prompt off the UART so GPS can read it
             "enable_attacks": False,
             "release_gate_enabled": False,
             "release_gate_message": "",
@@ -680,6 +719,7 @@ class SharedData:
             "scan_subnets": [],
             "default_vulnerability_ports": [22, 80, 443],
             "network_max_failed_pings": 15,
+            "host_presence_enabled": True,
             "network_device_retention_days": 14,
             "network_device_retention_hours": 8,  # Legacy data cleanup after 8 hours
             "network_ping_grace_period_minutes": 30,
@@ -770,6 +810,25 @@ class SharedData:
             "ethernet_scan_enabled": True,
             "ethernet_prefer_over_wifi": True,
             "ethernet_auto_detect": True,
+            # Cellular uplink fallback (cellular_uplink.py): a USB-tethered
+            # hotspot/phone/LTE modem is pinned to a high route metric so it
+            # only carries traffic when Ethernet and Wi-Fi are down, and is
+            # never used as a scan target (metered data, carrier LAN).
+            "cellular_fallback_enabled": True,
+            "cellular_route_metric": 20000,
+            "cellular_allow_scan": False,
+            # Space/comma-separated overrides for detection by driver/vendor.
+            "cellular_force_ifaces": "",
+            "cellular_exclude_ifaces": "",
+            # Heartbeat failover: probe public targets THROUGH each primary
+            # uplink every ~10 s; fail over after N bad rounds (only if the
+            # cellular link passes too), fail back after M good rounds.
+            "cellular_heartbeat_enabled": True,
+            "cellular_heartbeat_targets": "1.1.1.1:443 8.8.8.8:443 9.9.9.9:443",
+            "cellular_heartbeat_min_ok": 1,
+            "cellular_failover_after": 3,
+            "cellular_failback_after": 6,
+            "cellular_promoted_metric": 50,
             # When True, the e-Paper shows an Ethernet-focused network
             # diagnostic screen (link / IP / switch port), auto-cycling pages
             # every 5s. Web-toggled from Network > Diagnostics. e-Paper only.
@@ -810,6 +869,19 @@ class SharedData:
             "incident_correlation_enabled": True,
             "incident_window_s": 600,                # entity-correlation sliding window
             "incident_notify_min_confidence": 50,    # page a named incident at/above this %
+            # Asset inventory: change-detection layer over the discovered-hosts
+            # table (asset_inventory.py). Emits new-device / IP-move / spoof /
+            # offline events into the Watchtower log so they page + forward.
+            "asset_inventory_enabled": False,        # run the periodic snapshotter
+            "asset_inventory_interval_s": 120,       # seconds between diffs (min 30)
+            "asset_inventory_alert_on_baseline": False,  # page every host on first run
+            # SIEM / outbound forwarding: ship every normalized alert to external
+            # collectors (syslog CEF/LEEF, Splunk HEC, Elastic, webhook). Egress
+            # rides the Watchtower poll cycle, so watchtower_enabled must be on.
+            # Per-target secrets may be 'env:RAGNAR_*' to stay out of this JSON.
+            "siem_enabled": False,
+            "siem_min_severity": "high",             # forward floor: critical/high/medium/low/info
+            "siem_targets": [],                      # list of {type, ...} target dicts
             # IP attribution (ip_intel.py): country/ASN/owner/abuse contact for a
             # hostile IP. Registry-derived (RDAP + Team Cymru); never a street
             # address. Set ip_intel_allow_network false to stay fully offline
@@ -835,19 +907,33 @@ class SharedData:
             "ai_enabled": False,
             "openai_api_token": "",
             "ai_model": "gpt-5.4-nano",
+            # Self-hosted / OpenAI-compatible endpoint (issue #462). Leave blank
+            # for OpenAI's cloud. Set to e.g. http://192.168.1.50:11434/v1 to
+            # point at an Ollama/LocalAI/vLLM/LM Studio server; Ragnar then
+            # talks Chat Completions and the API key becomes optional.
+            "ai_base_url": "",
+            "ai_api_style": "auto",  # auto | responses | chat
+            "ai_fallback_model": "",  # cloud model used if a self-hosted endpoint drops (blank = gpt-5.4-nano)
             "ai_analysis_enabled": True,
             "ai_vulnerability_summaries": True,
             "ai_network_insights": True,
+            "ai_chat_enabled": True,
             "ai_max_tokens": 500,
             "ai_temperature": 0.7,
 
-            "__title_pushover__": "Pushover Notifications",
+            "__title_pushover__": "Push Notifications",
+            # Master switch for push notifications (key name kept for compat).
+            # Delivered to every configured channel: Pushover and/or Slack
+            # (RAGNAR_SLACK_WEBHOOK_URL in .env).
             "pushover_enabled": False,
             "pushover_notify_new_device": True,
             "pushover_notify_new_vulnerability": True,
             "pushover_notify_new_credential": True,
             "pushover_notify_device_lost": False,
             "pushover_notify_device_back_online": False,
+            "pushover_notify_wardrive_upload": True,  # summary after each auto-uploaded wardrive
+            "pushover_notify_adsb_upload": True,       # summary after each ADS-B auto-upload to Wardrift
+            "pushover_notify_cellular": True,  # uplink failover to / restore from a tethered cellular hotspot
 
             "__title_rusense_pushover__": "RuSense Sensing Alerts",
             # Master switch for camera-free (WiFi-CSI) surveillance alerts. Sent
@@ -923,6 +1009,9 @@ class SharedData:
             "wardriving_scan_interval": 2,
             "wardriving_gps_port": "auto",
             "wardriving_gps_baudrate": 9600,
+            "wardriving_gps_assist": True,
+            "wardriving_piglet_sync": True,
+            "wardriving_gps_set_clock": True,
             "wardriving_interfaces": [],
             "wardriving_auto_export": True,
             "wardriving_wigle_include_zigbee": False,
@@ -937,7 +1026,30 @@ class SharedData:
             "kiosk_enabled": False,
             "kiosk_url": "http://localhost:8000",
             "kiosk_rotation": 0,
-            "kiosk_hide_cursor": True
+            "kiosk_hide_cursor": True,
+            # Handheld / small-screen decks (e.g. Hackberry Pi CM5): force the
+            # on-screen ✕ + Ctrl+Alt+Q escape hatch on (Chromium --kiosk otherwise
+            # traps you on a keyboard with no easy Ctrl), and scale the dense
+            # dashboard up for the square 720x720 panel. Env RAGNAR_KIOSK_EXIT /
+            # RAGNAR_KIOSK_SCALE still override these at launch.
+            "kiosk_handheld": False,
+            "kiosk_scale": 1.0,
+
+            "__title_sdr__": "SDR / RF Waterfall",
+            # Synthetic RF Waterfall demo. Hidden by default: the route
+            # /demo/rf-waterfall serves a self-contained synthetic spectrum
+            # (sub-GHz ISM + Wi-Fi bands) ONLY while this is on, so the waterfall
+            # display can be shown with no SDR attached. 404s when off, so it
+            # stays out of sight until deliberately switched on. Env
+            # RAGNAR_SDR_DEMO=1 also enables it without persisting to config.
+            "sdr_demo": False,
+
+            # ADS-B -> Wardrift (Aircraft Watch). The radar logs the unique
+            # aircraft seen each UTC day; these control auto-uploading that day's
+            # sightings to Wardrift via the signed-in account. Off by default.
+            "adsb_wardrift_auto": False,
+            "adsb_wardrift_interval_min": 30,   # minutes between auto-uploads while receiving
+            "wardriving_autostart_adsb": False,  # start the ADS-B radar when a wardrive begins
         }
 
     def apply_display_profile(self, epd_type=None, set_orientation_if_missing=False, persist=False):
@@ -962,6 +1074,17 @@ class SharedData:
             if self.config.get('screen_reversed') != desired_orientation:
                 self.config['screen_reversed'] = desired_orientation
                 changed = True
+
+        # A panel mounted upside down gets its 180 degree turn once, the first
+        # time it is selected. The marker makes it a default, not a rule: an
+        # orientation chosen afterwards (web UI, Backspace on the keyboard) is
+        # kept, and one already set by hand is not turned back.
+        if profile.get('mounted_flipped') and self.config.get('orientation_default_applied') != epd_key:
+            if normalize_rotation(self.config.get('screen_reversed', 0)) == 0:
+                self.config['screen_reversed'] = 180
+                self.screen_reversed = 180
+            self.config['orientation_default_applied'] = epd_key
+            changed = True
 
         if persist and changed:
             self.save_config()
@@ -1110,8 +1233,8 @@ class SharedData:
     #         raise
     def initialize_epd_display(self):
         """Initialize the e-paper display."""
-        if EPDHelper is None or self._pager_mode:
-            logger.info("EPD not available (Pager mode or missing module) - skipping EPD init")
+        if EPDHelper is None or self._pager_mode or self._headless_mode:
+            logger.info("EPD not available (Pager/Headless mode or missing module) - skipping EPD init")
             self.epd_helper = None
             fallback_profile = DISPLAY_PROFILES.get(DEFAULT_EPD_TYPE, {"ref_width": 122, "ref_height": 250, "default_flip": False})
             epd_type = self.config.get('epd_type') or DEFAULT_EPD_TYPE
@@ -1192,7 +1315,9 @@ class SharedData:
             # Try auto-detection as fallback before giving up
             logger.info("Attempting auto-detection as fallback...")
             try:
-                result = EPDHelper.auto_detect()
+                result = None
+                if self.config.get("epd_type") not in BUILT_IN_PANELS:
+                    result = EPDHelper.auto_detect()
                 if result:
                     epd_type = result[0]
                     logger.info(f"Fallback auto-detected EPD: {epd_type} ({result[1]}x{result[2]})")
@@ -1236,6 +1361,11 @@ class SharedData:
         self.display_should_exit = False
         self.orchestrator_should_exit = False
         self.webapp_should_exit = False
+        # Set True while a wardriving session is active. The orchestrator reads
+        # this to pause its active scans (nmap port/vuln, attacks): on a small
+        # board those scans thrash RAM/CPU and starve gpsd, so cold-start GPS
+        # never completes while wardriving. Passive wardriving keeps running.
+        self.wardriving_session_active = False
         self.web_portal_active = True  # Tracks whether the web portal is currently running
         self.ragnar_instance = None
         self.gateway_info = {}  # Populated by NetworkScanner.get_gateway_info()
@@ -1285,6 +1415,14 @@ class SharedData:
         self.lost_target_ips = []
         self.last_sync_timestamp = 0.0
         self.imagegen = None  # Initialize imagegen variable
+        # Female (shieldmaiden) status frames, loaded from status/woman/. Used
+        # for the on-screen character when this unit is on the mesh with a
+        # woman's Viking name (see load_female_images / update_image_randomizer).
+        self.female_image_series = {}
+        self._female_unit_cache = None
+        # Full-colour versions of the character frames, built on demand for
+        # colour panels (see color_sprite).
+        self._color_sprite_cache = {}
         self.x_center = 0  # Initialize x_center for image positioning
         self.y_bottom = 0  # Initialize y_bottom for image positioning
         self.x_center1 = 0  # Alternative positioning
@@ -1820,9 +1958,220 @@ class SharedData:
                 self.x_center1 = self.width // 2  # Center horizontally
                 self.y_bottom1 = self.height - 20  # Default bottom position
 
+            # Female (shieldmaiden) character frames for mesh units named after
+            # a woman. Loaded here so they share the same scale as the standard
+            # frames and are ready before the first randomizer tick.
+            try:
+                self.load_female_images(img_scale)
+            except Exception as e:
+                logger.error(f"Error loading female (woman) images: {e}")
+
         except Exception as e:
             logger.error(f"Error loading images: {e}")
             raise
+
+    # Which woman/*.png stands in for each scan status. With no entry, a status
+    # draws a random frame from the plain portraits, and IDLE draws from those
+    # plus the idle_*.png expression variants (see load_female_images). Add a
+    # status entry here to pin specific art to a specific status.
+    WOMAN_STATUS_IMAGES = {}
+
+    def _prepare_female_image(self, img, img_scale):
+        """Turn a status/woman/*.png into a 1-bit character frame the same
+        height as the default animation frames.
+
+        The frames are shipped ready-made: 78x78, 1-bit, already dithered and
+        outlined by scripts/gen_female_frames.py. So this only flattens any
+        transparency onto white, converts to 1-bit with a plain threshold (no
+        second dither), and scales with NEAREST on large displays — the same
+        way the default .bmp frames are scaled — so the dither pattern stays
+        crisp instead of being smeared."""
+        if img is None or Image is None:
+            return None
+        # Match the height of the standard animation frames as loaded (78px,
+        # already scaled up on large displays). Note self.IDLE is the small
+        # 28px status icon, not an animation frame, so it is not a reference.
+        target_h = max(1, int(78 * (img_scale if img_scale and img_scale > 1.05 else 1.0)))
+        for frames in (getattr(self, 'image_series', None) or {}).values():
+            if frames:
+                target_h = frames[0].height
+                break
+        if img.mode in ('RGBA', 'LA', 'P'):
+            img = img.convert('RGBA')
+            bg = Image.new('RGB', img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[-1])
+            img = bg
+        if img.mode != '1':
+            img = img.convert('L').point(lambda p: 255 if p > 127 else 0, mode='1')
+        if img.height != target_h:
+            ratio = target_h / float(img.height)
+            resample = getattr(Image, 'Resampling', Image).NEAREST
+            img = img.resize((max(1, int(round(img.width * ratio))), target_h), resample)
+        return img
+
+    def load_female_images(self, img_scale):
+        """Build the per-status female frame pool from status/woman/*.png.
+
+        Each PNG is loaded and prepared once; the status map then references the
+        prepared copies, so a status with several images shares them rather than
+        re-decoding. Runs whether or not the unit is currently female — cheap,
+        and the unit's name can change at runtime."""
+        self.female_image_series = {}
+        self._color_sprite_cache = {}
+        woman_dir = os.path.join(self.statuspicdir, 'woman')
+        if not os.path.isdir(woman_dir):
+            logger.info("No status/woman directory — female frames unavailable.")
+            return
+        prepared = {}
+        for name in os.listdir(woman_dir):
+            if not name.lower().endswith('.png'):
+                continue
+            base = os.path.splitext(name)[0]
+            img = self.load_image(os.path.join(woman_dir, name))
+            img = self._prepare_female_image(img, img_scale)
+            if img is not None:
+                prepared[base] = img
+                color_path = os.path.join(woman_dir, 'color', name)
+                if os.path.exists(color_path):
+                    img.info['ragnar_color_path'] = color_path
+        if not prepared:
+            logger.warning("status/woman has no usable .png frames.")
+            return
+        # idle_*.png are expression variants (closed eyes, blink, wink) meant
+        # for a unit that is doing nothing: only IDLE draws them. Every other
+        # status shares the plain portraits.
+        names_sorted = sorted(prepared)
+        shared_pool = [prepared[b] for b in names_sorted if not b.startswith('idle_')] \
+            or list(prepared.values())
+        idle_pool = [prepared[b] for b in self.WOMAN_STATUS_IMAGES.get('IDLE', ())
+                     if b in prepared] or [prepared[b] for b in names_sorted]
+        for status in self.status_list:
+            names = self.WOMAN_STATUS_IMAGES.get(status)
+            pool = [prepared[b] for b in names if b in prepared] if names else []
+            self.female_image_series[status] = pool or shared_pool
+        self.female_image_series['IDLE'] = idle_pool
+        logger.info(f"Loaded female frames for {len(self.female_image_series)} statuses "
+                    f"from {len(prepared)} woman images.")
+
+    # Colour panels (the 1.44" LCD HAT) show the character in full colour on
+    # a dark background, so they need the frame without its white backdrop.
+    COLOR_SPRITE_BG_TOLERANCE = 30   # how far from white still counts as backdrop
+
+    def color_sprite(self, frame=None):
+        """The full-colour RGBA version of a character frame (default: the
+        frame on screen now, imagegen), with a transparent background. None
+        when there is no colour version, so the caller keeps its 1-bit path.
+
+        The shieldmaiden frames have ready-made colour twins in
+        status/woman/color/. The default viking's frames are already colour
+        .bmp files on a white backdrop, which is cut away here. Built on first
+        use and cached, so 1-bit panels never pay for it."""
+        if frame is None:
+            frame = getattr(self, 'imagegen', None)
+        if frame is None or Image is None:
+            return None
+        key = id(frame)
+        # The entry keeps the frame itself: that pins its id (no reuse by a
+        # later image) and lets a recycled id be told apart.
+        hit = self._color_sprite_cache.get(key)
+        if hit is not None and hit[0] is frame:
+            return hit[1]
+        sprite = None
+        try:
+            path = getattr(frame, 'info', {}).get('ragnar_color_path')
+            if path:
+                sprite = Image.open(path).convert('RGBA')
+            elif frame.mode in ('RGB', 'RGBA', 'P'):
+                sprite = self._cut_out_backdrop(frame)
+        except Exception as e:
+            logger.debug(f"colour sprite unavailable: {e}")
+            sprite = None
+        if len(self._color_sprite_cache) > 400:      # frames reloaded: drop stale ids
+            self._color_sprite_cache.clear()
+        self._color_sprite_cache[key] = (frame, sprite)
+        return sprite
+
+    def _cut_out_backdrop(self, frame):
+        """A colour frame drawn on white -> RGBA with the white backdrop
+        transparent. Only white connected to the image border is removed, so
+        white inside the figure (eyes, teeth, highlights) stays."""
+        from PIL import ImageDraw, ImageFilter
+        rgb = frame.convert('RGB')
+        w, h = rgb.size
+        # The frames end in a one-pixel floor line; it is a ruling for the
+        # white e-paper layout, not part of the character.
+        last = [rgb.getpixel((x, h - 1)) for x in range(w)]
+        floor = sum(1 for p in last if max(p) < 110 and max(p) - min(p) < 12) > w * 0.8
+        if floor:
+            rgb.paste((255, 255, 255), (0, h - 1, w, h))
+        marker = (255, 0, 255)
+        work = rgb.copy()
+        for x in range(w):
+            for y in (0, h - 1):
+                if work.getpixel((x, y)) != marker:
+                    ImageDraw.floodfill(work, (x, y), marker, thresh=self.COLOR_SPRITE_BG_TOLERANCE) \
+                        if sum(255 - c for c in work.getpixel((x, y))) <= self.COLOR_SPRITE_BG_TOLERANCE else None
+        for y in range(h):
+            for x in (0, w - 1):
+                if work.getpixel((x, y)) != marker:
+                    ImageDraw.floodfill(work, (x, y), marker, thresh=self.COLOR_SPRITE_BG_TOLERANCE) \
+                        if sum(255 - c for c in work.getpixel((x, y))) <= self.COLOR_SPRITE_BG_TOLERANCE else None
+        bg = Image.new('L', (w, h), 0)
+        bpx, wpx = bg.load(), work.load()
+        for y in range(h):
+            for x in range(w):
+                if wpx[x, y] == marker:
+                    bpx[x, y] = 255
+        alpha = bg.point(lambda v: 255 - v)
+        # The anti-aliased rim between figure and backdrop is a pale blend
+        # with white; on a dark background it would glow. Fade rim pixels by
+        # how light they are instead of keeping them opaque.
+        rim = bg.filter(ImageFilter.MaxFilter(3))
+        apx, rpx, cpx = alpha.load(), rim.load(), rgb.load()
+        for y in range(h):
+            for x in range(w):
+                if apx[x, y] and rpx[x, y]:
+                    cr, cg, cb = cpx[x, y]
+                    apx[x, y] = max(0, min(255, int((255 - min(cr, cg, cb)) * 2.2)))
+        out = rgb.convert('RGBA')
+        out.putalpha(alpha)
+        return out
+
+    def _unit_is_female(self):
+        """True when mesh_viking_gender is pinned to female, or this unit is on
+        the mesh and carries a woman's Viking name. Mirrors webapp _mesh_viking_female
+        so the e-paper/LCD character matches the fleet portrait. Cached on the
+        configured name+gender so the per-frame randomizer never re-derives it."""
+        cfg = self.config
+        gender = (cfg.get('mesh_viking_gender') or '').strip().lower()
+        # An explicit pin is the operator's choice and holds on or off the
+        # mesh; a gender derived from the Viking name only exists on the mesh.
+        if gender == 'female':
+            return True
+        if gender == 'male' or not cfg.get('mesh_enabled'):
+            return False
+        name = (cfg.get('mesh_viking_name') or '').strip()
+        cache = self._female_unit_cache
+        if cache is not None and cache[0] == (name, gender):
+            return cache[1]
+        try:
+            import mesh_manager
+            resolved = name or mesh_manager.derive_viking_name()
+            result = mesh_manager.is_female_viking(resolved)
+        except Exception:
+            result = False
+        self._female_unit_cache = ((name, gender), result)
+        return result
+
+    def active_image_series(self):
+        """The per-status frame pools the on-device character should animate
+        from right now: the shieldmaiden pools for a female mesh unit, the
+        default ones otherwise. Screens that walk the frames themselves (the
+        round GC9A01) read this instead of image_series so they follow the
+        unit's gender exactly like update_image_randomizer does."""
+        if self.female_image_series and self._unit_is_female():
+            return self.female_image_series
+        return getattr(self, 'image_series', {})
 
     def update_ragnarstatus(self):
         """ Using getattr to obtain the reference of the attribute with the name stored in self.ragnarorch_status"""
@@ -1859,6 +2208,18 @@ class SharedData:
         """Update the image randomizer and the imagegen variable."""
         try:
             status = self.ragnarstatustext
+            # A mesh unit named after a shieldmaiden draws the female frames
+            # (status/woman/) instead of the default character. Same per-status
+            # + random pick, just a different pool; falls through to the normal
+            # frames when this unit isn't female or no female art is loaded.
+            if self._unit_is_female():
+                female_pool = self.female_image_series.get(status) or \
+                    self.female_image_series.get('IDLE')
+                if female_pool:
+                    self.imagegen = random.choice(female_pool)
+                    self.x_center = (self.width - self.imagegen.width) // 2
+                    self.y_bottom = self.height - self.imagegen.height
+                    return
             if status in self.image_series and self.image_series[status]:
                 random_index = random.randint(0, len(self.image_series[status]) - 1)
                 self.imagegen = self.image_series[status][random_index]

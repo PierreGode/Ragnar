@@ -1,0 +1,15 @@
+# /etc/ragnar/apcguard/nmc.list -- cards apcguard must ALWAYS analyse. One card per line: ADDRESS [MAC], IPv4 or IPv6.
+#
+# Declared cards are PINNED: they are never evicted and are not counted against --max-observed-nmcs, so a
+# flood of spoofed SNMP sources cannot push them out. Cards that are only LEARNED from a sysDescr answer
+# are capped, and once the cap is hit a card first seen afterwards is ignored (APC-012 says so).
+# Declaring cards is what makes Class B work when the tap does not see the card's SNMP replies.
+#
+# The MAC is optional. Declare a MAC only where the tap sees the card's own frames. It lets apcguard tell the
+# card's own ICMP rejection of a tunnel packet from one sent by a firewall on its behalf, and it is the only
+# thing that allows a later attempt's severity to be lowered for a card seen rejecting tunnels. In a routed
+# topology every frame carries the router's MAC: leave the MAC out there.
+# If APC-110 appears for a card, its declared MAC does not match what this tap sees: fix it or remove it.
+192.0.2.10        02:aa:bb:cc:dd:10   # rack PDU, row A
+2001:db8::10      02:aa:bb:cc:dd:10   # the same card's IPv6 address
+192.0.2.11                            # a card whose MAC is not declared

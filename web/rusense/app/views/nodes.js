@@ -1,6 +1,7 @@
 // Nodes — per-node CSI sensor health, mesh status, hardware spec.
 import { icons } from '../icons.js';
-import { html, $, fetchJSON, fmt } from '../lib.js?v=20260704-sparkfit';
+import { html, $, fetchJSON, fmt, toast } from '../lib.js?v=20260704-sparkfit';
+import { sensingService } from '../../services/sensing.service.js';
 
 // Graduated node health from last_seen. The sensing-server exposes a binary
 // active/stale that flips the instant a node gaps for ~a second, which reads as
@@ -53,18 +54,35 @@ function piSyncState(relOffUs, stalenessMs, guardUs) {
   return { label: 'desynced', cls: 'badge-bad', key: 'desynced' };
 }
 
-function nodeRow(n, names = {}) {
+function nodeRow(n, names = {}, cals = {}) {
   const h = nodeHealth(n.last_seen_ms);
   const nm = names[String(n.node_id)];
   const label = nm ? `${nm} <span class="text-ink-muted text-xs">#${n.node_id}</span>` : `#${n.node_id}`;
+  const c = cals[String(n.node_id)];
+  const badge = c ? `<span class="${qualityBadgeCls(c.quality)}" title="Calibrated ${new Date(c.ts).toLocaleString()} — ${Math.round((c.quality ?? 0) * 100)}% of the recording was in the green (close) zone">✓ ${Math.round((c.quality ?? 0) * 100)}%</span>` : '';
   return `<tr class="border-b border-ink-3 last:border-0">
     <td class="py-2.5 pr-3 font-mono">${label}</td>
     <td class="py-2.5 pr-3"><span class="${h.badge}" title="last frame ${fmt.ago((n.last_seen_ms ?? 0) / 1000)}"><span class="dot ${h.dot}"></span>${h.label}</span></td>
     <td class="py-2.5 pr-3 font-mono text-right">${fmt.dbm(n.rssi_dbm)}</td>
     <td class="py-2.5 pr-3 text-ink-soft">${(n.motion_level || '—').replace(/_/g, ' ')}</td>
     <td class="py-2.5 pr-3 text-right font-mono">${n.person_count ?? 0}</td>
-    <td class="py-2.5 text-right text-ink-muted">${fmt.ago((n.last_seen_ms ?? 0) / 1000)}</td>
+    <td class="py-2.5 pr-3 text-right text-ink-muted">${fmt.ago((n.last_seen_ms ?? 0) / 1000)}</td>
+    <td class="py-2.5 text-right" style="white-space:nowrap;">${badge ? badge + ' ' : ''}<button class="btn-ghost !py-1 !px-2.5 text-xs" data-cal-node="${n.node_id}" title="Walk to this node and watch the bar fill green as you get close">${c ? 'Recalibrate' : 'Calibrate'}</button></td>
   </tr>`;
+}
+
+// Bar colour for a proximity value (0..1): red far → amber mid → green close.
+function proxColor(v) {
+  if (v >= 0.6) return 'rgb(34 197 94)';    // ok / green
+  if (v >= 0.34) return 'rgb(245 158 11)';  // warn / amber
+  return 'rgb(239 68 68)';                   // bad / red
+}
+
+// Badge class for a saved calibration quality (green-zone fraction, 0..1).
+function qualityBadgeCls(q) {
+  if ((q ?? 0) >= 0.6) return 'badge-ok';
+  if ((q ?? 0) >= 0.3) return 'badge-warn';
+  return 'badge-bad';
 }
 
 export default {
@@ -76,7 +94,13 @@ export default {
     // Custom node names come from Ragnar config (Settings), not the sensing
     // roster; load them once so the table shows names instead of just "#id".
     let nodeNames = {};
-    fetchJSON('/api/config').then((c) => { nodeNames = (c && c.rusense_node_names) || {}; });
+    // Saved per-node calibrations (persist in Ragnar config until a new
+    // recording overwrites them); drives the "✓ NN%" Calibrated badge.
+    let nodeCal = {};
+    fetchJSON('/api/config').then((c) => {
+      nodeNames = (c && c.rusense_node_names) || {};
+      nodeCal = (c && c.rusense_node_calibration) || {};
+    });
 
     root.appendChild(html`
       <section class="space-y-5">
@@ -99,9 +123,10 @@ export default {
               <thead><tr class="text-left text-xs uppercase tracking-wide text-ink-muted border-b border-ink-3">
                 <th class="py-2 pr-3 font-medium">Node</th><th class="py-2 pr-3 font-medium">Status</th>
                 <th class="py-2 pr-3 font-medium text-right">RSSI</th><th class="py-2 pr-3 font-medium">Motion</th>
-                <th class="py-2 pr-3 font-medium text-right">People</th><th class="py-2 font-medium text-right">Last seen</th>
+                <th class="py-2 pr-3 font-medium text-right">People</th><th class="py-2 pr-3 font-medium text-right">Last seen</th>
+                <th class="py-2 font-medium text-right">Calibrate</th>
               </tr></thead>
-              <tbody id="n-body"><tr><td colspan="6" class="py-6 text-center text-ink-muted">Loading…</td></tr></tbody>
+              <tbody id="n-body"><tr><td colspan="7" class="py-6 text-center text-ink-muted">Loading…</td></tr></tbody>
             </table>
           </div>
         </div>
@@ -132,6 +157,65 @@ export default {
             ${[['Node chip', 'ESP32-S3 / C6'], ['Band', '2.4 GHz WiFi CSI'], ['Subcarriers', 'up to 114'], ['Sample rate', '~100 Hz'], ['mmWave option', 'Seeed MR60BHA2 (60 GHz)']]
               .map(([k, v]) => `<div class="flex justify-between border-b border-ink-3 pb-2 last:border-0"><dt class="text-ink-muted">${k}</dt><dd class="font-mono text-right">${v}</dd></div>`).join('')}
           </dl>
+        </div>
+
+        <!-- Per-node proximity calibration modal (walk to the node, watch the bar fill green) -->
+        <div id="cal-modal" class="fixed top-0 bottom-0 inset-x-0 z-50 backdrop-blur" style="display:none;background:rgba(0,0,0,.55);align-items:center;justify-content:center;padding:1rem;">
+          <div class="card" style="width:100%;max-width:30rem;max-height:92vh;overflow-y:auto;">
+            <div class="card-pad space-y-4">
+              <div class="flex items-center justify-between">
+                <h2 class="card-title" id="cal-title">Calibrate node</h2>
+                <button id="cal-close" class="btn-ghost !py-1 !px-2.5 text-xs">Close</button>
+              </div>
+              <p class="text-sm text-ink-soft leading-snug">
+                Walk to <strong id="cal-nodename">this node</strong> and <strong>move around</strong> near it.
+                The bar fills and turns <span class="text-ok">green</span> the closer you are — it reads how
+                strongly you're perturbing <em>this node's</em> link versus the others. Hold at the greenest
+                spot, then <strong>Record</strong> to save a reference for it.
+              </p>
+
+              <!-- Big proximity bar -->
+              <div>
+                <div class="flex items-baseline justify-between mb-1">
+                  <span class="stat-label">Proximity</span>
+                  <span id="cal-prox-pct" class="font-mono text-lg font-bold">—</span>
+                </div>
+                <div style="position:relative;width:100%;height:1.75rem;border-radius:9999px;overflow:hidden;background:rgb(31 40 49);">
+                  <span id="cal-bar" style="display:block;height:100%;width:0%;border-radius:9999px;background:rgb(239 68 68);transition:width .25s ease,background-color .25s ease;"></span>
+                  <span id="cal-peak" title="best seen" style="position:absolute;top:0;bottom:0;width:2px;background:rgb(103 232 249);left:0%;display:none;"></span>
+                </div>
+                <div class="flex justify-between text-xs text-ink-muted mt-1">
+                  <span>far</span><span id="cal-hint">move near the node</span><span>close</span>
+                </div>
+              </div>
+
+              <!-- Full live output -->
+              <div class="rounded-lg bg-ink-1 border border-ink-3 p-3">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="stat-label">Live output</span>
+                  <span id="cal-src" class="badge-mut">—</span>
+                </div>
+                <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+                  ${[['Motion band power', 'cal-motion'], ['Baseline (quiet floor)', 'cal-base'],
+                     ['Activity vs floor', 'cal-act'], ['Share of all nodes', 'cal-share'],
+                     ['Peak proximity', 'cal-peakv'], ['RSSI', 'cal-rssi']]
+                    .map(([k, id]) => `<div class="flex justify-between border-b border-ink-3 pb-1"><dt class="text-ink-muted">${k}</dt><dd class="font-mono text-right" id="${id}">—</dd></div>`).join('')}
+                </dl>
+                <div id="cal-others" class="mt-2 space-y-1"></div>
+              </div>
+
+              <div class="flex items-center gap-2">
+                <button id="cal-record" class="btn-primary flex-1 !py-2 text-sm">Record calibration (15s)</button>
+                <button id="cal-reset" class="btn-ghost !py-2 text-sm" title="Forget the learned quiet-floor baselines and start fresh">Reset baseline</button>
+              </div>
+              <div id="cal-saved" class="text-sm text-center" style="display:none;"></div>
+              <p class="text-xs text-ink-muted leading-snug">
+                Honest limits: WiFi CSI proximity is <strong>near-field</strong> — a moving body perturbs every
+                link, so the bar is sharpest when you're right beside a node and fuzzier mid-room. This is
+                relative guidance, not survey-grade ranging.
+              </p>
+            </div>
+          </div>
         </div>
       </section>`);
 
@@ -273,8 +357,8 @@ export default {
       $('#n-lagging').textContent = by.lagging;
       $('#n-offline').textContent = by.offline;
       body.innerHTML = list.length
-        ? list.map((n) => nodeRow(n, nodeNames)).join('')
-        : '<tr><td colspan="6" class="py-6 text-center text-ink-muted">No nodes reporting. Power on an ESP32 CSI node and provision it to this server.</td></tr>';
+        ? list.map((n) => nodeRow(n, nodeNames, nodeCal)).join('')
+        : '<tr><td colspan="7" class="py-6 text-center text-ink-muted">No nodes reporting. Power on an ESP32 CSI node and provision it to this server.</td></tr>';
       renderMeshHealth(mesh, list, status);
     };
 
@@ -330,11 +414,213 @@ export default {
       }
     };
 
+    // ── Per-node proximity calibration ────────────────────────────────────
+    // Walk to a node, watch the bar fill green. The proximity signal mirrors
+    // the server's activity-centroid localizer: each node's live motion is
+    // measured RELATIVE to its own slowly-learned quiet floor (asymmetric EMA —
+    // rises slowly, falls fast), so a node that always reads hot doesn't win by
+    // default. When ≥2 nodes stream, proximity = the selected node's SHARE of
+    // total activity; with a single node it's activity auto-scaled to its own
+    // peak. Baselines persist across the modal being closed so they stay warm.
+    const cal = {
+      open: false, nodeId: null,
+      base: {},          // node_id -> EMA quiet-floor of motion_band_power
+      latest: {},        // node_id -> { motion, act, share, rssi, stale }
+      peak: 0,           // best proximity seen for the selected node (hold)
+      selPeakAct: 0,     // running peak activity (single-node auto-scale)
+      smooth: 0,         // smoothed proximity 0..1
+      rec: null,         // { n, motion, act, share, rssi, peakShare }
+      recTimer: null,
+      lastRender: 0,
+    };
+    const A_UP = 0.005, A_DOWN = 0.05, POW = 2;   // baseline EMA + share sharpening
+
+    // Fold one live frame into the per-node baselines / activities / shares.
+    const calFeed = (data) => {
+      const feats = (data && data.node_features) || [];
+      if (!feats.length) return;
+      const acts = {};
+      let anyActive = 0;
+      for (const f of feats) {
+        const id = f.node_id;
+        const stale = f.stale === true;
+        const motion = Math.max(0, (f.features && f.features.motion_band_power) || f.motion_band_power || 0);
+        const b = (cal.base[id] == null) ? motion : cal.base[id];
+        cal.base[id] = (motion > b) ? b + A_UP * (motion - b) : b + A_DOWN * (motion - b);
+        const act = stale ? 0 : Math.max(0, motion - cal.base[id]);
+        acts[id] = act;
+        if (!stale) anyActive++;
+        cal.latest[id] = { motion, act, base: cal.base[id], rssi: f.rssi_dbm, stale };
+      }
+      // Shares from activity^POW across all nodes.
+      let denom = 0;
+      for (const id in acts) denom += Math.pow(acts[id], POW);
+      for (const id in cal.latest) {
+        cal.latest[id].share = denom > 1e-9 ? Math.pow(acts[id] || 0, POW) / denom : 0;
+      }
+      // Proximity of the selected node.
+      if (cal.nodeId != null && cal.latest[cal.nodeId]) {
+        const L = cal.latest[cal.nodeId];
+        let prox;
+        if (anyActive >= 2) {
+          prox = L.share;                                   // spatial share
+        } else {
+          cal.selPeakAct = Math.max(cal.selPeakAct * 0.999, L.act);
+          prox = cal.selPeakAct > 1e-6 ? L.act / cal.selPeakAct : 0;  // self-relative
+        }
+        cal.smooth += 0.2 * (prox - cal.smooth);
+        if (cal.smooth > cal.peak) cal.peak = cal.smooth;
+        if (cal.rec) {
+          cal.rec.n++; cal.rec.motion += L.motion; cal.rec.act += L.act;
+          cal.rec.share += (L.share || 0); cal.rec.rssi += (L.rssi || 0);
+          cal.rec.peakShare = Math.max(cal.rec.peakShare, cal.smooth);
+          if (cal.smooth >= 0.6) cal.rec.green++;   // frames spent in the green (close) zone
+        }
+      }
+      if (cal.open) calRender();
+    };
+
+    const calRender = () => {
+      const now = Date.now();
+      if (now - cal.lastRender < 90) return;   // ~11 fps DOM cap
+      cal.lastRender = now;
+      const L = cal.nodeId != null ? cal.latest[cal.nodeId] : null;
+      const v = Math.max(0, Math.min(1, cal.smooth));
+      const pct = Math.round(v * 100);
+      const bar = $('#cal-bar'); if (bar) { bar.style.width = pct + '%'; bar.style.background = proxColor(v); }
+      const pk = $('#cal-peak');
+      if (pk) { if (cal.peak > 0.02) { pk.style.display = 'block'; pk.style.left = Math.round(cal.peak * 100) + '%'; } else pk.style.display = 'none'; }
+      const set = (id, txt) => { const el = $('#' + id); if (el) el.textContent = txt; };
+      set('cal-prox-pct', L ? pct + '%' : '—');
+      set('cal-hint', !L ? 'waiting for live CSI…' : (v >= 0.6 ? 'close — hold here' : v >= 0.34 ? 'getting warmer' : 'move near the node'));
+      set('cal-motion', L ? fmt.num(L.motion, 4) : '—');
+      set('cal-base', L ? fmt.num(L.base, 4) : '—');
+      set('cal-act', L ? fmt.num(L.act, 4) : '—');
+      set('cal-share', L ? Math.round((L.share || 0) * 100) + '%' : '—');
+      set('cal-peakv', Math.round(cal.peak * 100) + '%');
+      set('cal-rssi', L && L.rssi != null ? fmt.dbm(L.rssi) : '—');
+      const src = $('#cal-src');
+      if (src) {
+        const live = sensingService.dataSource === 'live';
+        src.textContent = L ? (live ? 'live CSI' : sensingService.dataSource) : 'no data';
+        src.className = L && live ? 'badge-ok' : 'badge-mut';
+      }
+      // Other nodes' shares for context (so you can see this node winning).
+      const others = $('#cal-others');
+      if (others) {
+        const ids = Object.keys(cal.latest).filter((id) => String(id) !== String(cal.nodeId)).sort((a, b) => (+a) - (+b));
+        others.innerHTML = ids.length
+          ? '<div class="text-xs text-ink-muted mb-1">Other nodes (share)</div>' + ids.map((id) => {
+              const o = cal.latest[id]; const sp = Math.round((o.share || 0) * 100);
+              const nm = nodeNames[id] ? `${nodeNames[id]} #${id}` : `#${id}`;
+              return `<div class="flex items-center gap-2 text-xs"><span class="font-mono w-16 shrink-0">${nm}</span>
+                <span class="meter" style="flex:1;"><span style="width:${sp}%;background:rgb(138 154 168);"></span></span>
+                <span class="font-mono text-ink-muted" style="width:2.5rem;text-align:right;">${sp}%</span></div>`;
+            }).join('')
+          : '';
+      }
+    };
+
+    // Show the persistent saved-calibration status for a node in the modal.
+    const renderSaved = (nodeId, justSaved) => {
+      const el = $('#cal-saved'); if (!el) return;
+      const c = nodeCal[String(nodeId)];
+      if (!c) { el.style.display = 'none'; el.innerHTML = ''; return; }
+      const q = Math.round((c.quality ?? 0) * 100);
+      const cls = qualityBadgeCls(c.quality);
+      const when = new Date(c.ts).toLocaleString();
+      el.style.display = 'block';
+      el.innerHTML = `${justSaved ? '<span class="text-ok">✓ Saved.</span> ' : ''}Calibrated <span class="${cls}">${q}% quality</span> `
+        + `<span class="text-ink-muted">· ${c.samples} frames · ${when}</span>`;
+    };
+
+    const openCal = (nodeId) => {
+      cal.open = true; cal.nodeId = String(nodeId);
+      cal.peak = 0; cal.smooth = 0; cal.selPeakAct = 0;
+      const nm = nodeNames[cal.nodeId] ? `${nodeNames[cal.nodeId]} #${cal.nodeId}` : `Node #${cal.nodeId}`;
+      const tEl = $('#cal-title'); if (tEl) tEl.textContent = `Calibrate ${nm}`;
+      const nEl = $('#cal-nodename'); if (nEl) nEl.textContent = nm;
+      const m = $('#cal-modal'); if (m) m.style.display = 'flex';
+      renderSaved(cal.nodeId, false);
+      calRender();
+    };
+    const closeCal = () => {
+      cal.open = false;
+      if (cal.recTimer) { clearTimeout(cal.recTimer); cal.recTimer = null; }
+      cal.rec = null;
+      const rb = $('#cal-record'); if (rb) { rb.disabled = false; rb.textContent = 'Record calibration (15s)'; }
+      const m = $('#cal-modal'); if (m) m.style.display = 'none';
+    };
+
+    const recordCal = async (btn) => {
+      if (cal.rec || cal.nodeId == null) return;
+      const nodeId = cal.nodeId;
+      cal.rec = { n: 0, motion: 0, act: 0, share: 0, rssi: 0, peakShare: 0, green: 0 };
+      const savedEl = $('#cal-saved'); if (savedEl) savedEl.style.display = 'none';
+      const SECS = 15, started = Date.now();
+      btn.disabled = true;
+      const tick = () => {
+        if (!cal.rec) return;
+        const left = Math.max(0, SECS - Math.round((Date.now() - started) / 1000));
+        const q = cal.rec.n ? Math.round((cal.rec.green / cal.rec.n) * 100) : 0;
+        btn.textContent = `Recording… ${left}s · ${q}% green`;
+        if (left > 0) cal.recTimer = setTimeout(tick, 250);
+      };
+      tick();
+      await new Promise((r) => setTimeout(r, SECS * 1000));
+      const rec = cal.rec; cal.rec = null;
+      btn.disabled = false; btn.textContent = 'Record calibration (15s)';
+      if (!rec || rec.n < 5) { toast('Not enough live frames — retry while moving near the node.', 'warn'); return; }
+      // Quality = fraction of the recording spent in the green (close) zone.
+      const quality = +(rec.green / rec.n).toFixed(3);
+      const entry = {
+        node_id: Number(nodeId),
+        quality,
+        mean_motion: +(rec.motion / rec.n).toFixed(5),
+        mean_activity: +(rec.act / rec.n).toFixed(5),
+        mean_share: +(rec.share / rec.n).toFixed(4),
+        peak_proximity: +rec.peakShare.toFixed(4),
+        mean_rssi: +(rec.rssi / rec.n).toFixed(1),
+        samples: rec.n,
+        ts: new Date().toISOString(),
+      };
+      // Merge into the shared per-node calibration map on the server config.
+      let store = {};
+      try { const c = await fetchJSON('/api/config'); store = (c && c.rusense_node_calibration) || {}; } catch (_) {}
+      store[String(nodeId)] = entry;
+      try {
+        const resp = await fetch('/api/config', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rusense_node_calibration: store }),
+        });
+        if (resp.ok) {
+          nodeCal = store;                        // reflect the new saved state everywhere
+          renderSaved(nodeId, true);              // "✓ Saved · NN% quality" in the modal
+          refresh();                              // repaint the table badge immediately
+          toast(`Saved calibration for node #${nodeId} — ${Math.round(quality * 100)}% quality (${rec.n} frames).`, 'ok');
+        } else toast('Save failed — config endpoint rejected the write.', 'bad');
+      } catch (_) { toast('Save failed — could not reach the server.', 'bad'); }
+    };
+
+    const offCal = sensingService.onData(calFeed);
+    // Delegated: Calibrate buttons live in rows that get re-rendered each refresh.
+    $('#n-body').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-cal-node]');
+      if (b) openCal(b.getAttribute('data-cal-node'));
+    });
+    $('#cal-close').addEventListener('click', closeCal);
+    $('#cal-modal').addEventListener('click', (e) => { if (e.target.id === 'cal-modal') closeCal(); });
+    $('#cal-record').addEventListener('click', (e) => recordCal(e.currentTarget));
+    $('#cal-reset').addEventListener('click', () => {
+      cal.base = {}; cal.peak = 0; cal.smooth = 0; cal.selPeakAct = 0;
+      toast('Baselines reset — hold still a few seconds to relearn the quiet floor.', 'info');
+    });
+
     refresh();
     $('#n-refresh').addEventListener('click', refresh);
     const logsBtn = $('#n-logs');
     if (logsBtn) logsBtn.addEventListener('click', (e) => captureLogs(e.currentTarget));
     const t = setInterval(refresh, 4000);
-    return () => { clearInterval(t); capturing = false; };
+    return () => { clearInterval(t); capturing = false; offCal(); if (cal.recTimer) clearTimeout(cal.recTimer); };
   },
 };

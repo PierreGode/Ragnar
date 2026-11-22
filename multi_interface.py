@@ -35,13 +35,32 @@ class NetworkContextRegistry:
     def __init__(self, shared_data):
         self.shared_data = shared_data
         self._lock = threading.RLock()
+        # Scan-scoped override contexts currently in force, innermost last
+        # (activate() can nest).
+        self._override_stack: List[Dict[str, str]] = []
 
-    def _snapshot_current(self) -> Optional[Dict[str, str]]:
-        ssid = self.shared_data.active_network_ssid
+    def is_overridden(self) -> bool:
+        """True while a scan job has temporarily swapped the network context.
+
+        During an override ``shared_data.active_network_ssid`` names the
+        network being SCANNED, not the network the box is on. Anything that
+        reads it to decide "has the network changed?" must use the durable
+        ``storage_manager.active_ssid`` instead.
+        """
+        return bool(self._override_stack)
+
+    def _durable_context(self) -> Optional[Dict[str, str]]:
+        """The context storage actually considers active.
+
+        activate() only ever takes snapshots, so storage_manager.active_* is
+        never touched by a scan override — it is the durable truth. Restoring
+        to it (instead of a snapshot taken before the job) also stays correct
+        if a genuine network change lands while a scan is running.
+        """
         try:
-            return self.shared_data.storage_manager.get_context_snapshot(ssid)
+            return self.shared_data.storage_manager.get_active_context()
         except Exception as exc:
-            logger.warning(f"Unable to snapshot current network context: {exc}")
+            logger.warning(f"Unable to read durable network context: {exc}")
             return None
 
     def _apply_context(self, context: Optional[Dict[str, str]]):
@@ -58,15 +77,20 @@ class NetworkContextRegistry:
             return
 
         with self._lock:
-            previous_context = self._snapshot_current()
             target_context = self.shared_data.storage_manager.get_context_snapshot(ssid)
+            self._override_stack.append(target_context)
             self._apply_context(target_context)
 
         try:
             yield target_context
         finally:
             with self._lock:
-                self._apply_context(previous_context)
+                if self._override_stack:
+                    self._override_stack.pop()
+                # Back to the enclosing override if nested, otherwise to the
+                # durable network — never to a snapshot that may be stale.
+                self._apply_context(self._override_stack[-1] if self._override_stack
+                                    else self._durable_context())
 
 
 class MultiInterfaceState:
@@ -348,7 +372,49 @@ class MultiInterfaceState:
                         )
                     )
 
-        return jobs
+        return self._merge_same_network_jobs(jobs)
+
+    @staticmethod
+    def _merge_same_network_jobs(jobs: List[ScanJob]) -> List[ScanJob]:
+        """Scan each physical network once, even when two interfaces sit on it.
+
+        A box with wired Ethernet AND a Wi-Fi adapter on the same LAN used to
+        get two jobs for one subnet: the Ethernet one filed under 'LAN' and the
+        Wi-Fi one under the real SSID. That scanned the LAN twice per cycle,
+        split the same hosts across two storage contexts, and swapped the
+        active context to 'LAN' for the whole Ethernet scan (issue #818).
+
+        Jobs sharing a network_cidr collapse to ONE: it keeps the first job's
+        interface (the preferred one — Ethernet when ethernet_prefer_over_wifi,
+        faster and more reliable than a Wi-Fi adapter), but takes the Wi-Fi
+        SSID as its context when there is one, because that SSID is the identity
+        the rest of Ragnar (storage, dashboard, per-network DB) already uses for
+        this network. Scanning it then needs no context swap at all.
+        Jobs without a known network_cidr are left alone.
+        """
+        merged: List[ScanJob] = []
+        by_network: Dict[str, ScanJob] = {}
+        for job in jobs:
+            net = job.network_cidr
+            if not net:
+                merged.append(job)
+                continue
+            kept = by_network.get(net)
+            if kept is None:
+                by_network[net] = job
+                merged.append(job)
+                continue
+            if kept.interface_type != 'wifi' and job.interface_type == 'wifi' and job.ssid:
+                logger.info(
+                    f"[MULTI-SCAN] {job.interface} ({job.ssid}) is on the same network "
+                    f"{net} as {kept.interface} — scanning it once via {kept.interface}, "
+                    f"stored under '{job.ssid}'")
+                kept.ssid = job.ssid
+            else:
+                logger.info(
+                    f"[MULTI-SCAN] {job.interface} is on the same network {net} as "
+                    f"{kept.interface} — skipping the duplicate scan")
+        return merged
 
     def get_state_payload(self) -> Dict:
         with self._lock:

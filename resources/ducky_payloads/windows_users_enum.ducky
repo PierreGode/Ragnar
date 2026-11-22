@@ -1,0 +1,10 @@
+REM Windows user/group enumeration to the Desktop (users.txt).
+REM Authorized testing only.
+DELAY 1000
+GUI r
+DELAY 500
+STRING cmd
+ENTER
+DELAY 1000
+STRING (whoami /all & echo. & net user & echo. & net localgroup & echo. & net localgroup Administrators & echo. & query user) > "%USERPROFILE%\Desktop\users.txt"
+ENTER

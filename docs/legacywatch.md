@@ -120,7 +120,7 @@ sudo python3 python/legacywatch.py --iface wlan1 -o /var/log/ragnar/legacywatch-
 | self-test | `python3 python/legacywatch.py --self-test` | 33/33 |
 | conformance | `python3 python/legacywatch_conformance.py` | 35/35 |
 | replay (real Scapy path) | `lab/make_lab_pcap.py legacy … && --replay` | 10 codes observed |
-| live lab (hwsim) | `sudo lab/hwsim_lab.sh legacy` | written, hardware-gated (see `lab/LAB.md`) |
+| live lab (hwsim) | `sudo lab/hwsim_lab.sh legacy` | written, hardware-gated (see `docs/lab.md`) |
 
 - **Watchtower**: emits JSONL to `/var/log/legacywatch/alerts.jsonl`, wired into
   `watchtower.py` (`DEFAULT_SOURCES['legacywatch']`) so alerts land in the

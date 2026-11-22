@@ -3,8 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="/scripts/i18n/active.js"></script>
+  <script src="/scripts/i18n.js?v=20261104-i18n"></script>
   <title>RuView Observatory — WiFi DensePose</title>
-  <link rel="stylesheet" href="observatory/css/observatory.css?v=20260701-mobilecards2">
+  <link rel="stylesheet" href="observatory/css/observatory.css?v=20260815-leftstack">
 </head>
 <body>
   <canvas id="observatory-canvas"></canvas>
@@ -12,8 +14,16 @@
   <!-- ======= HUD Overlay ======= -->
   <div id="hud">
 
-    <!-- Top-right: Connection + status + gear -->
-    <div id="status-bar">
+    <!-- Left stack: DEMO flag on top, the auto-cycle scenario picker below it.
+         Both are laid out in normal flow, so when the DEMO flag hides (a real
+         node connects) the auto-cycle picker rises into its place automatically. -->
+    <div id="left-stack">
+      <!-- Demo flag: shown whenever the view is running on simulated demo data,
+           i.e. until a real sensing node connects and streams a live frame. -->
+      <div id="demo-flag" class="demo-flag--hidden"
+           title="No sensing node connected — showing simulated demo data. Connect an ESP32 node (or set Data Source to Live WebSocket) to see real readings.">
+        <span class="demo-flag__dot"></span><span class="demo-flag__text">DEMO — no node connected</span>
+      </div>
       <div id="scenario-area">
         <select id="scenario-quick-select" title="Change scenario">
           <option value="auto">Auto-Cycle</option>
@@ -31,6 +41,10 @@
           <option value="security_patrol">Security Patrol</option>
         </select>
       </div>
+    </div>
+
+    <!-- Top-right: status + fullscreen -->
+    <div id="status-bar">
       <div id="scenario-description"></div>
       <div id="fps-counter" style="display:none">60 FPS</div>
       <button id="fullscreen-btn" title="Toggle Fullscreen">&#9974;</button>
@@ -115,16 +129,18 @@
     </div>
   </div>
 
-  <!-- Three.js r160 + addons from CDN -->
+  <!-- Three.js r160 + addons, vendored locally under web/vendor/three/ so the
+       Observatory loads under the same-origin CSP (script-src 'self') and with
+       no internet access in the field. -->
   <script type="importmap">
   {
     "imports": {
-      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      "three": "/web/vendor/three/three.module.js",
+      "three/addons/": "/web/vendor/three/examples/jsm/"
     }
   }
   </script>
 
-  <script type="module" src="observatory/js/main.js?v=20260704-obsgate"></script>
+  <script type="module" src="observatory/js/main.js?v=20260819-fpsync"></script>
 </body>
 </html>

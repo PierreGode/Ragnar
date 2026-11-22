@@ -73,6 +73,11 @@ declared mA) when the radio is a dongle.
 
 ## Power — USB budget + supply health
 
+> The main **Dashboard** carries a small always-on **[power badge](power.md)**
+> that lights straight off the same throttle register when the board under-volts
+> — you don't have to open this panel to catch a brownout. This section is the
+> deeper per-radio view.
+
 `power()` reports the per-USB-device **declared** draw (`bMaxPower` from the USB
 descriptor — *declared, not measured*; no Pi meters per-port current), which
 netdev each adapter backs, and the summed budget. Plus supply health from
@@ -179,6 +184,95 @@ so you can see the sky the receiver is looking at.
 
 No external libraries or CDN — pure SVG + vanilla JS; the RA/Dec→alt/az
 transform is self-tested against Polaris (altitude ≈ latitude, azimuth ≈ 0°).
+
+### Ragnar Starview — the Observatory mode
+
+The same overlay has an **enhanced "Ragnar Starview"** mode: an alt/az sky
+**panorama** (rather than the polar disc) that turns the starfield into a small
+pocket-planetarium *and* a live GNSS instrument. It opens when the code passes
+`{ enhanced: true }` to `RagnarSkyView.open()` — the Wardriving dashboard wires
+it to the **easter egg** (clicking the word *Wardriving* in the config/header),
+distinct from the plain polar sky view above. Everything below is enhanced-mode
+only; the polar view is unchanged.
+
+**Astronomy layers**
+
+- **Real IAU constellation figures.** Proper asterism stick-figures — not
+  nearest-neighbour guesses — projected live from
+  [`web/vendor/constellation_lines.json`](../web/vendor/constellation_lines.json)
+  (88 constellations, `[RA,Dec]` J2000 vertices; d3-celestial, BSD-2-Clause).
+  Toggle with the **✦ Constellations** chip.
+- **Deep-sky (Messier) overlay.** All 110 Messier objects from
+  [`web/vendor/deep_sky.json`](../web/vendor/deep_sky.json) (id, common name,
+  type, magnitude; d3-celestial, BSD-2-Clause), drawn as dashed markers with a
+  click-through card (type / magnitude / RA-Dec / airmass). Toggle with the
+  **◇ Deep sky** chip.
+- **Sun, twilight and Moon phase.** The Sun is drawn and its altitude drives a
+  **Sky conditions** card — daylight / civil / nautical / astronomical twilight /
+  night, a darkness %, and the *next* sunrise/sunset plus when astronomical dark
+  begins (a forward 5-minute scan of solar altitude). The Moon is rendered with a
+  **lit-fraction terminator** and its phase name / illumination % / age.
+- **Planets** (Mercury–Neptune) and the **ecliptic + Milky Way** band, as before.
+- **What's up now** — the brightest objects currently above 8°, sorted by
+  magnitude, with altitude / cardinal azimuth / magnitude.
+
+**GNSS instrument layers** (this is the part hobbyists/pros actually use)
+
+- **Geometry (DOP).** Live **PDOP / HDOP / VDOP** computed from the tracked
+  satellites' az/el geometry (a 4×4 normal-matrix inversion), with a plain-English
+  verdict (excellent → poor geometry).
+- **Obstruction / multipath sky survey.** The **▦ Sky survey** chip paints a
+  per-cell heatmap (5°×5° az/el bins) of how often a satellite is *seen* in a
+  direction versus how often it is actually *tracked* (has SNR). Directions
+  frequently transited but rarely locked are obstructed — buildings, trees, an
+  antenna mask. It yields an **open-sky score** and is **persisted to
+  `localStorage`** so a survey builds up across visits; **⟲ Reset survey** clears
+  it. This is a real GNSS site-survey tool built from data already streaming.
+- **SNR-vs-elevation scatter** — the classic curve that exposes antenna/cable
+  problems at a glance.
+- **Integrity (experimental).** Heuristic **spoofing / jamming** indicators —
+  uniform high SNR across many sats, improbable SNR, single-constellation lock,
+  identical-SNR clusters, and position jumps between polls — surfaced as an
+  OK / caution / suspect verdict with the reason.
+
+**Controls**
+
+- **Time scrubber** (bottom) — drag ±12 h to see the sky at any moment
+  (planning); **● Live** returns to now. The header shows a `⏱ ±Hh Mm` flag when
+  scrubbed. The stars, Sun, Moon and planets move from their ephemerides, and the
+  **GNSS satellites move too** via an **approximate circular-orbit model**: each
+  satellite's geocentric position is reconstructed from its az/el plus a
+  per-constellation nominal orbit radius, its orbital plane is *learned from the
+  motion seen between live polls*, then advanced at the Keplerian mean rate.
+  Scrubbed (modeled) satellites draw **dashed**, and the header/card say
+  `sats modeled`. It is deliberately approximate — it ignores eccentricity, J2
+  drift and mixed-altitude constellations, and can only propagate satellites that
+  are *visible now* (it cannot show ones that rise later), so the sat sky thins as
+  you scrub hours out. At offset 0 it is an exact no-op (measured az/el verbatim).
+- **One consistent satellite set.** The **panorama**, the **GNSS radar** minimap,
+  and the **GNSS quality** card are all driven by the *same* satellite array, so
+  their counts agree: the card shows `In view / tracked` and how many sats the
+  PDOP solution used, and the radar caption echoes `N in view · M tracked`.
+  Satellites everywhere use one visual language — a constellation-coloured marker,
+  **filled/solid = SNR-locked**, **hollow/dim = visible-only**, **dashed =
+  modeled**. On the radar the old green dots are now the **🛰 glyph** inside a
+  constellation-coloured ring.
+- **Zoom / pan**, click-through info cards, the **GNSS radar** minimap, and a
+  **📷 snapshot** button (header) that rasterises the current sky to a PNG.
+- **Mobile / touch friendly.** On phones the observatory is a full-screen,
+  notch-aware layout: **pinch-to-zoom and two-finger drag** pan the sky (the tiny
+  +/− pad is hidden on touch since the gesture replaces it), the header collapses
+  to icon-only buttons (Diagnostics becomes a 🛰 icon), the legend / Layers key /
+  brand / pointer-readout hide to reclaim space, tap targets grow to ~40 px, and
+  the time scrubber spans the full width above the safe-area inset. The layer
+  controls (**Constellations / Deep sky / Sky survey / Reset survey**) shrink to
+  small icon-only buttons tucked in the top-right corner just under the header —
+  next to the Diagnostics button — instead of floating over the sky. A single
+  mouse pointer still pans exactly as before, and the mouse wheel still zooms.
+
+Still no external libraries or CDN — the astronomy math (Sun/Moon low-precision
+ephemerides, DOP inversion) is plain JS, and the two new catalogs are bundled
+locally alongside the existing star catalog.
 
 ---
 

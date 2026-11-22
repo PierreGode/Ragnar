@@ -110,6 +110,33 @@ GPIO pins (BCM), fixed by the HAT: `KEY1=21`, `KEY2=20`, `KEY3=16`; joystick
 > screen** — and re‑aligns automatically when **KEY2** rotates the display.
 > The directions in the tables below are always relative to the upright text.
 
+### Colour
+
+The LCD HAT is a colour panel, and two kinds of screen use it:
+
+- **Main screen** — dark background, gold title, each stat icon in its own
+  colour, and the character in **full colour**: the blonde-bearded viking, or
+  the shieldmaiden on a female unit (see
+  [mesh.md](mesh.md#the-shieldmaiden-shows-on-the-panel-not-just-the-web)).
+- **Wardriving screens** — the same dark theme; the VIKING screen shows the
+  full-colour character too.
+- **Info pages** — Network, Vulnerabilities, Discovered hosts, Advanced and
+  Traffic all use the dark theme with a gold title.
+- **Network Diagnostic mode** — the cards, the card-selection menu and the
+  per-network signal bars use the dark theme too; the Wi-Fi signal bars are
+  **green**, matching the web GUI's signal meters.
+
+Two config keys in `config/shared_config.json` switch it off, each defaulting
+to on; restart the service after changing one:
+
+| Key | `false` gives |
+|-----|---------------|
+| `lcd_color` | The black-on-white main screen |
+| `wardriving_lcd_color` | Black-on-white wardriving screens |
+
+Colour applies only to the 1.44" LCD HAT. E-paper and every other panel render
+exactly as before.
+
 ### Default mode
 
 | Input | Action |
@@ -140,6 +167,22 @@ become wardriving actions:
 | **KEY1** | **Return to the Ragnar view** — leave the wardriving screens (wardriving keeps running) |
 | **KEY2** | **Reconnect** to a known Wi‑Fi (wardriving keeps running) |
 | **KEY3** | **Start / stop** the phone-access AP |
+
+> **What "known Wi‑Fi" means (KEY2 here, KEY4 on the 2.7" HAT):** Ragnar's own
+> saved networks first, then **every Wi‑Fi profile saved in NetworkManager** —
+> the ones added by the Pi Imager, `nmcli` or the desktop, which is where most
+> units keep them. It rescans, then brings up the best saved network **in
+> range** (NetworkManager priority first, then the one used most recently) with
+> `nmcli connection up`, using its stored password as-is. AP profiles, and
+> profiles pinned to a Wi‑Fi dongle that isn't plugged in, are skipped. This is
+> the reliable way back online after carrying the unit out of range and back:
+> NetworkManager stops retrying a profile after a few failed attempts, and this
+> clears that back-off. The web UI's **Reconnect** button runs the same code.
+> Previously, with Ragnar's own list empty, the key logged "No known networks
+> configured" and did nothing.
+>
+> KEY2 reconnects only on the **wardriving screens**. On the normal Ragnar
+> pages (after KEY1) it rotates the screen.
 
 The screens, in carousel order (the footer shows the key hints and an `n/6`
 counter):
@@ -217,13 +260,25 @@ The **IFACE** card picks which NIC the egress tests (**Speedtest**, **Ping GW**,
 **Ping WAN**) originate from: ↑/↓ highlights **Auto** or an interface, the
 centre press selects it (`*` marks the active choice, and each row shows the
 NIC's IP, *no IP*, or *down*). **Auto** follows a fixed priority — **built-in
-Ethernet → USB Ethernet → wlan1 → wlan0** — picking the first interface that is
+Ethernet → USB Ethernet → wlan1 → wlan0 → cellular** (a USB-tethered hotspot,
+see [Cellular Uplink Fallback](cellular-uplink.md); pin it to test the cellular
+link itself) — picking the first interface that is
 up, addressed and (for the speedtest) verified able to reach the internet, so a
 plugged-in cable is tested instead of whatever holds the default route. A pinned
 interface really binds the socket to that device; Ping GW then targets that
 link's own gateway. The choice resets to Auto when the mode is switched on.
 
 ---
+
+## M5Stack CardputerZero (keyboard)
+
+The CardputerZero's keyboard drives the same three modes as the 1.44" LCD HAT above:
+`F` `X` `Z` `C` are the joystick directions (up, down, left, right) and **OK** (Enter)
+the joystick press. Differences: on the Ragnar screens **OK** opens the diagnostic
+screens (page autoscroll moved to the `A` key), **Esc** goes back one step, Backspace
+flips the screen 180° instead of stepping through four rotations, and the footer hints
+name keyboard keys instead of `K1`-`K4`. Space, Backspace and Tab are still KEY1, KEY2
+and KEY3. Full table: [M5Stack CardputerZero](M5StackCardputerZero.md).
 
 ## Notes
 
@@ -238,8 +293,19 @@ link's own gateway. The choice resets to Auto when the mode is switched on.
 - **Rotation:** `KEY2` cycles the screen rotation on both HATs. On the square
   128×128 LCD the panel realises two visual orientations (upright / 180°), and
   the joystick tracks whichever is shown.
+- **Landscape (lying-down) layout:** the dashboard is authored for a tall
+  portrait canvas (122×250). When a small e-paper such as the 2.13" is rotated
+  **90° or 270°** it lies down into a wide, short strip (~250×122), where the
+  portrait coordinates would squash together. In that orientation the Default
+  screen automatically switches to a **dedicated landscape layout** — a centred
+  header, two five-wide stat rows, the status line and speech, and a **half-size
+  character sprite** in the bottom-right corner. The frise ribbon is dropped
+  (there is no vertical room for it lying down). Rotate back to 0°/180° and the
+  normal portrait dashboard returns.
 - Headless installs (no display) accept the display toggles but have nothing to
   render on and no buttons to read.
+  To add a screen (e.g. this HAT) to a headless install, run
+  `sudo ./installhead.sh` — see [Install Guide](INSTALL.md#adding-a-screen-to-a-headless-install-installheadsh).
 
 ---
 
@@ -251,7 +317,7 @@ onboard buttons**, so it behaves like the other button-less panels — Default a
 Wardriving screens render, but there are no keys or joystick to drive Network
 Diagnostic mode from the panel (use the web UI toggles instead).
 
-Select **3.5" SPI TFT — ILI9486/ILI9488 (320×480)** under **Settings → Display**,
+Select **3.5" SPI TFT — ILI9486/ILI9488 (320x480)** as **EPD Type** under **Config → Advanced → Display**,
 or set `"epd_type": "ili9486"` (or `"ili9488"`) in the config, then let the
 service restart.
 
@@ -301,3 +367,43 @@ the defaults target the common ILI9486 320×480 HAT:
 > hardware-validated against every board variant. If your panel needs different
 > settings that worked, please open an issue with the board name and the env-var
 > values so the defaults can be improved.
+
+## 1.28" GC9A01 round TFT (240×240)
+
+Select **1.28" GC9A01 Round TFT (240x240)** as **EPD Type** under **Config → Advanced → Display**, or set
+`"epd_type": "gc9a01"` in the config. Ragnar renders a full-colour round
+dashboard (Viking mascot, status ring, SSID/GPS line). SPI must be enabled
+(`raspi-config` → Interfaces → SPI, or `dtparam=spi=on`).
+
+### Wiring (Raspberry Pi 40-pin header)
+
+| Signal | GPIO (BCM) | Pin | Override env var |
+|--------|-----------|-----|------------------|
+| `VCC`  | 3.3V      | 1/17 | — |
+| `GND`  | GND       | 6   | — |
+| `DIN`  | GPIO10 / MOSI | 19 | — (SPI0) |
+| `CLK`  | GPIO11 / SCLK | 23 | — (SPI0) |
+| `CS`   | GPIO8 / CE0 | 24 | — (SPI0) |
+| `DC`   | GPIO25    | 22  | `RAGNAR_GC9A01_DC_PIN` |
+| `RST`  | GPIO27    | 13  | `RAGNAR_GC9A01_RST_PIN` |
+| `BL`   | GPIO18    | 12  | `RAGNAR_GC9A01_BL_PIN` (`-1` = no backlight pin) |
+
+### Only getting static / "snow"?
+
+A GC9A01 that shows nothing but random noise is almost always being clocked too
+fast for the wiring: at the panel's 40 MHz ceiling the init-sequence bytes get
+corrupted over Dupont/jumper leads, so the controller is never configured and
+you see its power-on noise. Ragnar now defaults to a safer **20 MHz**; if it is
+still noisy, keep lowering `RAGNAR_GC9A01_SPI_HZ` (try `10000000`, then
+`8000000`) and use the shortest leads you can.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `RAGNAR_GC9A01_SPI_HZ` | `20000000` | SPI clock. Lower (e.g. `10000000`) if the panel shows static/noise on long wiring |
+| `RAGNAR_GC9A01_MADCTL` | `0x48` | Scan direction + colour order. Change if the image is mirrored/rotated or colours look swapped |
+| `RAGNAR_GC9A01_INVERT` | `1` | `1` = INVON (normal for GC9A01). Set `0` if the panel shows a photo-negative image |
+| `RAGNAR_GC9A01_RST_PIN` / `RAGNAR_GC9A01_DC_PIN` / `RAGNAR_GC9A01_BL_PIN` | `27` / `25` / `18` | GPIO overrides for boards that wire these differently |
+
+> **Status:** the GC9A01 round-TFT driver is community-contributed and not yet
+> hardware-validated against every panel batch. If different settings worked for
+> your board, please open an issue with the values.

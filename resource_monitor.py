@@ -7,6 +7,7 @@ Prevents system hangs by monitoring and limiting resource usage
 import os
 import logging
 import subprocess
+import threading
 import time
 from logger import Logger
 
@@ -17,6 +18,56 @@ except ImportError:
     _HAS_PSUTIL = False
 
 logger = Logger(name="resource_monitor", level=logging.INFO)
+
+
+# ---------------------------------------------------------------------------
+# Non-blocking CPU sampling
+# ---------------------------------------------------------------------------
+# psutil.cpu_percent(interval=N) SLEEPS the calling thread for N seconds to
+# measure over that window. The status endpoints call it, and the dashboard
+# polls those endpoints, so every tab switch / click paid a full ~1s stall
+# (the "1-2 second delay when clicking on things" operators reported).
+#
+# Instead we sample in compute-since-last-call mode (interval=None), which
+# returns instantly, and cache it — re-sampling at most once per
+# _CPU_MIN_WINDOW seconds so each real sample still spans a meaningful window.
+# Every caller shares this one cache, so the value stays consistent and no
+# request ever blocks. The very first reading is 0.0 until the sampler primes.
+_cpu_lock = threading.Lock()
+_cpu_cached = 0.0
+_cpu_primed = False
+_cpu_sampled_at = 0.0
+_CPU_MIN_WINDOW = 1.0  # minimum seconds between real psutil samples
+
+
+def cpu_percent_nonblocking():
+    """Instant system CPU-usage %, cached and sampled without ever blocking.
+
+    A drop-in for ``psutil.cpu_percent(interval=1)`` that never sleeps: it uses
+    the compute-since-last-call mode and caches the result, re-sampling at most
+    once per ``_CPU_MIN_WINDOW`` seconds. Accuracy is a rolling average over
+    roughly the poll interval; the first reading is 0.0 until primed.
+    """
+    global _cpu_cached, _cpu_primed, _cpu_sampled_at
+    if not _HAS_PSUTIL:
+        return 0.0
+    now = time.monotonic()
+    with _cpu_lock:
+        if not _cpu_primed:
+            try:
+                psutil.cpu_percent(interval=None)  # prime; first call reads 0.0
+            except Exception:
+                return 0.0
+            _cpu_primed = True
+            _cpu_sampled_at = now
+            return _cpu_cached
+        if now - _cpu_sampled_at >= _CPU_MIN_WINDOW:
+            try:
+                _cpu_cached = psutil.cpu_percent(interval=None)
+            except Exception:
+                pass
+            _cpu_sampled_at = now
+        return _cpu_cached
 
 
 class ResourceMonitor:
@@ -48,11 +99,11 @@ class ResourceMonitor:
             return 0
 
     def get_cpu_usage(self):
-        """Get current CPU usage percentage (1 second average)"""
+        """Get current CPU usage percentage (non-blocking, cached rolling avg)."""
         if not _HAS_PSUTIL:
             return 0
         try:
-            return psutil.cpu_percent(interval=1)
+            return cpu_percent_nonblocking()
         except Exception as e:
             self.logger.error(f"Error getting CPU usage: {e}")
             return 0
@@ -161,7 +212,7 @@ class ResourceMonitor:
             }
         try:
             mem = psutil.virtual_memory()
-            cpu_percent = psutil.cpu_percent(interval=0.5)
+            cpu_percent = cpu_percent_nonblocking()
 
             # Get process count
             process_count = len(psutil.pids())

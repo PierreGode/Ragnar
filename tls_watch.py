@@ -36,9 +36,34 @@ import struct
 ENABLE_JA4S = False
 ACKNOWLEDGE_JA4S_LICENSE = False
 
-# Ports treated as TLS-over-TCP / QUIC-over-UDP for live capture.
-TLS_TCP_PORTS = (443, 8443, 993, 995, 465, 990, 4433)
+# Ports treated as TLS-over-TCP / QUIC-over-UDP for live capture. 2083 (RadSec,
+# RFC 6614) and 802 (Modbus/TCP Security, "mbaps") carry a service label below.
+TLS_TCP_PORTS = (443, 8443, 993, 995, 465, 990, 4433, 2083, 802)
 QUIC_UDP_PORTS = (443,)
+DTLS_UDP_PORTS = (2083,)        # RadSec over DTLS (RFC 7360); captured even with --no-quic
+
+
+# ---- Service-port labels (v8) -----------------------------------------------
+# A flow whose server-side port is one of these carries a `service` tag, so
+# RADIUS-over-TLS and Modbus/TCP Security traffic is identifiable without
+# re-deriving it from the 5-tuple. Ports outside the table carry no label rather
+# than a guessed one.
+#   radsec          - RADIUS over TLS, TCP/2083 (RFC 6614); over DTLS, UDP/2083
+#                     (RFC 7360). Both specs mandate mutual TLS; the label is the
+#                     hook a future client-certificate check keys on.
+#   modbus-security - Modbus/TCP Security, TCP/802 ("mbaps"); the spec requires
+#                     TLS 1.2+, so a legacy version here raises the existing
+#                     *_legacy_version findings. Cleartext Modbus posture belongs
+#                     to modbuswatch (MBW-041/MBW-042) and is not duplicated here.
+_SERVICE_PORTS = {
+    ('tcp', 2083): 'radsec', ('udp', 2083): 'radsec',
+    ('tcp', 802): 'modbus-security',
+}
+
+
+def _service_for(transport, sport, dport):
+    """Service label for a flow, keyed on whichever endpoint sits on a known port."""
+    return _SERVICE_PORTS.get((transport, dport)) or _SERVICE_PORTS.get((transport, sport))
 
 
 # ---- GREASE (draft-davidben-tls-grease-01): 0x0a0a, 0x1a1a, ..., 0xfafa ------
@@ -200,12 +225,32 @@ _JA4_VER = {
     0xfeff: 'd1', 0xfefd: 'd2', 0xfefc: 'd3',
 }
 
+# Human labels for the protocol versions that reach a finding message.
+_VER_NAME = {
+    0x0304: 'TLS 1.3', 0x0303: 'TLS 1.2', 0x0302: 'TLS 1.1', 0x0301: 'TLS 1.0',
+    0x0300: 'SSL 3.0', 0xfefc: 'DTLS 1.3', 0xfefd: 'DTLS 1.2', 0xfeff: 'DTLS 1.0',
+}
+
+# DTLS wire versions are INVERTED (0xfeff=DTLS 1.0 > 0xfefd=DTLS 1.2 > 0xfefc=DTLS 1.3),
+# so every ordering/policy comparison maps through the TLS version each is defined
+# against (RFC 6347 s1, RFC 9147): a raw `< 0x0303` test would wave DTLS 1.0 straight
+# through, since 0xfeff is numerically greater than 0x0303 while being the older protocol.
+_DTLS_TLS_EQUIV = {0xfeff: 0x0302, 0xfefd: 0x0303, 0xfefc: 0x0304}
+
+
+def _tls_equiv_version(v):
+    """Map a DTLS wire version to the TLS version it is defined against; pass TLS
+    (and anything unknown) through unchanged."""
+    return _DTLS_TLS_EQUIV.get(v, v)
+
 
 def _ja4_version(sup_versions, client_version):
     """JA4 two-char version: highest non-GREASE supported_versions entry, else
-    the record client_version."""
+    the record client_version. Highest is by PROTOCOL order (via _tls_equiv_version),
+    not raw wire value, so DTLS's inverted numbering is not mis-ranked."""
     cand = [v for v in sup_versions if not _is_grease(v)]
-    return _JA4_VER.get(max(cand) if cand else client_version, '00')
+    best = max(cand, key=_tls_equiv_version) if cand else client_version
+    return _JA4_VER.get(best, '00')
 
 
 def _ja4_alpn(alpn):
@@ -279,6 +324,7 @@ def parse_server_hello(hs_body):
     exts_order = []
     alpn = []
     neg_version = None
+    selected_group = None
     if r.rem() >= 2:
         er = _Reader(r.take(r.u16()))
         while er.rem() >= 4:
@@ -289,8 +335,10 @@ def parse_server_hello(hs_body):
                 neg_version = (edata[0] << 8) | edata[1]
             elif etype == 0x0010:
                 alpn = _parse_alpn(edata)
+            elif etype == 0x0033 and len(edata) >= 2:    # key_share: selected group (TLS 1.3)
+                selected_group = (edata[0] << 8) | edata[1]
     return {'server_version': server_version, 'cipher': cipher,
-            'exts_order': exts_order, 'alpn': alpn,
+            'exts_order': exts_order, 'alpn': alpn, 'selected_group': selected_group,
             'neg_version': neg_version or server_version}
 
 
@@ -359,6 +407,444 @@ _WEAK_CIPHERS = frozenset({
     0xc011, 0xc012, 0xc015, 0xc016, 0xc017, 0xc018, 0xc019,
 })
 
+# SWEET32 (CVE-2016-2183): 64-bit block ciphers (DES/3DES) in CBC hit a birthday
+# bound after ~32 GiB under one write key, letting an attacker recover plaintext.
+# The negotiated suite IS the precondition and travels in cleartext in the
+# ServerHello, so this is an EXPOSURE observed directly on the wire — no version
+# fingerprinting, no probing. NVD/CISA-ADP score it 7.5 HIGH (IBM X-Force 3.7 LOW,
+# reflecting the traffic volume the attack needs). https://sweet32.info/
+_CVE_2016_2183 = {'cve': 'CVE-2016-2183', 'cvss': 7.5,
+                  'cvss_source': 'NVD (NIST), concurred by CISA-ADP'}
+SWEET32_CIPHERS = {
+    0x0008: ('TLS_RSA_EXPORT_WITH_DES40_CBC_SHA', 'DES'),
+    0x0009: ('TLS_RSA_WITH_DES_CBC_SHA', 'DES'),
+    0x000a: ('TLS_RSA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x000b: ('TLS_DH_DSS_EXPORT_WITH_DES40_CBC_SHA', 'DES'),
+    0x000c: ('TLS_DH_DSS_WITH_DES_CBC_SHA', 'DES'),
+    0x000d: ('TLS_DH_DSS_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x000e: ('TLS_DH_RSA_EXPORT_WITH_DES40_CBC_SHA', 'DES'),
+    0x000f: ('TLS_DH_RSA_WITH_DES_CBC_SHA', 'DES'),
+    0x0010: ('TLS_DH_RSA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x0011: ('TLS_DHE_DSS_EXPORT_WITH_DES40_CBC_SHA', 'DES'),
+    0x0012: ('TLS_DHE_DSS_WITH_DES_CBC_SHA', 'DES'),
+    0x0013: ('TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x0014: ('TLS_DHE_RSA_EXPORT_WITH_DES40_CBC_SHA', 'DES'),
+    0x0015: ('TLS_DHE_RSA_WITH_DES_CBC_SHA', 'DES'),
+    0x0016: ('TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x0019: ('TLS_DH_anon_EXPORT_WITH_DES40_CBC_SHA', 'DES'),
+    0x001a: ('TLS_DH_anon_WITH_DES_CBC_SHA', 'DES'),
+    0x001b: ('TLS_DH_anon_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x001e: ('TLS_KRB5_WITH_DES_CBC_SHA', 'DES'),
+    0x001f: ('TLS_KRB5_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x0022: ('TLS_KRB5_WITH_DES_CBC_MD5', 'DES'),
+    0x0023: ('TLS_KRB5_WITH_3DES_EDE_CBC_MD5', '3DES'),
+    0x0026: ('TLS_KRB5_EXPORT_WITH_DES_CBC_40_SHA', 'DES'),
+    0x0029: ('TLS_KRB5_EXPORT_WITH_DES_CBC_40_MD5', 'DES'),
+    0x008b: ('TLS_PSK_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x008f: ('TLS_DHE_PSK_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x0093: ('TLS_RSA_PSK_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc003: ('TLS_ECDH_ECDSA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc008: ('TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc00d: ('TLS_ECDH_RSA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc012: ('TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc017: ('TLS_ECDH_anon_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc01a: ('TLS_SRP_SHA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc01b: ('TLS_SRP_SHA_RSA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc01c: ('TLS_SRP_SHA_DSS_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc034: ('TLS_ECDHE_PSK_WITH_3DES_EDE_CBC_SHA', '3DES'),
+}
+# Same 64-bit-block birthday weakness (RC2/IDEA), outside CVE-2016-2183's named
+# DES/3DES scope. Kept as a distinct code so the CVE's coverage claim stays exact.
+BLOCK64_OTHER = {
+    0x0006: ('TLS_RSA_EXPORT_WITH_RC2_CBC_40_MD5', 'RC2'),
+    0x0007: ('TLS_RSA_WITH_IDEA_CBC_SHA', 'IDEA'),
+    0x0021: ('TLS_KRB5_WITH_IDEA_CBC_SHA', 'IDEA'),
+    0x0025: ('TLS_KRB5_WITH_IDEA_CBC_MD5', 'IDEA'),
+    0x0027: ('TLS_KRB5_EXPORT_WITH_RC2_CBC_40_SHA', 'RC2'),
+    0x002a: ('TLS_KRB5_EXPORT_WITH_RC2_CBC_40_MD5', 'RC2'),
+}
+
+# RC4 stream-cipher suites (new in v4). RC4 in TLS carries two named CVEs of its
+# own — CVE-2013-2566 (keystream biases) and CVE-2015-2808 (the Invariance
+# Weakness that Bar Mitzvah exploits) — and BOTH are EXPOSURES observed directly:
+# the negotiated suite IS the vulnerable condition, so nothing is inferred. Kept
+# as its own table (not folded into _WEAK_CIPHERS) so every RC4 code point is
+# named — including the KRB5/PSK RC4 suites the generic legacy list happens to
+# miss — and so the CVE attribution rides on exactly the RC4 suites and no others.
+RC4_CIPHERS = {
+    0x0003: 'TLS_RSA_EXPORT_WITH_RC4_40_MD5',
+    0x0004: 'TLS_RSA_WITH_RC4_128_MD5',
+    0x0005: 'TLS_RSA_WITH_RC4_128_SHA',
+    0x0017: 'TLS_DH_anon_EXPORT_WITH_RC4_40_MD5',
+    0x0018: 'TLS_DH_anon_WITH_RC4_128_MD5',
+    0x0020: 'TLS_KRB5_WITH_RC4_128_SHA',
+    0x0024: 'TLS_KRB5_WITH_RC4_128_MD5',
+    0x0028: 'TLS_KRB5_EXPORT_WITH_RC4_40_SHA',
+    0x002b: 'TLS_KRB5_EXPORT_WITH_RC4_40_MD5',
+    0x008a: 'TLS_PSK_WITH_RC4_128_SHA',
+    0x008e: 'TLS_DHE_PSK_WITH_RC4_128_SHA',
+    0x0092: 'TLS_RSA_PSK_WITH_RC4_128_SHA',
+    0xc002: 'TLS_ECDH_ECDSA_WITH_RC4_128_SHA',
+    0xc007: 'TLS_ECDHE_ECDSA_WITH_RC4_128_SHA',
+    0xc00c: 'TLS_ECDH_RSA_WITH_RC4_128_SHA',
+    0xc011: 'TLS_ECDHE_RSA_WITH_RC4_128_SHA',
+    0xc016: 'TLS_ECDH_anon_WITH_RC4_128_SHA',
+    0xc033: 'TLS_ECDHE_PSK_WITH_RC4_128_SHA',
+}
+_CVE_RC4 = {'cves': ['CVE-2013-2566', 'CVE-2015-2808'], 'cvss': 5.9,
+            'cvss_source': 'NVD, as republished by Tenable'}
+
+# ---- record-layer CVEs (new in v4) -----------------------------------------
+# Read from the plaintext TLS record framing, not from any handshake field. Both
+# are DoS-class OpenSSL bugs.
+#
+# CVE-2016-8610 "SSL Death Alert": unbounded plaintext ALERT processing during
+# the handshake. The alerts are plaintext by definition — the flood happens
+# before any key is in effect — so the record type, level and count are read
+# directly. The threshold is OpenSSL's own: its fix errors above FIVE consecutive
+# warning alerts (SSL_R_TOO_MANY_WARN_ALERTS), so six is the vendor's statement
+# of what is too many.
+_ALERT_LEVEL_WARNING = 1
+_ALERT_LEVEL_FATAL = 2
+_SSL_DEATH_ALERT_TIERS = (
+    (6, 'warn', "exceeds the five consecutive warning alerts OpenSSL's own fix permits"),
+    (100, 'high', 'sustained alert flood consistent with a deliberate CPU-exhaustion '
+                  'attempt rather than a misbehaving peer'),
+)
+_CVE_2016_8610 = {'cve': 'CVE-2016-8610', 'cvss': 7.5,
+                  'cvss_source': 'Red Hat and IBM agree on 7.5 / A:H'}
+
+# CVE-2017-3731 truncated-record out-of-bounds read: a PROTECTED (application_data)
+# record whose declared length is below the 16-byte authenticator both vulnerable
+# ciphers append cannot be well-formed — it is precisely the underflow OpenSSL's
+# fix guards. The RC4-MD5 half rides on RC4_CIPHERS, but the ChaCha20-Poly1305
+# half is a modern, correct cipher that no weak-cipher table should ever hold, so
+# the precondition needs its own table. What is NOT observable is whether the peer
+# is 32-bit or which OpenSSL it runs, so this reports an attack SHAPE against a
+# susceptible cipher, never a vulnerable host.
+_CVE_2017_3731_CIPHERS = {
+    0x0004: 'TLS_RSA_WITH_RC4_128_MD5',
+    0x0018: 'TLS_DH_anon_WITH_RC4_128_MD5',
+    0xcca8: 'TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256',
+    0xcca9: 'TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256',
+    0xccaa: 'TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256',
+    0xccab: 'TLS_PSK_WITH_CHACHA20_POLY1305_SHA256',
+    0xccac: 'TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256',
+    0xccad: 'TLS_DHE_PSK_WITH_CHACHA20_POLY1305_SHA256',
+    0xccae: 'TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256',
+    0xcc13: 'TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 (draft)',
+    0xcc14: 'TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 (draft)',
+    0xcc15: 'TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256 (draft)',
+}
+_CVE_2017_3731_MIN_RECORD = 16
+_CVE_2017_3731 = {'cve': 'CVE-2017-3731', 'cvss': 7.5,
+                  'cvss_source': 'Red Hat (A:H); IBM X-Force scores 5.3 with A:L',
+                  'score_confidence': 'disputed'}
+
+# ---- CVE-2014-0160 Heartbleed: TLS heartbeat buffer over-read ---------------
+# A heartbeat REQUEST whose declared payload_length is larger than the record that
+# carries it makes a vulnerable OpenSSL 1.0.1 copy adjacent heap back to the peer.
+# Observable passively because the reference exploit sends the malformed heartbeat
+# right after the ClientHello, BEFORE the handshake completes — so the heartbeat
+# record is still cleartext and its length field is readable. A heartbeat sent after
+# the handshake turns encrypted is invisible (explicit blind spot). This is an
+# ATTACK SHAPE (an over-read was attempted), not a version fingerprint.
+_CT_HEARTBEAT = 0x18              # record content type 24
+_HEARTBEAT_HEADER_BYTES = 3       # type(1) + payload_length(2)
+_HEARTBEAT_MIN_PADDING = 16       # RFC 6520 §4 minimum padding
+_CVE_2014_0160 = {'cve': 'CVE-2014-0160', 'cvss': 7.5, 'cvss_source': 'NVD (KEV)',
+                  'score_confidence': 'agreed'}
+
+# CVE-2016-2108 (OpenSSL ASN.1 negative-zero memory corruption) is DELIBERATELY
+# NOT detected. The attack needs a crafted ASN.1 structure fed to the victim's
+# decoder; the only ASN.1 a passive tap sees is the server certificate chain, and
+# that only on TLS 1.2 over TCP (1.3 encrypts the Certificate, QUIC is always 1.3).
+# A certificate on the wire says nothing about whether it triggers the decoder
+# bug — deciding that would mean reimplementing the vulnerable parser and hoping
+# ours is wrong the same way — and the attack path that matters (a client feeding
+# a crafted structure to a server) is carried in no field a passive observer can
+# read. The v4 standalone defers it for the same reason; recorded here so the
+# absence is a reviewable decision, not an oversight.
+
+
+# ---- CVE-2026-52346 (v11): unvalidated SNI host_name length (RouterOS xt_tls) ----
+# An out-of-bounds read in RouterOS's xt_tls, which reads the attacker-supplied SNI
+# host_name length out of a ClientHello without validating it against the packet
+# bounds. Observable because the ClientHello is cleartext by definition — the same
+# "readable because it happens before the handshake finishes" class as Heartbleed, but
+# cleaner (the ClientHello is ALWAYS cleartext). The check is pure arithmetic on the four
+# RFC 6066 nested lengths; no threshold, no baseline. The wire evidence is a generic TLS
+# grammar violation, so tlswatch owns it while the RouterOS version bounds live in
+# mikrotikwatch's registry. Fires on any ClientHello — TLS, DTLS and QUIC alike.
+_EXT_SERVER_NAME = 0x0000
+_SNI_HOST_NAME_T = 0x00
+_CVE_2026_52346 = {'cve': 'CVE-2026-52346', 'cvss': 7.5,
+                   'cvss_source': "Reporter's disclosure (blog.nns.ee); MikroTik "
+                                  'publishes no score, NVD had no record as of 2026-10-17',
+                   'cwe': 'CWE-125'}
+
+
+def scan_sni_overread(body):
+    """Read-only bounds audit of the SNI host_name length in a ClientHello body.
+    Returns None when there is no SNI or the nesting is legal, else a dict naming the
+    outermost container the declared length crosses (CVE-2026-52346). Never raises."""
+    try:
+        return _scan_sni_overread(bytes(body))
+    except Exception:
+        return None
+
+
+def _scan_sni_overread(b):
+    msg_end = len(b)
+    o = 2 + 32                                    # legacy_version + random
+    if o + 1 > msg_end:
+        return None
+    o += 1 + b[o]                                 # session_id
+    if o + 2 > msg_end:
+        return None
+    o += 2 + ((b[o] << 8) | b[o + 1])             # cipher_suites
+    if o + 1 > msg_end:
+        return None
+    o += 1 + b[o]                                 # compression_methods
+    if o + 2 > msg_end:
+        return None
+    block_declared_end = o + 2 + ((b[o] << 8) | b[o + 1])
+    o += 2
+    block_end = min(block_declared_end, msg_end)
+    while o + 4 <= block_end:
+        et = (b[o] << 8) | b[o + 1]
+        el = (b[o + 2] << 8) | b[o + 3]
+        o += 4
+        ext_declared_end = o + el
+        if et != _EXT_SERVER_NAME:
+            o = ext_declared_end
+            continue
+        return _sni_entry_overread(b, o, min(ext_declared_end, block_end),
+                                   ext_declared_end, block_declared_end, msg_end)
+    return None
+
+
+def _sni_entry_overread(b, o, ext_end, ext_declared_end, block_declared_end, msg_end):
+    if o + 2 > ext_end:
+        return None                               # no room for the list length itself
+    list_declared_end = o + 2 + ((b[o] << 8) | b[o + 1])
+    o += 2
+    list_end = min(list_declared_end, ext_end)
+    while o + 3 <= list_end:
+        ntype = b[o]
+        nlen = (b[o + 1] << 8) | b[o + 2]
+        o += 3
+        host_end = o + nlen
+        if ntype != _SNI_HOST_NAME_T:
+            o = host_end
+            continue
+        # Classify by the OUTERMOST limit crossed: only a read past the captured
+        # handshake message proves the bytes cannot come from the packet (high);
+        # an inner-container overrun is equally illegal but not provably off-packet
+        # from a reassembled view (warn).
+        if host_end > msg_end:
+            bound, limit = 'handshake_message', msg_end
+        elif host_end > block_declared_end:
+            bound, limit = 'extensions_block', block_declared_end
+        elif host_end > ext_declared_end:
+            bound, limit = 'extension_data', ext_declared_end
+        elif host_end > list_declared_end:
+            bound, limit = 'server_name_list', list_declared_end
+        else:
+            return None                           # legal nesting
+        return {'bound': bound, 'declared_host_len': nlen,
+                'available': max(0, limit - o), 'overrun_bytes': host_end - limit,
+                'severity': 'high' if bound == 'handshake_message' else 'warn'}
+    return None
+
+
+def _client_hello_and_overread(body):
+    """Parse a ClientHello AND independently scan its SNI for CVE-2026-52346. The parse
+    raises on an over-claim one level up (an over-declared extensions block or a truncated
+    trailing extension), and all ClientHello call sites drop the message on that — so the
+    scan MUST run outside the parse, never inside it."""
+    try:
+        client = parse_client_hello(body)
+    except Exception:
+        client = None
+    return client, scan_sni_overread(body)
+
+
+def _dtls_ch_overread(body):
+    """Cookie-strip a DTLS ClientHello to TLS shape, then run the SNI over-read scan.
+    Does not touch _parse_dtls_client_hello (which has its own callers)."""
+    try:
+        r = _Reader(body)
+        r.take(2 + 32)                            # legacy_version + random
+        r.take(r.u8())                            # session_id
+        cookie_at = r.i
+        clen = r.u8()
+        r.take(clen)
+        tls_body = bytes(body[:cookie_at]) + bytes(body[cookie_at + 1 + clen:])
+    except Exception:
+        return None
+    return scan_sni_overread(tls_body)
+
+
+# ---- CVE-2026-47291 (v11): http.sys per-request buffer-reference array overflow ----
+# An integer overflow in http.sys (MSRC 9.8). One buffer reference is added per receive
+# buffer consumed parsing HTTP/1.x header LINES; a 16-bit capacity grows by +5 with no
+# overflow check and wraps after 13107 growths, after which a memmove copies count*8 into
+# a 40-byte allocation. REACHABLE OVER TLS ONLY: SChannel hands http.sys one buffer per
+# decrypted TLS record, so one header line per record gives a 1:1 reference count; over
+# plaintext TCP coalescing / UlpMergeBuffers prevents it. So the discriminator is RECORD
+# CADENCE, read off cleartext record headers: a run of client application_data records
+# with no server response, the non-full ones being the primary signal. PRECONDITION (not
+# observable): MaxRequestBytes >= 262144 — the default 16384 is not exploitable. HTTP/1.x
+# only (the h2/h3 parser paths never touch the array). In-app SNAPSHOT SCOPE: this fires on
+# the clean no-server-response flood a bounded capture catches; the interleaved
+# keep-alive/multi-request case (a flood on a later request after an earlier response) needs
+# the streaming daemon's per-request window and is deferred here — see analyze_session.
+HTTPSYS_REF_TRIGGER = 65536
+TLS_PLAINTEXT_MAX = 16384
+CVE_2026_47291_TIERS = (
+    (1000, 'warn', 'zdi_reporting_threshold'),
+    (4096, 'high', 'beyond_default_max_request_bytes'),
+    (HTTPSYS_REF_TRIGGER, 'high', 'trigger_reference_count_reached'),
+)
+# TLS 1.3 early-server-record grace (bounded 3 ways so it cannot hold a window across an
+# attack): 8 records, each <= 1024 bytes, only while the client is under 32 records in.
+# Measured against OpenSSL 3.0, whose encrypted handshake flight + tickets ride outer
+# type 0x17 and would otherwise read as "the response" and close the window early.
+NST_ALLOWANCE = 8
+NST_MAX_TICKET_LEN = 1024
+NST_WITHIN_CLIENT_RECORDS = 32
+TLS13_SUITE_TAG_LEN = {0x1301: 16, 0x1302: 16, 0x1303: 16, 0x1304: 16, 0x1305: 8}
+TLS12_CHACHA_TAG_LEN = 16
+_RF_APPDATA_CAP = HTTPSYS_REF_TRIGGER + 16        # bound per-direction record-length lists
+_CVE_2026_47291 = {'cve': 'CVE-2026-47291', 'cvss': 9.8,
+                   'cvss_source': 'MSRC (rated "Exploitation More Likely"); no vector '
+                                  'string is published',
+                   'cwe': 'CWE-190',
+                   'score_note': ('Sources disagree on the mechanism (ZDI http.sys '
+                                  'reference-array overflow vs Ionix request-size '
+                                  'arithmetic vs an HTTP/2 counter wrap); every reading is '
+                                  'TLS-borne against http.sys, so the detection holds and '
+                                  'only the attribution would change.')}
+
+
+def tls_max_record_len(version, cipher):
+    """Largest conformant TLSCiphertext length for the negotiated parameters. CONSERVATIVE
+    by construction: returning a value ABOVE the true maximum would call a full record
+    non-full and report a bulk upload as an attack (the one FP this cannot afford), so the
+    exact maximum is derived only where the suite is identifiable from a table carrying its
+    IANA name; everything else falls back to the always-safe 2^14 floor."""
+    if version == 0x0304 or cipher in TLS13_SUITE_TAG_LEN:
+        return TLS_PLAINTEXT_MAX + 1 + TLS13_SUITE_TAG_LEN.get(cipher, 16)
+    name = _CVE_2017_3731_CIPHERS.get(cipher) or ''
+    if 'CHACHA20_POLY1305' in name:
+        return TLS_PLAINTEXT_MAX + TLS12_CHACHA_TAG_LEN
+    return TLS_PLAINTEXT_MAX
+
+
+def is_nonfull_record(rlen, version, cipher):
+    """A record that cannot be a full one — the primary CVE-2026-47291 signal: a body
+    upload rides full-size records, while one header line per record never does."""
+    return rlen < tls_max_record_len(version, cipher)
+
+
+def record_flood_armed(client, server, negotiated_version):
+    """HTTP/1.x-only gating from what is visible on the wire. TLS 1.2 and below: the
+    server's ALPN selection is cleartext in the ServerHello, so h2/h3 is excluded exactly.
+    TLS 1.3: the selection moves into encrypted EncryptedExtensions and is not visible, so
+    arm unless the client offered h2/h3 ONLY. QUIC and DTLS never reach here."""
+    if negotiated_version is None:
+        return False
+    offered = list((client or {}).get('alpn') or [])
+    if _tls_equiv_version(negotiated_version) < 0x0304:
+        selected = list((server or {}).get('alpn') or [])
+        if selected:
+            return not any(a.startswith('h2') or a.startswith('h3') for a in selected)
+        return True                               # no ALPN selected: HTTP/1.x by default
+    if offered and all(a.startswith('h2') or a.startswith('h3') for a in offered):
+        return False
+    return True
+
+
+# ---- CVE-2002-20001 D(HE)at: DoS on finite-field Diffie-Hellman -------------
+# A server cannot tell a random number from a real DH public key without first doing the
+# expensive modular exponentiation, so a client forcing finite-field DHE makes the server
+# pay. PROTOCOL FLAW — no patch fixes it; mitigation is to disable FFDH or cap the group
+# size. Related: CVE-2022-40735 (long exponents), CVE-2024-41996 (peer-key validation).
+_CVE_2002_20001 = {'cve': 'CVE-2002-20001', 'cvss': 7.5, 'cvss_source': 'NVD',
+                   'related': ['CVE-2022-40735', 'CVE-2024-41996']}
+# TLS 1.3 finite-field DH named groups (RFC 7919), modulus size in bits.
+FFDHE_GROUPS = {0x0100: ('ffdhe2048', 2048), 0x0101: ('ffdhe3072', 3072),
+                0x0102: ('ffdhe4096', 4096), 0x0103: ('ffdhe6144', 6144),
+                0x0104: ('ffdhe8192', 8192)}
+# TLS<1.3 finite-field ephemeral-DH cipher suites — the server performs a modexp to build
+# its ServerKeyExchange. ECDHE is absent (cheap, not this CVE); anon-DH is present (server
+# still pays). A suite missing here is a MISSED detection, never a false positive.
+DHE_SUITES = frozenset((
+    0x0013, 0x0016, 0x001B, 0x0032, 0x0033, 0x0034, 0x0038, 0x0039, 0x003A,
+    0x0040, 0x0067, 0x006A, 0x006B, 0x006C, 0x006D, 0x008F, 0x0090, 0x0091,
+    0x009E, 0x009F, 0x00A2, 0x00A3, 0x00A6, 0x00A7, 0x00AA, 0x00AB, 0x00B2,
+    0x00B3, 0xCCAA, 0xCCAD))
+# Cost scales non-linearly with modulus size, so a large group needs far fewer requests to
+# hurt (OpenSSL 3.x / OpenJDK default to ffdhe8192). Volume tiers over the capture window,
+# keyed by the largest group seen, applied to the count of repeated DHE handshakes/source.
+DHEAT_LARGE_GROUP_BITS = 4096
+_DHEAT_TIERS_SMALL = ((50, 'warn'), (500, 'high'))
+_DHEAT_TIERS_LARGE = ((20, 'warn'), (200, 'high'))
+
+
+def _dheat_tiers(bits):
+    return _DHEAT_TIERS_LARGE if (bits or 0) >= DHEAT_LARGE_GROUP_BITS else _DHEAT_TIERS_SMALL
+
+
+def _dhe_info(server):
+    """(is_dhe, group_name, bits) for a parsed ServerHello. Classic finite-field DHE is
+    read from the negotiated suite (group not in ServerHello → bits None); TLS 1.3 from the
+    selected key_share group. ECDHE is not finite-field DH and is never counted."""
+    if not server:
+        return (False, None, None)
+    sg = server.get('selected_group')
+    if sg in FFDHE_GROUPS:
+        name, bits = FFDHE_GROUPS[sg]
+        return (True, name, bits)
+    if server.get('cipher') in DHE_SUITES:
+        # bits from the ServerKeyExchange prime when it was parsed (TLS 1.2 DHE);
+        # None if the SKE was not seen (then the D(HE)at tier uses the small-group table).
+        return (True, 'classic-DHE', server.get('dh_prime_bits'))
+    return (False, None, None)
+
+
+# ---- CVE-2018-0732 oversized DH prime in ServerKeyExchange ------------------
+# A malicious server sends a very large DH prime p; the client must do a modexp with
+# it, burning CPU (client-side DoS — the mirror image of D(HE)at). OpenSSL's fix
+# rejects any prime above 10000 bits. The prime is cleartext in the TLS 1.2 DHE
+# ServerKeyExchange, so its size is measured directly (an on-the-wire EXPOSURE, not a
+# fingerprint). TLS 1.3 has no ServerKeyExchange and QUIC is always 1.3, so this is
+# TLS-1.2-and-below over TCP only, and fires on servers our own hosts connect out to.
+OPENSSL_DH_MAX_MODULUS_BITS = 10000
+_CVE_2018_0732 = {'cve': 'CVE-2018-0732', 'cvss': 7.5,
+                  'cvss_source': 'NVD 7.5 HIGH; OpenSSL advisory rates Low',
+                  'score_confidence': 'disputed'}
+
+
+def parse_dhe_server_key_exchange(body):
+    """Bit length of the DH prime p in a (finite-field) ServerKeyExchange, or None.
+    ServerDHParams (RFC 5246 §7.4.3) starts with dh_p as u16-length + bytes; leading
+    zero octets are skipped so the reported size is the true modulus bit length."""
+    r = _Reader(body)
+    if r.rem() < 2:
+        return None
+    n = r.u16()
+    if n == 0 or r.rem() < n:
+        return None
+    p = r.take(n)
+    i = 0
+    while i < len(p) and p[i] == 0:                  # skip leading zero octets
+        i += 1
+    if i >= len(p):
+        return None
+    return (len(p) - i - 1) * 8 + p[i].bit_length()
+
 
 def _leaf_findings(der, chain_len, sni, now):
     """Return (findings, info) for the leaf certificate. Requires cryptography;
@@ -413,9 +899,14 @@ def _leaf_findings(der, chain_len, sni, now):
     return out, info
 
 
-def analyze_session(client, server, cert_ders, now):
+def analyze_session(client, server, cert_ders, now, records=None, sni_overread=None):
     """Combine parsed client/server/cert state into a findings list (severity
-    descending) plus per-cert info. Any argument may be None."""
+    descending) plus per-cert info. Any argument may be None. `records` is the
+    optional list of per-direction record-layer stats from `_scan_tls_stream`,
+    used for the record-layer findings (CVE-2016-8610 / CVE-2017-3731, and the v11
+    CVE-2026-47291 record cadence). `sni_overread` is the v11 CVE-2026-52346 scan
+    result for the ClientHello (works even when `client` is None, because the parse
+    raises on exactly the over-claims the scan is meant to catch)."""
     findings = []
 
     def add(sev, code, msg):
@@ -424,18 +915,250 @@ def analyze_session(client, server, cert_ders, now):
     if client:
         cand = [v for v in client['sup_versions'] if not _is_grease(v)] \
             or [client['client_version']]
-        if max(cand) <= 0x0302:
-            add('warn', 'client_legacy_version', 'Client offers only TLS 1.1 or lower')
-        if 0x0000 not in client['exts_order']:
+        top = max(cand, key=_tls_equiv_version)
+        if _tls_equiv_version(top) <= 0x0302:
+            add('warn', 'client_legacy_version',
+                'Client offers only {} or lower'.format(_VER_NAME.get(top, 'TLS 1.1')))
+        if 0x0000 not in client['exts_order'] and not sni_overread:
+            # Scoped out when an over-read is present: before this, an over-claiming
+            # host_name length was indistinguishable from a hello with no SNI and got
+            # reported as the benign no_sni notice — an attack wearing an innocent
+            # explanation (CVE-2026-52346).
             add('notice', 'no_sni', 'ClientHello carries no SNI')
         if 0xfe0d in client['exts_order'] or 0xfe08 in client['exts_order']:
             add('info', 'ech_present', 'encrypted_client_hello present; true SNI hidden')
+    # ---- CVE-2026-52346 (v11): unvalidated SNI host_name length (RouterOS xt_tls) ----
+    # Independent of parse_client_hello, so it fires even when the parse raised on an
+    # over-claim one level up. high only when the read passes the captured handshake
+    # message itself; the inner-container overruns are equally illegal but not provably
+    # off-packet from a reassembled view. Fires on TLS, DTLS and QUIC alike.
+    if sni_overread:
+        _m = _CVE_2026_52346
+        findings.append({
+            'severity': sni_overread['severity'],
+            'code': 'cve_2026_52346_sni_overread',
+            'message': ('ClientHello SNI host_name length ({} bytes) runs past its {} '
+                        '({} available, overrun {} bytes) - the RouterOS xt_tls '
+                        'out-of-bounds read shape (CVE-2026-52346); a crafted length is '
+                        'malformed however it is transported'.format(
+                            sni_overread['declared_host_len'], sni_overread['bound'],
+                            sni_overread['available'], sni_overread['overrun_bytes'])),
+            'cve': _m['cve'], 'cvss': _m['cvss'], 'cvss_source': _m['cvss_source'],
+            'cwe': _m['cwe'], 'detect_class': 'attack', 'bound': sni_overread['bound'],
+            'declared_host_len': sni_overread['declared_host_len'],
+            'available': sni_overread['available'],
+            'overrun_bytes': sni_overread['overrun_bytes'],
+            'precondition_unobserved': True})
     if server:
-        if server['neg_version'] <= 0x0302:
-            add('warn', 'server_legacy_version', 'Server negotiated TLS 1.1 or lower')
-        if server['cipher'] in _WEAK_CIPHERS:
+        if _tls_equiv_version(server['neg_version']) <= 0x0302:
+            add('warn', 'server_legacy_version',
+                'Server negotiated {}'.format(
+                    _VER_NAME.get(server['neg_version'], 'TLS 1.1 or lower')))
+        ch = server['cipher']
+        if ch in SWEET32_CIPHERS:
+            # CVE-2016-2183 (SWEET32) EXPOSURE: the negotiated 64-bit block cipher
+            # is the vulnerable condition, observed directly (not inferred).
+            name, algo = SWEET32_CIPHERS[ch]
+            f = {'severity': 'high', 'code': 'cve_2016_2183_negotiated',
+                 'message': ('Server negotiated {} (0x{:04x}) - {} uses a 64-bit block, '
+                             'so this session is exposed to SWEET32 (CVE-2016-2183) once '
+                             '~32 GiB passes under one write key'.format(name, ch, algo)),
+                 'cve': 'CVE-2016-2183', 'cvss': _CVE_2016_2183['cvss'],
+                 'cvss_source': _CVE_2016_2183['cvss_source'],
+                 'detect_class': 'exposure', 'cipher': '0x{:04x}'.format(ch)}
+            findings.append(f)
+        elif ch in BLOCK64_OTHER:
+            name, algo = BLOCK64_OTHER[ch]
+            findings.append({'severity': 'warn', 'code': 'weak_block_cipher_64bit',
+                             'message': ('Server negotiated {} (0x{:04x}) - {} is a 64-bit '
+                                         'block cipher with the same birthday-bound weakness '
+                                         'as SWEET32, though CVE-2016-2183 names only DES/3DES'
+                                         .format(name, ch, algo)),
+                             'related_cve': 'CVE-2016-2183', 'cipher': '0x{:04x}'.format(ch)})
+        elif ch in RC4_CIPHERS:
+            # RC4 in TLS: two named CVEs, both EXPOSURES (the negotiated suite is
+            # itself the vulnerable condition, so nothing is inferred). Attached
+            # to the weak_cipher finding as attribution rather than a second code
+            # — that would be one observation reported twice.
+            findings.append({
+                'severity': 'high', 'code': 'weak_cipher',
+                'message': ('Server selected RC4 suite {} (0x{:04x}) - keystream biases '
+                            '(CVE-2013-2566) and the Invariance Weakness that Bar Mitzvah '
+                            'exploits (CVE-2015-2808) both enable plaintext recovery '
+                            'against RC4 in TLS'.format(RC4_CIPHERS[ch], ch)),
+                'cve': list(_CVE_RC4['cves']), 'cvss': _CVE_RC4['cvss'],
+                'cvss_source': _CVE_RC4['cvss_source'], 'detect_class': 'exposure',
+                'cipher': '0x{:04x}'.format(ch), 'cipher_name': RC4_CIPHERS[ch]})
+        elif ch in _WEAK_CIPHERS:
             add('high', 'weak_cipher',
-                'Server selected weak/legacy cipher 0x{:04x}'.format(server['cipher']))
+                'Server selected weak/legacy cipher 0x{:04x}'.format(ch))
+    if client and not any(f['code'] == 'cve_2016_2183_negotiated' for f in findings):
+        # CVE-2016-2183 POSTURE: offering 3DES was near-universal for years and
+        # says nothing about what got negotiated; informational unless a server
+        # actually selected one (handled above).
+        offered = [c for c in client['ciphers'] if c in SWEET32_CIPHERS]
+        if offered:
+            findings.append({'severity': 'info', 'code': 'cve_2016_2183_client_offer',
+                             'message': ('Client offers {} DES/3DES suite(s); it would accept '
+                                         'a SWEET32-exposed session (CVE-2016-2183) if a server '
+                                         'selected one'.format(len(offered))),
+                             'cve': 'CVE-2016-2183', 'detect_class': 'posture'})
+    # ---- CVE-2002-20001 D(HE)at EXPOSURE: server negotiated finite-field DHE ----
+    dhe, dhe_group, dhe_bits = _dhe_info(server)
+    if dhe:
+        big = (dhe_bits or 0) >= DHEAT_LARGE_GROUP_BITS
+        bits_txt = ' ({}-bit)'.format(dhe_bits) if dhe_bits else ''
+        findings.append({
+            'severity': 'warn' if big else 'notice',
+            'code': 'cve_2002_20001_dhe_offered',
+            'message': ('Server negotiated finite-field DHE ({}{}), performing a modular '
+                        'exponentiation per handshake - exposed to D(HE)at (CVE-2002-20001): '
+                        'a client can force that work cheaply, and large groups (OpenSSL 3.x '
+                        'and OpenJDK default to ffdhe8192) need far fewer requests to hurt'
+                        .format(dhe_group, bits_txt)),
+            'cve': 'CVE-2002-20001', 'cvss': _CVE_2002_20001['cvss'],
+            'cvss_source': _CVE_2002_20001['cvss_source'], 'detect_class': 'exposure',
+            'related_cve': list(_CVE_2002_20001['related']),
+            'dhe_group': dhe_group, 'group_bits': dhe_bits})
+    # ---- CVE-2018-0732 oversized DH prime EXPOSURE (server-attacks-client) ----
+    # A DH prime above OpenSSL's 10000-bit ceiling in the ServerKeyExchange makes the
+    # client burn a modexp — the mirror image of D(HE)at. Read directly from the SKE
+    # prime size threaded onto the server dict by the dispatch (TLS 1.2 DHE only).
+    if server and server.get('cipher') in DHE_SUITES:
+        pb = server.get('dh_prime_bits')
+        if pb and pb > OPENSSL_DH_MAX_MODULUS_BITS:
+            findings.append({
+                'severity': 'warn', 'code': 'cve_2018_0732_oversized_dh_prime',
+                'message': ('Server sent a {}-bit DH prime in its ServerKeyExchange, above '
+                            'the {}-bit ceiling OpenSSL\'s own fix enforces — a client doing '
+                            'the modexp burns CPU (CVE-2018-0732, client-side DoS)'
+                            .format(pb, OPENSSL_DH_MAX_MODULUS_BITS)),
+                'cve': _CVE_2018_0732['cve'], 'cvss': _CVE_2018_0732['cvss'],
+                'cvss_source': _CVE_2018_0732['cvss_source'],
+                'score_confidence': _CVE_2018_0732['score_confidence'],
+                'detect_class': 'exposure', 'prime_bits': pb,
+                'limit_bits': OPENSSL_DH_MAX_MODULUS_BITS,
+                'cipher': '0x{:04x}'.format(server['cipher'])})
+
+    # ---- record-layer attack shapes (v4): read from the plaintext record stream ----
+    neg_ch = server['cipher'] if server else None
+    for d in (records or []):
+        # CVE-2014-0160 (Heartbleed): a cleartext heartbeat request over-declaring its
+        # payload — a buffer over-read attempt on the wire (attack shape, latched once).
+        bad_hb = d.get('bad_heartbeats', 0)
+        if bad_hb:
+            declared, rlen = d.get('heartbeat_sample') or (None, None)
+            findings.append({
+                'severity': 'high', 'code': 'cve_2014_0160_heartbleed',
+                'message': ('{} cleartext TLS heartbeat request(s) on {} declaring more '
+                            'payload than the record carries (declared {} bytes in a {}-byte '
+                            'record) — the Heartbleed buffer over-read shape (CVE-2014-0160)'
+                            .format(bad_hb, d.get('label', '?'), declared, rlen)),
+                'cve': _CVE_2014_0160['cve'], 'cvss': _CVE_2014_0160['cvss'],
+                'cvss_source': _CVE_2014_0160['cvss_source'], 'detect_class': 'attack',
+                'confidence': 'shape', 'direction': d.get('label'),
+                'bad_heartbeats': bad_hb})
+        # CVE-2016-8610 (SSL Death Alert): consecutive plaintext warning alerts
+        # during the handshake. Latching tiers on the per-direction run — a fatal
+        # alert or any non-alert record already broke the run in the scanner.
+        run = d.get('max_consec_warn', 0)
+        tier = None
+        for limit, sev, why in _SSL_DEATH_ALERT_TIERS:
+            if run >= limit:
+                tier = (limit, sev, why)
+        if tier:
+            limit, sev, why = tier
+            findings.append({
+                'severity': sev, 'code': 'cve_2016_8610_alert_flood',
+                'message': ('{} consecutive plaintext warning alerts on {} ({} alert '
+                            'records total) - {}'.format(
+                                run, d.get('label', '?'),
+                                d.get('plaintext_alerts', run), why)),
+                'cve': _CVE_2016_8610['cve'], 'cvss': _CVE_2016_8610['cvss'],
+                'cvss_source': _CVE_2016_8610['cvss_source'], 'detect_class': 'attack',
+                'direction': d.get('label'), 'consecutive_warning_alerts': run,
+                'total_plaintext_alerts': d.get('plaintext_alerts', run),
+                'threshold': limit,
+                'note': ("OpenSSL's own fix errors above five consecutive warning "
+                         'alerts (SSL_R_TOO_MANY_WARN_ALERTS); a patched peer rejects '
+                         'this rather than burning CPU on it')})
+        # CVE-2017-3731 (truncated record): a complete protected record below the
+        # 16-byte authenticator, against a susceptible cipher. Attack SHAPE, never
+        # a vulnerable host — the 32-bit/OpenSSL-version preconditions are not on
+        # the wire. The cipher precondition is checked here because only the
+        # session knows what was negotiated.
+        short = d.get('short_records', 0)
+        if short and neg_ch in _CVE_2017_3731_CIPHERS:
+            findings.append({
+                'severity': 'warn', 'code': 'cve_2017_3731_short_record',
+                'message': ('{} protected record(s) on {} shorter than the 16-byte '
+                            'authenticator {} appends (smallest {} bytes) - the '
+                            'truncation shape that underflows OpenSSL length '
+                            'arithmetic'.format(short, d.get('label', '?'),
+                                                _CVE_2017_3731_CIPHERS[neg_ch],
+                                                d.get('shortest'))),
+                'cve': _CVE_2017_3731['cve'], 'cvss': _CVE_2017_3731['cvss'],
+                'cvss_source': _CVE_2017_3731['cvss_source'],
+                'score_confidence': _CVE_2017_3731['score_confidence'],
+                'detect_class': 'attack', 'confidence': 'shape',
+                'direction': d.get('label'), 'cipher': '0x{:04x}'.format(neg_ch),
+                'cipher_name': _CVE_2017_3731_CIPHERS[neg_ch], 'short_records': short})
+
+    # ---- CVE-2026-47291 (v11): http.sys record-cadence flood ----
+    # SNAPSHOT SCOPE: the streaming daemon counts client application_data records
+    # per-request and resets the window on each server response. A bounded capture
+    # cannot bound "pre-response" across an interleaved keep-alive, so this fires only on
+    # the case a snapshot sees unambiguously — a flood of client records with NO
+    # substantive server response (grace-aware) — and defers the post-response keep-alive
+    # flood to the streaming path. The non-full client records are the primary signal.
+    rec_by_dir = {d.get('dir'): d for d in (records or []) if d.get('dir')}
+    c2s, s2c = rec_by_dir.get('c2s'), rec_by_dir.get('s2c')
+    neg_version = server.get('neg_version') if server else None
+    if c2s is not None and record_flood_armed(client, server, neg_version):
+        neg_cipher = server.get('cipher') if server else None
+        client_lens = c2s.get('appdata_lens') or []
+        pre = len(client_lens)
+        nonfull = sum(1 for L in client_lens
+                      if is_nonfull_record(L, neg_version, neg_cipher))
+        # A substantive server response — any server record beyond the bounded TLS 1.3
+        # early-record grace — would have reset the window; if one exists the pre-response
+        # count is unbounded from a snapshot, so the flood is left to the streaming path.
+        server_lens = (s2c.get('appdata_lens') or []) if s2c is not None else []
+        substantive_server = any(L > NST_MAX_TICKET_LEN or i >= NST_ALLOWANCE
+                                 for i, L in enumerate(server_lens))
+        tier = None
+        if not substantive_server:
+            for limit, sev, label in CVE_2026_47291_TIERS:
+                if nonfull >= limit:
+                    tier = (sev, label)
+            if tier is None and pre >= HTTPSYS_REF_TRIGGER:
+                # Size-agnostic catch-all: TLS 1.3 record padding can inflate a one-line
+                # record to full size, so a client reaching the trigger count regardless
+                # of size is reported too (suppressed once a non-full tier has fired).
+                tier = ('high', 'padded_or_bulk')
+        if tier is not None:
+            sev, label = tier
+            _m = _CVE_2026_47291
+            try:
+                sh = _maybe_ja4s(server) if server else None
+            except Exception:
+                sh = None
+            findings.append({
+                'severity': sev, 'code': 'cve_2026_47291_record_flood',
+                'message': ('{} client application_data records ({} non-full) with no '
+                            'server response - the http.sys buffer-reference flood shape '
+                            '(CVE-2026-47291, {}); reachable over TLS only, and needs '
+                            'MaxRequestBytes >= 262144 to overflow, which is not '
+                            'observable here'.format(pre, nonfull, label)),
+                'cve': _m['cve'], 'cvss': _m['cvss'], 'cvss_source': _m['cvss_source'],
+                'cwe': _m['cwe'], 'detect_class': 'attack', 'tier': label,
+                'primary_signal': ('client_records_pre_response'
+                                   if label == 'padded_or_bulk' else 'nonfull_records'),
+                'client_records_pre_response': pre, 'nonfull_records': nonfull,
+                'server_stack_hint': sh, 'server_stack': 'unverified',
+                'cve_conflict_note': _m['score_note'],
+                'precondition_unobserved': True, 'confidence': 'heuristic'})
+
     infos = []
     if cert_ders:
         try:
@@ -612,20 +1335,267 @@ def handshake_messages(buf):
 
 
 # ======================= capture -> sessions -> verdict ======================
-def _handshake_from_tls_stream(stream):
-    """Extract handshake messages from a reassembled TLS-over-TCP byte stream,
-    walking record headers and concatenating handshake (type 22) record bodies."""
-    i, hs = 0, b''
-    while i + 5 <= len(stream):
+def _scan_tls_stream(stream):
+    """Walk record headers in a reassembled TLS-over-TCP byte stream once and
+    return (handshake_messages, record_stats).
+
+    Besides concatenating handshake (type 22) record bodies for the fingerprint
+    path, this counts the two record-layer attack shapes v4 names, both read
+    directly from the plaintext record framing:
+
+      * CVE-2016-8610 (SSL Death Alert) — PLAINTEXT alert records (type 21) seen
+        before the handshake turns encrypted, tracking the longest run of
+        consecutive *warning* alerts (a fatal alert, or any non-alert record,
+        ends a run). Only pre-CCS / pre-appdata alerts count: afterwards the two
+        body bytes are encrypted and unreadable, and the flood the CVE describes
+        happens during the handshake anyway.
+      * CVE-2017-3731 (truncated record) — COMPLETE application_data records
+        (type 23) whose declared length is below the 16-byte authenticator. Only
+        fully-present records are counted; a short *read* (a record's bytes still
+        arriving across TCP segments) is incomplete data, not an attack.
+    """
+    i, hs = 0, bytearray()
+    saw_ccs = saw_appdata = False
+    plaintext_alerts = 0
+    consec_warn = max_consec_warn = 0
+    alert_sample = []
+    short_records = 0
+    shortest = None
+    appdata_lens = []                             # post-handshake type-23 record lengths (v11)
+    bad_heartbeats = heartbeats_seen = 0
+    heartbeat_sample = None
+    n = len(stream)
+    while i + 5 <= n:
         ctype = stream[i]
         rlen = (stream[i + 3] << 8) | stream[i + 4]
-        body = stream[i + 5:i + 5 + rlen]
-        if len(body) < rlen:
-            break
-        if ctype == 22:
-            hs += body
+        if i + 5 + rlen > n:
+            break                                 # record body not fully captured
+        frag = stream[i + 5:i + 5 + rlen]
+        if ctype == 22:                           # handshake
+            hs += frag
+            consec_warn = 0
+        elif ctype == 23:                         # application_data (protected)
+            saw_appdata = True
+            consec_warn = 0
+            if len(appdata_lens) < _RF_APPDATA_CAP:   # CVE-2026-47291 record cadence
+                appdata_lens.append(rlen)
+            if rlen < _CVE_2017_3731_MIN_RECORD:
+                short_records += 1
+                if shortest is None or rlen < shortest:
+                    shortest = rlen
+        elif ctype == 20:                         # ChangeCipherSpec
+            saw_ccs = True
+            consec_warn = 0
+        elif ctype == _CT_HEARTBEAT:              # heartbeat (CVE-2014-0160)
+            # Only cleartext (pre-CCS/appdata) heartbeats are readable. A request whose
+            # declared payload + RFC 6520 minimum padding cannot fit the record is the
+            # Heartbleed over-read shape (the reference exploit sends it pre-handshake).
+            if not (saw_ccs or saw_appdata) and len(frag) >= _HEARTBEAT_HEADER_BYTES:
+                heartbeats_seen += 1
+                declared = (frag[1] << 8) | frag[2]
+                if _HEARTBEAT_HEADER_BYTES + declared + _HEARTBEAT_MIN_PADDING > rlen:
+                    bad_heartbeats += 1
+                    if heartbeat_sample is None:
+                        heartbeat_sample = (declared, rlen)
+            consec_warn = 0
+        elif ctype == 21:                         # alert
+            if not (saw_ccs or saw_appdata):
+                plaintext_alerts += 1
+                level = frag[0] if len(frag) >= 1 else None
+                desc = frag[1] if len(frag) >= 2 else None
+                if len(alert_sample) < 8:
+                    alert_sample.append((level, desc))
+                if level == _ALERT_LEVEL_WARNING:
+                    consec_warn += 1
+                    if consec_warn > max_consec_warn:
+                        max_consec_warn = consec_warn
+                else:                             # fatal ends the connection/run
+                    consec_warn = 0
         i += 5 + rlen
-    return handshake_messages(hs)
+    stats = {'plaintext_alerts': plaintext_alerts,
+             'max_consec_warn': max_consec_warn, 'alert_sample': alert_sample,
+             'short_records': short_records, 'shortest': shortest,
+             'appdata_lens': appdata_lens,
+             'bad_heartbeats': bad_heartbeats, 'heartbeats_seen': heartbeats_seen,
+             'heartbeat_sample': heartbeat_sample}
+    return handshake_messages(bytes(hs)), stats
+
+
+def _handshake_from_tls_stream(stream):
+    """Handshake messages from a reassembled TLS-over-TCP byte stream (record
+    walk in `_scan_tls_stream`); thin wrapper for callers that only want the
+    messages."""
+    return _scan_tls_stream(stream)[0]
+
+
+# ----------------------------- DTLS (RadSec, v8) -----------------------------
+# A DTLSPlaintext record is a 13-byte header (type, version, 2-byte epoch, 48-bit
+# sequence, length) carrying 12-byte handshake headers (msg_type, 3-byte length,
+# message_seq, 3-byte fragment_offset, 3-byte fragment_length). DTLS 1.3 sends its
+# ClientHello / ServerHello in the same plaintext layout with a 0xfefd legacy
+# version, so this one decoder covers both hellos; encrypted DTLS 1.3 records use
+# the unified header (first byte 0b001xxxxx) and are never decryptable passively.
+# The record-layer volume detectors (alert flood, Heartbleed, short record, SWEET32
+# and D(HE)at accounting) stay TLS-over-TCP only, as in the daemon: datagram
+# transport has its own retransmission/replay model that their accounting does not
+# transfer to unexamined. The handshake checks (version, cipher, cert_*) apply.
+_DTLS_RECORD_HDR = 13
+_DTLS_HS_HDR = 12
+_DTLS_CT_HANDSHAKE = 22
+_DTLS_MAX_MESSAGE = 65536     # bound per reassembled handshake message
+_DTLS_MAX_PENDING = 16        # bound on concurrently reassembling messages per direction
+
+
+def _looks_like_dtls(pd):
+    """A DTLSPlaintext record: a known content type and a 0xfe major version. QUIC
+    long headers set the top bit and can never satisfy this."""
+    return (len(pd) >= _DTLS_RECORD_HDR and pd[0] in (20, 21, 22, 23, 24)
+            and pd[1] == 0xfe)
+
+
+def _iter_dtls_records(pd):
+    """Yield (content_type, version, epoch, fragment) for each record in a datagram.
+    Stops at the first record whose declared length overruns the datagram, or at an
+    encrypted unified-header record — a malformed length is rejected, never trusted."""
+    o, n = 0, len(pd)
+    while n - o >= _DTLS_RECORD_HDR:
+        ctype = pd[o]
+        if (ctype & 0xe0) == 0x20 or pd[o + 1] != 0xfe:
+            return
+        ver = (pd[o + 1] << 8) | pd[o + 2]
+        epoch = (pd[o + 3] << 8) | pd[o + 4]
+        rlen = (pd[o + 11] << 8) | pd[o + 12]
+        body_start = o + _DTLS_RECORD_HDR
+        if body_start + rlen > n:
+            return
+        yield ctype, ver, epoch, bytes(pd[body_start:body_start + rlen])
+        o = body_start + rlen
+
+
+class _DtlsHandshakeAssembler:
+    """Reassemble DTLS handshake fragments keyed by message_seq. Fragments may arrive
+    out of order, duplicated (DTLS retransmits whole flights) or overlapping; each
+    message_seq is yielded at most once, so a retransmitted flight is not reported
+    twice. Malformed fragments (offset+length past the declared total, a total above
+    the bound, or a total disagreeing with an earlier fragment) are dropped."""
+
+    def __init__(self, max_msg=_DTLS_MAX_MESSAGE, max_pending=_DTLS_MAX_PENDING):
+        self.pending = {}     # seq -> [mtype, total, bytearray, [(start, end), ...]]
+        self.done = set()
+        self.max_msg = max_msg
+        self.max_pending = max_pending
+
+    def add(self, frag):
+        """Feed one handshake record fragment body; return completed (type, seq, body)."""
+        out, o, n = [], 0, len(frag)
+        while n - o >= _DTLS_HS_HDR:
+            mtype = frag[o]
+            total = (frag[o + 1] << 16) | (frag[o + 2] << 8) | frag[o + 3]
+            seq = (frag[o + 4] << 8) | frag[o + 5]
+            foff = (frag[o + 6] << 16) | (frag[o + 7] << 8) | frag[o + 8]
+            flen = (frag[o + 9] << 16) | (frag[o + 10] << 8) | frag[o + 11]
+            start = o + _DTLS_HS_HDR
+            if start + flen > n:
+                break         # fragment runs past its record: reject, stop
+            o = start + flen
+            if total > self.max_msg or foff + flen > total or seq in self.done:
+                continue
+            ent = self.pending.get(seq)
+            if ent is None:
+                if len(self.pending) >= self.max_pending:
+                    continue
+                ent = [mtype, total, bytearray(total), []]
+                self.pending[seq] = ent
+            elif ent[0] != mtype or ent[1] != total:
+                continue      # inconsistent with earlier fragments of this message
+            ent[2][foff:foff + flen] = frag[start:start + flen]
+            ent[3].append((foff, foff + flen))
+            if self._covered(ent[3], total):
+                del self.pending[seq]
+                self.done.add(seq)
+                out.append((mtype, seq, bytes(ent[2])))
+        return out
+
+    @staticmethod
+    def _covered(ranges, total):
+        reach = 0
+        for a, b in sorted(ranges):
+            if a > reach:
+                return False
+            reach = max(reach, b)
+        return reach >= total
+
+
+def _parse_dtls_client_hello(body):
+    """DTLS ClientHello = TLS ClientHello with a cookie<0..255> after session_id.
+    Strip the cookie and hand the rest to the shared TLS parser. Returns
+    (fields, cookie_len)."""
+    r = _Reader(body)
+    r.take(2 + 32)                               # legacy_version + random
+    r.take(r.u8())                               # session_id
+    cookie_at = r.i
+    clen = r.u8()
+    r.take(clen)
+    tls_body = bytes(body[:cookie_at]) + bytes(body[cookie_at + 1 + clen:])
+    return parse_client_hello(tls_body), clen
+
+
+def _dtls_sessions(udp):
+    """Reassemble DTLS handshakes from captured UDP datagrams. Only a ClientHello
+    opens a flow (a tap joining mid-flight cannot tell client from server); the far
+    side is the server. Returns a list of session dicts shaped like the TLS path."""
+    flows = {}
+    for (src, sport, dst, dport, pay) in udp:
+        if _looks_like_dtls(pay):
+            flows.setdefault(tuple(sorted(((src, sport), (dst, dport)))), []) \
+                .append((src, sport, dst, dport, pay))
+
+    sessions = []
+    for dgrams in flows.values():
+        client_addr = c5 = None
+        asm = {}
+        client = server = None
+        sni_ov = None
+        certs = []
+        neg_version = None
+        for (src, sport, dst, dport, pay) in dgrams:
+            for ctype, _ver, epoch, frag in _iter_dtls_records(pay):
+                if ctype != _DTLS_CT_HANDSHAKE or epoch != 0:
+                    continue                      # epoch>0 is protected; not passive
+                if client_addr is None:
+                    if frag[:1] != b'\x01':
+                        continue                  # only a ClientHello opens a flow
+                    client_addr, c5 = (src, sport), (src, sport, dst, dport)
+                is_client = (src, sport) == client_addr
+                role = 'client' if is_client else 'server'
+                a = asm.get(role) or asm.setdefault(role, _DtlsHandshakeAssembler())
+                for mtype, _seq, hbody in a.add(frag):
+                    try:
+                        if is_client and mtype == 0x01 and client is None:
+                            sni_ov = _dtls_ch_overread(hbody)   # before the parse (v11)
+                            client = _parse_dtls_client_hello(hbody)[0]
+                        elif not is_client and mtype == 0x02 and server is None:
+                            server = parse_server_hello(hbody)
+                            neg_version = server.get('neg_version')
+                        elif not is_client and mtype == 0x0b and not certs \
+                                and neg_version is not None \
+                                and _tls_equiv_version(neg_version) < 0x0304:
+                            certs = parse_certificates(hbody)   # DTLS 1.2 cert is cleartext
+                        elif not is_client and mtype == 0x0c and server is not None \
+                                and server.get('cipher') in DHE_SUITES:
+                            bits = parse_dhe_server_key_exchange(hbody)
+                            if bits:
+                                server['dh_prime_bits'] = bits
+                    except Exception:
+                        continue
+        if (client is None and sni_ov is None) or c5 is None:
+            continue                              # keep a session for a malformed-SNI CH
+        csrc, csport, cdst, cdport = c5
+        sessions.append({'proto': 'dtls', 'src': csrc, 'sport': csport,
+                         'dst': cdst, 'dport': cdport, 'client': client,
+                         'server': server, 'certs': certs, 'sni_overread': sni_ov,
+                         'service': _service_for('udp', csport, cdport)})
+    return sessions
 
 
 def parse_pcap(path):
@@ -670,25 +1640,45 @@ def parse_pcap(path):
             continue
         src, sport, dst, dport = key
         rev = (dst, dport, src, sport)
-        cmsgs = _handshake_from_tls_stream(stream)
+        cmsgs, cstats = _scan_tls_stream(stream)
         if any(m[0] == 0x01 for m in cmsgs):
-            client = parse_client_hello(next(b for t, b in cmsgs if t == 0x01))
+            client, sni_ov = _client_hello_and_overread(
+                next(b for t, b in cmsgs if t == 0x01))
             server, certs = None, []
-            for t, b in _handshake_from_tls_stream(streams.get(rev, b'')):
+            smsgs, sstats = _scan_tls_stream(streams.get(rev, b''))
+            for t, b in smsgs:
                 if t == 0x02 and server is None:
                     server = parse_server_hello(b)
                 elif t == 0x0b:
                     certs = parse_certificates(b)
+                elif t == 0x0c and server is not None \
+                        and server.get('cipher') in DHE_SUITES:
+                    # ServerKeyExchange: recover the DH prime size (CVE-2018-0732, and
+                    # the real group bits for the D(HE)at accounting on TLS 1.2 DHE).
+                    bits = parse_dhe_server_key_exchange(b)
+                    if bits:
+                        server['dh_prime_bits'] = bits
             seen.add(rev)
+            # Per-direction record-layer stats, labelled by who is talking, so a
+            # death-alert flood or a truncated record is attributed to the side
+            # that sent it — CVE-2016-8610 and CVE-2017-3731 are both asymmetric.
+            records = [
+                dict(cstats, dir='c2s',
+                     label='{}:{} -> {}:{}'.format(src, sport, dst, dport)),
+                dict(sstats, dir='s2c',
+                     label='{}:{} -> {}:{}'.format(dst, dport, src, sport)),
+            ]
             sessions.append({'proto': 'tls', 'src': src, 'sport': sport,
                              'dst': dst, 'dport': dport, 'client': client,
-                             'server': server, 'certs': certs})
+                             'server': server, 'certs': certs, 'records': records,
+                             'sni_overread': sni_ov,
+                             'service': _service_for('tcp', sport, dport)})
         seen.add(key)
 
     quic_seen = set()
     for (src, sport, dst, dport, pay) in udp:
         if not pay or not (pay[0] & 0x80):
-            continue
+            continue                              # DTLS (top bit clear) handled below
         qkey = (src, sport, dst, dport)
         if qkey in quic_seen:
             continue                              # retransmitted / coalesced Initial
@@ -700,13 +1690,18 @@ def parse_pcap(path):
             for t, b in handshake_messages(reassemble_crypto(plain)):
                 if t == 0x01:
                     quic_seen.add(qkey)           # one session per QUIC connection
+                    client_q, sni_ov = _client_hello_and_overread(b)
                     sessions.append({'proto': 'quic', 'src': src, 'sport': sport,
                                      'dst': dst, 'dport': dport,
-                                     'client': parse_client_hello(b),
-                                     'server': None, 'certs': []})
+                                     'client': client_q,
+                                     'server': None, 'certs': [],
+                                     'sni_overread': sni_ov,
+                                     'service': _service_for('udp', sport, dport)})
                     break
         except Exception:
             continue                              # not a decryptable client Initial
+
+    sessions.extend(_dtls_sessions(udp))          # RadSec/DTLS handshakes (v8)
     return sessions
 
 
@@ -727,11 +1722,13 @@ def _tls_analyze(sessions, now=None, denylist=None):
     # server, so a completed handshake is never masked by an aborted one.
     out, index = [], {}
     for s in sessions:
-        pchar = 'q' if s['proto'] == 'quic' else 't'
+        pchar = {'quic': 'q', 'dtls': 'd'}.get(s['proto'], 't')
         client, server = s.get('client'), s.get('server')
         rec = {'proto': s['proto'],
                'src': '{}:{}'.format(s['src'], s['sport']),
                'dst': '{}:{}'.format(s['dst'], s['dport'])}
+        if s.get('service'):
+            rec['service'] = s['service']
         if client:
             ja4, ja4_r = ja4_client(client, proto=pchar)
             rec.update({'sni': client.get('sni'), 'alpn': client.get('alpn'),
@@ -743,7 +1740,9 @@ def _tls_analyze(sessions, now=None, denylist=None):
             j4s = _maybe_ja4s(server, pchar)
             if j4s:
                 rec['ja4s'] = j4s
-        findings, infos = analyze_session(client, server, s.get('certs'), now)
+        findings, infos = analyze_session(client, server, s.get('certs'), now,
+                                          records=s.get('records'),
+                                          sni_overread=s.get('sni_overread'))
         if client and rec.get('ja4') in denylist:
             findings.insert(0, {'severity': 'high', 'code': 'ja4_denylist',
                                 'message': 'Client JA4 on denylist: {}'.format(
@@ -769,6 +1768,35 @@ def _tls_analyze(sessions, now=None, denylist=None):
         index[key] = rec
         out.append(rec)
 
+    # ---- CVE-2002-20001 D(HE)at volume tier: a source repeating finite-field DH
+    # handshakes in the capture window is the DoS-flood shape. Uses the dedup `count`
+    # (per client fingerprint), tiered by the DH group size. Coarser than the daemon's
+    # per-flow "no application data" refinement, but the same volume-from-one-source signal.
+    for rec in out:
+        dhe_f = next((f for f in rec['findings']
+                      if f['code'] == 'cve_2002_20001_dhe_offered'), None)
+        if not dhe_f:
+            continue
+        bits = dhe_f.get('group_bits')
+        tiers = _dheat_tiers(bits)
+        if rec['count'] < tiers[0][0]:
+            continue
+        sev = tiers[0][1]
+        for limit, s in tiers:
+            if rec['count'] >= limit:
+                sev = s
+        rec['findings'].insert(0, {
+            'severity': sev, 'code': 'cve_2002_20001_dheat_flood',
+            'message': ('{} finite-field DH handshakes of this shape from {} in the capture '
+                        'window - the D(HE)at volume signature (CVE-2002-20001): a source '
+                        'forcing repeated server modexps (group {})'
+                        .format(rec['count'], rec['src'].split(':')[0],
+                                dhe_f.get('dhe_group'))),
+            'cve': 'CVE-2002-20001', 'cvss': _CVE_2002_20001['cvss'],
+            'cvss_source': _CVE_2002_20001['cvss_source'], 'detect_class': 'attack',
+            'confidence': 'heuristic', 'count': rec['count'],
+            'group': dhe_f.get('dhe_group'), 'group_bits': bits})
+
     # Verdict from the deduplicated set (recompute so an upgraded representative
     # is scored on its final findings).
     verdict = 'clean'
@@ -785,6 +1813,28 @@ def _tls_analyze(sessions, now=None, denylist=None):
     return {'success': True, 'verdict': verdict, 'sessions': out, 'count': len(out)}
 
 
+# Admit IPv6 packets that sit behind an extension header (Hop-by-Hop 0, Routing 43,
+# Fragment 44, AH 51, Destination Options 60). libpcap's `tcp/udp port` primitive
+# matches plain IPv4 AND plain IPv6, but reads the transport port at a fixed offset
+# that an extension-header chain shifts — the next-header byte at ip6[6] is then the
+# EH, not the transport — so an EH-bearing TLS/QUIC flow is dropped by the kernel
+# filter before parse_pcap (which walks the chain via scapy) ever sees it. This narrow
+# next-header clause admits ONLY EH-bearing v6 — NOT a blanket `or ip6`, which would
+# copy the whole v6 stream to userspace to drop it in Python (needless load on a Pi
+# Zero 2W). Same shape the in-app vendor guards already use.
+_IPV6_EXTHDR_BPF = ('(ip6 and (ip6[6] = 0 or ip6[6] = 43 or ip6[6] = 44 '
+                    'or ip6[6] = 51 or ip6[6] = 60))')
+
+
+def _build_capture_bpf(tcp_ports, udp_ports):
+    """Capture filter: precise port scoping for IPv4 + plain IPv6, plus a narrow
+    clause admitting EH-bearing IPv6 (see _IPV6_EXTHDR_BPF). Pure/testable."""
+    parts = ['tcp port {}'.format(p) for p in tcp_ports] \
+        + ['udp port {}'.format(p) for p in udp_ports]
+    parts.append(_IPV6_EXTHDR_BPF)
+    return ' or '.join(parts)
+
+
 def _capture_pcap(interface, seconds, tcp_ports, udp_ports):
     """Run tcpdump for `seconds` into a temp pcap and return its path. Passive:
     -w only, no probes. Returns None if tcpdump is unavailable."""
@@ -793,9 +1843,7 @@ def _capture_pcap(interface, seconds, tcp_ports, udp_ports):
     import tempfile
     if not shutil.which('tcpdump'):
         return None
-    parts = ['tcp port {}'.format(p) for p in tcp_ports] \
-        + ['udp port {}'.format(p) for p in udp_ports]
-    bpf = ' or '.join(parts)
+    bpf = _build_capture_bpf(tcp_ports, udp_ports)
     fd, path = tempfile.mkstemp(suffix='.pcap', prefix='tlswatch_')
     import os
     os.close(fd)
@@ -823,7 +1871,8 @@ def do_tls_watch(interface=None, seconds=12, learn=True, quick=False,
     except Exception:
         return {'success': False, 'missing_tool': 'scapy',
                 'error': 'the Python "scapy" package is required for pcap dissection'}
-    udp_ports = () if no_quic else QUIC_UDP_PORTS
+    # DTLS (RadSec) is captured regardless of --no-quic; --no-quic only drops QUIC.
+    udp_ports = tuple(DTLS_UDP_PORTS) + (() if no_quic else QUIC_UDP_PORTS)
     pcap = _capture_pcap(interface, seconds, TLS_TCP_PORTS, udp_ports)
     if not pcap:
         return {'success': False, 'missing_tool': 'tcpdump',
@@ -840,7 +1889,8 @@ def do_tls_watch(interface=None, seconds=12, learn=True, quick=False,
     res = _tls_analyze(sessions, denylist=denylist)
     res.update({'interface': interface, 'seconds': seconds,
                 'tls': sum(1 for s in res['sessions'] if s['proto'] == 'tls'),
-                'quic': sum(1 for s in res['sessions'] if s['proto'] == 'quic')})
+                'quic': sum(1 for s in res['sessions'] if s['proto'] == 'quic'),
+                'dtls': sum(1 for s in res['sessions'] if s['proto'] == 'dtls')})
     return res
 
 
@@ -913,12 +1963,15 @@ def _build_quic_initial(dcid, scid, keys, handshake_bytes, version, pn=0):
     return bytes(pkt)
 
 
-def _mk_server_hello(version, cipher, neg_version=None, alpn=None):
+def _mk_server_hello(version, cipher, neg_version=None, alpn=None, group=None):
     body = struct.pack('!H', version) + b'\x11' * 32 + b'\x00'
     body += struct.pack('!H', cipher) + b'\x00'
     exts = b''
     if neg_version is not None:
         exts += struct.pack('!HH', 0x002b, 2) + struct.pack('!H', neg_version)
+    if group is not None:                            # key_share: group + 1-byte key_exchange
+        ks = struct.pack('!H', group) + struct.pack('!H', 1) + b'\x00'
+        exts += struct.pack('!HH', 0x0033, len(ks)) + ks
     if alpn:
         protos = b''.join(struct.pack('!B', len(p.encode())) + p.encode() for p in alpn)
         d = struct.pack('!H', len(protos)) + protos
@@ -1069,6 +2122,170 @@ def selftest():
     fw, _ = analyze_session(None, shw, [], now)
     ck('weak_cipher', any(x['code'] == 'weak_cipher' for x in fw))
 
+    # ---- RC4 (CVE-2013-2566 / CVE-2015-2808): weak_cipher carries both CVEs ----
+    frc4 = next((x for x in fw if x['code'] == 'weak_cipher'), None)
+    ck('rc4_cve_list', (frc4 or {}).get('cve'), ['CVE-2013-2566', 'CVE-2015-2808'])
+    ck('rc4_exposure_class', (frc4 or {}).get('detect_class'), 'exposure')
+    ck('rc4_cipher_name', (frc4 or {}).get('cipher_name'), 'TLS_RSA_WITH_RC4_128_SHA')
+    # A KRB5 RC4 suite the generic legacy list misses is still named as RC4.
+    shk = parse_server_hello(_mk_server_hello(0x0303, 0x0020)[4:])   # KRB5_WITH_RC4_128_SHA
+    fk = next((x for x in analyze_session(None, shk, [], now)[0]
+               if x['code'] == 'weak_cipher'), None)
+    ck('rc4_krb5_named', (fk or {}).get('cve'), ['CVE-2013-2566', 'CVE-2015-2808'])
+
+    # ---- CVE-2016-2183 (SWEET32): negotiated 64-bit block cipher ----
+    sh3des = parse_server_hello(_mk_server_hello(0x0303, 0x000a)[4:])   # 3DES_EDE_CBC
+    f3, _ = analyze_session(None, sh3des, [], now)
+    fc3 = next((x for x in f3 if x['code'] == 'cve_2016_2183_negotiated'), None)
+    ck('sweet32_negotiated', fc3 is not None)
+    ck('sweet32_cve_field', (fc3 or {}).get('cve'), 'CVE-2016-2183')
+    ck('sweet32_exposure_class', (fc3 or {}).get('detect_class'), 'exposure')
+    ck('sweet32_high', (fc3 or {}).get('severity'), 'high')
+    ck('sweet32_not_generic_weak',           # named finding supersedes weak_cipher
+       not any(x['code'] == 'weak_cipher' for x in f3))
+    ck('sweet32_verdict_suspicious', _tls_analyze(
+        [{'proto': 'tls', 'src': 'a', 'sport': 1, 'dst': 'b', 'dport': 443,
+          'client': None, 'server': sh3des, 'certs': []}])['verdict'], 'suspicious')
+    # RC2/IDEA: same 64-bit weakness, outside the CVE's DES/3DES scope.
+    shidea = parse_server_hello(_mk_server_hello(0x0303, 0x0007)[4:])   # IDEA_CBC
+    fi, _ = analyze_session(None, shidea, [], now)
+    fci = next((x for x in fi if x['code'] == 'weak_block_cipher_64bit'), None)
+    ck('block64_other', fci is not None)
+    ck('block64_related_cve', (fci or {}).get('related_cve'), 'CVE-2016-2183')
+    # POSTURE: a client that merely offers 3DES (no SWEET32 negotiated).
+    cpos = parse_client_hello(_build_client_hello(
+        _KAT_CIPHERS + [0x000a], _KAT_EXTS, _KAT_SIGALGS, [0x0303],
+        alpn=['h2'], sni='x.test')[4:])
+    fp = {x['code'] for x in analyze_session(cpos, None, [], now)[0]}
+    ck('sweet32_client_offer', 'cve_2016_2183_client_offer' in fp)
+    # Clean client (no 3DES offered) stays silent.
+    cclean = parse_client_hello(_build_client_hello(
+        _KAT_CIPHERS, _KAT_EXTS, _KAT_SIGALGS, [0x0304], alpn=['h2'], sni='x.test')[4:])
+    ck('no_sweet32_false_positive', 'cve_2016_2183_client_offer'
+       not in {x['code'] for x in analyze_session(cclean, None, [], now)[0]})
+
+    # ---- CVE-2002-20001 D(HE)at: finite-field DHE exposure + volume tier ----
+    shdhe = parse_server_hello(_mk_server_hello(0x0303, 0x0033)[4:])   # classic DHE_RSA_AES128
+    fd = next((x for x in analyze_session(None, shdhe, [], now)[0]
+               if x['code'] == 'cve_2002_20001_dhe_offered'), None)
+    ck('dheat_classic_dhe_exposure', fd is not None)
+    ck('dheat_cve_field', (fd or {}).get('cve'), 'CVE-2002-20001')
+    ck('dheat_exposure_class', (fd or {}).get('detect_class'), 'exposure')
+    # TLS 1.3 ffdhe8192 (large group) -> warn severity + group bits.
+    sh13 = parse_server_hello(_mk_server_hello(0x0303, 0x1301, neg_version=0x0304,
+                                               group=0x0104)[4:])
+    f13 = next((x for x in analyze_session(None, sh13, [], now)[0]
+                if x['code'] == 'cve_2002_20001_dhe_offered'), None)
+    ck('dheat_ffdhe8192_group', (f13 or {}).get('dhe_group'), 'ffdhe8192')
+    ck('dheat_ffdhe8192_bits', (f13 or {}).get('group_bits'), 8192)
+    ck('dheat_large_group_warn', (f13 or {}).get('severity'), 'warn')
+    # ECDHE (x25519 group 0x001d) must NOT trigger D(HE)at.
+    shec = parse_server_hello(_mk_server_hello(0x0303, 0x1301, neg_version=0x0304,
+                                               group=0x001d)[4:])
+    ck('dheat_ecdhe_no_finding', 'cve_2002_20001_dhe_offered'
+       not in {x['code'] for x in analyze_session(None, shec, [], now)[0]})
+    # Volume tier: many classic-DHE handshakes from one source -> flood attack finding.
+    dhe_sessions = [{'proto': 'tls', 'src': '10.0.0.9', 'sport': 40000 + i,
+                     'dst': '10.0.0.1', 'dport': 443, 'client': None,
+                     'server': parse_server_hello(_mk_server_hello(0x0303, 0x0033)[4:]),
+                     'certs': [], 'records': []} for i in range(60)]
+    fa = _tls_analyze(dhe_sessions, now)
+    ck('dheat_flood_volume_tier',
+       any(f['code'] == 'cve_2002_20001_dheat_flood'
+           for rec in fa['sessions'] for f in rec['findings']))
+
+    # ---- record-layer CVEs (v4): CVE-2016-8610 death alert, CVE-2017-3731 short record ----
+    def _rec_bytes(ct, body):
+        return bytes([ct]) + struct.pack('!HH', 0x0303, len(body)) + body
+
+    def _alert(level, desc=0):
+        return _rec_bytes(21, bytes([level, desc]))
+    # The scanner counts a run of consecutive plaintext warning alerts.
+    _m, st7 = _scan_tls_stream(_alert(1) * 7)
+    ck('death_alert_run', st7['max_consec_warn'], 7)
+    da = analyze_session(None, None, [], now, records=[dict(st7, label='c -> s')])[0]
+    fda = next((x for x in da if x['code'] == 'cve_2016_8610_alert_flood'), None)
+    ck('death_alert_finding', fda is not None)
+    ck('death_alert_warn', (fda or {}).get('severity'), 'warn')
+    ck('death_alert_cve', (fda or {}).get('cve'), 'CVE-2016-8610')
+    ck('death_alert_attack_class', (fda or {}).get('detect_class'), 'attack')
+    # >= 100 consecutive warning alerts escalates to the high tier.
+    _m, st100 = _scan_tls_stream(_alert(1) * 100)
+    dh = analyze_session(None, None, [], now, records=[dict(st100, label='c -> s')])[0]
+    ck('death_alert_high', next((x for x in dh
+        if x['code'] == 'cve_2016_8610_alert_flood'), {}).get('severity'), 'high')
+    # Five warnings alone stay under the six-alert bound OpenSSL's fix permits.
+    _m, st5 = _scan_tls_stream(_alert(1) * 5)
+    ck('death_alert_under_threshold', st5['max_consec_warn'], 5)
+    d5 = analyze_session(None, None, [], now, records=[dict(st5, label='c -> s')])[0]
+    ck('death_alert_no_fp',
+       not any(x['code'] == 'cve_2016_8610_alert_flood' for x in d5))
+    # A fatal alert breaks the run of warnings.
+    _m, stf = _scan_tls_stream(_alert(1) * 4 + _alert(2) + _alert(1) * 3)
+    ck('death_alert_fatal_breaks_run', stf['max_consec_warn'], 4)
+    # Alerts AFTER ChangeCipherSpec are encrypted, so they are not counted.
+    _m, stpost = _scan_tls_stream(_rec_bytes(20, b'\x01') + _alert(1) * 8)
+    ck('death_alert_post_ccs_ignored', stpost['max_consec_warn'], 0)
+
+    # CVE-2017-3731: a complete protected (appdata, type 23) record below 16 bytes,
+    # against a susceptible cipher (ChaCha20-Poly1305), is the truncation shape.
+    _m, stsr = _scan_tls_stream(_rec_bytes(23, b'\x00' * 4))
+    ck('short_record_count', stsr['short_records'], 1)
+    ck('short_record_shortest', stsr['shortest'], 4)
+    shcc = parse_server_hello(_mk_server_hello(0x0303, 0xcca8)[4:])   # ChaCha20-Poly1305
+    sr = analyze_session(None, shcc, [], now, records=[dict(stsr, label='s -> c')])[0]
+    fsr = next((x for x in sr if x['code'] == 'cve_2017_3731_short_record'), None)
+    ck('short_record_finding', fsr is not None)
+    ck('short_record_warn', (fsr or {}).get('severity'), 'warn')
+    ck('short_record_shape', (fsr or {}).get('confidence'), 'shape')
+    # The same short record against a modern AEAD cipher is NOT the shape (no
+    # susceptible precondition) — no finding.
+    shaes = parse_server_hello(_mk_server_hello(0x0303, 0xc030)[4:])   # AES-GCM
+    sr2 = analyze_session(None, shaes, [], now, records=[dict(stsr, label='s -> c')])[0]
+    ck('short_record_needs_precondition',
+       not any(x['code'] == 'cve_2017_3731_short_record' for x in sr2))
+    # A full-length protected record is not short.
+    _m, stok = _scan_tls_stream(_rec_bytes(23, b'\x00' * 40))
+    ck('short_record_no_fp', stok['short_records'], 0)
+
+    # ---- CVE-2014-0160 Heartbleed: cleartext heartbeat over-declaring payload ----
+    hb_body = bytes([1]) + struct.pack('!H', 0x4000) + b'\x00'   # request, declares 16384
+    _m, sthb = _scan_tls_stream(_rec_bytes(_CT_HEARTBEAT, hb_body))
+    ck('heartbleed_bad_count', sthb['bad_heartbeats'], 1)
+    hbf = analyze_session(None, None, [], now, records=[dict(sthb, label='c -> s')])[0]
+    fhb = next((x for x in hbf if x['code'] == 'cve_2014_0160_heartbleed'), None)
+    ck('heartbleed_finding', fhb is not None)
+    ck('heartbleed_high', (fhb or {}).get('severity'), 'high')
+    ck('heartbleed_cve', (fhb or {}).get('cve'), 'CVE-2014-0160')
+    ck('heartbleed_attack_class', (fhb or {}).get('detect_class'), 'attack')
+    # A well-formed heartbeat (declared payload + padding fits the record) is NOT flagged.
+    good_hb = bytes([1]) + struct.pack('!H', 4) + b'\x00' * 4 + b'\x00' * 16
+    _m, stokhb = _scan_tls_stream(_rec_bytes(_CT_HEARTBEAT, good_hb))
+    ck('heartbleed_no_fp', stokhb['bad_heartbeats'], 0)
+    # A heartbeat AFTER ChangeCipherSpec is encrypted, so its length is not inspected.
+    _m, stench = _scan_tls_stream(_rec_bytes(20, b'\x01')
+                                  + _rec_bytes(_CT_HEARTBEAT, hb_body))
+    ck('heartbleed_post_ccs_ignored', stench['bad_heartbeats'], 0)
+
+    # ---- CVE-2018-0732 oversized DH prime in ServerKeyExchange ----
+    big_p = b'\xff' * 1300                         # 1300 bytes -> 10400-bit modulus
+    ske_big = struct.pack('!H', len(big_p)) + big_p
+    ck('dh_prime_bits_parse', parse_dhe_server_key_exchange(ske_big), 10400)
+    shdhe2 = parse_server_hello(_mk_server_hello(0x0303, 0x0033)[4:])   # DHE_RSA_AES128
+    shdhe2['dh_prime_bits'] = parse_dhe_server_key_exchange(ske_big)
+    fdh = analyze_session(None, shdhe2, [], now)[0]
+    fdho = next((x for x in fdh if x['code'] == 'cve_2018_0732_oversized_dh_prime'), None)
+    ck('oversized_dh_finding', fdho is not None)
+    ck('oversized_dh_warn', (fdho or {}).get('severity'), 'warn')
+    ck('oversized_dh_bits', (fdho or {}).get('prime_bits'), 10400)
+    # A normal 2048-bit prime is NOT flagged as oversized.
+    ok_p = b'\xff' * 256                            # 2048-bit modulus
+    shdhe3 = parse_server_hello(_mk_server_hello(0x0303, 0x0033)[4:])
+    shdhe3['dh_prime_bits'] = parse_dhe_server_key_exchange(struct.pack('!H', len(ok_p)) + ok_p)
+    ck('oversized_dh_no_fp',
+       not any(x['code'] == 'cve_2018_0732_oversized_dh_prime'
+               for x in analyze_session(None, shdhe3, [], now)[0]))
+
     try:
         # self-signed leaf + SNI mismatch (the interception signal)
         der = _gen_cert('realbank.example', ['realbank.example'], -1, 30)
@@ -1170,6 +2387,54 @@ def selftest():
     finally:
         g['ENABLE_JA4S'], g['ACKNOWLEDGE_JA4S_LICENSE'] = saved
 
+    # ---- DTLS / RadSec service labels + decode primitives (v8, no scapy) ----
+    ck('service_radsec_tcp', _service_for('tcp', 55000, 2083), 'radsec')
+    ck('service_radsec_udp', _service_for('udp', 2083, 55000), 'radsec')
+    ck('service_modbus_security', _service_for('tcp', 55000, 802), 'modbus-security')
+    ck('service_unlabelled', _service_for('tcp', 55000, 443), None)
+    # DTLS numbering is inverted: 1.3 (0xfefc) is newest though its wire value is lowest.
+    ck('dtls_equiv_newest_is_13',
+       max([0xfeff, 0xfefd, 0xfefc], key=_tls_equiv_version), 0xfefc)
+    ck('dtls_ja4_ver_from_ext', _ja4_version([0xfefc], 0xfefd), 'd3')
+    ck('dtls_ja4_ver_legacy_10', _ja4_version([], 0xfeff), 'd1')
+    ck('dtls_legacy_10_flags_server',
+       any(f['code'] == 'server_legacy_version'
+           for f in analyze_session(None, {'neg_version': 0xfeff, 'cipher': 0xc030,
+                                            'exts_order': []}, None, now)[0]))
+
+    def _dtls_hs_record(mtype, body, seq=0, epoch=0, foff=0, flen=None, total=None):
+        total = len(body) if total is None else total
+        flen = len(body) if flen is None else flen
+
+        def _u24(x):
+            return bytes([(x >> 16) & 0xff, (x >> 8) & 0xff, x & 0xff])
+        hs = bytes([mtype]) + _u24(total) + struct.pack('!H', seq) \
+            + _u24(foff) + _u24(flen) + body
+        return (bytes([22]) + struct.pack('!H', 0xfefd) + struct.pack('!H', epoch)
+                + b'\x00\x00\x00\x00\x00\x01' + struct.pack('!H', len(hs)) + hs)
+
+    # DTLS ClientHello body = TLS CH body with a zero-length cookie after session_id.
+    _ch_tls = _build_client_hello(_KAT_CIPHERS, _KAT_EXTS, _KAT_SIGALGS, [0xfefd],
+                                  alpn=['h2'], sni='radius.example')[4:]
+    _ch_dtls = _ch_tls[:35] + b'\x00' + _ch_tls[35:]
+    ck('iter_dtls_one_record', len(list(_iter_dtls_records(_dtls_hs_record(0x01, _ch_dtls)))), 1)
+    ck('iter_dtls_rejects_overrun', list(_iter_dtls_records(
+        bytes([22]) + struct.pack('!H', 0xfefd) + b'\x00\x00'
+        + b'\x00\x00\x00\x00\x00\x01' + struct.pack('!H', 999) + b'\x01')), [])
+    cp, clen = _parse_dtls_client_hello(_ch_dtls)
+    ck('dtls_cookie_stripped', (clen, cp['sni']), (0, 'radius.example'))
+    # Out-of-order fragments reassemble once; a retransmitted flight is not re-yielded.
+    _asm = _DtlsHandshakeAssembler()
+    _half = len(_ch_dtls) // 2
+    _f1 = _dtls_hs_record(0x01, _ch_dtls[:_half], foff=0, flen=_half, total=len(_ch_dtls))
+    _f2 = _dtls_hs_record(0x01, _ch_dtls[_half:], foff=_half,
+                          flen=len(_ch_dtls) - _half, total=len(_ch_dtls))
+    _o1 = [m for *_h, fr in _iter_dtls_records(_f2) for m in _asm.add(fr)]
+    _o2 = [m for *_h, fr in _iter_dtls_records(_f1) for m in _asm.add(fr)]
+    _o3 = [m for *_h, fr in _iter_dtls_records(_f1) for m in _asm.add(fr)]   # retransmit
+    ck('dtls_frag_out_of_order', (_o1, len(_o2), len(_o3)), ([], 1, 0))
+    ck('dtls_frag_body_exact', _o2 and _o2[0][2] == _ch_dtls, True)
+
     # pcap capture->parse->classify e2e leg (scapy required)
     try:
         import os
@@ -1216,6 +2481,122 @@ def selftest():
         ck('pcap_quic_retransmit_deduped', quicrec['count'], 1)
     except Exception as e:
         checks.append({'name': 'pcap_e2e', 'pass': True, 'skipped': str(e)})
+
+    # ---- DTLS/RadSec e2e: a real datagram handshake through parse_pcap (v8) ----
+    try:
+        import os
+        import tempfile
+        from scapy.all import Ether, wrpcap
+        from scapy.layers.inet import IP, UDP
+        from scapy.packet import Raw
+        der_ds = _gen_cert('radius.example', ['radius.example'], -1, 30)
+        sh_body = _mk_server_hello(0xfefd, 0xc030)[4:]       # DTLS 1.2 ServerHello body
+        cert_body = _mk_cert_msg([der_ds])[4:]               # Certificate body
+        dpkts = [
+            Ether() / IP(src='10.0.0.7', dst='10.0.0.20')
+            / UDP(sport=55000, dport=2083) / Raw(_dtls_hs_record(0x01, _ch_dtls)),
+            Ether() / IP(src='10.0.0.20', dst='10.0.0.7') / UDP(sport=2083, dport=55000)
+            / Raw(_dtls_hs_record(0x02, sh_body)
+                  + _dtls_hs_record(0x0b, cert_body, seq=1)),
+            # a retransmitted ClientHello flight: must collapse to one session
+            Ether() / IP(src='10.0.0.7', dst='10.0.0.20')
+            / UDP(sport=55000, dport=2083) / Raw(_dtls_hs_record(0x01, _ch_dtls)),
+        ]
+        dpth = os.path.join(tempfile.gettempdir(), 'tlswatch_dtls_selftest.pcap')
+        wrpcap(dpth, dpkts)
+        dsess = parse_pcap(dpth)
+        os.unlink(dpth)
+        dr = _tls_analyze(dsess)
+        drec = next(x for x in dr['sessions'] if x['proto'] == 'dtls')
+        ck('dtls_pcap_proto', drec['proto'], 'dtls')
+        ck('dtls_pcap_ja4_d', drec['ja4'][0], 'd')
+        ck('dtls_pcap_ja4_ver', drec['ja4'][1:3], 'd2')      # DTLS 1.2 from supported_versions
+        ck('dtls_pcap_service', drec.get('service'), 'radsec')
+        ck('dtls_pcap_sni', drec['sni'], 'radius.example')
+        ck('dtls_pcap_cert_seen', bool(drec.get('certs')))   # DTLS 1.2 cert is cleartext
+        ck('dtls_pcap_dedup', drec['count'], 1)
+        ck('dtls_pcap_clean', dr['verdict'], 'clean')         # matching cert, modern cipher
+    except Exception as e:
+        checks.append({'name': 'dtls_pcap_e2e', 'pass': True, 'skipped': str(e)})
+
+    # ---- capture BPF: IPv6 extension-header admission (new in v5) ----
+    _bpf = _build_capture_bpf((443, 8443), (443,))
+    ck('bpf_tcp_port_scoped', 'tcp port 443' in _bpf and 'tcp port 8443' in _bpf)
+    ck('bpf_udp_port_scoped', 'udp port 443' in _bpf)
+    ck('bpf_ext_v6_admitted', 'ip6[6] = 0' in _bpf and 'ip6[6] = 44' in _bpf
+       and 'ip6[6] = 60' in _bpf)
+    # NOT a blanket `or ip6` (which would flood a Pi Zero 2W); v6 is gated on a
+    # next-header extension-header clause.
+    ck('bpf_not_blanket_ip6', '(ip6 and (ip6[6]' in _bpf)
+    # v8 service ports are in the capture set; DTLS rides udp/2083 even with --no-quic.
+    ck('ports_radsec_modbus_tcp', 2083 in TLS_TCP_PORTS and 802 in TLS_TCP_PORTS)
+    ck('ports_dtls_udp', 2083 in DTLS_UDP_PORTS)
+    _bpf2 = _build_capture_bpf(TLS_TCP_PORTS, tuple(DTLS_UDP_PORTS))
+    ck('bpf_radsec_dtls_udp', 'udp port 2083' in _bpf2 and 'tcp port 2083' in _bpf2
+       and 'tcp port 802' in _bpf2)
+
+    # ---- CVE-2026-52346 (v11): SNI host_name over-read ----
+    def _ch52346(nlen=None, host=b'h.lab', pad=0, ext_len=None, block_len=None,
+                 list_len=None):
+        n = len(host) if nlen is None else nlen
+        entry = b'\x00' + n.to_bytes(2, 'big') + host
+        ll = len(entry) if list_len is None else list_len
+        sni = ll.to_bytes(2, 'big') + entry
+        el = len(sni) if ext_len is None else ext_len
+        ext = _EXT_SERVER_NAME.to_bytes(2, 'big') + el.to_bytes(2, 'big') + sni
+        bl = len(ext) if block_len is None else block_len
+        b = bytearray()
+        b += (0x0303).to_bytes(2, 'big') + b'\x00' * 32 + b'\x00'
+        b += (2).to_bytes(2, 'big') + (0x1301).to_bytes(2, 'big') + b'\x01\x00'
+        b += bl.to_bytes(2, 'big') + ext + b'\x00' * pad
+        return bytes(b)
+    _H = len(b'h.lab')
+    ck('sni_overread_exact_fit_silent', scan_sni_overread(_ch52346(nlen=_H)), None)
+    _ov = scan_sni_overread(_ch52346(nlen=_H + 1))
+    ck('sni_overread_one_over_fires', bool(_ov), True)
+    ck('sni_overread_one_over_bound', _ov and _ov['bound'], 'handshake_message')
+    ck('sni_overread_one_over_high', _ov and _ov['severity'], 'high')
+    ck('sni_overread_overrun_bytes', _ov and _ov['overrun_bytes'], 1)
+    ck('sni_overread_clean_silent', scan_sni_overread(_ch52346()), None)
+    _ov2 = scan_sni_overread(_ch52346(nlen=_H + 4, pad=64))     # inner-container overrun
+    ck('sni_overread_inner_warn', _ov2 and _ov2['severity'], 'warn')
+    _f346 = analyze_session(None, None, [], now, sni_overread=_ov)[0]
+    ck('sni_overread_e2e_fires',
+       any(x['code'] == 'cve_2026_52346_sni_overread' for x in _f346), True)
+    ck('sni_overread_e2e_cve',
+       next((x['cve'] for x in _f346
+             if x['code'] == 'cve_2026_52346_sni_overread'), None), 'CVE-2026-52346')
+    _fno = analyze_session(cnos, None, [], now, sni_overread=_ov)[0]
+    ck('sni_overread_scopes_out_no_sni',
+       any(x['code'] == 'no_sni' for x in _fno), False)
+    ck('sni_overread_still_fires_with_client',
+       any(x['code'] == 'cve_2026_52346_sni_overread' for x in _fno), True)
+    ck('no_sni_without_overread',
+       any(x['code'] == 'no_sni' for x in analyze_session(cnos, None, [], now)[0]), True)
+
+    # ---- CVE-2026-47291 (v11): http.sys record-cadence flood ----
+    ck('rf_armed_tls12_no_h2', record_flood_armed(None, {'alpn': []}, 0x0303), True)
+    ck('rf_armed_tls12_server_h2',
+       record_flood_armed(None, {'alpn': ['h2']}, 0x0303), False)
+    ck('rf_armed_tls13_client_h2_only',
+       record_flood_armed({'alpn': ['h2']}, None, 0x0304), False)
+    ck('rf_armed_tls13_mixed_alpn',
+       record_flood_armed({'alpn': ['http/1.1', 'h2']}, None, 0x0304), True)
+    ck('rf_nonfull_small', is_nonfull_record(50, 0x0303, 0x009c), True)
+    ck('rf_full_not_nonfull', is_nonfull_record(TLS_PLAINTEXT_MAX, 0x0303, 0x009c), False)
+    _srv12 = {'server_version': 0x0303, 'cipher': 0x009c, 'exts_order': [],
+              'alpn': [], 'selected_group': None, 'neg_version': 0x0303}
+
+    def _rf(nonfull, full=0, server_resp=None):
+        c2s = {'dir': 'c2s', 'appdata_lens': [50] * nonfull + [TLS_PLAINTEXT_MAX] * full}
+        s2c = {'dir': 's2c', 'appdata_lens': server_resp or []}
+        return [x for x in analyze_session(None, _srv12, [], now, records=[c2s, s2c])[0]
+                if x['code'] == 'cve_2026_47291_record_flood']
+    ck('rf_flood_warn_tier', (_rf(1000)[0]['severity'] if _rf(1000) else None), 'warn')
+    ck('rf_flood_high_tier', (_rf(4096)[0]['severity'] if _rf(4096) else None), 'high')
+    ck('rf_below_threshold_silent', _rf(999), [])
+    ck('rf_bulk_full_records_silent', _rf(0, full=4096), [])
+    ck('rf_server_response_defers', _rf(4096, server_resp=[16000]), [])
 
     failed = sum(1 for c in checks if not c['pass'])
     return {'success': failed == 0, 'checks': checks, 'failed': failed}

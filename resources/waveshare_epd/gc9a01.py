@@ -13,28 +13,61 @@
 #   CLK  → GPIO11 / SCLK  (pin 23)
 #   CS   → GPIO8  / CE0   (pin 24)
 #   DC   → GPIO25         (pin 22)
-#   RST  → GPIO27         (pin 13)
-#   BL   → GPIO18         (pin 12)
+#   RST  → GPIO27         (pin 13)   [override: RAGNAR_GC9A01_RST_PIN]
+#   BL   → GPIO18         (pin 12)   [override: RAGNAR_GC9A01_BL_PIN, -1 = none]
+#
+# Environment overrides (all optional):
+#   RAGNAR_GC9A01_SPI_HZ   SPI clock in Hz (default 20000000; lower if noisy)
+#   RAGNAR_GC9A01_RST_PIN  reset GPIO   (default 27)
+#   RAGNAR_GC9A01_DC_PIN   data/command GPIO (default 25)
+#   RAGNAR_GC9A01_BL_PIN   backlight GPIO (default 18; -1 disables control)
+#   RAGNAR_GC9A01_MADCTL   memory-access/scan byte (default 0x48)
+#   RAGNAR_GC9A01_INVERT   1 = INVON (default), 0 = INVOFF
 
 import logging
+import os
 import time
 import struct
 
 logger = logging.getLogger(__name__)
 
+
+def _env_int(name, default):
+    """Read an integer env override, accepting 0x-prefixed hex. Falls back to
+    `default` on anything unparseable so a typo never crashes the driver."""
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return int(str(raw).strip(), 0)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring bad %s=%r, using default %r", name, raw, default)
+        return default
+
+
 EPD_WIDTH  = 240
 EPD_HEIGHT = 240
 
-RST_PIN  = 27
-DC_PIN   = 25
+RST_PIN  = _env_int("RAGNAR_GC9A01_RST_PIN", 27)
+DC_PIN   = _env_int("RAGNAR_GC9A01_DC_PIN", 25)
 CS_PIN   = 8
-BL_PIN   = 18
+BL_PIN   = _env_int("RAGNAR_GC9A01_BL_PIN", 18)   # -1 disables backlight control
 MOSI_PIN = 10
 SCLK_PIN = 11
 
 SPI_BUS    = 0
 SPI_DEVICE = 0
-SPI_MAX_HZ = 40_000_000
+# The GC9A01's 40 MHz ceiling is only reachable with short, clean traces. Over
+# Dupont/jumper wiring that clock corrupts the init-sequence command bytes: the
+# controller never gets configured and the panel just shows its power-on noise
+# ("snow"/static). Default to a conservative 20 MHz — fast enough for the ~2 fps
+# render loop — and let users drop lower (e.g. 10000000) via the env override.
+SPI_MAX_HZ = _env_int("RAGNAR_GC9A01_SPI_HZ", 20_000_000)
+
+# MADCTL (0x36): memory-access / scan direction + colour order (0x48 = portrait, RGB).
+MADCTL = _env_int("RAGNAR_GC9A01_MADCTL", 0x48)
+# GC9A01 panels are normally-black and need display inversion on (INVON).
+INVERT = _env_int("RAGNAR_GC9A01_INVERT", 1)
 
 
 class EPD:
@@ -154,9 +187,9 @@ class EPD:
 
             self._gpio["rst"] = gpiozero.LED(RST_PIN)
             self._gpio["dc"]  = gpiozero.LED(DC_PIN)
-            self._gpio["bl"]  = gpiozero.LED(BL_PIN)
-
-            self._gpio["bl"].on()
+            if BL_PIN is not None and BL_PIN >= 0:
+                self._gpio["bl"] = gpiozero.LED(BL_PIN)
+                self._gpio["bl"].on()
         except Exception as e:
             logger.error("GC9A01 hardware setup failed: %s", e)
             raise
@@ -248,7 +281,7 @@ class EPD:
         self._write_data([0x00, 0x20])
 
         self._write_cmd(0x36)   # MADCTL — memory access / scan direction
-        self._write_data(0x48)  # portrait, RGB order
+        self._write_data(MADCTL & 0xFF)  # portrait, RGB order (env-overridable)
 
         self._write_cmd(0x3A)   # COLMOD — pixel format
         self._write_data(0x05)  # 16-bit RGB565
@@ -338,7 +371,7 @@ class EPD:
         self._write_data([0x3E, 0x07])
 
         self._write_cmd(0x35)   # TEON
-        self._write_cmd(0x21)   # INVON
+        self._write_cmd(0x21 if INVERT else 0x20)   # INVON / INVOFF
 
         self._write_cmd(0x11)   # SLPOUT
         time.sleep(0.12)

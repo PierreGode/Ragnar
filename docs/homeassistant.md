@@ -140,20 +140,30 @@ separate box, just use the Ragnar unit's LAN IP or its
 
 Notify a phone on any high/critical Ragnar security alert:
 
+> **`event.ragnar_security_alert` is an event *entity*, not a bus event.** The
+> integration updates the entity's state (a timestamp) and carries the alert's
+> `severity` / `source` / `title` / `key` as **attributes** — it does **not**
+> fire a `ragnar_security_alert` event on the HA event bus. So automations must
+> use a **state trigger** on the entity and read `trigger.to_state.attributes`,
+> as below. (A `platform: event, event_type: ragnar_security_alert` trigger will
+> never fire.)
+
 ```yaml
 automation:
   - alias: Notify on Ragnar critical security alert
     trigger:
-      - platform: event
-        event_type: ragnar_security_alert
+      - platform: state
+        entity_id: event.ragnar_security_alert
     condition:
       - condition: template
-        value_template: "{{ trigger.event.data.severity in ['high','critical'] }}"
+        value_template: "{{ trigger.to_state.attributes.severity in ['high','critical'] }}"
     action:
       - service: notify.mobile_app_myphone
         data:
-          title: "Ragnar: {{ trigger.event.data.severity | upper }}"
-          message: "{{ trigger.event.data.source }}: {{ trigger.event.data.title }}"
+          title: "Ragnar: {{ trigger.to_state.attributes.severity | upper }}"
+          message: >
+            {{ trigger.to_state.attributes.source }}:
+            {{ trigger.to_state.attributes.title }}
 ```
 
 Warn when a mesh node drops or needs attention:
@@ -190,6 +200,185 @@ automation:
         target:
           entity_id: light.hallway
 ```
+
+Turn an LED strip **red** when a captive-portal / evil-twin attack is detected.
+HaleHound's GARMR fingerprint and WiFi Defense's evil-twin / attack-tool
+detections both flow into Watchtower and surface on the
+`event.ragnar_security_alert` entity — the `condition` below keeps the strip
+reacting to portal-class alerts specifically (drop the `is search(...)` clause to
+react to **any** medium-or-worse alert). Replace `light.led_strip` with your
+strip's entity.
+
+> **Severity note.** A freshly-started captive portal often scores **`medium`**
+> ("possible") from HaleHound, not `high`/`critical` — it only escalates once the
+> GARMR portal is confirmed across multiple signals. So this example triggers on
+> `medium` and above; the keyword filter keeps ordinary `medium` noise (asset /
+> IP-change alerts) from setting it off.
+
+```yaml
+automation:
+  - alias: LED strip red on Ragnar captive-portal attack
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id: event.ragnar_security_alert
+    condition:
+      - condition: template
+        value_template: >
+          {% set a = trigger.to_state.attributes %}
+          {% set t = ((a.title | default('')) ~ ' ' ~ (a.source | default(''))) | lower %}
+          {{ (a.severity | default('')) in ['medium','high','critical']
+             and (t is search('portal|captive|garmr|evil.?twin|halehound|marauder|ghost.?esp|rogue|multitool|attack.?tool')) }}
+    action:
+      # Snapshot the strip so we can restore it afterward.
+      - service: scene.create
+        data:
+          scene_id: ragnar_led_restore
+          snapshot_entities:
+            - light.led_strip
+      # Flash red.
+      - repeat:
+          count: 6
+          sequence:
+            - service: light.turn_on
+              target:
+                entity_id: light.led_strip
+              data:
+                rgb_color: [255, 0, 0]
+                brightness_pct: 100
+            - delay: "00:00:00.6"
+            - service: light.turn_off
+              target:
+                entity_id: light.led_strip
+            - delay: "00:00:00.4"
+      # Hold solid red for a minute, then restore the previous state.
+      - service: light.turn_on
+        target:
+          entity_id: light.led_strip
+        data:
+          rgb_color: [255, 0, 0]
+          brightness_pct: 100
+      - delay: "00:01:00"
+      - service: scene.turn_on
+        target:
+          entity_id: scene.ragnar_led_restore
+```
+
+> Prefer to react to **any** high/critical alert instead?
+> `binary_sensor.ragnar_security_alert` turns `on` for those — trigger on it going
+> `on` — but it can't single out the captive-portal case (and, being high/critical
+> only, it misses the `medium` "possible portal" verdict the example above catches),
+> so the event-entity route is the better fit here.
+
+## Worked example: flash Philips Hue strips red on a captive-portal attack
+
+A complete, end-to-end setup — this is the exact recipe used to make two Hue
+light strips flash red the moment Ragnar sees a captive portal. Adapt the entity
+names to your own lights.
+
+**1. Get your strips into Home Assistant.** A Hue strip is controlled through the
+**Hue Bridge**, so add the bridge, not the strip: **Settings → Devices &
+Services → Add Integration → Philips Hue**. HA auto-discovers the bridge on the
+LAN; press the round **link button** on top of the bridge when prompted. Every
+light paired to the bridge then appears as a `light.<name>` entity. Two things to
+check for each strip you want to flash:
+
+- It must be **color-capable** — in **Developer Tools → States**, its
+  `supported_color_modes` should include `xy`, `hs`, `rgb`, or `rgbw`. A
+  white/tunable-white strip can't go red.
+- Note its exact **entity_id** (e.g. `light.undersangen`,
+  `light.hue_lightstrip_sangram`) — you'll paste it into the automation.
+
+**2. Understand what fires.** When Ragnar/HaleHound sees an evil-twin captive
+portal, it raises a Watchtower alert (`source: halehound`) that the integration
+delivers on the **`event.ragnar_security_alert` entity**. A just-started portal
+usually scores **`medium`** ("possible, ~45%") and only escalates to
+`high`/`critical` once the GARMR portal is confirmed — so the automation must
+trigger at `medium` and above, and (crucially) use a **state trigger** on the
+event entity, because that entity does not fire a `ragnar_security_alert` bus
+event (see the note under [Example automation](#example-automation)).
+
+**3. The automation.** Snapshots the strips, flashes them red six times, holds
+solid red for a minute, then restores whatever they were doing before. Replace
+the two `light.*` entities with yours (there are four references — the snapshot,
+the two flash calls, and the hold):
+
+```yaml
+automation:
+  - alias: LED strips red on Ragnar captive-portal attack
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id: event.ragnar_security_alert
+    condition:
+      - condition: template
+        value_template: >
+          {% set a = trigger.to_state.attributes %}
+          {% set t = ((a.title | default('')) ~ ' ' ~ (a.source | default(''))) | lower %}
+          {{ (a.severity | default('')) in ['medium','high','critical']
+             and (t is search('portal|captive|garmr|evil.?twin|halehound|marauder|ghost.?esp|rogue|multitool|attack.?tool')) }}
+    action:
+      # Remember the strips' current state so we can restore them afterward.
+      - service: scene.create
+        data:
+          scene_id: ragnar_led_restore
+          snapshot_entities:
+            - light.undersangen
+            - light.hue_lightstrip_sangram
+      # Flash red six times.
+      - repeat:
+          count: 6
+          sequence:
+            - service: light.turn_on
+              target:
+                entity_id:
+                  - light.undersangen
+                  - light.hue_lightstrip_sangram
+              data:
+                rgb_color: [255, 0, 0]
+                brightness_pct: 100
+            - delay: "00:00:00.6"
+            - service: light.turn_off
+              target:
+                entity_id:
+                  - light.undersangen
+                  - light.hue_lightstrip_sangram
+            - delay: "00:00:00.4"
+      # Hold solid red for a minute, then restore the previous state.
+      - service: light.turn_on
+        target:
+          entity_id:
+            - light.undersangen
+            - light.hue_lightstrip_sangram
+        data:
+          rgb_color: [255, 0, 0]
+          brightness_pct: 100
+      - delay: "00:01:00"
+      - service: scene.turn_on
+        target:
+          entity_id: scene.ragnar_led_restore
+```
+
+**4. Test it.** Two levels:
+
+- **Light actions only** — on the automation, use **⋮ → Run** (or Developer Tools
+  → Actions → *Automation: Trigger* with *skip conditions* on). This skips the
+  trigger/condition and runs the flash-and-restore actions, confirming the strips
+  react and restore.
+- **The whole chain** — start a captive portal on a test ESP32 and watch the
+  strips. Within one poll interval (default 30 s) of Ragnar raising the alert
+  they flash red. Check **Settings → Automations → (this one) → Traces** if it
+  doesn't fire: the trace shows the event entity's attributes and exactly which
+  condition line passed or failed.
+
+> **Why medium, not high/critical?** HaleHound's captive-portal verdict is
+> confidence-scored. A portal you just switched on typically reads
+> `medium` / "possible"; it climbs to `high`/`critical` only when the GARMR
+> DNS-hijack + redirect + credential-form signals all confirm. Gating at
+> `medium`+ with the keyword filter catches the portal early while the keyword
+> list keeps ordinary `medium` chatter (asset-inventory / IP-change alerts) from
+> triggering the lights. Tighten the list to
+> `portal|captive|garmr|evil.?twin` if you want captive-portal alerts *only*.
 
 ## Options
 

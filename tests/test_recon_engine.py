@@ -237,6 +237,77 @@ def test_cancel_scan_returns_false_when_already_done():
     assert engine.cancel_scan("S1") is False
 
 
+def test_port_scan_enum_and_is_ip():
+    from recon_engine import ReconType, _is_ip
+    assert ReconType.PORT_SCAN.value == "port_scan"
+    assert _is_ip("192.168.1.1") is True
+    assert _is_ip("::1") is True
+    assert _is_ip("example.com") is False
+
+
+def test_port_scan_finds_open_port(monkeypatch):
+    """_run_port_scan should surface a listening web port with scheme + url."""
+    import socket
+    import threading
+    from recon_engine import ReconEngine
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    port = srv.getsockname()[1]
+
+    stop = threading.Event()
+    def accept_loop():
+        srv.settimeout(0.5)
+        while not stop.is_set():
+            try:
+                c, _ = srv.accept()
+                c.close()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+    t = threading.Thread(target=accept_loop, daemon=True)
+    t.start()
+
+    # Scan only our ephemeral port so the test is deterministic and fast.
+    monkeypatch.setattr("recon_engine.COMMON_WEB_PORTS", (port,))
+    engine = ReconEngine.__new__(ReconEngine)
+    engine._lock = __import__("threading").Lock()
+    result = engine._run_port_scan("127.0.0.1")
+
+    stop.set()
+    srv.close()
+
+    assert result.status == "ok"
+    ports = result.artifacts.get("ports", [])
+    assert any(p["port"] == port for p in ports)
+    p = next(p for p in ports if p["port"] == port)
+    assert p["scheme"] in ("http", "https")
+    assert p["url"] == f"{p['scheme']}://127.0.0.1:{port}"
+
+
+def test_handoff_options_includes_ports():
+    from recon_engine import (
+        ReconEngine, ReconScanState, ReconType, ReconResult,
+    )
+    engine = ReconEngine.__new__(ReconEngine)
+    engine._lock = __import__("threading").Lock()
+    state = ReconScanState(scan_id="P1", target="10.0.0.5",
+                           recon_types=[ReconType.PORT_SCAN])
+    pr = ReconResult(recon_type=ReconType.PORT_SCAN, target="10.0.0.5")
+    pr.status = "ok"
+    pr.artifacts = {"host": "10.0.0.5",
+                    "ports": [{"port": 8443, "scheme": "https",
+                               "url": "https://10.0.0.5:8443"}]}
+    state.results = {ReconType.PORT_SCAN: pr}
+    engine.active_scans = {"P1": state}
+    opts = engine.get_handoff_options("P1")
+    assert opts["ports"] == [{"port": 8443, "scheme": "https",
+                              "url": "https://10.0.0.5:8443"}]
+
+
 if __name__ == "__main__":
     import sys
     rc = __import__("pytest").main([__file__, "-v"])

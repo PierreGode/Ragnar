@@ -137,6 +137,10 @@ class WiFiManager:
         self.ap_ssid = shared_data.config.get('wifi_ap_ssid', 'Ragnar')
         self.ap_password = shared_data.config.get('wifi_ap_password', 'ragnarconnect')
         self.ap_interface = self.default_wifi_interface
+        # Why the last AP start did not happen, in words a user can act on
+        # (None when it worked). Surfaced by the web UI and /api/wifi/status.
+        self.ap_last_error = None
+        self._ap_support_cache = {}
         # Resolved lazily by _client_wifi_interface(); the built-in hosts the
         # AP and a dongle, when present, carries the client connection.
         self._client_iface_cache = None
@@ -214,6 +218,108 @@ class WiFiManager:
         self._client_iface_cache = iface
         self._client_iface_cache_ts = now
         return iface
+
+    # ── AP-mode capability ─────────────────────────────────────────────
+    #
+    # Not every Wi-Fi adapter can be an access point: plenty of USB dongle
+    # drivers are station/monitor only. hostapd then fails, but only after
+    # the interface has been taken away from NetworkManager, so the box loses
+    # its Wi-Fi and gains nothing. Asking the driver first avoids that.
+
+    @staticmethod
+    def _parse_iw_interface_modes(phy_info):
+        """The 'Supported interface modes' of an `iw phy <phy> info` dump, as a
+        set of mode names, or None when the section is missing."""
+        modes, in_section = set(), False
+        for line in (phy_info or '').splitlines():
+            stripped = line.strip()
+            if stripped.lower().startswith('supported interface modes'):
+                in_section = True
+                continue
+            if in_section:
+                if stripped.startswith('*'):
+                    modes.add(stripped.lstrip('*').strip())
+                elif stripped:
+                    break
+        return modes if in_section else None
+
+    def _iw_interface_modes(self, iface):
+        """Interface modes the driver behind `iface` supports (set of names),
+        or None when that cannot be determined (no iw, no such interface)."""
+        try:
+            dev = subprocess.run(['iw', 'dev', iface, 'info'],
+                                 capture_output=True, text=True, timeout=5)
+            if dev.returncode != 0:
+                return None
+            match = re.search(r'^\s*wiphy\s+(\d+)', dev.stdout, re.MULTILINE)
+            if not match:
+                return None
+            phy = subprocess.run(['iw', 'phy', f'phy{match.group(1)}', 'info'],
+                                 capture_output=True, text=True, timeout=5)
+            if phy.returncode != 0:
+                return None
+            return self._parse_iw_interface_modes(phy.stdout)
+        except Exception as exc:
+            self.logger.debug(f"AP capability check failed on {iface}: {exc}")
+            return None
+
+    def interface_supports_ap(self, iface=None):
+        """True / False when the driver says so, None when it cannot be told
+        (callers must then behave as before and simply try)."""
+        iface = iface or self.ap_interface
+        if not iface:
+            return None
+        cached = self._ap_support_cache.get(iface)
+        now = time.time()
+        if cached and (now - cached[1]) < 60.0:
+            return cached[0]
+        modes = self._iw_interface_modes(iface)
+        supported = None if modes is None else ('AP' in modes)
+        self._ap_support_cache[iface] = (supported, now)
+        return supported
+
+    @staticmethod
+    def _interface_driver(iface):
+        try:
+            return os.path.basename(os.readlink(f'/sys/class/net/{iface}/device/driver'))
+        except OSError:
+            return None
+
+    def ap_mode_blocker(self, iface=None):
+        """A user-facing reason AP mode cannot run on `iface`, or None."""
+        iface = iface or self.ap_interface
+        if self.interface_supports_ap(iface) is not False:
+            return None
+        driver = self._interface_driver(iface)
+        message = (f"The Wi-Fi adapter on {iface}"
+                   + (f" (driver {driver})" if driver else "")
+                   + " does not support Access Point mode, so the hotspot was not started"
+                     " and the current Wi-Fi connection was left untouched.")
+        try:
+            others = [i.get('name') for i in gather_wifi_interfaces(self.default_wifi_interface)]
+        except Exception:
+            others = []
+        capable = [n for n in others if n and n != iface and self.interface_supports_ap(n)]
+        if capable:
+            message += (f" {capable[0]} does support it: set Wi-Fi default interface"
+                        f" (wifi_default_interface) to {capable[0]} and restart Ragnar.")
+        else:
+            message += (" Use the Raspberry Pi's built-in Wi-Fi or an adapter whose driver"
+                        " lists AP under 'Supported interface modes' in `iw list`.")
+        return message
+
+    def _refuse_ap_if_unsupported(self, iface=None):
+        """Record and log the blocker, if any. True when AP must not be tried."""
+        blocker = self.ap_mode_blocker(iface)
+        if not blocker:
+            return False
+        self.ap_last_error = blocker
+        self.logger.warning(f"AP mode not started: {blocker}")
+        try:
+            self.ap_logger.warning(f"AP mode not started: {blocker}")
+        except Exception:
+            pass
+        return True
 
     def _has_dedicated_client_radio(self):
         """True when the client connection has a radio of its own, so bringing
@@ -356,7 +462,7 @@ class WiFiManager:
         if not hasattr(self.shared_data, 'set_active_network'):
             return
 
-        active_ssid = getattr(self.shared_data, 'active_network_ssid', None)
+        active_ssid = self._durable_active_ssid()
 
         # Same SSID as what storage already considers active → clear pending.
         if ssid == active_ssid:
@@ -396,6 +502,25 @@ class WiFiManager:
         self._propagate_active_network(ssid)
         self._pending_ssid_change = None
         self._pending_ssid_first_seen = 0.0
+
+    def _durable_active_ssid(self):
+        """The SSID storage is really on — never a scan job's temporary one.
+
+        In multi-interface mode the orchestrator scans each interface inside
+        ``context_registry.activate(<job ssid>)``, which temporarily rewrites
+        ``shared_data.active_network_ssid`` for the duration of the scan. With
+        wired Ethernet AND Wi-Fi up on the same LAN, the Ethernet job runs as
+        'LAN' while this loop keeps reporting the real SSID every tick. Reading
+        the overridden value, a scan of a minute or more looked like a
+        confirmed network switch once the debounce ran out, so
+        set_active_network() fired and mark_all_hosts_degraded() flipped every
+        host Degraded/Offline — once per scan cycle (issue #818). The storage
+        manager's own active SSID is never touched by an override.
+        """
+        storage = getattr(self.shared_data, 'storage_manager', None)
+        if storage is not None and getattr(storage, 'active_slug', None) is not None:
+            return getattr(storage, 'active_ssid', None)
+        return getattr(self.shared_data, 'active_network_ssid', None)
 
     def _propagate_active_network(self, ssid):
         try:
@@ -901,7 +1026,9 @@ class WiFiManager:
             self.force_exit_ap_mode = False
             self.logger.info("Endless Loop: AP mode started, waiting for connections or timeout")
         else:
-            self.logger.error("Endless Loop: Failed to start AP mode, retrying WiFi search")
+            self.logger.error("Endless Loop: Failed to start AP mode"
+                              + (f" ({self.ap_last_error})" if self.ap_last_error else "")
+                              + ", retrying WiFi search")
             # If AP fails, try WiFi search again after short delay
             time.sleep(30)
             self._endless_loop_wifi_search()
@@ -1452,17 +1579,24 @@ class WiFiManager:
         """Check if Wi-Fi is connected using multiple methods"""
         try:
             self._ensure_wifi_interfaces_up()
-            # Method 1: Check using nmcli for active wireless connections
-            result = subprocess.run(['nmcli', '-t', '-f', 'ACTIVE,TYPE', 'con', 'show'], 
-                                  capture_output=True, text=True, timeout=30)
-            if result.returncode == 0:
-                for line in result.stdout.strip().split('\n'):
-                    if line and 'yes:802-11-wireless' in line:
-                        # Double-check with device status
-                        dev_result = subprocess.run(['nmcli', '-t', '-f', 'DEVICE,STATE', 'dev', 'status'], 
-                                                  capture_output=True, text=True, timeout=5)
-                        if dev_result.returncode == 0 and 'connected' in dev_result.stdout:
-                            return True
+            # Method 1: Check using nmcli for active wireless connections.
+            # Guarded: hosts without NetworkManager (containers, minimal
+            # installs) have no nmcli — a missing binary must fall through to
+            # the iwconfig/ping methods below, not abort the whole check and
+            # report "disconnected" on a perfectly good uplink.
+            try:
+                result = subprocess.run(['nmcli', '-t', '-f', 'ACTIVE,TYPE', 'con', 'show'], 
+                                      capture_output=True, text=True, timeout=30)
+                if result.returncode == 0:
+                    for line in result.stdout.strip().split('\n'):
+                        if line and 'yes:802-11-wireless' in line:
+                            # Double-check with device status
+                            dev_result = subprocess.run(['nmcli', '-t', '-f', 'DEVICE,STATE', 'dev', 'status'], 
+                                                      capture_output=True, text=True, timeout=5)
+                            if dev_result.returncode == 0 and 'connected' in dev_result.stdout:
+                                return True
+            except FileNotFoundError:
+                pass  # nmcli not available — fall through to iwconfig/ping
             
             # Methods 2 and 3 name an interface, so they must name the one
             # actually carrying the connection. With a dongle that is wlan1,
@@ -1590,45 +1724,101 @@ class WiFiManager:
         except Exception as exc:
             self.logger.debug(f"Unable to re-enable Wi-Fi interfaces: {exc}")
     
-    def get_current_ssid(self):
-        """Get the current connected SSID"""
+    def _ssid_of_connection(self, name):
+        """Resolve a NetworkManager connection NAME to the SSID it joins.
+
+        A connection name is a label, not the network: netplan (Ubuntu) names
+        them ``netplan-<iface>-<SSID>``, NetworkManager auto-names a second
+        profile for an SSID it already knows ``"<SSID> 1"``, and users rename
+        them freely. Treating the name as the SSID made a USB Wi-Fi dongle
+        joining the SAME network look like a switch to a different one — the
+        client radio moves to the dongle, its profile name differs, and after
+        the debounce every host was marked degraded (issue #818).
+        """
+        if not name:
+            return None
         try:
-            # Method 1: SSID from the active connection on the CLIENT radio —
-            # the dongle when one is fitted, since the built-in may be hosting
-            # the AP and would report the AP's own name instead.
-            result = subprocess.run(['nmcli', '-t', '-f', 'GENERAL.CONNECTION', 'dev', 'show', self._client_wifi_interface()],
+            result = subprocess.run(
+                ['nmcli', '-g', '802-11-wireless.ssid', 'connection', 'show', name],
+                capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                ssid = result.stdout.strip()
+                if ssid and ssid != '--':
+                    return ssid
+        except Exception as e:
+            self.logger.debug(f"Could not resolve SSID of connection {name!r}: {e}")
+        return None
+
+    def _ssid_on_interface(self, iface):
+        """The SSID the radio is actually associated to, straight from the kernel."""
+        if not iface:
+            return None
+        try:
+            result = subprocess.run(['iw', 'dev', iface, 'link'],
+                                    capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    line = line.strip()
+                    if line.startswith('SSID:'):
+                        ssid = line[len('SSID:'):].strip()
+                        if ssid:
+                            return ssid
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            self.logger.debug(f"iw link failed on {iface}: {e}")
+        return None
+
+    def get_current_ssid(self):
+        """Get the current connected SSID — the network's name, never a profile label."""
+        try:
+            client_iface = self._client_wifi_interface()
+
+            # Method 1: the connection active on the CLIENT radio — the dongle
+            # when one is fitted, since the built-in may be hosting the AP and
+            # would report the AP's own name instead. Resolve its SSID; the
+            # connection NAME is not the SSID (see _ssid_of_connection).
+            result = subprocess.run(['nmcli', '-t', '-f', 'GENERAL.CONNECTION', 'dev', 'show', client_iface],
                                   capture_output=True, text=True, timeout=10)
             if result.returncode == 0 and result.stdout.strip():
-                # Extract connection name (which is usually the SSID for WiFi)
                 for line in result.stdout.strip().split('\n'):
                     if line.startswith('GENERAL.CONNECTION:'):
-                        ssid = line.split(':', 1)[1].strip()
-                        if ssid and ssid != '--':
-                            return ssid
-            
-            # Method 2: Try using iwgetid as fallback
+                        conn = line.split(':', 1)[1].strip()
+                        if conn and conn != '--':
+                            ssid = (self._ssid_of_connection(conn)
+                                    or self._ssid_on_interface(client_iface))
+                            if ssid:
+                                return ssid
+
+            # Method 2: what the client radio is associated to, from the kernel.
+            ssid = self._ssid_on_interface(client_iface)
+            if ssid:
+                return ssid
+
+            # Method 3: iwgetid, scoped to the client radio so a second adapter
+            # on another network can't answer for it.
             try:
-                result = subprocess.run(['iwgetid', '-r'], 
+                result = subprocess.run(['iwgetid', client_iface, '-r'],
                                       capture_output=True, text=True, timeout=5)
                 if result.returncode == 0 and result.stdout.strip():
                     return result.stdout.strip()
             except FileNotFoundError:
                 pass  # iwgetid not available
-            
-            # Method 3: Parse from nmcli connection show (active connections)
-            result = subprocess.run(['nmcli', '-t', '-f', 'ACTIVE,NAME,TYPE', 'con', 'show'], 
+
+            # Method 4: any active Wi-Fi connection, resolved to its SSID.
+            result = subprocess.run(['nmcli', '-t', '-f', 'ACTIVE,NAME,TYPE', 'con', 'show'],
                                   capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 for line in result.stdout.strip().split('\n'):
                     parts = line.split(':')
                     if len(parts) >= 3 and parts[0] == 'yes' and '802-11-wireless' in parts[2]:
-                        return parts[1]
-            
+                        return self._ssid_of_connection(parts[1]) or parts[1]
+
             return None
         except Exception as e:
             self.logger.error(f"Error getting current SSID: {e}")
             return None
-    
+
     def scan_networks(self, interface=None):
         """Scan for available Wi-Fi networks and mark those with system profiles"""
         try:
@@ -1997,19 +2187,28 @@ class WiFiManager:
             return []
     
     def try_connect_known_networks(self):
-        """Try to connect to known networks in priority order"""
-        if not self.known_networks:
-            self.logger.info("No known networks configured")
-            return False
-        
-        # First, check if we're already connected to one of our known networks
+        """Try to connect to known networks in priority order: Ragnar's own
+        list first, then the Wi-Fi profiles saved in NetworkManager.
+
+        The NetworkManager fallback matters because most units never populate
+        Ragnar's list — their networks were added by the Pi Imager, nmcli or
+        the OS, and live only as NM profiles. Every caller here means
+        "reconnect me now" (LCD/e-Paper reconnect key, force_reconnect,
+        restart_networking), and with an empty Ragnar list this used to log
+        "No known networks configured" and do nothing at all.
+        """
+        # First, check if we're already connected to a known network
         current_ssid = self.get_current_ssid()
         if current_ssid:
             known_ssids = [net['ssid'] for net in self.known_networks]
-            if current_ssid in known_ssids:
+            if current_ssid in known_ssids or current_ssid in self._system_profile_ssids():
                 self.logger.info(f"Already connected to known network: {current_ssid}")
                 return True
-        
+
+        if not self.known_networks:
+            self.logger.info("No Ragnar known networks configured — trying saved system Wi-Fi profiles")
+            return self._try_connect_system_profiles()
+
         # Sort known networks by priority (highest first)
         sorted_networks = sorted(self.known_networks, key=lambda x: x.get('priority', 0), reverse=True)
         
@@ -2026,9 +2225,175 @@ class WiFiManager:
                     
             except Exception as e:
                 self.logger.error(f"Error connecting to {network.get('ssid', 'unknown')}: {e}")
-        
+
+        # None of Ragnar's own entries worked — the saved system profiles may.
+        return self._try_connect_system_profiles()
+
+    @staticmethod
+    def _nmcli_split(line):
+        """Split one `nmcli -t` line on unescaped ':' (nmcli escapes ':' and
+        '\\' inside values, e.g. a profile named "Cafe: 2nd floor")."""
+        parts, cur, esc = [], '', False
+        for ch in line:
+            if esc:
+                cur += ch
+                esc = False
+            elif ch == '\\':
+                esc = True
+            elif ch == ':':
+                parts.append(cur)
+                cur = ''
+            else:
+                cur += ch
+        parts.append(cur)
+        return parts
+
+    def _system_wifi_profile_details(self):
+        """Saved NetworkManager Wi-Fi client profiles:
+        [{'name', 'ssid', 'priority', 'last_used', 'iface'}]. AP-mode profiles (Ragnar's own
+        hotspot) are left out — "reconnect" must never bring up an AP."""
+        profiles = []
+        try:
+            result = subprocess.run(['nmcli', '-t', '-f', 'NAME,TYPE', 'connection', 'show'],
+                                    capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                return profiles
+            for line in result.stdout.splitlines():
+                parts = self._nmcli_split(line)
+                if len(parts) < 2 or parts[1] != '802-11-wireless':
+                    continue
+                name = parts[0]
+                detail = subprocess.run(
+                    ['nmcli', '-t', '-f',
+                     '802-11-wireless.ssid,802-11-wireless.mode,'
+                     'connection.autoconnect-priority,connection.timestamp,'
+                     'connection.interface-name',
+                     'connection', 'show', name],
+                    capture_output=True, text=True, timeout=10)
+                if detail.returncode != 0:
+                    continue
+                fields = {}
+                for dl in detail.stdout.splitlines():
+                    key, _, val = dl.partition(':')
+                    fields[key] = val.replace('\\:', ':').strip()
+                if fields.get('802-11-wireless.mode') == 'ap':
+                    continue
+                try:
+                    priority = int(fields.get('connection.autoconnect-priority') or 0)
+                except ValueError:
+                    priority = 0
+                try:
+                    last_used = int(fields.get('connection.timestamp') or 0)
+                except ValueError:
+                    last_used = 0
+                iface = fields.get('connection.interface-name') or ''
+                profiles.append({'name': name,
+                                 'ssid': fields.get('802-11-wireless.ssid') or name,
+                                 'priority': priority,
+                                 'last_used': last_used,
+                                 'iface': '' if iface == '--' else iface})
+        except Exception as e:
+            self.logger.debug(f"Could not list system Wi-Fi profiles: {e}")
+        return profiles
+
+    def _system_profile_ssids(self):
+        return {p['ssid'] for p in self._system_wifi_profile_details()}
+
+    def _visible_ssids(self):
+        """SSIDs in range right now, from a fresh NetworkManager rescan on
+        every Wi-Fi radio. Empty when the scan itself fails."""
+        try:
+            subprocess.run(['nmcli', 'device', 'wifi', 'rescan'],
+                           capture_output=True, text=True, timeout=15)
+            time.sleep(3)
+            result = subprocess.run(['nmcli', '-t', '-f', 'SSID', 'device', 'wifi', 'list',
+                                     '--rescan', 'no'],
+                                    capture_output=True, text=True, timeout=15)
+            if result.returncode == 0:
+                return {self._nmcli_split(l)[0] for l in result.stdout.splitlines()
+                        if l.strip()}
+        except Exception as e:
+            self.logger.debug(f"Wi-Fi rescan failed: {e}")
+        return set()
+
+    def _try_connect_system_profiles(self):
+        """Bring up the best saved NetworkManager profile that is in range.
+
+        Uses `nmcli connection up` on the existing profile, so stored
+        credentials, pinned interface and settings are used as-is and nothing
+        is created or modified. This also clears NetworkManager's own
+        autoconnect back-off: after a few failed attempts while out of range NM
+        stops retrying a profile for a while, which is why a unit carried out
+        and back in does not always rejoin by itself.
+        """
+        profiles = [p for p in self._system_wifi_profile_details()
+                    # A profile pinned to a radio that isn't plugged in can't come up.
+                    if not p['iface'] or os.path.isdir(f"/sys/class/net/{p['iface']}")]
+        if not profiles:
+            self.logger.info("No saved system Wi-Fi profiles to connect to")
+            return False
+        visible = self._visible_ssids()
+        candidates = [p for p in profiles if p['ssid'] in visible] if visible else profiles
+        if not candidates:
+            self.logger.info("None of the saved Wi-Fi networks are in range "
+                             f"({', '.join(sorted(p['ssid'] for p in profiles))})")
+            return False
+        # NM priority first; among equals (usually all 0) the network used most
+        # recently — the one the unit was on before it left — goes first.
+        candidates.sort(key=lambda p: (p['priority'], p['last_used']), reverse=True)
+
+        if self.ap_mode_active:
+            self.logger.info("Stopping AP mode before connecting to a saved Wi-Fi profile...")
+            self.stop_ap_mode()
+            time.sleep(2)
+
+        for p in candidates:
+            self.logger.info(f"Connecting to saved Wi-Fi profile {p['name']!r} (SSID {p['ssid']!r})...")
+            try:
+                result = subprocess.run(['sudo', 'nmcli', '--wait', '25', 'connection', 'up',
+                                         'id', p['name']],
+                                        capture_output=True, text=True, timeout=35)
+                if result.returncode == 0:
+                    self.logger.info(f"Connected to {p['ssid']} via saved profile {p['name']!r}")
+                    return True
+                self.logger.warning(f"Saved profile {p['name']!r} failed: "
+                                    f"{(result.stderr or result.stdout).strip()[:200]}")
+            except Exception as e:
+                self.logger.warning(f"Saved profile {p['name']!r} error: {e}")
         return False
-    
+
+    def _rescan_and_wait(self, ssid, timeout=25):
+        """Trigger a Wi-Fi rescan and wait (up to timeout) for `ssid` to show up.
+
+        Called right after leaving AP mode: NetworkManager has just reclaimed
+        wlan0 and has no scan results yet, so an immediate connect by SSID fails
+        with "No network with SSID found". nmcli may refuse a rescan that comes
+        too soon after the previous one ("Scanning not allowed immediately..."),
+        so we loop and tolerate that. Returns True once the SSID is visible.
+        """
+        iface = getattr(self, 'ap_interface', None) or 'wlan0'
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                subprocess.run(['sudo', 'nmcli', 'dev', 'wifi', 'rescan', 'ifname', iface],
+                               capture_output=True, timeout=15)
+            except Exception:
+                pass
+            try:
+                r = subprocess.run(['nmcli', '-t', '-f', 'SSID', 'dev', 'wifi', 'list',
+                                    'ifname', iface],
+                                   capture_output=True, text=True, timeout=15)
+                if ssid and any(line.strip() == ssid for line in r.stdout.splitlines()):
+                    self.logger.info(f"Post-AP rescan: '{ssid}' is now visible")
+                    return True
+            except Exception:
+                pass
+            time.sleep(3)
+        self.logger.warning(
+            f"Post-AP rescan: '{ssid}' not seen within {timeout}s; "
+            "trying the connect anyway (a saved profile can still auto-join)")
+        return False
+
     def connect_to_network(self, ssid, password=None):
         """Connect to a specific Wi-Fi network - NEVER deletes existing system profiles"""
         try:
@@ -2043,6 +2408,11 @@ class WiFiManager:
                 self.logger.info("Stopping AP mode before connecting to WiFi network...")
                 self.stop_ap_mode()
                 time.sleep(2)  # Give system time to clean up AP mode
+                # NetworkManager has just taken wlan0 back from hostapd and has
+                # NOT scanned the airwaves yet, so `nmcli dev wifi connect <ssid>`
+                # fails with "No network with SSID found" even for a network in
+                # range. Force a rescan and wait for the target SSID to appear.
+                self._rescan_and_wait(ssid, timeout=25)
             
             # IMPORTANT: NEVER delete existing NetworkManager profiles!
             # Check if a connection profile already exists
@@ -2452,6 +2822,11 @@ class WiFiManager:
     def enable_ap_mode_from_web(self):
         """Enable AP mode from web interface - uses endless loop behavior"""
         self.logger.info("AP mode requested from web interface")
+        # Check BEFORE dropping Wi-Fi: on an adapter that cannot be an access
+        # point the hotspot never comes up, and the box would just go offline.
+        self.ap_last_error = None
+        if not self.ap_mode_active and self._refuse_ap_if_unsupported():
+            return False
         if self.wifi_connected:
             # If connected, disconnect first
             self.disconnect_wifi()
@@ -2464,7 +2839,12 @@ class WiFiManager:
         if self.endless_loop_active:
             # Use endless loop AP mode
             self._endless_loop_start_ap_mode()
-            return True
+            # Report what actually happened: the loop used to answer True even
+            # when hostapd never came up.
+            if self.ap_mode_active or self.shared_data.config.get('wardriving_enabled', False) \
+                    or self.shared_data.config.get('network_diagnostic_mode', False):
+                return True
+            return False
         else:
             # Fallback to regular AP mode if endless loop not active
             return self.start_ap_mode()
@@ -2480,7 +2860,11 @@ class WiFiManager:
             self.logger.info("AP mode already active")
             self.ap_logger.info("AP mode start requested but already active")
             return True
-        
+
+        self.ap_last_error = None
+        if self._refuse_ap_if_unsupported():
+            return False
+
         try:
             self.logger.info(f"Starting AP mode: {self.ap_ssid}")
             self.ap_logger.info(f"Starting AP mode: SSID={self.ap_ssid}, Interface={self.ap_interface}")
@@ -2532,6 +2916,9 @@ class WiFiManager:
                 return True
             else:
                 self.ap_logger.error("Failed to start AP services")
+                if not self.ap_last_error:
+                    self.ap_last_error = (f"The access point could not be started on {self.ap_interface}"
+                                          " (hostapd or dnsmasq failed). See the AP log for details.")
                 self._cleanup_ap_mode()
                 return False
                 
@@ -2654,6 +3041,14 @@ class WiFiManager:
         # 3) Last resort.
         if iface is None:
             iface = self.default_wifi_interface
+
+        # An adapter that cannot be an access point: say so and hand the radio
+        # back, before the WiFi uplink is dropped for nothing.
+        if self._refuse_ap_if_unsupported(iface):
+            if self._wardrive_ap_lent_iface and engine is not None:
+                engine.reclaim_interface_from_ap(self._wardrive_ap_lent_iface)
+            self._wardrive_ap_lent_iface = None
+            return False
 
         # If we're taking the live WiFi uplink, drop it cleanly first — a single
         # chip can't be both a station and an AP.
@@ -2955,6 +3350,9 @@ port=0
                 stdout, stderr = self.hostapd_process.communicate()
                 self.logger.error("hostapd failed to start")
                 self.ap_logger.error("hostapd failed to start")
+                _tail = [l.strip() for l in (stdout.decode(errors='replace') + stderr.decode(errors='replace')).splitlines() if l.strip()]
+                self.ap_last_error = (f"hostapd could not start an access point on {self.ap_interface}"
+                                      + (f": {_tail[-1][:160]}" if _tail else "."))
                 self.ap_logger.error(f"Hostapd stdout: {stdout.decode()}")
                 self.ap_logger.error(f"Hostapd stderr: {stderr.decode()}")
                 return False
@@ -3123,7 +3521,11 @@ port=0
             'known_networks_count': len(self.known_networks),
             'connection_attempts': self.connection_attempts,
             'startup_complete': self.startup_complete,
-            'available_networks': len(self.available_networks)
+            'available_networks': len(self.available_networks),
+            'ap_interface': self.ap_interface,
+            # True / False from the driver, None when it could not be asked.
+            'ap_supported': self.interface_supports_ap(),
+            'ap_error': self.ap_last_error,
         }
         
         # Add AP mode timing information

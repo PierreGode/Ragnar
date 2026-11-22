@@ -271,9 +271,53 @@
   | `ai_enabled` | False | Enables AI insights; requires token. |
   | `release_gate_enabled` | False | Lock UI/API until passphrase provided (demo mode). |
   | `steal_file_names` | [...] | Keyword list used by loot modules. |
-  | `mac_scan_blacklist` | [] | MACs excluded from scanning/attacks. |
+  | `mac_scan_blacklist` | [] | MACs excluded from scanning/attacks. Managed from the Network tab's per-host **Ignore** button (or Settings) via `POST/DELETE /api/config/scan-blacklist`. |
+  | `ip_scan_blacklist` | [] | IPs excluded from scanning/attacks. Same management path as `mac_scan_blacklist`. |
+- The `blacklistcheck` toggle ("Honor Scan Blacklists", Config → Advanced → General) is the master switch that enables/disables enforcement of both ignore lists.
 - Runtime modules reference `shared_data.config` live; writes through the Web UI call `SharedData.save_config()` which flushes JSON, updates in-memory attributes, and triggers downstream watchers (e.g., Wi-Fi manager reloading known networks, display toggling `screen_reversed`).
 - Config headings (`__title_*`) are used purely for UI grouping; the parser strips these keys automatically when exporting to Python dicts.
+
+### 13.1 Settings sub-tabs (UI grouping)
+The Settings (Configuration) tab groups its many sections behind a sub-tab bar
+(`showConfigSubtab()` in `ragnar_modern.js`, mirroring `showNetworkSubtab()`):
+**System** (System Management), **Network** (Network Scanning), **Bluetooth**
+(the mobile app over Bluetooth), **Wardriving**, **Security** (Security +
+Pwnagotchi Bridge), **Integrations** (AI + Push Notifications), and **Advanced**
+(Hardware Resource Configuration + the raw fine-tune form). Each group lives in a
+`#cfg-sub-*` wrapper (`.cfg-subview`) that is show/hidden with the `hidden`
+class; the last-viewed sub-tab is remembered in `localStorage` (`cfg-subtab`) and
+restored when the tab is reopened. The bar is `flex flex-wrap`, so it collapses
+to multiple rows on phone widths. Sub-tabs are **purely visual**: every input
+stays in the DOM regardless of which sub-tab is active, so `saveConfig()` still
+posts the whole form (see below) and no field is dropped when saving from any
+sub-tab.
+
+### 13.2 When a settings change restarts the service
+Saving settings must **not** bounce the service. The Settings tab is a single
+form and `saveConfig()` posts every field in it, so a save always carries keys
+the user did not touch — which is why the restart gate is "a restart-bound key
+whose value actually **changed**", never "the key is present".
+
+- `CONFIG_RESTART_REQUIRED_KEYS` (`webapp_modern.py`) is the whole list of keys
+  that earn a restart. It currently holds only **`epd_type`**: the e-Paper
+  driver object is constructed at import time by `SharedData()`, so a different
+  panel driver cannot be swapped into a running process.
+- The comparison runs on the **resolved** driver name. The UI posts a size key
+  (`"2.13"`) while the config stores a driver (`"epd2in13_V4"`), so the raw
+  values never match and comparing them would restart on every save.
+  `resolve_epd_type()` keeps the current driver when the size family is
+  unchanged, so re-saving the same panel is correctly a no-op.
+- Display geometry (`ref_width`, `ref_height`, `screen_reversed`,
+  `display_brightness`) is re-read per render and is deliberately **not**
+  restart-bound.
+- When a restart does happen the response carries `restart_required` plus
+  `restart_reason` (the key that changed), and the UI says so before the socket
+  drops.
+- Feature toggles own their own live-apply path and must never reach for a
+  service restart. Bluetooth peripheral is the worked example: the **adapter**
+  picker rebuilds the peripheral (the controller is bound at construction),
+  while **auto-stop after provisioning** is read live on the loop thread and is
+  applied to the running peripheral via `BlePeripheral.set_auto_stop()`.
 
 ## 14. Folder Structure Highlights
 | Path | Purpose |
@@ -385,6 +429,7 @@ _Ground truth: `webapp_modern.py` as of December 2025. Methods shown exactly as 
 | `/api/logs/activity` | GET | Activity feed summarizing recent actions. |
 | `/api/network` | GET | Current network snapshot (hosts, ports, tags). |
 | `/api/network/stable` | GET | Debounced network stats for widgets that poll less frequently. |
+| `/api/network/presence` | GET | Live up/down verdict per host from the ARP presence monitor, with its mode and counters. |
 
 ### 20.4 Configuration & Profile Management
 | Path | Methods | Purpose |

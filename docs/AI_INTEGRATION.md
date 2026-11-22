@@ -36,13 +36,66 @@ Identifies potential attack vectors and security gaps in your network:
 3. Configure the following settings:
 
 - **ai_enabled**: Set to `true` to enable AI features
-- **openai_api_token**: Your OpenAI API token (required)
-- **ai_model**: Model to use (default: "gpt-5.4-nano")
+- **openai_api_token**: Your OpenAI API token (required for OpenAI's cloud; optional for a self-hosted endpoint)
+- **ai_model**: Model to use (default: "gpt-5.4-nano"; for a local server use its model tag, e.g. `qwen2.5:7b`)
+- **ai_base_url**: Optional OpenAI-compatible endpoint (see below). Blank = OpenAI cloud
+- **ai_api_style**: `auto` (default), `responses`, or `chat` — overrides which API dialect Ragnar speaks
 - **ai_analysis_enabled**: Enable/disable AI analysis
 - **ai_vulnerability_summaries**: Enable vulnerability summaries
 - **ai_network_insights**: Enable network insights
+- **ai_chat_enabled**: Show the Dashboard chat assistant and accept chat requests (default: true)
 - **ai_max_tokens**: Maximum tokens per response (default: 500)
 - **ai_temperature**: Creativity setting (default: 0.7)
+
+### Self-hosted / local AI endpoints (issue #462)
+
+Ragnar can talk to any **OpenAI-compatible** server instead of OpenAI's cloud —
+[Ollama](https://ollama.com/), [LocalAI](https://localai.io/), vLLM, or LM Studio.
+Set **ai_base_url** (in Config → Integrations → *Self-Hosted / Custom Endpoint*) to the
+server's `/v1` URL, e.g. `http://192.168.1.50:11434/v1`, and set **ai_model** to
+that server's model tag. When a base URL is present:
+
+- Ragnar uses the **Chat Completions** API (`/v1/chat/completions`) — local
+  servers implement this, not OpenAI's proprietary Responses API. `ai_api_style`
+  lets you force `responses` or `chat` if auto-detection guesses wrong.
+- The API token becomes **optional** (most local servers accept any key).
+
+Click **Connect** next to the endpoint field to list the models the server
+offers and pick one from the dropdown (backed by `POST /api/ai/models`, which
+the Pi proxies so it works even though the browser can't reach the remote server
+directly). Then click **Save Endpoint**. URLs are tidied automatically — a
+missing `http://` or `/v1` is added, so `192.168.1.50:11434` becomes
+`http://192.168.1.50:11434/v1`.
+
+**Scan Network** (auto-discovery): the button beside *Connect* sweeps your
+**Tailscale peers** (via the Ragnar Mesh) *and* the **local subnet** for a
+running Ollama on port 11434 (`POST /api/ai/discover`), then lists every
+responder with its model count. Click one to fill the endpoint + model dropdown,
+then **Save Endpoint**. This is how you reach an Ollama on another machine over
+Tailscale — join that machine to the same tailnet and it shows up here.
+
+> Ollama binds to `127.0.0.1` by default, so it is *not* reachable over Tailscale
+> or the LAN until you set **`OLLAMA_HOST=0.0.0.0:11434`** on that machine and
+> allow port 11434 through its firewall. The scan says so when nothing answers.
+
+**Cloud fallback:** if a self-hosted endpoint becomes unreachable (connection
+lost / timeout) mid-run and an OpenAI token is configured, Ragnar automatically
+falls back to OpenAI's cloud so insights keep flowing. The dashboard header
+shows `… → OpenAI fallback` while this is active, and reverts once the local
+endpoint answers again. Set **ai_fallback_model** to choose the cloud model used
+(blank = `gpt-5.4-nano`). The dashboard AI card's title and footer always show
+the model actually in use.
+
+**The model runs on whatever host you point at — not on the Pi.** The Pi stays a
+thin HTTP client, exactly as it is with OpenAI. This pairs naturally with a
+fleet: a small board (e.g. a Pi Zero 2W) can offload inference to a capable box
+running Ollama on the LAN or mesh.
+
+> **Running a model on the Pi itself:** a Pi 5 (16 GB) *can* self-host a small
+> quantized model (e.g. a 3B–8B Q4 via Ollama) — point `ai_base_url` at
+> `http://localhost:11434/v1` — but expect **triage-grade** quality and only a
+> few tokens/sec on CPU. A Pi Zero 2W (512 MB) cannot run a useful model; use it
+> as a client to a remote endpoint instead.
 
 ### 2. Get an OpenAI API Token
 
@@ -66,6 +119,12 @@ Once configured, AI insights appear automatically on the Dashboard tab:
 2. **Vulnerability Assessment** - Prioritized vulnerability analysis
 3. **Network Weaknesses** - Identified attack vectors and security gaps
 
+### Answer language
+
+Every prose answer (dashboard insights, analyses, the chat assistant) is written
+in the UI language picked in **Config > System > Language**. Changing it reruns
+the dashboard insights in the new language. See [Languages](i18n.md).
+
 ### Refresh Insights
 
 Click the "Refresh" button in the AI Insights section to:
@@ -73,9 +132,95 @@ Click the "Refresh" button in the AI Insights section to:
 - Generate new analysis with latest data
 - Get updated recommendations
 
+## Chat Assistant (Dashboard)
+
+When AI is enabled, a **floating chat button** appears in the bottom-right of the
+**Dashboard** tab. Click it to open a conversation with **Ragnar** — an assistant
+that both **understands Ragnar** (it answers from this repo's own `docs/` folder)
+and can **take real actions** on the unit, then read the results back and explain
+them in plain language.
+
+To hide it, untick **Show chat assistant** under **Config → Integrations**. This
+removes the button and also stops chat requests, so nothing can be proposed or run through
+chat while it is off. AI Insights keep working.
+
+### What it can do
+
+Ask it questions ("how does wardriving GPS work?", "what is Watchtower?") or give
+it commands. It reads your data straight away, but **every action needs your approval**:
+it shows what it wants to do with **Run** and **Cancel** buttons, and nothing happens
+until you click Run. A prompt expires after 5 minutes and works once.
+Available tools (a curated allowlist):
+
+| Intent | Tools |
+| --- | --- |
+| **Docs** | `search_docs` — search the `docs/` folder |
+| **Read state** | `get_network_devices`, `get_vulnerabilities`, `get_ai_insights`, `get_watchtower`, `get_incidents`, `get_scan_status`, `get_wifi_status` |
+| **Network scans** | `run_network_scan` (ARP + nmap sweep), `deep_scan_host` (single host), `start_vulnerability_scan` |
+| **Wi-Fi** | `start_wifi_scan`, `stop_wifi_scan` |
+
+Example prompts: *"scan the network and tell me what's new"*, *"deep scan
+192.168.1.20"*, *"show me the latest vulnerabilities and which to fix first"*,
+*"start a vulnerability scan"*.
+
+### How it works
+
+`ai_chat.py` runs a small **agentic loop** on top of `ai_service.py`. It is
+deliberately **model-agnostic**: instead of native function-calling (which the
+OpenAI Responses API and self-hosted Ollama/LocalAI servers all express
+differently), the assistant emits a tiny text protocol —
+`<tool>{"tool":"name","args":{...}}</tool>` — which the server executes and feeds
+back as `<result>…</result>`. This works identically on **OpenAI's cloud and on a
+local model**.
+
+Each action tool maps to one of Ragnar's **existing API endpoints**, dispatched
+**in-process** with the caller's session cookie forwarded — so every action reuses
+the real, already-authenticated handler (no self-HTTP, no auth bypass) and
+inherits its exact behaviour. Documentation retrieval is a lightweight keyword
+search over `docs/*.md` (no embeddings), so it runs even on a Pi Zero.
+
+The chat button only shows when the AI service is enabled **and** configured
+(same gate as the dashboard insight cards).
+
+### Knowledge base
+
+[`docs/knowledgebase.md`](knowledgebase.md) holds short, verified answers to common
+questions. The assistant reads a matching entry first and falls back to the rest of
+`docs/` and `README.md` when none fits. Short, specific answers suit a small local
+model better than long pages, and they keep the assistant from calling extra tools.
+
+Each entry names its source and carries a hidden proof phrase from that source.
+`tests/test_knowledgebase.py` fails if the phrase disappears, so a doc or UI change
+can't leave a stale answer behind. To add an entry, follow the format of the others,
+then run that test. Each question must be the top search hit for itself.
+
+The kill switch command is removed from everything the model reads. The kill switch
+erases the whole install, so the assistant points to **Data Management** when asked
+to clear scan data, and to `docs/KILL_SWITCH.md` when asked about the switch itself.
+
 ## API Endpoints
 
 The following API endpoints are available for programmatic access:
+
+### POST /api/ai/chat
+Backs the dashboard **Chat Assistant**. Body:
+`{ "message": "<user text>", "history": [{"role":"user|assistant","content":"…"}] }`.
+Returns `{ success, reply, actions, docs, model }`, where `actions` lists the
+tools the assistant ran this turn (`{tool, args, ok, summary}`) and `docs` lists
+the documentation sections it consulted. When it wants to run an action it also
+returns `pending: { id, label }` and runs nothing. Requires `ai_enabled`,
+`ai_chat_enabled` and a ready AI service (token or self-hosted endpoint), otherwise
+returns 400/503 with a reason.
+
+### POST /api/ai/chat/confirm
+Runs or cancels a pending action. Body: `{ "id": "<pending id>", "approve": true }`.
+Only `approve: true` runs it. Ids work once and expire after 5 minutes. Returns the
+same shape as `/api/ai/chat`.
+
+### POST /api/ai/models
+Lists the models offered by an OpenAI-compatible endpoint (self-hosted support).
+Body: `{ "base_url": "http://host:11434/v1", "api_key": "optional" }` — both
+fall back to the saved config. Returns `{ "success": true, "models": [...] }`.
 
 ### GET /api/ai/status
 Returns AI service status and configuration
@@ -93,7 +238,18 @@ Returns AI service status and configuration
 ```
 
 ### GET /api/ai/insights
-Returns comprehensive AI insights
+Returns comprehensive AI insights. The four analyses (network summary,
+vulnerability, weakness, posture) are generated in a **background thread** and
+the endpoint **answers immediately** — so a slow board (e.g. a Pi Zero) never
+blocks the dashboard on the multi-second generation, which is what timed out and
+showed "could not reach". While the first run is in flight the response carries
+`status:"computing"` (plus any previous result), and the page **polls** every
+~6s until it lands; completed results are cached (1h server-side; client-side 1h
+on full success, 2min if any analysis failed). Pass `?refresh=1` (the Refresh
+button) to force a recompute. Inside the background run the analyses go 2-at-a-
+time so units sharing one API key don't trip OpenAI's per-key rate limits, each
+with a 25s per-request timeout; `attempted`/`failed` tell the UI which analyses
+ran and which came back empty (per-section "Temporarily unavailable + Retry").
 ```json
 {
   "enabled": true,
@@ -116,11 +272,31 @@ Returns weakness analysis only
 ### POST /api/ai/wifi-analyze
 Professional assessment of the **current Wi-Fi connection and RF environment**,
 used by the **WiFi Spectrum Analyzer → "Analyze with AI"** button. Body:
-`{"scan": <result of /api/net/wifi/scan>}`. The server determines the connected
-network itself (`iw dev … link`), enriches it from the scan (channel, width,
-security, Wi-Fi generation), computes the co-/adjacent-channel picture, and
-returns prioritized, plain-language recommendations (band/channel/width/security
-changes, AP placement). Neutral professional tone — no persona.
+`{"scan": <result of /api/net/wifi/scan>, "bt": <bt overlay?>, "zb": <zigbee overlay?>}`.
+The server determines the connected network itself (`iw dev … link`), enriches
+it from the scan (channel, width, security, Wi-Fi generation), computes the
+co-/adjacent-channel picture, and returns prioritized, plain-language
+recommendations (band/channel/width/security changes, AP placement). Neutral
+professional tone — no persona.
+
+When the **Bluetooth** and/or **Zigbee** 2.4 GHz overlays are active, the panel
+also passes those payloads. The AI folds their **per-Wi-Fi-channel coexistence
+pressure** into its 2.4 GHz channel advice (e.g. recommending a move to 5/6 GHz
+when BT/Zigbee load on ch 1/6/11 is significant), and the response's `overlays`
+field lists which were included. The pressure figures are heuristic activity
+estimates, not measured energy, and the prompt says so.
+
+### POST /api/ai/wifidef-analyze
+One professional read across the **three WiFi Defense modules** for the capture
+the panel currently holds, used by the **WiFi Defense → "Analyze with AI"**
+button. Body: `{"wids": <do_scan>, "airtime": <do_airtime?>, "isolation": <do_isolation?>}`.
+The server compacts each module (WIDS threat/detections/airspace, airtime
+findings + per-AP retry/airtime, client-isolation verdicts) and asks the model
+to **correlate across all three** — e.g. tying a deauth burst to a retry spike,
+or flagging a "rogue" that's really a legit AP with a randomized-MAC client.
+Returns the analysis plus the `modules` that were included. Severity is
+calibrated against capture length so a short hopping capture reads as weak
+evidence, not an incident. Neutral SOC-analyst tone.
 
 ### POST /api/ai/clear-cache
 Clears the AI response cache

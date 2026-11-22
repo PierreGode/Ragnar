@@ -1,108 +1,140 @@
-"""Data-plane rate sampler — reads the NIC's kernel counters from
-/sys/class/net/<iface>/statistics, turns successive reads into rates, and
-cross-references them against the live IGMP subscriber census.
+"""Data-plane rate sampler.
 
-Still passive: it only reads counters the kernel already keeps. It opens no
-network handle and — by design — imports no socket library (the self-test
-asserts this). The evaluation logic is pure and injected-snapshot driven so it
-tests with no NIC.
+The IGMP detectors watch the multicast *control plane* (joins, leaves,
+queries). This module closes the loop on the *data plane*: it reads the NIC's
+own kernel counters from ``/sys/class/net/<iface>/statistics`` at an interval,
+turns them into rates, and cross-references those rates against the live
+IGMP-subscribed group census that ``State`` maintains.
+
+Still passive: it only *reads* sysfs counters that the kernel already keeps for
+frames the mirror delivered. It transmits nothing and opens no network handle.
+
+The kernel counters are segment-level, not per-group (per-group data-plane
+accounting isn't exposed in sysfs), so the cross-reference is: a sustained
+multicast packet rate while *no data groups are subscribed* means multicast is
+being flooded to groups nobody joined -- an unregistered-multicast flood, a
+switch snooping failure, or injected traffic. That's the signal that a
+control-plane-only view misses.
 """
+from __future__ import annotations
 
-import os
-import threading
-import time
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
-from .alert import Alert
+from .detectors import Alert
+from .models import Severity
 
-DEFAULTS = {
-    'interval': 5.0,
-    'mcast_storm_pps': 1000.0,     # received multicast pps
-    'mcast_ratio': 0.6,            # multicast fraction of total rx
-    'mcast_ratio_floor_pps': 100.0,   # ignore ratio on an idle link
-    'flood_no_members_pps': 50.0,     # mcast pps that counts as "on the wire"
-}
-
-_FIELDS = ('rx_packets', 'multicast', 'rx_dropped')
+_COUNTERS = ("rx_bytes", "rx_packets", "multicast", "rx_dropped")
 
 
-def read_counters(iface):
-    """Return {rx_packets, multicast, rx_dropped} from sysfs, or None."""
-    base = '/sys/class/net/{}/statistics'.format(iface)
-    out = {}
+def read_sysfs_counters(iface: str) -> Optional[Dict[str, int]]:
+    """Read the RX counters for ``iface``. Returns None if unavailable.
+
+    ``multicast`` is the kernel's count of received multicast packets;
+    ``rx_dropped`` rising indicates the ring buffer / capture path is losing
+    frames, which is itself a storm symptom.
+    """
+    base = f"/sys/class/net/{iface}/statistics/"
+    out: Dict[str, int] = {}
     try:
-        for f in _FIELDS:
-            with open(os.path.join(base, f)) as fh:
-                out[f] = int(fh.read().strip())
+        for name in _COUNTERS:
+            with open(base + name, "r") as fh:
+                out[name] = int(fh.read().strip())
     except (OSError, ValueError):
         return None
     return out
 
 
-def evaluate(prev, cur, dt, data_group_count, cfg=None):
-    """Pure: turn two counter snapshots into alerts. Returns [] on the priming
-    read, a counter reset (iface bounce / 32-bit wrap), or dt <= 0."""
-    c = dict(DEFAULTS)
-    c.update(cfg or {})
-    if not prev or not cur or dt <= 0:
-        return []
-    # Counter reset / wrap: any field went backwards -> re-prime silently.
-    if any(cur.get(f, 0) < prev.get(f, 0) for f in _FIELDS):
-        return []
-    d_rx = cur['rx_packets'] - prev['rx_packets']
-    d_mc = cur['multicast'] - prev['multicast']
-    d_drop = cur['rx_dropped'] - prev['rx_dropped']
-    mc_pps = d_mc / dt
-    rx_pps = d_rx / dt
-    out = []
-    if mc_pps >= c['mcast_storm_pps']:
-        out.append(Alert('dataplane', 'mcast_storm', 'HIGH',
-                         'received multicast {:.0f} pps'.format(mc_pps)))
-    if mc_pps >= c['flood_no_members_pps'] and data_group_count == 0:
-        out.append(Alert('dataplane', 'mcast_flood_no_members', 'HIGH',
-                         'multicast {:.0f} pps on the wire with 0 subscribed data groups '
-                         '(unregistered flooding / snooping failure / injection)'
-                         .format(mc_pps)))
-    if rx_pps >= c['mcast_ratio_floor_pps'] and d_rx > 0:
-        ratio = d_mc / d_rx
-        if ratio >= c['mcast_ratio']:
-            out.append(Alert('dataplane', 'mcast_ratio', 'MED',
-                             'multicast is {:.0f}% of rx ({:.0f}/{:.0f} pps)'
-                             .format(ratio * 100, mc_pps, rx_pps)))
-    if d_drop > 0:
-        out.append(Alert('dataplane', 'rx_drops', 'MED',
-                         'rx_dropped climbing (+{} in {:.0f}s) — ring overrun / storm symptom'
-                         .format(d_drop, dt)))
-    return out
+@dataclass
+class _Sample:
+    ts: float
+    c: Dict[str, int]
 
 
-class DataPlaneSampler(threading.Thread):
-    """Own thread; reads counters outside the pipeline lock, locks only the
-    census snapshot + emit."""
+class DataPlaneSampler:
+    """Turns successive counter reads into rates and emits data-plane alerts.
 
-    def __init__(self, iface, state, emit, cfg=None, stop_event=None):
-        super().__init__(daemon=True, name='igmpwatch-dataplane')
-        self.iface = iface
-        self.state = state
-        self.emit = emit
-        self.cfg = dict(DEFAULTS)
-        self.cfg.update(cfg or {})
-        self._stop = stop_event or threading.Event()
+    ``sample()`` is pure w.r.t. the outside world: hand it a timestamp, a
+    counter dict, and the current active-data-group count, and it returns a
+    list of Alerts. The first call (or the first after a counter reset) only
+    primes the baseline and returns nothing.
+    """
 
-    def run(self):
-        prev = read_counters(self.iface)
-        last = time.time()
-        while not self._stop.is_set():
-            self._stop.wait(self.cfg['interval'])
-            if self._stop.is_set():
-                break
-            cur = read_counters(self.iface)
-            now = time.time()
-            dt = now - last
-            groups = len(self.state.data_groups())
-            for a in evaluate(prev, cur, dt, groups, self.cfg):
-                self.emit(a)
-            if cur is not None:
-                prev, last = cur, now
+    def __init__(self, cfg: dict):
+        d = cfg["dataplane"]
+        self.c = d
+        self._last: Optional[_Sample] = None
 
-    def stop(self):
-        self._stop.set()
+    def sample(self, now: float, counters: Optional[Dict[str, int]],
+               active_data_groups: int) -> List[Alert]:
+        if counters is None:
+            return []
+        prev = self._last
+        self._last = _Sample(now, counters)
+        if prev is None:
+            return []
+
+        dt = now - prev.ts
+        if dt <= 0:
+            return []
+
+        # Counter reset / wrap (iface bounce, 32-bit rollover): re-prime, don't alert.
+        if any(counters[k] < prev.c.get(k, 0) for k in _COUNTERS):
+            return []
+
+        d_pkts = counters["rx_packets"] - prev.c["rx_packets"]
+        d_mcast = counters["multicast"] - prev.c["multicast"]
+        d_drop = counters["rx_dropped"] - prev.c["rx_dropped"]
+
+        pps = d_pkts / dt
+        mcast_pps = d_mcast / dt
+        drop_pps = d_drop / dt
+
+        out: List[Alert] = []
+
+        # 1. Absolute multicast storm on the wire.
+        if mcast_pps > self.c["mcast_pps"]:
+            out.append(Alert(
+                rule="dataplane.mcast_storm",
+                severity=Severity.HIGH,
+                detail={"mcast_pps": round(mcast_pps, 1),
+                        "threshold": self.c["mcast_pps"],
+                        "active_data_groups": active_data_groups,
+                        "window_s": round(dt, 2)},
+            ))
+        # 2. Multicast flooding to groups nobody joined (the cross-reference).
+        elif (active_data_groups < self.c["members_floor"]
+              and mcast_pps > self.c["mcast_pps_floor"]):
+            out.append(Alert(
+                rule="dataplane.mcast_flood_no_members",
+                severity=Severity.HIGH,
+                detail={"mcast_pps": round(mcast_pps, 1),
+                        "floor": self.c["mcast_pps_floor"],
+                        "active_data_groups": active_data_groups,
+                        "note": "multicast on the wire with no subscribed data groups",
+                        "window_s": round(dt, 2)},
+            ))
+
+        # 3. Multicast dominates the link (with a floor so idle links stay quiet).
+        if (pps >= self.c["ratio_min_pps"]
+                and mcast_pps / pps > self.c["mcast_ratio"]):
+            out.append(Alert(
+                rule="dataplane.mcast_ratio",
+                severity=Severity.MEDIUM,
+                detail={"mcast_frac": round(mcast_pps / pps, 3),
+                        "threshold": self.c["mcast_ratio"],
+                        "pps": round(pps, 1),
+                        "window_s": round(dt, 2)},
+            ))
+
+        # 4. Capture-path loss -- ring buffer can't keep up (storm symptom).
+        if drop_pps > self.c["rx_drop_pps"]:
+            out.append(Alert(
+                rule="dataplane.rx_drops",
+                severity=Severity.MEDIUM,
+                detail={"drop_pps": round(drop_pps, 1),
+                        "threshold": self.c["rx_drop_pps"],
+                        "window_s": round(dt, 2)},
+            ))
+
+        return out

@@ -104,8 +104,8 @@ def _iface_is_usb(name):
 def netdiag_iface_choices():
     """Physical interfaces a field test could originate from, in the fixed
     priority order the HAT tests use: built-in Ethernet, USB Ethernet, wlan1,
-    wlan0, remaining wireless. Each entry:
-        {'name', 'usb', 'wireless', 'up', 'ipv4'}
+    wlan0, remaining wireless, cellular (USB-tethered hotspot). Each entry:
+        {'name', 'usb', 'wireless', 'up', 'cellular', 'ipv4'}
     'up' means carrier for wired / operstate up for wireless; 'ipv4' is the
     first address (no CIDR) or None. Cached ~10s."""
     now = time.time()
@@ -143,11 +143,20 @@ def netdiag_iface_choices():
                     up = f.read().strip() == '1'
             except OSError:  # admin-down reads of carrier raise EINVAL
                 up = False
+        try:
+            from cellular_uplink import is_cellular
+            cellular = is_cellular(name)
+        except Exception:
+            cellular = False
         choices.append({'name': name, 'usb': _iface_is_usb(name),
-                        'wireless': wireless, 'up': up,
+                        'wireless': wireless, 'up': up, 'cellular': cellular,
                         'ipv4': addrs.get(name)})
 
     def _rank(c):
+        # A tethered hotspot is the fallback uplink: last in Auto, still
+        # pinnable from the IFACE card to test the cellular link itself.
+        if c.get('cellular'):
+            return (5, c['name'])
         if not c['wireless']:
             return (1 if c['usb'] else 0, c['name'])
         if c['name'] == 'wlan1':

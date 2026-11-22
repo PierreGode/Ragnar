@@ -1,0 +1,3 @@
+# /etc/ragnar/apcguard/apcguard.conf -- read as an EnvironmentFile by apcguard@.service (optional: the leading
+# '-' in the unit means a missing file is fine and the sensor then learns cards from SNMP only).
+APCGUARD_ARGS=--nmc-file /etc/ragnar/apcguard/nmc.list --min-severity info --max-observed-nmcs 8192

@@ -1,0 +1,13 @@
+{
+  "name": "Ragnar RoomScan — ESP32-S3-Touch-LCD-4B (480x480 touch floor-plan tracer)",
+  "version": "1.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "firmware/roomscan-s3-lcd.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

@@ -137,10 +137,26 @@ $RECYCLE.BIN/
 
 # Bjorn-specific files and directories
 # Runtime data directories
+data/rf_settings.json    # per-box RF settings; the shipped defaults live in rtl_sdr.py
 data/logs/
 data/output/
+# RDAP/WHOIS IANA bootstrap + whois-server cache (fetched at runtime)
+data/rdap_cache/
 backup/backups/
 backup/uploads/
+
+# Encrypted Safe vault — user data, must never be committed
+data/safe/
+# sensing-server browser-session secret (generated at runtime; never track)
+data/session-secret
+# per-box local kiosk auth-bypass token (never commit)
+data/kiosk_token
+
+# Mesh file-transfer inbox — received files, must never be committed
+data/mesh_inbox/
+
+# Mesh Share — files this unit publishes to the mesh, must never be committed
+data/mesh_share/
 
 # Configuration files (contains sensitive data)
 config/shared_config.json
@@ -241,6 +257,8 @@ data/pcaps/
 # ── RuSense (WiFi-CSI) user data — captured/trained per install, never commit ──
 # raw CSI recordings (can be tens of MB+)
 data/recordings/
+data/rf_recordings/
+data/iq_captures/
 # locally-trained adaptive sensing model
 data/adaptive_model.json
 # locally-trained / downloaded sensing models
@@ -257,3 +275,33 @@ var/log/
 
 # HA integration bytecode
 custom_components/**/__pycache__/
+
+
+# Python temporary bytecode files from UPS 1.2 lite
+__pycache__/
+*.pyc
+
+# Local runtime telemetry and config selection files
+battery.json
+ups_config.json
+
+# Environment or system logs
+*.log
+
+# Self-signed TLS material (generated at runtime — never commit private keys)
+certs/
+*.key
+*.crt
+*.pem
+
+# Console scripts — seeded at runtime, user-editable (never overwrite on update)
+data/console_scripts/
+
+# Ulfberht engagement history — persisted run reports written by the service
+data/engagements/
+
+# Ulfberht user playbooks — seeded/uploaded at runtime (synced via the Files tab)
+data/engagement_playbooks/
+
+# Ragnar OS image build (pi-gen checkout + deploy artifacts)
+os-image/.pi-gen/

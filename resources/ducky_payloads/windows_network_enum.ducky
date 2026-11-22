@@ -1,0 +1,10 @@
+REM Windows network enumeration — interfaces, ARP, routes, listeners to the Desktop.
+REM Authorized testing only.
+DELAY 1000
+GUI r
+DELAY 500
+STRING cmd
+ENTER
+DELAY 1000
+STRING (ipconfig /all & echo. & arp -a & echo. & route print & echo. & netstat -ano) > "%USERPROFILE%\Desktop\net_enum.txt"
+ENTER

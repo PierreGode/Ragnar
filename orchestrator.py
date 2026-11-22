@@ -719,12 +719,18 @@ class Orchestrator:
             scans_skipped = 0
             
             for row in alive_hosts:
+                # Wardriving may have started mid-scan — stop launching new
+                # per-host nmap scans so the drive gets the CPU back.
+                if self._wardriving_active():
+                    logger.info("⏸ Wardriving started — aborting remaining vulnerability scans")
+                    break
+
                 ip = row.get("IPs", "")
                 if not ip or ip == "STANDALONE":
                     logger.debug(f"Skipping host with invalid IP: {ip!r}")
                     scans_skipped += 1
                     continue
-                
+
                 action_key = "NmapVulnScanner"
                 hostname = row.get("Hostnames", "Unknown")
                 
@@ -811,6 +817,16 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"Error during vulnerability scanning cycle: {e}")
 
+    def _wardriving_active(self):
+        """True while a wardriving session is running.
+
+        Active scans (nmap port/vuln, attacks) are heavy; on a small board they
+        thrash RAM/CPU and starve gpsd, so cold-start GPS never completes while
+        wardriving. We pause them for the duration of the drive — passive
+        wardriving capture keeps running the whole time.
+        """
+        return bool(getattr(self.shared_data, 'wardriving_session_active', False))
+
     def run(self):
         """
         Run the orchestrator cycle with proper scan order:
@@ -836,15 +852,18 @@ class Orchestrator:
         logger.info("ORCHESTRATOR STARTUP - PHASE 1: ARP + Port Scan")
         logger.info("=" * 70)
         
-        if self.network_scanner:
+        if not self.network_scanner:
+            logger.error("Network scanner not initialized. Cannot start orchestrator.")
+            return
+
+        if self._wardriving_active():
+            logger.info("⊘ Phase 1 skipped: wardriving active — active scans paused")
+        else:
             self.shared_data.ragnarorch_status = "NetworkScanner"
             self.shared_data.ragnarstatustext2 = "Initial scan..."
             self._execute_network_scans(reason="startup")
             self.shared_data.ragnarstatustext2 = ""
             logger.info("✓ Phase 1 complete: Network hosts and ports discovered")
-        else:
-            logger.error("Network scanner not initialized. Cannot start orchestrator.")
-            return
         
         # ====================================================================
         # PHASE 2: Initial Vulnerability Scan
@@ -853,7 +872,9 @@ class Orchestrator:
         logger.info("ORCHESTRATOR STARTUP - PHASE 2: Vulnerability Scan")
         logger.info("=" * 70)
         
-        if scan_vuln_running and self.nmap_vuln_scanner:
+        if self._wardriving_active():
+            logger.info("⊘ Phase 2 skipped: wardriving active — active scans paused")
+        elif scan_vuln_running and self.nmap_vuln_scanner:
             logger.info("Running initial vulnerability scan on all discovered hosts...")
             # Set orchestrator status to show vulnerability scanning in web UI
             self.shared_data.ragnarorch_status = "NmapVulnScanner"
@@ -891,13 +912,34 @@ class Orchestrator:
         logger.info("=" * 70)
         logger.info("ENTERING MAIN ORCHESTRATOR LOOP")
         logger.info("=" * 70)
-        
+        wardriving_paused = False
+
         while not self.shared_data.orchestrator_should_exit:
+            # Pause the whole active-scan/attack cycle while wardriving runs.
+            # Sleep in short slices so we resume promptly when the drive ends
+            # and still notice orchestrator_should_exit.
+            if self._wardriving_active():
+                if not wardriving_paused:
+                    logger.info("⏸ Wardriving active — pausing active scans (nmap/attacks) until it stops")
+                    self.shared_data.ragnarorch_status = "PAUSED_WARDRIVE"
+                    wardriving_paused = True
+                for _ in range(10):
+                    if self.shared_data.orchestrator_should_exit or not self._wardriving_active():
+                        break
+                    time.sleep(1)
+                continue
+            if wardriving_paused:
+                logger.info("▶ Wardriving stopped — resuming active scans")
+                wardriving_paused = False
+                # Refresh on resume rather than waiting out the old interval.
+                last_network_scan_time = 0
+                last_vuln_scan_check = 0
+
             cycle_count += 1
             logger.info(f"\n{'=' * 70}")
             logger.info(f"ORCHESTRATOR CYCLE #{cycle_count}")
             logger.info(f"{'=' * 70}")
-            
+
             # Periodically log resource status (every 3 minutes - reduced for Pi Zero W2)
             if time.time() - last_resource_log_time > 180:
                 resource_monitor.log_system_status()

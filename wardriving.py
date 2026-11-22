@@ -13,8 +13,10 @@ import queue
 import sqlite3
 import threading
 import subprocess
+import collections
+from contextlib import contextmanager
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("Wardriving")
 
@@ -111,6 +113,125 @@ def _freq_to_channel(freq_mhz):
     return 0
 
 
+# Callables run with the session id whenever any engine stops a session
+# (the webapp registers auto-upload here).
+SESSION_FINISHED_HOOKS = []
+
+# Callables run with the session id whenever any engine starts a session (the
+# webapp registers ADS-B auto-start here). Mirrors SESSION_FINISHED_HOOKS.
+SESSION_STARTED_HOOKS = []
+
+# A row whose position is within this many metres of the GPS track (inside the
+# row's own first..last-seen window, plus slack) is re-timed to that moment.
+_ALIGN_MAX_M = 50
+_ALIGN_SLACK_S = 15
+# Between two consecutive fixes a row is timed by interpolating along the
+# segment joining them - the track is logged only every ~9 s, so snapping to
+# the nearest fix gave rows 100 m apart the same second (a 300+ km/h "jump"
+# to Wardrift). A segment longer than this, or faster than any car, is a lost
+# fix / glitch and is never interpolated across.
+_ALIGN_SEG_MAX_S = 30
+_ALIGN_SEG_MAX_MPS = 70
+
+
+def _ts_to_epoch(s):
+    """Session timestamp -> epoch seconds or None.
+
+    Live rows are UTC ISO-8601 ('2026-09-23T16:37:44.420181+00:00'); imported
+    CSVs carry WiGLE's naive 'YYYY-MM-DD HH:MM:SS' (read as UTC, per WiGLE)."""
+    from datetime import datetime, timezone
+    v = str(s or '').strip()
+    if not v:
+        return None
+    try:
+        dt = datetime.fromisoformat(v.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _wigle_time(epoch):
+    """epoch -> WiGLE CSV FirstSeen ('YYYY-MM-DD HH:MM:SS', UTC)."""
+    return time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(epoch))
+
+
+def _csv_field(v):
+    """RFC 4180 quoting: WiGLE / WDGWars / Wardrift parse standard CSV, so a
+    comma inside an SSID must be quoted - '\\,' made them split the row there."""
+    v = '' if v is None else str(v)
+    if any(c in v for c in ',"\r\n'):
+        return '"' + v.replace('"', '""') + '"'
+    return v
+
+
+def _align_rows_to_track(recs, track):
+    """Pure: keep GPS-pinned rows, re-time them to the track, sort by time.
+
+    `recs` are export dicts with first/last ('YYYY-MM-DD HH:MM:SS') and
+    lat/lon; `track` is [(epoch, lat, lon)] sorted by epoch. A row's position
+    is where its signal peaked, but its FirstSeen is when it was first heard,
+    so the two can be minutes and kilometres apart; route-building services
+    then see the trail jump back and forth. Each row gets the track moment,
+    inside its own seen window, that is closest to its position. Rows without
+    a usable position are dropped, and - when the session has a track - so are
+    rows the track can't confirm (seen while the GPS had no fix): Wardrift
+    rejects a drive whose trail it "couldn't piece together". With no track at
+    all (e.g. an imported CSV), located rows keep their FirstSeen.
+    FirstSeen is written in WiGLE's 'YYYY-MM-DD HH:MM:SS' (UTC) form."""
+    import bisect
+    import math
+    out = []
+    ts = [t[0] for t in track]
+    for r in recs:
+        try:
+            lat, lon = float(r['lat']), float(r['lon'])
+        except (TypeError, ValueError):
+            continue
+        if (lat == 0 and lon == 0) or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            continue
+        r = dict(r, lat=lat, lon=lon)
+        t0, t1 = _ts_to_epoch(r.get('first')), _ts_to_epoch(r.get('last'))
+        when = t0
+        if track and t0 is not None:
+            t1 = t1 if (t1 is not None and t1 >= t0) else t0
+            lo = bisect.bisect_left(ts, t0 - _ALIGN_SLACK_S)
+            hi = bisect.bisect_right(ts, t1 + _ALIGN_SLACK_S)
+            kx = math.cos(math.radians(lat)) * 111320.0
+            best = None
+            # Bound the scan on very long sightings (a network heard for hours).
+            step = max(1, (hi - lo) // 4000)
+            for i in range(lo, hi, step):
+                ta, alat, alon = track[i]
+                ax, ay = (alon - lon) * kx, (alat - lat) * 110540.0
+                cand = (ax * ax + ay * ay, ta)
+                if step == 1 and i + 1 < len(track):
+                    tb, blat, blon = track[i + 1]
+                    bx, by = (blon - lon) * kx, (blat - lat) * 110540.0
+                    sx, sy = bx - ax, by - ay
+                    seg2 = sx * sx + sy * sy
+                    dt = tb - ta
+                    if 0 < dt <= _ALIGN_SEG_MAX_S and seg2 > 0 and seg2 <= (_ALIGN_SEG_MAX_MPS * dt) ** 2:
+                        f = min(1.0, max(0.0, -(ax * sx + ay * sy) / seg2))
+                        px, py = ax + f * sx, ay + f * sy
+                        cand = (px * px + py * py, ta + f * dt)
+                if best is None or cand[0] < best[0]:
+                    best = cand
+            if best is not None and best[0] <= _ALIGN_MAX_M ** 2:
+                when = best[1]
+            else:
+                continue                    # not pinned to a GPS fix
+        if when is not None:
+            r['first'] = _wigle_time(when)
+        r['_t'] = when if when is not None else float('inf')
+        out.append(r)
+    out.sort(key=lambda x: x['_t'])
+    for r in out:
+        r.pop('_t', None)
+    return out
+
+
 class _CompanionState:
     """All mutable state for one USB-serial companion (Huginn / Piglet / Piglet Core / Piglet Coordinator)."""
 
@@ -118,6 +239,8 @@ class _CompanionState:
         self.port = port
         self.thread: threading.Thread | None = None
         self.connected: bool = False
+        # Set by the API to pull Piglet's SD logs on the listener's next turn.
+        self.piglet_sync_request: bool = False
         self.networks: int = 0
         # Split by band so a dual-band companion (Huginn on an ESP32-C5) shows
         # what each radio is actually contributing instead of one merged total.
@@ -133,6 +256,9 @@ class _CompanionState:
         # Huginn runtime-config push queue (webapp → listener thread)
         self.huginn_config_queue: queue.Queue = queue.Queue()
         self.huginn_handshake_pushed: bool = False
+        # Serial read -> parse/store split (_SerialLinePipeline), set by the
+        # listener while it runs; exposed for the backlog / drop counters.
+        self.pipeline = None
         # Per-connection scan state
         self.current_esp_mode: str = 'wifi'
         # True while the companion is in HuginnESP's wardrive loop. In that mode
@@ -205,7 +331,114 @@ class _CompanionState:
             'esp_ble_count':     self.esp_ble_count,
             'esp_zigbee_count':  self.esp_zigbee_count,
             'esp_alerts':        self.esp_alerts[-5:],
+            # Lines read but not yet stored, and lines lost to a full queue —
+            # nonzero dropped means this host can't keep up with the companion.
+            'serial_backlog':    self.pipeline.backlog() if self.pipeline else 0,
+            'serial_dropped':    self.pipeline.dropped if self.pipeline else 0,
         }
+
+
+def _wigle_time_to_iso(value):
+    """WiGLE CSV FirstSeen ('YYYY-MM-DD HH:MM:SS', UTC) → ISO-8601 UTC, or
+    None when absent/unparseable/implausible (e.g. a device that logged
+    before it had a clock: 1970/2000 epochs)."""
+    value = (value or '').strip()
+    if not value:
+        return None
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M'):
+        try:
+            dt = datetime.strptime(value[:19], fmt).replace(tzinfo=timezone.utc)
+            break
+        except ValueError:
+            continue
+    else:
+        return None
+    if dt.year < 2015:
+        return None
+    return dt.isoformat()
+
+
+_NO_POS = object()   # _parse_serial_line: "look the GPS fix up now"
+
+
+class _SerialLinePipeline:
+    """Read a companion's serial port on one thread, parse + store on another.
+
+    A Huginn prints ~16-20 lines/s (mostly BLE) and its USB-serial link DROPS
+    whatever the host does not read in time — the dongle keeps scanning at full
+    speed, the output is simply lost. Measured on a T-Dongle-C5: a reader doing
+    5 lines/s lost ~88 % of Wi-Fi sightings; on a busy Pi Zero 2 W, which
+    parsed and committed each line before reading the next, ~95 % of a walk
+    never arrived. So the serial thread now only reads: each line goes into a
+    queue with the GPS fix of the moment it arrived, and this worker parses the
+    queue in batches, one DB transaction per batch.
+    """
+
+    MAX_QUEUE = 50000        # ~40 min of Huginn output; oldest dropped beyond it
+    INTERVAL_S = 0.5         # batch cadence
+    MAX_BATCH = 2000         # lines per transaction (keeps the session lock short)
+
+    def __init__(self, engine, companion):
+        self._engine = engine
+        self._companion = companion
+        self._q = collections.deque(maxlen=self.MAX_QUEUE)
+        self._stop = threading.Event()
+        self._thread = None
+        self.dropped = 0          # lines lost because the queue was full
+        self.processed = 0
+
+    def start(self):
+        self._thread = threading.Thread(
+            target=self._run, daemon=True,
+            name=f"wardriving-parse-{os.path.basename(self._companion.port or '?')}")
+        self._thread.start()
+        return self
+
+    def put(self, line):
+        """Queue one line (called on the serial thread — must stay cheap)."""
+        gps = self._engine._gps
+        pos = gps.get_position() if gps else None
+        if len(self._q) == self._q.maxlen:
+            self.dropped += 1
+        self._q.append((line, pos))
+
+    def backlog(self):
+        return len(self._q)
+
+    def _run(self):
+        while True:
+            stopping = self._stop.wait(self.INTERVAL_S)
+            self._drain_all()
+            if stopping:
+                return
+
+    def _drain_all(self):
+        while self._q:
+            items = []
+            while self._q and len(items) < self.MAX_BATCH:
+                items.append(self._q.popleft())
+            session = self._engine.session
+            if session is None:
+                return
+            try:
+                with session.batch():
+                    for line, pos in items:
+                        try:
+                            self._engine._parse_serial_line(line, self._companion, pos=pos)
+                        except Exception as e:
+                            logger.debug(f"[{self._companion.port}] parse error: {e!r}")
+                self.processed += len(items)
+            except Exception as e:
+                logger.warning(f"[{self._companion.port}] batch write failed: {e!r}")
+
+    def stop(self, timeout=10):
+        """Process everything still queued, then end the worker."""
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout)
+        if self.dropped:
+            logger.warning(f"[{self._companion.port}] {self.dropped} serial line(s) "
+                           f"dropped: the parse queue was full")
 
 
 class WardrivingSession:
@@ -220,8 +453,58 @@ class WardrivingSession:
         self.end_time = None
         self.network_count = 0
         self.unique_bssids = set()
-        self._lock = threading.Lock()
+        # Re-entrant: batch() holds it for a whole batch while the upserts
+        # inside take it again.
+        self._lock = threading.RLock()
+        self._tls = threading.local()      # .conn = the open batch connection
         self._init_db()
+
+    @staticmethod
+    def _open(db_path):
+        conn = sqlite3.connect(db_path, timeout=5)
+        # synchronous is a per-CONNECTION setting: _init_db() setting it once
+        # never reached the per-write connections, so every sighting committed
+        # with the default FULL — an fsync of the WAL per row, which on an
+        # SD-card Pi Zero (also swapping to that card) was the bottleneck.
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+
+    @contextmanager
+    def _db(self):
+        """Connection for one write — or the open batch()'s shared one."""
+        shared = getattr(self._tls, 'conn', None)
+        if shared is not None:
+            yield shared                    # batch(): its commit covers this write
+            return
+        conn = self._open(self.db_path)
+        try:
+            with conn:                      # commit (or roll back) this write
+                yield conn
+        finally:
+            conn.close()
+
+    @contextmanager
+    def batch(self):
+        """Run many writes in ONE transaction on ONE connection.
+
+        A companion streaming ~20 lines/s (Huginn) or a scan returning ~50
+        networks used to open a connection and commit once per row. Inside a
+        batch every upsert shares a single connection and commits once at the
+        end. Nested batches join the outer one. Keep batches short: the session
+        lock is held for the whole batch.
+        """
+        if getattr(self._tls, 'conn', None) is not None:
+            yield
+            return
+        with self._lock:
+            conn = self._open(self.db_path)
+            self._tls.conn = conn
+            try:
+                with conn:
+                    yield
+            finally:
+                self._tls.conn = None
+                conn.close()
 
     def _init_db(self):
         """Create the session database tables."""
@@ -441,13 +724,64 @@ class WardrivingSession:
                     value TEXT
                 )
             """)
+            # INSERT OR IGNORE: only a NEW session gets its start time here.
+            # _init_db also runs every time an existing session is opened
+            # (viewing, export, upload, backfill), and REPLACE used to stamp
+            # "now" over the real start — old drives then showed up in the
+            # session list under whatever date they were last opened.
             conn.execute(
-                "INSERT OR REPLACE INTO session_info (key, value) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO session_info (key, value) VALUES (?, ?)",
                 ('start_time', datetime.now(timezone.utc).isoformat())
             )
 
+    _TIMED_TABLES = ('networks', 'network_observations', 'bluetooth_devices',
+                     'cell_towers', 'zigbee_devices')
+
+    def shift_times(self, delta, cutoff_epoch):
+        """Move every timestamp recorded before a wall-clock step forward by
+        the step.
+
+        A Pi has no RTC: booted away from Wi-Fi it runs on the last saved
+        time until NTP or GPS corrects it, and everything recorded until then
+        is stamped with the wrong clock. When the clock steps forward by
+        `delta` seconds, rows stamped before `cutoff_epoch` (the moment of the
+        step on the OLD clock) are shifted, so the session reads in real time.
+        Rows written after the step already carry the corrected clock.
+        """
+        def _shift_iso(v):
+            if not v:
+                return v
+            try:
+                t = datetime.fromisoformat(v.replace('Z', '+00:00'))
+            except ValueError:
+                return v
+            if t.timestamp() >= cutoff_epoch:
+                return v
+            return (t + timedelta(seconds=delta)).isoformat()
+
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.create_function('ragnar_shift_iso', 1, _shift_iso)
+                for t in self._TIMED_TABLES:
+                    try:
+                        conn.execute(f"UPDATE {t} SET first_seen = ragnar_shift_iso(first_seen), "
+                                     f"last_seen = ragnar_shift_iso(last_seen)")
+                    except sqlite3.OperationalError:
+                        pass                    # table absent in an old session
+                conn.execute("UPDATE gps_track SET timestamp = timestamp + ? WHERE timestamp < ?",
+                             (delta, cutoff_epoch))
+                conn.execute("UPDATE session_info SET value = ragnar_shift_iso(value) "
+                             "WHERE key = 'start_time'")
+                prev = conn.execute("SELECT value FROM session_info WHERE key = 'clock_steps'").fetchone()
+                note = f"{datetime.now(timezone.utc).isoformat()} {delta:+.1f}s"
+                conn.execute("INSERT OR REPLACE INTO session_info (key, value) VALUES ('clock_steps', ?)",
+                             ((prev[0] + '; ' if prev else '') + note,))
+            if self.start_time < cutoff_epoch:
+                self.start_time += delta
+            self._stats_cache = None
+
     def upsert_network(self, bssid, ssid, security, channel, frequency,
-                       rssi, lat, lon, alt, speed, hdop, interface=''):
+                       rssi, lat, lon, alt, speed, hdop, interface='', seen_at=None):
         """Insert or update a discovered network (thread-safe)."""
         # Sanitize SSID: strip null bytes, hex escape sequences, and non-printable chars
         if ssid:
@@ -458,7 +792,7 @@ class WardrivingSession:
             # If nothing printable remains, treat as hidden
             if not ssid or all(ord(c) < 32 for c in ssid):
                 ssid = ''
-        now = datetime.now(timezone.utc).isoformat()
+        now = seen_at or datetime.now(timezone.utc).isoformat()
         band = '5GHz' if (frequency and int(frequency) > 4900) else '2.4GHz'
         if frequency and int(frequency) > 5925:
             band = '6GHz'
@@ -470,7 +804,7 @@ class WardrivingSession:
 
         with self._lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
+                with self._db() as conn:
                     existing = conn.execute(
                         "SELECT rssi, best_rssi, scan_count FROM networks WHERE bssid = ?",
                         (bssid,)
@@ -569,14 +903,14 @@ class WardrivingSession:
                 logger.error(f"DB upsert error: {e}")
         return False
 
-    def log_gps_track(self, lat, lon, alt, speed, satellites, hdop):
-        """Log a GPS trackpoint."""
+    def log_gps_track(self, lat, lon, alt, speed, satellites, hdop, timestamp=None):
+        """Log a GPS trackpoint (at `timestamp`, default now)."""
         with self._lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
+                with self._db() as conn:
                     conn.execute(
                         "INSERT INTO gps_track (timestamp, latitude, longitude, altitude, speed_kmh, satellites, hdop) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (time.time(), lat, lon, alt, speed, satellites, hdop)
+                        (timestamp or time.time(), lat, lon, alt, speed, satellites, hdop)
                     )
             except Exception as e:
                 logger.debug(f"GPS track log error: {e}")
@@ -596,7 +930,7 @@ class WardrivingSession:
         a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
         return R * 2 * atan2(sqrt(a), sqrt(1 - a))
 
-    def upsert_bluetooth(self, mac, name, rssi, device_type, lat, lon, alt):
+    def upsert_bluetooth(self, mac, name, rssi, device_type, lat, lon, alt, seen_at=None):
         """Insert or update a discovered Bluetooth device.
 
         GPS position logic:
@@ -605,10 +939,10 @@ class WardrivingSession:
           consecutive pings at a new location (>GPS_DRIFT_THRESHOLD_M away).
           This filters out GPS drift/jumps while still tracking moving devices.
         """
-        now = datetime.now(timezone.utc).isoformat()
+        now = seen_at or datetime.now(timezone.utc).isoformat()
         with self._lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
+                with self._db() as conn:
                     existing = conn.execute(
                         """SELECT scan_count, rssi, best_rssi, latitude, longitude,
                                   pending_lat, pending_lon, pending_count
@@ -707,13 +1041,13 @@ class WardrivingSession:
             except Exception as e:
                 logger.debug(f"BT upsert error: {e}")
 
-    def upsert_cell_tower(self, cell_id, mcc, mnc, lac, tech, provider,
-                          signal_dbm, band_freq, lat, lon):
+    def upsert_cell_tower(self, cell_id, mcc='', mnc='', lac='', tech='', provider='',
+                          signal_dbm=None, band_freq='', lat=None, lon=None, seen_at=None):
         """Insert or update a detected cell tower."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = seen_at or datetime.now(timezone.utc).isoformat()
         with self._lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
+                with self._db() as conn:
                     existing = conn.execute(
                         "SELECT scan_count FROM cell_towers WHERE cell_id = ?", (cell_id,)
                     ).fetchone()
@@ -755,7 +1089,7 @@ class WardrivingSession:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             try:
-                with sqlite3.connect(self.db_path) as conn:
+                with self._db() as conn:
                     existing = conn.execute(
                         "SELECT scan_count, best_rssi FROM zigbee_devices WHERE addr = ?",
                         (addr,)
@@ -939,17 +1273,21 @@ class WardrivingSession:
 
     def get_networks(self, limit=500, offset=0, sort_by='best_rssi', order='DESC'):
         """Get paginated network list."""
-        allowed_sort = {'best_rssi', 'ssid', 'channel', 'first_seen', 'last_seen', 'scan_count', 'band'}
-        if sort_by not in allowed_sort:
-            sort_by = 'best_rssi'
-        if order.upper() not in ('ASC', 'DESC'):
-            order = 'DESC'
+        # Map user input to literal SQL fragments so the ORDER BY can never carry
+        # attacker-controlled text (sort_by/order are not parameterizable).
+        _SORT_COLS = {
+            'best_rssi': 'best_rssi', 'ssid': 'ssid', 'channel': 'channel',
+            'first_seen': 'first_seen', 'last_seen': 'last_seen',
+            'scan_count': 'scan_count', 'band': 'band',
+        }
+        sort_col = _SORT_COLS.get(sort_by, 'best_rssi')
+        order_sql = 'ASC' if str(order).upper() == 'ASC' else 'DESC'
         with self._lock:
             try:
                 with sqlite3.connect(self.db_path) as conn:
                     conn.row_factory = sqlite3.Row
                     rows = conn.execute(
-                        f"SELECT * FROM networks ORDER BY {sort_by} {order} LIMIT ? OFFSET ?",
+                        "SELECT * FROM networks ORDER BY " + sort_col + " " + order_sql + " LIMIT ? OFFSET ?",
                         (limit, offset)
                     ).fetchall()
                     return [dict(r) for r in rows]
@@ -957,15 +1295,31 @@ class WardrivingSession:
                 logger.error(f"Get networks error: {e}")
                 return []
 
-    def get_bluetooth_devices(self):
-        """Get all discovered Bluetooth devices."""
+    def get_bluetooth_devices(self, limit=None, offset=0, sort_by='best_rssi', order='DESC'):
+        """Get discovered Bluetooth devices, optionally paginated and sorted.
+
+        Mirrors get_networks: the live map pulls the most-recently-seen slice
+        (sort_by='last_seen') over a thin link instead of the whole table. With
+        no limit it returns everything, as before. sort_by/order map to literal
+        SQL fragments so an ORDER BY can never carry attacker-controlled text.
+        """
+        _SORT_COLS = {
+            'best_rssi': 'best_rssi', 'rssi': 'rssi', 'name': 'name',
+            'first_seen': 'first_seen', 'last_seen': 'last_seen',
+            'scan_count': 'scan_count',
+        }
+        sort_col = _SORT_COLS.get(sort_by, 'best_rssi')
+        order_sql = 'ASC' if str(order).upper() == 'ASC' else 'DESC'
         with self._lock:
             try:
                 with sqlite3.connect(self.db_path) as conn:
                     conn.row_factory = sqlite3.Row
-                    rows = conn.execute(
-                        "SELECT * FROM bluetooth_devices ORDER BY rssi DESC"
-                    ).fetchall()
+                    sql = "SELECT * FROM bluetooth_devices ORDER BY " + sort_col + " " + order_sql
+                    params = ()
+                    if limit is not None:
+                        sql += " LIMIT ? OFFSET ?"
+                        params = (limit, offset)
+                    rows = conn.execute(sql, params).fetchall()
                     return [dict(r) for r in rows]
             except Exception:
                 return []
@@ -1145,118 +1499,92 @@ class WardrivingSession:
     def export_wigle_csv(self, device_name='Ragnar', include_zigbee=False):
         """Export session to WiGLE CSV format string including WiFi, BT, and cell.
 
-        Rows whose position was estimated via backfill_gps_from_track
-        (gps_backfilled = 1) are excluded — they are interpolated coordinates,
-        not real observations, and must not be submitted to WiGLE.
+        Only GPS-pinned rows are written (measured with a fix; never an
+        estimated position), as ONE time-ordered list
+        across WiFi / BT / cell (not table after table), and each row's
+        FirstSeen is re-timed to when we were actually at its position (see
+        _align_rows_to_track). Services that rebuild the drive route from the
+        CSV (Wardrift) otherwise see the trail teleport: a row's position is
+        where its signal peaked, often minutes after it was first seen.
 
         Zigbee / 802.15.4 devices are excluded by default: WiGLE has no
         standard 802.15.4 record type, so those rows are only useful for the
         user's own tooling. Set `include_zigbee=True` (opt-in from the config
         tab) to append them with a `ZIGBEE` type token."""
         lines = []
+        bf = "WHERE COALESCE(gps_backfilled, 0) = 0 "
         dn = device_name or 'Ragnar'
         lines.append(f'WigleWifi-1.4,appRelease=Ragnar,model=RaspberryPi,release=1.0,device={dn},display=EPD,board=RPi,brand=Ragnar')
         lines.append(','.join(WIGLE_HEADER))
 
+        # Each entry: dict(mac, name, auth, first, last, channel, rssi, lat, lon, alt, acc, type)
+        recs = []
+        track = []
         with self._lock:
             try:
                 with sqlite3.connect(self.db_path) as conn:
                     conn.row_factory = sqlite3.Row
-                    # WiFi networks (skip backfilled positions)
-                    rows = conn.execute(
-                        "SELECT * FROM networks WHERE COALESCE(gps_backfilled, 0) = 0 "
-                        "ORDER BY first_seen"
-                    ).fetchall()
-                    for row in rows:
+                    for row in conn.execute(f"SELECT * FROM networks {bf}"):
                         r = dict(row)
-                        lines.append(','.join([
-                            r.get('bssid', ''),
-                            r.get('ssid', '').replace(',', '\\,'),
-                            _map_security(r.get('security', '')),
-                            r.get('first_seen', ''),
-                            str(r.get('channel', 0)),
-                            str(r.get('best_rssi', -100)),
-                            str(r.get('best_lat', '') or ''),
-                            str(r.get('best_lon', '') or ''),
-                            str(r.get('altitude', '') or ''),
-                            str(r.get('hdop', '') or ''),
-                            'WIFI'
-                        ]))
-                    # Bluetooth devices
+                        recs.append(dict(
+                            mac=r.get('bssid', ''), name=r.get('ssid', '') or '',
+                            auth=_map_security(r.get('security', '')),
+                            first=r.get('first_seen', ''), last=r.get('last_seen', ''),
+                            channel=str(r.get('channel', 0)), rssi=str(r.get('best_rssi', -100)),
+                            lat=r.get('best_lat'), lon=r.get('best_lon'),
+                            alt=r.get('altitude'), acc=r.get('hdop'), type='WIFI'))
                     try:
-                        bt_rows = conn.execute(
-                            "SELECT * FROM bluetooth_devices WHERE COALESCE(gps_backfilled, 0) = 0 "
-                            "ORDER BY first_seen"
-                        ).fetchall()
-                        for row in bt_rows:
+                        for row in conn.execute(f"SELECT * FROM bluetooth_devices {bf}"):
                             r = dict(row)
-                            lines.append(','.join([
-                                r.get('mac', ''),
-                                r.get('name', '').replace(',', '\\,'),
-                                '[BT]',
-                                r.get('first_seen', ''),
-                                '0',
-                                str(r.get('rssi', -100)),
-                                str(r.get('latitude', '') or ''),
-                                str(r.get('longitude', '') or ''),
-                                str(r.get('altitude', '') or ''),
-                                '',
-                                'BT'
-                            ]))
+                            recs.append(dict(
+                                mac=r.get('mac', ''), name=r.get('name', '') or '', auth='[BT]',
+                                first=r.get('first_seen', ''), last=r.get('last_seen', ''),
+                                channel='0', rssi=str(r.get('rssi', -100)),
+                                lat=r.get('latitude'), lon=r.get('longitude'),
+                                alt=r.get('altitude'), acc=None, type='BT'))
                     except Exception:
                         pass
-                    # Cell towers
                     try:
-                        cell_rows = conn.execute(
-                            "SELECT * FROM cell_towers WHERE COALESCE(gps_backfilled, 0) = 0 "
-                            "ORDER BY first_seen"
-                        ).fetchall()
-                        for row in cell_rows:
+                        for row in conn.execute(f"SELECT * FROM cell_towers {bf}"):
                             r = dict(row)
-                            lines.append(','.join([
-                                r.get('cell_id', ''),
-                                f"{r.get('provider', '')} {r.get('tech', '')}".strip().replace(',', '\\,'),
-                                f"[{r.get('tech', 'GSM')}]",
-                                r.get('first_seen', ''),
-                                str(r.get('band_freq', '')),
-                                str(r.get('signal_dbm', -120)),
-                                str(r.get('latitude', '') or ''),
-                                str(r.get('longitude', '') or ''),
-                                '',
-                                '',
-                                'GSM'
-                            ]))
+                            recs.append(dict(
+                                mac=r.get('cell_id', ''),
+                                name=f"{r.get('provider', '')} {r.get('tech', '')}".strip(),
+                                auth=f"[{r.get('tech', 'GSM')}]",
+                                first=r.get('first_seen', ''), last=r.get('last_seen', ''),
+                                channel=str(r.get('band_freq', '')), rssi=str(r.get('signal_dbm', -120)),
+                                lat=r.get('latitude'), lon=r.get('longitude'),
+                                alt=None, acc=None, type='GSM'))
                     except Exception:
                         pass
                     # Zigbee / 802.15.4 devices — opt-in only (see docstring).
                     if include_zigbee:
                         try:
-                            zb_rows = conn.execute(
-                                "SELECT * FROM zigbee_devices WHERE COALESCE(gps_backfilled, 0) = 0 "
-                                "ORDER BY first_seen"
-                            ).fetchall()
-                            for row in zb_rows:
+                            for row in conn.execute(f"SELECT * FROM zigbee_devices {bf}"):
                                 r = dict(row)
                                 zlat = r.get('best_lat') if r.get('best_lat') is not None else r.get('latitude')
                                 zlon = r.get('best_lon') if r.get('best_lon') is not None else r.get('longitude')
-                                lines.append(','.join([
-                                    r.get('addr', ''),
-                                    (r.get('panid', '') or '').replace(',', '\\,'),
-                                    '[ZIGBEE]',
-                                    r.get('first_seen', ''),
-                                    str(r.get('channel', 0)),
-                                    str(r.get('best_rssi', -100)),
-                                    str(zlat if zlat is not None else ''),
-                                    str(zlon if zlon is not None else ''),
-                                    str(r.get('altitude', '') or ''),
-                                    '',
-                                    'ZIGBEE'
-                                ]))
+                                recs.append(dict(
+                                    mac=r.get('addr', ''), name=r.get('panid', '') or '', auth='[ZIGBEE]',
+                                    first=r.get('first_seen', ''), last=r.get('last_seen', ''),
+                                    channel=str(r.get('channel', 0)), rssi=str(r.get('best_rssi', -100)),
+                                    lat=zlat, lon=zlon, alt=r.get('altitude'), acc=None, type='ZIGBEE'))
                         except Exception:
                             pass
+                    try:
+                        track = conn.execute(
+                            "SELECT timestamp, latitude, longitude FROM gps_track ORDER BY timestamp"
+                        ).fetchall()
+                    except Exception:
+                        track = []
             except Exception as e:
                 logger.error(f"WiGLE export error: {e}")
 
+        recs = _align_rows_to_track(recs, [tuple(t) for t in track])
+        for r in recs:
+            lines.append(','.join(_csv_field(v) for v in (
+                r['mac'], r['name'], r['auth'], r['first'], r['channel'], r['rssi'],
+                r['lat'], r['lon'], r['alt'] or '', r['acc'] or '', r['type'])))
         return '\n'.join(lines)
 
     def export_kml(self):
@@ -1755,6 +2083,26 @@ class WardrivingSession:
             if 'mac' not in col_map:
                 return {'error': 'CSV missing MAC/BSSID column', 'imported': 0}
 
+            # Rows keep the time they were SEEN (the CSV's FirstSeen, UTC per
+            # the WiGLE format), not the time of the import — an imported
+            # drive must read as the drive, and exports rebuild the route from
+            # these times. Positioned rows also rebuild the GPS track (one
+            # point per 5 s), so the map, backfill and route have a trail.
+            last_track_ts = None
+            # A device that logs before it has a clock (Piglet: 1970-01-01)
+            # gets the nearest valid time instead of the import time: the
+            # previous valid row's, or the file's first valid one.
+            last_valid_seen = None
+            if 'firstseen' in col_map:
+                for _l in data_lines:
+                    try:
+                        _r = next(csv.reader([_l]))
+                    except Exception:
+                        continue
+                    if col_map['firstseen'] < len(_r):
+                        last_valid_seen = _wigle_time_to_iso(_r[col_map['firstseen']])
+                        if last_valid_seen:
+                            break
             for line in data_lines:
                 if not line:
                     continue
@@ -1807,18 +2155,34 @@ class WardrivingSession:
                     except (ValueError, TypeError):
                         pass
 
+                if lat == 0 and lon == 0:
+                    lat = lon = alt = None      # 0,0 = "no fix" (Piglet before lock)
+
+                seen_at = None
+                if 'firstseen' in col_map and col_map['firstseen'] < len(row):
+                    seen_at = _wigle_time_to_iso(row[col_map['firstseen']])
+                if seen_at:
+                    last_valid_seen = seen_at
+                else:
+                    seen_at = last_valid_seen
+                if seen_at and lat is not None and lon is not None:
+                    ts = datetime.fromisoformat(seen_at).timestamp()
+                    if last_track_ts is None or ts - last_track_ts >= 5:
+                        self.log_gps_track(lat, lon, alt, None, None, None, timestamp=ts)
+                        last_track_ts = ts
+
                 # Determine type
                 record_type = ''
                 if 'type' in col_map and col_map['type'] < len(row):
                     record_type = row[col_map['type']].strip().upper()
 
                 if record_type in ('BT', 'BLE', 'BLUETOOTH'):
-                    self.upsert_bluetooth(mac, ssid, rssi, 'BLE', lat, lon, alt)
+                    self.upsert_bluetooth(mac, ssid, rssi, 'BLE', lat, lon, alt, seen_at=seen_at)
                     imported_bt += 1
                 elif record_type in ('GSM', 'CDMA', 'LTE', 'UMTS', 'CELL', '5G', 'NR'):
                     self.upsert_cell_tower(
                         cell_id=mac, tech=record_type, provider=ssid,
-                        signal_dbm=rssi, lat=lat, lon=lon
+                        signal_dbm=rssi, lat=lat, lon=lon, seen_at=seen_at
                     )
                     imported_cell += 1
                 else:
@@ -1833,7 +2197,7 @@ class WardrivingSession:
                         bssid=mac, ssid=ssid, security=auth,
                         channel=channel, frequency=freq, rssi=rssi,
                         lat=lat, lon=lon, alt=alt, speed=None, hdop=None,
-                        interface='import'
+                        interface='import', seen_at=seen_at
                     )
                     imported_wifi += 1
 
@@ -1889,6 +2253,9 @@ class WardrivingEngine:
         self._bt_thread = None
         self._cell_thread = None
         self._gps = None
+        self._standby_gps = None   # GPS reader for when no session runs (see standby_gps)
+        self._phone_gps = None     # receiver-less manager fed by the mobile app (see phone_gps_fix)
+        self._phone_gps_last = 0.0
         self.session = None
         self.scan_interval = 2  # seconds between scans (fast!)
         self.interfaces = []     # WiFi interfaces to use
@@ -1926,6 +2293,14 @@ class WardrivingEngine:
         # Multi-companion support: one _CompanionState per USB-serial port.
         # Keyed by port path (e.g. '/dev/ttyACM0').
         self._companions: dict[str, _CompanionState] = {}
+        # Publish the serial ports this engine holds so the CYD bridge and the
+        # Meshtastic link never open them (see serial_claims.py).
+        try:
+            import serial_claims
+            serial_claims.register('wardrive-companions', lambda: list(self._companions.keys()))
+            serial_claims.register('wardrive-gps', self._held_gps_ports)
+        except Exception:
+            pass
         self._esp_stations = []
 
     # ------------------------------------------------------------------
@@ -2003,6 +2378,39 @@ class WardrivingEngine:
             alerts.extend(c.esp_alerts)
         return sorted(alerts, key=lambda a: a.get('time', 0))
 
+    def _held_gps_ports(self):
+        """GPS ports this engine (or the gpsd it pins) holds - for serial_claims."""
+        ports = []
+        gps = getattr(self, '_gps', None)
+        port = getattr(gps, 'port', None) if gps is not None else None
+        if port and port != 'gpsd':
+            ports.append(port)
+        standby = getattr(getattr(self, '_standby_gps', None), 'port', None)
+        if standby and standby != 'gpsd':
+            ports.append(standby)
+        pinned = self._gpsd_configured_realpath()
+        if pinned and os.path.exists(pinned):
+            ports.append(pinned)
+        return ports
+
+    @staticmethod
+    def _foreign_ports():
+        """realpaths held by other components (CYD bridge, Meshtastic link, ...)."""
+        try:
+            import serial_claims
+            return serial_claims.claimed(exclude_owner='wardrive-*')
+        except Exception:
+            return set()
+
+    @staticmethod
+    def _port_holder(port):
+        """Owner of ``port`` if another component holds/reserves it, else None."""
+        try:
+            import serial_claims
+            return serial_claims.claims(exclude_owner='wardrive-*').get(os.path.realpath(port))
+        except Exception:
+            return None
+
     def _gpsd_configured_realpath(self):
         """realpath of the device gpsd is currently pinned to, or None.
 
@@ -2068,10 +2476,110 @@ class WardrivingEngine:
         except Exception as e:
             logger.debug(f"_ensure_gpsd best-effort failed: {e}")
 
+    # ── Standby GPS ────────────────────────────────────────────────────
+    # The GPS is otherwise only read during a session. Something that wants a
+    # position between sessions (the Meshtastic node on a CardputerZero LoRa +
+    # GNSS Cap, which cannot read the shared UART itself) asks for this reader.
+    # It belongs to the engine so there is never a second reader on the port:
+    # a session closes it before opening the GPS, and the status reports it.
+    STANDBY_GPS_RETRY_SECONDS = 30
+
+    def standby_gps(self, port=None, baudrate=9600, make=None):
+        """The GPS reader to use right now: the session's while one runs,
+        otherwise a standby reader on `port` (opened on first use). None when
+        there is none."""
+        if self._gps is not None or self._running or self._starting:
+            return self._gps
+        if self._standby_gps is not None:
+            return self._standby_gps
+        now = time.time()
+        if not port or now < getattr(self, '_standby_gps_retry', 0):
+            return None
+        try:
+            if make is None:
+                from gps_manager import GPSManager
+                make = GPSManager
+            mgr = make(port=port, baudrate=baudrate, assist=False, set_clock=False)
+            if mgr.start():
+                self._standby_gps = mgr
+                logger.info(f"Standby GPS reader on {port}")
+                return mgr
+            mgr.stop()
+        except Exception as e:
+            logger.debug(f"standby GPS not opened: {e}")
+        self._standby_gps_retry = now + self.STANDBY_GPS_RETRY_SECONDS
+        return None
+
+    def stop_standby_gps(self):
+        mgr, self._standby_gps = self._standby_gps, None
+        if mgr is not None:
+            try:
+                mgr.stop()
+            except Exception:
+                pass
+            logger.info("Standby GPS reader closed")
+
+    # ── Phone GPS ──────────────────────────────────────────────────────────
+    # The Ragnar mobile app can feed the phone's own location to the box, so a
+    # unit with no GPS receiver still pins what it scans. Fixes go into the
+    # session's reader while one runs (a GPSManager exists even when no
+    # receiver was found). Between sessions they go to a standby reader if one
+    # is open, else to a receiver-less manager kept only for the phone, so the
+    # GPS status shows the fix before Start is pressed.
+    PHONE_GPS_FRESH_SECONDS = 30
+
+    def phone_gps_fix(self, lat, lon, alt=None, speed_kmh=None, course=None,
+                      accuracy_m=None, epoch=None, source='phone'):
+        """Feed one phone fix to whichever GPS manager is current. Returns
+        True when it was taken (False: invalid, or a local receiver has a fresh
+        fix of its own and wins)."""
+        mgr = self._gps if (self._gps is not None and (self._running or self._starting)) else None
+        if mgr is None:
+            mgr = self._standby_gps
+        if mgr is None:
+            if self._phone_gps is None:
+                from gps_manager import GPSManager
+                self._phone_gps = GPSManager(
+                    state_file=os.path.join(self.data_dir, 'last_gps.json'),
+                    assist=False,
+                    set_clock=self.shared_data.config.get('wardriving_gps_set_clock', True))
+                self._phone_gps.start_time = time.time()
+            mgr = self._phone_gps
+        hdop = None
+        if accuracy_m is not None:
+            try:
+                # Rough HDOP equivalent (accuracy ~ HDOP x 5 m) so everything
+                # that stores HDOP per sighting keeps a comparable number.
+                hdop = round(max(0.5, float(accuracy_m) / 5.0), 1)
+            except (TypeError, ValueError):
+                accuracy_m = None
+        ok = mgr.update_external_fix(lat, lon, alt, speed_kmh=speed_kmh, hdop=hdop,
+                                     source=source, course=course,
+                                     accuracy_m=accuracy_m, epoch=epoch)
+        if ok:
+            self._phone_gps_last = time.time()
+        return ok
+
+    def current_gps(self):
+        """The GPS manager whose state describes 'now', or None: the
+        session's while one runs, else the standby reader, else the phone-fed
+        manager while the phone is still sending."""
+        if self._gps is not None and (self._running or self._starting):
+            return self._gps
+        if self._standby_gps is not None:
+            return self._standby_gps
+        if (self._phone_gps is not None
+                and time.time() - self._phone_gps_last < self.PHONE_GPS_FRESH_SECONDS):
+            return self._phone_gps
+        return None
+
     def start(self, interfaces=None, gps_port=None, device_name=None):
         """Start a wardriving session."""
         if self._running:
             return {'error': 'Already running'}
+        # The session opens the GPS itself: one reader per port.
+        self.stop_standby_gps()
+        self._phone_gps = None      # the phone's next fix lands in the session reader
 
         # Flag the bring-up window so the display flips to wardriving mode right
         # away (see __init__). Cleared once _running goes True, on early error
@@ -2127,6 +2635,7 @@ class WardrivingEngine:
         import glob as _glob
         _raw_candidates = sorted(_glob.glob('/dev/ttyACM*') + _glob.glob('/dev/ttyUSB*'))
         esp_exclude = {p for p in _raw_candidates if self._port_is_espressif(p)}
+        esp_exclude |= self._foreign_ports()
 
         # If gpsd is installed, make sure it's running and pinned to the current
         # USB GPS (any puck, hot-swap aware). gps_manager auto-detection then
@@ -2140,7 +2649,9 @@ class WardrivingEngine:
             gps_port = None
         self._gps = GPSManager(
             port=gps_port, exclude_ports=esp_exclude,
-            state_file=os.path.join(self.data_dir, 'last_gps.json'))
+            state_file=os.path.join(self.data_dir, 'last_gps.json'),
+            assist=self.shared_data.config.get('wardriving_gps_assist', True),
+            set_clock=self.shared_data.config.get('wardriving_gps_set_clock', True))
         gps_ok = self._gps.start()
         if not gps_ok:
             logger.warning(f"GPS not available: {self._gps.error}. Wardriving without GPS.")
@@ -2149,6 +2660,12 @@ class WardrivingEngine:
         self.session = WardrivingSession(self.data_dir)
         self._running = True
         self._starting = False
+        # Tell the orchestrator to pause its active scans (nmap/attacks) while
+        # we drive — they thrash a small board and starve cold-start GPS.
+        try:
+            self.shared_data.wardriving_session_active = True
+        except Exception:
+            pass
         self.error = None
         self.scans_completed = 0
         self.bt_count = 0
@@ -2167,6 +2684,11 @@ class WardrivingEngine:
         # Start scanning threads
         self._thread = threading.Thread(target=self._scan_loop, daemon=True, name="wardriving")
         self._thread.start()
+
+        # Repair the session when the wall clock steps (NTP or GPS correcting
+        # an RTC-less Pi that booted on a stale time).
+        threading.Thread(target=self._clock_watch_loop, daemon=True,
+                         name="wardriving-clock").start()
 
         # Start Bluetooth scanning thread
         self._bt_thread = threading.Thread(target=self._bt_scan_loop, daemon=True, name="wardriving-bt")
@@ -2193,6 +2715,14 @@ class WardrivingEngine:
         self._ensure_hat_buttons()
 
         logger.info(f"Wardriving started: interfaces={self.interfaces}, GPS={gps_ok}, device={self.device_name}")
+        # Every start path (web, CYD, boot) lands here; the webapp uses this to
+        # auto-start the ADS-B radar when the operator opted in.
+        if self.session:
+            for cb in list(SESSION_STARTED_HOOKS):
+                try:
+                    cb(self.session.session_id)
+                except Exception as e:
+                    logger.error(f"session-started hook failed: {e}")
         return {
             'success': True,
             'session_id': self.session.session_id,
@@ -2394,6 +2924,11 @@ class WardrivingEngine:
 
         self._running = False
         self._starting = False
+        # Let the orchestrator resume active scans now that we've stopped.
+        try:
+            self.shared_data.wardriving_session_active = False
+        except Exception:
+            pass
         if self.session:
             self.session.close()
         if self._gps:
@@ -2412,6 +2947,15 @@ class WardrivingEngine:
 
         stats = self.session.get_stats() if self.session else {}
         logger.info(f"Wardriving stopped. Networks: {stats.get('total_networks', 0)}")
+        # Every stop path (web UI, CYD, display keys, diagnostic mode) and every
+        # engine instance (webapp or the boot-time one in Ragnar.py) lands here,
+        # so this is where a finished drive is handed to auto-upload.
+        if self.session:
+            for cb in list(SESSION_FINISHED_HOOKS):
+                try:
+                    cb(self.session.session_id)
+                except Exception as e:
+                    logger.error(f"session-finished hook failed: {e}")
         return {'success': True, 'stats': stats}
 
     def _start_companion_thread(self, port: str) -> '_CompanionState | None':
@@ -2419,6 +2963,14 @@ class WardrivingEngine:
         gps_port = self._gps.port if self._gps else None
         if gps_port and port == gps_port:
             logger.warning(f"Skipping companion on {port}: same port as GPS")
+            return None
+        # Every start path (USB monitor, manual Connect) funnels through here, so
+        # enforce serial_claims here too: a second reader on a port another
+        # component holds (e.g. the serial console) splits the byte stream —
+        # banners and probe replies get eaten and Huginn mis-identifies.
+        holder = self._port_holder(port)
+        if holder:
+            logger.warning(f"Skipping companion on {port}: port is reserved by {holder}")
             return None
         existing = self._companions.get(port)
         if existing and existing.thread and existing.thread.is_alive():
@@ -2440,6 +2992,9 @@ class WardrivingEngine:
         gps_port = self._gps.port if self._gps else None
         if gps_port and port == gps_port:
             return {'error': f'Port {port} is already in use by GPS'}
+        holder = self._port_holder(port)
+        if holder:
+            return {'error': f'Port {port} is reserved by {holder} — release it there first'}
         companion = self._start_companion_thread(port)
         if companion is None:
             return {'error': f'Could not start companion on {port}'}
@@ -2765,6 +3320,25 @@ class WardrivingEngine:
         while self._running:
             try:
                 present = self._enumerate_serial_devices()
+                # Never touch a port another component holds. The CYD is an
+                # ESP32 on a CH340/CP2102 bridge and a Meshtastic Heltec is an
+                # ESP32-S3, so both classify as a 'companion' and this monitor
+                # would open them in parallel with their owner — the two readers
+                # then split the byte stream. Drop them here: if one was already
+                # attached, it drops out of `present` and the removal path below
+                # stops that listener, handing the port back to its owner.
+                foreign = self._foreign_ports()
+                if foreign:
+                    # Say so once per device: otherwise a companion on a reserved
+                    # port just never appears ("No GPS device detected").
+                    logged = self.__dict__.setdefault('_claim_skip_logged', set())
+                    for dev_id, node in present.items():
+                        if os.path.realpath(node) in foreign and dev_id not in logged:
+                            logged.add(dev_id)
+                            logger.warning(f"[usb-monitor] not attaching {node}: reserved by "
+                                           f"{self._port_holder(node) or 'another component'}")
+                    present = {k: v for k, v in present.items()
+                               if os.path.realpath(v) not in foreign}
                 managed = self._managed_devices
 
                 # Removals: a managed device id is no longer present.
@@ -2902,18 +3476,40 @@ class WardrivingEngine:
         # the !running case ensures the status reflects current hardware.
         if self._gps and self._running:
             gps_status = self._gps.get_status()
+        elif self.current_gps() is not None:
+            gps_status = self.current_gps().get_status()
         else:
             now = time.time()
-            if not hasattr(self, '_gps_probe_cache') or now - self._gps_probe_time > 15:
-                from gps_manager import detect_gps_device
-                try:
-                    companion_ports = set(self._companions.keys())
-                    detected = detect_gps_device(exclude_ports=companion_ports or None)
-                except Exception:
-                    detected = None
-                self._gps_probe_cache = detected
-                self._gps_probe_time = now
-            detected = self._gps_probe_cache
+            # detect_gps_device opens/reads serial ports (up to ~1.5s x 4 bauds
+            # EACH, over every ttyUSB/ttyACM/ttyS/ttyAMA), so it can block the
+            # caller for tens of seconds — which froze this whole get_status (and
+            # the /api/wardriving/status endpoint, and the CYD serial bridge that
+            # calls it). Never run it on the hot path: refresh a 15s cache in a
+            # daemon thread and return the cached value immediately. A probe that
+            # stalls leaks at most one thread; get_status stays responsive.
+            if (now - getattr(self, '_gps_probe_time', 0) > 15
+                    and not getattr(self, '_gps_probe_busy', False)):
+                self._gps_probe_busy = True
+
+                def _probe():
+                    det = None
+                    try:
+                        from gps_manager import detect_gps_device
+                        exclude = set(self._companions.keys())
+                        # Also skip ports other components hold (CYD bridge,
+                        # Meshtastic link) so the NMEA probe doesn't steal bytes.
+                        exclude |= self._foreign_ports()
+                        det = detect_gps_device(exclude_ports=exclude or None)
+                    except Exception:
+                        det = None
+                    finally:
+                        self._gps_probe_cache = det
+                        self._gps_probe_time = time.time()
+                        self._gps_probe_busy = False
+
+                threading.Thread(target=_probe, name='wardrive-gps-probe',
+                                 daemon=True).start()
+            detected = getattr(self, '_gps_probe_cache', None)
             gps_status = {
                 'connected': bool(detected),
                 'port': detected,
@@ -3052,6 +3648,8 @@ class WardrivingEngine:
                 sid = f[8:-3]  # strip 'session_' and '.db'
                 db_path = os.path.join(wd_dir, f)
                 size = os.path.getsize(db_path)
+                if size == 0 and not os.path.exists(db_path + '-wal'):
+                    continue  # created, never written (power cut at start): nothing to show
                 try:
                     with sqlite3.connect(db_path) as conn:
                         conn.row_factory = sqlite3.Row
@@ -3059,13 +3657,25 @@ class WardrivingEngine:
                         info = {}
                         for row in conn.execute("SELECT key, value FROM session_info").fetchall():
                             info[row[0]] = row[1]
+                        first, last = conn.execute(
+                            "SELECT MIN(first_seen), MAX(last_seen) FROM networks").fetchone()
+                    start, end = info.get('start_time', ''), info.get('end_time', '')
+                    # The recorded data is the ground truth for when a drive
+                    # happened. A start_time later than the first sighting was
+                    # overwritten by an older build when the session was
+                    # reopened; a session cut off by a power loss never got
+                    # an end_time. Both are recovered from the networks table.
+                    if first and (not start or start > first):
+                        start = first
+                    if last and not end:
+                        end = last
                     sessions.append({
                         'session_id': sid,
                         'db_path': db_path,
                         'file_size': size,
                         'total_networks': total,
-                        'start_time': info.get('start_time', ''),
-                        'end_time': info.get('end_time', ''),
+                        'start_time': start,
+                        'end_time': end,
                     })
                 except Exception:
                     sessions.append({'session_id': sid, 'error': 'corrupt'})
@@ -3167,6 +3777,41 @@ class WardrivingEngine:
             pass
         return False
 
+    # A wall-clock step at least this large during a session is treated as
+    # a correction (NTP sync, or the clock set from GPS) and repaired. Smaller
+    # wobble is ignored. Checked every second so rows written after the step
+    # are never mistaken for pre-step ones.
+    _CLOCK_STEP_MIN_S = 10.0
+
+    def _clock_watch_loop(self):
+        """Detect wall-clock steps (wall − monotonic changing) and shift the
+        running session's earlier timestamps by the step."""
+        ref = time.time() - time.monotonic()
+        while self._running:
+            time.sleep(1)
+            new_ref = time.time() - time.monotonic()
+            step = new_ref - ref
+            if abs(step) < self._CLOCK_STEP_MIN_S:
+                ref = new_ref if abs(step) > 0.5 else ref
+                continue
+            cutoff = time.monotonic() + ref          # "now" on the old clock
+            ref = new_ref
+            session = self.session
+            if session is None:
+                continue
+            if step < 0:
+                # A backwards step makes old and new stamps overlap; there is
+                # no safe way to tell them apart, so only report it.
+                logger.warning(f"Wall clock stepped {step:+.0f} s backwards during a "
+                               f"wardriving session; earlier timestamps left as recorded")
+                continue
+            try:
+                session.shift_times(step, cutoff)
+                logger.warning(f"Wall clock corrected by {step:+.0f} s during the session "
+                               f"(Pi has no RTC) — shifted this session's earlier timestamps")
+            except Exception as e:
+                logger.error(f"Session clock repair failed: {e}")
+
     def _scan_loop(self):
         """Main scanning loop — runs fast continuous scans."""
         logger.info(f"Scan loop started with {len(self.interfaces)} interface(s)")
@@ -3228,20 +3873,21 @@ class WardrivingEngine:
                     for t in threads:
                         t.join(timeout=20)
 
-                for iface, networks in results.items():
-                    for net in networks:
-                        self.session.upsert_network(
-                            bssid=net['bssid'],
-                            ssid=net['ssid'],
-                            security=net['security'],
-                            channel=net['channel'],
-                            frequency=net['frequency'],
-                            rssi=net['rssi'],
-                            lat=lat, lon=lon, alt=alt,
-                            speed=speed, hdop=hdop,
-                            interface=iface
-                        )
-                        total_found += 1
+                with self.session.batch():      # one commit per scan, not per network
+                    for iface, networks in results.items():
+                        for net in networks:
+                            self.session.upsert_network(
+                                bssid=net['bssid'],
+                                ssid=net['ssid'],
+                                security=net['security'],
+                                channel=net['channel'],
+                                frequency=net['frequency'],
+                                rssi=net['rssi'],
+                                lat=lat, lon=lon, alt=alt,
+                                speed=speed, hdop=hdop,
+                                interface=iface
+                            )
+                            total_found += 1
 
                 self.networks_per_scan = total_found
                 self.scans_completed += 1
@@ -3408,7 +4054,7 @@ class WardrivingEngine:
                     for line in r.stdout.split('\n'):
                         if '(disabled)' in line.lower():
                             continue
-                        m = re.search(r'\*\s*(\d{4,5})\s*MHz', line)
+                        m = re.search(r'\*\s*(\d{4,5})(?:\.\d+)?\s*MHz', line)
                         if m:
                             supported.add(int(m.group(1)))
             except Exception as e:
@@ -3472,7 +4118,7 @@ class WardrivingEngine:
                         for line in r.stdout.split('\n'):
                             if '(disabled)' in line.lower():
                                 continue
-                            m = re.search(r'\*\s*(\d{4,5})\s*MHz', line)
+                            m = re.search(r'\*\s*(\d{4,5})(?:\.\d+)?\s*MHz', line)
                             if m:
                                 bands.add(self._freq_to_band(int(m.group(1))))
                 except Exception:
@@ -3961,16 +4607,26 @@ class WardrivingEngine:
         logger.info("Bluetooth scan loop stopped")
 
     def _scan_bluetooth(self):
-        """Scan for Bluetooth Classic + BLE devices."""
-        devices = []
-        seen_macs = set()
+        """Scan for Bluetooth Classic + BLE devices in range right now.
 
+        BlueZ discovery over D-Bus gives every device with its measured signal
+        strength, and only the ones heard during this scan. Without python-dbus
+        the bluetoothctl / hcitool text scan below still finds devices, but
+        those tools print no signal strength, so it records a nominal one.
+        """
         # Ensure Bluetooth is not soft-blocked
         try:
             subprocess.run(['sudo', 'rfkill', 'unblock', 'bluetooth'],
                            capture_output=True, timeout=3)
         except Exception:
             pass
+
+        measured = self._scan_bluetooth_dbus()
+        if measured is not None:
+            return measured
+
+        devices = []
+        seen_macs = set()
 
         # Method 1: bluetoothctl (Classic + BLE)
         try:
@@ -4023,6 +4679,36 @@ class WardrivingEngine:
         except Exception as e:
             logger.warning(f"hcitool lescan failed: {e}")
 
+        return devices
+
+    @staticmethod
+    def _scan_bluetooth_dbus(duration=5):
+        """One BlueZ discovery: [{mac, name, rssi, type}] with the measured RSSI,
+        or None when D-Bus discovery is not available on this unit."""
+        try:
+            import bt_scanner
+            ctrl = bt_scanner._pick_controller()
+            if not ctrl:
+                return None
+            found, reason = bt_scanner._discover_dbus(ctrl['hci'], duration)
+        except Exception as e:
+            logger.debug(f"BT D-Bus scan unavailable: {e}")
+            return None
+        if found is None:
+            logger.debug(f"BT D-Bus scan unavailable: {reason}")
+            return None
+        devices = []
+        for d in found:
+            mac = d.get('mac')
+            if not mac:
+                continue
+            devices.append({
+                'mac': mac,
+                'name': d.get('name') or '',
+                'rssi': d['rssi'],
+                # A class of device is only reported by Bluetooth Classic.
+                'type': 'Classic' if d.get('cls') else 'BLE',
+            })
         return devices
 
     # ------------------------------------------------------------------
@@ -4323,7 +5009,17 @@ class WardrivingEngine:
                     _last_diag = time.time()
                     _last_devcheck = time.time()
                     _sample_lines = []
+                    # Solo drives: pull any finished CSVs off Piglet's SD card
+                    # (firmware with SerialSync answers; older firmware simply
+                    # doesn't, and the live stream carries on either way).
+                    if companion.name in ('Piglet', 'Piglet Core'):
+                        self._piglet_sync(ser, companion, _readline)
+                    pipe = _SerialLinePipeline(self, companion).start()
+                    companion.pipeline = pipe
                     while self._running and companion.port in self._companions:
+                        if companion.piglet_sync_request:
+                            companion.piglet_sync_request = False
+                            self._piglet_sync(ser, companion, _readline, manual=True)
                         try:
                             raw = _readline(2.0)
                             if raw:
@@ -4333,7 +5029,7 @@ class WardrivingEngine:
                                 if line:
                                     if len(_sample_lines) < 3:
                                         _sample_lines.append(line[:120])
-                                    self._parse_serial_line(line, companion)
+                                    pipe.put(line)
                             now_ts = time.time()
                             if now_ts - _last_devcheck >= 5.0:
                                 _last_devcheck = now_ts
@@ -4354,6 +5050,7 @@ class WardrivingEngine:
                         except Exception as e:
                             logger.warning(f"[wardriving] {companion.port} read error: {e!r}")
                             break
+                    pipe.stop()
                     try:
                         ser.close()
                     except Exception:
@@ -4413,13 +5110,17 @@ class WardrivingEngine:
 
         last_config_drain = time.time()
         last_role_check = time.time()
+        # This thread only reads; parsing + DB writes run on the pipeline's
+        # worker so the port is always drained (Huginn drops unread output).
+        pipe = _SerialLinePipeline(self, companion).start()
+        companion.pipeline = pipe
         while self._running and companion.port in self._companions:
             try:
                 raw = ser.readline()
                 if raw:
                     line = raw.decode('utf-8', errors='replace').strip()
                     if line:
-                        self._parse_serial_line(line, companion)
+                        pipe.put(line)
                 now = time.time()
                 if now - last_config_drain > 5:
                     self._drain_huginn_queue(ser, companion)
@@ -4443,6 +5144,7 @@ class WardrivingEngine:
                 logger.debug(f"Serial read error (huginn) on {companion.port}: {e}")
                 break
 
+        pipe.stop()          # parse whatever is still queued before the final flush
         if companion.serial_entry_buffer.get('bssid'):
             pos = self._gps.get_position() if self._gps else None
             self._flush_serial_entry(
@@ -4487,12 +5189,52 @@ class WardrivingEngine:
             alt = gps_alt
         return lat, lon, alt, True
 
-    def _parse_serial_line(self, line: str, companion: '_CompanionState'):
-        """Parse a single line from one ESP32 serial companion."""
+    def _piglet_sync(self, ser, companion, readline, manual=False):
+        """Import Piglet's finished SD logs as sessions (see piglet_sync).
+        Lines that aren't sync replies keep flowing to the live parser."""
+        if not manual and not self.shared_data.config.get('wardriving_piglet_sync', True):
+            return
+        try:
+            import piglet_sync
+            link = piglet_sync.PigletLink(
+                ser.write, readline, lambda line: self._parse_serial_line(line, companion))
+            self.piglet_sync_status = {'state': 'running', 'port': companion.port,
+                                       'at': time.time()}
+            summary = piglet_sync.sync(link, self.data_dir,
+                                       hello_wait_s=20.0 if not manual else 10.0)
+            summary.update({'state': 'done', 'port': companion.port, 'at': time.time()})
+            self.piglet_sync_status = summary
+            if summary.get('supported'):
+                logger.warning(
+                    f"[wardriving] Piglet sync on {companion.port}: "
+                    f"{len(summary['imported'])} file(s) imported, {summary['skipped']} skipped, "
+                    f"{len(summary['errors'])} error(s)")
+        except Exception as e:
+            self.piglet_sync_status = {'state': 'error', 'error': str(e),
+                                       'port': companion.port, 'at': time.time()}
+            logger.warning(f"[wardriving] Piglet sync failed on {companion.port}: {e!r}")
+
+    def request_piglet_sync(self):
+        """Ask every connected Piglet listener to sync now. Returns the ports
+        asked (empty when no Piglet is connected through the engine)."""
+        ports = []
+        for c in list(getattr(self, '_companions', {}).values()):
+            if c.connected and c.name in ('Piglet', 'Piglet Core'):
+                c.piglet_sync_request = True
+                ports.append(c.port)
+        return ports
+
+    def _parse_serial_line(self, line: str, companion: '_CompanionState', pos=_NO_POS):
+        """Parse a single line from one ESP32 serial companion.
+
+        ``pos`` is the GPS fix from when the line was READ (the pipeline parses
+        it a moment later); omitted, the current fix is used.
+        """
         if not self.session:
             return
 
-        pos = self._gps.get_position() if self._gps else None
+        if pos is _NO_POS:
+            pos = self._gps.get_position() if self._gps else None
         gps_lat = pos['lat'] if pos else None
         gps_lon = pos['lon'] if pos else None
         gps_alt = pos.get('alt') if pos else None

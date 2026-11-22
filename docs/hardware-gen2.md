@@ -61,7 +61,9 @@ stack — web UI, recon tooling, the WiFi Spectrum Analyzer, and WiFi Defense
   tri-band radio. Use a **5 V / 2.5 A+** supply. Under-powering shows up as the
   dongle dropping off the bus mid-scan.
 - Optional: a [PiSugar UPS](https://www.pisugar.com/) adds battery power,
-  battery telemetry, and the hardware-button mode switch.
+  battery telemetry, and the hardware-button mode switch. A Waveshare
+  UPS HAT (C) also works for battery power and the on-screen percentage
+  (see [ups-hat.md](ups-hat.md)); it has no button.
 
 ---
 

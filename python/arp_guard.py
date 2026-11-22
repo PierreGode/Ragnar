@@ -44,7 +44,77 @@ DEFAULTS = {
     'flap_count': 3,                 # binding changes for one ip in the window
     'stable_threshold_s': 300.0,     # an old binding this stable -> high on change
     'trusted_bindings': {},          # ip -> mac, pinned OUT OF BAND
+    # FHRP (HSRP/VRRP) virtual groups the operator has CONFIRMED, out of band —
+    # a list of {"protocol","group","virtual_ip","virtual_mac"}. Trust comes only
+    # from an exact (virtual_ip, virtual_mac) pair here; a MAC merely *looking*
+    # like an FHRP virtual MAC is annotated, never trusted (it is spoofable).
+    'trusted_fhrp_groups': [],
 }
+
+
+# ===========================================================================
+# FHRP (HSRP/VRRP) virtual-MAC awareness
+# ===========================================================================
+# A redundant gateway pair legitimately moves its virtual IP between physical
+# routers with a gratuitous ARP — the exact pattern layers 1 & 2 catch — so
+# without this, normal failover looks like an attack. Recognition here is a pure
+# shape match (does the MAC fall in a reserved FHRP range); it is INFORMATIONAL.
+# Real trust is only an operator-pinned (virtual_ip, virtual_mac) pair, because a
+# MAC is spoofable — the same reasoning ndpwatch used to refuse prefix-only trust.
+# Ranges (Cisco/IETF): HSRPv1 00:00:0c:07:ac:GG, HSRPv2 00:00:0c:9f:fG:GG,
+# VRRP 00:00:5e:00:01:VV.
+def _classify_virtual_mac(mac):
+    """(proto, group, version) if `mac` shape-matches an FHRP virtual-MAC range,
+    else None. A match is informational only — never a basis for trust."""
+    try:
+        b = bytes(int(p, 16) for p in (mac or '').split(':'))
+    except (ValueError, AttributeError):
+        return None
+    if len(b) != 6:
+        return None
+    if b[:5] == b'\x00\x00\x0c\x07\xac':
+        return ('hsrp', b[5], 1)
+    if b[:4] == b'\x00\x00\x0c\x9f' and (b[4] & 0xf0) == 0xf0:
+        return ('hsrp', ((b[4] & 0x0f) << 8) | b[5], 2)
+    if b[:5] == b'\x00\x00\x5e\x00\x01':
+        return ('vrrp', b[5], None)
+    return None
+
+
+def _describe_virtual_mac(info):
+    if not info:
+        return None
+    proto, group, ver = info
+    return 'HSRPv%d group %d' % (ver, group) if proto == 'hsrp' else 'VRRP VRID %d' % group
+
+
+def _build_trusted_fhrp(groups):
+    """{(virtual_ip, mac_lower): entry} from trusted_fhrp_groups. An entry missing
+    either field degrades to 'not trusted' rather than raising."""
+    out = {}
+    for g in groups or []:
+        ip, mac = (g or {}).get('virtual_ip'), (g or {}).get('virtual_mac')
+        if ip and mac:
+            out[(ip, mac.lower())] = g
+    return out
+
+
+def _derive_fhrp_vmac(proto, group):
+    """The protocol-mandated virtual MAC for an HSRP/VRRP group number, or None.
+    HSRP group <=255 is v1 (00:00:0c:07:ac:GG); larger is v2 (00:00:0c:9f:fG:GG)."""
+    try:
+        g = int(group)
+    except (TypeError, ValueError):
+        return None
+    p = (proto or '').lower()
+    if p == 'hsrp':
+        if 0 <= g <= 255:
+            return '00:00:0c:07:ac:%02x' % g
+        if g <= 4095:
+            return '00:00:0c:9f:f%x:%02x' % ((g >> 8) & 0x0f, g & 0xff)
+    elif p == 'vrrp' and 0 <= g <= 255:
+        return '00:00:5e:00:01:%02x' % g
+    return None
 
 
 # ===========================================================================
@@ -124,6 +194,7 @@ class ArpGuard:
         self.cfg = c
         self.emit = emit or (lambda a: None)
         self.trusted = {k.lower(): v.lower() for k, v in (c.get('trusted_bindings') or {}).items()}
+        self.trusted_fhrp = _build_trusted_fhrp(c.get('trusted_fhrp_groups'))
         # layer 1
         self._bind = {}                          # ip -> {'mac', 'since', 'flaps': deque}
         # layer 2
@@ -173,15 +244,45 @@ class ArpGuard:
         macs_in_window = {m for _t, m in b['flaps']} | {b['mac']}
         prev = b['mac']
         b['mac'], b['since'] = mac, ts
-        if len(b['flaps']) >= self.cfg['flap_count'] and len(macs_in_window) >= 2:
-            return [{'layer': 'binding', 'code': 'binding_flap', 'severity': 'critical',
-                     'detail': '%s is flapping between %d MACs (%d changes/%.0fs) — two '
-                     'hosts racing to answer (active ARP spoofing)'
-                     % (ip, len(macs_in_window), len(b['flaps']), self.cfg['flap_window_s'])}]
-        sev = 'high' if stable_for >= self.cfg['stable_threshold_s'] else 'medium'
-        return [{'layer': 'binding', 'code': 'binding_conflict', 'severity': sev,
-                 'detail': '%s moved from %s to %s (old binding stable %.0fs) — ARP '
-                 'cache poisoning' % (ip, prev, mac, stable_for)}]
+        flapping = (len(b['flaps']) >= self.cfg['flap_count'] and len(macs_in_window) >= 2)
+        if flapping:
+            code, sev = 'binding_flap', 'critical'
+            detail = ('%s is flapping between %d MACs (%d changes/%.0fs) — two hosts '
+                      'racing to answer (active ARP spoofing)'
+                      % (ip, len(macs_in_window), len(b['flaps']), self.cfg['flap_window_s']))
+        else:
+            sev = 'high' if stable_for >= self.cfg['stable_threshold_s'] else 'medium'
+            code = 'binding_conflict'
+            detail = ('%s moved from %s to %s (old binding stable %.0fs) — ARP cache '
+                      'poisoning' % (ip, prev, mac, stable_for))
+
+        # --- FHRP awareness (trust = a confirmed (ip, mac) pin only) ---
+        old_trusted = self.trusted_fhrp.get((ip, prev.lower()))
+        new_trusted = self.trusted_fhrp.get((ip, mac.lower()))
+        if old_trusted and not new_trusted:
+            # Moving AWAY from a confirmed FHRP virtual MAC is the direction a real
+            # first-hop hijack takes — escalate, never de-escalate (even if flapping).
+            code, sev = 'fhrp_hijack', 'critical'
+            detail = ('%s was a CONFIRMED %s virtual-MAC binding (%s) and is now '
+                      'claimed by %s — first-hop gateway impersonation'
+                      % (ip, (old_trusted.get('protocol') or 'fhrp').upper(), prev, mac))
+        elif new_trusted and not old_trusted and not flapping:
+            # A clean one-time move INTO the confirmed virtual MAC for this exact IP
+            # is the expected shape of HSRP/VRRP failover — de-escalate to info.
+            code, sev = 'fhrp_transition', 'info'
+            detail = ('%s moved to its confirmed %s virtual MAC %s — expected '
+                      'failover/convergence'
+                      % (ip, (new_trusted.get('protocol') or 'fhrp').upper(), mac))
+
+        f = {'layer': 'binding', 'code': code, 'severity': sev, 'detail': detail}
+        # Shape-only match (not pinned): annotate, but DO NOT change behaviour.
+        shape = _describe_virtual_mac(_classify_virtual_mac(mac))
+        if shape and not new_trusted:
+            f['fhrp_shape'] = shape
+            f['detail'] += (' [new MAC matches the %s range but is not in '
+                            'trusted_fhrp_groups — register it if this is legitimate]'
+                            % shape)
+        return [f]
 
     # -- layer 2: gratuitous ARP rate + breadth ------------------------------
     def _layer2_gratuitous(self, pkt, ts):
@@ -189,20 +290,34 @@ class ArpGuard:
         # Gratuitous ARP: sender IP == target IP (an unsolicited binding assert).
         if not ip or not mac or ip == ZERO_IP or pkt.get('target_ip') != ip:
             return []
+        # A confirmed FHRP virtual MAC announcing its own registered virtual IP is
+        # exactly what HSRP/VRRP failover does — expected, not an attack.
+        if (ip, mac.lower()) in self.trusted_fhrp:
+            return []
         dq = self._garp[mac]
         dq.append((ts, ip))
         self._trim(dq, ts, self.cfg['garp_window_s'])
         same_ip = sum(1 for _t, i in dq if i == ip)
         distinct = {i for _t, i in dq}
+        # Shape-only match (not pinned): annotate the finding, no behaviour change.
+        shape = _describe_virtual_mac(_classify_virtual_mac(mac))
+        note = ('' if not shape else
+                ' [MAC matches the %s range but is not in trusted_fhrp_groups — '
+                'register it if this is legitimate FHRP traffic]' % shape)
         out = []
         if len(distinct) >= self.cfg['garp_breadth_threshold']:
-            out.append({'layer': 'gratuitous', 'code': 'garp_subnet_poison', 'severity': 'high',
-                        'detail': '%s sent gratuitous ARP for %d distinct IPs in %.0fs — '
-                        'subnet-wide poisoning' % (mac, len(distinct), self.cfg['garp_window_s'])})
+            f = {'layer': 'gratuitous', 'code': 'garp_subnet_poison', 'severity': 'high',
+                 'detail': '%s sent gratuitous ARP for %d distinct IPs in %.0fs — '
+                 'subnet-wide poisoning%s' % (mac, len(distinct), self.cfg['garp_window_s'], note)}
         elif same_ip >= self.cfg['garp_rate_threshold']:
-            out.append({'layer': 'gratuitous', 'code': 'garp_rate_flood', 'severity': 'medium',
-                        'detail': '%s sent %d gratuitous ARPs for %s in %.0fs — targeted '
-                        'poisoning/flood' % (mac, same_ip, ip, self.cfg['garp_window_s'])})
+            f = {'layer': 'gratuitous', 'code': 'garp_rate_flood', 'severity': 'medium',
+                 'detail': '%s sent %d gratuitous ARPs for %s in %.0fs — targeted '
+                 'poisoning/flood%s' % (mac, same_ip, ip, self.cfg['garp_window_s'], note)}
+        else:
+            return []
+        if shape:
+            f['fhrp_shape'] = shape
+        out.append(f)
         return out
 
     # -- layer 3: structural integrity ---------------------------------------
@@ -290,6 +405,38 @@ def learn_gateway(gateway_ip):
     return None
 
 
+def _default_fhrp_watch_path():
+    """FHRP Watch stores its learned groups in <repo>/data/fhrp_watch.json."""
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        'data', 'fhrp_watch.json')
+
+
+def suggest_fhrp_groups(path):
+    """Cross-pivot: read FHRP Watch's learned baseline and propose
+    trusted_fhrp_groups entries (protocol/group/virtual_ip/virtual_mac) for the
+    operator to CONFIRM. HSRP/VRRP virtual MACs are protocol-derived from the
+    group number; GLBP is skipped (its virtual MACs are per-forwarder, not a
+    single group MAC). This only *suggests* — trust still requires the operator to
+    paste a verified entry into the config. Returns [] on any error/empty."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return []
+    out = []
+    for g in (data.get('groups') or {}).values():
+        proto = (g.get('proto') or '').lower()
+        if proto not in ('hsrp', 'vrrp'):
+            continue
+        vmac = _derive_fhrp_vmac(proto, g.get('group'))
+        if not vmac:
+            continue
+        for vip in (g.get('vips') or []):
+            out.append({'protocol': proto, 'group': g.get('group'),
+                        'virtual_ip': vip, 'virtual_mac': vmac})
+    return out
+
+
 # ===========================================================================
 # Live capture / replay (scapy, lazy)
 # ===========================================================================
@@ -333,6 +480,10 @@ def main(argv=None):
     ap.add_argument('--learn-gateway', action='store_true',
                     help='print the gateway MAC from the kernel neighbour table (passive)')
     ap.add_argument('--gateway-ip', help='gateway IP for --learn-gateway')
+    ap.add_argument('--suggest-fhrp', action='store_true',
+                    help="propose trusted_fhrp_groups from FHRP Watch's learned groups "
+                         '(operator confirms before pinning)')
+    ap.add_argument('--fhrp-watch-json', help='path to fhrp_watch.json for --suggest-fhrp')
     ap.add_argument('--self-test', action='store_true')
     args = ap.parse_args(argv)
 
@@ -348,6 +499,18 @@ def main(argv=None):
             return 0
         sys.stderr.write('no neighbour entry for %s — ping it once, then retry\n' % args.gateway_ip)
         return 1
+    if args.suggest_fhrp:
+        path = args.fhrp_watch_json or _default_fhrp_watch_path()
+        groups = suggest_fhrp_groups(path)
+        if not groups:
+            sys.stderr.write('no HSRP/VRRP groups found in %s — run FHRP Watch first '
+                             '(it learns the segment\'s groups)\n' % path)
+            return 1
+        sys.stderr.write('# suggested trusted_fhrp_groups from FHRP Watch (%s).\n'
+                         '# VERIFY each is a real gateway you trust, then paste into '
+                         'arp_guard config:\n' % path)
+        print(json.dumps({'trusted_fhrp_groups': groups}, indent=2))
+        return 0
 
     cfg = {}
     if args.config:

@@ -93,6 +93,138 @@ DEFAULT_SOURCES = {
     'wpswatch':  {'label': 'WPS Watch',
                   'paths': ['/var/log/ragnar/wpswatch.jsonl',
                             '/var/log/wpswatch/alerts.jsonl']},
+    # Sub-GHz RF spectrum baseline/anomaly watch (rtl_sdr.py SpectrumBaseline):
+    # new/vanished carriers + broadband jamming vs a learned baseline.
+    'rfwatch':   {'label': 'RF Spectrum Watch (sub-GHz)',
+                  'paths': ['/var/log/ragnar/rfwatch.jsonl']},
+    # Standalone passive Dell SmartFabric OS10 SSRF-egress sensor (python/dellguard.py,
+    # its own systemd unit). LLDP-attributed egress vs a learned baseline — CVE-2025-22474.
+    'dellguard': {'label': 'Dell Guard (OS10 SSRF egress)',
+                  'paths': ['/var/log/ragnar/dellguard.jsonl']},
+    # In-app vendor CVE guards (network_diagnostics do_*_guard) emit JSON-lines
+    # findings here so Watchtower folds them into the one pane and Pushover path.
+    'cisco_guard':   {'label': 'Cisco Guard (IOS/IOS-XE/NX-OS)',
+                      'paths': ['/var/log/ragnar/cisco_guard.jsonl']},
+    'juniper_guard': {'label': 'Juniper Guard (J-Web/SSR/Space)',
+                      'paths': ['/var/log/ragnar/juniper_guard.jsonl']},
+    'arista_guard':  {'label': 'Arista Guard (EOS)',
+                      'paths': ['/var/log/ragnar/arista_guard.jsonl']},
+    'comware_guard': {'label': 'Comware Guard (VRF-hop / MPLS)',
+                      'paths': ['/var/log/ragnar/comware_guard.jsonl']},
+    'mikrotik_guard': {'label': 'MikroTik Guard (RouterOS CCR/CRS)',
+                       'paths': ['/var/log/ragnar/mikrotik_guard.jsonl']},
+    'aruba_guard': {'label': 'Aruba Guard (ArubaOS PAPI)',
+                    'paths': ['/var/log/ragnar/aruba_guard.jsonl']},
+    'apc_guard': {'label': 'APC Guard (NMC Ripple20)',
+                  'paths': ['/var/log/ragnar/apc_guard.jsonl']},
+    'liebert_guard': {'label': 'Liebert Guard (RomPager / RDU101)',
+                      'paths': ['/var/log/ragnar/liebert_guard.jsonl']},
+    # Continuous apcguard@<iface> daemon (python/apcguard.py, scripts/apcguard@.service).
+    'apcguard': {'label': 'APC Guard daemon (NMC Ripple20)',
+                 'paths': ['/var/log/ragnar/apcguard.jsonl']},
+    # Continuous liebert_guard@<iface> daemon (python/liebert_guard.py).
+    'liebertguard': {'label': 'Liebert Guard daemon (RomPager / RDU101)',
+                     'paths': ['/var/log/ragnar/liebertguard.jsonl']},
+    # In-app L5-L7 passive observers (ssh_watch / telnet_watch do_*_watch) emit
+    # their non-info findings here so the unified pane tails them too.
+    'ssh_watch':     {'label': 'SSH Watch (regreSSHion / Terrapin)',
+                      'paths': ['/var/log/ragnar/ssh_watch.jsonl']},
+    'telnet_watch':  {'label': 'Telnet Watch (Telnet + r-services: CVE-2026-24061 / 32746 / 2011-4862, rlogin -froot)',
+                      'paths': ['/var/log/ragnar/telnet_watch.jsonl']},
+    # In-app L3 redirect/ARP-poison MITM (do_icmp_watch v2) + BGP Path Watch v2
+    # convergence detection (do_path_convergence) stream their alerts here too.
+    'icmp_watch':    {'label': 'ICMP Watch (redirect MITM / ARP-poison)',
+                      'paths': ['/var/log/ragnar/icmp_watch.jsonl']},
+    'pathwatch':     {'label': 'BGP Path Watch (convergence / hijack)',
+                      'paths': ['/var/log/ragnar/pathwatch.jsonl']},
+    # SMB & Kerberos Watch v2: Responder poisoning, SMBv1 abuse, Kerberos
+    # roasting/downgrade/KDC-recon, and the NTLM relay tells (N2/N3).
+    'smb_watch':     {'label': 'SMB / Kerberos Watch (Responder / roast / relay)',
+                      'paths': ['/var/log/ragnar/smb_watch.jsonl']},
+    # LACP / Marker slow-protocol integrity (do_lacp_watch): aggregation hijack,
+    # VLAN-tagged / non-group-MAC LACPDU delivery-path anomalies, sync/timeout
+    # flapping, Marker floods — the HIGH/CRITICAL findings land here.
+    'lacp_watch':    {'label': 'LACP Watch (aggregation hijack / flapping)',
+                      'paths': ['/var/log/ragnar/lacp_watch.jsonl']},
+    # 802.3ah Link OAM (do_oam_watch): Loopback Control link blackhole, forged /
+    # flapping failure flags, re-peering, cleartext MIB reads, malformed OAMPDUs.
+    'oam_watch':     {'label': 'OAM Watch (Link OAM loopback blackhole / flag forgery)',
+                      'paths': ['/var/log/ragnar/oam_watch.jsonl']},
+    # 802.1ag CFM / Y.1731 service OAM (do_cfm_watch): forged APS protection
+    # switching, forged AIS / CCM, moved / duplicate MEPs, linktrace sweeps, LBM
+    # floods, malformed CFM (CVE-2020-1639) and the CVE-2025-52961 load pattern.
+    'cfm_watch':     {'label': 'CFM Watch (802.1ag / Y.1731 protection-switch / CCM forgery)',
+                      'paths': ['/var/log/ragnar/cfm_watch.jsonl']},
+    # RPC / NetLogon Watch (do_rpc_watch): Zerologon chain, NetLogon secure-channel
+    # posture, DCERPC auth-trailer posture, NTLM weaknesses, DCSync / remote-exec /
+    # backup-key / EPM-sweep, and WinRM/WS-Man posture. Coercion is Relay Watch's.
+    'rpc_watch':     {'label': 'RPC / NetLogon Watch (Zerologon / DCSync / WinRM)',
+                      'paths': ['/var/log/ragnar/rpc_watch.jsonl']},
+    # RDP Watch (do_rdp_watch): cleartext X.224 negotiation posture + connection
+    # abuse (Standard RDP Security selected, TLS refused, NLA not enforced,
+    # Restricted-Admin, cleartext mstshash cookie, brute force / spray / scan).
+    'rdp_watch':     {'label': 'RDP Watch (X.224 negotiation posture / brute-force)',
+                      'paths': ['/var/log/ragnar/rdp_watch.jsonl']},
+    # BFD failover-manipulation (do_bfd_watch): forged teardown / forced AdminDown /
+    # illegal state regression that induces routing reconvergence, malformed/truncated
+    # headers (CVE-2018-0155 iosd crash), auth downgrade/asymmetric, GTSM violations.
+    'bfd_watch':     {'label': 'BFD Watch (forged teardown / failover manipulation)',
+                      'paths': ['/var/log/ragnar/bfd_watch.jsonl']},
+    # PTP / IEEE-1588 / gPTP timing-plane manipulation (do_ptp_watch): grandmaster
+    # takeover / two sources one GM identity, correctionField or origin-timestamp
+    # injection, mid-session currentUtcOffset flip, management SET/WRITE, unicast-cancel
+    # forgery, and gPTP multi-peer-delay-responder denial-of-timing.
+    'ptp_watch':     {'label': 'PTP Watch (grandmaster takeover / time injection)',
+                      'paths': ['/var/log/ragnar/ptp_watch.jsonl']},
+    # ProFTPD mod_copy abuse (pre-auth / anonymous SITE CPFR-CPTO) and the quoted
+    # command verb that drives make_ftp_cmd out of bounds (do_ftp_watch).
+    'ftp_watch':     {'label': 'FTP Watch (ProFTPD mod_copy / quoted verb)',
+                      'paths': ['/var/log/ragnar/ftp_watch.jsonl']},
+    # Exim ${...} expansion in MAIL/RCPT (CVE-2019-10149, KEV), malformed SNI /
+    # client-cert DN (CVE-2019-15846) and the AUTH 4n+3 base64 over-consume
+    # (CVE-2018-6789, KEV) — do_smtp_watch.
+    'smtp_watch':    {'label': 'SMTP Watch (Exim expansion / SNI / AUTH b64)',
+                      'paths': ['/var/log/ragnar/smtp_watch.jsonl']},
+    # Cleartext HTTP/1.x + h2c + gRPC (do_http_watch): CL/TE framer disagreement
+    # (request smuggling / desync), HTTP.sys MS15-034 Range and Accept-Encoding
+    # shapes, credentials in the clear (always redacted), h2 Rapid Reset /
+    # CONTINUATION / HPACK abuse and gRPC header violations. HIGH/CRITICAL only.
+    'http_watch':    {'label': 'HTTP Watch (smuggling / HTTP.sys / cleartext creds / h2c-gRPC)',
+                      'paths': ['/var/log/ragnar/http_watch.jsonl']},
+    # Modbus/TCP posture: off-baseline writes, FC8 Force Listen Only / restart, UMAS
+    # + the ModiPwn sequence (CVE-2021-22779) and malformed MBAP/PDU framing — the
+    # libmodbus trigger (CVE-2019-14462/14463, CVE-2024-10918) — do_modbus_watch.
+    'modbus_watch':  {'label': 'Modbus Watch (PLC write / listen-only / UMAS)',
+                      'paths': ['/var/log/ragnar/modbus_watch.jsonl']},
+    # LLDP (802.1AB) malformed-TLV CVE shapes (lldpd CVE-2015-8011, Cisco, Juniper
+    # l2cpd, OVS, Aruba, PAN-OS, SonicWall), LLDP flood and forged neighbour —
+    # do_lldp_watch. Version-screening notes stay in the card.
+    'lldp_watch':    {'label': 'LLDP Watch (malformed TLV / flood / forged neighbour)',
+                      'paths': ['/var/log/ragnar/lldp_watch.jsonl']},
+    # MPLS / SR-MPLS / SRv6 label & segment manipulation (do_sr_mpls_watch): a label
+    # or SRH on a customer-facing port (label-injection / VRF-hopping), reserved /
+    # implicit-null labels forwarded, TTL-expired frames forwarded, SRv6 path
+    # disclosure / missing HMAC, and LDP/RSVP/BGP-SR/IS-IS-SR/OSPF-SR control tells.
+    'sr_mpls_watch': {'label': 'SR-MPLS Watch (label / segment injection)',
+                      'paths': ['/var/log/ragnar/sr_mpls_watch.jsonl']},
+    # In-app IKEv1/IKEv2 key-exchange posture (do_ipsec_watch): D(HE)at / weak DH
+    # groups, SWEET32 64-bit IKE ciphers, Aggressive Mode, weak PSK-hash / PRF,
+    # and the stateful DH-downgrade correlator.
+    'ipsec_watch':   {'label': 'IPsec / IKE Watch (D(HE)at / weak-DH / SWEET32)',
+                      'paths': ['/var/log/ragnar/ipsec_watch.jsonl']},
+    # Passive DNS-response threat detector (do_dns_watch): KeyTrap / NSEC3 DNSSEC
+    # DoS, NXNSAttack, MaginotDNS cache-poisoning, DNSBomb, SAD DNS.
+    'dns_watch':     {'label': 'DNS Watch (KeyTrap / NSEC3 / cache-poisoning)',
+                      'paths': ['/var/log/ragnar/dns_watch.jsonl']},
+    # Asset inventory change-detection (asset_inventory.py) emits new-device /
+    # IP-move / spoof / offline events here so they page + forward like any alert.
+    'asset_inventory': {'label': 'Asset Inventory',
+                        'paths': ['/var/log/ragnar/asset_inventory.jsonl']},
+    # CYD hybrid-node 2.4 GHz sensor (cyd_sensor.py): deauth floods + new/rogue
+    # AP sightings a cabled Cheap-Yellow-Display reports, folded in as a coarse
+    # second WiFi-Defense vantage point.
+    'cydsensor': {'label': 'CYD Sensor (2.4 GHz WiFi Defense)',
+                  'paths': ['/var/log/ragnar/cydsensor.jsonl']},
 }
 
 # Directories globbed for `*.jsonl`; the basename becomes the source name. This is
@@ -171,13 +303,21 @@ def normalize(raw, source):
     if ts is None:
         ts = time.time()
     codes = _codes(raw)
-    title = _first(raw, 'summary', 'reason', 'detail', 'message', 'msg',
+    title = _first(raw, 'summary', 'reason', 'title', 'note', 'detail', 'message', 'msg',
                    'signal', 'sni', 'subject_cn')
     if not title:
         title = ', '.join(codes) if codes else source
     src = _first(raw, 'src', 'sender_ip', 'server_ip', 'saddr', 'source_ip',
                  'identity', 'system')
     target = _first(raw, 'target', 'dst', 'group', 'victim', 'server_port')
+    # server/client records (liebert_guard): an attempt comes FROM the client at the
+    # server; a banner finding is about the server itself.
+    if src is None and raw.get('server') is not None:
+        attempt = str(raw.get('severity', '')).lower() in ('high', 'critical') \
+            and raw.get('banner') is None and raw.get('client') is not None
+        src = raw.get('client') if attempt else raw.get('server')
+        if attempt and target is None:
+            target = raw.get('server')
     module = raw.get('module') or source
     # Dedup key: same source + finding + endpoints = the same standing condition.
     key = '|'.join([source, ','.join(codes) or str(title),
@@ -307,6 +447,11 @@ class Watchtower:
         items = list(reversed(items))
         return items[:limit] if limit else items
 
+    def clear(self):
+        """Drop every alert from the display ring. File offsets are untouched, so
+        the tailer keeps its place and only genuinely new lines re-appear."""
+        self._alerts.clear()
+
     def load(self, alerts):
         """Seed the display ring from persisted alerts (does not affect offsets)."""
         for a in alerts:
@@ -387,6 +532,22 @@ def _self_test():
     ck('igmp sev HIGH->high', igmp['severity'] == 'high')
     ck('igmp rule->codes', igmp['codes'] == ['querier_spoof'])
     ck('igmp signal as title', igmp['title'] == 'rogue querier')
+    apc = normalize({'module': 'apcguard', 'code': 'APC-101', 'severity': 'critical',
+                     'title': 'Fragmented IPv4-in-IP tunnel datagram sent to an NMC',
+                     'detail': {'ident': 7}, 'src': '8.8.8.8'}, 'apcguard')
+    lg = normalize({'module': 'liebert_guard', 'code': 'LG-101', 'severity': 'high',
+                    'server': '10.9.0.5', 'client': '203.0.113.9', 'banner': None,
+                    'note': 'HTTP request line with a method token over 64 bytes',
+                    'detail': 'method_len=70'}, 'liebertguard')
+    lb = normalize({'module': 'liebert_guard', 'code': 'LG-001', 'severity': 'critical',
+                    'server': '10.9.0.5', 'client': '10.9.0.77', 'banner': 'RomPager/4.07',
+                    'note': 'RomPager banner is in the CVE-2014-9222 range', 'detail': None},
+                   'liebertguard')
+    ck('liebert attempt: src=client target=server, note as title',
+       lg['src'] == '203.0.113.9' and lg['target'] == '10.9.0.5' and lg['title'].startswith('HTTP request'))
+    ck('liebert banner: src=server', lb['src'] == '10.9.0.5' and lb['title'].startswith('RomPager'))
+    ck('apcguard title beats dict detail', apc['title'].startswith('Fragmented')
+       and apc['severity'] == 'critical')
 
     snmp = normalize({'module': 'snmpwatch', 'severity': 'CRITICAL',
                       'src': '10.0.0.7', 'dst': '10.0.0.1', 'reason': 'SNMP write'},

@@ -1,0 +1,11 @@
+REM macOS network enumeration to the Desktop (net_enum.txt).
+REM Authorized testing only.
+DELAY 1000
+GUI SPACE
+DELAY 600
+STRING Terminal
+DELAY 800
+ENTER
+DELAY 1500
+STRING { ifconfig; echo; netstat -rn; echo; scutil --dns | grep nameserver; echo; (lsof -i -P -n | grep LISTEN); echo; arp -a; } > ~/Desktop/net_enum.txt 2>&1
+ENTER

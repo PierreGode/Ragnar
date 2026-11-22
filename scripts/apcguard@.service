@@ -1,0 +1,112 @@
+# Ragnar apcguard — passive APC / Schneider NMC Ripple20 sensor (continuous mode).
+# OPT-IN, one instance per tapped interface. RX-only: it never transmits. The in-app
+# "APC Guard" card runs the same engine on demand; this unit watches continuously and
+# streams JSON-lines findings to /var/log/ragnar/apcguard.jsonl, which Watchtower tails
+# into the unified feed + Pushover path.
+#
+#   sudo cp scripts/apcguard@.service /etc/systemd/system/
+#   sudo install -d /etc/ragnar/apcguard
+#   sudo cp scripts/apcguard.conf.example /etc/ragnar/apcguard/apcguard.conf        # optional
+#   sudo cp scripts/apcguard-nmc.list.example /etc/ragnar/apcguard/nmc.list         # list your cards
+#   sudo systemctl daemon-reload && sudo systemctl enable --now apcguard@eth1
+#   tail -f /var/log/ragnar/apcguard.jsonl     # or watch the Watchtower pane
+#
+# Adapted from the module author's unit (hardening kept line for line):
+#   * paths point at the repo checkout (python/apcguard.py);
+#   * ProtectHome=read-only, not =yes: the script lives under /home, =yes would hide it;
+#   * the author's optional findings-file drop-in is folded in: LogsDirectory=ragnar +
+#     StandardOutput=append, so findings reach Watchtower out of the box. That gives the
+#     sensor one writable path, /var/log/ragnar (log data: never executed or unpickled);
+#   * the start-up self-test prints its summary on stdout, so it is sent to stderr (the
+#     journal) to keep the JSON-lines log clean.
+#
+[Unit]
+Description=Ragnar apcguard passive APC NMC Ripple20 sensor on %I
+Documentation=file:///home/ragnar/Ragnar/docs/nettools.md
+After=sys-subsystem-net-devices-%i.device
+BindsTo=sys-subsystem-net-devices-%i.device
+# StartLimit* belongs in [Unit]: in [Service] systemd silently ignores it and `systemd-analyze verify` still exits 0.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ragnar
+Group=ragnar
+EnvironmentFile=-/etc/ragnar/apcguard/apcguard.conf
+Environment=PYTHONDONTWRITEBYTECODE=1
+# A parser regression fails the unit here, loudly, instead of the sensor silently mis-detecting.
+ExecStartPre=/bin/sh -c 'exec /usr/bin/python3 /home/ragnar/Ragnar/python/apcguard.py --self-test 1>&2'
+ExecStart=/usr/bin/python3 /home/ragnar/Ragnar/python/apcguard.py --iface %I $APCGUARD_ARGS
+# One JSON finding per line on stdout -> the Watchtower log; the stats line (stderr) stays in the journal.
+LogsDirectory=ragnar
+StandardOutput=append:/var/log/ragnar/apcguard.jsonl
+# stderr defaults to "inherit" (= the file above); keep the self-test and stats lines in the journal.
+StandardError=journal
+Restart=on-failure
+RestartSec=5
+SyslogIdentifier=apcguard-%i
+
+# --- privilege: MEASURED. Runs unprivileged with CAP_NET_RAW alone -- promiscuous mode and the BPF filter attach
+# --- were both observed in that run's syscalls. With no capability at all, socket() fails EPERM (negative control).
+# --- CAP_NET_ADMIN is therefore not needed. It also executes /sbin/ldconfig at start (scapy locates libpcap that
+# --- way), so ldconfig and libpcap must exist on the host.
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_RAW
+AmbientCapabilities=CAP_NET_RAW
+
+# --- sockets: MEASURED. The live path opens exactly the families listed here and no others.
+RestrictAddressFamilies=AF_PACKET AF_NETLINK
+
+# --- W^X: MEASURED with systemd's own seccomp rules reproduced (mmap W+X, any mprotect(PROT_EXEC), shmat SHM_EXEC
+# --- refused; a control proved they were enforced). The sensor behaved identically, libpcap BPF compile included.
+# --- x86_64 ONLY: re-run apcguard_measure_runtime.py ON THE TARGET; drop-in 30-no-mdwe.conf.example turns it off.
+MemoryDenyWriteExecute=yes
+
+# --- syscalls: every syscall the measurement observed is inside this set (checked by apcguard_unit_verify.py).
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# @system-service still allows these; none was observed, and denying them costs nothing measurable.
+SystemCallFilter=~keyctl mknod process_vm_writev setgid userfaultfd
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+# --- filesystem: the sensor reads libraries, /etc/ld.so.cache, /etc/protocols, /etc/localtime, /etc/resolv.conf,
+# --- /dev/null and its own /proc/self/{cgroup,mountinfo}; scapy also OPTIONALLY reads a pickle cache under $HOME,
+# --- which the sensor works without. Its only persistent write is the findings log above. scapy unpickles
+# --- that cache, so a writable cache directory would be the only persistent path a compromised parser could plant
+# --- a payload in; the cost of having none was measured on a scapy import (cold vs warm), not on the sensor.
+# --- Hence no ReadWritePaths=; the one *Directory= is LogsDirectory= for the findings log (see top).
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+UMask=0077
+LimitCORE=0
+
+# --- resources: MEASURED. MemoryMax is ~1.6x the peak RSS seen with BOTH state caps exceeded by a flood. Findings now go
+# --- to the log file here. The journal limit is kept raised anyway (default 10000 per 30 s is BELOW the measured flood
+# --- rate; ~3x that rate) so findings are not dropped if StandardOutput is ever pointed back at the journal.
+MemoryMax=160M
+TasksMax=16
+LogRateLimitIntervalSec=30
+LogRateLimitBurst=50000
+
+# --- forbidden, deliberately absent: PrivateNetwork (hides the tapped interface), PrivateUsers (breaks CAP_NET_RAW in
+# --- the host user namespace), DynamicUser (the web UI reads files as the shared ragnar user), ProcSubset=pid (would
+# --- hide /proc/net, which this measurement did not exercise; left off rather than assumed safe).
+
+[Install]
+WantedBy=multi-user.target

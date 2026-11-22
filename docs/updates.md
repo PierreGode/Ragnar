@@ -5,12 +5,17 @@ behave identically:
 
 | | |
 |---|---|
-| **Web UI** | **Settings → System Updates → Update System** |
+| **Web UI** | **Config → System → Update System** |
 | **Terminal** | `sudo /home/ragnar/Ragnar/update_ragnar.sh` |
 
 The web path is handled by [`git_updater.py`](../git_updater.py), a dedicated
 update engine, plus [`scripts/post_update.sh`](../scripts/post_update.sh) which
 finishes the job and restarts the service.
+
+This updates **Ragnar's code**. The operating system underneath it (the kernel,
+security fixes, and third-party packages such as **Tailscale**) comes from apt
+and is updated separately: see
+[Operating-system packages (apt)](#operating-system-packages-apt).
 
 ---
 
@@ -76,6 +81,7 @@ in the card and in the console panel underneath it.
 | `disk_full` | Not enough space to pull | Free space — `data/logs` and old captures first |
 | `not_a_repo` | No `.git` (tarball install) **and** upstream unreachable | Check the box's internet connection; the check repairs this by itself once it can reach github.com |
 | `branch_missing` | The tracked branch is gone upstream | Nothing — the updater falls back to the default branch automatically |
+| `repo_damaged` (also shown for `broken_tag`) | Git's own files on the box are damaged, usually by a power cut during a write | Click **Repair and Update**. Most damage is repaired by the update check itself and never shown; see [Damaged git data](#damaged-git-data) |
 | `ownership` | Git refused the checkout's file ownership | Usually self-repairing; else `sudo chown -R ragnar:ragnar /home/ragnar/Ragnar` |
 | `locked` | Another git process holds the repository | Wait a moment and retry; stale locks are swept automatically |
 | `permission` | The service cannot write its own directory | `sudo chown -R ragnar:ragnar /home/ragnar/Ragnar` |
@@ -139,6 +145,137 @@ data/logs/post_update.json    # machine-readable state, step and outcome
 
 ---
 
+## Operating-system packages (apt)
+
+**Config → System → OS Packages** updates everything apt manages: the kernel and
+firmware, Debian / Raspberry Pi OS / Kali security fixes, and the third-party
+repositories the installer adds (Tailscale from `pkgs.tailscale.com`, Docker,
+cloudflared, ...). Before this card existed none of that was reachable from the
+web UI. `update_ragnar.sh` does not do it either: it installs Tailscale when the
+mesh is enabled, but never upgrades a copy that is already there.
+
+| Button | What it runs |
+|---|---|
+| **Check for Updates** | `apt-get update`, then lists what can be upgraded. Security fixes are tagged and listed first |
+| **Upgrade All (N)** | `apt-get upgrade --with-new-pkgs`: every upgradable package, plus any new dependency they need (new kernels do) |
+| **Update Tailscale only** | `apt-get install --only-upgrade --no-remove tailscale`. Shown when a Tailscale update is waiting; the **Ragnar Mesh** tab shows the same button |
+| **Upgrade anyway** | On a *held-back* package only: upgrades it and lets apt remove the packages the card names, nothing else. See [Held-back packages](#held-back-packages) |
+
+The list is read from apt's own state, so updates that `apt-get update` found
+elsewhere (in an SSH session, or apt-daily) show up too. "Package lists
+refreshed ... ago" says how current it is.
+
+### Safe by design
+
+- **Nothing is removed unless you approve it.** Ragnar uses
+  `upgrade --with-new-pkgs`, never `full-upgrade`, and every run passes
+  `--no-remove`. An upgrade can add a dependency, but it can never uninstall a
+  tool Ragnar relies on. A package that would need something removed is
+  [held back](#held-back-packages), and the card says what it would remove.
+- **Download first, install second.** Everything is downloaded before dpkg
+  touches the system, so a dropped connection mid-download changes nothing.
+- **Disk-space check.** Between download and install, apt's own estimate of the
+  space the install adds is compared with what is free (plus 300 MB headroom).
+  If it doesn't fit, nothing is installed. A root filesystem filling up halfway
+  through dpkg is the one way an upgrade really breaks a box.
+- **Non-interactive.** No debconf questions, no conffile prompts: every changed
+  config file keeps **your** version (`--force-confold`). `needrestart` only
+  lists services; it never restarts them on its own.
+- **Survives the restarts it causes.** The run executes in a transient systemd
+  unit, `ragnar-os-update`, not inside the web service. An upgrade can restart
+  `tailscaled` (a browser on the tailnet drops for a few seconds), NetworkManager
+  or wpa_supplicant (Wi-Fi blips), or Ragnar's own dependencies. The run carries
+  on regardless, and the card reconnects and picks up the progress by itself.
+- **Interrupted runs are repaired.** Every upgrade starts with
+  `dpkg --configure -a`, so a run cut short by a power loss is finished by the
+  next one. A run whose process vanished, including across a reboot, shows as
+  *interrupted* instead of leaving the card stuck on "Upgrading...".
+- **Cleans up after itself.** `apt-get clean` drops the downloaded `.deb` files
+  afterwards; on a 16 GB card a big upgrade can otherwise leave hundreds of MB
+  behind.
+
+### Held-back packages
+
+`apt list --upgradable` shows every package with a newer version, including some
+that **Upgrade All** will never install. After every check and upgrade, Ragnar
+works out which ones those are and why, lists them under **Held back** on the
+card, and leaves them out of the **Upgrade All (N)** count. If only held-back
+packages are left, the badge reads *N held back* and Upgrade All is disabled.
+Before this, the card offered "Upgrade All (1)" and each run quietly skipped it,
+so the box looked stuck.
+
+| Reason on the card | What it means | Button |
+|---|---|---|
+| Upgrading it means removing another package | The new version conflicts with something installed. The card lists what it **removes** and what it **adds** | **Upgrade anyway** |
+| Upgrade All leaves it alone, but it can be upgraded on its own | apt's upgrade solver is conservative; a direct install works and removes nothing | **Upgrade anyway** |
+| It is on hold (`apt-mark hold`) | Someone pinned it. Ragnar respects the hold | none; `sudo apt-mark unhold <pkg>` lifts it |
+| Phased rollout | Ubuntu is releasing it to a share of machines at a time. It installs by itself later | none |
+| apt cannot upgrade it without breaking another package | Unresolvable right now; the apt error is shown | none |
+
+**Upgrade anyway** shows exactly what goes and what comes before it starts. The
+run then re-plans the upgrade and **changes nothing** (`removal_changed`) if apt
+now wants to remove anything that wasn't on that list.
+
+The common case on Raspberry Pi OS (trixie, late 2026) is **`rpd-common`
+1.18 → 1.35**. The new desktop settings package depends on `pcmanfm-pi`,
+Raspberry Pi's fork of the PCManFM file manager, which declares
+`Breaks/Replaces: pcmanfm`. Upgrading means `pcmanfm` is removed and
+`pcmanfm-pi`, `qt6gtk2`, `brightnessctl` and `brightness-udev` come in. That's a
+planned package swap, and the desktop file manager keeps working. Ragnar itself
+doesn't use any of these packages, so it's safe either way. A headless unit
+doesn't need it at all.
+
+### After an upgrade
+
+The card says **Reboot recommended** when a newer kernel is installed than the
+one running, when a package raised Debian's `/run/reboot-required` flag, or when
+the kernel, firmware, libc, systemd, dbus or OpenSSL was upgraded. Rebooting is
+up to you; the button is right there.
+
+A large first upgrade on an old image (hundreds of packages) can take tens of
+minutes on a Pi 4/5 and much longer on a Pi Zero 2 W. Leave the box powered.
+You can close the page: the run continues, and reopening the card shows where it
+is. **Last run output** on the card is the full apt log
+(`data/logs/os_update.log`); **Run before** shows the one before it
+(`data/logs/os_update.prev.log`), so a quick check right after a big upgrade no
+longer replaces the only record of how the upgrade went. apt keeps its own
+history in `/var/log/apt/history.log` as well.
+
+### When a check or upgrade fails
+
+The card shows one sentence on what happened and one on what to do:
+
+| Code | Meaning |
+|---|---|
+| `offline` | The package mirrors could not be reached. Nothing was installed |
+| `repo_key` | A repository's signing key is missing or expired (the card names the repo). For Tailscale, `sudo bash scripts/setup_mesh.sh install` re-adds it |
+| `locked` | Another apt run (SSH, apt-daily) held the lock for 10 minutes |
+| `disk_full` | Not enough space for the download or the install. Nothing was installed |
+| `dpkg_broken` / `dpkg_error` | dpkg stopped part-way. Run the upgrade again: it starts with `dpkg --configure -a` |
+| `needs_removal` | A targeted upgrade (e.g. Update Tailscale only) would have to remove another package. Nothing was changed; it shows up as held back |
+| `removal_changed` | **Upgrade anyway**: apt now plans to remove something you didn't approve. Nothing was changed. Check again and review |
+| `interrupted` | The run was stopped (power loss, reboot, unit stopped) before it finished |
+
+In a Docker container the card says OS updates are not available there: the
+packages come with the image, so pull or rebuild it instead. On a distribution
+without apt the card explains that too.
+
+### Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/system/os-updates` | Upgradable packages (cached against apt's state), current/last run, Tailscale versions, reboot state |
+| `POST /api/system/os-updates/check` | Start `apt-get update` in the `ragnar-os-update` unit |
+| `POST /api/system/os-updates/upgrade` | Upgrade everything, or `{"packages": ["tailscale"]}` for named packages. Names must be on the upgradable list. `"allow_remove": ["pcmanfm"]` approves removals for a held-back package (a ceiling: the run stops if apt plans any other) |
+| `GET /api/system/os-updates/log` | Tail of the run's apt output; `?previous=1` for the run before |
+
+All four need a logged-in session. A second run while one is active returns
+**409** `busy`. The engine is [`os_updates.py`](../os_updates.py); its tests,
+[`tests/test_os_updates.py`](../tests/test_os_updates.py), drive the real
+runner against fake `apt-get` / `dpkg` binaries through every failure above.
+
+---
+
 ## Troubleshooting
 
 ### The update button reports an error and nothing else
@@ -172,6 +309,59 @@ the same. A box in that state is not "behind" — it is running the release it w
 installed from — so once the metadata is back the card simply reads **Up to
 Date**. Only a box that cannot reach github.com at all reports `not_a_repo`, and
 the repair is retried at most every 10 minutes until it succeeds.
+
+### Damaged git data
+
+Git keeps its state in small files under `.git`. A box that loses power in the
+middle of a write (a pulled plug, a flat battery, a handheld switched off) can
+be left with empty or half-written ones. A single bad file is enough to make
+every fetch fail, and with it every update and every branch switch. The usual
+symptom was an orange **Needs attention** with a message about a corrupt tag and
+an Update button that could not be clicked.
+
+Ragnar repairs this itself, in steps of increasing cost:
+
+0. **Ownership.** Files in `.git` that belong to the wrong user are given back
+   to the checkout's owner, so the steps below (and git itself) can write there.
+1. **Plain-file fixes.** An unreadable `HEAD`, `config` or `packed-refs`, empty
+   ref files and zero-length object files are fixed or removed.
+2. **Broken references.** Every tag, branch, remote branch or stash that points
+   at an object git cannot read is dropped (the fetch recreates what matters),
+   and a corrupt index is rebuilt.
+3. **Refetch.** Missing objects are downloaded again from upstream.
+4. **Rebuild.** If git still cannot work, `.git` is replaced with a fresh one
+   built around the files already on disk.
+
+The background update check runs steps 0 to 3, so most damage is gone before
+you see it. Step 4 runs only when you click **Repair and Update** (or run
+`update_ragnar.sh`), because it resets Ragnar's own program files to the upstream
+version; with the old history unreadable, a local edit cannot be told apart from
+an old version. It also only runs when git itself reports damaged data, never for
+an error Ragnar does not recognise. Your settings, databases and collected data
+are gitignored and are not touched by any step. If the rebuild cannot reach
+github.com, the old `.git` is put back exactly as it was.
+
+**Where root-owned files came from.** The Ragnar service runs as root while the
+checkout belongs to `ragnar`. Each background update check fetched as root and
+left root-owned files in `.git`, and git's automatic clean-up, started in the
+background by that fetch, went on writing more after it returned. A `git`
+command run by hand as `ragnar` then failed with "permission denied". Ragnar now
+hands the files back after every fetch and runs that clean-up in the foreground,
+so nothing is written afterwards. Running `update_ragnar.sh` with `sudo` remains
+the supported way to update from a shell; it fixes ownership itself.
+
+Two habits still help: shut the board down instead of cutting power, and keep
+some free space on the card (`df -h`); an update refuses to start below 60 MB.
+
+The button now stays usable in every state except "git does not run on this
+board" and "the disk is full".
+
+By hand, from a shell:
+
+```bash
+cd /home/ragnar/Ragnar
+sudo ./update_ragnar.sh        # runs the same repair ladder, then updates
+```
 
 ### The service did not come back after an update
 

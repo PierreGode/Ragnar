@@ -1,0 +1,8 @@
+# Install as /etc/systemd/system/apcguard@eth1.service.d/10-restrict-interface.conf  (one per instance).
+#
+# The interface name MUST be a LITERAL. `RestrictNetworkInterfaces=%I` parses, is rejected at runtime
+# ("Invalid interface name, ignoring: %I") because systemd validates before expanding the specifier, and
+# `systemd-analyze verify` still exits 0. This directive is also a no-op (systemd logs it) on kernels
+# without the BPF LSM, so treat it as defence in depth, not as the boundary.
+[Service]
+RestrictNetworkInterfaces=eth1

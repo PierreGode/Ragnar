@@ -85,7 +85,7 @@ function buildNvsPartition(size, keys) {
 // written right after target_port). node_id gives each node a unique identity;
 // without it every node falls back to the firmware default (1) and they collide
 // -- the server then only ever shows one node at a time.
-function buildCsiCfgNvs({ ssid, password, target_ip, target_port = 5005, node_id, edge_tier = 0, ext_antenna }) {
+function buildCsiCfgNvs({ ssid, password, target_ip, target_port = 5005, node_id, channel, edge_tier = 0, ext_antenna }) {
   const keys = [
     { type: 'namespace', key: 'csi_cfg', value: 1 },
     { type: 'string', key: 'ssid', value: ssid },
@@ -95,6 +95,13 @@ function buildCsiCfgNvs({ ssid, password, target_ip, target_port = 5005, node_id
   ];
   if (node_id !== undefined && node_id !== null) {
     keys.push({ type: 'u8', key: 'node_id', value: node_id & 0xFF });
+  }
+  // ADR-060: fixed CSI channel override (u8 'csi_channel'). At boot the firmware
+  // takes this as priority #1 over connected-AP auto-detect and the Kconfig
+  // default (csi_collector.c). Matches provision.py --channel. Omit the key to
+  // let the node auto-detect its channel from the AP it associates with.
+  if (channel !== undefined && channel !== null) {
+    keys.push({ type: 'u8', key: 'csi_channel', value: channel & 0xFF });
   }
   // XIAO ESP32-C6 antenna select (u8 'ext_ant'): 1 = external u.FL, 0 = on-board.
   // Read by the firmware in app_main before the radio starts. Only meaningful on

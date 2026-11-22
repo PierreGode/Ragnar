@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import ipaddress
 import logging
 import re
 import subprocess
+import threading
+import time
 from typing import Dict, List, Optional
 
 from logger import Logger
@@ -251,37 +254,47 @@ def gather_wifi_interfaces(default_interface: str = 'wlan0') -> List[Dict]:
 
 def _check_ethernet_carrier(interface_name: str) -> bool:
     """Check if an Ethernet interface has a physical connection (carrier)."""
+    # Read sysfs directly. This runs for every Ethernet-type interface on
+    # every status refresh; spawning `cat` for it was the single largest
+    # source of process churn in the web app.
     try:
-        # Check carrier file in sysfs
-        result = subprocess.run(
-            ['cat', f'/sys/class/net/{interface_name}/carrier'],
-            capture_output=True,
-            text=True,
-            timeout=2
-        )
-        if result.returncode == 0:
-            carrier = result.stdout.strip()
-            return carrier == '1'
-    except Exception as exc:
-        logger.debug(f"Unable to check carrier for {interface_name}: {exc}")
-
-    # Fallback: check if interface is UP and has an IP
-    try:
-        result = subprocess.run(
-            ['ip', 'link', 'show', interface_name],
-            capture_output=True,
-            text=True,
-            timeout=2
-        )
-        if result.returncode == 0:
-            return 'state UP' in result.stdout
-    except Exception:
+        with open(f'/sys/class/net/{interface_name}/carrier', 'r') as handle:
+            return handle.read().strip() == '1'
+    except OSError:
+        # Reading carrier fails with EINVAL while the interface is
+        # administratively down, and the file is absent if it vanished.
         pass
+
+    try:
+        with open(f'/sys/class/net/{interface_name}/operstate', 'r') as handle:
+            return handle.read().strip().lower() == 'up'
+    except OSError as exc:
+        logger.debug(f"Unable to check carrier for {interface_name}: {exc}")
 
     return False
 
 
+# gather_ethernet_interfaces() costs an nmcli run, an `ip link` run and one
+# `ip addr` run per interface. The status broadcast asks for it several times
+# per tick, so identical answers are shared for a short while.
+_ETHERNET_CACHE_TTL = 3.0
+_ethernet_cache_lock = threading.Lock()
+_ethernet_cache: Dict[str, tuple] = {}
+
+
 def gather_ethernet_interfaces(default_interface: str = 'eth0') -> List[Dict]:
+    """Collect Ethernet interface metadata (briefly cached, see above)."""
+    now = time.monotonic()
+    with _ethernet_cache_lock:
+        cached = _ethernet_cache.get(default_interface)
+        if cached and now - cached[0] < _ETHERNET_CACHE_TTL:
+            return copy.deepcopy(cached[1])
+        result = _gather_ethernet_interfaces_uncached(default_interface)
+        _ethernet_cache[default_interface] = (time.monotonic(), result)
+        return copy.deepcopy(result)
+
+
+def _gather_ethernet_interfaces_uncached(default_interface: str = 'eth0') -> List[Dict]:
     """Collect Ethernet interface metadata using nmcli + ip link fallbacks."""
     interfaces: Dict[str, Dict] = {}
 
@@ -383,6 +396,15 @@ def gather_ethernet_interfaces(default_interface: str = 'eth0') -> List[Dict]:
         # If we have a valid (non-link-local) IP, we're likely connected
         if iface['ip_address'] and iface.get('has_carrier') and not iface.get('is_link_local'):
             iface['connected'] = True
+
+    # A USB-tethered hotspot/phone (enx<mac>) is a cellular fallback uplink,
+    # not a LAN to scan — keep it out of the Ethernet list entirely.
+    try:
+        from cellular_uplink import is_cellular
+    except Exception:  # pragma: no cover - module always ships alongside
+        is_cellular = None
+    if is_cellular:
+        interfaces = {k: v for k, v in interfaces.items() if not is_cellular(k)}
 
     return sorted(interfaces.values(), key=lambda entry: entry['name'])
 

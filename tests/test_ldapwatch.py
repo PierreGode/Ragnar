@@ -14,9 +14,11 @@ import ipaddress
 import ldap_watch as L
 
 
-def _detect(messages, flowkey=('10.0.0.9', 55000, '10.0.0.1', 389), cldap=None):
+def _detect(messages, flowkey=('10.0.0.9', 55000, '10.0.0.1', 389), cldap=None,
+            local_nets=None):
     """Feed fabricated LDAP messages through the real parse + detect path."""
     det = L.LdapDetector()
+    det.local_nets = local_nets
     for raw in messages:
         parsed, _ = L.split_ldap_messages(raw)
         for m in parsed:
@@ -150,6 +152,27 @@ def test_brute_force_invalid_credentials():
         for msg in msgs:
             det.feed_message(fk, msg)
     assert 'brute-force' in {f['code'] for f in det.result()['findings']}
+
+
+def test_external_referral_ldapnightmare():
+    nets = [ipaddress.ip_network('10.0.0.0/24')]
+    # SearchResultReference to an external IP == LDAPNightmare steering vector.
+    r = _detect([L._search_ref(['ldap://203.0.113.66:389/dc=evil,dc=com'])],
+                local_nets=nets)
+    assert 'external-referral' in _codes(r)
+    assert r['verdict'] == 'compromised'
+    # A [3] referral in a bind response is caught the same way.
+    r = _detect([L._bind_resp(L.RC_SUCCESS, referrals=['ldap://198.51.100.5/'])],
+                local_nets=nets)
+    assert 'external-referral' in _codes(r)
+
+
+def test_in_forest_referral_is_clean():
+    nets = [ipaddress.ip_network('10.0.0.0/24')]
+    # A referral to our own subnet (or a hostname we can't place) must NOT fire.
+    r = _detect([L._search_ref(['ldap://10.0.0.7/dc=corp',
+                                'ldap://dc2.corp.local/dc=corp'])], local_nets=nets)
+    assert 'external-referral' not in _codes(r)
 
 
 def test_cldap_reflection_off_subnet():
