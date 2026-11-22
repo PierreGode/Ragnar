@@ -123,6 +123,61 @@ def test_the_result_is_cached_until_reset(env):
     assert len(calls) == 2
 
 
+# ── robust getty discovery / port fallback (the "GPS stays silent" fix) ──────
+
+def test_a_prompt_named_serial0_is_still_seen(monkeypatch):
+    """The login prompt is usually serial-getty@serial0 or @ttyAMA0, not the
+    hard-coded @ttyS0. serial_getty_active() must see it or the UART is never
+    freed and the GPS never gets read."""
+    monkeypatch.setattr(cc, "_gnss_getty_units",
+                        lambda: ["serial-getty@ttyS0.service",
+                                 "serial-getty@serial0.service"])
+
+    def runner(args):
+        if args[0] == "is-active":
+            return (0, "active") if "serial0" in args[1] else (3, "inactive")
+        return 0, ""
+
+    assert cc.serial_getty_active(runner=runner) is True        # aggregate sees it
+    assert cc.serial_getty_active(port="/dev/ttyS0", runner=runner) is False  # ttyS0 alone missed it
+
+
+def test_free_uart_stops_the_prompt_whatever_it_is_named(monkeypatch):
+    monkeypatch.setattr(cc, "_gnss_getty_units",
+                        lambda: ["serial-getty@ttyS0.service",
+                                 "serial-getty@ttyAMA0.service"])
+    up = {"serial-getty@ttyAMA0.service": True}
+    calls = []
+
+    def runner(args):
+        calls.append(args)
+        unit = args[1] if len(args) > 1 else ""
+        if args[0] == "is-active":
+            return (0, "active") if up.get(unit) else (3, "inactive")
+        if args[0] == "stop":
+            up[unit] = False
+        return 0, ""
+
+    ok, message = cc.free_gnss_uart(root="/nonexistent", runner=runner)   # port=None → auto
+    assert ok and "stopped" in message
+    assert ["stop", "serial-getty@ttyAMA0.service"] in calls
+    assert ["mask", "serial-getty@ttyAMA0.service"] in calls
+
+
+def test_gps_found_on_serial0_when_ttys0_is_silent(env, monkeypatch):
+    """ttyS0 is silent or absent; the GPS answers on /dev/serial0 (the real
+    GPIO14/15 UART). The probe tries serial0 and reports it as the port."""
+    monkeypatch.setattr(cc, "_gnss_port_candidates",
+                        lambda: ["/dev/ttyS0", "/dev/serial0"])
+
+    def probe(dev):
+        return 9600 if dev == "/dev/serial0" else None
+
+    g = cc.detect_grove_gnss(config={}, free_uart=True, baud_probe=probe)
+    assert g["present"] is True and g["port"] == "/dev/serial0" and g["baud"] == 9600
+    assert cc.grove_gnss_standby() == ("/dev/serial0", 9600)
+
+
 # ── detect() integration ─────────────────────────────────────────────────────
 
 def test_detect_surfaces_the_grove_gps(env, monkeypatch):

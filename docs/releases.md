@@ -4,6 +4,17 @@
 
 ### 2026-11-22
 
+#### fix(cardputer): Grove GPS found whatever the login prompt is named; Grove 5 V powers on after start-up; display-off self-heals
+
+*branch `fix/cardputer-grove-power-gps`*
+
+- **Grove GPS is now reliably detected.** The serial login prompt that has to come off the UART before GPS can read it is usually `serial-getty@serial0` (or `@ttyAMA0`), not the hard-coded `@ttyS0` — so Ragnar was not actually freeing it and the receiver stayed silent even though its fix LED was blinking. Ragnar now finds and stops the prompt **whatever it is named** (`ttyS0` / `ttyAMA0` / `serial0`), and probes `/dev/serial0` and `/dev/ttyAMA0` as well as `/dev/ttyS0`, so the GPS is found on whichever device the Grove UART really is on this board.
+- **"Source: serial" is the working state.** The Grove port *is* a UART, so a running Grove GPS correctly reads `source: serial` (direct NMEA, as opposed to `gpsd`). There is no separate "grove" source — *grove* is only the hardware-panel label for where the serial GPS is plugged in. Clarified in the docs.
+- **Grove 5 V now powers on a moment *after* start-up**, with a clean off→on edge, rather than being snapped on during boot — safer, and it gives a GPS unit a fresh power-up once the Pi is settled (`cardputer_grove_power`, unchanged default `true`).
+- **Display-off (the `0` key) self-heals.** If the one backlight-wake write glitched, the screen could stay dark until a reboot; the render loop now keeps retrying the wake until the light is back.
+- Tests: getty discovery by alias, `/dev/serial0` port fallback; 438 in the cardputer/GPS/mesh group pass.
+- Docs: [CardputerZero-Caps.md → GPS on the Grove port](CardputerZero-Caps.md).
+
 #### feat(cardputer): a GPS on the Grove port drives wardriving and Meshtastic
 
 *branch `feat/cardputer-grove-gps`*
