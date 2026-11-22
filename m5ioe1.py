@@ -29,11 +29,21 @@
 #   0x25 PWM_FREQ_L/ 0x26 PWM_FREQ_H global PWM frequency (Hz, 16-bit)
 #   PWMx_H bits: 7 = EN, 6 = POL (1 = active-low), [3:0] = DUTY[11:8]
 
+import contextlib
 import logging
 import os
 import time
 
 logger = logging.getLogger(__name__)
+
+try:
+    import i2c_bus
+
+    def _bus_lock():
+        return i2c_bus.lock()
+except Exception:                      # pragma: no cover - keep the no-op guarantee
+    def _bus_lock():
+        return contextlib.nullcontext()
 
 # --- Register addresses -------------------------------------------------------
 REG_GPIO_M_L   = 0x03
@@ -92,7 +102,8 @@ class M5IOE1:
             self._bus = smbus2.SMBus(self.bus_num)
             # UID_L (0x00) is a read-only factory id — a clean way to confirm the
             # expander is really answering at this address before we poke it.
-            self._bus.read_byte_data(self.addr, 0x00)
+            with _bus_lock():
+                self._bus.read_byte_data(self.addr, 0x00)
             self.available = True
             logger.info("M5IOE1: expander present at 0x%02X on i2c-%d "
                         "(backlight PWM%d, reset IO%d)",
@@ -129,9 +140,10 @@ class M5IOE1:
 
     def _set_gpio(self, io, level):
         dir_reg, out_reg, drv_reg, bit = self._gpio_regs(io)
-        self._update_bit(drv_reg, bit, False)   # push-pull (0), not open-drain
-        self._update_bit(dir_reg, bit, True)    # direction = output
-        self._update_bit(out_reg, bit, bool(level))
+        with _bus_lock():                        # the three RMWs are one unit
+            self._update_bit(drv_reg, bit, False)   # push-pull (0), not open-drain
+            self._update_bit(dir_reg, bit, True)    # direction = output
+            self._update_bit(out_reg, bit, bool(level))
 
     # --- public API --------------------------------------------------------
     def reset_lcd(self):
@@ -140,12 +152,13 @@ class M5IOE1:
         if not self.available:
             return False
         try:
-            self._set_gpio(self.rst_io, 1)   # idle deasserted
-            time.sleep(0.010)
-            self._set_gpio(self.rst_io, 0)   # assert reset
-            time.sleep(0.010)
-            self._set_gpio(self.rst_io, 1)   # release
-            time.sleep(0.120)
+            with _bus_lock():
+                self._set_gpio(self.rst_io, 1)   # idle deasserted
+                time.sleep(0.010)
+                self._set_gpio(self.rst_io, 0)   # assert reset
+                time.sleep(0.010)
+                self._set_gpio(self.rst_io, 1)   # release
+                time.sleep(0.120)
             return True
         except Exception as e:
             logger.warning("M5IOE1: LCD reset failed: %s", e)
@@ -158,14 +171,15 @@ class M5IOE1:
             return False
         duty = self.bl_duty if duty is None else max(0, min(0xFFF, int(duty)))
         try:
-            # Global PWM frequency (shared by all channels).
-            self._bus.write_byte_data(self.addr, REG_PWM_FREQ_L, self.pwm_hz & 0xFF)
-            self._bus.write_byte_data(self.addr, REG_PWM_FREQ_H, (self.pwm_hz >> 8) & 0xFF)
-            lo = REG_PWM_BASE + (self.bl_pwm - 1) * 2
-            hi = lo + 1
-            self._bus.write_byte_data(self.addr, lo, duty & 0xFF)
-            # active-high (POL=0), enabled, high nibble of the 12-bit duty
-            self._bus.write_byte_data(self.addr, hi, PWM_EN | ((duty >> 8) & 0x0F))
+            with _bus_lock():
+                # Global PWM frequency (shared by all channels).
+                self._bus.write_byte_data(self.addr, REG_PWM_FREQ_L, self.pwm_hz & 0xFF)
+                self._bus.write_byte_data(self.addr, REG_PWM_FREQ_H, (self.pwm_hz >> 8) & 0xFF)
+                lo = REG_PWM_BASE + (self.bl_pwm - 1) * 2
+                hi = lo + 1
+                self._bus.write_byte_data(self.addr, lo, duty & 0xFF)
+                # active-high (POL=0), enabled, high nibble of the 12-bit duty
+                self._bus.write_byte_data(self.addr, hi, PWM_EN | ((duty >> 8) & 0x0F))
             return True
         except Exception as e:
             logger.warning("M5IOE1: backlight enable failed: %s", e)
@@ -176,8 +190,9 @@ class M5IOE1:
             return False
         try:
             hi = REG_PWM_BASE + (self.bl_pwm - 1) * 2 + 1
-            cur = self._bus.read_byte_data(self.addr, hi)
-            self._bus.write_byte_data(self.addr, hi, cur & ~PWM_EN & 0xFF)
+            with _bus_lock():
+                cur = self._bus.read_byte_data(self.addr, hi)
+                self._bus.write_byte_data(self.addr, hi, cur & ~PWM_EN & 0xFF)
             return True
         except Exception as e:
             logger.warning("M5IOE1: backlight off failed: %s", e)

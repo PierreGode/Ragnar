@@ -986,6 +986,24 @@ class Display:
                 self._cardputer_wake_pending = False
                 logger.info("CardputerZero: backlight recovered after a failed wake")
 
+    _CARDPUTER_BL_KEEPALIVE = 8.0     # seconds between backlight re-asserts
+
+    def _cardputer_backlight_keepalive(self):
+        """Re-assert the LCD backlight every few seconds while rendering. The
+        backlight hangs off the M5IOE1 expander; if the expander glitches and
+        drops the PWM output, nothing else would turn it back on and the screen
+        stays black until a reboot. One expander write per interval brings it
+        back within a few seconds instead. Not run while the display is blanked
+        by the "0" key, so it never fights a deliberate blank; a no-op on boards
+        with no such backlight."""
+        if self.config.get("epd_type") != "st7789v2":
+            return
+        now = time.monotonic()
+        if now - getattr(self, '_cardputer_bl_keepalive_at', 0.0) < self._CARDPUTER_BL_KEEPALIVE:
+            return
+        self._cardputer_bl_keepalive_at = now
+        self._set_cardputer_backlight(True)
+
     def _get_cached_page_data(self, key, fetch_fn, ttl=10):
         """Get cached page data, refreshing if older than ttl seconds."""
         if not hasattr(self, '_page_cache'):
@@ -2051,6 +2069,7 @@ class Display:
                     self._run_display_off()
                     continue
                 self._resume_cardputer_backlight()
+                self._cardputer_backlight_keepalive()
                 now = time.monotonic()
                 problem = None
                 if not holding and now >= next_try:
@@ -5152,6 +5171,7 @@ class Display:
                     self._run_display_off()
                     continue
                 self._resume_cardputer_backlight()
+                self._cardputer_backlight_keepalive()
                 self.epd_helper.init_partial_update()
                 # Pull latest orientation settings so web toggles take effect without restarting the service.
                 self.screen_reversed = self.shared_data.screen_reversed
