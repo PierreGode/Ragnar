@@ -14,7 +14,8 @@ installed, so the tab shows up on every board.
 
 - **OWASP ZAP** is the sole exception: its Java daemon holds ~1GB+ resident, so it
   stays gated at **8GB+ RAM** and greys out below that while the rest of the tab
-  keeps working. **Parallel scanning** is likewise an 8GB+ feature.
+  keeps working. **Parallel scanning** is likewise an 8GB+ feature. A small board can still
+  run ZAP by pointing at a daemon on another host — see [Remote ZAP](#remote-zap-offload-to-another-host).
 - **Nuclei is gated at 900MB RAM** — it loads a heavy template engine that would
   OOM a 512MB Pi Zero 2 W, so it greys out below its floor (a 1GB Pi 3 runs it
   fine). From 900MB up it **auto-tunes to the board's RAM**: lower concurrency, a
@@ -33,6 +34,57 @@ back into the local scan view — a small "🛰️ Mesh ready — Nuclei → ylv
 who's handling it. Discovery / auto-pick / relay ride the existing Tailscale
 peer-identity auth. (Needs 2+ units; a single-unit board just sees the normal
 grey-out.) See [Ragnar Mesh](mesh.md).
+
+## Remote ZAP (offload to another host)
+
+ZAP can also run on **a different machine** from the Ragnar that drives it. Set
+two environment variables on the small unit and it talks to that daemon instead
+of launching its own:
+
+| Variable | Meaning |
+|---|---|
+| `RAGNAR_ZAP_REMOTE_URL` | Base URL of the remote ZAP daemon, e.g. `http://100.x.y.z:8090` |
+| `RAGNAR_ZAP_REMOTE_KEY` | That daemon's API key |
+
+- With the variables unset nothing changes.
+- In remote mode Ragnar **never starts a local ZAP**, so the 8GB gate no longer
+  applies and ZAP is available in the tab even without a local `zaproxy` binary.
+- Put them in a systemd drop-in so `update_ragnar.sh` can't wipe them:
+
+```ini
+# /etc/systemd/system/ragnar.service.d/50-zap-remote.conf
+[Service]
+Environment=RAGNAR_ZAP_REMOTE_URL=http://100.x.y.z:8090
+Environment=RAGNAR_ZAP_REMOTE_KEY=change-me
+```
+
+then `sudo systemctl daemon-reload && sudo systemctl restart ragnar`.
+
+### Example: a phone that runs Ragnar *and* serves ZAP
+
+A OnePlus 6T on **Kali NetHunter Pro** (native Kali, arm64) runs its **own
+Ragnar** web UI on `:8000` and, at the same time, a headless **ZAP daemon** on
+`:8090` that a 4GB Pi uses for its web scans. One device, two jobs: a pocket
+Ragnar unit and the ZAP back-end for a small board.
+
+On the phone:
+
+```bash
+zaproxy -daemon -host 0.0.0.0 -port 8090 \
+  -config api.key=change-me \
+  -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true
+```
+
+On the Pi, set the drop-in above to the phone's address. Over Tailscale use the
+phone's `100.x` IP. If the phone is behind NAT, it can instead open a reverse SSH
+tunnel to the Pi (`ssh -N -R 8090:127.0.0.1:8090 user@pi`), and the Pi uses
+`RAGNAR_ZAP_REMOTE_URL=http://127.0.0.1:8090`.
+
+Notes:
+- The API key is the only thing protecting the daemon. Bind it to the Tailscale
+  interface or tunnel it; don't expose `:8090` on an untrusted LAN.
+- Scans from the Pi run **from the phone's network position**, since ZAP itself
+  makes the requests. Targets must be reachable from the phone.
 
 ---
 
@@ -96,3 +148,4 @@ web interface.
 - [Scanning & Attacks](scanning-and-attacks.md) — the core discovery/assess/attack loop
 - [Traffic Analysis](traffic-analysis.md) — the light `tcpdump`-based analyzer that runs on any board
 - [Ragnar Mesh](mesh.md) — how gated scans are delegated to a capable peer
+- [Remote ZAP](#remote-zap-offload-to-another-host) — drive a ZAP daemon on another host (e.g. a phone running Ragnar too)

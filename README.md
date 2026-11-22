@@ -153,7 +153,7 @@ The installer auto-detects your platform and configures everything — distro de
 
 ## 🖥️ Server Mode: Advanced Features (8GB+ RAM)
 
-On 8GB+ systems Ragnar automatically unlocks OWASP ZAP and parallel scanning. The rest of the Adv Scan tab (Nuclei, Nikto, SQLMap, WhatWeb, Nmap vuln scripts) and Traffic Analysis run on any board — see [Advanced Vulnerability Scanning](docs/adv-scan.md) for the full breakdown of what runs where, RAM gating, and mesh delegation. Fresh 8GB+ installs get the advanced tools automatically; on an existing box:
+On 8GB+ systems Ragnar automatically unlocks OWASP ZAP and parallel scanning. The rest of the Adv Scan tab (Nuclei, Nikto, SQLMap, WhatWeb, Nmap vuln scripts) and Traffic Analysis run on any board — see [Advanced Vulnerability Scanning](docs/adv-scan.md) for the full breakdown of what runs where, RAM gating, and mesh delegation. A smaller board can also use **ZAP running on another host**, such as a NetHunter Pro phone that runs its own Ragnar too, through `RAGNAR_ZAP_REMOTE_URL` — see [Remote ZAP](docs/adv-scan.md#remote-zap-offload-to-another-host). Fresh 8GB+ installs get the advanced tools automatically; on an existing box:
 
 ```bash
 cd /home/ragnar/Ragnar
