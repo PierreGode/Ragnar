@@ -258,9 +258,13 @@ Only one Cap fits at a time: both use SPI chip-select 1. The panel's **Refresh**
 button updates GNSS, camera and pin state; it only looks for a Cap again when
 none was found at start.
 
-The Grove port on the right side has its own switched 5 V output (off at
-power-on). Ragnar switches it on at start (`cardputer_grove_power: true`), so a
-Grove unit works as soon as it is plugged in; **fn** + **Backspace** toggles it.
+The Grove port on the right side has its own switched 5 V output, **off by
+default** (the safe stock state). Plug a Grove unit in with the port unpowered,
+then switch the rail on with **fn** + **Backspace** (or the web control) — that
+also detects a Grove GPS. The choice is saved (`cardputer_grove_power`), so if you
+leave it on it comes back on at the next start. Connecting onto a live rail can
+draw an inrush surge that briefly browns the board out (black LCD / battery
+glitch), which is why it stays off until you ask.
 
 **A GPS on the Grove port.** The Grove port is a UART (Port C), so a UART GPS —
 such as the **M5Stack GPS Unit** (AT6668) — plugs straight in and feeds

@@ -86,51 +86,54 @@ class Ragnar:
         except Exception as e:
             logger.debug(f"CardputerZero Cap power not set: {e}")
 
-        # CardputerZero: the Grove port's 5 V pin is a switched rail (off at
-        # power-on). Rather than snap it on during boot, bring it up a moment
-        # AFTER start-up — a cleaner, settled power-up for whatever is plugged
-        # in, and a real off→on cycle so a GPS unit gets a fresh start. If a UART
-        # GPS is on the port it talks NMEA on the same /dev/ttyS0 the Cap's GNSS
-        # uses, so hand the port to it the same way Ragnar frees the UART for the
-        # Cap — then wardriving and the Meshtastic node get a fix. All in a
-        # thread (power settle + a few seconds of listening) so start-up is not
-        # held up.
+        # CardputerZero: the Grove port's 5 V pin is a switched rail, and OFF at
+        # power-on. Leave it off by default — that is the safe, stock state, and
+        # it avoids an inrush surge (which can brown the board out: black LCD,
+        # battery glitch) when a unit is plugged into a live rail. Plug a Grove
+        # unit in with the port unpowered, then switch it on with fn+Backspace or
+        # from the web — that path powers the rail AND detects a GPS. Only when
+        # the user has opted in (`cardputer_grove_power: true`, saved by the
+        # toggle) does Ragnar power it at start and hand a UART GPS to wardriving
+        # and the Meshtastic node, the same way it frees the UART for the Cap.
         try:
             import cardputer_caps
             if cardputer_caps.is_cardputer_zero(shared_data.config):
-                want_grove = shared_data.config.get('cardputer_grove_power', True)
+                want_grove = shared_data.config.get('cardputer_grove_power', False)
                 want_gps = shared_data.config.get('cardputer_free_gnss_uart', True)
                 cardputer_caps.allow_expander(shared_data.config)
-                if want_grove:
-                    # Start from a known-off state so the unit sees a clean edge.
+                if not want_grove:
+                    # Enforce the off state (a service restart must not leave a
+                    # previously-on rail powered against the saved choice).
                     cardputer_caps.set_grove5v(False)
-                    logger.info("CardputerZero Grove 5 V: off (powers on after start-up)")
+                    logger.info("CardputerZero Grove 5 V: off (default; "
+                                "switch it on to use a Grove unit)")
+                else:
+                    cardputer_caps.set_grove5v(False)   # clean off→on edge
 
-                def _grove_bringup():
-                    try:
-                        import time as _t
-                        cardputer_caps.allow_expander(shared_data.config)
-                        if want_grove:
+                    def _grove_bringup():
+                        try:
+                            import time as _t
+                            cardputer_caps.allow_expander(shared_data.config)
                             _t.sleep(0.3)        # brief off before on = a power-cycle
                             grove = cardputer_caps.power_on_grove()
                             logger.info("CardputerZero Grove 5 V: %s", 'on' if grove
                                         else 'not available' if grove is None else 'off')
-                            _t.sleep(1.5)        # let the unit boot and start talking
-                        if want_gps:
-                            g = cardputer_caps.detect_grove_gnss(shared_data.config, free_uart=True)
-                            if g and g.get('present'):
-                                logger.info("CardputerZero Grove GPS on %s @ %s baud",
-                                            g.get('port'), g.get('baud'))
-                            elif g and g.get('console_conflict'):
-                                logger.warning("CardputerZero Grove GPS: the serial login "
-                                               "prompt holds the UART and could not be freed "
-                                               "(root needed)")
-                    except Exception as e:
-                        logger.debug(f"CardputerZero Grove bring-up: {e}")
+                            if want_gps:
+                                _t.sleep(1.5)    # let the unit boot and start talking
+                                g = cardputer_caps.detect_grove_gnss(shared_data.config, free_uart=True)
+                                if g and g.get('present'):
+                                    logger.info("CardputerZero Grove GPS on %s @ %s baud",
+                                                g.get('port'), g.get('baud'))
+                                elif g and g.get('console_conflict'):
+                                    logger.warning("CardputerZero Grove GPS: the serial login "
+                                                   "prompt holds the UART and could not be freed "
+                                                   "(root needed)")
+                        except Exception as e:
+                            logger.debug(f"CardputerZero Grove bring-up: {e}")
 
-                import threading as _threading
-                _threading.Thread(target=_grove_bringup, name="grove-bringup",
-                                  daemon=True).start()
+                    import threading as _threading
+                    _threading.Thread(target=_grove_bringup, name="grove-bringup",
+                                      daemon=True).start()
         except Exception as e:
             logger.debug(f"CardputerZero Grove setup not set: {e}")
 
