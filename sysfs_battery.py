@@ -43,7 +43,8 @@ except Exception:  # standalone / CLI use
 POWER_SUPPLY_ROOT = "/sys/class/power_supply"
 
 POLL_SECONDS = 10
-MAX_FAILURES = 6            # consecutive bad polls before the reading is dropped
+MAX_FAILURES = 6            # consecutive bad polls counted as "degraded" (logs a recovery)
+DROP_AFTER = 30            # consecutive bad polls (~5 min) before the reading is dropped
 PROBE_ATTEMPTS = 6          # the driver can bind a little after we start at boot
 
 # --- BQ27220 standard commands (little-endian 16-bit words) --------------------
@@ -254,27 +255,41 @@ class SysfsBatteryMonitor:
         return False
 
     def poll(self):
-        """Take one sample. Returns True on success."""
-        if self._reader is None:
-            return False
+        """Take one sample. Returns True on a fresh reading.
+
+        A failed read keeps the last value on show and, for the I2C gauge,
+        reopens the port on the next poll — so a transient glitch (an I2C
+        brownout when a Grove unit is plugged in and draws a surge) does not
+        blank the battery icon until a reboot. Only a long outage drops it, and
+        the gauge comes back on its own once it answers again."""
+        if self._reader is None and not self.probe():
+            return self._note_failure()
         try:
             sample = self._reader.read()
         except Exception as e:
             logger.debug(f"battery read failed: {e}")
-            sample = None
+            self._close()                 # a stale fd: reopen (re-probe) next poll
+            return self._note_failure()
         if sample is None:
-            self._failures += 1
-            if self._failures >= MAX_FAILURES and self.available:
-                logger.warning("Built-in battery stopped answering - reading dropped")
-                with self._lock:
-                    self.available = False
-                    self._sample = None
-            return False
+            return self._note_failure()
+        if self._failures >= MAX_FAILURES:
+            logger.info("Built-in battery recovered")
         self._failures = 0
         with self._lock:
             self._sample = sample
             self.available = True
         return True
+
+    def _note_failure(self):
+        """Record a failed poll. Keep showing the last reading through a glitch;
+        drop it only after a long outage so a genuinely dead gauge clears."""
+        self._failures += 1
+        if self._failures >= DROP_AFTER and self.available:
+            logger.warning("Built-in battery stopped answering - reading dropped")
+            with self._lock:
+                self.available = False
+                self._sample = None
+        return False
 
     def _run(self):
         # Fixed hardware: if it is not there shortly after boot it is not

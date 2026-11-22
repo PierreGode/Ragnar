@@ -4,6 +4,16 @@
 
 ### 2026-11-22
 
+#### fix(cardputer): the battery read-out survives an I2C glitch instead of vanishing until a reboot
+
+*branch `fix/cardputer-grove-battery-glitch`*
+
+- **The CardputerZero battery icon no longer disappears when a Grove unit is plugged in.** Hot-plugging a GPS (or any current-drawing unit) onto the live Grove 5 V rail draws a surge that can brown the board out for a moment and upset the I2C fuel gauge (BQ27220). The battery monitor used to drop the reading after ~60 s of failed reads and never try again, so the icon stayed gone until a reboot.
+- **Now it rides the glitch out:** the icon keeps its last reading through a transient failure, the I2C gauge is reopened on the next poll (a stale bus handle no longer sticks), and the reading recovers on its own when the gauge answers again. Only a genuinely long outage (~5 min) clears it.
+- **Advice added:** connect the Grove GPS with the unit powered off, like the Caps — a cold connect avoids the inrush surge entirely.
+- Tests: survive-a-glitch, I2C reopen-after-bus-error, drop-only-after-a-long-outage. Battery + Cardputer display groups pass (160).
+- Docs: [CardputerZero-Caps.md → GPS on the Grove port](CardputerZero-Caps.md).
+
 #### fix(cardputer): Grove GPS found whatever the login prompt is named; Grove 5 V powers on after start-up; display-off self-heals
 
 *branch `fix/cardputer-grove-power-gps`*
