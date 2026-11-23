@@ -154,18 +154,6 @@ EXT5V_EXPANDER_IO = 13
 GROVE5V_PATH = os.environ.get("RAGNAR_GROVE_5V", "/sys/class/leds/grove_5v_out/brightness")
 GROVE5V_EXPANDER_IO = 4
 _use_expander = False        # set by detect()/power_on_cap() on a known CardputerZero
-_grove_gnss = None           # cache: last detect_grove_gnss() result (dict) or None
-_rail_last = {}              # io -> last successfully-read rail state (True/False)
-
-import contextlib as _contextlib
-try:
-    import i2c_bus as _i2c_bus
-
-    def _bus_lock():
-        return _i2c_bus.lock()
-except Exception:            # pragma: no cover - keep rail access working regardless
-    def _bus_lock():
-        return _contextlib.nullcontext()
 
 
 def _expander():
@@ -190,33 +178,22 @@ def _expander_rail_state(exp, io=EXT5V_EXPANDER_IO):
 
 
 def _rail_state(path, io):
-    """True/False for a switched 5 V rail, None when the board has no such
-    switch. A rail physically holds its state, so a transient I2C read blip on
-    the expander must NOT be reported as "off" — it returns the last value we
-    actually read (sticky). Genuinely-absent switches stay None."""
     value = _read_text(path)
     if value is None:
         exp = _expander()
         if exp is None:
-            # No expander allowed on this board → genuinely no switch (None).
-            # Expander allowed but not answering this instant → keep the last read.
-            return _rail_last.get(io) if _use_expander else None
+            return None
         try:
-            with _bus_lock():
-                state = _expander_rail_state(exp, io)
-            _rail_last[io] = state
-            return state
+            return _expander_rail_state(exp, io)
         except Exception as e:
-            logger.debug(f"5 V switch: expander read failed (keeping last state): {e}")
-            return _rail_last.get(io)           # sticky through a read blip
+            logger.debug(f"5 V switch: expander read failed: {e}")
+            return None
         finally:
             exp.close()
     try:
-        state = int(value) > 0
-        _rail_last[io] = state
-        return state
+        return int(value) > 0
     except ValueError:
-        return _rail_last.get(io)
+        return None
 
 
 def _set_rail(on, path, io):
@@ -225,14 +202,8 @@ def _set_rail(on, path, io):
         if exp is None:
             return False
         try:
-            with _bus_lock():
-                exp._set_gpio(io, bool(on))      # the write itself
-                try:
-                    ok = _expander_rail_state(exp, io) is bool(on)
-                except Exception:
-                    ok = True                    # write did not throw; readback blipped
-            _rail_last[io] = bool(on)            # we commanded it; remember that state
-            return ok
+            exp._set_gpio(io, bool(on))
+            return _expander_rail_state(exp, io) is bool(on)
         except Exception as e:
             logger.warning(f"5 V switch: expander write failed: {e}")
             return False
@@ -244,7 +215,6 @@ def _set_rail(on, path, io):
     except OSError as e:
         logger.warning(f"5 V switch: cannot write {path}: {e}")
         return False
-    _rail_last[io] = bool(on)
     return _rail_state(path, io) is bool(on)
 
 
@@ -430,50 +400,6 @@ def _getty_unit(port=None):
     return f"serial-getty@{os.path.basename(port or GNSS_PORT)}.service"
 
 
-def _gnss_getty_units():
-    """Login-prompt units that could hold the GNSS UART. systemd names the
-    serial getty after the *resolved* device, and the Pi's GPIO14/15 UART is
-    reached through the ``/dev/serial0`` alias, which resolves to ``ttyS0`` on
-    some boards and ``ttyAMA0`` on others. So a getty on the port may be called
-    ``serial-getty@ttyS0``, ``@ttyAMA0`` or ``@serial0`` — try them all, port
-    first. (The hard-coded ``@ttyS0`` alone missed the real prompt, so the GPS
-    never got the port.)"""
-    units, seen = [], set()
-    for dev in (GNSS_PORT, "/dev/serial0", "/dev/serial1"):
-        for name in (os.path.basename(dev), os.path.basename(os.path.realpath(dev))):
-            unit = f"serial-getty@{name}.service"
-            if unit not in seen:
-                seen.add(unit)
-                units.append(unit)
-    return units
-
-
-def _gnss_port_candidates():
-    """Native UART devices to try for a GPS, the configured port first, then
-    the Pi's ``serial0`` alias (whatever it resolves to) and ``ttyAMA0`` — so a
-    receiver on the real GPIO14/15 UART is found even when it is not ``ttyS0``.
-    De-duplicated by real path, order preserved; existence is not required (a
-    missing device simply fails to open and the next is tried)."""
-    out, seen = [], set()
-    for dev in (GNSS_PORT, "/dev/serial0", "/dev/ttyAMA0", "/dev/serial1"):
-        real = os.path.realpath(dev)
-        if real in seen:
-            continue
-        seen.add(real)
-        out.append(dev)
-    return out
-
-
-def _unit_active(unit, runner=None):
-    code, out = _systemctl("is-active", unit, runner=runner)
-    return code == 0 and out == "active"
-
-
-def _active_gnss_gettys(runner=None):
-    """The subset of _gnss_getty_units() that is active right now."""
-    return [u for u in _gnss_getty_units() if _unit_active(u, runner=runner)]
-
-
 def _systemctl(*args, runner=None):
     """Run systemctl, returning (exit code, stdout). (127, '') without it."""
     if runner is not None:
@@ -491,12 +417,9 @@ def _systemctl(*args, runner=None):
 
 def serial_getty_active(port=None, runner=None):
     """True while a login prompt holds the GNSS UART. It reads the port, so
-    the receiver's sentences never reach the GPS reader in one piece. With an
-    explicit ``port`` only that port's getty is checked; otherwise every name
-    the UART can go by (see _gnss_getty_units)."""
-    if port is not None:
-        return _unit_active(_getty_unit(port), runner=runner)
-    return bool(_active_gnss_gettys(runner=runner))
+    the receiver's sentences never reach the GPS reader in one piece."""
+    code, out = _systemctl("is-active", _getty_unit(port), runner=runner)
+    return code == 0 and out == "active"
 
 
 def _cmdline_files(root=""):
@@ -518,26 +441,16 @@ def free_gnss_uart(port=None, root="", runner=None):
     works without a reboot), keep it from coming back, and take the serial
     console off the kernel command line for the next boot. cmdline.txt is
     copied to cmdline.txt.ragnar-bak first. Returns (ok, message)."""
-    # With an explicit port, act on that getty only (keeps the Cap path exact).
-    # Auto (port=None): stop every login prompt actually holding the UART,
-    # whatever it is named — ttyS0, ttyAMA0 or serial0.
-    if port is not None:
-        units = [_getty_unit(port)]
-    else:
-        units = _active_gnss_gettys(runner=runner) or [_getty_unit()]
+    unit = _getty_unit(port)
     done = []
-    stopped = False
-    for unit in units:
-        if _unit_active(unit, runner=runner):
-            _systemctl("stop", unit, runner=runner)
-            if _unit_active(unit, runner=runner):
-                return False, f"could not stop {unit} (run as root)"
-            stopped = True
-        # The prompt is generated from the kernel command line, so mask it too:
-        # it then stays away even if console= is put back.
-        _systemctl("mask", unit, runner=runner)
-    if stopped:
+    if serial_getty_active(port, runner=runner):
+        _systemctl("stop", unit, runner=runner)
+        if serial_getty_active(port, runner=runner):
+            return False, f"could not stop {unit} (run as root)"
         done.append("stopped the serial login prompt")
+    # The prompt is generated from the kernel command line, so mask it too:
+    # it then stays away even if console= is put back.
+    _systemctl("mask", unit, runner=runner)
     for path in _cmdline_files(root):
         text = _read_text(path)
         if text is None:
@@ -562,8 +475,7 @@ def free_gnss_uart(port=None, root="", runner=None):
 def restore_serial_console(port=None, root="", runner=None):
     """Undo free_gnss_uart: put cmdline.txt back and allow the login prompt
     again (it returns at the next boot). Returns (ok, message)."""
-    for unit in ([_getty_unit(port)] if port is not None else _gnss_getty_units()):
-        _systemctl("unmask", unit, runner=runner)
+    _systemctl("unmask", _getty_unit(port), runner=runner)
     for path in _cmdline_files(root):
         backup = path + ".ragnar-bak"
         if os.path.exists(backup):
@@ -574,117 +486,6 @@ def restore_serial_console(port=None, root="", runner=None):
                 return False, f"could not restore {path}: {e}"
             return True, f"restored {path}; reboot to get the serial console back"
     return True, "no saved cmdline.txt to restore; the login prompt is allowed again"
-
-
-def _grove_gnss_mode(config=None):
-    """cardputer_grove_gnss: 'auto' (default) finds a Grove GPS by listening;
-    'true'/'on' always hands the UART over; 'false'/'off' never does."""
-    cfg = config if config is not None else saved_config()
-    value = str(cfg.get("cardputer_grove_gnss", "auto")).strip().lower()
-    return value if value in ("auto", "true", "on", "false", "off") else "auto"
-
-
-def reset_grove_gnss():
-    """Forget the cached Grove-GPS result (a Refresh re-probes)."""
-    global _grove_gnss
-    _grove_gnss = None
-
-
-def detect_grove_gnss(config=None, free_uart=True, runner=None, force=False,
-                      baud_probe=None):
-    """A plain UART GPS on the **Grove port** (Port C), with no Cap fitted — for
-    example an M5Stack GPS Unit (AT6668). It talks NMEA on the same UART the LoRa
-    Cap's GNSS uses (`/dev/ttyS0`), so the only thing standing between it and
-    wardriving / the Meshtastic node is the serial login prompt. This finds the
-    receiver and hands the port to GPS the same way Ragnar does for the Cap.
-
-    Returns a cached dict (``present``, ``port``, ``baud``, ``sentences``,
-    ``console_conflict``, ``freed``, ``source``) or ``None`` when this is not a
-    CardputerZero or the feature is switched off. The probe needs the port to
-    itself, so an active login prompt is stopped for it; if nothing answers, the
-    prompt is started again, so a unit with no Grove GPS keeps its console."""
-    global _grove_gnss
-    if _grove_gnss is not None and not force:
-        return _grove_gnss
-    if not is_cardputer_zero(config):
-        return None
-    if _grove_gnss_mode(config) in ("false", "off"):
-        return None
-    # The Cap owns this UART when it is fitted; leave that path to the Cap.
-    if identify_cap()[0] == CAP_LORA_GNSS:
-        return None
-    # Another reader already holds the UART (a running GPS): don't open it a
-    # second time to probe — the two reads would split the receiver's data.
-    # (When a serial GPS is already reading, it is working; the hardware panel's
-    # "GPS (Grove port)" row then comes from the cache set at start-up.)
-    try:
-        import serial_claims
-        claimed = serial_claims.claimed()
-        if any(os.path.realpath(p) in claimed for p in _gnss_port_candidates()):
-            return None
-    except Exception:
-        pass
-
-    result = {"present": False, "port": GNSS_PORT, "baud": None, "sentences": 0,
-              "console_conflict": False, "freed": None, "source": "grove"}
-    stopped = []
-    if serial_getty_active(runner=runner):
-        if not free_uart:
-            result["console_conflict"] = True
-            _grove_gnss = result
-            return result
-        # Stop every login prompt that holds the UART (ttyS0 / ttyAMA0 / serial0),
-        # not just the hard-coded ttyS0 one — that is why the GPS stayed silent.
-        stopped = _active_gnss_gettys(runner=runner) or [_getty_unit()]
-        for unit in stopped:
-            _systemctl("stop", unit, runner=runner)
-        if serial_getty_active(runner=runner):
-            result["console_conflict"] = True        # could not stop it (not root)
-            _grove_gnss = result
-            return result
-
-    probe = baud_probe
-    if probe is None:
-        try:
-            from gps_manager import probe_nmea_baud as probe
-        except Exception as e:
-            logger.debug(f"Grove GNSS: no baud probe ({e})")
-            probe = lambda _port: None
-    # Try the configured port first, then serial0 / ttyAMA0 — the GPS answers on
-    # whichever one the Grove UART actually is on this board.
-    found_port, baud = None, None
-    for dev in _gnss_port_candidates():
-        try:
-            b = probe(dev)
-        except Exception as e:
-            logger.debug(f"Grove GNSS probe on {dev} failed: {e}")
-            b = None
-        if b:
-            found_port, baud = dev, b
-            break
-
-    if baud:
-        result.update(present=True, port=found_port, baud=baud, sentences=3)
-        if stopped:
-            ok, message = free_gnss_uart(runner=runner)
-            result["freed"] = "freed" if ok else None
-            logger.info(f"Grove GPS on {found_port} @ {baud} baud: {message}")
-        else:
-            logger.info(f"Grove GPS on {found_port} @ {baud} baud")
-    elif stopped:
-        for unit in stopped:                 # nothing there: give the console back
-            _systemctl("start", unit, runner=runner)
-    _grove_gnss = result
-    return result
-
-
-def grove_gnss_standby():
-    """(port, baud) for the Meshtastic standby GPS reader when a Grove GPS was
-    found, else (None, None)."""
-    g = _grove_gnss
-    if g and g.get("present"):
-        return g.get("port"), g.get("baud")
-    return None, None
 
 
 def probe_gnss(port=None, baud=GNSS_BAUD, seconds=2.0, opener=None):
@@ -948,7 +749,7 @@ def identify_cap(force=False):
 
 
 def detect(config=None, power=True, probe_serial=True, camera=True, reidentify=False,
-           free_uart=False, grove=False):
+           free_uart=False):
     """What is on the header and whether the camera answers.
 
     Returns a dict: board, ext5v, cap ('none' / 'lora_gnss' / 'subghz_nfc'),
@@ -991,18 +792,6 @@ def detect(config=None, power=True, probe_serial=True, camera=True, reidentify=F
         result["lora"] = lora_daemon_state()
     if result["cap"] == CAP_SUBGHZ_NFC:
         result["nfc_spi"] = os.path.exists(NFC_SPI_DEV)
-    # No LoRa+GNSS Cap, but a GPS may be on the Grove port (Port C UART). Only
-    # when the GPS reader does not already hold the port (probe_serial).
-    if grove and result["cap"] == CAP_NONE and probe_serial:
-        g = detect_grove_gnss(config, free_uart=free_uart)
-        if g is not None:
-            result["grove_gnss"] = bool(g.get("present"))
-            if g.get("present") or g.get("console_conflict"):
-                result["gnss"] = {"port": g["port"], "baud": g.get("baud"),
-                                  "sentences": g.get("sentences", 0),
-                                  "console_conflict": g.get("console_conflict", False),
-                                  "kernel_console": serial_console_on(),
-                                  "freed": g.get("freed"), "source": "grove"}
     result["camera"] = detect_camera() if camera else None
     return result
 
@@ -1039,7 +828,7 @@ def main():
         # Which Cap is fitted, for the setup script: "lora_gnss", "subghz_nfc" or nothing.
         print(detect(config, probe_serial=False, camera=False).get("cap") or "")
         return 0
-    info = detect(config, grove=True)
+    info = detect(config)
     if "--json" in sys.argv:
         info["header"] = header_state()
         print(json.dumps(info, indent=2))

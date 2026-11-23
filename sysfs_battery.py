@@ -29,20 +29,10 @@ it: see ups_hat.battery_source().
 CLI:  python3 sysfs_battery.py        one reading (exit 1 when none is found)
 """
 
-import contextlib
 import logging
 import os
 import sys
 import threading
-
-try:
-    import i2c_bus
-
-    def _bus_lock():
-        return i2c_bus.lock()
-except Exception:                      # pragma: no cover - battery must still work
-    def _bus_lock():
-        return contextlib.nullcontext()
 
 try:
     from logger import Logger
@@ -53,9 +43,7 @@ except Exception:  # standalone / CLI use
 POWER_SUPPLY_ROOT = "/sys/class/power_supply"
 
 POLL_SECONDS = 10
-MAX_FAILURES = 6            # consecutive bad polls counted as "degraded" (logs a recovery)
-DROP_AFTER = 30            # consecutive bad polls (~5 min) before the reading is dropped
-REOPEN_EVERY = 3           # reopen the I2C gauge only every Nth failed poll, not every one
+MAX_FAILURES = 6            # consecutive bad polls before the reading is dropped
 PROBE_ATTEMPTS = 6          # the driver can bind a little after we start at boot
 
 # --- BQ27220 standard commands (little-endian 16-bit words) --------------------
@@ -172,12 +160,10 @@ class Bq27220Reader:
 
     def read(self):
         """One sample: dict(level, voltage, charging), or None when the answer
-        is not a plausible single-cell gauge reading. Held under the shared
-        bus-1 lock so it does not interleave with the expander's reads/writes."""
-        with _bus_lock():
-            level = self._word(BQ_CMD_SOC)
-            voltage = self._word(BQ_CMD_VOLTAGE) / 1000.0
-            current = self._word(BQ_CMD_CURRENT)
+        is not a plausible single-cell gauge reading."""
+        level = self._word(BQ_CMD_SOC)
+        voltage = self._word(BQ_CMD_VOLTAGE) / 1000.0
+        current = self._word(BQ_CMD_CURRENT)
         if current > 0x7FFF:
             current -= 0x10000
         if not 0 <= level <= 100:
@@ -268,44 +254,27 @@ class SysfsBatteryMonitor:
         return False
 
     def poll(self):
-        """Take one sample. Returns True on a fresh reading.
-
-        A failed read keeps the last value on show and, for the I2C gauge,
-        reopens the port on the next poll — so a transient glitch (an I2C
-        brownout when a Grove unit is plugged in and draws a surge) does not
-        blank the battery icon until a reboot. Only a long outage drops it, and
-        the gauge comes back on its own once it answers again."""
-        if self._reader is None and not self.probe():
-            return self._note_failure()
+        """Take one sample. Returns True on success."""
+        if self._reader is None:
+            return False
         try:
             sample = self._reader.read()
         except Exception as e:
             logger.debug(f"battery read failed: {e}")
-            # A stale fd needs a reopen, but reopening on *every* blip piles I2C
-            # traffic onto an already-busy bus. Only reopen every Nth failure.
-            if (self._failures + 1) % REOPEN_EVERY == 0:
-                self._close()             # reopen (re-probe) on the next poll
-            return self._note_failure()
+            sample = None
         if sample is None:
-            return self._note_failure()
-        if self._failures >= MAX_FAILURES:
-            logger.info("Built-in battery recovered")
+            self._failures += 1
+            if self._failures >= MAX_FAILURES and self.available:
+                logger.warning("Built-in battery stopped answering - reading dropped")
+                with self._lock:
+                    self.available = False
+                    self._sample = None
+            return False
         self._failures = 0
         with self._lock:
             self._sample = sample
             self.available = True
         return True
-
-    def _note_failure(self):
-        """Record a failed poll. Keep showing the last reading through a glitch;
-        drop it only after a long outage so a genuinely dead gauge clears."""
-        self._failures += 1
-        if self._failures >= DROP_AFTER and self.available:
-            logger.warning("Built-in battery stopped answering - reading dropped")
-            with self._lock:
-                self.available = False
-                self._sample = None
-        return False
 
     def _run(self):
         # Fixed hardware: if it is not there shortly after boot it is not

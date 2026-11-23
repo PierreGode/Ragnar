@@ -659,9 +659,8 @@ class SharedData:
             "cardputer_cap_power": True,  # CardputerZero: switch the expansion header's 5 V rail on at start so a Cap works
             "meshtastic_share_gps": True,  # hand Ragnar's GPS fix to the Meshtastic node running on this unit (it has no GPS of its own)
             "camera_rotation": "auto",  # turn the camera picture: 0, 180, or "auto" (180 on the CardputerZero, whose sensor is mounted upside down)
-            "cardputer_grove_power": False,  # CardputerZero: leave the Grove port's 5 V pin OFF at start (safe stock state); switch it on (fn+Backspace or web) to use a Grove unit
+            "cardputer_grove_power": True,  # CardputerZero: switch the Grove port's 5 V pin on at start
             "cardputer_free_gnss_uart": True,  # CardputerZero: with the LoRa + GNSS Cap fitted, take the serial login prompt off the UART so GPS can read it
-            "cardputer_grove_gnss": "auto",  # CardputerZero: a UART GPS on the Grove port (no Cap) — "auto" finds it and hands over the UART, "true" always, "false" never
             "enable_attacks": False,
             "release_gate_enabled": False,
             "release_gate_message": "",

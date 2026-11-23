@@ -258,23 +258,8 @@ Only one Cap fits at a time: both use SPI chip-select 1. The panel's **Refresh**
 button updates GNSS, camera and pin state; it only looks for a Cap again when
 none was found at start.
 
-The Grove port on the right side has its own switched 5 V output, **off by
-default** (the safe stock state). Plug a Grove unit in with the port unpowered,
-then switch the rail on with **fn** + **Backspace** (or the web control) — that
-also detects a Grove GPS. The choice is saved (`cardputer_grove_power`), so if you
-leave it on it comes back on at the next start. Connecting onto a live rail can
-draw an inrush surge that briefly browns the board out (black LCD / battery
-glitch), which is why it stays off until you ask.
-
-**A GPS on the Grove port.** The Grove port is a UART (Port C), so a UART GPS —
-such as the **M5Stack GPS Unit** (AT6668) — plugs straight in and feeds
-wardriving and the Meshtastic node, no Cap needed. It talks NMEA on the same
-`/dev/ttyS0` the LoRa Cap's GNSS uses, so Ragnar hands the port to it the same
-way: it listens for the receiver at start and, when it hears one, takes the
-serial login prompt off the UART so GPS can read it. Leave **GPS Serial Port**
-on `auto`; the baud is detected. See
-[CardputerZero-Caps.md → GPS on the Grove port](CardputerZero-Caps.md).
-`cardputer_grove_gnss: false` turns the probe off and keeps the serial console.
+The Grove port on the right side has its own switched 5 V output, which is also
+off by default. Ragnar does not switch that one on.
 
 ### Cap LoRa-1262 + GNSS
 
@@ -454,28 +439,6 @@ On the framebuffer path the kernel owns the expander and the backlight, which ap
 
 Read/modify/write is used on the expander's GPIO registers so Ragnar never clobbers the
 other pins on the same registers (which hold board power and peripheral-reset state).
-
-### If the screen blanks or the Grove/battery reading flickers
-
-The expander, the fuel gauge and the rail reads all share I²C bus 1, and on some
-units that bus is marginal — the expander intermittently stops answering for a
-moment. Because that one chip drives the backlight **and** the 5 V rails **and**
-sits next to the gauge, a blip can look like three separate faults at once: the
-LCD goes black, the Grove/Cap rail reads as "off," and the battery icon vanishes.
-It is **not** a power/undervoltage fault (`vcgencmd get_throttled` stays `0x0`).
-
-Ragnar is built to ride a blip out rather than let it stick:
-- All bus-1 access (expander + gauge) is serialised behind one lock (`i2c_bus.py`),
-  so our own threads never race a read-modify-write on the shared GPIO byte.
-- A rail read that blips keeps its **last known** value instead of reporting a
-  false "off" (`cardputer_caps._rail_last`).
-- The render loop **re-asserts the backlight every few seconds**, so if the
-  expander dropped the PWM output the screen comes back on its own.
-- The battery monitor keeps the last reading through a blip and only re-opens the
-  gauge every few failures, instead of hammering a busy bus.
-
-If a unit still blanks often, the bus itself is suspect: check the I²C pull-ups
-and the expander's solder joints, and compare against another unit.
 
 ### Environment overrides
 If a board revision moves a pin, correct it without touching code:

@@ -646,9 +646,6 @@ class CardputerInputListener(LCDHATInputListener):
                     result = "Grove 5V on" if now else "Grove 5V off"
                     self.shared_data.config["cardputer_grove_power"] = bool(now)
                     self.shared_data.save_config()
-                    cardputer_caps.reset_grove_gnss()   # state changed: re-detect fresh
-                    if now:
-                        self._rescan_grove_gps()        # a GPS here now has power
         except Exception as e:
             logger.warning("CardputerZero: Grove power not switched (%s)", e)
             result = "Grove 5V: failed"
@@ -656,31 +653,6 @@ class CardputerInputListener(LCDHATInputListener):
         if self.last_key:
             self.last_key = (self.last_key[0], result, time.monotonic())
             self.key_seq += 1
-
-    GROVE_RESCAN_SETTLE = 1.5     # seconds for a just-powered receiver to start talking
-
-    def _rescan_grove_gps(self):
-        """The Grove rail was just switched on, so a GPS plugged into it now has
-        power. Detect it and free the UART — the same hand-off start-up does —
-        so wardriving and the Meshtastic node pick it up without a restart. Runs
-        in a thread (power settle + a few seconds of listening)."""
-        if not self.shared_data.config.get("cardputer_free_gnss_uart", True):
-            return
-
-        def _run():
-            try:
-                import cardputer_caps
-                time.sleep(self.GROVE_RESCAN_SETTLE)
-                cardputer_caps.reset_grove_gnss()       # forget a stale "nothing there"
-                g = cardputer_caps.detect_grove_gnss(self.shared_data.config, free_uart=True)
-                if g and g.get("present"):
-                    logger.info("CardputerZero Grove GPS on %s @ %s baud",
-                                g.get("port"), g.get("baud"))
-            except Exception as e:
-                logger.debug("Grove GPS rescan: %s", e)
-
-        import threading
-        threading.Thread(target=_run, name="grove-gps-rescan", daemon=True).start()
 
     # --- Camera screen ------------------------------------------------------
 
