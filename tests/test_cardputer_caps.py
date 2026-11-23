@@ -15,17 +15,6 @@ import cardputer_caps as cc  # noqa: E402
 GGA = b"$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n"
 
 
-@pytest.fixture(autouse=True)
-def _reset_rail_globals():
-    """Rail state is sticky and expander-use is process-wide, so clear both
-    before each test — otherwise one board's reading leaks into the next."""
-    cc._rail_last.clear()
-    cc._use_expander = False
-    yield
-    cc._rail_last.clear()
-    cc._use_expander = False
-
-
 # ── the header ───────────────────────────────────────────────────────────────
 
 def test_header_matches_the_label_on_the_case():
@@ -636,49 +625,6 @@ def test_no_grove_switch_on_other_boards(tmp_path, monkeypatch):
     monkeypatch.setattr(cc, "GROVE5V_PATH", str(tmp_path / "missing"))
     monkeypatch.setattr(cc, "_expander", lambda: None)
     assert cc.power_on_grove() is None
-
-
-def test_a_read_blip_keeps_the_last_rail_state(monkeypatch):
-    """A rail physically holds its state, so an I2C read blip must report the
-    last real value, not a false 'off' (None)."""
-    cc._use_expander = True
-    monkeypatch.setattr(cc, "EXT5V_PATH", "/nonexistent")
-    exp = types.SimpleNamespace(close=lambda: None)
-    monkeypatch.setattr(cc, "_expander", lambda: exp)
-    answers = [True]
-
-    def rail(e, io=cc.EXT5V_EXPANDER_IO):
-        if answers:
-            return answers.pop()
-        raise OSError("bus blip")
-
-    monkeypatch.setattr(cc, "_expander_rail_state", rail)
-    assert cc.ext5v_state() is True        # a real read
-    assert cc.ext5v_state() is True        # blip → sticky last value, not None
-
-
-def test_no_expander_board_still_reports_none(monkeypatch):
-    """Sticky state must not leak onto a board that genuinely has no switch."""
-    cc._use_expander = False
-    monkeypatch.setattr(cc, "EXT5V_PATH", "/nonexistent")
-    monkeypatch.setattr(cc, "_expander", lambda: None)
-    cc._rail_last[cc.EXT5V_EXPANDER_IO] = True      # stale from another context
-    assert cc.ext5v_state() is None
-
-
-def test_turning_a_rail_on_through_a_readback_blip_reports_on(monkeypatch):
-    """The write took; only the confirming read blipped — report on, not failure."""
-    cc._use_expander = True
-    monkeypatch.setattr(cc, "EXT5V_PATH", "/nonexistent")
-    exp = types.SimpleNamespace(_set_gpio=lambda io, lvl: None, close=lambda: None)
-    monkeypatch.setattr(cc, "_expander", lambda: exp)
-
-    def blip(e, io=cc.EXT5V_EXPANDER_IO):
-        raise OSError("readback blip")
-
-    monkeypatch.setattr(cc, "_expander_rail_state", blip)
-    assert cc.set_ext5v(True) is True
-    assert cc.ext5v_state() is True         # remembered as on
 
 
 def test_mesh_page_names_the_lora_cap_instead_of_usb(monkeypatch):

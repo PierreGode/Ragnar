@@ -172,31 +172,6 @@ def test_run_display_off_relights_on_shutdown():
     assert epd.calls == [False, True]
 
 
-def test_backlight_keepalive_reasserts_on_a_cadence():
-    """If the expander drops the backlight, the render loop re-asserts it every
-    few seconds so the screen cannot stay black — but not on every frame."""
-    d = _display()
-    epd = _FakeEpd()
-    d.epd_helper = types.SimpleNamespace(epd=epd)
-    d.config = {"epd_type": "st7789v2"}
-    d._cardputer_backlight_keepalive()                      # first pass drives it on
-    assert epd.calls == [True]
-    d._cardputer_backlight_keepalive()                      # within the interval: nothing
-    assert epd.calls == [True]
-    d._cardputer_bl_keepalive_at -= d._CARDPUTER_BL_KEEPALIVE + 1    # interval elapsed
-    d._cardputer_backlight_keepalive()
-    assert epd.calls == [True, True]
-
-
-def test_backlight_keepalive_is_a_noop_off_cardputer():
-    d = _display()
-    epd = _FakeEpd()
-    d.epd_helper = types.SimpleNamespace(epd=epd)
-    d.config = {"epd_type": "epd2in13_V4"}
-    d._cardputer_backlight_keepalive()
-    assert epd.calls == []
-
-
 def test_no_display_off_flag_on_other_boards():
     d = _display()
     d.button_listener = types.SimpleNamespace()          # LCD HAT: no such flag

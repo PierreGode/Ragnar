@@ -85,31 +85,15 @@ def test_out_of_range_percentage_is_rejected(tmp_path, capacity):
     assert not monitor(tmp_path).probe()
 
 
-def test_a_glitch_keeps_the_last_reading_and_recovers(tmp_path):
-    """An I2C glitch (e.g. a Grove unit plugged in drawing a surge) must not
-    blank the battery icon: the last reading keeps showing, and the gauge comes
-    back on its own when it answers again — no reboot."""
-    d = gauge(tmp_path, capacity=76)
-    m = monitor(tmp_path)
-    assert m.probe() and m.poll() and m.get_battery_level() == 76
-    (d / "capacity").unlink()
-    for _ in range(sb.MAX_FAILURES + 3):
-        assert not m.poll()
-    # still showing the last value, not blanked away
-    assert m.available and m.get_battery_level() == 76
-    (d / "capacity").write_text("40\n")           # gauge answers again
-    assert m.poll() and m.get_battery_level() == 40
-
-
-def test_reading_is_dropped_only_after_a_long_outage(tmp_path):
+def test_reading_is_dropped_when_the_gauge_goes_away(tmp_path):
     d = gauge(tmp_path)
     m = monitor(tmp_path)
     assert m.probe() and m.poll()
     (d / "capacity").unlink()
-    for _ in range(sb.DROP_AFTER):
+    for _ in range(sb.MAX_FAILURES):
         assert not m.poll()
     assert not m.available and m.get_battery_level() is None
-    (d / "capacity").write_text("40\n")           # and still recovers afterwards
+    (d / "capacity").write_text("40\n")
     assert m.poll() and m.get_battery_level() == 40
 
 
@@ -172,35 +156,6 @@ def test_another_chip_on_the_address_is_not_taken_for_a_battery(tmp_path, bad):
     m = monitor(tmp_path, opener=lambda: g)
     assert not m.probe()
     assert g.closed
-
-
-def test_i2c_gauge_reopens_after_repeated_bus_errors(tmp_path):
-    """A bus error keeps the last value on show; the gauge is reopened only every
-    Nth failure (not every blip, which would thrash an already-busy bus), and the
-    reading returns once the bus is back."""
-    state = {"fail": False, "opens": 0}
-
-    class Flaky(FakeGauge):
-        def __init__(self):
-            state["opens"] += 1
-            super().__init__(words(soc=55))
-
-        def read(self):
-            if state["fail"]:
-                raise OSError("bus error")
-            return super().read()
-
-    m = monitor(tmp_path, opener=Flaky)       # tmp_path has no sysfs gauge → i2c path
-    assert m.probe() and m.poll() and m.get_battery_level() == 55
-    opens0 = state["opens"]
-    state["fail"] = True
-    for _ in range(sb.REOPEN_EVERY):
-        assert not m.poll()
-    assert m.available and m.get_battery_level() == 55   # last value still shown
-    assert state["opens"] == opens0                       # not reopened on every blip
-    state["fail"] = False                                 # the Nth failure closed the fd
-    assert m.poll() and m.get_battery_level() == 55       # reopened, reading again
-    assert state["opens"] == opens0 + 1
 
 
 def test_kernel_gauge_wins_over_i2c(tmp_path):

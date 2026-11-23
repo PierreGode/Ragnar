@@ -86,56 +86,18 @@ class Ragnar:
         except Exception as e:
             logger.debug(f"CardputerZero Cap power not set: {e}")
 
-        # CardputerZero: the Grove port's 5 V pin is a switched rail, and OFF at
-        # power-on. Leave it off by default — that is the safe, stock state, and
-        # it avoids an inrush surge (which can brown the board out: black LCD,
-        # battery glitch) when a unit is plugged into a live rail. Plug a Grove
-        # unit in with the port unpowered, then switch it on with fn+Backspace or
-        # from the web — that path powers the rail AND detects a GPS. Only when
-        # the user has opted in (`cardputer_grove_power: true`, saved by the
-        # toggle) does Ragnar power it at start and hand a UART GPS to wardriving
-        # and the Meshtastic node, the same way it frees the UART for the Cap.
+        # CardputerZero: the Grove port's 5 V pin is switched too, and off at
+        # power-on. Turn it on so a Grove unit works when plugged in.
         try:
             import cardputer_caps
-            if cardputer_caps.is_cardputer_zero(shared_data.config):
-                want_grove = shared_data.config.get('cardputer_grove_power', False)
-                want_gps = shared_data.config.get('cardputer_free_gnss_uart', True)
+            if (shared_data.config.get('cardputer_grove_power', True)
+                    and cardputer_caps.is_cardputer_zero(shared_data.config)):
                 cardputer_caps.allow_expander(shared_data.config)
-                if not want_grove:
-                    # Enforce the off state (a service restart must not leave a
-                    # previously-on rail powered against the saved choice).
-                    cardputer_caps.set_grove5v(False)
-                    logger.info("CardputerZero Grove 5 V: off (default; "
-                                "switch it on to use a Grove unit)")
-                else:
-                    cardputer_caps.set_grove5v(False)   # clean off→on edge
-
-                    def _grove_bringup():
-                        try:
-                            import time as _t
-                            cardputer_caps.allow_expander(shared_data.config)
-                            _t.sleep(0.3)        # brief off before on = a power-cycle
-                            grove = cardputer_caps.power_on_grove()
-                            logger.info("CardputerZero Grove 5 V: %s", 'on' if grove
-                                        else 'not available' if grove is None else 'off')
-                            if want_gps:
-                                _t.sleep(1.5)    # let the unit boot and start talking
-                                g = cardputer_caps.detect_grove_gnss(shared_data.config, free_uart=True)
-                                if g and g.get('present'):
-                                    logger.info("CardputerZero Grove GPS on %s @ %s baud",
-                                                g.get('port'), g.get('baud'))
-                                elif g and g.get('console_conflict'):
-                                    logger.warning("CardputerZero Grove GPS: the serial login "
-                                                   "prompt holds the UART and could not be freed "
-                                                   "(root needed)")
-                        except Exception as e:
-                            logger.debug(f"CardputerZero Grove bring-up: {e}")
-
-                    import threading as _threading
-                    _threading.Thread(target=_grove_bringup, name="grove-bringup",
-                                      daemon=True).start()
+                grove = cardputer_caps.power_on_grove()
+                logger.info(f"CardputerZero Grove 5 V: "
+                            f"{'on' if grove else 'not available' if grove is None else 'off'}")
         except Exception as e:
-            logger.debug(f"CardputerZero Grove setup not set: {e}")
+            logger.debug(f"CardputerZero Grove power not set: {e}")
 
         # Built-in fuel gauge (kernel power-supply class; the CardputerZero's
         # BQ27220), auto-detected

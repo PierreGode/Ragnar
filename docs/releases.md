@@ -2,68 +2,6 @@
 
 ## Releases
 
-### 2026-11-23
-
-#### fix(cardputer): ride out I²C expander blips — no more stuck black screen / false "Grove off" / vanishing battery
-
-*branch `fix/cardputer-i2c-expander-resilience`*
-
-Read-only diagnosis of a live unit showed the real cause of the black-screen / "Grove says off" / battery-disappears cluster: the **M5IOE1 I²C expander (0x4F) intermittently stops answering on bus 1** — seen flapping with the GPS unplugged, Grove off, and the CPU idle (so **not** power: `vcgencmd get_throttled` stayed `0x0`, and not the GPS load). That one chip drives the LCD backlight + reset **and** both 5 V rails **and** shares the bus with the fuel gauge, so a single blip looks like three faults. These changes make Ragnar ride a blip out instead of letting it stick:
-
-- **One lock for all I²C bus-1 access** (new `i2c_bus.py`): the expander (`m5ioe1.py`) and the gauge (`sysfs_battery.py`) now serialise on a shared re-entrant lock, so our own threads can't race a read-modify-write on the shared GPIO byte (where the backlight-reset bit and the rail-enable bits live together).
-- **Rail reads are sticky:** a blip on the expander keeps the **last known** rail state instead of reporting a false "off," and turning a rail on through a read-back blip no longer reports failure (`cardputer_caps`).
-- **Backlight keep-alive:** the render loop re-asserts the LCD backlight every few seconds, so if the expander dropped the PWM output the screen comes back on its own instead of staying black until a reboot.
-- **Battery monitor backs off:** it keeps the last reading through a blip and only re-opens the I²C gauge every few failures, instead of hammering an already-busy bus every poll.
-
-These are resilience fixes — they stop a marginal bus from turning into stuck, user-visible breakage. A genuinely faulty bus (pull-ups / expander solder) still needs a hardware look; the docs say how to tell.
-
-- Tests: sticky rail state + read-back-blip tolerance, battery reopen backoff, backlight keep-alive cadence; full cardputer + battery group (341) passes.
-- Docs: [M5StackCardputerZero.md → If the screen blanks or the Grove/battery reading flickers](M5StackCardputerZero.md).
-
-### 2026-11-22
-
-#### fix(cardputer): Grove port 5 V is now OFF by default — no inrush brownout at start
-
-*branch `fix/cardputer-grove-power-off-default`*
-
-- **The Grove port's 5 V rail now stays off at start** (the safe, stock state), instead of Ragnar powering it on. Powering a live rail when a current-drawing unit (a GPS) is plugged in draws an inrush surge that can brown the board out for a moment — a **black LCD** or a battery read-out glitch. Keeping it off until asked removes that at boot, which matters most for a unit that ships to other users.
-- **Switch it on when you want it:** **fn + Backspace** (the **del** key) or the web control. Turning it on now **also detects a Grove GPS** (frees the UART and hands it to wardriving / Meshtastic), so there is no restart needed. The choice is saved (`cardputer_grove_power`), so if you leave it on it comes back on next start.
-- **Recommended flow:** plug the GPS in with the port unpowered, then switch the rail on — the surge is then small and under your control.
-- Default change: `cardputer_grove_power` **`true` → `false`**.
-- Tests: switching Grove on rescans for a GPS; off does not. Grove-key + display groups pass.
-- Docs: [CardputerZero-Caps.md → Powering the Grove port](CardputerZero-Caps.md), [M5StackCardputerZero.md](M5StackCardputerZero.md).
-
-#### fix(cardputer): the battery read-out survives an I2C glitch instead of vanishing until a reboot
-
-*branch `fix/cardputer-grove-battery-glitch`*
-
-- **The CardputerZero battery icon no longer disappears when a Grove unit is plugged in.** Hot-plugging a GPS (or any current-drawing unit) onto the live Grove 5 V rail draws a surge that can brown the board out for a moment and upset the I2C fuel gauge (BQ27220). The battery monitor used to drop the reading after ~60 s of failed reads and never try again, so the icon stayed gone until a reboot.
-- **Now it rides the glitch out:** the icon keeps its last reading through a transient failure, the I2C gauge is reopened on the next poll (a stale bus handle no longer sticks), and the reading recovers on its own when the gauge answers again. Only a genuinely long outage (~5 min) clears it.
-- **Advice added:** connect the Grove GPS with the unit powered off, like the Caps — a cold connect avoids the inrush surge entirely.
-- Tests: survive-a-glitch, I2C reopen-after-bus-error, drop-only-after-a-long-outage. Battery + Cardputer display groups pass (160).
-- Docs: [CardputerZero-Caps.md → GPS on the Grove port](CardputerZero-Caps.md).
-
-#### fix(cardputer): Grove GPS found whatever the login prompt is named; Grove 5 V powers on after start-up; display-off self-heals
-
-*branch `fix/cardputer-grove-power-gps`*
-
-- **Grove GPS is now reliably detected.** The serial login prompt that has to come off the UART before GPS can read it is usually `serial-getty@serial0` (or `@ttyAMA0`), not the hard-coded `@ttyS0` — so Ragnar was not actually freeing it and the receiver stayed silent even though its fix LED was blinking. Ragnar now finds and stops the prompt **whatever it is named** (`ttyS0` / `ttyAMA0` / `serial0`), and probes `/dev/serial0` and `/dev/ttyAMA0` as well as `/dev/ttyS0`, so the GPS is found on whichever device the Grove UART really is on this board.
-- **"Source: serial" is the working state.** The Grove port *is* a UART, so a running Grove GPS correctly reads `source: serial` (direct NMEA, as opposed to `gpsd`). There is no separate "grove" source — *grove* is only the hardware-panel label for where the serial GPS is plugged in. Clarified in the docs.
-- **Grove 5 V now powers on a moment *after* start-up**, with a clean off→on edge, rather than being snapped on during boot — safer, and it gives a GPS unit a fresh power-up once the Pi is settled (`cardputer_grove_power`, unchanged default `true`).
-- **Display-off (the `0` key) self-heals.** If the one backlight-wake write glitched, the screen could stay dark until a reboot; the render loop now keeps retrying the wake until the light is back.
-- Tests: getty discovery by alias, `/dev/serial0` port fallback; 438 in the cardputer/GPS/mesh group pass.
-- Docs: [CardputerZero-Caps.md → GPS on the Grove port](CardputerZero-Caps.md).
-
-#### feat(cardputer): a GPS on the Grove port drives wardriving and Meshtastic
-
-*branch `feat/cardputer-grove-gps`*
-
-- **A UART GPS on the CardputerZero's Grove port now just works** — no LoRa Cap needed. Plug in a UART GPS such as the **M5Stack GPS Unit** (AT6668) and it feeds wardriving, the maps and the Meshtastic node, the same way the Cap's GNSS does.
-- **How:** the Grove port (Port C) is the same `/dev/ttyS0` UART the Cap's GNSS uses. Ragnar already powers the Grove port at start; it now also listens there for a receiver, and when it hears NMEA it hands the UART to GPS (stops the serial login prompt, takes the serial console out of `cmdline.txt`, keeps a `.ragnar-bak`) — exactly the hand-off it does for the Cap. If no receiver answers, the login prompt is left alone, so a unit without a Grove GPS keeps its serial console. The Meshtastic node gets the fix through the existing standby-GPS hand-over (`meshtastic_share_gps`).
-- **Config:** `cardputer_grove_gnss` (default `auto`): `auto` listens and hands over when a GPS is found, `true` always hands over, `false` never (keeps the serial console). The master switch `cardputer_free_gnss_uart` still gates both the Cap and the Grove GPS.
-- **UI:** the *System → CardputerZero hardware* panel shows a **GPS (Grove port)** row once the receiver is found. Baud is auto-detected (an M5 GPS Unit is 9600); leave **GPS Serial Port** on `auto`.
-- Docs: [CardputerZero-Caps.md → GPS on the Grove port](CardputerZero-Caps.md), [M5StackCardputerZero.md](M5StackCardputerZero.md).
-
 ### 2026-11-20
 
 #### docs: Testing Tiers glossary, how each detection module is tested for accuracy

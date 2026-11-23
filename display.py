@@ -958,8 +958,7 @@ class Display:
         then idle (Ragnar keeps running) until the key is pressed again or the
         service stops. Re-lights the backlight on the way out so the next frame
         is visible. The web preview (screen.png) keeps its last frame."""
-        blanked = self._set_cardputer_backlight(False)
-        if not blanked:
+        if not self._set_cardputer_backlight(False):
             logger.info("CardputerZero: display-off requested but the backlight "
                         "could not be switched; idling anyway")
         try:
@@ -967,42 +966,7 @@ class Display:
                    and not self.shared_data.display_should_exit):
                 time.sleep(0.1)
         finally:
-            # Re-light. A single I2C/sysfs write can glitch and leave the panel
-            # dark (which previously needed a reboot). If the one attempt does
-            # not confirm, flag it so the render loop keeps retrying until the
-            # light is back — only when we actually blanked, so a board without
-            # a backlight switch is left alone.
-            if blanked and not self._set_cardputer_backlight(True):
-                self._cardputer_wake_pending = True
-            else:
-                self._cardputer_wake_pending = False
-
-    def _resume_cardputer_backlight(self):
-        """Heal a backlight that did not come back from a display-off blank:
-        retry once per render pass until it confirms. A no-op unless a wake is
-        pending, so normal frames pay nothing."""
-        if getattr(self, '_cardputer_wake_pending', False):
-            if self._set_cardputer_backlight(True):
-                self._cardputer_wake_pending = False
-                logger.info("CardputerZero: backlight recovered after a failed wake")
-
-    _CARDPUTER_BL_KEEPALIVE = 8.0     # seconds between backlight re-asserts
-
-    def _cardputer_backlight_keepalive(self):
-        """Re-assert the LCD backlight every few seconds while rendering. The
-        backlight hangs off the M5IOE1 expander; if the expander glitches and
-        drops the PWM output, nothing else would turn it back on and the screen
-        stays black until a reboot. One expander write per interval brings it
-        back within a few seconds instead. Not run while the display is blanked
-        by the "0" key, so it never fights a deliberate blank; a no-op on boards
-        with no such backlight."""
-        if self.config.get("epd_type") != "st7789v2":
-            return
-        now = time.monotonic()
-        if now - getattr(self, '_cardputer_bl_keepalive_at', 0.0) < self._CARDPUTER_BL_KEEPALIVE:
-            return
-        self._cardputer_bl_keepalive_at = now
-        self._set_cardputer_backlight(True)
+            self._set_cardputer_backlight(True)
 
     def _get_cached_page_data(self, key, fetch_fn, ttl=10):
         """Get cached page data, refreshing if older than ttl seconds."""
@@ -2068,8 +2032,6 @@ class Display:
                 if self._cardputer_display_off():
                     self._run_display_off()
                     continue
-                self._resume_cardputer_backlight()
-                self._cardputer_backlight_keepalive()
                 now = time.monotonic()
                 problem = None
                 if not holding and now >= next_try:
@@ -5170,8 +5132,6 @@ class Display:
                 if self._cardputer_display_off():
                     self._run_display_off()
                     continue
-                self._resume_cardputer_backlight()
-                self._cardputer_backlight_keepalive()
                 self.epd_helper.init_partial_update()
                 # Pull latest orientation settings so web toggles take effect without restarting the service.
                 self.screen_reversed = self.shared_data.screen_reversed

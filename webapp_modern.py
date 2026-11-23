@@ -14990,10 +14990,6 @@ def _mesh_standby_port():
             return None, None
         if data.get('cap') == cardputer_caps.CAP_LORA_GNSS:
             return cardputer_caps.GNSS_PORT, cardputer_caps.GNSS_BAUD
-        # A plain GPS on the Grove port (no Cap), once the probe has found it.
-        port, baud = cardputer_caps.grove_gnss_standby()
-        if port:
-            return port, baud
     except Exception:
         pass
     return None, None
@@ -15215,13 +15211,10 @@ def _cz_gps_live():
 
 def _cz_detect_now(reidentify=False):
     import cardputer_caps
-    if reidentify:
-        cardputer_caps.reset_grove_gnss()      # a Refresh re-probes the Grove port too
     in_use = _cz_gnss_port_in_use()
     info = cardputer_caps.detect(shared_data.config, probe_serial=not in_use, camera=False,
                                  reidentify=reidentify,
-                                 free_uart=bool(shared_data.config.get('cardputer_free_gnss_uart', True)),
-                                 grove=True)
+                                 free_uart=bool(shared_data.config.get('cardputer_free_gnss_uart', True)))
     if info.get('gnss') is not None:
         info['gnss']['in_use'] = in_use
     if info.get('board'):
