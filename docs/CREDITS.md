@@ -14,9 +14,9 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **386 CVEs detected from the wire.** 455 distinct CVE IDs are named across Ragnar's
-  code; 386 of them a passive detector actually identifies. The rest are named, not detected:
-  60 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
+- **403 CVEs detected from the wire.** 478 distinct CVE IDs are named across Ragnar's
+  code; 403 of them a passive detector actually identifies. The rest are named, not detected:
+  66 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
   cannot reconstruct on the wire — the Ripple20 IPv6 bug CVE-2020-11897, which APC Guard
@@ -27,17 +27,23 @@ behind them is Solarflere's work.
   EAP-pwd side channels and a logrotate priv-esc, all undetectable from a passive RADIUS vantage,
   and **RDP Watch's CVE-2005-1794** Standard-RDP-Security MITM, carried as a posture reference
   on RDP-001/RDP-002 only — RDP Watch is a posture/abuse module with no CVE codes of its own —
-  and **HTTP Watch's five deferred CVEs** — the gRPC accept-loop bug with no wire artifact, two
+  and **HTTP Watch's eleven deferred CVEs** — the gRPC accept-loop bug with no wire artifact, two
   gRPC HPACK / `-bin` bugs below the 6.5 bar, a grpc-js local-API prototype pollution and Netty's
-  `setUri()` library misuse, whose wire effect the generic smuggling rules already catch),
+  `setUri()` library misuse, whose wire effect the generic smuggling rules already catch, plus (v3)
+  three Struts OGNL CVEs whose expression sits in a free-form location (CVE-2017-9791,
+  CVE-2018-11776 / S2-057, CVE-2020-17530 / S2-061), the Confluence OGNL bug (CVE-2022-26134) kept
+  as the contrast that defines the Struts gate, and two PHP session bugs decided by host
+  configuration rather than wire bytes (phpAfterShell CVE-2026-126714, CVE-2026-115560)),
   3 in card prose as related context, and 6 **active** BLE
   checks in the BLE Pentest action. Every one is listed, with its detector and status, in the
   generated **[CVE Index](CVE.md)**.
 - **28 years of coverage** — from **CVE-1999-0113** (the rlogin `-froot` bypass) to
-  **CVE-2026-102019**.
+  **CVE-2026-126714**.
 - **Two CISA KEV entries** join the corpus with SMTP Watch (CVE-2019-10149, CVE-2018-6789),
   and APC Guard adds the KEV-listed Ripple20 CVE-2020-11899. HTTP Watch adds two more:
-  **MS15-034** (CVE-2015-1635) and **HTTP/2 Rapid Reset** (CVE-2023-44487).
+  **MS15-034** (CVE-2015-1635) and **HTTP/2 Rapid Reset** (CVE-2023-44487). HTTP Watch v3 and DHCP
+  Guardian v4 bring **Shellshock** (CVE-2014-6271 and CVE-2014-7169), and HTTP Watch v3 adds
+  **React2Shell** (CVE-2025-55182) and the **Brotli** block-switch write (CVE-2026-111497).
 - **Arista Guard v4** tracks 17 EOS switch/router CVEs across posture / exposure / attack —
   BlastRADIUS (CVE-2024-3596, now scoped to Arista hardware learned from LLDP), regreSSHion,
   gNOI authorization bypass (CVE-2025-1260 / CVE-2025-0936), the actively-exploited
@@ -160,6 +166,18 @@ behind them is Solarflere's work.
   te / `:scheme` header abort (**CVE-2023-1428**). It also reads **credentials in the clear**,
   including the FS S3150-8T2F credential cookie (**CVE-2025-25613**), and every password, token
   and cookie value is replaced by an 8-hex SHA-256 tag before it reaches a finding.
+  **HTTP Watch v3** (36 codes) adds **eleven** more detected CVEs as attempt findings on
+  attack-shaped requests — never a claim the target is vulnerable: **Shellshock** in any header
+  (**CVE-2014-6271**, CISA KEV, with CVE-2014-7169 / -6277 / -6278 / -7186 / -7187),
+  **Java4Shell** Base64 padding no encoder produces (**CVE-2026-114938**), **Struts S2-045 /
+  S2-046** OGNL in a Content-Type meeting all three evaluation conditions or in a multipart
+  filename (**CVE-2017-5638**), **Spring4Shell** class-path binding (**CVE-2022-22965**, and the
+  original **CVE-2010-1622**) and **React2Shell** Flight property-path references
+  (**CVE-2025-55182**, CISA KEV / Next.js **CVE-2025-66478**), read from bodies decoded every way
+  an affected server might. The **PHP2Shell** memory leak is read as an oversized PHP session
+  cookie (**CVE-2026-109618** / **CVE-2026-109619**, lengths only), and the **Brotli** decoder
+  block-switch out-of-bounds write (**CVE-2026-111497**, CISA KEV) is checked with the host's own
+  libbrotli only after proving that library carries the fix.
 - **SNMP / multicast / time-plane** — the in-app **SNMP Watch** now reads raw BER off the
   wire for **USM HMAC truncation** (CVE-2008-0960), **Cisco SNMP RCE** (CVE-2017-6736..6744,
   CISA KEV), **snmptrapd overflow** (CVE-2025-68615) and **net-snmp VACM malformed-OID**
@@ -215,6 +233,14 @@ behind them is Solarflere's work.
   Windows / CVE-2020-25583 FreeBSD rtsold) alongside the existing Bad Neighbor
   (CVE-2020-16898). The two Microsoft DHCP heap-overflow CVEs (CVE-2026-50518 /
   CVE-2026-56159) are deferred — no published trigger, so no passive signature exists yet.
+  **DHCP Guardian v4** adds **Shellshock via DHCP** (**CVE-2014-6271**, CISA KEV, and its
+  function-import siblings CVE-2014-7169 / -6277 / -6278 / -7186 / -7187): the exact bash
+  function-import prefix `() {` at the start of any field a DHCP hook exports to a shell, across
+  DHCPv4 (option 52 overload into `sname`/`file`, option 82 / 125 sub-options, decoded option 119
+  names) and DHCPv6 (every option through relay and IA nesting). **LDAP Watch v6** adds the
+  **Log4Shell** JNDI delivery leg (**CVE-2021-44228** / **CVE-2021-45046**): a directory returning
+  a remote `javaCodeBase` (compromise-class) or a serialized Java object (suspicious) to a client,
+  also on the default rogue-JNDI port 1389.
 
 - **Routing / IGP wave** — **EIGRP Watch** names three CVEs on shapes it already detects:
   the K-value / Goodbye adjacency-reset (CVE-2005-4436), weak/absent authentication

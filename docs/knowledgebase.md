@@ -468,6 +468,16 @@ Source: bluetooth.md
 
 ## Alerts and reporting
 
+### Does Ragnar detect Log4Shell?
+Yes, the delivery leg. **LDAP Watch** flags a directory that returns a remote `javaCodeBase` (or a serialized Java object) to a client, on LDAP ports 389, 3268 and 1389. It reports delivery on the wire, not whether the client ran it.
+Source: nettools.md
+<!-- proof: docs/nettools.md | adds the **JNDI delivery leg** of **Log4Shell**-class attacks -->
+
+### Does Ragnar detect Shellshock?
+Yes, as attempts. **HTTP Watch** flags the bash `() {` prefix at the start of any request header, and **DHCP Guardian** flags it in DHCPv4 and DHCPv6 fields. Neither can tell whether the target runs a vulnerable bash.
+Source: nettools.md
+<!-- proof: docs/nettools.md | **Shellshock via DHCP (v4)** -->
+
 ### What is Watchtower?
 One deduplicated feed of the alerts from Ragnar's passive watchers, with one notification path for new high and critical findings.
 Source: watchtower.md
