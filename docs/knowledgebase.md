@@ -473,6 +473,11 @@ Yes, the delivery leg. **LDAP Watch** flags a directory that returns a remote `j
 Source: nettools.md
 <!-- proof: docs/nettools.md | adds the **JNDI delivery leg** of **Log4Shell**-class attacks -->
 
+### Does Ragnar detect ProxyLogon, ProxyShell or ToolShell?
+Yes, as attempts, with **HTTP Watch**. It sees only the cleartext hop between a TLS-offloading load balancer and Exchange or SharePoint, so no finding on a TLS-end-to-end deployment does not mean the server is safe.
+Source: nettools.md
+<!-- proof: docs/nettools.md | **Exchange and SharePoint** (*v4*; -->
+
 ### Does Ragnar detect Shellshock?
 Yes, as attempts. **HTTP Watch** flags the bash `() {` prefix at the start of any request header, and **DHCP Guardian** flags it in DHCPv4 and DHCPv6 fields. Neither can tell whether the target runs a vulnerable bash.
 Source: nettools.md
