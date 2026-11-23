@@ -2226,7 +2226,8 @@ def test_struts_attack_dedup():
           w2.stats["attacks_suppressed"] >= 1)
     check("attack dedup: every attack-class code is in the set",
           hw.ATTACK_CODES == {"HTTP-080", "HTTP-081", "HTTP-082", "HTTP-083",
-                              "HTTP-084", "HTTP-085", "HTTP-090"})
+                              "HTTP-084", "HTTP-085", "HTTP-086", "HTTP-087",
+                              "HTTP-088", "HTTP-090"})
     check("attack dedup: and no posture code is",
           not (hw.ATTACK_CODES & {"HTTP-045", "HTTP-048", "HTTP-060"}))
 
@@ -2249,7 +2250,7 @@ def test_struts_attack_dedup():
           w3.stats["attacks_suppressed"] == 2)
 
 def test_registry():
-    check("registry: 36 codes", len(hw.FINDING_REGISTRY) == 36)
+    check("registry: 39 codes", len(hw.FINDING_REGISTRY) == 39)
     for code, d in hw.FINDING_REGISTRY.items():
         check(f"registry: {code} code matches key", d.code == code)
         check(f"registry: {code} has a summary", len(d.summary) > 20)
@@ -2291,8 +2292,19 @@ def test_registry():
         check(f"catalog: {cve} vector version matches what is recorded",
               vector.startswith("CVSS:3.") or
               meta.get("cvss_version") == "4.0")
-        check(f"catalog: {cve} score is at or above the 6.5 bar",
-              meta["score"] >= 6.5)
+        chained = meta.get("below_bar_because_chained_to")
+        if chained:
+            # A sub-bar CVE is admitted only as a pinned link in a chain
+            # whose terminal CVE clears the bar on its own.
+            check(f"catalog: {cve} names a terminal CVE in the catalog",
+                  chained in hw.CVE_CATALOG)
+            check(f"catalog: {cve}'s terminal CVE {chained} clears the bar",
+                  hw.CVE_CATALOG.get(chained, {}).get("score", 0) >= 6.5)
+            check(f"catalog: {cve} explains the exemption",
+                  len(meta.get("note", "")) > 40)
+        else:
+            check(f"catalog: {cve} score is at or above the 6.5 bar",
+                  meta["score"] >= 6.5)
     # where sources disagree, both figures must be recorded
     for cve, meta in hw.CVE_CATALOG.items():
         if meta.get("disputed"):
@@ -2846,6 +2858,763 @@ def test_php_cookie_live_regeneration():
           0 < worst <= hw.PHP_COOKIE_NATIVE_CEILING)
     check("HTTP-048: the 256-char ceiling is 256 * len('%2C')",
           hw.PHP_COOKIE_NATIVE_CEILING == 256 * 3)
+
+
+# ---------------------------------------------------------------------------
+# HTTP-086 / 087 / 088: Exchange and SharePoint
+# ---------------------------------------------------------------------------
+def _ex(raw, cfg=None):
+    w = hw.HttpWatch(cfg=cfg) if cfg else hw.HttpWatch()
+    return w.feed("x", "10.0.0.5", "10.0.0.9", 80, raw, True, now=1.0)
+
+
+def _excodes(raw, cfg=None):
+    return {f.code for f in _ex(raw, cfg)}
+
+
+def _cookie_req(cookie, target=b"/owa/auth/x.js", extra=b""):
+    return (b"GET " + target + b" HTTP/1.1\r\nHost: exch.corp\r\nCookie: "
+            + cookie + b"\r\n" + extra + b"\r\n")
+
+
+def test_canonical_uri_path():
+    """Every case here is held against real System.Uri in the xcheck tier."""
+    # measured against Mono's System.Uri.AbsolutePath
+    for src, want in [
+        (b"/_layouts/SignOut.aspx", b"/_layouts/SignOut.aspx"),
+        (b"/_layouts/./SignOut.aspx", b"/_layouts/SignOut.aspx"),
+        (b"/_layouts/15/../SignOut.aspx", b"/_layouts/SignOut.aspx"),
+        (b"/_layouts/15/16/../../SignOut.aspx", b"/_layouts/SignOut.aspx"),
+        (br"\_layouts\SignOut.aspx", b"/_layouts/SignOut.aspx"),
+        (b"/_layouts/%2e/SignOut.aspx", b"/_layouts/SignOut.aspx"),
+        (b"/_layouts/%2E%2E/SignOut.aspx", b"/SignOut.aspx"),
+        (b"https://sp.corp/_layouts/SignOut.aspx", b"/_layouts/SignOut.aspx"),
+        (b"https://sp.corp/_layouts/SignOut.aspx?x=1", b"/_layouts/SignOut.aspx"),
+        (b"https://sp.corp/_layouts/SignOut.aspx#frag", b"/_layouts/SignOut.aspx"),
+        (b"https://u:p@sp.corp:8443/_layouts/SignOut.aspx",
+         b"/_layouts/SignOut.aspx"),
+        (b"//sp.corp/_layouts/SignOut.aspx", b"/_layouts/SignOut.aspx"),
+        (b"http://sp.corp", b"/"),
+        # PathInfo is preserved, which is what the 53771 bypass needs
+        (b"/_layouts/15/ToolPane.aspx/lx", b"/_layouts/15/ToolPane.aspx/lx"),
+        (b"/_layouts/15/ToolPane.aspx/", b"/_layouts/15/ToolPane.aspx/"),
+        # a relative reference is made absolute
+        (b"_layouts/SignOut.aspx", b"/_layouts/SignOut.aspx"),
+        # '+' is NOT a space in a path
+        (b"/_layouts/a+b.aspx", b"/_layouts/a+b.aspx"),
+        # percent-decoding happens before dot-segment removal
+        (b"/a/%2e%2e/b", b"/b"),
+    ]:
+        got = hw.canonical_uri_path(src)
+        check(f"canonical_uri_path({src!r}) == {want!r} (got {got!r})",
+              got == want)
+    check("canonical_uri_path of empty is None",
+          hw.canonical_uri_path(b"") is None)
+    check("canonical_uri_path of whitespace is None",
+          hw.canonical_uri_path(b"  ") is None)
+    # Case is preserved: SharePoint compares case-insensitively, the
+    # canonicaliser must not do the folding for it or the evidence lies.
+    # An empty segment is significant. Collapsing it would make
+    # /_layouts//SignOut.aspx compare equal to the sign-out path that
+    # HTTP-088 keys on, while the real SharePoint would not have skipped
+    # its checks - a false positive. Held against System.Uri in xcheck.
+    for src, want in [
+        (b"/_layouts//15//ToolPane.aspx", b"/_layouts//15//ToolPane.aspx"),
+        (b"/_layouts//SignOut.aspx", b"/_layouts//SignOut.aspx"),
+        (b"/a//../b", b"/a/b"),
+        (b"/a/./../b", b"/b"),
+    ]:
+        got = hw.canonical_uri_path(src)
+        check(f"empty segments are preserved: {src!r} -> {want!r} "
+              f"(got {got!r})", got == want)
+    check("a doubled slash does not forge a sign-out Referer",
+          "HTTP-088" not in _excodes(_sp(b"/_layouts/15/ToolPane.aspx",
+                                        b"/_layouts//SignOut.aspx")))
+    check("canonical_uri_path preserves case",
+          hw.canonical_uri_path(b"/_layouts/SignOut.aspx")
+          == b"/_layouts/SignOut.aspx")
+
+
+def test_check_host_name():
+    """Uri.CheckHostName equivalent - this IS the ProxyLogon patch check."""
+    for host, want in [
+        (b"EXCH01", "Dns"),
+        (b"exch01.corp.example.com", "Dns"),
+        (b"EXCH01.Corp.Example.COM", "Dns"),
+        (b"localhost", "Dns"),
+        (b"a-b.example", "Dns"),
+        (b"host_name", "Dns"),          # underscore is accepted by .NET
+        (b"a-", "Dns"),                 # a trailing hyphen is accepted
+        (b"a_b-c.example", "Dns"),
+        (b"example.com.", "Dns"),       # a trailing root dot is legal
+        (b"10.1.2.3", "IPv4"),
+        (b"[::1]", "IPv6"),
+        (b"[2001:db8::1]", "IPv6"),
+        # everything the patch rejects
+        (b"@backend.example.local:444", "Unknown"),
+        (b"localhost/EWS/Exchange.asmx", "Unknown"),
+        (b"localhost:444", "Unknown"),
+        (b"localhost#", "Unknown"),
+        (b"localhost?a=", "Unknown"),
+        (b"host\\share", "Unknown"),
+        (b"", "Unknown"),
+        (b"..", "Unknown"),
+        (b"a..b", "Unknown"),
+        (b"[notv6]", "Unknown"),
+        # a label may not BEGIN with a hyphen or underscore, though it may
+        # end with one. Measured against Uri.CheckHostName.
+        (b"-lead.example", "Unknown"),
+        (b"-a", "Unknown"),
+        (b"_lead.example", "Unknown"),
+        (b".example.com", "Unknown"),
+        (b"a" * 64 + b".com", "Unknown"),     # label over 63
+        (b"a" * 256, "Unknown"),              # host over 255
+    ]:
+        got = hw.check_host_name(host)
+        check(f"check_host_name({host!r}) == {want} (got {got})", got == want)
+
+
+def test_http_086_positives():
+    pz = (b"POST /ecp/favicon.ico HTTP/1.1\r\nHost: exch.corp\r\n"
+          b"Cookie: X-BEResource=@backend.example.local:444/ecp/"
+          b"proxyLogon.ecp#~1941962753\r\nContent-Length: 0\r\n\r\n")
+    check("HTTP-086 fires on the in-the-wild auth-bypass request",
+          "HTTP-086" in _excodes(pz))
+    for label, cookie in [
+        ("the EWS form",
+         b"X-BEResource=localhost/EWS/Exchange.asmx#~1942062522"),
+        ("the ?a=~ form",
+         b"X-BEResource=localhost/autodiscover/autodiscover.xml?a=~1942062522"),
+        ("an FQDN with an injected path",
+         b"X-BEResource=exch01.corp.local/ecp/proxyLogon.ecp#~1942062522"),
+        ("X-AnonResource-Backend",
+         b"X-AnonResource-Backend=localhost/ecp/proxyLogon.ecp#~1942062522"),
+        ("percent-encoded %2F",
+         b"X-BEResource=localhost%2FEWS%2FExchange.asmx%23~1942062522"),
+        ("percent-encoded %40",
+         b"X-BEResource=%40backend:444/ecp/x.ecp%23~1942062522"),
+        ("lowercase cookie name",
+         b"x-beresource=localhost/ecp/x.ecp#~1942062522"),
+        ("alongside other cookies",
+         b"sessionid=aaa; X-BEResource=localhost/ecp/x.ecp#~1942062522; o=1"),
+    ]:
+        check(f"HTTP-086 fires on {label}",
+              "HTTP-086" in _excodes(_cookie_req(cookie)))
+
+
+def test_http_086_negatives():
+    for label, cookie in [
+        ("a bare hostname", b"X-BEResource=EXCH01~1942062522"),
+        ("an FQDN", b"X-BEResource=exch01.corp.example.com~1942062522"),
+        ("mixed case", b"X-BEResource=EXCH01.Corp.Example.COM~1942062522"),
+        ("an IPv4 literal", b"X-BEResource=10.1.2.3~1942062522"),
+        ("an IPv6 literal", b"X-BEResource=[2001:db8::1]~1942062522"),
+        ("an underscore hostname", b"X-BEResource=exch_01~1942062522"),
+        # Exchange's own FromString rejects these, so they are not attacks
+        ("two tildes, which FromString rejects",
+         b"X-BEResource=localhost/ecp/x.ecp~bad~1942062522"),
+        ("no tilde at all", b"X-BEResource=localhost/ecp/x.ecp"),
+        ("a non-integer version",
+         b"X-BEResource=localhost/ecp/x.ecp#~notanumber"),
+        ("a negative version",
+         b"X-BEResource=localhost/ecp/x.ecp#~-1"),
+        ("an empty host", b"X-BEResource=~1942062522"),
+        ("unrelated cookies", b"sessionid=abc; cadata=def; FedAuth=ghi"),
+        ("a lookalike cookie name",
+         b"X-BEResource-Backend=localhost/ecp/x.ecp#~1"),
+    ]:
+        check(f"HTTP-086 silent on {label}",
+              "HTTP-086" not in _excodes(_cookie_req(cookie)))
+    check("HTTP-086 silent with no Cookie header",
+          "HTTP-086" not in _excodes(
+              b"GET /owa/x.js HTTP/1.1\r\nHost: e\r\n\r\n"))
+
+
+def test_http_086_tilde_split_is_unambiguous():
+    """The two-part requirement makes the split's maxsplit irrelevant.
+
+    A second tilde always lands in the version and fails isdigit(), so
+    there is no maxsplit-related evasion route into this rule. Asserted
+    exhaustively rather than argued, because the bite tier cannot probe an
+    equivalence from outside: a mutation that changes nothing is not a hole
+    but it is not evidence of coverage either.
+    """
+    import itertools
+    alpha = [b"a", b"~", b"1", b"/", b".", b"%", b"2", b"F"]
+    checked = diff = 0
+    for n in range(1, 6):
+        for combo in itertools.product(alpha, repeat=n):
+            value = b"".join(combo)
+            full = hw.exchange_backend_verdict(hw.EXCHANGE_BE_COOKIE, value)
+            # the same rule with the split's maxsplit changed
+            parts_full = value.split(b"~")
+            parts_one = value.split(b"~", 1)
+            # "accepts" is the pair of victim-code guards together
+            accept_full = len(parts_full) == 2 and parts_full[1].isdigit()
+            accept_one = len(parts_one) == 2 and parts_one[1].isdigit()
+            if accept_full != accept_one:
+                diff += 1
+            elif accept_full and parts_full[0] != parts_one[0]:
+                diff += 1       # same verdict must also mean the same host
+            checked += 1
+            del full
+    check("the tilde split was exercised over the whole alphabet",
+          checked == sum(len(alpha) ** n for n in range(1, 6)))
+    check("no input distinguishes a full split from maxsplit=1",
+          diff == 0, )
+    # and the two tildes case really is rejected, from both directions
+    for value in (b"localhost/ecp/x.ecp~bad~1942062522",
+                  b"localhost/ecp/x.ecp~1~2",
+                  b"a~b~c~d"):
+        check(f"a multi-tilde value is rejected: {value!r}",
+              hw.exchange_backend_verdict(hw.EXCHANGE_BE_COOKIE, value) is None)
+
+
+def test_http_086_evidence():
+    pz = (b"POST /ecp/favicon.ico HTTP/1.1\r\nHost: exch.corp\r\n"
+          b"Cookie: msExchLogonMailbox=S-1-5-20; X-BEResource="
+          b"@backend.example.local:444/ecp/proxyLogon.ecp#~1941962753\r\n"
+          b"Authorization: Basic dXNlcjpwdw==\r\nContent-Length: 0\r\n\r\n")
+    f = [x for x in _ex(pz) if x.code == "HTTP-086"][0]
+    e = f.evidence
+    check("HTTP-086 reports the injected path",
+          e["target_path"] == "/ecp/proxyLogon.ecp")
+    check("HTTP-086 reports the injected characters",
+          set(e["injected_characters"]) >= {"/", "@", ":"})
+    check("HTTP-086 records the FromString structure",
+          e["tilde_parts"] == 2 and e["version_is_integer"] is True)
+    check("HTTP-086 records the failing host check",
+          e["host_check"] == "Unknown")
+    check("HTTP-086 flags the admin-impersonation cookie",
+          e["logon_sid_present"] is True)
+    check("HTTP-086 names which cookie matched", e["cookie"] == "x-beresource")
+    # evidence discipline: these are live credentials on Exchange
+    blob = repr(e)
+    check("HTTP-086 never logs the Authorization value",
+          "dXNlcjpwdw" not in blob)
+    check("HTTP-086 never logs the logon SID value", "S-1-5-20" not in blob)
+    check("HTTP-086 does not log the cookie value by default",
+          "payload" not in e)
+    check("HTTP-086 digests the matched value",
+          e["value_digest"].startswith("sha256:"))
+    # and only on the operator's explicit say-so
+    cfg = hw.WatchConfig(log_attack_payload=True)
+    f2 = [x for x in _ex(pz, cfg) if x.code == "HTTP-086"][0]
+    check("HTTP-086 logs the payload only when asked",
+          "proxyLogon.ecp" in f2.evidence.get("payload", ""))
+    check("HTTP-086 still withholds other cookies when asked",
+          "S-1-5-20" not in repr(f2.evidence))
+    check("HTTP-086 says attempt, not vulnerable",
+          "attempt" in e["note"] and "patch state is not on the wire" in e["note"])
+
+
+def test_http_086_decoded_form_is_labelled():
+    raw = _cookie_req(b"X-BEResource=localhost%2FEWS%2FExchange.asmx%23~1942062522")
+    f = [x for x in _ex(raw) if x.code == "HTTP-086"][0]
+    check("HTTP-086 says which form it matched on",
+          f.evidence["evaluated_on"] == "percent_decoded")
+    check("HTTP-086 names the injected path from the decoded form",
+          f.evidence["target_path"] == "/EWS/Exchange.asmx")
+    raw2 = _cookie_req(b"X-BEResource=localhost/EWS/Exchange.asmx#~1942062522")
+    f2 = [x for x in _ex(raw2) if x.code == "HTTP-086"][0]
+    check("HTTP-086 labels a raw match as raw",
+          f2.evidence["evaluated_on"] == "raw")
+
+
+def test_http_087_positives():
+    ps = (b"GET /autodiscover/autodiscover.json?@evil.corp/?&Email="
+          b"autodiscover/autodiscover.json%3F@evil.corp HTTP/1.1\r\n"
+          b"Host: exch.corp\r\n\r\n")
+    check("HTTP-087 fires on the canonical ProxyShell PoC",
+          "HTTP-087" in _excodes(ps))
+    f = [x for x in _ex(ps) if x.code == "HTTP-087"][0]
+    check("HTTP-087 unauthenticated is the ProxyShell shape",
+          f.evidence["attack"] == "ProxyShell")
+    pns = (b"GET /autodiscover/autodiscover.json?@evil.com/&Email="
+           b"autodiscover/autodiscover.json%3f@evil.com HTTP/1.1\r\n"
+           b"Host: exch.corp\r\nAuthorization: Basic dXNlcjpwdw==\r\n\r\n")
+    check("HTTP-087 fires on the ProxyNotShell form",
+          "HTTP-087" in _excodes(pns))
+    f = [x for x in _ex(pns) if x.code == "HTTP-087"][0]
+    check("HTTP-087 authenticated is the ProxyNotShell shape",
+          f.evidence["attack"] == "ProxyNotShell")
+    check("HTTP-087 never logs the Authorization value",
+          "dXNlcjpwdw" not in repr(f.evidence))
+    # Every published back-end target, in the real published shape: the
+    # trailing "/?&" is what makes the remainder a query, so that after the
+    # strip the back-end path is the target and nothing else.
+    for tgt in [b"/powershell/", b"/mapi/nspi/", b"/ews/exchange.asmx",
+                b"/autodiscover/autodiscover.xml", b"/"]:
+        raw = (b"GET /autodiscover/autodiscover.json?@evil.corp" + tgt +
+               b"?&Email=autodiscover/autodiscover.json%3F@evil.corp HTTP/1.1"
+               b"\r\nHost: e.corp\r\n\r\n")
+        check(f"HTTP-087 fires with target {tgt!r}", "HTTP-087" in _excodes(raw))
+    # the key and the suffix both fold case
+    for label, raw in [
+        ("an uppercase Email key",
+         b"GET /autodiscover/autodiscover.json?@e.corp/&EMAIL=autodiscover/"
+         b"autodiscover.json%3F@e.corp HTTP/1.1\r\nHost: e\r\n\r\n"),
+        ("a mixed-case path",
+         b"GET /Autodiscover/AutoDiscover.Json?@e.corp/&Email=Autodiscover/"
+         b"AutoDiscover.Json%3F@e.corp HTTP/1.1\r\nHost: e\r\n\r\n"),
+        ("an encoded %3f",
+         b"GET /autodiscover/autodiscover.json?@e.corp/&Email=autodiscover/"
+         b"autodiscover.json%3f@e.corp HTTP/1.1\r\nHost: e\r\n\r\n"),
+        ("a path with a dot segment",
+         b"GET /autodiscover/./autodiscover.json?@e.corp/&Email=autodiscover/"
+         b"autodiscover.json%3F@e.corp HTTP/1.1\r\nHost: e\r\n\r\n"),
+    ]:
+        check(f"HTTP-087 fires on {label}", "HTTP-087" in _excodes(raw))
+
+
+def test_http_087_negatives():
+    for label, target in [
+        ("a legitimate autodiscover v2 request",
+         b"/autodiscover/autodiscover.json?Email=user@contoso.com"
+         b"&Protocol=ActiveSync&RedirectCount=1"),
+        ("a legitimate request with a long SMTP address",
+         b"/autodiscover/autodiscover.json?Email=first.last+tag@sub.contoso.com"
+         b"&Protocol=Autodiscoverv1"),
+        ("an autodiscover.xml POST", b"/autodiscover/autodiscover.xml?Email=u@c.com"),
+        ("no Email parameter at all", b"/autodiscover/autodiscover.json"),
+        ("an empty Email", b"/autodiscover/autodiscover.json?Email="),
+        # Microsoft's broad mitigation regex fires on this; the strip
+        # condition does not, which is the whole point
+        ("autodiscover and powershell with no strip construct",
+         b"/autodiscover/autodiscover.json?Email=u@c.com&x=/powershell"),
+        ("a path that does not end at the handler",
+         b"/autodiscover/autodiscover.json/x?@e.corp/&Email=autodiscover/"
+         b"autodiscover.json%3F@e.corp"),
+        # The strip leaves it on the same handler, so it is not the
+        # defect. These three are the ones that matter: in each the strip
+        # really does occur, and the post-strip handler test is the only
+        # thing keeping the rule quiet. The bite tier found that the
+        # earlier corpus never reached this branch at all - the value below
+        # does not even strip, because "/foo/autodiscover.json" never
+        # appears in the URI. A legitimate Email value that happens to
+        # match a leading path segment is the false positive this guards.
+        ("an Email matching a leading path segment",
+         b"/foo/autodiscover/autodiscover.json?Email=foo"),
+        ("an Email of 'autodiscover', which strips to /autodiscover.json",
+         b"/autodiscover/autodiscover.json?Email=autodiscover"),
+        ("a single-character leading segment",
+         b"/a/autodiscover/autodiscover.json?Email=a"),
+        ("a value that does not strip at all",
+         b"/autodiscover/autodiscover.json?Email=foo/autodiscover.json"),
+    ]:
+        raw = b"GET " + target + b" HTTP/1.1\r\nHost: e.corp\r\n\r\n"
+        check(f"HTTP-087 silent on {label}", "HTTP-087" not in _excodes(raw))
+
+
+def test_http_087_evidence():
+    raw = (b"GET /autodiscover/autodiscover.json?@evil.corp/powershell/?"
+           b"&Email=autodiscover/autodiscover.json%3F@evil.corp HTTP/1.1\r\n"
+           b"Host: exch.corp\r\n\r\n")
+    f = [x for x in _ex(raw) if x.code == "HTTP-087"][0]
+    e = f.evidence
+    check("HTTP-087 reports the routed path",
+          e["routed_path"] == "/autodiscover/autodiscover.json")
+    check("HTTP-087 reports the stripped back-end path",
+          e["stripped_target"].lower().startswith("/powershell"))
+    check("HTTP-087 flags the RCE stage", e["rce_stage"] is True)
+    check("HTTP-087 digests the logon value",
+          e["logon_value_digest"].startswith("sha256:"))
+    check("HTTP-087 does not log the target by default", "payload" not in e)
+    check("HTTP-087 explains the AbsolutePath/AbsoluteUri mismatch",
+          "AbsolutePath" in e["note"] and "AbsoluteUri" in e["note"])
+    check("HTTP-087 says attempt, not compromise", "attempt" in e["note"])
+
+
+def test_http_087_authority_is_part_of_the_uri():
+    """The strip runs over AbsoluteUri, so the authority is in scope.
+
+    RemoveExplicitLogonFromUrlAbsoluteUri does an IndexOf over the whole
+    absolute URI, authority included, and strips the FIRST occurrence. So a
+    Host that itself contains the explicit-logon value changes which
+    occurrence is removed, and therefore the verdict. Dropping the
+    authority from the reconstruction looks harmless and is not: it turns
+    this pair into two identical firings, the second of which is a false
+    positive. The bite tier found that nothing here varied the Host.
+    """
+    target = b"/autodiscover/autodiscover.json?Email=autodiscover.json"
+    fires = hw.exchange_logon_strip_verdict(target, b"exch.corp")
+    check("HTTP-087: an ordinary Host leaves the first match in the path",
+          fires is not None and fires["stripped_target"] == "/autodiscover")
+    # the same target, with a Host that contains the value: the first
+    # occurrence is now inside the authority, the strip lands there, and
+    # the request is still on the autodiscover handler afterwards
+    silent = hw.exchange_logon_strip_verdict(target, b"autodiscover.json")
+    check("HTTP-087: a Host containing the logon value moves the match "
+          "into the authority, and the rule stays silent", silent is None)
+    # end to end, so the Host header really is the one being read
+    def with_host(host):
+        raw = (b"GET " + target + b" HTTP/1.1\r\nHost: " + host + b"\r\n\r\n")
+        return "HTTP-087" in _excodes(raw)
+    check("HTTP-087 end to end: fires with an ordinary Host",
+          with_host(b"exch.corp"))
+    check("HTTP-087 end to end: silent with the colliding Host",
+          not with_host(b"autodiscover.json"))
+    # and the scheme is part of it too: a needle that only matches once the
+    # authority is dropped must not be found
+    check("HTTP-087: the reconstruction keeps the scheme and authority",
+          hw.exchange_logon_strip_verdict(
+              b"/autodiscover/autodiscover.json?Email=exch.corp",
+              b"exch.corp") is None)
+
+
+def test_http_087_duplicate_email_is_comma_joined():
+    """HttpUtility.ParseQueryString comma-joins duplicates - measured, not
+    assumed, and held against Mono in the xcheck tier."""
+    raw = (b"GET /autodiscover/autodiscover.json?@e.corp/&Email=a"
+           b"&Email=autodiscover/autodiscover.json%3F@e.corp HTTP/1.1\r\n"
+           b"Host: e\r\n\r\n")
+    check("HTTP-087 evaluates each individual duplicate value",
+          "HTTP-087" in _excodes(raw))
+    f = [x for x in _ex(raw) if x.code == "HTTP-087"][0]
+    check("HTTP-087 counts the duplicate values",
+          f.evidence["explicit_logon_values"] == 2)
+
+
+def _sp(target, referer=None, body=b"", method=b"POST", extra=b""):
+    head = method + b" " + target + b" HTTP/1.1\r\nHost: sp.corp\r\n"
+    if referer is not None:
+        head += b"Referer: " + referer + b"\r\n"
+    if body:
+        head += (b"Content-Type: application/x-www-form-urlencoded\r\n"
+                 b"Content-Length: " + str(len(body)).encode() + b"\r\n")
+    else:
+        head += b"Content-Length: 0\r\n"
+    return head + extra + b"\r\n" + body
+
+
+def test_http_088_positives():
+    ts = _sp(b"/_layouts/15/ToolPane.aspx?DisplayMode=Edit",
+             b"/_layouts/SignOut.aspx", b"MSOtlPn_DWP=markup")
+    check("HTTP-088 fires on the original CVE-2025-49706 shape",
+          "HTTP-088" in _excodes(ts))
+    for label, target, referer in [
+        ("the trailing-slash 53771 bypass",
+         b"/_layouts/15/ToolPane.aspx/", b"/_layouts/SignOut.aspx"),
+        ("the SANS-observed PathInfo form",
+         b"/_layouts/15/ToolPane.aspx/lx?DisplayMode=Edit&lx=/ToolPane.aspx",
+         b"/_layouts/SignOut.aspx"),
+        ("the /_layouts/16/ hive",
+         b"/_layouts/16/ToolPane.aspx?DisplayMode=Edit",
+         b"/_layouts/SignOut.aspx"),
+        ("the /_layouts/14/ hive",
+         b"/_layouts/14/ToolPane.aspx", b"/_layouts/SignOut.aspx"),
+        ("no hive segment at all",
+         b"/_layouts/ToolPane.aspx", b"/_layouts/SignOut.aspx"),
+        ("a lowercase target",
+         b"/_layouts/15/toolpane.aspx", b"/_layouts/SignOut.aspx"),
+        ("an uppercase target",
+         b"/_LAYOUTS/15/TOOLPANE.ASPX", b"/_layouts/SignOut.aspx"),
+        ("the ./SignOut.aspx Referer",
+         b"/_layouts/15/ToolPane.aspx", b"/_layouts/./SignOut.aspx"),
+        ("a dot-dot Referer",
+         b"/_layouts/15/ToolPane.aspx", b"/_layouts/15/../SignOut.aspx"),
+        ("an absolute-URL Referer",
+         b"/_layouts/15/ToolPane.aspx",
+         b"https://sharepoint.target.internal/_layouts/SignOut.aspx"),
+        ("a backslash Referer",
+         b"/_layouts/15/ToolPane.aspx", br"\_layouts\SignOut.aspx"),
+        ("a %2e Referer", b"/_layouts/15/ToolPane.aspx",
+         b"/_layouts/%2e/SignOut.aspx"),
+        ("the 14 sign-out path",
+         b"/_layouts/15/ToolPane.aspx", b"/_layouts/14/SignOut.aspx"),
+        ("the 15 sign-out path",
+         b"/_layouts/15/ToolPane.aspx", b"/_layouts/15/SignOut.aspx"),
+        ("a case-variant Referer",
+         b"/_layouts/15/ToolPane.aspx", b"/_LAYOUTS/15/signout.ASPX"),
+        ("a Referer with a query and fragment",
+         b"/_layouts/15/ToolPane.aspx",
+         b"/_layouts/SignOut.aspx?ReturnUrl=%2f#x"),
+        ("a GET rather than a POST",
+         b"/_layouts/15/ToolPane.aspx", b"/_layouts/SignOut.aspx"),
+    ]:
+        raw = _sp(target, referer,
+                  method=b"GET" if "GET" in label else b"POST")
+        check(f"HTTP-088 fires on {label}", "HTTP-088" in _excodes(raw))
+
+
+def test_http_088_negatives():
+    for label, target, referer in [
+        ("a sign-out Referer to init.js",
+         b"/_layouts/15/init.js", b"/_layouts/SignOut.aspx"),
+        ("a sign-out Referer to core.js",
+         b"/_layouts/15/core.js", b"/_layouts/SignOut.aspx"),
+        ("a sign-out Referer to theming.js",
+         b"/_layouts/15/theming.js", b"/_layouts/SignOut.aspx"),
+        ("a sign-out Referer to ScriptResource.axd",
+         b"/ScriptResource.axd?d=x", b"/_layouts/SignOut.aspx"),
+        ("a sign-out Referer to WebResource.axd",
+         b"/WebResource.axd?d=x", b"/_layouts/SignOut.aspx"),
+        ("a sign-out Referer to corev15.css",
+         b"/_layouts/15/1033/styles/corev15.css", b"/_layouts/SignOut.aspx"),
+        ("a sign-out Referer to favicon.ico",
+         b"/_layouts/15/images/favicon.ico", b"/_layouts/SignOut.aspx"),
+        ("a sign-out Referer back to SignOut.aspx itself",
+         b"/_layouts/15/SignOut.aspx", b"/_layouts/SignOut.aspx"),
+        # ordinary admin web-part editing
+        ("ToolPane with an ordinary site Referer",
+         b"/_layouts/15/ToolPane.aspx?DisplayMode=Edit",
+         b"/sites/x/SitePages/Home.aspx"),
+        ("ToolPane with a Referer on another SharePoint page",
+         b"/_layouts/15/ToolPane.aspx", b"/_layouts/15/start.aspx"),
+        # R2 territory: counted, never alerted
+        ("a sign-out Referer to start.aspx",
+         b"/_layouts/15/start.aspx", b"/_layouts/SignOut.aspx"),
+        ("a sign-out Referer to viewlsts.aspx",
+         b"/_layouts/15/viewlsts.aspx", b"/_layouts/SignOut.aspx"),
+        # signout.aspx in the Referer's QUERY, not its path
+        ("signout.aspx only in the Referer query",
+         b"/_layouts/15/ToolPane.aspx",
+         b"/sites/x/p.aspx?r=/_layouts/SignOut.aspx"),
+        # toolpane.aspx not under _layouts
+        ("ToolPane.aspx outside the _layouts hive",
+         b"/_other/ToolPane.aspx", b"/_layouts/SignOut.aspx"),
+        ("ToolPane.aspx deep under a site",
+         b"/sites/x/_catalogs/ToolPane.aspx", b"/_layouts/SignOut.aspx"),
+        # a lookalike filename
+        ("a ToolPane lookalike name",
+         b"/_layouts/15/ToolPane.aspx.bak", b"/_layouts/SignOut.aspx"),
+        ("toolpane.aspx as a substring of a longer segment",
+         b"/_layouts/15/MyToolPane.aspx", b"/_layouts/SignOut.aspx"),
+    ]:
+        raw = _sp(target, referer)
+        check(f"HTTP-088 silent on {label}", "HTTP-088" not in _excodes(raw))
+    check("HTTP-088 silent with no Referer at all",
+          "HTTP-088" not in _excodes(_sp(b"/_layouts/15/ToolPane.aspx")))
+    check("HTTP-088 silent with an empty Referer",
+          "HTTP-088" not in _excodes(
+              _sp(b"/_layouts/15/ToolPane.aspx", b"")))
+
+
+def test_http_088_evidence():
+    raw = _sp(b"/_layouts/15/ToolPane.aspx/lx?DisplayMode=Edit&lx=/ToolPane.aspx",
+              b"https://sp.corp/_layouts/./SignOut.aspx",
+              b"MSOtlPn_DWP=SECRETMARKER&MSOtlPn_Uri=/x",
+              extra=b"Cookie: FedAuth=CREDENTIALMARKER\r\n")
+    f = [x for x in _ex(raw) if x.code == "HTTP-088"][0]
+    e = f.evidence
+    check("HTTP-088 reports the canonical target path",
+          e["target_path"] == "/_layouts/15/ToolPane.aspx/lx")
+    check("HTTP-088 reports the handler path",
+          e["handler_path"] == "/_layouts/15/ToolPane.aspx")
+    check("HTTP-088 reports the canonical Referer path, host stripped",
+          e["referer_path"] == "/_layouts/SignOut.aspx")
+    check("HTTP-088 records that the Referer needed canonicalising",
+          e["referer_canonicalised"] is True)
+    check("HTTP-088 marks the PathInfo bypass form",
+          e["pathinfo_suffix"] is True)
+    check("HTTP-088 notes DisplayMode=Edit", e["display_mode_edit"] is True)
+    check("HTTP-088 notes the DWP parameter", e["dwp_present"] is True)
+    check("HTTP-088 records the body length", e["body_length"] > 0)
+    check("HTTP-088 records the hive", e["hive"] == "15")
+    check("HTTP-088 records that ToolPane is not allowlisted",
+          e["allowlisted"] is False)
+    blob = repr(e)
+    check("HTTP-088 never logs the body", "SECRETMARKER" not in blob)
+    check("HTTP-088 never logs FedAuth", "CREDENTIALMARKER" not in blob)
+    check("HTTP-088 never logs the Referer host", "sp.corp" not in blob)
+    check("HTTP-088 digests the body", e["body_digest"].startswith("sha256:"))
+    check("HTTP-088 says every hit is an attempt",
+          "attempt" in e["note"] and "patch state is not on the wire"
+          in e["note"])
+    cfg = hw.WatchConfig(log_attack_payload=True)
+    f2 = [x for x in _ex(raw, cfg) if x.code == "HTTP-088"][0]
+    check("HTTP-088 logs the body only when asked",
+          "SECRETMARKER" in f2.evidence.get("payload", ""))
+    check("HTTP-088 still withholds FedAuth when asked",
+          "CREDENTIALMARKER" not in repr(f2.evidence))
+
+
+def test_http_088_request_class():
+    post = _sp(b"/_layouts/15/ToolPane.aspx", b"/_layouts/SignOut.aspx")
+    get = _sp(b"/_layouts/15/ToolPane.aspx", b"/_layouts/SignOut.aspx",
+              method=b"GET")
+    fp = [x for x in _ex(post) if x.code == "HTTP-088"][0]
+    fg = [x for x in _ex(get) if x.code == "HTTP-088"][0]
+    check("HTTP-088 classes a POST critical",
+          fp.evidence["request_class"] == "critical")
+    check("HTTP-088 classes other methods high",
+          fg.evidence["request_class"] == "high")
+
+
+def test_http_088_r2_counter_only():
+    """R2 is a counter, never an alert: administrators can extend the
+    July 20 allowlist, so a sign-out Referer to some other page cannot be
+    zero-FP."""
+    w = hw.HttpWatch()
+    for target in [b"/_layouts/15/start.aspx", b"/_layouts/15/viewlsts.aspx",
+                   b"/_layouts/15/settings.aspx"]:
+        out = w.feed("x", "10.0.0.5", "10.0.0.9", 80,
+                     _sp(target, b"/_layouts/SignOut.aspx"), True, now=1.0)
+        check(f"R2 never alerts on {target!r}",
+              not any(f.code == "HTTP-088" for f in out))
+    check("R2 counts the non-allowlisted sign-out referrals",
+          w.stats["toolshell_signout_nonallowlisted"] == 3)
+    # allowlisted resources are not even counted
+    w2 = hw.HttpWatch()
+    w2.feed("x", "10.0.0.5", "10.0.0.9", 80,
+            _sp(b"/_layouts/15/init.js", b"/_layouts/SignOut.aspx"), True,
+            now=1.0)
+    check("R2 does not count allowlisted resources",
+          w2.stats["toolshell_signout_nonallowlisted"] == 0)
+    # and a non-.aspx is not counted either
+    w3 = hw.HttpWatch()
+    w3.feed("x", "10.0.0.5", "10.0.0.9", 80,
+            _sp(b"/_layouts/15/custom.js", b"/_layouts/SignOut.aspx"), True,
+            now=1.0)
+    check("R2 only counts .aspx pages",
+          w3.stats["toolshell_signout_nonallowlisted"] == 0)
+    check("the July 20 allowlist is pinned at 12 entries",
+          len(hw.SHAREPOINT_SIGNOUT_ALLOWLIST) == 12)
+    check("ToolPane.aspx is not on the allowlist",
+          not any(b"toolpane" in p for p in hw.SHAREPOINT_SIGNOUT_ALLOWLIST))
+
+
+def test_exchange_sharepoint_dedup():
+    """All three codes are attack-class, so they rate-limit per client."""
+    for code in ("HTTP-086", "HTTP-087", "HTTP-088"):
+        check(f"{code} is attack-class for dedup", code in hw.ATTACK_CODES)
+    w = hw.HttpWatch()
+    raw = _sp(b"/_layouts/15/ToolPane.aspx", b"/_layouts/SignOut.aspx")
+    first = w.feed("a", "10.0.0.5", "10.0.0.9", 80, raw, True, now=1.0)
+    second = w.feed("b", "10.0.0.5", "10.0.0.9", 80, raw, True, now=2.0)
+    check("HTTP-088 reports the first hit",
+          any(f.code == "HTTP-088" for f in first))
+    check("HTTP-088 suppresses the repeat",
+          not any(f.code == "HTTP-088" for f in second))
+    check("HTTP-088 counts the suppression", w.stats["attacks_suppressed"] >= 1)
+    # a different code on the same pair still reports
+    third = w.feed("c", "10.0.0.5", "10.0.0.9", 80,
+                   _cookie_req(b"X-BEResource=localhost/ecp/x.ecp#~1"),
+                   True, now=3.0)
+    check("dedup is per code, so HTTP-086 still reports",
+          any(f.code == "HTTP-086" for f in third))
+
+
+def test_exchange_sharepoint_registry():
+    for code, tier, cves in [
+        ("HTTP-086", "E", {"CVE-2021-26855"}),
+        ("HTTP-087", "F", {"CVE-2021-34473", "CVE-2022-41040"}),
+        ("HTTP-088", "E", {"CVE-2025-49706", "CVE-2025-53771"}),
+    ]:
+        d = hw.FINDING_REGISTRY[code]
+        check(f"{code} is tier {tier}", d.tier == tier)
+        check(f"{code} is critical", d.severity == "critical")
+        check(f"{code} is exact-confidence", d.confidence == "exact")
+        check(f"{code} carries its CVEs", set(d.cves) == cves)
+    # the chained CVEs that are deliberately NOT walked
+    for cve in ("CVE-2021-27065", "CVE-2021-31207", "CVE-2022-41082",
+                "CVE-2022-41080", "CVE-2021-34523"):
+        check(f"{cve} is recorded as deferred", cve in hw.DEFERRED_CVES)
+    check("OWASSRF is deferred with a reason",
+          len(hw.DEFERRED_CVES["CVE-2022-41080"]) > 20)
+    check("CVE-2025-53770 is in the catalog as the chain terminus",
+          hw.CVE_CATALOG["CVE-2025-53770"]["score"] == 9.8)
+
+
+
+def test_exchange_sharepoint_h2c():
+    """The three rules read only headers and the request line, so the h2c
+    path runs them too.
+
+    This is deliberate over-approximation, not a claimed shape: IIS
+    supports HTTP/2 only over TLS and falls back to HTTP/1.1 in the clear,
+    so an Exchange or SharePoint offload leg cannot be h2c. It costs
+    nothing and covers a non-IIS front end or proxy in the path.
+    """
+    def drive_h2(fields, from_client=True):
+        st = hw.H2ConnectionState("h2x", synced=True)
+        blk = b"".join(_hpack_literal(n, v) for n, v in fields)
+        return st.feed([hw.H2Frame(len(blk), hw.FRAME_HEADERS,
+                                   hw.FLAG_END_HEADERS, 1, blk)],
+                       from_client=from_client, now=1.0)
+
+    # --- HTTP-086 over decoded HPACK
+    out = drive_h2([(b":method", b"POST"), (b":path", b"/ecp/favicon.ico"),
+                    (b":authority", b"exch.corp"),
+                    (b"cookie", b"X-BEResource=@backend.example.local:444"
+                                b"/ecp/proxyLogon.ecp#~1941962753")])
+    check("HTTP-086 h2c: fires on a decoded cookie field",
+          "HTTP-086" in codes(out))
+    hit = [f for f in out if f.code == "HTTP-086"]
+    check("HTTP-086 h2c: reports the injected path",
+          hit and hit[0].evidence["target_path"] == "/ecp/proxyLogon.ecp")
+    out = drive_h2([(b":method", b"GET"), (b":path", b"/owa/x.js"),
+                    (b"cookie", b"X-BEResource=EXCH01~1942062522")])
+    check("HTTP-086 h2c: silent on a legitimate back-end cookie",
+          "HTTP-086" not in codes(out))
+
+    # --- HTTP-087 over decoded HPACK
+    out = drive_h2([(b":method", b"GET"), (b":authority", b"exch.corp"),
+                    (b":path", b"/autodiscover/autodiscover.json?@evil.corp/?"
+                               b"&Email=autodiscover/autodiscover.json%3F"
+                               b"@evil.corp")])
+    check("HTTP-087 h2c: fires on the strip construct in :path",
+          "HTTP-087" in codes(out))
+    out = drive_h2([(b":method", b"GET"), (b":authority", b"exch.corp"),
+                    (b":path", b"/autodiscover/autodiscover.json?Email="
+                               b"user@contoso.com&Protocol=ActiveSync")])
+    check("HTTP-087 h2c: silent on a legitimate autodiscover request",
+          "HTTP-087" not in codes(out))
+
+    # --- HTTP-088 over decoded HPACK, with the body honestly absent
+    out = drive_h2([(b":method", b"POST"), (b":authority", b"sp.corp"),
+                    (b":path", b"/_layouts/15/ToolPane.aspx?DisplayMode=Edit"),
+                    (b"referer", b"/_layouts/./SignOut.aspx")])
+    check("HTTP-088 h2c: fires on :path plus a decoded referer",
+          "HTTP-088" in codes(out))
+    hit = [f for f in out if f.code == "HTTP-088"]
+    e = hit[0].evidence if hit else {}
+    check("HTTP-088 h2c: canonicalises the referer from HPACK",
+          e.get("referer_path") == "/_layouts/SignOut.aspx")
+    # DATA frames reach no body sink, so the body attributes must say
+    # "not seen" rather than reading as a negative
+    check("HTTP-088 h2c: says outright that the body was not visible",
+          e.get("body_visible") is False)
+    check("HTTP-088 h2c: dwp_present is null, not False",
+          e.get("dwp_present") is None)
+    check("HTTP-088 h2c: body_length is null, not 0",
+          e.get("body_length") is None)
+    check("HTTP-088 h2c: no body digest is claimed",
+          e.get("body_digest") is None)
+    out = drive_h2([(b":method", b"GET"), (b":authority", b"sp.corp"),
+                    (b":path", b"/_layouts/15/init.js"),
+                    (b"referer", b"/_layouts/SignOut.aspx")])
+    check("HTTP-088 h2c: silent on an allowlisted resource",
+          "HTTP-088" not in codes(out))
+
+    # --- the server direction is not a request, so none of them run
+    out = drive_h2([(b":status", b"200"),
+                    (b"cookie", b"X-BEResource=localhost/ecp/x.ecp#~1")],
+                   from_client=False)
+    check("the Exchange rules do not run on the server direction",
+          not ({"HTTP-086", "HTTP-087", "HTTP-088"} & set(codes(out))))
+
+    # --- and end to end through the analyzer over h2c prior knowledge
+    w = hw.HttpWatch()
+    w.feed("e2eх", "10.0.0.1", "10.0.0.2", 8080, hw.H2_PREFACE, True, now=1.0)
+    blk = (_hpack_literal(b":method", b"POST")
+           + _hpack_literal(b":authority", b"sp.corp")
+           + _hpack_literal(b":path", b"/_layouts/15/ToolPane.aspx/")
+           + _hpack_literal(b"referer", b"/_layouts/SignOut.aspx"))
+    frame = _h2_frame_bytes(hw.FRAME_HEADERS, hw.FLAG_END_HEADERS, 1, blk)
+    out = w.feed("e2eх", "10.0.0.1", "10.0.0.2", 8080, frame, True, now=1.0)
+    check("HTTP-088 h2c: reaches the analyzer end to end",
+          "HTTP-088" in codes(out))
+
+    # --- the HTTP/1.x path still reports the body, so the refactor did not
+    #     quietly turn body_visible off everywhere
+    one = _ex(_sp(b"/_layouts/15/ToolPane.aspx", b"/_layouts/SignOut.aspx",
+                  b"MSOtlPn_DWP=x"))
+    f1 = [f for f in one if f.code == "HTTP-088"][0]
+    check("HTTP-088 over HTTP/1.x still sees the body",
+          f1.evidence["body_visible"] is True
+          and f1.evidence["dwp_present"] is True
+          and f1.evidence["body_length"] > 0)
 
 
 def test_record_shape():

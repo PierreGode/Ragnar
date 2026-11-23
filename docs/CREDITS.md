@@ -14,9 +14,9 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **403 CVEs detected from the wire.** 478 distinct CVE IDs are named across Ragnar's
-  code; 403 of them a passive detector actually identifies. The rest are named, not detected:
-  66 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
+- **408 CVEs detected from the wire.** 489 distinct CVE IDs are named across Ragnar's
+  code; 408 of them a passive detector actually identifies. The rest are named, not detected:
+  72 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
   cannot reconstruct on the wire — the Ripple20 IPv6 bug CVE-2020-11897, which APC Guard
@@ -27,13 +27,16 @@ behind them is Solarflere's work.
   EAP-pwd side channels and a logrotate priv-esc, all undetectable from a passive RADIUS vantage,
   and **RDP Watch's CVE-2005-1794** Standard-RDP-Security MITM, carried as a posture reference
   on RDP-001/RDP-002 only — RDP Watch is a posture/abuse module with no CVE codes of its own —
-  and **HTTP Watch's eleven deferred CVEs** — the gRPC accept-loop bug with no wire artifact, two
+  and **HTTP Watch's seventeen deferred CVEs** — the gRPC accept-loop bug with no wire artifact, two
   gRPC HPACK / `-bin` bugs below the 6.5 bar, a grpc-js local-API prototype pollution and Netty's
   `setUri()` library misuse, whose wire effect the generic smuggling rules already catch, plus (v3)
   three Struts OGNL CVEs whose expression sits in a free-form location (CVE-2017-9791,
   CVE-2018-11776 / S2-057, CVE-2020-17530 / S2-061), the Confluence OGNL bug (CVE-2022-26134) kept
   as the contrast that defines the Struts gate, and two PHP session bugs decided by host
-  configuration rather than wire bytes (phpAfterShell CVE-2026-126714, CVE-2026-115560)),
+  configuration rather than wire bytes (phpAfterShell CVE-2026-126714, CVE-2026-115560), plus (v4)
+  the Exchange chain CVEs that arrive through the redirected request with free-form content
+  (CVE-2021-27065, CVE-2021-31207, CVE-2021-34523, CVE-2022-41082), OWASSRF (CVE-2022-41080, a
+  different endpoint) and the ToolShell deserialization half (CVE-2025-53770)),
   3 in card prose as related context, and 6 **active** BLE
   checks in the BLE Pentest action. Every one is listed, with its detector and status, in the
   generated **[CVE Index](CVE.md)**.
@@ -43,7 +46,9 @@ behind them is Solarflere's work.
   and APC Guard adds the KEV-listed Ripple20 CVE-2020-11899. HTTP Watch adds two more:
   **MS15-034** (CVE-2015-1635) and **HTTP/2 Rapid Reset** (CVE-2023-44487). HTTP Watch v3 and DHCP
   Guardian v4 bring **Shellshock** (CVE-2014-6271 and CVE-2014-7169), and HTTP Watch v3 adds
-  **React2Shell** (CVE-2025-55182) and the **Brotli** block-switch write (CVE-2026-111497).
+  **React2Shell** (CVE-2025-55182) and the **Brotli** block-switch write (CVE-2026-111497). HTTP
+  Watch v4 adds **ProxyLogon** (CVE-2021-26855), **ProxyShell** (CVE-2021-34473), **ProxyNotShell**
+  (CVE-2022-41040) and **ToolShell** (CVE-2025-49706).
 - **Arista Guard v4** tracks 17 EOS switch/router CVEs across posture / exposure / attack —
   BlastRADIUS (CVE-2024-3596, now scoped to Arista hardware learned from LLDP), regreSSHion,
   gNOI authorization bypass (CVE-2025-1260 / CVE-2025-0936), the actively-exploited
@@ -177,7 +182,14 @@ behind them is Solarflere's work.
   an affected server might. The **PHP2Shell** memory leak is read as an oversized PHP session
   cookie (**CVE-2026-109618** / **CVE-2026-109619**, lengths only), and the **Brotli** decoder
   block-switch out-of-bounds write (**CVE-2026-111497**, CISA KEV) is checked with the host's own
-  libbrotli only after proving that library carries the fix.
+  libbrotli only after proving that library carries the fix. **HTTP Watch v4** (39 codes) adds
+  **five** detected CVEs on Exchange and SharePoint, each rule the vendor's own check inverted:
+  **ProxyLogon** (**CVE-2021-26855**, an `X-BEResource` host part that fails `Uri.CheckHostName`),
+  **ProxyShell / ProxyNotShell** (**CVE-2021-34473** / **CVE-2022-41040**, the explicit-logon
+  strip that moves an autodiscover request onto another handler — keyed on the strip, so
+  re-encoded targets cannot evade it) and **ToolShell** (**CVE-2025-49706** and its trailing-slash
+  patch bypass **CVE-2025-53771**, a sign-out Referer on a request to `ToolPane`). They watch the
+  cleartext offload hop in front of IIS, so silence on TLS end to end is not evidence of safety.
 - **SNMP / multicast / time-plane** — the in-app **SNMP Watch** now reads raw BER off the
   wire for **USM HMAC truncation** (CVE-2008-0960), **Cisco SNMP RCE** (CVE-2017-6736..6744,
   CISA KEV), **snmptrapd overflow** (CVE-2025-68615) and **net-snmp VACM malformed-OID**

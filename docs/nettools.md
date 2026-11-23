@@ -743,7 +743,7 @@ hosts already sent and transmits nothing (no Range test request, no h2 PING, no 
 HTTP over TLS is ciphertext after the handshake, so SNI / ALPN / JA4 / certificates stay with
 [TLS Watch](#tls-watch) and Cert Watch; the http.sys-over-TLS record flood (CVE-2026-47291) is TLS
 Watch's. One bounded `tcpdump` window (full snaplen, `-p`, packet cap), each packet dissected and fed
-through the vendored engine (`python/httpwatch.py`, v3). **36 codes** in seven tiers, each with a
+through the vendored engine (`python/httpwatch.py`, v4). **39 codes** in seven tiers, each with a
 confidence class — `exact` (the observation is the condition), `shape` (the malformation is read
 directly; whether the receiver is vulnerable is not observable), `heuristic` (a threshold or a
 name-matched field) or `posture`:
@@ -804,6 +804,41 @@ name-matched field) or `posture`:
   OGNL opener (`CVE-2017-5638`). A single opener in a free-form field is deliberately not enough
   (the Confluence `CVE-2022-26134` false-positive class), so S2-057 / S2-061 / `CVE-2017-9791` stay
   named-but-deferred.
+- **Exchange and SharePoint** (*v4*; `HTTP-086` / `HTTP-088` in Tier E, `HTTP-087` in Tier F, all
+  critical, attempt findings). Each rule is the vendor's own check, inverted, so it has no benign
+  reading:
+  - `HTTP-086` — **ProxyLogon** (`CVE-2021-26855`, CISA KEV): an `X-BEResource` back-end cookie that
+    splits on `~` into exactly two parts with an integer version (what Exchange's own parser
+    accepts) and whose host part fails `Uri.CheckHostName` (the check the March 2021 patch added).
+    The raw and percent-decoded values are both judged. A plain host name, FQDN or IP literal
+    (bracketed or bare IPv6 included) stays silent, and so does a value Exchange itself rejects (two tildes, no version). The sibling
+    `X-AnonResource-Backend` cookie gets the host check on its whole value.
+  - `HTTP-087` — **ProxyShell / ProxyNotShell** (`CVE-2021-34473` / `CVE-2022-41040`, both CISA
+    KEV): a request routed to the autodiscover handler whose explicit-logon strip (the `Email`
+    parameter, duplicate keys comma-joined, case-folded) leaves it pointing at a different handler.
+    It keys on that mismatch, never on the back-end target, so the re-encoded targets that defeated
+    Microsoft's two URL-rewrite mitigations change nothing, and dot segments in the path are
+    resolved the way `Url.AbsoluteUri` does. An `Authorization` header or auth cookie marks the
+    authenticated ProxyNotShell form; a stripped target under `/powershell` marks the RCE stage.
+  - `HTTP-088` — **ToolShell** (`CVE-2025-49706`, CISA KEV, and its patch bypass `CVE-2025-53771`):
+    a SharePoint sign-out-page `Referer` (`/_layouts[/14|/15]/SignOut.aspx`, compared after
+    `System.Uri`-style normalisation, which keeps `//`) on a request that reaches the `ToolPane`
+    handler, matched by path segment so the trailing-slash bypass of the first patch is covered. A
+    sign-out Referer reaching any other page off the default allowlist is returned as the
+    `toolshell_signout_nonallowlisted` counter, never an alert, because administrators can extend
+    the allowlist.
+
+  **Vantage:** IIS serves HTTP/2 only over TLS, so these see only the **cleartext hop between a
+  TLS-offloading load balancer and the Exchange / SharePoint front end** (and run over h2c anyway).
+  They are blind to TLS end to end, which is the default on Exchange 2019 CU14+ with Extended
+  Protection, so **no finding there is not evidence of safety**. Patch state is never on the wire.
+  On these products the surrounding headers are live credentials, so a finding carries the 5-tuple,
+  method, canonical paths and a digest of the matched value — never other cookies,
+  `Authorization`, `FedAuth`, the canary or the body. Named but not matched (free-form content, or a
+  different endpoint): the chained `CVE-2021-27065`, `CVE-2021-31207`, `CVE-2021-34523` and
+  `CVE-2022-41082`, OWASSRF `CVE-2022-41080`, and the ToolShell deserialization half
+  `CVE-2025-53770` (its `__VIEWSTATE` / `ExcelDataSet` payload is free-form, so stolen-machine-key
+  persistence is not detected).
 - **Tier F — attack-shaped request bodies** (*v3*; `HTTP-082`, `083`, `085`). Bodies are dechunked
   and parsed as multipart (each part decoded with its declared charset, UTF-8 and the wide
   encodings) or as form / query parameters, so a body any affected server accepts cannot slip past.
@@ -842,14 +877,15 @@ The engine also states its considered-and-rejected CVEs (`DEFERRED_CVES`) — no
 the 6.5 bar, a local-API defect, host configuration rather than wire bytes (phpAfterShell
 `CVE-2026-126714`, the PHP session-handler `CVE-2026-115560`), a free-form OGNL location (Struts
 `CVE-2017-9791` / `CVE-2018-11776` / `CVE-2020-17530`), or another watcher's — so the CVE count never
-quietly overstates. Detector Self-Test runs the engine's 1167-check suite plus smuggling, redaction,
-WinRM-suppression, Range-boundary, Shellshock / S2-045 / Spring4Shell trigger-and-near-miss,
-Brotli-arming and verdict scenarios, and a Scapy pcap leg carrying an IPv6 Hop-by-Hop header.
+quietly overstates. Detector Self-Test runs the engine's 1465-check suite plus smuggling, redaction,
+WinRM-suppression, Range-boundary, Shellshock / S2-045 / Spring4Shell and ProxyLogon / ProxyShell /
+ToolShell trigger-and-near-miss, Brotli-arming and verdict scenarios, and a Scapy pcap leg carrying
+an IPv6 Hop-by-Hop header.
 
 - Endpoint: `GET /api/net/http-watch` (`?interface=<nic>&seconds=5..60&ports=80,8080,…`) — returns
   `verdict`, `findings` (code, tier, severity, confidence, CVEs + KEV flag, redacted evidence,
-  client / server / port / address family, count), `by_severity`, flow / message counts and
-  `brotli` (Tier G arming status)
+  client / server / port / address family, count), `by_severity`, flow / message counts,
+  `brotli` (Tier G arming status) and `toolshell_signout_nonallowlisted` (corroborating counter)
 
 ### MAC Watch
 **Detection-only** MAC-spoofing + randomization monitor — it *never spoofs or

@@ -10,7 +10,7 @@ Tiers:
   B  HTTP.sys parser CVEs
   C  Credential-in-the-clear posture and slow-read abuse
   D  Cleartext HTTP/2 (h2c) and gRPC
-  E  Attack-shaped input in request headers
+  E  Attack-shaped input in request headers and targets
   F  Attack-shaped input in request bodies and parameters
   G  Content-coding validation (needs a patched decoder; see ARMING)
 
@@ -157,6 +157,15 @@ FINDING_REGISTRY: Dict[str, FindingDef] = {
            "Content-Type satisfies all three conditions Struts needs to "
            "evaluate it as OGNL (S2-045)",
            ["CVE-2017-5638"]),
+        _f("HTTP-086", "exchange_proxylogon_beresource", "E", CRITICAL, EXACT,
+           "Exchange back-end cookie carries a value the patch's own host "
+           "check rejects (ProxyLogon)",
+           ["CVE-2021-26855"]),
+        _f("HTTP-088", "sharepoint_toolshell_signout_referer", "E", CRITICAL,
+           EXACT,
+           "Sign-out-page Referer on a request reaching the SharePoint "
+           "ToolPane handler (ToolShell)",
+           ["CVE-2025-49706", "CVE-2025-53771"]),
         _f("HTTP-082", "react2shell_flight_path_reference", "F", CRITICAL, SHAPE,
            "RSC Flight reply carries a property-path reference, which a real "
            "encoder never emits (React2Shell)",
@@ -169,6 +178,10 @@ FINDING_REGISTRY: Dict[str, FindingDef] = {
            "Multipart filename carries a NUL and an OGNL opener, which "
            "commons-fileupload echoes into an evaluated message (S2-046)",
            ["CVE-2017-5638"]),
+        _f("HTTP-087", "exchange_proxyshell_logon_strip", "F", CRITICAL, EXACT,
+           "Explicit-logon strip moves the request off the autodiscover "
+           "handler it was routed by (ProxyShell / ProxyNotShell)",
+           ["CVE-2021-34473", "CVE-2022-41040"]),
         # ---- Tier G: content-coding validation ---------------------------
         _f("HTTP-090", "brotli_block_switch_violation", "G", CRITICAL, EXACT,
            "Brotli-coded body contains a block switch for a category with "
@@ -421,6 +434,74 @@ CVE_CATALOG.update({
                 "victim's own code, pinned from the shipped source on "
                 "2026-11-23 - see the module comment above HTTP-084.",
     },
+    # --- Exchange "Proxy" family ------------------------------------------
+    "CVE-2021-26855": {
+        "score": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2021-11-03", "alias": "ProxyLogon",
+        "note": "Pre-auth SSRF in the Exchange client-access front end, "
+                "exploited at scale by HAFNIUM; patched March 2021. The "
+                "front end picks a back end from the X-BEResource cookie and "
+                "builds the back-end URL by concatenation, so path syntax in "
+                "the host portion redirects the request. The patch added "
+                "Uri.CheckHostName on the host portion - HTTP-086 is that "
+                "check, inverted. The chained CVE-2021-27065 post-auth file "
+                "write is not covered: it arrives through the redirected "
+                "request and its content is free-form.",
+    },
+    "CVE-2021-34473": {
+        "score": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2021-11-03", "alias": "ProxyShell",
+        "note": "Pre-auth path confusion. The front end decides a request is "
+                "an autodiscover v2 request from Url.AbsolutePath, then "
+                "strips the explicit-logon address out of Url.AbsoluteUri - "
+                "and that mismatch is the bug. Chained with CVE-2021-34523 "
+                "and CVE-2021-31207, neither of which is covered.",
+    },
+    "CVE-2022-41040": {
+        "score": 8.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2022-10-03", "alias": "ProxyNotShell",
+        "note": "The authenticated repeat of the same explicit-logon "
+                "construct, chained with CVE-2022-41082 for RCE. Microsoft's "
+                "interim URL-rewrite mitigations were bypassed twice, both "
+                "times because they matched the raw URL; HTTP-087 keys on "
+                "the strip condition instead and ignores the target.",
+    },
+    # --- SharePoint ToolShell ---------------------------------------------
+    "CVE-2025-49706": {
+        "score": 6.5, "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+        "kev": True, "kev_added": "2025-07-22", "alias": "ToolShell (auth bypass)",
+        "note": "PostAuthenticateRequestHandler skips the unauthorized-access "
+                "checks when the Referer matches a sign-out page. Fixed by "
+                "the July 2025 updates; machine-key rotation is also required "
+                "because forged ViewState survives patching.",
+    },
+    "CVE-2025-53771": {
+        "score": 6.3, "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+        "kev": False, "alias": "ToolShell (bypass of the July 8 patch)",
+        # 6.3 is below httpwatch's 6.5 scope bar. It is in scope anyway
+        # because it is not a standalone vulnerability: it is the bypass
+        # that re-opens CVE-2025-49706, and the chain terminates in
+        # CVE-2025-53770 at 9.8. The exemption is per-CVE and names the
+        # terminal CVE, so the bar cannot erode by accident - the self-test
+        # requires that terminal CVE to be in the catalog and to clear the
+        # bar on its own.
+        "below_bar_because_chained_to": "CVE-2025-53770",
+        "note": "The July 8 patch tested whether the requested path ends with "
+                "'ToolPane.aspx'; appending a '/' defeated it. July 20 "
+                "replaced that with an allowlist of paths permitted with a "
+                "sign-out referrer, which ToolPane.aspx is not on. HTTP-088 "
+                "matches the path by SEGMENT, so both the original and the "
+                "trailing-slash form are covered.",
+    },
+    "CVE-2025-53770": {
+        "score": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2025-07-20",
+        "alias": "ToolShell (deserialization bypass)",
+        "note": "The deserialization half, reached through the auth bypass "
+                "HTTP-088 detects. The payload itself is NOT matched: "
+                "MSOtlPn_DWP is free-form WebPart markup carrying a Base64 "
+                "compressed serialized DataSet.",
+    },
     # --- Tier G -----------------------------------------------------------
     "CVE-2026-111497": {
         "score": 9.2,
@@ -515,6 +596,33 @@ DEFERRED_CVES: Dict[str, str] = {
         "collides with real unrendered-template traffic. Struts S2-045 "
         "stacks three fixed conditions set by the victim's own code, which "
         "is why one is in and the other is not."
+    ),
+    "CVE-2021-27065": (
+        "The ProxyLogon post-auth file write. It arrives through the "
+        "request HTTP-086 already flags, and its content is a free-form "
+        "file path and body, so matching it would add nothing but false "
+        "positives."
+    ),
+    "CVE-2021-31207": (
+        "The ProxyShell mailbox-export-to-webshell stage. Free-form "
+        "PowerShell and a free-form UNC path, reached through the request "
+        "HTTP-087 already flags."
+    ),
+    "CVE-2022-41082": (
+        "The ProxyNotShell PowerShell-remoting RCE stage. Free-form "
+        "serialized PowerShell, reached through the request HTTP-087 "
+        "already flags."
+    ),
+    "CVE-2022-41080": (
+        "OWASSRF. A different Exchange SSRF that does NOT use the "
+        "autodiscover endpoint, so neither HTTP-086 nor HTTP-087 covers "
+        "it. Not walked; it needs its own preflight rather than being "
+        "folded into these two by assumption."
+    ),
+    "CVE-2021-34523": (
+        "The ProxyShell privilege-elevation stage (Exchange PowerShell "
+        "backend). No distinguishing wire shape of its own - it is reached "
+        "through the request HTTP-087 flags."
     ),
     "CVE-2020-7768": (
         "grpc-js prototype pollution via loadPackageDefinition. The defect is "
@@ -1395,7 +1503,8 @@ PHP_DEDUP_WINDOW = 300.0             # one HTTP-048 per server:port per 5 min
 ATTACK_DEDUP_WINDOW = 300.0
 ATTACK_CODES = frozenset({
     "HTTP-080", "HTTP-081", "HTTP-082", "HTTP-083",
-    "HTTP-084", "HTTP-085", "HTTP-090",
+    "HTTP-084", "HTTP-085", "HTTP-086", "HTTP-087", "HTTP-088",
+    "HTTP-090",
 })
 
 _PCT_ESCAPE_RE = re.compile(rb"%([0-9A-Fa-f]{2})")
@@ -2791,6 +2900,684 @@ def check_struts_s2046(msg: ParsedMessage, body: bytes,
     return findings
 
 
+
+# ---------------------------------------------------------------------------
+# URI canonicalisation, .NET System.Uri equivalent
+# ---------------------------------------------------------------------------
+# Three of the rules below compare a path the way a .NET application compares
+# it, which means matching what System.Uri.AbsolutePath produces: backslashes
+# folded to forward slashes, percent-escapes resolved, dot segments removed,
+# query and fragment dropped, and the scheme and authority stripped from an
+# absolute URI. Every case is held against real System.Uri in the cross-check
+# tier rather than being asserted here.
+_PCT = re.compile(rb"%([0-9A-Fa-f]{2})")
+_SCHEME = re.compile(rb"^[A-Za-z][A-Za-z0-9+.\-]*:")
+
+
+def pct_decode(data: bytes) -> bytes:
+    """Resolve percent-escapes. A path is not a form body, so '+' stays."""
+    if b"%" not in data:
+        return data
+    out = bytearray()
+    i = 0
+    while i < len(data):
+        m = _PCT.match(data, i)
+        if m:
+            out.append(int(m.group(1), 16))
+            i = m.end()
+        else:
+            out += data[i:i + 1]
+            i += 1
+    return bytes(out)
+
+
+def remove_dot_segments(path: bytes) -> bytes:
+    """RFC 3986 5.2.4, matching System.Uri.
+
+    An EMPTY segment is significant and is preserved: measured against real
+    System.Uri, /_layouts//15//ToolPane.aspx keeps both doubled slashes and
+    //x keeps its leading pair. Collapsing them would be an over-
+    approximation in the dangerous direction - /_layouts//SignOut.aspx would
+    then compare equal to the sign-out path that HTTP-088 keys on, while the
+    real SharePoint would not have skipped its checks, which is a false
+    positive. A ".." pops whatever segment precedes it, an empty one
+    included (/a//../b resolves to /a/b).
+    """
+    out: List[bytes] = []
+    absolute = path.startswith(b"/")
+    trailing = path.endswith((b"/", b"/.", b"/.."))
+    segs = path.split(b"/")
+    if absolute:
+        segs = segs[1:]
+    for seg in segs:
+        if seg == b".":
+            continue
+        if seg == b"..":
+            if out:
+                out.pop()
+            continue
+        out.append(seg)
+    joined = b"/".join(out)
+    result = (b"/" + joined) if absolute else joined
+    if trailing and not result.endswith(b"/"):
+        result += b"/"
+    return result or (b"/" if absolute else b"")
+
+
+def canonical_uri_path(value: bytes) -> Optional[bytes]:
+    """The path a .NET application would compare, i.e. AbsolutePath.
+
+    Returns None for something that is not usable as a URI reference at all.
+    """
+    if value is None:
+        return None
+    v = value.strip(b" \t")
+    if not v:
+        return None
+    # System.Uri folds backslashes to forward slashes for hierarchical
+    # schemes, which is why \\_layouts\\SignOut.aspx canonicalises to the
+    # sign-out path. Measured against real System.Uri, not assumed.
+    v = v.replace(b"\\", b"/")
+    m = _SCHEME.match(v)
+    if m and v[m.end():m.end() + 2] == b"//":
+        rest = v[m.end() + 2:]
+        slash = rest.find(b"/")
+        v = rest[slash:] if slash >= 0 else b"/"
+    elif v.startswith(b"//"):
+        rest = v[2:]
+        slash = rest.find(b"/")
+        v = rest[slash:] if slash >= 0 else b"/"
+    for sep in (b"#", b"?"):
+        i = v.find(sep)
+        if i >= 0:
+            v = v[:i]
+    if not v.startswith(b"/"):
+        v = b"/" + v
+    return remove_dot_segments(pct_decode(v))
+
+
+# ---------------------------------------------------------------------------
+# HTTP-086: Exchange ProxyLogon (CVE-2021-26855)
+# ---------------------------------------------------------------------------
+# The client-access front end lets static-resource requests reach the back
+# end without authentication - scripts and images have to load before login -
+# and picks the back end from a cookie. It then builds the back-end URL by
+# concatenation, so path syntax inside the host portion redirects the request
+# wherever the attacker likes, authenticated as the front end.
+#
+# What makes this zero-FP is that the rule IS the patch's own check,
+# inverted. Pinned from Project Zero's root-cause analysis:
+#
+#   BackEndServer.FromString:
+#       string[] array = input.Split(new char[]{'~'});
+#       if (array.Length != 2 || !int.TryParse(array[1], out version))
+#           ... reject
+#       // the patch adds:  Uri.CheckHostName(array[0])
+#
+# Three consequences, and the first two are victim-code conditions that
+# narrow the rule rather than widen it:
+#   - the value must split on '~' into EXACTLY two parts. A value with two
+#     tildes is rejected by Exchange, so it is not an attack and must not
+#     alert.
+#   - the second part must parse as an integer.
+#   - the first part must FAIL Uri.CheckHostName. That is precisely what the
+#     patch added, so "would the patched Exchange have rejected this host?"
+#     is the whole question, and it is answerable on the wire.
+#
+# X-AnonResource-Backend is the documented sibling cookie that sets the same
+# back-end target. Its value structure is NOT pinned to FromString by any
+# source reachable here, so for that cookie the two-part requirement is not
+# imposed - the host check is applied to the whole value, and to the part
+# before a tilde when there is one. Being less strict on the unpinned cookie
+# is the safe direction.
+EXCHANGE_BE_COOKIE = b"x-beresource"
+EXCHANGE_ANON_COOKIE = b"x-anonresource-backend"
+EXCHANGE_BACKEND_COOKIES = (EXCHANGE_BE_COOKIE, EXCHANGE_ANON_COOKIE)
+# The admin-impersonation step of the public chain carries this cookie.
+EXCHANGE_LOGON_SID_COOKIE = b"msexchlogonmailbox"
+# Characters that turn the concatenated back-end URL into a different
+# request. Recorded, not the condition - the condition is CheckHostName.
+EXCHANGE_INJECT_CHARS = b"/@#?:\\"
+
+
+def _is_ipv4_literal(text: str) -> bool:
+    parts = text.split(".")
+    return (len(parts) == 4
+            and all(p.isdigit() and p.isascii() and len(p) <= 3
+                    and int(p) <= 255 for p in parts))
+
+
+def _is_ipv6_literal(text: str) -> bool:
+    """Validate an IPv6 literal by hand.
+
+    inet_pton would do this in one line, but the module deliberately
+    imports no networking library at all: "no send path" is an invariant
+    the README verifier enforces by grep, and keeping it absolute is worth
+    more than the shortcut. Held against Uri.CheckHostName over a 24-value
+    literal corpus in the cross-check tier.
+    """
+    text = text.split("%", 1)[0]        # a zone id is permitted
+    if not text or len(text) > 45:
+        return False
+    groups = 8
+    if "." in text:                     # an embedded IPv4 tail
+        head, _, tail = text.rpartition(":")
+        if not _is_ipv4_literal(tail):
+            return False
+        text, groups = head, 6
+        if not text:
+            return False
+    if text.count("::") > 1:
+        return False
+    if ":::" in text:
+        return False
+    if "::" in text:
+        left, _, right = text.partition("::")
+        lo = [p for p in left.split(":") if p != ""] if left else []
+        ro = [p for p in right.split(":") if p != ""] if right else []
+        if (left and left.endswith(":")) or (right and right.startswith(":")):
+            return False
+        chunks, exact = lo + ro, False
+        if len(chunks) > groups - 1:
+            return False
+    else:
+        chunks = text.split(":")
+        exact = True
+        if len(chunks) != groups:
+            return False
+    for chunk in chunks:
+        if not 1 <= len(chunk) <= 4:
+            return False
+        if any(c not in "0123456789abcdefABCDEF" for c in chunk):
+            return False
+    return True
+
+
+def check_host_name(host: bytes) -> str:
+    """Uri.CheckHostName equivalent: "Dns", "IPv4", "IPv6" or "Unknown".
+
+    Held against real Uri.CheckHostName for every corpus value in the
+    cross-check tier, because this is the patch's own predicate and a
+    divergence here is a divergence in the rule.
+    """
+    if not host or len(host) > 255:
+        return "Unknown"
+    if host.startswith(b"[") and host.endswith(b"]"):
+        try:
+            inner = host[1:-1].decode("ascii")
+        except UnicodeDecodeError:
+            return "Unknown"
+        return "IPv6" if _is_ipv6_literal(inner) else "Unknown"
+    try:
+        text = host.decode("ascii")
+    except UnicodeDecodeError:
+        return "Unknown"
+    if _is_ipv4_literal(text):
+        return "IPv4"
+    # Measured against Uri.CheckHostName: a bare IPv6 literal with NO
+    # brackets is accepted. Treating it as Unknown would make HTTP-086 fire
+    # on a back-end host the patched Exchange accepts, which is a false
+    # positive, so the unbracketed form is validated too.
+    if ":" in text and _is_ipv6_literal(text):
+        return "IPv6"
+    parts = text.split(".")
+    labels = parts[:-1] if text.endswith(".") else parts
+    if not labels or any(l == "" for l in labels):
+        return "Unknown"
+    for label in labels:
+        if len(label) > 63:
+            return "Unknown"
+        # Measured against Uri.CheckHostName: a label may not BEGIN with a
+        # hyphen or an underscore, though it may end with one ("a-" is Dns,
+        # "-a" is Unknown). Getting this backwards would be a false
+        # negative on HTTP-086, since the patch rejects what this rejects.
+        if not (label[0].isalnum() and label[0].isascii()):
+            return "Unknown"
+        for ch in label:
+            if not (ch.isalnum() and ch.isascii()) and ch not in "-_":
+                return "Unknown"
+    return "Dns"
+
+
+def exchange_backend_verdict(cookie_name: bytes,
+                             value: bytes) -> Optional[Dict[str, Any]]:
+    """One back-end cookie value, judged as the patched Exchange would."""
+    # Both forms are judged, because whether Exchange decodes the cookie
+    # before building the URL is not pinned. A percent sign is not a legal
+    # host character either, so the raw form of an encoded injection already
+    # fails CheckHostName - but the DECODED form is the one whose evidence
+    # names the injected path, so it is tried first and labelled.
+    decoded = pct_decode(value)
+    candidates = [(decoded, "percent_decoded")] if decoded != value else []
+    candidates.append((value, "raw"))
+    for form, form_label in candidates:
+        parts = form.split(b"~")
+        if cookie_name == EXCHANGE_BE_COOKIE:
+            # the pinned FromString structure
+            if len(parts) != 2:
+                continue
+            host, version = parts
+            if not version.isdigit():
+                continue
+        else:
+            host = parts[0]
+            version = parts[1] if len(parts) == 2 else None
+        if not host:
+            continue
+        if check_host_name(host) != "Unknown":
+            continue        # a host the patch would have accepted
+        injected = sorted({bytes([c]).decode("latin-1")
+                           for c in host if c in EXCHANGE_INJECT_CHARS})
+        target = None
+        for sep in (b"/",):
+            i = host.find(sep)
+            if i >= 0:
+                target = host[i:].split(b"#")[0].split(b"?")[0]
+                break
+        return {
+            "cookie": cookie_name.decode("ascii"),
+            "evaluated_on": form_label,
+            "host_check": "Unknown",
+            "tilde_parts": len(parts),
+            "version_is_integer": bool(version and version.isdigit()),
+            "injected_characters": injected,
+            "target_path": (target or b"").decode("latin-1")[:160] or None,
+            "value_length": len(value),
+            "value_digest": redact(value),
+        }
+    return None
+
+
+def check_exchange_proxylogon_fields(cookie_headers: Sequence[bytes],
+                                     method: bytes, target: bytes,
+                                     cfg: WatchConfig = WATCH_DEFAULTS,
+                                     flow_id: Optional[str] = None
+                                     ) -> List[Finding]:
+    """HTTP-086 over whatever carried the Cookie headers.
+
+    Split out from the ParsedMessage wrapper so the h2c path can reach it:
+    the rule reads nothing but the Cookie header and the request line, so
+    it costs nothing to run over decoded HPACK as well. IIS supports HTTP/2
+    only over TLS and falls back to HTTP/1.1 in the clear, so an IIS
+    offload leg cannot be h2c - this is deliberate over-approximation for a
+    non-IIS front end or proxy in the path, not a claimed Exchange shape.
+    """
+    findings: List[Finding] = []
+    logon_sid = False
+    pairs: List[Tuple[bytes, bytes]] = []
+    for raw in cookie_headers:
+        for name, val in parse_cookie(raw):
+            low = name.lower()
+            if low == EXCHANGE_LOGON_SID_COOKIE:
+                logon_sid = True
+            if low in EXCHANGE_BACKEND_COOKIES:
+                pairs.append((low, val))
+    for low, val in pairs:
+        verdict = exchange_backend_verdict(low, val)
+        if verdict is None:
+            continue
+        ev = dict(verdict)
+        ev.update({
+            "attack": "ProxyLogon",
+            "method": (method or b"").decode("latin-1"),
+            "target": (target or b"").split(b"?")[0].decode("latin-1")[:200],
+            "logon_sid_present": logon_sid,
+            "note": "Exchange would accept this cookie's structure - it "
+                    "splits on '~' into exactly two parts with an integer "
+                    "version - and the host portion is one that "
+                    "Uri.CheckHostName rejects, which is exactly the check "
+                    "the March 2021 patch added. The back-end URL is built "
+                    "by concatenation, so path syntax in the host redirects "
+                    "the request. Only the matched cookie is logged, as a "
+                    "digest: the other cookies on an Exchange request are "
+                    "live credentials. This records an attempt - the patch "
+                    "state is not on the wire.",
+        })
+        if cfg.log_attack_payload:
+            ev["payload"] = val.decode("latin-1", "replace")[:512]
+        findings.append(make_finding("HTTP-086", ev, flow=flow_id))
+    return findings
+
+
+def check_exchange_proxylogon(msg: ParsedMessage,
+                              cfg: WatchConfig = WATCH_DEFAULTS
+                              ) -> List[Finding]:
+    """HTTP-086 over an HTTP/1.x request."""
+    return check_exchange_proxylogon_fields(
+        msg.get_all(b"cookie"), msg.method or b"", msg.target or b"", cfg)
+
+
+# ---------------------------------------------------------------------------
+# HTTP-087: Exchange ProxyShell and ProxyNotShell
+# ---------------------------------------------------------------------------
+# Pinned from Orange Tsai's Black Hat USA 2021 material. The front end
+# decides a request is an autodiscover v2 request from one string and then
+# rewrites a different one:
+#
+#   ResolveAnchorMailbox:
+#       if (RequestPathParser.IsAutodiscoverV2PreviewRequest(
+#               base.ClientRequest.Url.AbsolutePath))
+#   IsAutodiscoverV2PreviewRequest(string path):
+#       return path.EndsWith("/autodiscover.json",
+#                            StringComparison.OrdinalIgnoreCase);
+#
+#   GetClientUrlForProxy:
+#       string absoluteUri = base.ClientRequest.Url.AbsoluteUri;
+#       uri = UrlHelper.RemoveExplicitLogonFromUrlAbsoluteUri(
+#               absoluteUri, this.explicitLogonAddress);
+#   RemoveExplicitLogonFromUrlAbsoluteUri(absoluteUri, explicitLogonAddress):
+#       string text = "/" + explicitLogonAddress;
+#       if (absoluteUri.IndexOf(text) != -1)
+#           return absoluteUri.Substring(0, num)
+#                  + absoluteUri.Substring(num + text.Length);
+#
+# The check reads AbsolutePath; the strip operates on AbsoluteUri. THAT
+# MISMATCH IS THE BUG, so the rule is the mismatch rather than any payload:
+# the request was routed by the autodiscover handler, and after the strip it
+# is no longer pointing at that handler. Microsoft's two interim rewrite
+# mitigations both failed because they matched the raw URL looking for the
+# back-end target; this keys on the strip condition and ignores the target
+# entirely, which is why percent-encoding it changes nothing here.
+#
+# The explicit-logon address comes from the Email query parameter.
+# HttpUtility.ParseQueryString was measured: duplicate keys are COMMA-JOINED
+# rather than first-value-wins, and key lookup folds case. Both the joined
+# form Exchange would see and each individual value are evaluated, because
+# the joined form is what .NET hands the handler.
+AUTODISCOVER_V2_SUFFIX = b"/autodiscover.json"
+EXPLICIT_LOGON_PARAM = b"email"
+
+
+def _query_values(target: bytes, key: bytes) -> List[bytes]:
+    q = target.find(b"?")
+    if q < 0:
+        return []
+    out: List[bytes] = []
+    for pair in re.split(rb"[&;]", target[q + 1:]):
+        if not pair:
+            continue
+        eq = pair.find(b"=")
+        if eq < 0:
+            continue
+        if urldecode(pair[:eq]).lower() == key:
+            out.append(urldecode(pair[eq + 1:]))
+    return out
+
+
+def exchange_logon_strip_verdict(target: bytes, host: bytes
+                                 ) -> Optional[Dict[str, Any]]:
+    """The strip, emulated. Returns a verdict when it moves the handler."""
+    path = canonical_uri_path(target)
+    if not path or not path.lower().endswith(AUTODISCOVER_V2_SUFFIX):
+        return None
+    values = _query_values(target, EXPLICIT_LOGON_PARAM)
+    if not values:
+        return None
+    # what .NET's NameValueCollection would hand the handler, plus each
+    # individual value
+    forms = []
+    joined = b",".join(values)
+    if joined not in forms:
+        forms.append(joined)
+    for v in values:
+        if v not in forms:
+            forms.append(v)
+    # Url.AbsoluteUri, measured against real System.Uri: the PATH is
+    # normalised (dot segments and %2e resolved) while the QUERY keeps the
+    # percent-encoding exactly as it arrived. The strip runs over that
+    # string, so building it from the raw target would let a single "/./"
+    # defeat the rule - which is how the interim rewrite mitigations fell.
+    q = target.find(b"?")
+    raw_query = target[q:] if q >= 0 else b""
+    absolute = b"http://" + (host or b"host") + path + raw_query
+    for form in forms:
+        if not form:
+            continue
+        needle = b"/" + form
+        i = absolute.find(needle)
+        if i < 0:
+            continue
+        stripped = absolute[:i] + absolute[i + len(needle):]
+        new_path = canonical_uri_path(stripped)
+        if new_path is None:
+            continue
+        if new_path.lower().endswith(AUTODISCOVER_V2_SUFFIX):
+            continue        # the strip left it on the same handler
+        return {
+            "routed_path": path.decode("latin-1")[:200],
+            "explicit_logon_values": len(values),
+            "evaluated_form": ("comma_joined" if form == joined and
+                               len(values) > 1 else "single_value"),
+            "stripped_target": new_path.decode("latin-1")[:200],
+            "logon_value_length": len(form),
+            "logon_value_digest": redact(form),
+        }
+    return None
+
+
+EXCHANGE_AUTH_COOKIES = (b"sessionid", b"cadata", b"msexchecpcanary",
+                         b"x-owa-canary")
+
+
+def check_exchange_proxyshell_fields(target: bytes, host: bytes,
+                                     method: bytes,
+                                     authorization: Optional[bytes],
+                                     cookie_headers: Sequence[bytes],
+                                     cfg: WatchConfig = WATCH_DEFAULTS,
+                                     flow_id: Optional[str] = None
+                                     ) -> List[Finding]:
+    """HTTP-087 over the request line and headers alone.
+
+    Tiered F because it is about a parameter, but it reads no body at all,
+    so the h2c path can run it too. See the note on
+    check_exchange_proxylogon_fields for why that is over-approximation.
+    """
+    if not target:
+        return []
+    verdict = exchange_logon_strip_verdict(target, host or b"host")
+    if verdict is None:
+        return []
+    authed = bool(authorization)
+    if not authed:
+        for raw in cookie_headers:
+            for name, _ in parse_cookie(raw):
+                if name.lower() in EXCHANGE_AUTH_COOKIES:
+                    authed = True
+                    break
+    ev = dict(verdict)
+    stripped = verdict["stripped_target"].lower()
+    ev.update({
+        "attack": "ProxyNotShell" if authed else "ProxyShell",
+        "method": (method or b"").decode("latin-1"),
+        "authenticated": authed,
+        "rce_stage": stripped.startswith("/powershell"),
+        "note": "The front end decides this is an autodiscover v2 request "
+                "from Url.AbsolutePath, then strips the explicit-logon "
+                "address out of Url.AbsoluteUri - and after that strip the "
+                "request no longer points at the autodiscover handler. That "
+                "mismatch is the defect, so the rule does not look at the "
+                "back-end target and cannot be evaded by re-encoding it, "
+                "which is how both interim rewrite mitigations were beaten. "
+                "An authenticated request is the ProxyNotShell shape, an "
+                "unauthenticated one ProxyShell; no other cookie or the "
+                "Authorization value is logged. An attempt, not a "
+                "compromise.",
+    })
+    if cfg.log_attack_payload:
+        ev["payload"] = target.decode("latin-1", "replace")[:512]
+    return [make_finding("HTTP-087", ev, flow=flow_id)]
+
+
+def check_exchange_proxyshell(msg: ParsedMessage, body: bytes,
+                              cfg: WatchConfig = WATCH_DEFAULTS
+                              ) -> List[Finding]:
+    """HTTP-087 over an HTTP/1.x request."""
+    return check_exchange_proxyshell_fields(
+        msg.target or b"", msg.get(b"host") or b"host", msg.method or b"",
+        msg.get(b"authorization"), msg.get_all(b"cookie"), cfg)
+
+
+# ---------------------------------------------------------------------------
+# HTTP-088: SharePoint ToolShell
+# ---------------------------------------------------------------------------
+# PostAuthenticateRequestHandler skips the unauthorized-access checks when
+# the Referer matches a sign-out page, compared case-insensitively against
+# /_layouts/SignOut.aspx, /_layouts/14/SignOut.aspx and
+# /_layouts/15/SignOut.aspx. Nothing reachable from here decompiles that
+# comparison - Securelist shows it only as an image - so which URI property
+# it reads is NOT pinned from source. What IS known is stronger evidence than
+# a guess: in the wild, both /_layouts/./SignOut.aspx and full absolute URLs
+# carrying a host were accepted. Only a host-stripped, dot-segment-resolved
+# comparison behaves that way, and System.Uri.AbsolutePath is the .NET
+# property that produces it - so that is what this mirrors, and the
+# cross-check tier holds the canonicaliser against real System.Uri.
+#
+# The target match is by SEGMENT, deliberately. Microsoft's July 8 patch
+# tested whether the path ends with "ToolPane.aspx" and appending a "/"
+# defeated it (CVE-2025-53771); the July 20 fix replaced that with an
+# allowlist. A segment match covers the original shape, the trailing-slash
+# bypass, and the observed PathInfo forms, without depending on which patch
+# a server has.
+SHAREPOINT_SIGNOUT_PATHS = frozenset({
+    b"/_layouts/signout.aspx",
+    b"/_layouts/14/signout.aspx",
+    b"/_layouts/15/signout.aspx",
+})
+SHAREPOINT_TOOLPANE = b"toolpane.aspx"
+SHAREPOINT_LAYOUT_HIVES = frozenset({b"14", b"15", b"16"})
+# Microsoft's July 20 allowlist of paths permitted with a sign-out referrer.
+# ToolPane.aspx is not on it. Administrators can extend it, which is exactly
+# why the broader rule below is a counter and not an alert.
+SHAREPOINT_SIGNOUT_ALLOWLIST = frozenset({
+    b"/_layouts/15/signout.aspx",
+    b"/_layouts/15/1033/initstrings.js",
+    b"/_layouts/15/init.js",
+    b"/_layouts/15/theming.js",
+    b"/_layouts/15/blank.js",
+    b"/scriptresource.axd",
+    b"/webresource.axd",
+    b"/_layouts/15/1033/styles/corev15.css",
+    b"/_layouts/15/1033/styles/error.css",
+    b"/_layouts/15/images/favicon.ico",
+    b"/_layouts/15/1033/strings.js",
+    b"/_layouts/15/core.js",
+})
+SHAREPOINT_DWP_PARAM = b"MSOtlPn_DWP"
+
+
+def toolpane_segment_match(path: bytes) -> Optional[Dict[str, Any]]:
+    """Is this path the ToolPane handler, with or without PathInfo?"""
+    segs = [sg for sg in path.split(b"/") if sg]
+    for i, seg in enumerate(segs):
+        if seg.lower() != SHAREPOINT_TOOLPANE:
+            continue
+        parent = segs[:i]
+        if not parent:
+            continue
+        if parent[-1].lower() == b"_layouts":
+            ok = True
+        elif (len(parent) >= 2 and parent[-2].lower() == b"_layouts"
+                and parent[-1] in SHAREPOINT_LAYOUT_HIVES):
+            ok = True
+        else:
+            ok = False
+        if ok:
+            return {
+                "handler_path": b"/".join([b""] + parent
+                                          + [seg]).decode("latin-1")[:200],
+                "pathinfo_suffix": bool(segs[i + 1:]) or path.endswith(b"/"),
+                "hive": (parent[-1].decode("latin-1")
+                         if parent[-1] in SHAREPOINT_LAYOUT_HIVES else None),
+            }
+    return None
+
+
+def check_sharepoint_toolshell_fields(target: bytes,
+                                      referer: Optional[bytes],
+                                      method: bytes, body: bytes,
+                                      body_visible: bool = True,
+                                      cfg: WatchConfig = WATCH_DEFAULTS,
+                                      stats: Optional[Dict[str, int]] = None,
+                                      flow_id: Optional[str] = None
+                                      ) -> List[Finding]:
+    """HTTP-088 over the request line and headers, plus the counter.
+
+    R1 depends on nothing but the target and the Referer, so the h2c path
+    can run it; the body only supplies attributes. DATA frames reach no
+    body sink, so body_visible says so outright rather than letting
+    dwp_present read as a negative when the body was never seen.
+    """
+    if not referer:
+        return []
+    ref_path = canonical_uri_path(referer)
+    if ref_path is None or ref_path.lower() not in SHAREPOINT_SIGNOUT_PATHS:
+        return []
+    target_path = canonical_uri_path(target or b"")
+    if target_path is None:
+        return []
+    hit = toolpane_segment_match(target_path)
+    if hit is None:
+        # The root bypass applied to ANY page, not just ToolPane, but
+        # administrators can extend the allowlist, so a sign-out referrer
+        # reaching some other .aspx cannot be zero-FP. Counted, never
+        # alerted - which is the only honest place for it.
+        if (stats is not None and target_path.lower().endswith(b".aspx")
+                and target_path.lower() not in SHAREPOINT_SIGNOUT_ALLOWLIST):
+            stats["toolshell_signout_nonallowlisted"] = (
+                stats.get("toolshell_signout_nonallowlisted", 0) + 1)
+        return []
+    query = (target or b"").split(b"?", 1)
+    display_mode_edit = False
+    if len(query) == 2:
+        for name in urlencoded_names(query[1]):
+            pass
+        for pair in re.split(rb"[&;]", query[1]):
+            eq = pair.find(b"=")
+            if eq > 0 and urldecode(pair[:eq]).lower() == b"displaymode":
+                display_mode_edit = urldecode(pair[eq + 1:]).lower() == b"edit"
+    ev = dict(hit)
+    ev.update({
+        "attack": "ToolShell",
+        "method": (method or b"").decode("latin-1"),
+        "target_path": target_path.decode("latin-1")[:200],
+        # attacker-supplied and not secret, but the path only - never the host
+        "referer_path": ref_path.decode("latin-1")[:200],
+        "referer_canonicalised": ref_path != referer,
+        "display_mode_edit": display_mode_edit,
+        "body_visible": body_visible,
+        "dwp_present": (SHAREPOINT_DWP_PARAM in body) if body_visible else None,
+        "body_length": len(body) if body_visible else None,
+        "body_digest": (redact(body) if body else None) if body_visible
+                       else None,
+        "allowlisted": target_path.lower() in SHAREPOINT_SIGNOUT_ALLOWLIST,
+        "note": "A sign-out-page Referer makes "
+                "PostAuthenticateRequestHandler skip its unauthorized-access "
+                "checks, and this request reaches the ToolPane handler, "
+                "which Microsoft's July 20 allowlist does not permit with "
+                "that referrer. The path is matched by segment, so the "
+                "original shape and the trailing-slash bypass are both "
+                "covered. The body, FedAuth and other cookies are never "
+                "logged. KEV-driven scanning will hit patched servers too: "
+                "every hit is still an attempt, and patch state is not on "
+                "the wire.",
+    })
+    severity_note = "critical" if (method or b"") == b"POST" else "high"
+    ev["request_class"] = severity_note
+    if cfg.log_attack_payload and body and body_visible:
+        ev["payload"] = body.decode("latin-1", "replace")[:512]
+    return [make_finding("HTTP-088", ev, flow=flow_id)]
+
+
+def check_sharepoint_toolshell(msg: ParsedMessage, body: bytes,
+                               cfg: WatchConfig = WATCH_DEFAULTS,
+                               stats: Optional[Dict[str, int]] = None
+                               ) -> List[Finding]:
+    """HTTP-088 over an HTTP/1.x request."""
+    return check_sharepoint_toolshell_fields(
+        msg.target or b"", msg.get(b"referer"), msg.method or b"", body,
+        True, cfg, stats)
+
+
 # ---------------------------------------------------------------------------
 # Tier G: content-coding validation
 # ---------------------------------------------------------------------------
@@ -3428,6 +4215,7 @@ def analyse_http1_message(msg: ParsedMessage, raw: bytes,
         findings.extend(check_shellshock(msg, cfg))
         findings.extend(check_java4shell(msg))
         findings.extend(check_struts_s2045(msg, cfg))
+        findings.extend(check_exchange_proxylogon(msg, cfg))
         # --- Tier F ---
         # The decoded body is built once and shared: dechunking a 23 MB
         # body twice would be the kind of cost that gets a rule disabled.
@@ -3436,6 +4224,8 @@ def analyse_http1_message(msg: ParsedMessage, raw: bytes,
                                           stats))
         findings.extend(check_spring4shell(msg, decoded, body_info, cfg))
         findings.extend(check_struts_s2046(msg, decoded, body_info, cfg))
+        findings.extend(check_exchange_proxyshell(msg, decoded, cfg))
+        findings.extend(check_sharepoint_toolshell(msg, decoded, cfg, stats))
         # --- Tier G ---
         findings.extend(check_brotli(msg, decoded, body_info, cfg.brotli,
                                      stats))
@@ -3665,14 +4455,33 @@ class H2ConnectionState:
             self.gnmi_seen = True
 
         # --- Tier E over decoded h2 request headers ---
-        # _finish_block has already run HPACK, so these two rules get h2c
-        # coverage for free. The body rules (Tier F, Tier G) do not: DATA
-        # frames reach no body sink, which the README states as a gap.
+        # _finish_block has already run HPACK, so every rule that reads
+        # only headers and the request line gets h2c coverage for free.
+        # The rules that need a body (the rest of Tier F, and Tier G) do
+        # not: DATA frames reach no body sink, which the README states as a
+        # gap. HTTP-086/087/088 are here because they read no body either -
+        # over-approximation on a leg Exchange and SharePoint cannot
+        # actually serve, since IIS supports HTTP/2 only over TLS.
         if from_client:
             findings.extend(check_shellshock_fields(
                 headers, obs_fold=False, cfg=self.cfg, flow_id=self.flow_id))
             findings.extend(check_java4shell_fields(
                 headers, flow_id=self.flow_id))
+            cookies = [v for n, v in headers if n.lower() == b"cookie"]
+            authority = hmap.get(b":authority") or hmap.get(b"host") or b"host"
+            method = hmap.get(b":method", b"")
+            findings.extend(check_exchange_proxylogon_fields(
+                cookies, method, path, cfg=self.cfg, flow_id=self.flow_id))
+            findings.extend(check_exchange_proxyshell_fields(
+                path, authority, method, hmap.get(b"authorization"), cookies,
+                cfg=self.cfg, flow_id=self.flow_id))
+            # stats is None here: the h2 connection state carries no
+            # counter dict, and the R2 counter is corroborating only, so it
+            # is left un-plumbed rather than threading a new field through
+            # for it. R1 is unaffected.
+            findings.extend(check_sharepoint_toolshell_fields(
+                path, hmap.get(b"referer"), method, b"", body_visible=False,
+                cfg=self.cfg, stats=None, flow_id=self.flow_id))
 
         if from_client and self._once("h2c_posture"):
             findings.append(make_finding("HTTP-060", {
@@ -3911,6 +4720,7 @@ class HttpWatch:
             "flows": 0, "http1_messages": 0, "h2_frames": 0, "findings": 0,
             "leaks_suppressed": 0, "tierf_inspect_truncated": 0,
             "attacks_suppressed": 0,
+            "toolshell_signout_nonallowlisted": 0,
         }
 
     # -- lifecycle --------------------------------------------------------

@@ -4,6 +4,20 @@
 
 ### 2026-11-23
 
+#### feat(net): HTTP Watch v4 — Exchange ProxyLogon / ProxyShell / ProxyNotShell and SharePoint ToolShell
+*branch `feature/http-watch-v4`*
+
+- **Three new critical rules (36 → 39 codes)**, each the vendor's own check inverted, so they have no benign reading:
+  - **HTTP-086 ProxyLogon** (CVE-2021-26855, CISA KEV): an `X-BEResource` back-end cookie whose host part fails Exchange's `Uri.CheckHostName`, in the two-part form Exchange's own parser accepts.
+  - **HTTP-087 ProxyShell / ProxyNotShell** (CVE-2021-34473 / CVE-2022-41040, CISA KEV): the explicit-logon strip that moves an autodiscover-routed request onto a different handler. It keys on that mismatch, not the target, so the re-encoded targets that beat Microsoft's rewrite mitigations do not evade it. An `Authorization` header or auth cookie marks the authenticated form.
+  - **HTTP-088 ToolShell** (CVE-2025-49706, CISA KEV, and the patch bypass CVE-2025-53771): a SharePoint sign-out-page Referer on a request to the `ToolPane` handler, including the trailing-slash bypass.
+- **Where they can see.** Only the cleartext hop between a TLS-offloading load balancer and Exchange or SharePoint; IIS serves no h2c. On a TLS-end-to-end deployment no finding is not evidence of safety, and the docs and card say so.
+- **No credentials in findings.** On these products the surrounding headers are live credentials, so a finding carries the 5-tuple, paths and a digest of the matched value only.
+- **Context counter.** A sign-out Referer reaching any other page off SharePoint's default allowlist is returned as `toolshell_signout_nonallowlisted` and shown on the card as context, never as an alert.
+- **CVE index 478 named / 403 detected → 489 / 408.** Six are named as context only because the engine documents that they cannot be matched (free-form content or another endpoint): CVE-2021-27065, CVE-2021-31207, CVE-2021-34523, CVE-2022-41082, OWASSRF CVE-2022-41080 and the ToolShell deserialization half CVE-2025-53770.
+- **Docs:** [nettools.md](nettools.md) (HTTP Watch), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [knowledgebase.md](knowledgebase.md) (+1 entry), [README (root)](../README.md) (CVE figures), HTTP Watch card text.
+- **Validation:** HTTP self-test 28 → 41 scenarios (trigger and near-miss for each new rule, plus a ToolShell frame over IPv6 behind an extension header in the pcap leg), all passing. The module's own tiers on this box: self-test 1465/1465, conformance 289/289, cross-check 618/618 (the four comparisons against real .NET `System.Uri` skipped, as Mono is not installed), IPv6 parity 365/365, bite 119/120. The one escaped mutation (a bare, unbracketed IPv6 back-end host wrongly failing the host check, which would make ProxyLogon fire on a valid Exchange back end) is covered only by those .NET comparisons, so Ragnar's self-test now has its own `http086_bare_ipv6_backend_silent` scenario, and that scenario fails under the same mutation. Aggregate self-test: 61 of 62 suites pass; the `dns` failure is an existing DNS Doctor bug (a dig timeout message read as AS number 100), not part of this change.
+
 #### feat(net): DHCP Guardian v4, LDAP Watch v6, HTTP Watch v3 — Shellshock, Log4Shell delivery, attack-shaped HTTP and Brotli
 *branch `feature/dhcp4-ldap6-http3`*
 

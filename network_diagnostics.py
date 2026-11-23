@@ -16592,9 +16592,9 @@ def _ssdp_selftest():
 # --------------------------------------------------------------------------
 # Layer 7, cleartext only: once TLS completes the HTTP layer is ciphertext, so SNI /
 # ALPN / JA3 / certificates stay TLS Watch's and Cert Watch's. Engine vendored as
-# python/httpwatch.py (+ httpwatch_selftest.py, 1167 checks; v3); this adapter owns the
+# python/httpwatch.py (+ httpwatch_selftest.py, 1465 checks; v4); this adapter owns the
 # capture (one bounded tcpdump window, -w only, never a probe) and feeds each scapy
-# packet through the engine's own dissect_packet() + HttpWatch.feed(). 36 codes:
+# packet through the engine's own dissect_packet() + HttpWatch.feed(). 39 codes:
 #   A  HTTP/1.x framing ambiguity (request smuggling / desync, HTTP-001..011): one
 #      RFC 9112 grammar engine runs a Content-Length framer and a Transfer-Encoding
 #      framer side by side; HTTP-009 (critical) fires when they end the message at
@@ -16619,11 +16619,26 @@ def _ssdp_selftest():
 #      produces in an auth header (HTTP-081, CVE-2026-114938), and a Struts S2-045
 #      Content-Type that meets all three OGNL-evaluation conditions (HTTP-084,
 #      CVE-2017-5638). Attempt findings: they never claim the target is vulnerable.
+#      v4 adds the Exchange / SharePoint request shapes, each the vendor's own check
+#      inverted: ProxyLogon (HTTP-086, CVE-2021-26855) - an X-BEResource back-end cookie
+#      whose host part Uri.CheckHostName rejects; ToolShell (HTTP-088, CVE-2025-49706 /
+#      CVE-2025-53771) - a sign-out-page Referer on a request reaching the ToolPane
+#      handler, matched by path segment so the trailing-slash patch bypass is covered.
+#      They see only the cleartext offload hop in front of Exchange / SharePoint (IIS
+#      serves no h2c), so silence on a TLS-end-to-end deployment is not evidence of
+#      safety. A sign-out Referer reaching any other non-allowlisted page is a
+#      corroborating counter only (toolshell_signout_nonallowlisted), never an alert.
 #   F  (v3) attack-shaped request bodies (dechunked, multipart and urlencoded, every
 #      part decoded every plausible way): React2Shell Flight property-path reference
 #      (HTTP-082, CVE-2025-55182 / CVE-2025-66478), Spring4Shell class.* bean path
 #      (HTTP-083, CVE-2022-22965 / CVE-2010-1622), Struts S2-046 multipart filename
-#      OGNL (HTTP-085, CVE-2017-5638).
+#      OGNL (HTTP-085, CVE-2017-5638). v4: Exchange ProxyShell / ProxyNotShell
+#      (HTTP-087, CVE-2021-34473 / CVE-2022-41040) - the explicit-logon strip moves an
+#      autodiscover-routed request off the autodiscover handler; keyed on the strip, not
+#      the target, so the re-encoded targets that beat Microsoft's rewrite mitigations
+#      change nothing. The chained Exchange CVEs, OWASSRF and the ToolShell
+#      deserialization half are named in the engine's catalog / DEFERRED_CVES, not
+#      matched: their content is free-form.
 #   G  (v3) Brotli content-coding validation (HTTP-090, CVE-2026-111497): a request
 #      body is streamed through the HOST's own libbrotli, output discarded, and the
 #      block-switch format error a patched decoder raises is the finding. Arms only
@@ -16826,7 +16841,11 @@ def _http_analyze(packets, ports):
             'packets': seen['packets'], 'dissected': seen['dissected'],
             'ipv4': seen.get('ipv4', 0), 'ipv6': seen.get('ipv6', 0),
             'ports': list(ports), 'engine': getattr(hw, '__version__', ''),
-            'brotli': brotli}
+            'brotli': brotli,
+            # corroborating only (v4): a SharePoint sign-out Referer reaching a page off
+            # the default allowlist other than ToolPane - never an alert on its own.
+            'toolshell_signout_nonallowlisted':
+                int(st.get('toolshell_signout_nonallowlisted', 0))}
 
 
 def _http_capture(iface, seconds, ports):
@@ -16865,7 +16884,8 @@ def do_http_watch(interface=None, seconds=20, ports=None, pcap=None, quick=False
     shapes (MS15-034 Range, Accept-Encoding, trailers), credentials in the clear
     (always redacted), slow-read abuse, the PHP session-cookie memory leak, attack-
     shaped requests (Shellshock, Java4Shell, Struts S2-045 / S2-046, Spring4Shell,
-    React2Shell), Brotli block-switch violations (armed only on a patched host
+    React2Shell, Exchange ProxyLogon / ProxyShell / ProxyNotShell, SharePoint
+    ToolShell), Brotli block-switch violations (armed only on a patched host
     libbrotli; see result['brotli']) and h2c / gRPC abuse (Rapid Reset,
     CONTINUATION, HPACK, gRPC header and metadata). Dual-stack. HIGH / CRITICAL
     findings feed Watchtower unless quick or replaying a pcap."""
@@ -16912,10 +16932,12 @@ def do_http_watch(interface=None, seconds=20, ports=None, pcap=None, quick=False
 
 
 def _http_selftest():
-    """Self-test HTTP Watch: the vendored engine's own 1167-check suite, focused
+    """Self-test HTTP Watch: the vendored engine's own 1465-check suite, focused
     smuggling / clean / credential-redaction / WinRM-suppression / HTTP.sys Range
     boundary scenarios, the v3 attack-shaped request rules (Shellshock, Struts
-    S2-045, Spring4Shell) each with a near-miss, Brotli arming, the verdict ladder,
+    S2-045, Spring4Shell) and the v4 Exchange / SharePoint rules (ProxyLogon,
+    ProxyShell / ProxyNotShell, ToolShell) each with a near-miss, Brotli arming, the
+    verdict ladder,
     the catalog shape, the Watchtower normalizer, and a Scapy pcap end-to-end leg
     through do_http_watch carrying an IPv6 extension header."""
     hw = _http_import()
@@ -17009,6 +17031,68 @@ def _http_selftest():
     ck('http083_benign_field_silent',
        'HTTP-083' not in {f.code for f in feed(post_form(b'className=report&id=7'))})
 
+    # v4: Exchange ProxyLogon - the X-BEResource host part fails Uri.CheckHostName
+    # (the patch's own check, inverted); a plain FQDN back end stays silent.
+    def ecp(cookie):
+        return (b'POST /ecp/favicon.ico HTTP/1.1\r\nHost: exch.corp\r\nCookie: ' + cookie
+                + b'\r\nContent-Length: 0\r\n\r\n')
+    fs = feed(ecp(b'X-BEResource=@backend.example.local:444/ecp/proxyLogon.ecp#~1941962753'))
+    ck('http086_proxylogon',
+       any(f.code == 'HTTP-086' and 'CVE-2021-26855' in f.cves for f in fs))
+    ck('http086_fqdn_backend_silent',
+       'HTTP-086' not in {f.code for f in feed(ecp(
+           b'X-BEResource=exch01.corp.example.com~1942062522'))})
+    ck('http086_two_tildes_silent',          # Exchange's own FromString rejects it
+       'HTTP-086' not in {f.code for f in feed(ecp(
+           b'X-BEResource=localhost/ecp/x.ecp~bad~1942062522'))})
+    # Uri.CheckHostName accepts an UNbracketed IPv6 literal (measured by the module
+    # author against .NET), so a bare-IPv6 back end must stay silent. The module's own
+    # suite covers this only through its Mono cross-check; this guards it without Mono.
+    ck('http086_bare_ipv6_backend_silent',
+       'HTTP-086' not in {f.code for f in feed(ecp(
+           b'X-BEResource=2001:db8::1~1942062522'))}
+       and 'HTTP-086' not in {f.code for f in feed(ecp(
+           b'X-BEResource=[2001:db8::1]~1942062522'))})
+
+    # v4: Exchange ProxyShell (unauthenticated) / ProxyNotShell (authenticated); the
+    # dot-segment path form is the evasion that beat the URL-rewrite mitigations.
+    def ad(path, auth=b''):
+        return (b'GET ' + path + b'?@evil.corp/?&Email=autodiscover/autodiscover.json%3F'
+                b'@evil.corp HTTP/1.1\r\nHost: exch.corp\r\n' + auth + b'\r\n')
+    fs = feed(ad(b'/autodiscover/autodiscover.json'))
+    ck('http087_proxyshell',
+       any(f.code == 'HTTP-087' and f.evidence.get('attack') == 'ProxyShell' for f in fs))
+    fs = feed(ad(b'/autodiscover/autodiscover.json',
+                 auth=b'Authorization: Basic dXNlcjpwdw==\r\n'))
+    ck('http087_proxynotshell_no_auth_logged',
+       any(f.code == 'HTTP-087' and f.evidence.get('attack') == 'ProxyNotShell'
+           for f in fs)
+       and 'dXNlcjpwdw' not in json.dumps([f.to_dict() for f in fs], default=str))
+    ck('http087_dot_segment_evasion',
+       'HTTP-087' in {f.code for f in feed(ad(b'/autodiscover/./autodiscover.json'))})
+    ck('http087_plain_autodiscover_silent',
+       'HTTP-087' not in {f.code for f in feed(
+           b'GET /autodiscover/autodiscover.json?Email=user@corp.example&Protocol=EWS'
+           b' HTTP/1.1\r\nHost: exch.corp\r\n\r\n')})
+
+    # v4: SharePoint ToolShell - sign-out Referer + ToolPane, incl. the trailing-slash
+    # patch bypass; the same Referer on an ordinary page is not an alert.
+    def sp(target, referer):
+        return (b'POST ' + target + b' HTTP/1.1\r\nHost: sp.corp\r\nReferer: ' + referer
+                + b'\r\nContent-Length: 0\r\n\r\n')
+    ck('http088_toolshell',
+       'HTTP-088' in {f.code for f in feed(sp(b'/_layouts/15/ToolPane.aspx?DisplayMode=Edit',
+                                              b'/_layouts/SignOut.aspx'))})
+    ck('http088_trailing_slash_bypass',
+       'HTTP-088' in {f.code for f in feed(sp(b'/_layouts/15/ToolPane.aspx/',
+                                              b'/_layouts/15/SignOut.aspx'))})
+    ck('http088_double_slash_referer_silent',   # System.Uri keeps '//': not sign-out
+       'HTTP-088' not in {f.code for f in feed(sp(b'/_layouts/15/ToolPane.aspx',
+                                                  b'/_layouts//SignOut.aspx'))})
+    ck('http088_signout_elsewhere_not_alert',
+       'HTTP-088' not in {f.code for f in feed(sp(b'/_layouts/15/start.aspx',
+                                                  b'/_layouts/SignOut.aspx'))})
+
     # Tier G (v3): Brotli arming is always reported; a refused library raises. When
     # the host decoder is patched, a valid br body decodes clean and stays silent.
     _probe, _bst = _http_brotli()
@@ -17047,11 +17131,11 @@ def _http_selftest():
        and _http_verdict([], True) == 'clean'
        and _http_verdict([], False) == 'no-traffic')
 
-    # catalog shape: 36 codes over tiers A-G (v3); every attributed CVE is pinned in
+    # catalog shape: 39 codes over tiers A-G (v4); every attributed CVE is pinned in
     # the catalog with a score; nothing deferred is also attributed.
     attributed = {c for d in hw.FINDING_REGISTRY.values() for c in d.cves}
     ck('catalog_shape',
-       len(hw.FINDING_REGISTRY) == 36
+       len(hw.FINDING_REGISTRY) == 39
        and {d.tier for d in hw.FINDING_REGISTRY.values()}
        == {'A', 'B', 'C', 'D', 'E', 'F', 'G'}
        and all(hw.CVE_CATALOG.get(c, {}).get('score') for c in attributed)
@@ -17065,7 +17149,7 @@ def _http_selftest():
        nrm['severity'] == 'HIGH' and nrm['klass'] == 'EXPOSURE'
        and nrm['src'] == '192.168.1.9' and nrm['code'] == 'HTTP-040')
 
-    # the vendored engine's own full suite (1167 checks). Its counters are module
+    # the vendored engine's own full suite (1465 checks). Its counters are module
     # globals, so reset them first or a second panel run would accumulate; it
     # prints a report, so capture that so do_routing_selftest stays quiet.
     try:
@@ -17095,6 +17179,9 @@ def _http_selftest():
         clean = b'GET / HTTP/1.1\r\nHost: intranet\r\n\r\n'
         shock = (b'GET /cgi-bin/test.cgi HTTP/1.1\r\nHost: nas\r\n'
                  b'Referer: () { :;}; /bin/id\r\n\r\n')
+        toolshell = (b'POST /_layouts/15/ToolPane.aspx?DisplayMode=Edit HTTP/1.1\r\n'
+                     b'Host: sp.corp\r\nReferer: /_layouts/SignOut.aspx\r\n'
+                     b'Content-Length: 0\r\n\r\n')
         frames = [
             Ether(**em) / IP(src='192.168.1.9', dst='192.168.1.5')
             / TCP(sport=40000, dport=80, flags='PA') / Raw(load=smug),
@@ -17104,6 +17191,8 @@ def _http_selftest():
             / TCP(sport=40002, dport=80, flags='PA') / Raw(load=clean),
             Ether(**em) / IPv6(src='fd00::30', dst='fd00::5') / IPv6ExtHdrHopByHop()
             / TCP(sport=40003, dport=80, flags='PA') / Raw(load=shock),
+            Ether(**em) / IPv6(src='fd00::31', dst='fd00::6') / IPv6ExtHdrHopByHop()
+            / TCP(sport=40004, dport=80, flags='PA') / Raw(load=toolshell),
         ]
         fd_, pth = _tf.mkstemp(suffix='.pcap', prefix='httpwatch_selftest_')
         _os.close(fd_)
@@ -17121,6 +17210,9 @@ def _http_selftest():
            any(f['code'] == 'HTTP-080' and f['af'] == 'ipv6'
                for f in rr.get('findings', [])))
         ck('pcap_brotli_status_reported', isinstance(rr.get('brotli'), dict))
+        ck('pcap_http088_ipv6_exthdr',
+           any(f['code'] == 'HTTP-088' and f['af'] == 'ipv6'
+               for f in rr.get('findings', [])))
         scapy_result = {'ran': True, 'findings': len(rr.get('findings', []))}
     except ImportError as e:
         scapy_result = {'ran': False, 'reason': str(e)}
