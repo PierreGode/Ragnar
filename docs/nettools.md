@@ -743,7 +743,7 @@ hosts already sent and transmits nothing (no Range test request, no h2 PING, no 
 HTTP over TLS is ciphertext after the handshake, so SNI / ALPN / JA4 / certificates stay with
 [TLS Watch](#tls-watch) and Cert Watch; the http.sys-over-TLS record flood (CVE-2026-47291) is TLS
 Watch's. One bounded `tcpdump` window (full snaplen, `-p`, packet cap), each packet dissected and fed
-through the vendored engine (`python/httpwatch.py`, v4). **39 codes** in seven tiers, each with a
+through the vendored engine (`python/httpwatch.py`, v5). **42 codes** in seven tiers, each with a
 confidence class — `exact` (the observation is the condition), `shape` (the malformation is read
 directly; whether the receiver is vulnerable is not observable), `heuristic` (a threshold or a
 name-matched field) or `posture`:
@@ -839,6 +839,24 @@ name-matched field) or `posture`:
   `CVE-2022-41082`, OWASSRF `CVE-2022-41080`, and the ToolShell deserialization half
   `CVE-2025-53770` (its `__VIEWSTATE` / `ExcelDataSet` payload is free-form, so stolen-machine-key
   persistence is not detected).
+- **Log4Shell and Text4Shell** (*v5*; `HTTP-091` / `HTTP-092` in Tier E, critical, attempt findings).
+  `HTTP-091` — **Log4Shell** (`CVE-2021-44228`, CISA KEV, and the incomplete fix `CVE-2021-45046`):
+  a `jndi` lookup reaching a field Log4j interpolates. `HTTP-092` — **Text4Shell**
+  (`CVE-2022-42889`): a `script`, `url` or `dns` lookup reaching a field Apache Commons Text
+  interpolates. The obfuscation is the library's own substitution grammar, so
+  `${${lower:j}ndi:…}`, `${::-j}`-style defaults and decoder chains are **evaluated** by a walker
+  rather than string-matched; the module author held that walker against the real
+  `StrSubstitutor` / `StringSubstitutor` engines with every dangerous lookup replaced by a
+  recorder. Values the walker cannot know (environment variables) can never complete a
+  dangerous prefix. Carriers are fixed-decoding only: header values, cookies (raw and
+  percent-decoded), the request-target and decoded path, query names and values, and Basic
+  credentials (scanned, never logged). **Request bodies are never scanned** — legitimate text
+  quoting these strings lives there. A walk that hits the nesting / expansion cap is reported
+  as `walker_budget_exceeded`, never passed silently. Internet-facing taps will see years of
+  Log4Shell scanning noise; every hit is a delivery attempt. Out of scope and named only:
+  the recursion DoS `CVE-2021-45105` (below the 6.5 bar) and the JDBC appender `CVE-2021-44832`
+  (needs the logging configuration). [LDAP Watch](#ldap-watch) sees the other leg — the
+  directory's JNDI answer.
 - **Tier F — attack-shaped request bodies** (*v3*; `HTTP-082`, `083`, `085`). Bodies are dechunked
   and parsed as multipart (each part decoded with its declared charset, UTF-8 and the wide
   encodings) or as form / query parameters, so a body any affected server accepts cannot slip past.
@@ -847,7 +865,18 @@ name-matched field) or `posture`:
   encoder never emits. `HTTP-083` (critical) — **Spring4Shell** (`CVE-2022-22965`, and the original
   `CVE-2010-1622`): a bean property path that runs through `class` into JVM internals
   (`class.module.classLoader…`, bracket forms included). `HTTP-085` (critical) — **Struts S2-046**: a
-  multipart filename carrying a NUL and an OGNL opener (`CVE-2017-5638`).
+  multipart filename carrying a NUL and an OGNL opener (`CVE-2017-5638`). `HTTP-089` (critical,
+  *v5*) — **phpAfterShell** (`CVE-2026-126714`): a PHP serialized-object header
+  (`key|O:8:"stdClass":0:{}`, class-name length checked against PHP's own unserializer grammar)
+  in a multipart parameter that PHP's upload-progress handler writes into the session — the
+  unauthenticated route to a torn session write. Parameters are decoded the way PHP was
+  measured to decode them: the last duplicate wins, OWS before `=` hides the parameter
+  entirely, `filename*` is ignored, `'` quotes too. `stored` records PHP's necessary storage
+  condition (a non-file part with a non-empty value precedes the payload), which holds on any
+  `session.upload_progress.name`. Delivery only — the torn write and the deserialization are
+  not on the wire, and the fixed PHP releases also turn upload progress off by default. A
+  serialized scalar instead of an object is the `php_scalar_record_shape` counter, never an
+  alert. Blind to the nginx/Apache → php-fpm FastCGI hop.
 - **Tier G — Brotli content-coding** (*v3*; `HTTP-090`, critical): a Brotli-coded request body
   whose block-switch command names a category with only one block type — the out-of-bounds write
   in Google's Brotli decoder (`CVE-2026-111497`, CISA KEV, the "Node2Shell" family). The body is
@@ -874,18 +903,21 @@ Brotli or h2c / gRPC finding) ·
 client → server pair is folded into one row with a count. HTTP Watch runs in the **Network Integrity**
 rotation, and its HIGH / CRITICAL findings stream to **Watchtower** (`/var/log/ragnar/http_watch.jsonl`).
 The engine also states its considered-and-rejected CVEs (`DEFERRED_CVES`) — no wire artifact, below
-the 6.5 bar, a local-API defect, host configuration rather than wire bytes (phpAfterShell
-`CVE-2026-126714`, the PHP session-handler `CVE-2026-115560`), a free-form OGNL location (Struts
+the 6.5 bar, a local-API defect, host configuration rather than wire bytes (the PHP
+session-handler `CVE-2026-115560`; phpAfterShell `CVE-2026-126714` was here until v5 found its
+wire shape), a free-form OGNL location (Struts
 `CVE-2017-9791` / `CVE-2018-11776` / `CVE-2020-17530`), or another watcher's — so the CVE count never
-quietly overstates. Detector Self-Test runs the engine's 1465-check suite plus smuggling, redaction,
-WinRM-suppression, Range-boundary, Shellshock / S2-045 / Spring4Shell and ProxyLogon / ProxyShell /
-ToolShell trigger-and-near-miss, Brotli-arming and verdict scenarios, and a Scapy pcap leg carrying
-an IPv6 Hop-by-Hop header.
+quietly overstates. Detector Self-Test runs the engine's 1748-check suite plus smuggling, redaction,
+WinRM-suppression, Range-boundary, Shellshock / S2-045 / Spring4Shell, ProxyLogon / ProxyShell /
+ToolShell and phpAfterShell / Log4Shell / Text4Shell trigger-and-near-miss, Brotli-arming and
+verdict scenarios, and a Scapy pcap leg carrying an IPv6 Hop-by-Hop header.
 
 - Endpoint: `GET /api/net/http-watch` (`?interface=<nic>&seconds=5..60&ports=80,8080,…`) — returns
   `verdict`, `findings` (code, tier, severity, confidence, CVEs + KEV flag, redacted evidence,
   client / server / port / address family, count), `by_severity`, flow / message counts,
-  `brotli` (Tier G arming status) and `toolshell_signout_nonallowlisted` (corroborating counter)
+  `brotli` (Tier G arming status), the corroborating counters `toolshell_signout_nonallowlisted`
+  and `php_scalar_record_shape`, and `walker_budget_exceeded` (Log4Shell / Text4Shell values the
+  walker could not finish)
 
 ### MAC Watch
 **Detection-only** MAC-spoofing + randomization monitor — it *never spoofs or

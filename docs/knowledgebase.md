@@ -469,7 +469,7 @@ Source: bluetooth.md
 ## Alerts and reporting
 
 ### Does Ragnar detect Log4Shell?
-Yes, the delivery leg. **LDAP Watch** flags a directory that returns a remote `javaCodeBase` (or a serialized Java object) to a client, on LDAP ports 389, 3268 and 1389. It reports delivery on the wire, not whether the client ran it.
+Yes, both legs. **HTTP Watch** flags a `jndi` lookup in a cleartext HTTP header, cookie, URL or query, including obfuscated forms. **LDAP Watch** flags a directory returning a remote `javaCodeBase` or serialized Java object to a client. Both report attempts on the wire, not whether a server ran the code.
 Source: nettools.md
 <!-- proof: docs/nettools.md | adds the **JNDI delivery leg** of **Log4Shell**-class attacks -->
 

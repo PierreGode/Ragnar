@@ -2,6 +2,20 @@
 
 ## Releases
 
+### 2026-11-24
+
+#### feat(net): HTTP Watch v5 — Log4Shell, Text4Shell and phpAfterShell
+*branch `feature/http-watch-v5`*
+
+- **Three new critical rules (39 → 42 codes)**, all delivery attempts, never a claim the server is vulnerable:
+  - **HTTP-091 Log4Shell** (CVE-2021-44228 / CVE-2021-45046, CISA KEV): a `jndi` lookup in a header, cookie, URL, query or Basic credential. Obfuscations such as `${${lower:j}ndi:…}` are evaluated with Log4j's own substitution rules rather than string-matched. Request bodies are never scanned. LDAP Watch already sees the other half (the directory's JNDI answer), so Ragnar now covers both legs.
+  - **HTTP-092 Text4Shell** (CVE-2022-42889): a `script`, `url` or `dns` lookup reaching Apache Commons Text, with the same walker.
+  - **HTTP-089 phpAfterShell** (CVE-2026-126714): a PHP serialized object hidden in a multipart upload field that PHP's upload-progress handler writes into the session, decoded the way PHP decodes it. It was listed as undetectable until now.
+- **Two new counters** in every result and on the card: `walker_budget_exceeded` (a lookup nested too deeply to finish — reported, never silently passed) and `php_scalar_record_shape` (context only, never an alert).
+- **CVE index 489 named / 408 detected → 492 / 410.** phpAfterShell moves from context to detected and Text4Shell is new; the Log4j recursion DoS (CVE-2021-45105, below the bar) and JDBC appender (CVE-2021-44832, needs the logging config) are named as context only.
+- **Docs:** [nettools.md](nettools.md) (HTTP Watch), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [knowledgebase.md](knowledgebase.md) (Log4Shell answer now covers both legs), [README (root)](../README.md) (CVE figures), HTTP Watch card text.
+- **Validation:** HTTP self-test 41 → 53 scenarios (trigger and near-miss for each rule, obfuscated Log4Shell, body-never-scanned, and a Log4Shell frame over IPv6 behind an extension header in the pcap leg), all passing; aggregate self-test 62/62; pytest 2068 passed. Module tiers on this box: self-test 1748/1748, conformance 348/348, IPv6 parity 401/401, cross-check 696/696 — including the real-PHP oracles, which agree on PHP 8.4.27 (the module author measured 8.3.6 only); the Log4j / Commons Text jar oracle, the .NET checks and the external JS fixtures were skipped. Bite 159/160; the one escape is the bare-IPv6 ProxyLogon case only the .NET check covers, which Ragnar's `http086_bare_ipv6_backend_silent` scenario still catches on v5.
+
 ### 2026-11-23
 
 #### feat(net): HTTP Watch v4 — Exchange ProxyLogon / ProxyShell / ProxyNotShell and SharePoint ToolShell

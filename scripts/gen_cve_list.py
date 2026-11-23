@@ -180,14 +180,18 @@ FILE_CONTEXT_CVES = {
     # v4: the Exchange chain CVEs (CVE-2021-27065 / -31207 / -34523, CVE-2022-41082),
     # OWASSRF (CVE-2022-41080) and the ToolShell deserialization terminus CVE-2025-53770
     # sit in CVE_CATALOG notes and self-test asserts as deliberately NOT matched.
+    # v5: phpAfterShell CVE-2026-126714 is now DETECTED (HTTP-089), so it left this list;
+    # the Log4j recursion DoS CVE-2021-45105 (below the 6.5 bar) and JDBC-appender
+    # CVE-2021-44832 (needs the logging config, not the wire) are named as out of scope.
     'python/httpwatch.py': {'CVE-2018-0732', 'CVE-2026-41417', 'CVE-2022-26134',
                             'CVE-2021-27065', 'CVE-2021-31207', 'CVE-2021-34523',
-                            'CVE-2022-41082', 'CVE-2022-41080', 'CVE-2025-53770'},
+                            'CVE-2022-41082', 'CVE-2022-41080', 'CVE-2025-53770',
+                            'CVE-2021-45105', 'CVE-2021-44832'},
     'python/httpwatch_selftest.py': {'CVE-2026-41417', 'CVE-2026-115560',
-                                     'CVE-2026-126714', 'CVE-2021-27065',
-                                     'CVE-2021-31207', 'CVE-2021-34523',
-                                     'CVE-2022-41082', 'CVE-2022-41080',
-                                     'CVE-2025-53770'},
+                                     'CVE-2021-27065', 'CVE-2021-31207',
+                                     'CVE-2021-34523', 'CVE-2022-41082',
+                                     'CVE-2022-41080', 'CVE-2025-53770',
+                                     'CVE-2021-45105', 'CVE-2021-44832'},
 }
 # Per-CVE owner overrides where a shared helper names another vendor's CVE.
 CVE_OWNER_OVERRIDE = {'CVE-2021-0254': 'Juniper Guard'}
