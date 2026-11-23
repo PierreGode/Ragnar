@@ -2,6 +2,19 @@
 
 ## Releases
 
+### 2026-11-23
+
+#### feat(net): DHCP Guardian v4, LDAP Watch v6, HTTP Watch v3 — Shellshock, Log4Shell delivery, attack-shaped HTTP and Brotli
+*branch `feature/dhcp4-ldap6-http3`*
+
+- **DHCP Guardian v4 — Shellshock via DHCP** (`dhcp-shellshock`, CVE-2014-6271 and its five siblings). Flags the exact bash function-import prefix `() {` at the start of any field a DHCP hook exports to a shell. The full scan now captures **DHCPv6 too** (udp 546/547) and walks every DHCPv4 option, options moved into `sname`/`file` by option 52 overload, option 82 / 125 sub-options, decoded option 119 names, and every DHCPv6 option through relay and address containers. From a server it is critical and the verdict is `rogue`; from a client it is high, with a new `attack` verdict (the DHCP card shows it). Only a length and SHA-256 are kept, never the payload.
+- **LDAP Watch v6 — Log4Shell JNDI delivery** (CVE-2021-44228 / CVE-2021-45046). A directory returning a remote `javaCodeBase` URL to a client is `jndi-codebase-delivered` (compromised; names the codebase host to block); a serialized Java object (`AC ED 00 05`) is `jndi-serialized-object` (suspicious, since a legacy J2EE directory can legitimately serve one). Also captures tcp/1389, the default rogue-JNDI port.
+- **HTTP Watch v3** — the vendored engine goes from 28 to **36 codes**. New: Shellshock in any header (HTTP-080), Java4Shell Base64 padding (HTTP-081, CVE-2026-114938), Struts S2-045 / S2-046 OGNL (HTTP-084 / 085, CVE-2017-5638), Spring4Shell (HTTP-083, CVE-2022-22965 / CVE-2010-1622), React2Shell (HTTP-082, CVE-2025-55182 / CVE-2025-66478), the PHP2Shell session-cookie memory leak (HTTP-048, CVE-2026-109618 / -109619) and the Brotli block-switch write (HTTP-090, CVE-2026-111497). Request bodies are now dechunked and parsed as multipart and form data.
+- **Brotli check arms only on a patched library.** HTTP-090 decodes request bodies with the host's own libbrotli, so it first proves that library carries the fix (it must name error code −17; the version string is not trusted, because Debian backports keep `1.1.0`). Every HTTP Watch result and the card say whether it armed. It arms on Debian 13 (`libbrotli1 1.1.0-2+deb13u1`).
+- **CVE index 455 named / 386 detected → 478 / 403** (+17 detected). Six more are named as context only, because HTTP Watch documents them as not detectable from the wire: Struts CVE-2017-9791 / CVE-2018-11776 / CVE-2020-17530, Confluence CVE-2022-26134 and the PHP session CVE-2026-126714 / CVE-2026-115560. `scripts/gen_cve_list.py` maps the new DHCP constants to DHCP Guardian.
+- **Docs:** [nettools.md](nettools.md) (HTTP Watch, DHCP Guardian, LDAP Watch), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [knowledgebase.md](knowledgebase.md) (+2 entries: Log4Shell, Shellshock), [README (root)](../README.md) (CVE figures), card text for all three modules.
+- **Validation:** Detector self-tests: DHCP 14 → 28, LDAP 31 → 40, HTTP 15 → 28 scenarios, all passing. HTTP Watch v3's own tiers on this box: self-test 1167/1167, conformance 243/243, cross-check 618/618 (3 external oracles skipped), IPv6 parity 317/317, bite 88/88. Mutation checks on the new Ragnar code: 6/6 DHCP and 6/6 LDAP regressions caught. The LDAP port agrees with the module's real OpenLDAP captures (a legitimate local-factory reference stays silent; a legitimate serialized object is reported). The three cards were rendered at 390 px and 1200 px with no horizontal overflow.
+
 ### 2026-11-20
 
 #### docs: Testing Tiers glossary, how each detection module is tested for accuracy
