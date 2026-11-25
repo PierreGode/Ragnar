@@ -14,9 +14,9 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **410 CVEs detected from the wire.** 492 distinct CVE IDs are named across Ragnar's
-  code; 410 of them a passive detector actually identifies. The rest are named, not detected:
-  73 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
+- **417 CVEs detected from the wire.** 506 distinct CVE IDs are named across Ragnar's
+  code; 417 of them a passive detector actually identifies. The rest are named, not detected:
+  80 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
   cannot reconstruct on the wire — the Ripple20 IPv6 bug CVE-2020-11897, which APC Guard
@@ -27,7 +27,7 @@ behind them is Solarflere's work.
   EAP-pwd side channels and a logrotate priv-esc, all undetectable from a passive RADIUS vantage,
   and **RDP Watch's CVE-2005-1794** Standard-RDP-Security MITM, carried as a posture reference
   on RDP-001/RDP-002 only — RDP Watch is a posture/abuse module with no CVE codes of its own —
-  and **HTTP Watch's eighteen deferred CVEs** — the gRPC accept-loop bug with no wire artifact, two
+  and **HTTP Watch's twenty-five deferred CVEs** — the gRPC accept-loop bug with no wire artifact, two
   gRPC HPACK / `-bin` bugs below the 6.5 bar, a grpc-js local-API prototype pollution and Netty's
   `setUri()` library misuse, whose wire effect the generic smuggling rules already catch, plus (v3)
   three Struts OGNL CVEs whose expression sits in a free-form location (CVE-2017-9791,
@@ -38,12 +38,16 @@ behind them is Solarflere's work.
   (CVE-2021-44832), plus (v4)
   the Exchange chain CVEs that arrive through the redirected request with free-form content
   (CVE-2021-27065, CVE-2021-31207, CVE-2021-34523, CVE-2022-41082), OWASSRF (CVE-2022-41080, a
-  different endpoint) and the ToolShell deserialization half (CVE-2025-53770)),
+  different endpoint) and the ToolShell deserialization half (CVE-2025-53770), plus (v7) the
+  Struts REST-plugin and open-redirect siblings not walked (CVE-2013-2248 / S2-017,
+  CVE-2016-3087 / S2-033, CVE-2016-4438 / S2-037) and four N-central CVEs — the second stage
+  reached only through the bypass HTTP-099 already detects (CVE-2026-86207) and three with no
+  published mechanism (CVE-2026-18556, CVE-2026-18577, CVE-2026-86218)),
   3 in card prose as related context, and 6 **active** BLE
   checks in the BLE Pentest action. Every one is listed, with its detector and status, in the
   generated **[CVE Index](CVE.md)**.
 - **28 years of coverage** — from **CVE-1999-0113** (the rlogin `-froot` bypass) to
-  **CVE-2026-126714**.
+  **CVE-2026-132825**.
 - **Two CISA KEV entries** join the corpus with SMTP Watch (CVE-2019-10149, CVE-2018-6789),
   and APC Guard adds the KEV-listed Ripple20 CVE-2020-11899. HTTP Watch adds two more:
   **MS15-034** (CVE-2015-1635) and **HTTP/2 Rapid Reset** (CVE-2023-44487). HTTP Watch v3 and DHCP
@@ -199,7 +203,15 @@ behind them is Solarflere's work.
   against the real engines, so `${${lower:j}ndi:…}`-style obfuscation cannot hide it — and
   **phpAfterShell** (**CVE-2026-126714**, previously deferred): a PHP serialized-object header
   in a multipart parameter that the upload-progress handler stores in the session, decoded
-  exactly as PHP was measured to decode it.
+  exactly as PHP was measured to decode it. **HTTP Watch v7** (49 codes) adds **seven** more,
+  each a parameter name or message structure tested against the target's own grammar: Apache
+  Struts file-upload property overwrites (**CVE-2024-53677** / **CVE-2023-50164**, S2-066 /
+  S2-067), navigation-prefix OGNL (**CVE-2013-2251**, S2-016, CISA KEV) and DMI `method:` OGNL
+  (**CVE-2016-3081**, S2-032, CISA KEV); the Rack `_method` upcase overflow **Ruby2Shell**
+  (**CVE-2026-132825**); an Apache Axis 1.x inbound SOAP Fault with an `exceptionName`
+  (**CVE-2026-90436**, CISA KEV); and the N-central `;` path parameter + escaped `Forwarded`
+  access-control bypass (**CVE-2026-86206**) — plus a no-CVE rule for a DOCTYPE in a SOAP
+  request (the XXE shape, never dereferenced).
 - **SNMP / multicast / time-plane** — the in-app **SNMP Watch** now reads raw BER off the
   wire for **USM HMAC truncation** (CVE-2008-0960), **Cisco SNMP RCE** (CVE-2017-6736..6744,
   CISA KEV), **snmptrapd overflow** (CVE-2025-68615) and **net-snmp VACM malformed-OID**

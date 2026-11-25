@@ -186,12 +186,19 @@ FILE_CONTEXT_CVES = {
     'python/httpwatch.py': {'CVE-2018-0732', 'CVE-2026-41417', 'CVE-2022-26134',
                             'CVE-2021-27065', 'CVE-2021-31207', 'CVE-2021-34523',
                             'CVE-2022-41082', 'CVE-2022-41080', 'CVE-2025-53770',
-                            'CVE-2021-45105', 'CVE-2021-44832'},
+                            'CVE-2021-45105', 'CVE-2021-44832',
+                            # v7: N-central's second stage, reached only through the
+                            # CVE-2026-86206 doorway HTTP-099 already detects.
+                            'CVE-2026-86207'},
     'python/httpwatch_selftest.py': {'CVE-2026-41417', 'CVE-2026-115560',
                                      'CVE-2021-27065', 'CVE-2021-31207',
                                      'CVE-2021-34523', 'CVE-2022-41082',
                                      'CVE-2022-41080', 'CVE-2025-53770',
-                                     'CVE-2021-45105', 'CVE-2021-44832'},
+                                     'CVE-2021-45105', 'CVE-2021-44832',
+                                     # v7: Struts S2-017 / S2-033 / S2-037 asserted
+                                     # as deferred, not walked.
+                                     'CVE-2013-2248', 'CVE-2016-3087',
+                                     'CVE-2016-4438'},
 }
 # Per-CVE owner overrides where a shared helper names another vendor's CVE.
 CVE_OWNER_OVERRIDE = {'CVE-2021-0254': 'Juniper Guard'}
