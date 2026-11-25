@@ -8393,6 +8393,7 @@ const _DHCP_VERDICT_STYLE = {
     suspicious: ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ DHCP anomaly — review below'],
     rogue:      ['bg-red-950/60 border-red-800 text-red-300', '🛑 Rogue / fake DHCP server detected'],
     starvation: ['bg-red-950/60 border-red-800 text-red-300', '🛑 DHCP starvation (pool-exhaustion) detected'],
+    attack:     ['bg-red-950/60 border-red-800 text-red-300', '🛑 Attack payload in DHCP traffic (Shellshock aimed at the DHCP server)'],
     unknown:    ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
 function _dhcpFillIfaces() {
@@ -12471,7 +12472,7 @@ const _HTTP_VERDICT_STYLE = {
     observed:              ['bg-sky-950/40 border-sky-900 text-sky-300', 'ℹ Informational — h2c in use, a TRACE request or bare-LF line endings'],
     anomaly:               ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ HTTP posture issue — CL+TE in one message, obs-fold, Host conflict, slow-read, h2c on gNMI or trailers toward http.sys'],
     'credential-exposure': ['bg-red-950/60 border-red-800 text-red-300', '🛑 Credentials in the clear — Basic / form / cookie / URL / gRPC metadata secrets on cleartext HTTP (values redacted)'],
-    attack:                ['bg-red-950/60 border-red-800 text-red-300', '🛑 HTTP attack shape — request smuggling / desync, HTTP.sys exploit, or h2c/gRPC abuse'],
+    attack:                ['bg-red-950/60 border-red-800 text-red-300', '🛑 HTTP attack shape — request smuggling / desync, HTTP.sys exploit, attack-shaped request (Log4Shell, Struts, Exchange, SharePoint, SOAP, Shellshock…) or h2c/gRPC abuse'],
     unknown:               ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
 const _HTTP_SEV_COLOR = { critical: 'text-red-400', high: 'text-red-300', warn: 'text-amber-300', info: 'text-sky-300' };
@@ -12525,6 +12526,20 @@ async function runHttpWatch() {
         const s = d.by_severity || {};
         let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
         html += `<p class="text-xs text-gray-500 mb-2 break-words">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ports ${escapeHtml((d.ports || []).join(','))} · ${d.flows || 0} flow(s) · ${d.http1_messages || 0} HTTP/1 msg(s) · ${d.h2_frames || 0} h2 frame(s) · IPv4 ${d.ipv4 || 0} / IPv6 ${d.ipv6 || 0} seg(s) · ${s.critical || 0} critical, ${s.high || 0} high, ${s.warn || 0} warn, ${s.info || 0} info${d.kev_findings ? ` · <span class="text-red-300">${d.kev_findings} on CISA KEV</span>` : ''}</p>`;
+        if (d.brotli) {
+            html += d.brotli.armed
+                ? `<p class="text-xs text-gray-500 mb-2 break-words">Brotli check (HTTP-090) armed: host decoder ${escapeHtml(d.brotli.decoder || '')} ${escapeHtml(d.brotli.version || '')} is patched for CVE-2026-111497.</p>`
+                : `<p class="text-xs text-amber-300 mb-2 break-words">Brotli check (HTTP-090) not armed: ${escapeHtml((d.brotli.reason || 'no patched libbrotli on this host').replace(/^HTTP-090 not armed:\s*/, '').replace(/\.\s*$/, ''))}. Update libbrotli to turn it on; every other HTTP check ran.</p>`;
+        }
+        if (d.walker_budget_exceeded) {
+            html += `<p class="text-xs text-amber-300 mb-2 break-words">Log4Shell / Text4Shell check: ${d.walker_budget_exceeded} value(s) hit the lookup-walker's nesting or expansion limit and were not fully evaluated. Deeply nested lookups like these are themselves unusual; inspect them.</p>`;
+        }
+        if (d.php_scalar_record_shape) {
+            html += `<p class="text-xs text-gray-500 mb-2 break-words">PHP: ${d.php_scalar_record_shape} upload field(s) shaped like a serialized session value (not an object). Context for phpAfterShell, not an alert on its own.</p>`;
+        }
+        if (d.toolshell_signout_nonallowlisted) {
+            html += `<p class="text-xs text-gray-500 mb-2 break-words">SharePoint: ${d.toolshell_signout_nonallowlisted} request(s) with a sign-out-page Referer reached a page outside the default allowlist. Context for ToolShell, not an alert on its own (the allowlist can be extended by an administrator).</p>`;
+        }
         if ((d.findings || []).length) {
             html += '<div class="overflow-x-auto"><table class="nd-card-table min-w-full text-xs text-gray-300"><thead>' +
                 '<tr class="text-left text-gray-500"><th class="px-2 py-1">Code</th><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Client → server</th><th class="px-2 py-1">AF</th><th class="px-2 py-1">CVE</th><th class="px-2 py-1">Finding</th></tr></thead><tbody>';
@@ -12986,9 +13001,9 @@ async function runRoutingSelftest() {
             : 'Scapy: <span class="text-amber-300">not installed</span> — end-to-end leg skipped';
         if (instBtn) instBtn.classList.toggle('hidden', !!d.scapy_available);
 
-        const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory)', ssh: 'SSH Watch (regreSSHion / Terrapin)', telnet: 'Telnet Watch (CVE-2026-24061 / 32746)', ftp: 'FTP Watch (ProFTPD mod_copy / quoted verb)', smtp: 'SMTP Watch (Exim expansion / SNI / AUTH b64)', http: 'HTTP Watch (smuggling / HTTP.sys / cleartext creds / h2c-gRPC)', ble: 'BLE Watch (Bluetooth LE clone/spoof/MITM)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', lldp: 'LLDP Watch (802.1AB malformed TLV / CVE screening)', oam: 'OAM Watch (802.3ah Link OAM loopback / flag forgery)', cfm: 'CFM Watch (802.1ag / Y.1731 service OAM)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
+        const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory / JNDI delivery)', ssh: 'SSH Watch (regreSSHion / Terrapin)', telnet: 'Telnet Watch (CVE-2026-24061 / 32746)', ftp: 'FTP Watch (ProFTPD mod_copy / quoted verb)', smtp: 'SMTP Watch (Exim expansion / SNI / AUTH b64)', http: 'HTTP Watch (smuggling / HTTP.sys / cleartext creds / attack-shaped requests / Exchange + SharePoint / Log4Shell + Text4Shell / Struts / SOAP / Brotli / h2c-gRPC)', ble: 'BLE Watch (Bluetooth LE clone/spoof/MITM)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', lldp: 'LLDP Watch (802.1AB malformed TLV / CVE screening)', oam: 'OAM Watch (802.3ah Link OAM loopback / flag forgery)', cfm: 'CFM Watch (802.1ag / Y.1731 service OAM)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
                         arp: 'ARP Poisoning (incl. HSRP/VRRP virtual-MAC awareness)', dns: 'DNS Doctor (poison parser / anchors / ASN)',
-                        mac: 'MAC Watch (spoof / vendor-OUI / randomization / HSRP-VRRP virtual-MAC)', dhcp: 'DHCP Guardian (rogue server / starvation)',
+                        mac: 'MAC Watch (spoof / vendor-OUI / randomization / HSRP-VRRP virtual-MAC)', dhcp: 'DHCP Guardian (rogue server / starvation / TunnelVision / DynoRoot / Shellshock)',
                         lacp: 'LACP Watch (802.1AX LAG-hijack / flapping)', rpc: 'RPC/NetLogon Watch (Zerologon / DCSync / WinRM)',
                         bfd: 'BFD Watch (failover manipulation)', ptp: 'PTP Watch (IEEE-1588 grandmaster takeover)', srmpls: 'SR-MPLS Watch (MPLS segment injection)', ipsec: 'IPsec/IKE Watch (D(HE)at / weak-DH / SWEET32)',
                         dns_passive: 'DNS Watch (KeyTrap / NSEC3 / NXNSAttack / MaginotDNS / SAD DNS)',

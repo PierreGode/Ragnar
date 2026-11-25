@@ -2,6 +2,67 @@
 
 ## Releases
 
+### 2026-11-25
+
+#### feat(net): HTTP Watch v7 — Struts, Ruby2Shell, Axis SOAP Fault, SOAP DOCTYPE, N-central bypass
+*branch `feature/http-watch-v7`*
+
+- **Seven new rules (42 → 49 codes).** Each checks a parameter name or the message structure against the target's own grammar, never a payload signature, and each reports an attempt:
+  - **Apache Struts:** HTTP-093, a parameter overwriting a file-upload property Struts sets itself, by case variant or OGNL prefix (S2-066 / S2-067, CVE-2023-50164 / CVE-2024-53677). HTTP-094, OGNL after an `action:` / `redirect:` / `redirectAction:` prefix (S2-016, CVE-2013-2251, CISA KEV). HTTP-095, a `method:` name that is not a Java identifier (S2-032, CVE-2016-3081, CISA KEV).
+  - **HTTP-096 Ruby2Shell** (CVE-2026-132825): a Rails / Rack `_method` field that is not a valid HTTP method. It is a warning by default and critical only with byte `0xDF` in one of the 14 legacy encodings whose upcase grows.
+  - **HTTP-097 Apache Axis 1.x** (CVE-2026-90436, CISA KEV): a SOAP Fault arriving in a *request*, with an `exceptionName` where Axis loads the class from.
+  - **HTTP-098 DOCTYPE in a SOAP request** (no CVE): forbidden by both SOAP versions. Critical with an external DTD, which is named but never fetched.
+  - **HTTP-099 N-central bypass** (CVE-2026-86206): a raw `;` path parameter together with an escaped `Forwarded` address. Both halves are required, because each alone is legitimate.
+- **CVE index 492 named / 410 detected → 506 / 417.** Seven are named as context only because the engine documents why they are not matched: the Struts siblings CVE-2013-2248 / CVE-2016-3087 / CVE-2016-4438, the N-central second stage CVE-2026-86207, and CVE-2026-18556 / CVE-2026-18577 / CVE-2026-86218, which have no published mechanism.
+- **Docs:** [nettools.md](nettools.md) (HTTP Watch), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [knowledgebase.md](knowledgebase.md) (+1 entry: Apache Struts), [README (root)](../README.md) (CVE figures), HTTP Watch card text.
+- **Validation:**
+  - HTTP self-test 53 → 71 scenarios, all passing. Each new rule has a trigger and a near-miss, and the pcap leg sends the N-central bypass over IPv6 behind an extension header.
+  - Aggregate self-test 62/62; pytest 2070 passed.
+  - Module tiers on this box: self-test 2323/2323, conformance 519/519, IPv6 parity 506/506, cross-check 776/776 (with the real-PHP and JDK oracles), bite 221/222.
+  - 18 cross-checks were skipped because the Java jars (Commons FileUpload, Axis, Jetty, Log4j), the `rack` gem and Mono are not installed.
+  - The one bite escape is the bare-IPv6 ProxyLogon case only the .NET check covers, which Ragnar's own scenario still catches on v7.
+
+### 2026-11-24
+
+#### feat(net): HTTP Watch v5 — Log4Shell, Text4Shell and phpAfterShell
+*branch `feature/http-watch-v5`*
+
+- **Three new critical rules (39 → 42 codes)**, all delivery attempts, never a claim the server is vulnerable:
+  - **HTTP-091 Log4Shell** (CVE-2021-44228 / CVE-2021-45046, CISA KEV): a `jndi` lookup in a header, cookie, URL, query or Basic credential. Obfuscations such as `${${lower:j}ndi:…}` are evaluated with Log4j's own substitution rules rather than string-matched. Request bodies are never scanned. LDAP Watch already sees the other half (the directory's JNDI answer), so Ragnar now covers both legs.
+  - **HTTP-092 Text4Shell** (CVE-2022-42889): a `script`, `url` or `dns` lookup reaching Apache Commons Text, with the same walker.
+  - **HTTP-089 phpAfterShell** (CVE-2026-126714): a PHP serialized object hidden in a multipart upload field that PHP's upload-progress handler writes into the session, decoded the way PHP decodes it. It was listed as undetectable until now.
+- **Two new counters** in every result and on the card: `walker_budget_exceeded` (a lookup nested too deeply to finish — reported, never silently passed) and `php_scalar_record_shape` (context only, never an alert).
+- **CVE index 489 named / 408 detected → 492 / 410.** phpAfterShell moves from context to detected and Text4Shell is new; the Log4j recursion DoS (CVE-2021-45105, below the bar) and JDBC appender (CVE-2021-44832, needs the logging config) are named as context only.
+- **Docs:** [nettools.md](nettools.md) (HTTP Watch), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [knowledgebase.md](knowledgebase.md) (Log4Shell answer now covers both legs), [README (root)](../README.md) (CVE figures), HTTP Watch card text.
+- **Validation:** HTTP self-test 41 → 53 scenarios (trigger and near-miss for each rule, obfuscated Log4Shell, body-never-scanned, and a Log4Shell frame over IPv6 behind an extension header in the pcap leg), all passing; aggregate self-test 62/62; pytest 2068 passed. Module tiers on this box: self-test 1748/1748, conformance 348/348, IPv6 parity 401/401, cross-check 696/696 — including the real-PHP oracles, which agree on PHP 8.4.27 (the module author measured 8.3.6 only); the Log4j / Commons Text jar oracle, the .NET checks and the external JS fixtures were skipped. Bite 159/160; the one escape is the bare-IPv6 ProxyLogon case only the .NET check covers, which Ragnar's `http086_bare_ipv6_backend_silent` scenario still catches on v5.
+
+### 2026-11-23
+
+#### feat(net): HTTP Watch v4 — Exchange ProxyLogon / ProxyShell / ProxyNotShell and SharePoint ToolShell
+*branch `feature/http-watch-v4`*
+
+- **Three new critical rules (36 → 39 codes)**, each the vendor's own check inverted, so they have no benign reading:
+  - **HTTP-086 ProxyLogon** (CVE-2021-26855, CISA KEV): an `X-BEResource` back-end cookie whose host part fails Exchange's `Uri.CheckHostName`, in the two-part form Exchange's own parser accepts.
+  - **HTTP-087 ProxyShell / ProxyNotShell** (CVE-2021-34473 / CVE-2022-41040, CISA KEV): the explicit-logon strip that moves an autodiscover-routed request onto a different handler. It keys on that mismatch, not the target, so the re-encoded targets that beat Microsoft's rewrite mitigations do not evade it. An `Authorization` header or auth cookie marks the authenticated form.
+  - **HTTP-088 ToolShell** (CVE-2025-49706, CISA KEV, and the patch bypass CVE-2025-53771): a SharePoint sign-out-page Referer on a request to the `ToolPane` handler, including the trailing-slash bypass.
+- **Where they can see.** Only the cleartext hop between a TLS-offloading load balancer and Exchange or SharePoint; IIS serves no h2c. On a TLS-end-to-end deployment no finding is not evidence of safety, and the docs and card say so.
+- **No credentials in findings.** On these products the surrounding headers are live credentials, so a finding carries the 5-tuple, paths and a digest of the matched value only.
+- **Context counter.** A sign-out Referer reaching any other page off SharePoint's default allowlist is returned as `toolshell_signout_nonallowlisted` and shown on the card as context, never as an alert.
+- **CVE index 478 named / 403 detected → 489 / 408.** Six are named as context only because the engine documents that they cannot be matched (free-form content or another endpoint): CVE-2021-27065, CVE-2021-31207, CVE-2021-34523, CVE-2022-41082, OWASSRF CVE-2022-41080 and the ToolShell deserialization half CVE-2025-53770.
+- **Docs:** [nettools.md](nettools.md) (HTTP Watch), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [knowledgebase.md](knowledgebase.md) (+1 entry), [README (root)](../README.md) (CVE figures), HTTP Watch card text.
+- **Validation:** HTTP self-test 28 → 41 scenarios (trigger and near-miss for each new rule, plus a ToolShell frame over IPv6 behind an extension header in the pcap leg), all passing. The module's own tiers on this box: self-test 1465/1465, conformance 289/289, cross-check 618/618 (the four comparisons against real .NET `System.Uri` skipped, as Mono is not installed), IPv6 parity 365/365, bite 119/120. The one escaped mutation (a bare, unbracketed IPv6 back-end host wrongly failing the host check, which would make ProxyLogon fire on a valid Exchange back end) is covered only by those .NET comparisons, so Ragnar's self-test now has its own `http086_bare_ipv6_backend_silent` scenario, and that scenario fails under the same mutation. Aggregate self-test: 61 of 62 suites pass; the `dns` failure is an existing DNS Doctor bug (a dig timeout message read as AS number 100), not part of this change.
+
+#### feat(net): DHCP Guardian v4, LDAP Watch v6, HTTP Watch v3 — Shellshock, Log4Shell delivery, attack-shaped HTTP and Brotli
+*branch `feature/dhcp4-ldap6-http3`*
+
+- **DHCP Guardian v4 — Shellshock via DHCP** (`dhcp-shellshock`, CVE-2014-6271 and its five siblings). Flags the exact bash function-import prefix `() {` at the start of any field a DHCP hook exports to a shell. The full scan now captures **DHCPv6 too** (udp 546/547) and walks every DHCPv4 option, options moved into `sname`/`file` by option 52 overload, option 82 / 125 sub-options, decoded option 119 names, and every DHCPv6 option through relay and address containers. From a server it is critical and the verdict is `rogue`; from a client it is high, with a new `attack` verdict (the DHCP card shows it). Only a length and SHA-256 are kept, never the payload.
+- **LDAP Watch v6 — Log4Shell JNDI delivery** (CVE-2021-44228 / CVE-2021-45046). A directory returning a remote `javaCodeBase` URL to a client is `jndi-codebase-delivered` (compromised; names the codebase host to block); a serialized Java object (`AC ED 00 05`) is `jndi-serialized-object` (suspicious, since a legacy J2EE directory can legitimately serve one). Also captures tcp/1389, the default rogue-JNDI port.
+- **HTTP Watch v3** — the vendored engine goes from 28 to **36 codes**. New: Shellshock in any header (HTTP-080), Java4Shell Base64 padding (HTTP-081, CVE-2026-114938), Struts S2-045 / S2-046 OGNL (HTTP-084 / 085, CVE-2017-5638), Spring4Shell (HTTP-083, CVE-2022-22965 / CVE-2010-1622), React2Shell (HTTP-082, CVE-2025-55182 / CVE-2025-66478), the PHP2Shell session-cookie memory leak (HTTP-048, CVE-2026-109618 / -109619) and the Brotli block-switch write (HTTP-090, CVE-2026-111497). Request bodies are now dechunked and parsed as multipart and form data.
+- **Brotli check arms only on a patched library.** HTTP-090 decodes request bodies with the host's own libbrotli, so it first proves that library carries the fix (it must name error code −17; the version string is not trusted, because Debian backports keep `1.1.0`). Every HTTP Watch result and the card say whether it armed. It arms on Debian 13 (`libbrotli1 1.1.0-2+deb13u1`).
+- **CVE index 455 named / 386 detected → 478 / 403** (+17 detected). Six more are named as context only, because HTTP Watch documents them as not detectable from the wire: Struts CVE-2017-9791 / CVE-2018-11776 / CVE-2020-17530, Confluence CVE-2022-26134 and the PHP session CVE-2026-126714 / CVE-2026-115560. `scripts/gen_cve_list.py` maps the new DHCP constants to DHCP Guardian.
+- **Docs:** [nettools.md](nettools.md) (HTTP Watch, DHCP Guardian, LDAP Watch), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [knowledgebase.md](knowledgebase.md) (+2 entries: Log4Shell, Shellshock), [README (root)](../README.md) (CVE figures), card text for all three modules.
+- **Validation:** Detector self-tests: DHCP 14 → 28, LDAP 31 → 40, HTTP 15 → 28 scenarios, all passing. HTTP Watch v3's own tiers on this box: self-test 1167/1167, conformance 243/243, cross-check 618/618 (3 external oracles skipped), IPv6 parity 317/317, bite 88/88. Mutation checks on the new Ragnar code: 6/6 DHCP and 6/6 LDAP regressions caught. The LDAP port agrees with the module's real OpenLDAP captures (a legitimate local-factory reference stays silent; a legitimate serialized object is reported). The three cards were rendered at 390 px and 1200 px with no horizontal overflow.
+
 ### 2026-11-20
 
 #### docs: Testing Tiers glossary, how each detection module is tested for accuracy

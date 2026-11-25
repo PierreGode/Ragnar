@@ -10,6 +10,9 @@ Tiers:
   B  HTTP.sys parser CVEs
   C  Credential-in-the-clear posture and slow-read abuse
   D  Cleartext HTTP/2 (h2c) and gRPC
+  E  Attack-shaped input in request headers and targets
+  F  Attack-shaped input in request bodies and parameters
+  G  Content-coding validation (needs a patched decoder; see ARMING)
 
 Dual-stack by construction: all rules are L7 over TCP and
 address-family agnostic; the capture path admits IPv6 explicitly.
@@ -18,12 +21,16 @@ address-family agnostic; the capture path admits IPv6 explicitly.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
+import base64
+import binascii
 import re
 import sys
+import unicodedata
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 __version__ = "0.1.0-dev"
@@ -116,6 +123,10 @@ FINDING_REGISTRY: Dict[str, FindingDef] = {
            "One source holding many header sections open below the minimum rate"),
         _f("HTTP-047", "slow_body", "C", WARN, HEURISTIC,
            "One source delivering many declared bodies below the minimum rate"),
+        _f("HTTP-048", "php_session_cookie_oversized", "C", HIGH, SHAPE,
+           "Set-Cookie PHP session value past any size a cookie can work at "
+           "(PHP2Shell memory-disclosure stage)",
+           ["CVE-2026-109618", "CVE-2026-109619"]),
         # ---- Tier D: h2c / gRPC -------------------------------------------
         _f("HTTP-060", "h2c_cleartext", "D", INFO, EXACT,
            "Cleartext HTTP/2 (h2c) in use; warn when the path is gNMI/gNOI"),
@@ -134,6 +145,93 @@ FINDING_REGISTRY: Dict[str, FindingDef] = {
            ["CVE-2023-1428"]),
         _f("HTTP-065", "grpc_metadata_credentials", "D", HIGH, EXACT,
            "Credentials in gRPC metadata on a cleartext h2 connection"),
+        # ---- Tier E: attack-shaped request headers -----------------------
+        _f("HTTP-080", "shellshock_function_import", "E", HIGH, EXACT,
+           "Request header value begins with the bash function-import "
+           "prefix '() {' (Shellshock)",
+           ["CVE-2014-6271", "CVE-2014-6277", "CVE-2014-6278",
+            "CVE-2014-7169", "CVE-2014-7186", "CVE-2014-7187"]),
+        _f("HTTP-081", "java4shell_base64_padding", "E", HIGH, EXACT,
+           "Authentication header carries Base64 with padding no encoder "
+           "produces, at the length that reaches the JDK intrinsic",
+           ["CVE-2026-114938"]),
+        # ---- Tier F: attack-shaped request bodies and parameters ---------
+        _f("HTTP-084", "struts_s2045_content_type_ognl", "E", CRITICAL, EXACT,
+           "Content-Type satisfies all three conditions Struts needs to "
+           "evaluate it as OGNL (S2-045)",
+           ["CVE-2017-5638"]),
+        _f("HTTP-086", "exchange_proxylogon_beresource", "E", CRITICAL, EXACT,
+           "Exchange back-end cookie carries a value the patch's own host "
+           "check rejects (ProxyLogon)",
+           ["CVE-2021-26855"]),
+        _f("HTTP-088", "sharepoint_toolshell_signout_referer", "E", CRITICAL,
+           EXACT,
+           "Sign-out-page Referer on a request reaching the SharePoint "
+           "ToolPane handler (ToolShell)",
+           ["CVE-2025-49706", "CVE-2025-53771"]),
+        _f("HTTP-082", "react2shell_flight_path_reference", "F", CRITICAL, SHAPE,
+           "RSC Flight reply carries a property-path reference, which a real "
+           "encoder never emits (React2Shell)",
+           ["CVE-2025-55182", "CVE-2025-66478"]),
+        _f("HTTP-083", "spring4shell_class_property_path", "F", CRITICAL, SHAPE,
+           "Bean property path runs through 'class' into JVM internals "
+           "(Spring4Shell)",
+           ["CVE-2022-22965", "CVE-2010-1622"]),
+        _f("HTTP-085", "struts_s2046_filename_ognl", "F", CRITICAL, EXACT,
+           "Multipart filename carries a NUL and an OGNL opener, which "
+           "commons-fileupload echoes into an evaluated message (S2-046)",
+           ["CVE-2017-5638"]),
+        _f("HTTP-093", "struts_upload_param_override", "F", CRITICAL, EXACT,
+           "Parameter overwrites a file-upload property Struts sets itself "
+           "(S2-066 / S2-067)",
+           ["CVE-2024-53677", "CVE-2023-50164"]),
+        _f("HTTP-094", "struts_navigation_prefix_ognl", "F", CRITICAL, EXACT,
+           "Navigation-prefix parameter name carries an OGNL expression "
+           "(S2-016)",
+           ["CVE-2013-2251"]),
+        _f("HTTP-095", "struts_dmi_method_ognl", "F", HIGH, EXACT,
+           "method: parameter name whose remainder is not a Java identifier "
+           "(S2-032 DMI)",
+           ["CVE-2016-3081"]),
+        _f("HTTP-089", "php_aftershell_object_record", "F", CRITICAL, EXACT,
+           "PHP serialized-object header delivered in a multipart parameter "
+           "PHP stores in the session (phpAfterShell)",
+           ["CVE-2026-126714"]),
+        _f("HTTP-096", "rack_method_override_grammar", "F", WARN, EXACT,
+           "_method form field is not an RFC 9110 method token; critical "
+           "when a growing legacy encoding and 0xDF are both present "
+           "(Ruby2Shell)",
+           ["CVE-2026-132825"]),
+        _f("HTTP-097", "axis_inbound_fault_exceptionname", "F", CRITICAL,
+           EXACT,
+           "SOAP Fault in a REQUEST whose detail carries an Axis "
+           "exceptionName, in the position Axis loads it from",
+           ["CVE-2026-90436"]),
+        _f("HTTP-098", "soap_doctype_declaration", "F", HIGH, EXACT,
+           "Document type declaration in a SOAP request envelope, which "
+           "both SOAP versions forbid; critical with an external "
+           "identifier or external/parameter entities"),
+        _f("HTTP-099", "ncentral_semicolon_forwarded_bypass", "E", CRITICAL,
+           EXACT,
+           "Path parameter on the guarded first segment together with a "
+           "Forwarded for= quoted string carrying a backslash escape",
+           ["CVE-2026-86206"]),
+        _f("HTTP-087", "exchange_proxyshell_logon_strip", "F", CRITICAL, EXACT,
+           "Explicit-logon strip moves the request off the autodiscover "
+           "handler it was routed by (ProxyShell / ProxyNotShell)",
+           ["CVE-2021-34473", "CVE-2022-41040"]),
+        # ---- Tier G: content-coding validation ---------------------------
+        _f("HTTP-091", "log4shell_jndi_lookup", "E", CRITICAL, EXACT,
+           "JNDI lookup delivered in a field Log4j interpolates (Log4Shell)",
+           ["CVE-2021-44228", "CVE-2021-45046"]),
+        _f("HTTP-092", "text4shell_interpolator_lookup", "E", CRITICAL, EXACT,
+           "script, url or dns lookup delivered in a field Commons Text "
+           "interpolates (Text4Shell)",
+           ["CVE-2022-42889"]),
+        _f("HTTP-090", "brotli_block_switch_violation", "G", CRITICAL, EXACT,
+           "Brotli-coded body contains a block switch for a category with "
+           "one block type, which the decoder rejects as a format error",
+           ["CVE-2026-111497"]),
     ]
 }
 
@@ -162,6 +260,53 @@ CVE_CATALOG: Dict[str, Dict[str, Any]] = {
                 "evidence conflicts and CISA's is the one recorded here. "
                 "Microsoft named the component but not the malformation: "
                 "posture-of-possible is the ceiling.",
+    },
+    "CVE-2026-86206": {
+        "score": 6.9,
+        "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/"
+                  "SC:N/SI:N/SA:N",
+        "kev": False, "cwe": "CWE-791", "cvss_version": "4.0",
+        "note": "N-central internal-API access-control filter bypass. "
+                "Fixed in 2026.3 Hotfix 3 (2026.3.1.13); the CNA range is "
+                "everything below that build. The score is the CNA's "
+                "(N-able) CVSS v4 and is the only one published: NVD was "
+                "Awaiting Analysis and CISA-ADP supplied SSVC data only. "
+                "NOT in the CISA KEV catalog (checked 2026-11-24), though "
+                "Huntress reported it used in a chain against a fully "
+                "patched server. It is the entry point CVE-2026-86207 "
+                "needs, which is why covering it covers that one's "
+                "doorway.",
+    },
+    "CVE-2026-90436": {
+        "score": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2026-11-18", "kev_due": "2026-11-21",
+        "cwe": "CWE-470",
+        "note": "Apache Axis 1.x deserializes an inbound SOAP Fault and "
+                "loads the class named in <detail><exceptionName> before "
+                "any type check. Affected 0 through 1.4; Axis 1.x is EOL "
+                "and Apache does not expect to release a 1.x fix, though "
+                "the hardening commit 41f3b4e8 exists upstream. The score "
+                "recorded is CISA-ADP's (NVD secondary); Red Hat carries a "
+                "DRAFT 8.1 differing only in AC:H, and the Apache CNA "
+                "record has no CVSS metrics at all. Embedded in N-central "
+                "with the Legacy API enabled (removed in 2026.4 HF3, "
+                "2026.4.1.39) and in Confluence Data Center (fixed "
+                "9.2.28). Checked 2026-11-24.",
+    },
+    "CVE-2026-132825": {
+        "score": 7.4, "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": False, "cwe": "CWE-122", "alias": "Ruby2Shell",
+        "note": "Ruby heap overflow during case conversion of a single-byte "
+                "legacy encoding; one byte written out of bounds per 0xDF. "
+                "Affected before 3.3.14, 3.4.0-3.4.12, 4.0.0-4.0.9; 3.2 and "
+                "earlier are EOL and get no fix. The score recorded here is "
+                "the CNA's, published 2026-11-19, and its AV:L/AC:H "
+                "disagrees with Red Hat's DRAFT 9.8 at AV:N/AC:L. The "
+                "network vector is the operative one for this module, "
+                "because Rack::MethodOverride reaches the conversion "
+                "pre-auth from a form field; NVD had not finished analysis "
+                "at pin time (status Received, checked 2026-11-24), so the "
+                "CNA score is recorded rather than a derived one.",
     },
     "CVE-2025-25613": {
         "score": 7.5, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
@@ -223,6 +368,35 @@ CVE_CATALOG: Dict[str, Dict[str, Any]] = {
                 "substring test, against RFC 9112 7. Scored by GitHub as CNA; "
                 "scope-changed, which is why it outscores its siblings.",
     },
+    # Pinned 2026-11-22. Both scores are the PHP security team's own CVSS 4.0
+    # figures, confirmed by Tenable's advisory round-up; NVD carries no CVSS
+    # 3.1 vector for either, so none is invented here. An earlier 10.0 that
+    # circulated before release was withdrawn by the PHP Foundation.
+    "CVE-2026-109618": {
+        "score": 9.2, "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+        "cvss_version": "4.0",
+        "kev": True, "kev_added": "2026-10-26", "kev_due": "2026-10-29",
+        "alias": "PHP2Shell (OOM corruption)",
+        "note": "Out-of-memory during partial initialisation of internal "
+                "request data leaves cleanup treating that data as valid. "
+                "Exploited in the wild. Fixed in 8.2.35, 8.3.36, 8.4.27, "
+                "8.5.12; source backports only for 7.4-8.1; nothing for "
+                "5.4-7.3. httpwatch sees the memory-disclosure stage of the "
+                "public chains, not the host's patch level.",
+    },
+    "CVE-2026-109619": {
+        "score": 9.2, "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+        "cvss_version": "4.0",
+        "kev": True, "kev_added": "2026-10-26", "kev_due": "2026-10-29",
+        "alias": "PHP2Shell (stale global state)",
+        "note": "Use-after-free: state left by one request points at freed "
+                "memory a later request on the same worker reaches. PHP's "
+                "advisory lists memory disclosure as a confirmed impact. "
+                "Sources split on which of the pair owns the Set-Cookie "
+                "leak - Datadog places it in CVE-2026-109618's exploit "
+                "requirements, PHP records disclosure under this one - so "
+                "HTTP-048 is attributed to the pair and never to one ID.",
+    },
     "CVE-2026-42580": {
         "score": 6.5, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L",
         "kev": False, "disputed": True,
@@ -235,10 +409,355 @@ CVE_CATALOG: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# Pinned 2026-11-22 against the vendor and CNA records.
+CVE_CATALOG.update({
+    # --- Tier E -----------------------------------------------------------
+    "CVE-2014-6271": {
+        "score": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2021-11-03", "alias": "Shellshock",
+        "note": "bash imports a function from an environment variable whose "
+                "value begins with the four bytes '() {'. A CGI server copies "
+                "every request header into an HTTP_* variable, so the header "
+                "value is the delivery vehicle. Fixed by bash 4.3 patch 25; "
+                "patch 27 renames imports to BASH_FUNC_name%% and closes the "
+                "path. Measured here on bash 5.2.21: the prefix is exactly "
+                "those four bytes - no-space, double-space and leading-space "
+                "forms are not imported.",
+    },
+    "CVE-2014-7169": {
+        "score": 7.5, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L",
+        "kev": True, "kev_added": "2022-05-03",
+        "note": "The incomplete-fix sibling: parser state survives the "
+                "patch-25 check. Same four-byte prefix on the wire.",
+    },
+    "CVE-2014-6277": {
+        "score": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": False,
+        "note": "Function-import parser abuse, uninitialised memory. Same "
+                "four-byte prefix. Not separately listed in CISA KEV; the "
+                "family entry is CVE-2014-6271.",
+    },
+    "CVE-2014-6278": {
+        "score": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": False,
+        "note": "Command execution through the function-import path with the "
+                "'() { _; } >_[$($())] {' shape, which still begins with the "
+                "same four bytes. Not separately in CISA KEV.",
+    },
+    "CVE-2014-7186": {
+        "score": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": False,
+        "note": "redir_stack parser overflow reached through function import. "
+                "Not separately in CISA KEV.",
+    },
+    "CVE-2014-7187": {
+        "score": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": False,
+        "note": "Nested-loop off-by-one reached through function import. Not "
+                "separately in CISA KEV.",
+    },
+    "CVE-2026-114938": {
+        "score": 9.2, "vector": None, "vector_unpublished": True,
+        "cvss_version": "4.0",
+        "kev": False, "alias": "Java4Shell",
+        "disputed": True,
+        "dissent": "Oracle 8.1 under CVSS 3.1 in the November CSPU",
+        "note": "HotSpot AVX-512 Base64 intrinsic heap overflow, 62-63 bytes "
+                "past a heap array. Calif scored it 9.2 under CVSS 4.0 but "
+                "published NO vector string, so none is recorded here rather "
+                "than one being invented to match the other entries. NOT in "
+                "CISA KEV as of 2026-11-22 (probing reported, no confirmed "
+                "compromise). Affected: OpenJDK 17.0.6+ and every release "
+                "from 18 on, x86-64 with AVX-512 VBMI only; Java 8, 11, "
+                "17.0.0-17.0.5 and ARM64 are not affected. Fixed in "
+                "17.0.21.1, 21.0.13.1, 25.0.5.1, 27.0.1.1. The CPU and JVM "
+                "preconditions are host state and are not on the wire.",
+    },
+    # --- Tier F -----------------------------------------------------------
+    "CVE-2025-55182": {
+        "score": 10.0, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2025-12-05", "kev_due": "2025-12-26",
+        "alias": "React2Shell",
+        "note": "React Server Components Flight protocol resolved references "
+                "through inherited properties. The fix makes requireModule "
+                "return a value only when hasOwnProperty.call(moduleExports, "
+                "name) holds - own-property-only resolution. Affected: "
+                "react-server-dom-{webpack,parcel,turbopack} 19.0, 19.1.0, "
+                "19.1.1, 19.2.0; fixed 19.0.1, 19.1.2, 19.2.1.",
+    },
+    "CVE-2025-66478": {
+        "score": 10.0, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+        "kev": False,
+        "note": "The Next.js-side identifier for the same defect. Affected: "
+                "Next.js 15.x, 16.x and 14.3.0-canary.77 onward; 13.x, 14.x "
+                "stable, the Pages Router and the Edge Runtime are not "
+                "affected. Fixed in 15.0.5, 15.1.9, 15.2.6, 15.3.6, 15.4.8, "
+                "15.5.7 and 16.0.7. CISA listed the upstream React ID, not "
+                "this one, so kev is False here and True on CVE-2025-55182: "
+                "one defect, two records, and the catalog says which is "
+                "which rather than copying the flag across.",
+    },
+    "CVE-2022-22965": {
+        "score": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2022-04-04", "alias": "Spring4Shell",
+        "note": "Spring DataBinder binds a request parameter whose name is a "
+                "bean property path, and a path through 'class' reaches "
+                "getClass() and then reflective JVM internals. Needs JDK 9+; "
+                "the public chain also needs a Tomcat WAR deployment. Fixed "
+                "in Spring Framework 5.3.18 and 5.2.20.",
+    },
+    "CVE-2010-1622": {
+        "score": 7.5, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+        "kev": False,
+        "note": "The ancestor: class.classLoader reachable through the same "
+                "data binder. Covered by the same rule at no extra cost, "
+                "which is why it is attributed rather than left unlisted.",
+    },
+    "CVE-2017-5638": {
+        "score": 10.0, "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2021-11-03",
+        "alias": "Struts S2-045 / S2-046",
+        "note": "OGNL injection through the Jakarta multipart parser in "
+                "Apache Struts 2, and the entry point of the 2017 Equifax "
+                "breach. Struts tracks two advisories under this one CVE: "
+                "S2-045 (Content-Type) and S2-046 (Content-Disposition "
+                "filename). Affected 2.3.5-2.3.31 and 2.5-2.5.10; fixed "
+                "2.3.32 and 2.5.10.1. Three conditions, all set by the "
+                "victim's own code, pinned from the shipped source on "
+                "2026-11-23 - see the module comment above HTTP-084.",
+    },
+    # --- Exchange "Proxy" family ------------------------------------------
+    "CVE-2021-26855": {
+        "score": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2021-11-03", "alias": "ProxyLogon",
+        "note": "Pre-auth SSRF in the Exchange client-access front end, "
+                "exploited at scale by HAFNIUM; patched March 2021. The "
+                "front end picks a back end from the X-BEResource cookie and "
+                "builds the back-end URL by concatenation, so path syntax in "
+                "the host portion redirects the request. The patch added "
+                "Uri.CheckHostName on the host portion - HTTP-086 is that "
+                "check, inverted. The chained CVE-2021-27065 post-auth file "
+                "write is not covered: it arrives through the redirected "
+                "request and its content is free-form.",
+    },
+    "CVE-2021-34473": {
+        "score": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2021-11-03", "alias": "ProxyShell",
+        "note": "Pre-auth path confusion. The front end decides a request is "
+                "an autodiscover v2 request from Url.AbsolutePath, then "
+                "strips the explicit-logon address out of Url.AbsoluteUri - "
+                "and that mismatch is the bug. Chained with CVE-2021-34523 "
+                "and CVE-2021-31207, neither of which is covered.",
+    },
+    "CVE-2022-41040": {
+        "score": 8.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2022-10-03", "alias": "ProxyNotShell",
+        "note": "The authenticated repeat of the same explicit-logon "
+                "construct, chained with CVE-2022-41082 for RCE. Microsoft's "
+                "interim URL-rewrite mitigations were bypassed twice, both "
+                "times because they matched the raw URL; HTTP-087 keys on "
+                "the strip condition instead and ignores the target.",
+    },
+    # --- SharePoint ToolShell ---------------------------------------------
+    "CVE-2025-49706": {
+        "score": 6.5, "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+        "kev": True, "kev_added": "2025-07-22", "alias": "ToolShell (auth bypass)",
+        "note": "PostAuthenticateRequestHandler skips the unauthorized-access "
+                "checks when the Referer matches a sign-out page. Fixed by "
+                "the July 2025 updates; machine-key rotation is also required "
+                "because forged ViewState survives patching.",
+    },
+    "CVE-2025-53771": {
+        "score": 6.3, "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+        "kev": False, "alias": "ToolShell (bypass of the July 8 patch)",
+        # 6.3 is below httpwatch's 6.5 scope bar. It is in scope anyway
+        # because it is not a standalone vulnerability: it is the bypass
+        # that re-opens CVE-2025-49706, and the chain terminates in
+        # CVE-2025-53770 at 9.8. The exemption is per-CVE and names the
+        # terminal CVE, so the bar cannot erode by accident - the self-test
+        # requires that terminal CVE to be in the catalog and to clear the
+        # bar on its own.
+        "below_bar_because_chained_to": "CVE-2025-53770",
+        "note": "The July 8 patch tested whether the requested path ends with "
+                "'ToolPane.aspx'; appending a '/' defeated it. July 20 "
+                "replaced that with an allowlist of paths permitted with a "
+                "sign-out referrer, which ToolPane.aspx is not on. HTTP-088 "
+                "matches the path by SEGMENT, so both the original and the "
+                "trailing-slash form are covered.",
+    },
+    "CVE-2026-126714": {
+        # Scored 9.2 under CVSS 4.0 by PHP as CNA; NVD has published no score
+        # of its own. Vector recorded because the AT:P (attack requirements
+        # present) term is the race this rule cannot see.
+        "score": 9.2, "cvss_version": "4.0",
+        "vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/"
+                  "SC:N/SI:N/SA:N",
+        "kev": False, "alias": "phpAfterShell",
+        "fixed": "8.2.36, 8.3.37, 8.4.28, 8.5.13, 8.6.0",
+        "note": "PHP's file session handler rewrites a session file in "
+                "place, so an interrupted update can leave a mix of old and "
+                "new bytes. The unauthenticated way in is upload-progress "
+                "handling, which writes session state before the target "
+                "script runs. PHP 8.1 and older are end of life and get no "
+                "fix; the code dates to PHP 4.1.0. Verified in php-src: the "
+                "fixed releases also flip session.upload_progress.enabled "
+                "from \"1\" to \"0\", though it stays ZEND_INI_PERDIR and "
+                "can be re-enabled per directory.",
+    },
+    "CVE-2024-53677": {
+        "score": 9.8, "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": False, "alias": "Struts S2-067",
+        "affects": "Struts 2.0.0-2.3.37, 2.5.0-2.5.33, 6.0.0-6.3.0.2",
+        "fixed": "6.4.0",
+        "note": "FileUploadInterceptor turns a file part named F into the "
+                "properties F, F+ContentType and F+FileName and sets them "
+                "on the action. The exploit sends a second parameter that "
+                "overwrites one of them. Upgrading to 6.4.0 is not enough "
+                "on its own: an application still wired to the old "
+                "FileUploadInterceptor stays exposed, which is one reason "
+                "there is no version oracle worth reading on the wire.",
+    },
+    "CVE-2023-50164": {
+        "score": 9.8, "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": False, "alias": "Struts S2-066",
+        "affects": "Struts 2.0.0-2.5.32, 6.0.0-6.3.0.1",
+        "fixed": "2.5.33, 6.3.0.2",
+        "note": "The predecessor of S2-067, through the same mechanism "
+                "reached by a case variant of the property name. One rule "
+                "covers both, because the comparison is case-insensitive.",
+    },
+    "CVE-2013-2251": {
+        "score": 9.8, "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2022-03-25", "alias": "Struts S2-016",
+        "affects": "Struts 2.0.0-2.3.15", "fixed": "2.3.15.1",
+        "note": "DefaultActionMapper treats a parameter name beginning "
+                "action:, redirect: or redirectAction: as a navigation "
+                "instruction and puts the remainder through variable "
+                "translation, which evaluates ${...} and %{...}. The "
+                "prefixes are matched as case-sensitive text.",
+    },
+    "CVE-2016-3081": {
+        "score": 8.1, "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2026-10-08", "alias": "Struts S2-032",
+        "affects": "Struts 2.3.19-2.3.20.2, 2.3.21-2.3.24.1, "
+                   "2.3.25-2.3.28, with Dynamic Method Invocation enabled",
+        "fixed": "2.3.20.3, 2.3.24.3, 2.3.28.1",
+        "note": "With DMI enabled, a parameter name beginning method: "
+                "names the method to call and the remainder was evaluated "
+                "as OGNL. A legitimate DMI button always puts a Java method "
+                "name there, and running code needs #, @ or ( - none of "
+                "which can appear in a Java identifier. Whether DMI is "
+                "enabled is not on the wire, so this is attack detection "
+                "only.",
+    },
+    "CVE-2021-44228": {
+        "score": 10.0, "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2021-12-10", "alias": "Log4Shell",
+        "affects": "Log4j 2.0-beta9 through 2.14.1",
+        "note": "A JNDI lookup in any field Log4j interpolates. The "
+                "obfuscation is Log4j's own lookup grammar, which is why "
+                "this is walked rather than string-matched.",
+    },
+    "CVE-2021-45046": {
+        "score": 9.0, "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2021-12-10",
+        "alias": "Log4Shell incomplete fix (context lookups)",
+        "note": "The incomplete fix in 2.15.0. The attacker's carrier field "
+                "still holds the jndi lookup, so the same rule covers it.",
+    },
+    "CVE-2022-42889": {
+        # Not in KEV. The CISA KEV feed is unreachable from the build
+        # sandbox, so this is recorded from vendor databases rather than
+        # from the feed, and no kev_date is claimed.
+        "score": 9.8, "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": False, "alias": "Text4Shell",
+        "affects": "Apache Commons Text 1.5 through 1.9",
+        "fixed": "1.10.0",
+        "note": "StringSubstitutor.createInterpolator() resolves script, "
+                "url and dns lookups. 1.10.0 disables those three in the "
+                "default lookup set rather than removing the code. No "
+                "confirmed in-the-wild exploitation; public PoCs only, and "
+                "the 9.8 score is widely held to overstate real-world "
+                "exploitability, which depends on an application passing "
+                "attacker text to an interpolator.",
+    },
+    "CVE-2025-53770": {
+        "score": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2025-07-20",
+        "alias": "ToolShell (deserialization bypass)",
+        "note": "The deserialization half, reached through the auth bypass "
+                "HTTP-088 detects. The payload itself is NOT matched: "
+                "MSOtlPn_DWP is free-form WebPart markup carrying a Base64 "
+                "compressed serialized DataSet.",
+    },
+    # --- Tier G -----------------------------------------------------------
+    "CVE-2026-111497": {
+        "score": 9.2,
+        "vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N",
+        "cvss_version": "4.0",
+        "kev": True, "kev_added": "2026-10-27", "kev_due": "2026-11-10",
+        "alias": "Node2Shell / HTTP2Shell / Brotli2Shell",
+        "cwe": "CWE-252", "disputed": True,
+        "dissent": "Microsoft 8.1 under CVSS 3.1 for the .NET surface",
+        "note": "Out-of-bounds write in Google's reference Brotli decoder "
+                "(c/dec/decode.c), scored 9.2 by Google as CNA. A block "
+                "switch for a category declaring one block type returned the "
+                "same status as 'needs more input', so the decoder kept "
+                "buffering and overran - CWE-252. Affected Brotli 1.0.3 "
+                "through 1.2.0; fixed 1.0.10, 1.1.1, 1.2.1, and in Node "
+                "22.23.4 / 24.22.1 / 26.12.1, Bun 1.4.4, PyPI Brotli 1.2.1, "
+                "brotlicffi 1.2.1.0. Node 20, 23 and 25 are end-of-support "
+                "with no fix. Commit 0ed4268a makes a patched decoder return "
+                "BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH, which is the "
+                "oracle HTTP-090 reads; that commit ships no test vector.",
+    },
+})
+
 # CVEs considered and deliberately NOT detected, with the reason.  The
 # self-test asserts this is disjoint from the detected set and that every
 # reason is substantive (ciscoguard DEFERRED_CVES pattern).
 DEFERRED_CVES: Dict[str, str] = {
+    "CVE-2026-86207": (
+        "N-central's second stage, which the published analysis says is "
+        "only reachable through the CVE-2026-86206 bypass. HTTP-099 "
+        "detects that doorway, so a separate rule would fire on the same "
+        "request for the same reason. Covered at its entry point rather "
+        "than deferred for want of a mechanism."
+    ),
+    "CVE-2026-18556": (
+        "N-central. No mechanism has been published, so there is no "
+        "condition to test. Registering a rule on the product name alone "
+        "would be a posture guess dressed as a detection."
+    ),
+    "CVE-2026-18577": (
+        "N-central. No mechanism has been published, so there is no "
+        "condition to test, and nothing distinguishes a triggering request "
+        "from an ordinary one."
+    ),
+    "CVE-2026-86218": (
+        "N-central. No mechanism has been published. Deferred until the "
+        "vendor or an analysis names the field, and not pursued further: "
+        "working it out from the appliance would be exploitation research."
+    ),
+    "CVE-2013-2248": "Struts S2-017, the open-redirect half of the same "
+                     "DefaultActionMapper change. Not in KEV and not RCE.",
+    "CVE-2016-3087": "Struts S2-033, a REST-plugin sibling of S2-032. Not "
+                     "in KEV and not walked.",
+    "CVE-2016-4438": "Struts S2-037, a REST-plugin sibling of S2-032. Not "
+                     "in KEV and not walked.",
+    "CVE-2021-45105": "Log4j recursion DoS. NVD scores it below this "
+                      "module's 6.5 bar. The lookup walker's budget handles "
+                      "the self-referential shape safely and emits a "
+                      "walker_budget_exceeded signal, but no finding.",
+    "CVE-2021-44832": "Log4j JDBC appender RCE. Needs control of the "
+                      "logging configuration, not of the wire.",
     "CVE-2026-47291": (
         "HTTP.sys TLS header-line record flood. Assigned to tlswatch on "
         "2026-10-31: it is port-agnostic http.sys over TLS, and the record "
@@ -265,6 +784,68 @@ DEFERRED_CVES: Dict[str, str] = {
         "attribution needed. And the CNA scores it 5.3, below the bar (Red "
         "Hat 6.5, NVD none). It was briefly mis-attributed to HTTP-004 as the "
         "chunk-size overflow; that bug is CVE-2026-42580."
+    ),
+    "CVE-2026-115560": (
+        "PHP session-handler RCE vector. Two config preconditions must both "
+        "hold (session.upload_progress enabled, AND the application sets "
+        "session.serialize_handler to php_binary or php_serialize then "
+        "switches it to php with ini_set() before session_start()). The "
+        "advisory describes no distinguishing artifact in the request or the "
+        "response, and the trigger is entirely host configuration, so "
+        "nothing crosses the wire to observe."
+    ),
+    "CVE-2017-9791": (
+        "Struts 2 Showcase OGNL through a Struts 1 action wrapper. The "
+        "expression arrives in an ordinary form field, which is free-form, "
+        "and the opener alone is the Confluence-class false positive this "
+        "module refuses. No fixed shape at the load-bearing bytes."
+    ),
+    "CVE-2018-11776": (
+        "Struts S2-057: OGNL in the URL namespace. Reachable only when the "
+        "action configuration omits a namespace and uses a wildcard mapping, "
+        "which is host configuration and not on the wire, and the expression "
+        "sits in a free-form path segment. Each Struts OGNL CVE needs its "
+        "own walk; this one has no fixed wire shape."
+    ),
+    "CVE-2020-17530": (
+        "Struts S2-061: forced double OGNL evaluation through a tag "
+        "attribute. The expression is in free-form application parameters "
+        "whose names depend on the app's own tags, so there is no fixed "
+        "field and no fixed shape."
+    ),
+    "CVE-2022-26134": (
+        "Confluence OGNL injection. Kept here as the contrast that defines "
+        "the Struts gate: it has a SINGLE opener in a free-form path, which "
+        "collides with real unrendered-template traffic. Struts S2-045 "
+        "stacks three fixed conditions set by the victim's own code, which "
+        "is why one is in and the other is not."
+    ),
+    "CVE-2021-27065": (
+        "The ProxyLogon post-auth file write. It arrives through the "
+        "request HTTP-086 already flags, and its content is a free-form "
+        "file path and body, so matching it would add nothing but false "
+        "positives."
+    ),
+    "CVE-2021-31207": (
+        "The ProxyShell mailbox-export-to-webshell stage. Free-form "
+        "PowerShell and a free-form UNC path, reached through the request "
+        "HTTP-087 already flags."
+    ),
+    "CVE-2022-41082": (
+        "The ProxyNotShell PowerShell-remoting RCE stage. Free-form "
+        "serialized PowerShell, reached through the request HTTP-087 "
+        "already flags."
+    ),
+    "CVE-2022-41080": (
+        "OWASSRF. A different Exchange SSRF that does NOT use the "
+        "autodiscover endpoint, so neither HTTP-086 nor HTTP-087 covers "
+        "it. Not walked; it needs its own preflight rather than being "
+        "folded into these two by assumption."
+    ),
+    "CVE-2021-34523": (
+        "The ProxyShell privilege-elevation stage (Exchange PowerShell "
+        "backend). No distinguishing wire shape of its own - it is reached "
+        "through the request HTTP-087 flags."
     ),
     "CVE-2020-7768": (
         "grpc-js prototype pollution via loadPackageDefinition. The defect is "
@@ -1089,6 +1670,4974 @@ def make_finding(code: str, evidence: Optional[Dict[str, Any]] = None,
 
 
 # ---------------------------------------------------------------------------
+# HTTP-048: PHP session-cookie memory disclosure (PHP2Shell)
+# ---------------------------------------------------------------------------
+# The disclosure stage of the public PHP2Shell chains hands back reclaimed
+# worker heap in Set-Cookie: PHPSESSID=, percent-encoded by PHP itself: an
+# out-of-memory bailout during multipart parsing leaves PS(id) pointing at a
+# freed allocation, and a later multipart request on the same worker reaches
+# the upload-progress cleanup path before Session initialisation resets it.
+# PHP then treats the stale pointer and an attacker-chosen length as a live
+# string. It works even where the application never calls session_start().
+#
+# The rule's boundary was measured, not assumed (PHP 8.3.6, sandbox,
+# 2026-11-22), and confirmed over a real loopback HTTP round trip:
+#   - the native generator (bits_per_character 4/5/6 x lengths 22/32/256,
+#     1,800 cookies) emits only [0-9a-zA-Z,-]; the one escape it can produce
+#     is %2C, so its ceiling is 256 * 3 = 768 encoded bytes;
+#     NOTE for anyone re-measuring: PHP locks session.sid_length and
+#     session.sid_bits_per_character after the first session_create_id()
+#     call in a request, and ini_set() then returns false. A single process
+#     walking the combinations silently reuses the first one's settings and
+#     produces a corpus that looks plausible and is wrong. One process per
+#     combination, which is what the self-test's re-measurement does.
+#   - session_id() set by the application is emitted unvalidated: 'abc.def',
+#     'a%3Db%3Bc' and a 300-character ID all reach the wire as given.
+# So neither "outside the alphabet" nor "longer than 256" can be the rule -
+# both have legitimate forms. The boundary used instead is RFC 6265 6.1: a
+# user agent need only store 4096 bytes per cookie, so a session cookie
+# larger than that cannot function as a session and no working application
+# emits one. The leak size itself is attacker-chosen; no published source
+# fixes it, which is why the threshold is derived from the cookie spec
+# rather than from a reported leak size.
+PHP_SESSION_COOKIE_NAMES: Tuple[bytes, ...] = (b"PHPSESSID",)
+PHP_COOKIE_NATIVE_CEILING = 768      # 256 chars x %2C, measured
+PHP_COOKIE_MAX = 4096                # RFC 6265 6.1 minimum UA capability
+PHP2SHELL_LABEL = ("PHP2Shell memory-disclosure stage "
+                   "(CVE-2026-109618/109619)")
+# PHP's own default session.upload_progress.name. Used only to annotate a
+# finding that already stands on its own, never to gate one.
+PHP_UPLOAD_PROGRESS_FIELD = b"PHP_SESSION_UPLOAD_PROGRESS"
+UPLOAD_PROGRESS_WINDOW = 8 * 1024
+
+# Bounds for scanning a header section that has not terminated. A leak
+# larger than MAX_HEADER_SECTION never completes one, so the scan has to run
+# on the partial buffer; these keep that from becoming quadratic work on a
+# flow that never finishes its head.
+PHP_SCAN_GROWTH = 4096               # rescan at most once per 4 KiB of growth
+PHP_SCAN_CEILING = 256 * 1024        # stop scanning an unterminated head here
+HEAD_BUFFER_CEILING = 1024 * 1024    # stop growing an unterminated head here
+PHP_DEDUP_WINDOW = 300.0             # one HTTP-048 per server:port per 5 min
+# The attack-class codes rate-limit per (code, client, server:port) per five
+# minutes. Every one of these fires on attacker-chosen traffic, and an
+# internet-facing tap sees scanners hammer them continuously; one alert per
+# probe would bury everything else. The count of what was suppressed rides
+# on the next finding after the window rolls.
+ATTACK_DEDUP_WINDOW = 300.0
+ATTACK_CODES = frozenset({
+    "HTTP-080", "HTTP-081", "HTTP-082", "HTTP-083",
+    "HTTP-084", "HTTP-085", "HTTP-086", "HTTP-087", "HTTP-088",
+    "HTTP-089", "HTTP-090", "HTTP-091", "HTTP-092",
+    "HTTP-093", "HTTP-094", "HTTP-095",
+    "HTTP-096", "HTTP-097", "HTTP-098", "HTTP-099",
+})
+
+_PCT_ESCAPE_RE = re.compile(rb"%([0-9A-Fa-f]{2})")
+
+
+@dataclass(frozen=True)
+class PhpCookieConfig:
+    names: Tuple[bytes, ...] = PHP_SESSION_COOKIE_NAMES
+    threshold: int = PHP_COOKIE_MAX
+
+
+PHP_COOKIE_DEFAULTS = PhpCookieConfig()
+
+
+@dataclass(frozen=True)
+class WatchConfig:
+    """Everything an operator can turn. Defaults are the safe side.
+
+    One object rather than a growing parameter list, so a rule cannot be
+    given a default the operator thought they had overridden.
+    """
+    php: PhpCookieConfig = PHP_COOKIE_DEFAULTS
+    # HTTP-080: attacker-authored command text is off by default. It is the
+    # attacker's own bytes, but it carries URLs, tokens and staging hosts an
+    # operator may not want copied into syslog.
+    log_attack_payload: bool = False
+    # Tier F: how much decoded request body a rule will inspect. Over this,
+    # the finding-free path records inspect_truncated rather than passing.
+    body_cap: int = 1024 * 1024
+    # HTTP-080 priority only, never a gate.
+    internal_cidrs: Tuple[str, ...] = ()
+    # Tier G: set by arm_brotli(); None means HTTP-090 is not armed.
+    brotli: Optional[Any] = None
+    # Tier G response direction. Most outbound fetches are TLS, so off.
+    brotli_scan_responses: bool = False
+    # HTTP-083 segment comparison. See the README: Spring's introspection
+    # capitalisation fallback is not measurable here, so the rule compares
+    # case-insensitively, which can only widen matching.
+    spring_case_insensitive: bool = True
+
+
+WATCH_DEFAULTS = WatchConfig()
+
+
+def php_cookie_config(threshold: int = PHP_COOKIE_MAX,
+                      extra_names: Sequence[str] = ()) -> PhpCookieConfig:
+    """Validate and build the HTTP-048 configuration.
+
+    A threshold at or below the measured native ceiling is refused outright:
+    below 768 bytes the rule would fire on a legitimate 256-character session
+    ID, which is the one thing the measurement rules out. Anything under the
+    4096-byte RFC 6265 figure is accepted but is no longer zero-FP, because
+    an application may legitimately set a session ID of any length, so it
+    warns.
+    """
+    if threshold <= PHP_COOKIE_NATIVE_CEILING:
+        raise ValueError(
+            f"HTTP-048 threshold must exceed the measured native generator "
+            f"ceiling of {PHP_COOKIE_NATIVE_CEILING} bytes; {threshold} "
+            f"would fire on a legitimate 256-character session ID")
+    if threshold < PHP_COOKIE_MAX:
+        print(f"httpwatch: warning: HTTP-048 threshold {threshold} is below "
+              f"the RFC 6265 6.1 figure of {PHP_COOKIE_MAX}; the rule is no "
+              f"longer false-positive-free", file=sys.stderr)
+    names = list(PHP_SESSION_COOKIE_NAMES)
+    for n in extra_names or ():
+        b = n.encode("latin-1") if isinstance(n, str) else n
+        if b and b not in names:
+            names.append(b)
+    return PhpCookieConfig(names=tuple(names), threshold=threshold)
+
+
+def count_escapes(value: bytes) -> Dict[str, int]:
+    """R2: count control and high-byte percent-escapes in a cookie value.
+
+    Corroborating only. An application can pass binary to session_id(), so
+    on its own this is near-zero-FP rather than zero-FP; it rides on the
+    HTTP-048 evidence and is never a finding of its own.
+    """
+    control = high = total = 0
+    for m in _PCT_ESCAPE_RE.finditer(value):
+        total += 1
+        b = int(m.group(1), 16)
+        if b <= 0x1F or b == 0x7F:
+            control += 1
+        elif b >= 0x80:
+            high += 1
+    return {"control_escapes": control, "high_byte_escapes": high,
+            "percent_escapes": total}
+
+
+def header_lines(section: bytes) -> List[bytes]:
+    """Split a header section into logical lines, joining obsolete folds.
+
+    Folds are joined because a tolerant client joins them, so a folded
+    Set-Cookie must not be a way around a length check. The join is
+    length-preserving to within the one byte RFC 9110 5.2 replaces the fold
+    with, and the last line may be incomplete - that is the normal case when
+    this runs on a head still arriving.
+    """
+    out: List[bytes] = []
+    for ln in section.split(b"\n"):
+        if ln.endswith(b"\r"):
+            ln = ln[:-1]
+        if out and ln[:1] in (b" ", b"\t"):
+            out[-1] = out[-1] + b" " + ln.lstrip(b" \t")
+        else:
+            out.append(ln)
+    return out
+
+
+def _php_cookie_hit(name: bytes, value: bytes,
+                    cfg: PhpCookieConfig) -> Dict[str, Any]:
+    """Build the evidence for one oversized PHP session cookie.
+
+    The value never appears here, not even a prefix: its first bytes are a
+    live session token and the rest is reclaimed worker heap that can hold
+    other users' credentials and keys. Only lengths, escape counts and a
+    short correlation hash leave this function - the discipline the
+    r-services credential findings already follow.
+    """
+    esc = count_escapes(value)
+    return {
+        "cookie_name": name.decode("latin-1"),
+        "encoded_length": len(value),
+        "decoded_length": len(value) - 2 * esc["percent_escapes"],
+        "threshold": cfg.threshold,
+        "native_generator_ceiling": PHP_COOKIE_NATIVE_CEILING,
+        "value_digest": redact(value),
+        "control_escapes": esc["control_escapes"],
+        "high_byte_escapes": esc["high_byte_escapes"],
+    }
+
+
+def _php_cookie_from_field(field: bytes,
+                           cfg: PhpCookieConfig) -> Optional[Dict[str, Any]]:
+    """Evaluate one Set-Cookie field value.
+
+    RFC 6265 4.1.1 gives set-cookie-string = cookie-pair *( ";" SP
+    cookie-av ), so the value is what lies between the first '=' and the
+    first ';'. The cookie-name is compared literally: 6265 folds case for
+    attribute names and for the domain, and nowhere for the cookie-name
+    itself, and PHP matches session.name literally too - so 'phpsessid' is
+    not PHP's cookie and is not treated as one.
+
+    The threshold is deliberately conservative. RFC 6265 6.1 measures its
+    4096-byte figure as "the sum of the length of the cookie's name, value,
+    and attributes", so a value alone past 4096 is past the whole-cookie
+    budget with the name and attributes still to count. Measuring the value
+    alone can only ever miss a leak, never invent one.
+    """
+    eq = field.find(b"=")
+    if eq < 0:
+        return None
+    name = field[:eq]
+    if name not in cfg.names:
+        return None
+    value = field[eq + 1:]
+    semi = value.find(b";")
+    if semi >= 0:
+        value = value[:semi]
+    if len(value) <= cfg.threshold:
+        return None
+    return _php_cookie_hit(name, value, cfg)
+
+
+def php_cookie_hits(section: bytes,
+                    cfg: PhpCookieConfig = PHP_COOKIE_DEFAULTS,
+                    ) -> List[Dict[str, Any]]:
+    """R1 over an HTTP/1.x header section, complete or not.
+
+    The rule is a length floor, so a value already past the threshold is
+    past it whether or not the rest of the header ever arrives. Each
+    Set-Cookie is evaluated independently; the field name is matched
+    case-insensitively.
+    """
+    hits: List[Dict[str, Any]] = []
+    for ln in header_lines(section):
+        # field names are case-insensitive (RFC 9110 5.1)
+        if ln[:11].lower() != b"set-cookie:":
+            continue
+        hit = _php_cookie_from_field(ln[11:].lstrip(b" \t"), cfg)
+        if hit is not None:
+            hits.append(hit)
+    return hits
+
+
+def php_cookie_hits_fields(headers: Sequence[Tuple[bytes, bytes]],
+                           cfg: PhpCookieConfig = PHP_COOKIE_DEFAULTS,
+                           ) -> List[Dict[str, Any]]:
+    """R1 over decoded h2 response fields.
+
+    The length is measured on the HPACK-decoded value, which is the same
+    string an HTTP/1.x response carries literally; the Huffman-coded wire
+    form is shorter and would make the threshold mean something else. Every
+    set-cookie field is evaluated, not just the first: HTTP/2 carries each
+    cookie as its own field and a map would drop all but one.
+    """
+    hits: List[Dict[str, Any]] = []
+    for name, value in headers:
+        if name.lower() != b"set-cookie":
+            continue
+        hit = _php_cookie_from_field(value, cfg)
+        if hit is not None:
+            hits.append(hit)
+    return hits
+
+
+HTTP048_NOTE = (
+    "A PHP session cookie past the RFC 6265 6.1 user-agent minimum cannot "
+    "function as a session, so this is not a long session ID; it is the "
+    "response carrying back reclaimed worker heap. This records an exploit "
+    "stage seen on the wire - it is not a vulnerable-or-not verdict on the "
+    "host, and the value is deliberately never logged."
+)
+
+
+def php_cookie_findings(hits: Sequence[Dict[str, Any]],
+                        flow_id: Optional[str] = None,
+                        http_version: Optional[bytes] = None,
+                        upload_progress: bool = False,
+                        partial: bool = False,
+                        ) -> List[Finding]:
+    """Turn R1 hits into HTTP-048 findings, with R2 as attributes.
+
+    `partial` marks a measurement taken on a header section that had not
+    terminated, where every length is a floor rather than a total. Saying
+    so is the difference between a number and a number that is wrong.
+    """
+    out: List[Finding] = []
+    for hit in hits:
+        ev = dict(hit)
+        ev["attribution"] = PHP2SHELL_LABEL
+        ev["finding_class"] = "exploit_stage_observed"
+        if partial:
+            ev["measured_on"] = "unterminated_head"
+            ev["lengths_are_lower_bounds"] = True
+        if http_version is not None:
+            ev["http_version"] = (http_version.decode("latin-1")
+                                  if isinstance(http_version, bytes)
+                                  else str(http_version))
+        if upload_progress:
+            ev["preceded_by_multipart_upload_progress"] = True
+        ev["note"] = HTTP048_NOTE
+        out.append(make_finding("HTTP-048", ev, flow=flow_id))
+    return out
+
+
+class LeakDedup:
+    """One HTTP-048 per server address:port per window.
+
+    The count of hits suppressed in a window is carried on the first
+    finding of the next one, because that is the first moment it can be
+    known. Reporting every leaked response from a host under active
+    exploitation would bury the one alert that matters.
+    """
+
+    def __init__(self, window: float = PHP_DEDUP_WINDOW):
+        self.window = window
+        self._state: Dict[Tuple[str, int], Tuple[float, int]] = {}
+
+    def allow(self, key: Tuple[str, int], now: float) -> Tuple[bool, int]:
+        first, suppressed = self._state.get(key, (None, 0))
+        if first is None or now - first > self.window:
+            self._state[key] = (now, 0)
+            return True, suppressed
+        self._state[key] = (first, suppressed + 1)
+        return False, 0
+
+    def expire(self, now: float) -> None:
+        for key in [k for k, (t, _) in self._state.items()
+                    if now - t > self.window * 2]:
+            del self._state[key]
+
+
+
+# ---------------------------------------------------------------------------
+# Shared request-body decode pipeline (Tiers F and G)
+# ---------------------------------------------------------------------------
+# Nothing above this point decoded a request body. Tier C read Content-Length
+# framed bodies as raw bytes and that was enough for a form-field name match;
+# the Tier F and G rules need the bytes a server would actually hand its
+# application, which means dechunking, and for multipart it means parsing the
+# way the server's multipart layer parses.
+#
+# The parity risk is the whole game here (React2Shell's public tooling ships
+# charset, padding, boundary and framing evasions). The approach taken is NOT
+# "mirror one server exactly": a parser that under-approximates any affected
+# server is an evasion route, and there are several affected stacks. Instead
+# every part is decoded every plausible way and the rule matches on any of
+# them. Over-approximating can only cost a false positive, and the rules it
+# feed are anchored grammars where a spurious match is not a realistic
+# outcome - which the measured negative corpora then confirm.
+
+MULTIPART_MAX_PARTS = 256
+MULTIPART_MAX_PART_BYTES = 1024 * 1024
+# Charsets a multipart part may declare and a server may honour. UTF-16 and
+# UTF-32 are in the public React2Shell tooling precisely because byte-level
+# matchers miss them.
+PART_CHARSETS = ("utf-8", "utf-16-le", "utf-16-be", "utf-16",
+                 "utf-32-le", "utf-32-be", "utf-32", "latin-1")
+
+
+def parse_content_type(value: Optional[bytes]) -> Tuple[bytes, Dict[bytes, bytes]]:
+    """Split a Content-Type into its type and its parameters.
+
+    Tolerant in the directions servers are tolerant: parameter names fold
+    case, values may be quoted or bare, and a quoted value may contain a
+    semicolon.
+    """
+    if not value:
+        return b"", {}
+    out: Dict[bytes, bytes] = {}
+    main = value
+    i = value.find(b";")
+    if i >= 0:
+        main, rest = value[:i], value[i + 1:]
+    else:
+        rest = b""
+    pos = 0
+    while pos < len(rest):
+        eq = rest.find(b"=", pos)
+        if eq < 0:
+            break
+        name = rest[pos:eq].strip(b" \t").lower()
+        pos = eq + 1
+        while pos < len(rest) and rest[pos] in b" \t":
+            pos += 1
+        if pos < len(rest) and rest[pos:pos + 1] == b'"':
+            pos += 1
+            buf = bytearray()
+            while pos < len(rest):
+                ch = rest[pos:pos + 1]
+                if ch == b"\\" and pos + 1 < len(rest):
+                    buf += rest[pos + 1:pos + 2]
+                    pos += 2
+                    continue
+                if ch == b'"':
+                    pos += 1
+                    break
+                buf += ch
+                pos += 1
+            val = bytes(buf)
+        else:
+            end = rest.find(b";", pos)
+            if end < 0:
+                end = len(rest)
+            val = rest[pos:end].strip(b" \t")
+            pos = end
+        if name:
+            out.setdefault(name, val)
+        semi = rest.find(b";", pos)
+        pos = len(rest) if semi < 0 else semi + 1
+    return main.strip(b" \t").lower(), out
+
+
+def dechunk(raw: bytes, start: int, cap: int) -> Tuple[bytes, bool, bool]:
+    """Decode a chunked body. Returns (bytes, complete, truncated_at_cap).
+
+    Bounded by construction: it stops at `cap` and says so, so a 23 MB body
+    costs `cap` bytes of memory and not 23 MB. Tolerant of a bare-LF chunk
+    line, because a server that accepts one hands its application the same
+    bytes - and httpwatch already reports the bare LF separately as
+    HTTP-006, so tolerating it here loses no evidence.
+    """
+    out = bytearray()
+    pos = start
+    n = len(raw)
+    truncated = False
+    while pos < n:
+        nl = raw.find(b"\n", pos)
+        if nl < 0:
+            return bytes(out), False, truncated
+        line = raw[pos:nl].rstrip(b"\r")
+        semi = line.find(b";")
+        size_field = line if semi < 0 else line[:semi]
+        size_field = size_field.strip()
+        try:
+            size = int(size_field, 16)
+        except ValueError:
+            return bytes(out), False, truncated
+        pos = nl + 1
+        if size == 0:
+            return bytes(out), True, truncated
+        take = raw[pos:pos + size]
+        room = max(cap - len(out), 0)
+        if len(take) > room:
+            truncated = True
+        out += take[:room]
+        pos += size
+        # step over the chunk's trailing CRLF (or bare LF)
+        if raw[pos:pos + 2] == b"\r\n":
+            pos += 2
+        elif raw[pos:pos + 1] == b"\n":
+            pos += 1
+    return bytes(out), False, truncated
+
+
+def request_body(msg: ParsedMessage, raw: bytes,
+                 cap: int) -> Tuple[bytes, Dict[str, Any]]:
+    """The bytes a server would hand its application, bounded by `cap`.
+
+    Content-coding is NOT undone here. Tier G owns Brotli, and a coded body
+    that Tier F cannot read is recorded as such rather than guessed at.
+    """
+    info: Dict[str, Any] = {"framing": None, "truncated": False,
+                            "complete": True, "coded": None}
+    te = analyse_transfer_encoding(msg.get_all(b"transfer-encoding"))
+    enc = (msg.get(b"content-encoding") or b"").strip().lower()
+    if enc and enc != b"identity":
+        info["coded"] = enc.decode("latin-1")[:64]
+    if te["chunked"]:
+        info["framing"] = "chunked"
+        body, complete, trunc = dechunk(raw, msg.body_offset, cap)
+        info["complete"], info["truncated"] = complete, trunc
+        return body, info
+    cl, _ = parse_content_length(msg.get_all(b"content-length"))
+    if cl is None:
+        info["framing"] = "none"
+        return b"", info
+    info["framing"] = "content-length"
+    end = msg.body_offset + cl
+    body = raw[msg.body_offset:min(end, len(raw))]
+    info["complete"] = len(raw) >= end
+    if len(body) > cap:
+        body = body[:cap]
+        info["truncated"] = True
+    return body, info
+
+
+@dataclass
+class MultipartPart:
+    index: int
+    name: Optional[bytes] = None
+    filename: Optional[bytes] = None
+    charset: Optional[bytes] = None
+    content_type: bytes = b""
+    content: bytes = b""
+    headers: List[Tuple[bytes, bytes]] = field(default_factory=list)
+
+
+def parse_multipart(body: bytes, boundary: bytes,
+                    max_parts: int = MULTIPART_MAX_PARTS,
+                    max_part: int = MULTIPART_MAX_PART_BYTES,
+                    ) -> Tuple[List[MultipartPart], Dict[str, Any]]:
+    """Parse a multipart body the tolerant way servers parse it.
+
+    Deliberately tolerant about: a preamble before the first delimiter
+    (which is where the public tooling's 128 KB of junk goes, and it is
+    ignored rather than being treated as an inspection window), LF-only line
+    endings, part header name case, and a Content-Disposition whose name
+    parameter is quoted, bare, or escaped. Duplicate field names are kept as
+    separate parts rather than collapsed, because collapsing them is how a
+    parameter-pollution evasion gets through.
+    """
+    meta: Dict[str, Any] = {"parts": 0, "preamble_bytes": 0,
+                            "lf_only": False, "truncated_parts": 0,
+                            "closed": False}
+    if not boundary:
+        return [], meta
+    delim = b"--" + boundary
+    first = body.find(delim)
+    if first < 0:
+        return [], meta
+    meta["preamble_bytes"] = first
+    parts: List[MultipartPart] = []
+    pos = first
+    while pos < len(body) and len(parts) < max_parts:
+        pos += len(delim)
+        if body[pos:pos + 2] == b"--":
+            meta["closed"] = True
+            break
+        # skip the delimiter's own line ending
+        if body[pos:pos + 2] == b"\r\n":
+            pos += 2
+        elif body[pos:pos + 1] == b"\n":
+            pos += 1
+            meta["lf_only"] = True
+        nxt = body.find(delim, pos)
+        chunk = body[pos:] if nxt < 0 else body[pos:nxt]
+        # strip the CRLF that belongs to the following delimiter
+        if chunk.endswith(b"\r\n"):
+            chunk = chunk[:-2]
+        elif chunk.endswith(b"\n"):
+            chunk = chunk[:-1]
+            meta["lf_only"] = True
+        split = split_header_section(chunk)
+        if split is None:
+            hdr_bytes, content = chunk, b""
+        else:
+            hdr_bytes, off = split
+            content = chunk[off:]
+        part = MultipartPart(index=len(parts))
+        for ln in header_lines(hdr_bytes):
+            c = ln.find(b":")
+            if c < 0:
+                continue
+            hname = ln[:c].strip(b" \t").lower()
+            hval = ln[c + 1:].strip(b" \t")
+            part.headers.append((hname, hval))
+            if hname == b"content-disposition":
+                _, params = parse_content_type(hval)
+                part.name = params.get(b"name")
+                part.filename = params.get(b"filename")
+            elif hname == b"content-type":
+                part.content_type, cparams = parse_content_type(hval)
+                part.charset = cparams.get(b"charset")
+        if len(content) > max_part:
+            content = content[:max_part]
+            meta["truncated_parts"] += 1
+        part.content = content
+        parts.append(part)
+        if nxt < 0:
+            break
+        pos = nxt
+    meta["parts"] = len(parts)
+    return parts, meta
+
+
+def decode_every_way(data: bytes,
+                     declared: Optional[bytes] = None) -> List[Tuple[str, str]]:
+    """Decode one part every plausible way, as (charset_label, text) pairs.
+
+    A single "mirror the server" decode is an evasion route: there are
+    several affected stacks and the public tooling ships UTF-16 and UTF-32
+    declarations precisely because a matcher that guesses wrong misses. So
+    the declared charset is honoured AND utf-8 is always tried, and the rule
+    above matches on any decode. Over-approximating costs only a possible
+    false positive, and the grammars these feed are anchored.
+    """
+    order: List[str] = ["utf-8"]
+    if declared:
+        label = declared.decode("latin-1", "replace").strip().strip('"').lower()
+        alias = {"utf16": "utf-16", "utf-16le": "utf-16-le",
+                 "utf-16be": "utf-16-be", "utf32": "utf-32",
+                 "utf-32le": "utf-32-le", "utf-32be": "utf-32-be",
+                 "iso-8859-1": "latin-1", "us-ascii": "ascii",
+                 "ucs-2": "utf-16-le"}.get(label, label)
+        if alias not in order:
+            order.insert(0, alias)
+    # The wide encodings are always tried: a part may omit the declaration
+    # and still be read as UTF-16 by a server that sniffs a BOM.
+    for extra in ("utf-16-le", "utf-16-be"):
+        if extra not in order:
+            order.append(extra)
+    out: List[Tuple[str, str]] = []
+    seen: set = set()
+    for enc in order:
+        try:
+            text = data.decode(enc)
+        except (UnicodeDecodeError, LookupError, ValueError):
+            continue
+        if text not in seen:
+            seen.add(text)
+            out.append((enc, text))
+    return out
+
+
+def urldecode(data: bytes) -> bytes:
+    """Percent-decode and turn '+' into a space, as a form parser does."""
+    data = data.replace(b"+", b" ")
+    if b"%" not in data:
+        return data
+    out = bytearray()
+    i = 0
+    while i < len(data):
+        if data[i:i + 1] == b"%" and i + 2 < len(data) + 1:
+            hexpair = data[i + 1:i + 3]
+            if len(hexpair) == 2:
+                try:
+                    out.append(int(hexpair, 16))
+                    i += 3
+                    continue
+                except ValueError:
+                    pass
+        out += data[i:i + 1]
+        i += 1
+    return bytes(out)
+
+
+def urlencoded_names(data: bytes, limit: int = 4096) -> List[bytes]:
+    """Parameter NAMES from a query string or urlencoded body.
+
+    Names only. The values are where a web shell and any legitimate form
+    data both live, and no rule here reads them.
+    """
+    names: List[bytes] = []
+    for pair in re.split(rb"[&;]", data):
+        if not pair:
+            continue
+        eq = pair.find(b"=")
+        raw = pair if eq < 0 else pair[:eq]
+        names.append(urldecode(raw))
+        if len(names) >= limit:
+            break
+    return names
+
+
+# ---------------------------------------------------------------------------
+# Tier E: attack-shaped request headers
+# ---------------------------------------------------------------------------
+# HTTP-080 Shellshock (CVE-2014-6271 and the function-import siblings).
+#
+# A vulnerable bash imports a function from an environment variable only when
+# the value begins with exactly these four bytes, and a CGI server copies
+# every request header into an HTTP_* variable. There is no encoding, case or
+# spacing latitude at the load-bearing bytes, which is the whole reason this
+# is a rule and ${jndi: is not: Log4Shell tolerates nested lookups and lands
+# in any logged field, so the attacker has room to vary it. Here they have
+# four bytes and no room at all.
+#
+# Measured on bash 5.2.21 through the patch-27 BASH_FUNC_name%% import path,
+# which runs the same STREQN check in variables.c:
+#   '() { echo X; }'   imported        '(){ echo X; }'    not imported
+#   '() { echo X;}'    imported        '()  { echo X; }'  not imported
+#                                      ' () { echo X; }'  not imported
+#                                      '() {echo X; }'    not imported
+#                                      '(] { echo X; }'   not imported
+# So the prefix is the condition, and the body after it is free - which is
+# why every family variant, including 6278's '() { _; } >_[$($())] {', still
+# begins with these bytes.
+SHELLSHOCK_PREFIX = b"() {"
+# The 6278 shape's distinguishing marker, recorded as a variant, not matched.
+SHELLSHOCK_6278_MARKER = b">_["
+
+
+def check_shellshock_fields(headers: Sequence[Tuple[bytes, bytes]],
+                            obs_fold: bool = False,
+                            cfg: WatchConfig = WATCH_DEFAULTS,
+                            flow_id: Optional[str] = None) -> List[Finding]:
+    """HTTP-080 over every request header value.
+
+    Scope is every header name without exception - Cookie, User-Agent,
+    Referer and anything custom - because CGI exports them all. Values are
+    already OWS-trimmed and obs-folds already joined by parse_message, which
+    is the recipient behaviour this has to mirror: a fold is a way to split
+    the prefix across two lines, and joining it first closes that.
+    """
+    findings: List[Finding] = []
+    for name, value in headers:
+        value = value.strip(b" \t")
+        if not value.startswith(SHELLSHOCK_PREFIX):
+            # Mid-value is not a finding: bash imports on the prefix only.
+            continue
+        ev = {
+            "header_name": name.decode("latin-1")[:64],
+            "value_length": len(value),
+            "variant": ("6278_redir_shape"
+                        if SHELLSHOCK_6278_MARKER in value else "plain"),
+            "value_digest": redact(value),
+            "obs_folded": obs_fold,
+            "note": "A vulnerable bash imports a function only when the "
+                    "value begins with exactly '() {'. Measured: no-space, "
+                    "double-space and leading-space forms are not imported, "
+                    "so there is no latitude here to vary. This records an "
+                    "attempt - whether the target runs bash CGI at all is "
+                    "not visible on the wire.",
+        }
+        if cfg.log_attack_payload:
+            ev["payload"] = value.decode("latin-1")[:512]
+        findings.append(make_finding("HTTP-080", ev, flow=flow_id))
+    return findings
+
+
+def check_shellshock(msg: ParsedMessage,
+                     cfg: WatchConfig = WATCH_DEFAULTS) -> List[Finding]:
+    return check_shellshock_fields(msg.headers, obs_fold=msg.obs_fold, cfg=cfg)
+
+
+# ---------------------------------------------------------------------------
+# HTTP-081 Java4Shell (CVE-2026-114938).
+#
+# Crafted Base64 drives HotSpot's AVX-512 intrinsic 62-63 bytes past a heap
+# array. The intrinsic is reached on whole 64-byte blocks, so the published
+# minimum is 65 characters on JDK 21/25/27 and 129 on 17; the bad length
+# comes from a padded tail in the final partial block.
+#
+# What makes this a rule rather than a signature: RFC 4648 fixes the output
+# shape. A padded encoding has a length that is a multiple of four, padding
+# only in a trailing run, and at most two '='. No encoder produces anything
+# else. Unpadded Base64 carries no '=' at all and is legitimate at any
+# length, so it is never flagged.
+#
+# Scope is deliberately narrow. Calif withheld the product-specific fields,
+# saying only that authentication, file uploads and network messages can
+# reach the decoder. This rule covers only fields whose content the protocol
+# itself fixes as Base64 - RFC 7617 Basic and RFC 4559 Negotiate credentials
+# - and does not go looking for the withheld carriers. Note RFC 9110's
+# token68 permits any number of trailing '=', so HTTP does not forbid the
+# trigger; the violation is at the Base64 level, inside a field specified as
+# Base64.
+JAVA4SHELL_SCHEMES = (b"basic", b"negotiate")
+# 64 is the intrinsic's block size, and covers the JDK 17 threshold too: a
+# longer input still has to pass 64 before it reaches the tail.
+JAVA4SHELL_MIN_CORE = 64
+B64_STD_ALPHABET = frozenset(
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+B64_URL_ONLY = frozenset(b"-_")
+
+
+def base64_padding_violations(value: bytes) -> Dict[str, Any]:
+    """Describe how a Base64 value departs from RFC 4648, if it does.
+
+    Returns the violation list plus the facts a finding needs. Nothing here
+    decodes the value: it is a credentials field and stays unread.
+    """
+    stripped = value.rstrip(b"=")
+    pad_run = len(value) - len(stripped)
+    violations: List[str] = []
+    if pad_run:
+        if len(value) % 4 != 0:
+            # The published shape: every reported tail (=, ==, X=, X==, XY=,
+            # ===) after a whole block lands here.
+            violations.append("len_mod4")
+        if pad_run > 2:
+            violations.append("pad_run")
+    if b"=" in stripped:
+        violations.append("inner_pad")
+    chars = set(stripped)
+    return {
+        "violations": violations,
+        "core_length": len(stripped),
+        "pad_run": pad_run,
+        "total_length": len(value),
+        "non_alphabet": sorted(
+            bytes([c]).decode("latin-1")
+            for c in chars - B64_STD_ALPHABET - {ord("=")}),
+        "base64url_chars": bool(chars & B64_URL_ONLY),
+    }
+
+
+def check_java4shell_fields(headers: Sequence[Tuple[bytes, bytes]],
+                            flow_id: Optional[str] = None) -> List[Finding]:
+    """HTTP-081 over Authorization and Proxy-Authorization."""
+    findings: List[Finding] = []
+    by_name: Dict[bytes, List[bytes]] = {}
+    for n, v in headers:
+        by_name.setdefault(n.lower(), []).append(v)
+    for field in (b"authorization", b"proxy-authorization"):
+        for raw in by_name.get(field, ()):
+            parts = raw.split(None, 1)
+            if len(parts) != 2:
+                continue
+            scheme = parts[0].lower()
+            if scheme not in JAVA4SHELL_SCHEMES:
+                continue
+            creds = parts[1].strip(b" 	")
+            info = base64_padding_violations(creds)
+            if not info["violations"]:
+                continue
+            if info["core_length"] < JAVA4SHELL_MIN_CORE:
+                # Short malformed values cannot reach the intrinsic. Counter
+                # material, not an alert.
+                continue
+            if info["non_alphabet"]:
+                # A value carrying characters outside the alphabet is a
+                # client bug, not the trigger shape. Also a counter.
+                continue
+            ev = {
+                "header_name": field.decode("ascii"),
+                "scheme": scheme.decode("ascii"),
+                "violations": info["violations"],
+                "credentials_length": info["total_length"],
+                "core_length": info["core_length"],
+                "pad_run": info["pad_run"],
+                "value_digest": redact(creds),
+                "note": "No RFC 4648 encoder emits this padding, and the "
+                        "value is long enough to reach the AVX-512 Base64 "
+                        "intrinsic (65 characters on JDK 21/25/27, 129 on "
+                        "17). Trigger-shaped input sent - the CPU flags and "
+                        "JVM build that decide whether the target is "
+                        "affected are host state and are not on the wire.",
+            }
+            findings.append(make_finding("HTTP-081", ev, flow=flow_id))
+    return findings
+
+
+def check_java4shell(msg: ParsedMessage) -> List[Finding]:
+    return check_java4shell_fields(msg.headers)
+
+
+
+# ---------------------------------------------------------------------------
+# Tier F: attack-shaped request bodies and parameters
+# ---------------------------------------------------------------------------
+# HTTP-082 React2Shell (CVE-2025-55182 / CVE-2025-66478).
+#
+# React's Flight protocol serialises a Server Action's arguments as numbered
+# form fields holding JSON, in which a leading '$' marks a reference. The
+# defect was that reference resolution walked inherited properties, so a
+# reference path could step from a chunk onto the prototype chain and reach
+# the Function constructor. React's fix is one line of intent: requireModule
+# returns a value only when hasOwnProperty.call(moduleExports, name) holds.
+#
+# The rule is NOT a list of dangerous property names, and that matters.
+# Trend Micro's analysis shows the minimum viable chain is $1:then:constructor
+# - no __proto__, no prototype, and a single constructor segment - so a rule
+# keyed on "__proto__ or prototype, or constructor twice" misses the cheapest
+# working payload. Elastic's published rule has the same gap and matches on
+# the raw request body, which the public tooling's charset and padding flags
+# defeat outright.
+#
+# What is actually invariant is the path traversal itself. MEASURED, not
+# assumed: 704 JSON string values produced by real encodeReply from
+# react-server-dom-webpack 19.0.0, 19.0.1, 19.1.1, 19.1.2, 19.2.0 and 19.2.1
+# - covering every reference form the reply direction emits ($0 back-refs,
+# $Q/$W Map and Set, $K FormData, $B Blob, $o typed array, $x async
+# iterable, $@ Promise, $F server reference, $D Date, $n BigInt, $NaN,
+# $Infinity, $undefined, $-0), objects whose OWN keys are literally named
+# constructor, prototype, then and __proto__, Maps and Sets keyed on those
+# names, deep nesting, circular references and strings full of colons - and
+# ZERO of them is a property-path reference. A real encoder never emits one.
+#
+# Two details the measurement settled:
+#   - a user string that itself begins with '$' is emitted '$$'-escaped, so
+#     user data can never be mistaken for a reference;
+#   - a Date is emitted as $D2026-11-22T22:00:00.000Z, which CONTAINS colons.
+#     An unanchored "reference with a colon in it" rule fires on every Date
+#     in every Server Action. Hence the anchor, and the numeric chunk id.
+FLIGHT_PATH_REF = re.compile(r"^\$[0-9]+(?::[^:]+)+$")
+# Recorded on the finding so an analyst can see which chain was used. These
+# never gate the rule - the traversal does.
+JS_INHERITED_NAMES = frozenset({
+    "__proto__", "prototype", "constructor", "then",
+    "toString", "valueOf", "hasOwnProperty", "isPrototypeOf",
+    "propertyIsEnumerable", "toLocaleString", "__defineGetter__",
+    "__defineSetter__", "__lookupGetter__", "__lookupSetter__",
+    "call", "apply", "bind", "arguments", "caller", "__loo",
+})
+RSC_ACTION_HEADERS = (b"next-action", b"rsc-action-id", b"rsc-action")
+_JSON_STRING = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+def json_string_values(text: str) -> List[str]:
+    """Every JSON string value in `text`, with escapes resolved.
+
+    A real parse first, because that is what the server does and it resolves
+    \\uXXXX for free. The regex fallback exists because an evasive body need
+    not be valid JSON overall, and a rule that gave up on a parse error
+    would be evaded by one trailing comma.
+    """
+    out: List[str] = []
+    try:
+        doc = json.loads(text)
+    except Exception:
+        doc = None
+    if doc is not None:
+        stack = [doc]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, str):
+                out.append(node)
+            elif isinstance(node, dict):
+                stack.extend(node.keys())
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+        return out
+    for m in _JSON_STRING.finditer(text):
+        try:
+            out.append(json.loads('"' + m.group(1) + '"'))
+        except Exception:
+            out.append(m.group(1))
+    return out
+
+
+def flight_path_references(text: str) -> List[Dict[str, Any]]:
+    """Property-path Flight references in one decoded part."""
+    hits: List[Dict[str, Any]] = []
+    for value in json_string_values(text):
+        if not FLIGHT_PATH_REF.match(value):
+            continue
+        chunk, *segments = value[1:].split(":")
+        hits.append({
+            "chunk_id": chunk,
+            "segments": segments,
+            "depth": len(segments),
+            "traverses_inherited": sorted(
+                {sg for sg in segments if sg in JS_INHERITED_NAMES}),
+        })
+    return hits
+
+
+def looks_like_flight_field(name: Optional[bytes]) -> bool:
+    """Flight numbers its reply fields 0, 1, 2 ... (Next.js also uses an
+    $ACTION_ prefix, which is a field NAME and never a reference)."""
+    return bool(name) and name.isdigit()
+
+
+def check_react2shell(msg: ParsedMessage, body: bytes,
+                      body_info: Dict[str, Any],
+                      cfg: WatchConfig = WATCH_DEFAULTS,
+                      stats: Optional[Dict[str, int]] = None) -> List[Finding]:
+    """HTTP-082. Gate, decode every way, then apply the invariant."""
+    if msg.method != b"POST":
+        return []
+    names = {n.lower() for n, _ in msg.headers}
+    action_header = next((h for h in RSC_ACTION_HEADERS if h in names), None)
+    ctype, cparams = parse_content_type(msg.get(b"content-type"))
+    is_multipart = ctype == b"multipart/form-data"
+
+    parts: List[MultipartPart]
+    meta: Dict[str, Any]
+    if is_multipart:
+        parts, meta = parse_multipart(body, cparams.get(b"boundary", b""))
+    else:
+        parts, meta = [MultipartPart(index=0, name=b"0", content=body)], {}
+    # The gate is the header OR the body shape, because the other RSC
+    # frameworks need not send a Next.js header. A numbered field whose
+    # value decodes as JSON containing a $-reference is the body shape.
+    numbered = [p for p in parts if looks_like_flight_field(p.name)]
+    if action_header is None and not numbered:
+        return []
+
+    findings: List[Finding] = []
+    evasion: List[str] = []
+    if meta.get("lf_only"):
+        evasion.append("lf_only_line_endings")
+    if meta.get("preamble_bytes", 0) > 1024:
+        evasion.append(f"junk_preamble_{meta['preamble_bytes']}_bytes")
+    if body_info.get("framing") == "chunked":
+        evasion.append("chunked_body")
+    if not meta.get("closed", True) and is_multipart:
+        evasion.append("no_closing_delimiter")
+    if body_info.get("coded"):
+        evasion.append(f"content_coding_{body_info['coded']}")
+
+    for part in (numbered or parts):
+        for charset, text in decode_every_way(part.content, part.charset):
+            hits = flight_path_references(text)
+            if not hits:
+                continue
+            markers = list(evasion)
+            if charset != "utf-8":
+                markers.append(f"charset_{charset}")
+            if part.charset:
+                markers.append(
+                    "declared_charset_" +
+                    part.charset.decode("latin-1", "replace")[:24])
+            ev = {
+                "gate": ("action_header:" + action_header.decode("ascii")
+                         if action_header else "body_shape"),
+                "method": msg.method.decode("latin-1"),
+                "target": (msg.target or b"").decode("latin-1")[:200],
+                "part_index": part.index,
+                "field_name": (part.name or b"").decode("latin-1")[:32],
+                "decoded_as": charset,
+                "references": hits[:8],
+                "reference_count": len(hits),
+                "traverses_inherited": sorted(
+                    {x for h in hits for x in h["traverses_inherited"]}),
+                "body_length": len(body),
+                "body_truncated": bool(body_info.get("truncated")),
+                "evasion_markers": markers,
+                "note": "A property-path reference. Measured against real "
+                        "encodeReply output from six react-server-dom-webpack "
+                        "releases (704 string values, including own keys "
+                        "named constructor/prototype/then/__proto__): a "
+                        "legitimate encoder emits none. Chunk content is "
+                        "never logged - it carries the attacker's command "
+                        "and whatever app data sits in the other fields. "
+                        "This records an attempt, not a compromise.",
+            }
+            if action_header is not None:
+                val = msg.get(action_header)
+                if val:
+                    ev["action_id"] = val.decode("latin-1")[:80]
+            findings.append(make_finding("HTTP-082", ev))
+            break          # one finding per part, whichever decode found it
+    if not findings and (body_info.get("truncated")
+                         or not body_info.get("complete", True)):
+        # An RSC-gated body that did not fit the cap, or had not finished
+        # arriving, was only PARTLY inspected. Counting that is the
+        # difference between "nothing here" and "we did not look at all of
+        # it", and a silent pass would make those two indistinguishable.
+        if stats is not None:
+            stats["tierf_inspect_truncated"] = (
+                stats.get("tierf_inspect_truncated", 0) + 1)
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# HTTP-083 Spring4Shell (CVE-2022-22965, and CVE-2010-1622 for free).
+#
+# Spring's DataBinder treats a request parameter NAME as a bean property
+# path, so the payload that matters is the name, not the value. A 'class'
+# segment always resolves to getClass(), because no Java bean may declare a
+# property called class; a path from there into module, classLoader or
+# protectionDomain reaches reflective JVM internals and has no legitimate
+# form. The JSP web shell in the parameter VALUES is free-form and is
+# ignored entirely - and never logged, because that is also where any
+# legitimate form data lives.
+SPRING_INTERNAL_AFTER_CLASS = ("module", "classloader", "protectiondomain")
+SPRING_CLASS_SEGMENT = "class"
+
+
+def bean_property_segments(name: bytes) -> List[bytes]:
+    """Split a name with Spring's property-path syntax.
+
+    '.' nests, '[...]' indexes, and ['x'] / ["x"] quoted forms unwrap - the
+    bracket forms matter because class['module'] is the same path as
+    class.module to the binder and a dot-only split misses it.
+    """
+    segs: List[bytes] = []
+    buf = bytearray()
+    i = 0
+    while i < len(name):
+        ch = name[i:i + 1]
+        if ch == b".":
+            if buf:
+                segs.append(bytes(buf))
+                buf.clear()
+            i += 1
+        elif ch == b"[":
+            if buf:
+                segs.append(bytes(buf))
+                buf.clear()
+            j = name.find(b"]", i)
+            if j < 0:
+                i += 1
+                continue
+            inner = name[i + 1:j].strip(b" \t")
+            if (len(inner) >= 2 and inner[:1] in (b"'", b'"')
+                    and inner[-1:] == inner[:1]):
+                inner = inner[1:-1]
+            if inner:
+                segs.append(inner)
+            i = j + 1
+        else:
+            buf += ch
+            i += 1
+    if buf:
+        segs.append(bytes(buf))
+    return segs
+
+
+def spring_path_verdict(name: bytes,
+                        case_insensitive: bool = True) -> Optional[Dict[str, Any]]:
+    """Classify one parameter name. Returns None when it is ordinary.
+
+    Segment comparison is case-insensitive by default. Spring's
+    CachedIntrospectionResults has a capitalise/uncapitalise fallback whose
+    exact behaviour could not be measured here - Maven is not reachable from
+    the build environment, so no real BeanWrapper resolved these paths. The
+    README states that. Case-insensitive is the widening direction: it can
+    only match more, and the negative corpus is what proves it does not
+    match legitimate names.
+    """
+    segs = bean_property_segments(name)
+    if not segs:
+        return None
+    norm = [sg.decode("latin-1", "replace") for sg in segs]
+    cmp = [x.lower() for x in norm] if case_insensitive else norm
+    target = SPRING_CLASS_SEGMENT if case_insensitive else "class"
+    idx = [i for i, x in enumerate(cmp) if x == target]
+    if not idx:
+        return None
+    first = idx[0]
+    after = cmp[first + 1:]
+    # Every internal segment reached after the class segment, in order. The
+    # canonical chain is class.module.classLoader.resources..., so the first
+    # one reached is 'module' and the useful prefix runs through the LAST of
+    # them - reporting only 'class.module' would hide that it went on to
+    # reach the class loader.
+    internal = [(i + first + 1, sg) for i, sg in enumerate(after)
+                if sg in SPRING_INTERNAL_AFTER_CLASS]
+    # A class loader reached anywhere after a class segment counts, even if
+    # the segment right after class is something else.
+    adjacent = bool(after) and after[0] in SPRING_INTERNAL_AFTER_CLASS
+    if not internal:
+        return {
+            "segments": norm[:12], "class_segment_index": first,
+            "reached_internal": None, "internal_chain": [],
+            "matched_prefix": ".".join(norm[:first + 1])[:160],
+            "case_varied": any(x != x.lower() for x in norm[:first + 1]),
+            "bracket_form": b"[" in name,
+        }
+    reached = internal[0][1]
+    last_idx = internal[-1][0]
+    prefix = norm[:last_idx + 1]
+    return {
+        "segments": norm[:12],
+        "class_segment_index": first,
+        "reached_internal": reached,
+        "internal_chain": [sg for _, sg in internal],
+        "adjacent_to_class": adjacent,
+        "matched_prefix": ".".join(prefix)[:160],
+        "case_varied": any(x != x.lower() for x in norm[:first + 1]),
+        "bracket_form": b"[" in name,
+    }
+
+
+def check_spring4shell(msg: ParsedMessage, body: bytes,
+                       body_info: Dict[str, Any],
+                       cfg: WatchConfig = WATCH_DEFAULTS) -> List[Finding]:
+    """HTTP-083 over parameter names from all three carriers."""
+    sources: List[Tuple[str, bytes]] = []
+    target = msg.target or b""
+    q = target.find(b"?")
+    if q >= 0:
+        for nm in urlencoded_names(target[q + 1:]):
+            sources.append(("query", nm))
+    ctype, cparams = parse_content_type(msg.get(b"content-type"))
+    if ctype == b"application/x-www-form-urlencoded":
+        for nm in urlencoded_names(body):
+            sources.append(("urlencoded", nm))
+    elif ctype == b"multipart/form-data":
+        parts, _ = parse_multipart(body, cparams.get(b"boundary", b""))
+        for part in parts:
+            if part.name:
+                sources.append(("multipart", part.name))
+
+    alerting: List[Dict[str, Any]] = []
+    corroborating: List[str] = []
+    evasion: List[str] = []
+    for src, name in sources:
+        verdict = spring_path_verdict(name, cfg.spring_case_insensitive)
+        if verdict is None:
+            continue
+        if verdict["reached_internal"] is None:
+            # R2: a path through class that stops short, e.g. class.name.
+            # An attribute, never a finding of its own.
+            corroborating.append(verdict["matched_prefix"])
+            continue
+        verdict["source"] = src
+        alerting.append(verdict)
+        if verdict["bracket_form"]:
+            evasion.append("bracket_quoted_path")
+        if verdict["case_varied"]:
+            evasion.append("case_varied_segments")
+
+    if not alerting:
+        return []
+    if body_info.get("framing") == "chunked":
+        evasion.append("chunked_body")
+    if body_info.get("coded"):
+        evasion.append(f"content_coding_{body_info['coded']}")
+    charset = cparams.get(b"charset")
+    if charset and charset.lower() not in (b"utf-8", b"utf8"):
+        evasion.append("declared_charset_" +
+                       charset.decode("latin-1", "replace")[:24])
+    ev = {
+        "method": (msg.method or b"").decode("latin-1"),
+        "target": target.split(b"?")[0].decode("latin-1")[:200],
+        "sources": sorted({v["source"] for v in alerting}),
+        "matches": alerting[:8],
+        "match_count": len(alerting),
+        "reached": sorted({v["reached_internal"] for v in alerting}),
+        "paths_through_class_only": sorted(set(corroborating))[:8],
+        "declared_charset": (charset or b"").decode("latin-1", "replace")[:24]
+                            or None,
+        "evasion_markers": sorted(set(evasion)),
+        "note": "No Java bean may declare a property named 'class', so a "
+                "class segment always resolves to getClass(); continuing "
+                "into module, classLoader or protectionDomain reaches "
+                "reflective JVM internals and has no legitimate form. "
+                "Parameter VALUES are never read or logged - the web shell "
+                "and any real form data both live there. An attempt is "
+                "recorded; the JDK version, Spring version and deployment "
+                "type that decide exploitability are not on the wire.",
+    }
+    return [make_finding("HTTP-083", ev)]
+
+
+
+
+# ---------------------------------------------------------------------------
+# HTTP-084 / HTTP-085: Apache Struts S2-045 and S2-046 (CVE-2017-5638).
+#
+# OGNL injection through the Jakarta multipart parser, CVSS 10.0, in KEV, and
+# the entry point of the 2017 Equifax breach. Struts tracks two advisories
+# under the one CVE: S2-045 puts the expression in Content-Type, S2-046 puts
+# it in a multipart Content-Disposition filename.
+#
+# What makes this a rule rather than a signature is that THREE conditions
+# have to hold at once, and all three are set by the victim's own code, not
+# by the attacker. Pinned from the shipped source of the last vulnerable
+# releases on 2026-11-23 rather than from a write-up:
+#
+#   1. Struts routes the request into the multipart parser only when the
+#      Content-Type contains the literal lowercase "multipart/form-data".
+#      Dispatcher.wrapRequest (struts 2.3.31):
+#          String content_type = request.getContentType();
+#          if (content_type != null && content_type.contains("multipart/form-data")) {
+#      The value is the RAW header. It is not lowercased, trimmed or
+#      normalised, and nothing sits between this read and the parser - so
+#      the check is case-SENSITIVE on that exact byte sequence.
+#
+#   2. commons-fileupload raises the exception whose message echoes the
+#      header only when the value does NOT start with "multipart/", compared
+#      after lowercasing. FileItemIteratorImpl (fileupload 1.3.2):
+#          if ((null == contentType)
+#                  || (!contentType.toLowerCase(Locale.ENGLISH).startsWith(MULTIPART))) {
+#              throw new InvalidContentTypeException(format(
+#                  "the request doesn't contain a %s or %s stream, "
+#                  "content type header is %s", ...));
+#      MULTIPART is "multipart/", and the message carries the ORIGINAL value,
+#      not the lowercased one - so the attacker's bytes reach the message.
+#
+#   3. Struts evaluates that message through its text lookup, which only
+#      evaluates behind an opener. XWork TextParseUtil.translateVariables
+#      defaults to new char[]{'$', '%'}, each followed by '{' - so "${" and
+#      "%{" and nothing else.
+#
+# Conditions 1 and 2 pull in opposite directions, which is exactly why this
+# is zero-FP. The attacker satisfies both by hiding the literal inside a
+# quoted parameter of some other media type, so the type stays well-formed:
+# text/plain; a="%{...multipart/form-data...}". The rule does not depend on
+# grammar validity, which is why that works on it too - but whether they
+# bothered is recorded, because it says something about the tooling.
+#
+# And the near-miss false positive is excluded by construction, not by
+# tuning. A broken client template emitting
+#     multipart/form-data; boundary=${boundary}
+# satisfies 1 and 3 and FAILS 2, because it does start with "multipart/".
+# That is the shape that would have made this rule unusable, and the
+# victim's own code rules it out.
+#
+# Contrast with Confluence CVE-2022-26134, which stays OUT: one opener in a
+# free-form path, colliding with real unrendered-template traffic. Struts
+# stacks three fixed conditions. The difference is the whole gate.
+STRUTS_ROUTE_LITERAL = b"multipart/form-data"    # condition 1, case-sensitive
+STRUTS_FILEUPLOAD_PREFIX = b"multipart/"         # condition 2, lowercased
+OGNL_OPENERS = (b"%{", b"${")                    # condition 3
+
+
+def ognl_openers_in(value: bytes) -> List[str]:
+    return [o.decode("ascii") for o in OGNL_OPENERS if o in value]
+
+
+def media_type_grammar_valid(value: bytes) -> bool:
+    """Does this value obey RFC 9110 8.3's media-type grammar?
+
+    Only '{' and '(' appearing OUTSIDE a quoted-string are treated as
+    violations - they cannot occur in a token or a parameter value, so they
+    are the cheap tell that the attacker did not bother keeping the type
+    well-formed. Recorded as an attribute, never as a condition: the rule
+    must hold whether or not they kept it valid, because keeping it valid is
+    exactly what the public tooling does.
+    """
+    in_quotes = False
+    i = 0
+    while i < len(value):
+        ch = value[i:i + 1]
+        if in_quotes:
+            if ch == b"\\":
+                i += 2
+                continue
+            if ch == b'"':
+                in_quotes = False
+        elif ch == b'"':
+            in_quotes = True
+        elif ch in (b"{", b"("):
+            return False
+        i += 1
+    return True
+
+
+def struts_s2045_verdict(content_type: bytes) -> Optional[Dict[str, Any]]:
+    """All three conditions, or None.
+
+    Each condition is evaluated exactly as the corresponding Java does:
+    a case-sensitive byte search, a lowercased prefix test, and a literal
+    opener search.
+    """
+    routes = STRUTS_ROUTE_LITERAL in content_type
+    throws = not content_type.lower().startswith(STRUTS_FILEUPLOAD_PREFIX)
+    openers = ognl_openers_in(content_type)
+    if not (routes and throws and openers):
+        return None
+    return {
+        "openers": openers,
+        "grammar_valid": media_type_grammar_valid(content_type),
+        "value_length": len(content_type),
+        "value_digest": redact(content_type),
+    }
+
+
+def check_struts_s2045(msg: ParsedMessage,
+                       cfg: WatchConfig = WATCH_DEFAULTS) -> List[Finding]:
+    """HTTP-084 over the request's Content-Type header(s).
+
+    Tomcat hands Struts the FIRST Content-Type: MimeHeaders.getHeader
+    returns the earliest occurrence, deterministically, whatever its
+    javadoc's "an arbitrary one" says. JBoss and WebLogic are also in this
+    module's vantage and their choice is not pinned here, so the rule fires
+    if ANY Content-Type satisfies the three conditions and records whether
+    the one Tomcat would have used was among them. Alerting on the safe
+    side, and saying which it was.
+    """
+    values = msg.get_all(b"content-type")
+    if not values:
+        return []
+    hits = [(i, struts_s2045_verdict(v)) for i, v in enumerate(values)]
+    matched = [(i, v) for i, v in hits if v is not None]
+    if not matched:
+        return []
+    first_index, first_verdict = matched[0]
+    ev = dict(first_verdict)
+    ev.update({
+        "advisory": "S2-045",
+        "method": (msg.method or b"").decode("latin-1"),
+        "target": (msg.target or b"").split(b"?")[0].decode("latin-1")[:200],
+        "header_index": first_index,
+        "header_count": len(values),
+        "multi_header": len(values) > 1,
+        "container_visible_match": first_index == 0,
+        "matched_header_indexes": [i for i, _ in matched],
+        "conditions": {
+            "struts_routes_to_multipart_parser": True,
+            "fileupload_raises_and_echoes": True,
+            "struts_evaluates_behind_opener": True,
+        },
+        "note": "All three conditions hold at once: the Content-Type "
+                "contains the literal 'multipart/form-data' so Struts routes "
+                "it into the multipart parser, it does not start with "
+                "'multipart/' so commons-fileupload raises the exception "
+                "that echoes the header verbatim, and it carries an OGNL "
+                "opener so Struts' text lookup evaluates it. All three are "
+                "set by the victim's own code. A broken client template "
+                "like 'multipart/form-data; boundary=${boundary}' fails the "
+                "second and is excluded by construction. This records an "
+                "attempt - the Struts version and parser choice are host "
+                "state and are not on the wire.",
+    })
+    if cfg.log_attack_payload:
+        ev["payload"] = values[first_index].decode("latin-1")[:512]
+    return [make_finding("HTTP-084", ev)]
+
+
+def check_struts_s2046(msg: ParsedMessage, body: bytes,
+                       body_info: Dict[str, Any],
+                       cfg: WatchConfig = WATCH_DEFAULTS) -> List[Finding]:
+    """HTTP-085 over multipart Content-Disposition filenames.
+
+    commons-fileupload rejects a filename containing a NUL and puts the
+    filename in the message. Streams.checkFileName (fileupload 1.3.2):
+        if (fileName != null && fileName.indexOf('\\u0000') != -1) {
+            ... sb.append("\\\\0"); ...
+            throw new InvalidFileNameException(fileName,
+                "Invalid file name: " + sb);
+    The message is a concatenation, not a format string, and everything in
+    the filename other than the NUL itself passes through verbatim - so an
+    opener in the filename reaches the evaluated message.
+
+    A NUL in a multipart filename has no legitimate form, which is what
+    makes this zero-FP. The opener is required too, because a NUL alone is
+    a malformed upload rather than an attack on this CVE.
+
+    NOT covered, and stated as a gap rather than stretched to fit: S2-046's
+    oversized-request variant. Its OGNL also sits in the filename, but it
+    arrives through JakartaStreamMultiPartRequest, which compares
+    request.getContentLength() against struts.multipart.maxSize and then
+    calls addFileSkippedError - no NUL involved. Covering it would mean
+    "an opener in a filename plus a large body", and large uploads are
+    routine while a '${' in a filename is plausible. That is not zero-FP,
+    so it is out. It also needs the non-default JakartaStream parser.
+    """
+    ctype, cparams = parse_content_type(msg.get(b"content-type"))
+    if ctype != b"multipart/form-data":
+        return []
+    parts, meta = parse_multipart(body, cparams.get(b"boundary", b""))
+    findings: List[Finding] = []
+    for part in parts:
+        name = part.filename
+        if not name or b"\x00" not in name:
+            continue
+        openers = ognl_openers_in(name)
+        if not openers:
+            # A NUL with no opener is a malformed upload, not this attack.
+            continue
+        ev = {
+            "advisory": "S2-046",
+            "method": (msg.method or b"").decode("latin-1"),
+            "target": (msg.target or b"").split(b"?")[0].decode("latin-1")[:200],
+            "part_index": part.index,
+            "field_name": (part.name or b"").decode("latin-1")[:64],
+            "filename_length": len(name),
+            "nul_count": name.count(b"\x00"),
+            "openers": openers,
+            "filename_digest": redact(name),
+            "body_truncated": bool(body_info.get("truncated")),
+            "note": "commons-fileupload rejects a filename containing a NUL "
+                    "and builds 'Invalid file name: ' + the filename, which "
+                    "Struts then evaluates as OGNL. A NUL in a multipart "
+                    "filename has no legitimate form. The filename text is "
+                    "not logged - OGNL payloads carry commands and staging "
+                    "URLs. This records an attempt, not a compromise.",
+        }
+        if cfg.log_attack_payload:
+            ev["payload"] = name.decode("latin-1", "replace")[:512]
+        findings.append(make_finding("HTTP-085", ev))
+    return findings
+
+
+
+# ---------------------------------------------------------------------------
+# URI canonicalisation, .NET System.Uri equivalent
+# ---------------------------------------------------------------------------
+# Three of the rules below compare a path the way a .NET application compares
+# it, which means matching what System.Uri.AbsolutePath produces: backslashes
+# folded to forward slashes, percent-escapes resolved, dot segments removed,
+# query and fragment dropped, and the scheme and authority stripped from an
+# absolute URI. Every case is held against real System.Uri in the cross-check
+# tier rather than being asserted here.
+_PCT = re.compile(rb"%([0-9A-Fa-f]{2})")
+_SCHEME = re.compile(rb"^[A-Za-z][A-Za-z0-9+.\-]*:")
+
+
+def pct_decode(data: bytes) -> bytes:
+    """Resolve percent-escapes. A path is not a form body, so '+' stays."""
+    if b"%" not in data:
+        return data
+    out = bytearray()
+    i = 0
+    while i < len(data):
+        m = _PCT.match(data, i)
+        if m:
+            out.append(int(m.group(1), 16))
+            i = m.end()
+        else:
+            out += data[i:i + 1]
+            i += 1
+    return bytes(out)
+
+
+def remove_dot_segments(path: bytes) -> bytes:
+    """RFC 3986 5.2.4, matching System.Uri.
+
+    An EMPTY segment is significant and is preserved: measured against real
+    System.Uri, /_layouts//15//ToolPane.aspx keeps both doubled slashes and
+    //x keeps its leading pair. Collapsing them would be an over-
+    approximation in the dangerous direction - /_layouts//SignOut.aspx would
+    then compare equal to the sign-out path that HTTP-088 keys on, while the
+    real SharePoint would not have skipped its checks, which is a false
+    positive. A ".." pops whatever segment precedes it, an empty one
+    included (/a//../b resolves to /a/b).
+    """
+    out: List[bytes] = []
+    absolute = path.startswith(b"/")
+    trailing = path.endswith((b"/", b"/.", b"/.."))
+    segs = path.split(b"/")
+    if absolute:
+        segs = segs[1:]
+    for seg in segs:
+        if seg == b".":
+            continue
+        if seg == b"..":
+            if out:
+                out.pop()
+            continue
+        out.append(seg)
+    joined = b"/".join(out)
+    result = (b"/" + joined) if absolute else joined
+    if trailing and not result.endswith(b"/"):
+        result += b"/"
+    return result or (b"/" if absolute else b"")
+
+
+def canonical_uri_path(value: bytes) -> Optional[bytes]:
+    """The path a .NET application would compare, i.e. AbsolutePath.
+
+    Returns None for something that is not usable as a URI reference at all.
+    """
+    if value is None:
+        return None
+    v = value.strip(b" \t")
+    if not v:
+        return None
+    # System.Uri folds backslashes to forward slashes for hierarchical
+    # schemes, which is why \\_layouts\\SignOut.aspx canonicalises to the
+    # sign-out path. Measured against real System.Uri, not assumed.
+    v = v.replace(b"\\", b"/")
+    m = _SCHEME.match(v)
+    if m and v[m.end():m.end() + 2] == b"//":
+        rest = v[m.end() + 2:]
+        slash = rest.find(b"/")
+        v = rest[slash:] if slash >= 0 else b"/"
+    elif v.startswith(b"//"):
+        rest = v[2:]
+        slash = rest.find(b"/")
+        v = rest[slash:] if slash >= 0 else b"/"
+    for sep in (b"#", b"?"):
+        i = v.find(sep)
+        if i >= 0:
+            v = v[:i]
+    if not v.startswith(b"/"):
+        v = b"/" + v
+    return remove_dot_segments(pct_decode(v))
+
+
+# ---------------------------------------------------------------------------
+# HTTP-086: Exchange ProxyLogon (CVE-2021-26855)
+# ---------------------------------------------------------------------------
+# The client-access front end lets static-resource requests reach the back
+# end without authentication - scripts and images have to load before login -
+# and picks the back end from a cookie. It then builds the back-end URL by
+# concatenation, so path syntax inside the host portion redirects the request
+# wherever the attacker likes, authenticated as the front end.
+#
+# What makes this zero-FP is that the rule IS the patch's own check,
+# inverted. Pinned from Project Zero's root-cause analysis:
+#
+#   BackEndServer.FromString:
+#       string[] array = input.Split(new char[]{'~'});
+#       if (array.Length != 2 || !int.TryParse(array[1], out version))
+#           ... reject
+#       // the patch adds:  Uri.CheckHostName(array[0])
+#
+# Three consequences, and the first two are victim-code conditions that
+# narrow the rule rather than widen it:
+#   - the value must split on '~' into EXACTLY two parts. A value with two
+#     tildes is rejected by Exchange, so it is not an attack and must not
+#     alert.
+#   - the second part must parse as an integer.
+#   - the first part must FAIL Uri.CheckHostName. That is precisely what the
+#     patch added, so "would the patched Exchange have rejected this host?"
+#     is the whole question, and it is answerable on the wire.
+#
+# X-AnonResource-Backend is the documented sibling cookie that sets the same
+# back-end target. Its value structure is NOT pinned to FromString by any
+# source reachable here, so for that cookie the two-part requirement is not
+# imposed - the host check is applied to the whole value, and to the part
+# before a tilde when there is one. Being less strict on the unpinned cookie
+# is the safe direction.
+EXCHANGE_BE_COOKIE = b"x-beresource"
+EXCHANGE_ANON_COOKIE = b"x-anonresource-backend"
+EXCHANGE_BACKEND_COOKIES = (EXCHANGE_BE_COOKIE, EXCHANGE_ANON_COOKIE)
+# The admin-impersonation step of the public chain carries this cookie.
+EXCHANGE_LOGON_SID_COOKIE = b"msexchlogonmailbox"
+# Characters that turn the concatenated back-end URL into a different
+# request. Recorded, not the condition - the condition is CheckHostName.
+EXCHANGE_INJECT_CHARS = b"/@#?:\\"
+
+
+def _is_ipv4_literal(text: str) -> bool:
+    parts = text.split(".")
+    return (len(parts) == 4
+            and all(p.isdigit() and p.isascii() and len(p) <= 3
+                    and int(p) <= 255 for p in parts))
+
+
+def _is_ipv6_literal(text: str) -> bool:
+    """Validate an IPv6 literal by hand.
+
+    inet_pton would do this in one line, but the module deliberately
+    imports no networking library at all: "no send path" is an invariant
+    the README verifier enforces by grep, and keeping it absolute is worth
+    more than the shortcut. Held against Uri.CheckHostName over a 24-value
+    literal corpus in the cross-check tier.
+    """
+    text = text.split("%", 1)[0]        # a zone id is permitted
+    if not text or len(text) > 45:
+        return False
+    groups = 8
+    if "." in text:                     # an embedded IPv4 tail
+        head, _, tail = text.rpartition(":")
+        if not _is_ipv4_literal(tail):
+            return False
+        text, groups = head, 6
+        if not text:
+            return False
+    if text.count("::") > 1:
+        return False
+    if ":::" in text:
+        return False
+    if "::" in text:
+        left, _, right = text.partition("::")
+        lo = [p for p in left.split(":") if p != ""] if left else []
+        ro = [p for p in right.split(":") if p != ""] if right else []
+        if (left and left.endswith(":")) or (right and right.startswith(":")):
+            return False
+        chunks, exact = lo + ro, False
+        if len(chunks) > groups - 1:
+            return False
+    else:
+        chunks = text.split(":")
+        exact = True
+        if len(chunks) != groups:
+            return False
+    for chunk in chunks:
+        if not 1 <= len(chunk) <= 4:
+            return False
+        if any(c not in "0123456789abcdefABCDEF" for c in chunk):
+            return False
+    return True
+
+
+def check_host_name(host: bytes) -> str:
+    """Uri.CheckHostName equivalent: "Dns", "IPv4", "IPv6" or "Unknown".
+
+    Held against real Uri.CheckHostName for every corpus value in the
+    cross-check tier, because this is the patch's own predicate and a
+    divergence here is a divergence in the rule.
+    """
+    if not host or len(host) > 255:
+        return "Unknown"
+    if host.startswith(b"[") and host.endswith(b"]"):
+        try:
+            inner = host[1:-1].decode("ascii")
+        except UnicodeDecodeError:
+            return "Unknown"
+        return "IPv6" if _is_ipv6_literal(inner) else "Unknown"
+    try:
+        text = host.decode("ascii")
+    except UnicodeDecodeError:
+        return "Unknown"
+    if _is_ipv4_literal(text):
+        return "IPv4"
+    # Measured against Uri.CheckHostName: a bare IPv6 literal with NO
+    # brackets is accepted. Treating it as Unknown would make HTTP-086 fire
+    # on a back-end host the patched Exchange accepts, which is a false
+    # positive, so the unbracketed form is validated too.
+    if ":" in text and _is_ipv6_literal(text):
+        return "IPv6"
+    parts = text.split(".")
+    labels = parts[:-1] if text.endswith(".") else parts
+    if not labels or any(l == "" for l in labels):
+        return "Unknown"
+    for label in labels:
+        if len(label) > 63:
+            return "Unknown"
+        # Measured against Uri.CheckHostName: a label may not BEGIN with a
+        # hyphen or an underscore, though it may end with one ("a-" is Dns,
+        # "-a" is Unknown). Getting this backwards would be a false
+        # negative on HTTP-086, since the patch rejects what this rejects.
+        if not (label[0].isalnum() and label[0].isascii()):
+            return "Unknown"
+        for ch in label:
+            if not (ch.isalnum() and ch.isascii()) and ch not in "-_":
+                return "Unknown"
+    return "Dns"
+
+
+def exchange_backend_verdict(cookie_name: bytes,
+                             value: bytes) -> Optional[Dict[str, Any]]:
+    """One back-end cookie value, judged as the patched Exchange would."""
+    # Both forms are judged, because whether Exchange decodes the cookie
+    # before building the URL is not pinned. A percent sign is not a legal
+    # host character either, so the raw form of an encoded injection already
+    # fails CheckHostName - but the DECODED form is the one whose evidence
+    # names the injected path, so it is tried first and labelled.
+    decoded = pct_decode(value)
+    candidates = [(decoded, "percent_decoded")] if decoded != value else []
+    candidates.append((value, "raw"))
+    for form, form_label in candidates:
+        parts = form.split(b"~")
+        if cookie_name == EXCHANGE_BE_COOKIE:
+            # the pinned FromString structure
+            if len(parts) != 2:
+                continue
+            host, version = parts
+            if not version.isdigit():
+                continue
+        else:
+            host = parts[0]
+            version = parts[1] if len(parts) == 2 else None
+        if not host:
+            continue
+        if check_host_name(host) != "Unknown":
+            continue        # a host the patch would have accepted
+        injected = sorted({bytes([c]).decode("latin-1")
+                           for c in host if c in EXCHANGE_INJECT_CHARS})
+        target = None
+        for sep in (b"/",):
+            i = host.find(sep)
+            if i >= 0:
+                target = host[i:].split(b"#")[0].split(b"?")[0]
+                break
+        return {
+            "cookie": cookie_name.decode("ascii"),
+            "evaluated_on": form_label,
+            "host_check": "Unknown",
+            "tilde_parts": len(parts),
+            "version_is_integer": bool(version and version.isdigit()),
+            "injected_characters": injected,
+            "target_path": (target or b"").decode("latin-1")[:160] or None,
+            "value_length": len(value),
+            "value_digest": redact(value),
+        }
+    return None
+
+
+def check_exchange_proxylogon_fields(cookie_headers: Sequence[bytes],
+                                     method: bytes, target: bytes,
+                                     cfg: WatchConfig = WATCH_DEFAULTS,
+                                     flow_id: Optional[str] = None
+                                     ) -> List[Finding]:
+    """HTTP-086 over whatever carried the Cookie headers.
+
+    Split out from the ParsedMessage wrapper so the h2c path can reach it:
+    the rule reads nothing but the Cookie header and the request line, so
+    it costs nothing to run over decoded HPACK as well. IIS supports HTTP/2
+    only over TLS and falls back to HTTP/1.1 in the clear, so an IIS
+    offload leg cannot be h2c - this is deliberate over-approximation for a
+    non-IIS front end or proxy in the path, not a claimed Exchange shape.
+    """
+    findings: List[Finding] = []
+    logon_sid = False
+    pairs: List[Tuple[bytes, bytes]] = []
+    for raw in cookie_headers:
+        for name, val in parse_cookie(raw):
+            low = name.lower()
+            if low == EXCHANGE_LOGON_SID_COOKIE:
+                logon_sid = True
+            if low in EXCHANGE_BACKEND_COOKIES:
+                pairs.append((low, val))
+    for low, val in pairs:
+        verdict = exchange_backend_verdict(low, val)
+        if verdict is None:
+            continue
+        ev = dict(verdict)
+        ev.update({
+            "attack": "ProxyLogon",
+            "method": (method or b"").decode("latin-1"),
+            "target": (target or b"").split(b"?")[0].decode("latin-1")[:200],
+            "logon_sid_present": logon_sid,
+            "note": "Exchange would accept this cookie's structure - it "
+                    "splits on '~' into exactly two parts with an integer "
+                    "version - and the host portion is one that "
+                    "Uri.CheckHostName rejects, which is exactly the check "
+                    "the March 2021 patch added. The back-end URL is built "
+                    "by concatenation, so path syntax in the host redirects "
+                    "the request. Only the matched cookie is logged, as a "
+                    "digest: the other cookies on an Exchange request are "
+                    "live credentials. This records an attempt - the patch "
+                    "state is not on the wire.",
+        })
+        if cfg.log_attack_payload:
+            ev["payload"] = val.decode("latin-1", "replace")[:512]
+        findings.append(make_finding("HTTP-086", ev, flow=flow_id))
+    return findings
+
+
+def check_exchange_proxylogon(msg: ParsedMessage,
+                              cfg: WatchConfig = WATCH_DEFAULTS
+                              ) -> List[Finding]:
+    """HTTP-086 over an HTTP/1.x request."""
+    return check_exchange_proxylogon_fields(
+        msg.get_all(b"cookie"), msg.method or b"", msg.target or b"", cfg)
+
+
+# ---------------------------------------------------------------------------
+# HTTP-087: Exchange ProxyShell and ProxyNotShell
+# ---------------------------------------------------------------------------
+# Pinned from Orange Tsai's Black Hat USA 2021 material. The front end
+# decides a request is an autodiscover v2 request from one string and then
+# rewrites a different one:
+#
+#   ResolveAnchorMailbox:
+#       if (RequestPathParser.IsAutodiscoverV2PreviewRequest(
+#               base.ClientRequest.Url.AbsolutePath))
+#   IsAutodiscoverV2PreviewRequest(string path):
+#       return path.EndsWith("/autodiscover.json",
+#                            StringComparison.OrdinalIgnoreCase);
+#
+#   GetClientUrlForProxy:
+#       string absoluteUri = base.ClientRequest.Url.AbsoluteUri;
+#       uri = UrlHelper.RemoveExplicitLogonFromUrlAbsoluteUri(
+#               absoluteUri, this.explicitLogonAddress);
+#   RemoveExplicitLogonFromUrlAbsoluteUri(absoluteUri, explicitLogonAddress):
+#       string text = "/" + explicitLogonAddress;
+#       if (absoluteUri.IndexOf(text) != -1)
+#           return absoluteUri.Substring(0, num)
+#                  + absoluteUri.Substring(num + text.Length);
+#
+# The check reads AbsolutePath; the strip operates on AbsoluteUri. THAT
+# MISMATCH IS THE BUG, so the rule is the mismatch rather than any payload:
+# the request was routed by the autodiscover handler, and after the strip it
+# is no longer pointing at that handler. Microsoft's two interim rewrite
+# mitigations both failed because they matched the raw URL looking for the
+# back-end target; this keys on the strip condition and ignores the target
+# entirely, which is why percent-encoding it changes nothing here.
+#
+# The explicit-logon address comes from the Email query parameter.
+# HttpUtility.ParseQueryString was measured: duplicate keys are COMMA-JOINED
+# rather than first-value-wins, and key lookup folds case. Both the joined
+# form Exchange would see and each individual value are evaluated, because
+# the joined form is what .NET hands the handler.
+AUTODISCOVER_V2_SUFFIX = b"/autodiscover.json"
+EXPLICIT_LOGON_PARAM = b"email"
+
+
+def _query_values(target: bytes, key: bytes) -> List[bytes]:
+    q = target.find(b"?")
+    if q < 0:
+        return []
+    out: List[bytes] = []
+    for pair in re.split(rb"[&;]", target[q + 1:]):
+        if not pair:
+            continue
+        eq = pair.find(b"=")
+        if eq < 0:
+            continue
+        if urldecode(pair[:eq]).lower() == key:
+            out.append(urldecode(pair[eq + 1:]))
+    return out
+
+
+def exchange_logon_strip_verdict(target: bytes, host: bytes
+                                 ) -> Optional[Dict[str, Any]]:
+    """The strip, emulated. Returns a verdict when it moves the handler."""
+    path = canonical_uri_path(target)
+    if not path or not path.lower().endswith(AUTODISCOVER_V2_SUFFIX):
+        return None
+    values = _query_values(target, EXPLICIT_LOGON_PARAM)
+    if not values:
+        return None
+    # what .NET's NameValueCollection would hand the handler, plus each
+    # individual value
+    forms = []
+    joined = b",".join(values)
+    if joined not in forms:
+        forms.append(joined)
+    for v in values:
+        if v not in forms:
+            forms.append(v)
+    # Url.AbsoluteUri, measured against real System.Uri: the PATH is
+    # normalised (dot segments and %2e resolved) while the QUERY keeps the
+    # percent-encoding exactly as it arrived. The strip runs over that
+    # string, so building it from the raw target would let a single "/./"
+    # defeat the rule - which is how the interim rewrite mitigations fell.
+    q = target.find(b"?")
+    raw_query = target[q:] if q >= 0 else b""
+    absolute = b"http://" + (host or b"host") + path + raw_query
+    for form in forms:
+        if not form:
+            continue
+        needle = b"/" + form
+        i = absolute.find(needle)
+        if i < 0:
+            continue
+        stripped = absolute[:i] + absolute[i + len(needle):]
+        new_path = canonical_uri_path(stripped)
+        if new_path is None:
+            continue
+        if new_path.lower().endswith(AUTODISCOVER_V2_SUFFIX):
+            continue        # the strip left it on the same handler
+        return {
+            "routed_path": path.decode("latin-1")[:200],
+            "explicit_logon_values": len(values),
+            "evaluated_form": ("comma_joined" if form == joined and
+                               len(values) > 1 else "single_value"),
+            "stripped_target": new_path.decode("latin-1")[:200],
+            "logon_value_length": len(form),
+            "logon_value_digest": redact(form),
+        }
+    return None
+
+
+EXCHANGE_AUTH_COOKIES = (b"sessionid", b"cadata", b"msexchecpcanary",
+                         b"x-owa-canary")
+
+
+def check_exchange_proxyshell_fields(target: bytes, host: bytes,
+                                     method: bytes,
+                                     authorization: Optional[bytes],
+                                     cookie_headers: Sequence[bytes],
+                                     cfg: WatchConfig = WATCH_DEFAULTS,
+                                     flow_id: Optional[str] = None
+                                     ) -> List[Finding]:
+    """HTTP-087 over the request line and headers alone.
+
+    Tiered F because it is about a parameter, but it reads no body at all,
+    so the h2c path can run it too. See the note on
+    check_exchange_proxylogon_fields for why that is over-approximation.
+    """
+    if not target:
+        return []
+    verdict = exchange_logon_strip_verdict(target, host or b"host")
+    if verdict is None:
+        return []
+    authed = bool(authorization)
+    if not authed:
+        for raw in cookie_headers:
+            for name, _ in parse_cookie(raw):
+                if name.lower() in EXCHANGE_AUTH_COOKIES:
+                    authed = True
+                    break
+    ev = dict(verdict)
+    stripped = verdict["stripped_target"].lower()
+    ev.update({
+        "attack": "ProxyNotShell" if authed else "ProxyShell",
+        "method": (method or b"").decode("latin-1"),
+        "authenticated": authed,
+        "rce_stage": stripped.startswith("/powershell"),
+        "note": "The front end decides this is an autodiscover v2 request "
+                "from Url.AbsolutePath, then strips the explicit-logon "
+                "address out of Url.AbsoluteUri - and after that strip the "
+                "request no longer points at the autodiscover handler. That "
+                "mismatch is the defect, so the rule does not look at the "
+                "back-end target and cannot be evaded by re-encoding it, "
+                "which is how both interim rewrite mitigations were beaten. "
+                "An authenticated request is the ProxyNotShell shape, an "
+                "unauthenticated one ProxyShell; no other cookie or the "
+                "Authorization value is logged. An attempt, not a "
+                "compromise.",
+    })
+    if cfg.log_attack_payload:
+        ev["payload"] = target.decode("latin-1", "replace")[:512]
+    return [make_finding("HTTP-087", ev, flow=flow_id)]
+
+
+def check_exchange_proxyshell(msg: ParsedMessage, body: bytes,
+                              cfg: WatchConfig = WATCH_DEFAULTS
+                              ) -> List[Finding]:
+    """HTTP-087 over an HTTP/1.x request."""
+    return check_exchange_proxyshell_fields(
+        msg.target or b"", msg.get(b"host") or b"host", msg.method or b"",
+        msg.get(b"authorization"), msg.get_all(b"cookie"), cfg)
+
+
+# ---------------------------------------------------------------------------
+# HTTP-088: SharePoint ToolShell
+# ---------------------------------------------------------------------------
+# PostAuthenticateRequestHandler skips the unauthorized-access checks when
+# the Referer matches a sign-out page, compared case-insensitively against
+# /_layouts/SignOut.aspx, /_layouts/14/SignOut.aspx and
+# /_layouts/15/SignOut.aspx. Nothing reachable from here decompiles that
+# comparison - Securelist shows it only as an image - so which URI property
+# it reads is NOT pinned from source. What IS known is stronger evidence than
+# a guess: in the wild, both /_layouts/./SignOut.aspx and full absolute URLs
+# carrying a host were accepted. Only a host-stripped, dot-segment-resolved
+# comparison behaves that way, and System.Uri.AbsolutePath is the .NET
+# property that produces it - so that is what this mirrors, and the
+# cross-check tier holds the canonicaliser against real System.Uri.
+#
+# The target match is by SEGMENT, deliberately. Microsoft's July 8 patch
+# tested whether the path ends with "ToolPane.aspx" and appending a "/"
+# defeated it (CVE-2025-53771); the July 20 fix replaced that with an
+# allowlist. A segment match covers the original shape, the trailing-slash
+# bypass, and the observed PathInfo forms, without depending on which patch
+# a server has.
+SHAREPOINT_SIGNOUT_PATHS = frozenset({
+    b"/_layouts/signout.aspx",
+    b"/_layouts/14/signout.aspx",
+    b"/_layouts/15/signout.aspx",
+})
+SHAREPOINT_TOOLPANE = b"toolpane.aspx"
+SHAREPOINT_LAYOUT_HIVES = frozenset({b"14", b"15", b"16"})
+# Microsoft's July 20 allowlist of paths permitted with a sign-out referrer.
+# ToolPane.aspx is not on it. Administrators can extend it, which is exactly
+# why the broader rule below is a counter and not an alert.
+SHAREPOINT_SIGNOUT_ALLOWLIST = frozenset({
+    b"/_layouts/15/signout.aspx",
+    b"/_layouts/15/1033/initstrings.js",
+    b"/_layouts/15/init.js",
+    b"/_layouts/15/theming.js",
+    b"/_layouts/15/blank.js",
+    b"/scriptresource.axd",
+    b"/webresource.axd",
+    b"/_layouts/15/1033/styles/corev15.css",
+    b"/_layouts/15/1033/styles/error.css",
+    b"/_layouts/15/images/favicon.ico",
+    b"/_layouts/15/1033/strings.js",
+    b"/_layouts/15/core.js",
+})
+SHAREPOINT_DWP_PARAM = b"MSOtlPn_DWP"
+
+
+def toolpane_segment_match(path: bytes) -> Optional[Dict[str, Any]]:
+    """Is this path the ToolPane handler, with or without PathInfo?"""
+    segs = [sg for sg in path.split(b"/") if sg]
+    for i, seg in enumerate(segs):
+        if seg.lower() != SHAREPOINT_TOOLPANE:
+            continue
+        parent = segs[:i]
+        if not parent:
+            continue
+        if parent[-1].lower() == b"_layouts":
+            ok = True
+        elif (len(parent) >= 2 and parent[-2].lower() == b"_layouts"
+                and parent[-1] in SHAREPOINT_LAYOUT_HIVES):
+            ok = True
+        else:
+            ok = False
+        if ok:
+            return {
+                "handler_path": b"/".join([b""] + parent
+                                          + [seg]).decode("latin-1")[:200],
+                "pathinfo_suffix": bool(segs[i + 1:]) or path.endswith(b"/"),
+                "hive": (parent[-1].decode("latin-1")
+                         if parent[-1] in SHAREPOINT_LAYOUT_HIVES else None),
+            }
+    return None
+
+
+def check_sharepoint_toolshell_fields(target: bytes,
+                                      referer: Optional[bytes],
+                                      method: bytes, body: bytes,
+                                      body_visible: bool = True,
+                                      cfg: WatchConfig = WATCH_DEFAULTS,
+                                      stats: Optional[Dict[str, int]] = None,
+                                      flow_id: Optional[str] = None
+                                      ) -> List[Finding]:
+    """HTTP-088 over the request line and headers, plus the counter.
+
+    R1 depends on nothing but the target and the Referer, so the h2c path
+    can run it; the body only supplies attributes. DATA frames reach no
+    body sink, so body_visible says so outright rather than letting
+    dwp_present read as a negative when the body was never seen.
+    """
+    if not referer:
+        return []
+    ref_path = canonical_uri_path(referer)
+    if ref_path is None or ref_path.lower() not in SHAREPOINT_SIGNOUT_PATHS:
+        return []
+    target_path = canonical_uri_path(target or b"")
+    if target_path is None:
+        return []
+    hit = toolpane_segment_match(target_path)
+    if hit is None:
+        # The root bypass applied to ANY page, not just ToolPane, but
+        # administrators can extend the allowlist, so a sign-out referrer
+        # reaching some other .aspx cannot be zero-FP. Counted, never
+        # alerted - which is the only honest place for it.
+        if (stats is not None and target_path.lower().endswith(b".aspx")
+                and target_path.lower() not in SHAREPOINT_SIGNOUT_ALLOWLIST):
+            stats["toolshell_signout_nonallowlisted"] = (
+                stats.get("toolshell_signout_nonallowlisted", 0) + 1)
+        return []
+    query = (target or b"").split(b"?", 1)
+    display_mode_edit = False
+    if len(query) == 2:
+        for name in urlencoded_names(query[1]):
+            pass
+        for pair in re.split(rb"[&;]", query[1]):
+            eq = pair.find(b"=")
+            if eq > 0 and urldecode(pair[:eq]).lower() == b"displaymode":
+                display_mode_edit = urldecode(pair[eq + 1:]).lower() == b"edit"
+    ev = dict(hit)
+    ev.update({
+        "attack": "ToolShell",
+        "method": (method or b"").decode("latin-1"),
+        "target_path": target_path.decode("latin-1")[:200],
+        # attacker-supplied and not secret, but the path only - never the host
+        "referer_path": ref_path.decode("latin-1")[:200],
+        "referer_canonicalised": ref_path != referer,
+        "display_mode_edit": display_mode_edit,
+        "body_visible": body_visible,
+        "dwp_present": (SHAREPOINT_DWP_PARAM in body) if body_visible else None,
+        "body_length": len(body) if body_visible else None,
+        "body_digest": (redact(body) if body else None) if body_visible
+                       else None,
+        "allowlisted": target_path.lower() in SHAREPOINT_SIGNOUT_ALLOWLIST,
+        "note": "A sign-out-page Referer makes "
+                "PostAuthenticateRequestHandler skip its unauthorized-access "
+                "checks, and this request reaches the ToolPane handler, "
+                "which Microsoft's July 20 allowlist does not permit with "
+                "that referrer. The path is matched by segment, so the "
+                "original shape and the trailing-slash bypass are both "
+                "covered. The body, FedAuth and other cookies are never "
+                "logged. KEV-driven scanning will hit patched servers too: "
+                "every hit is still an attempt, and patch state is not on "
+                "the wire.",
+    })
+    severity_note = "critical" if (method or b"") == b"POST" else "high"
+    ev["request_class"] = severity_note
+    if cfg.log_attack_payload and body and body_visible:
+        ev["payload"] = body.decode("latin-1", "replace")[:512]
+    return [make_finding("HTTP-088", ev, flow=flow_id)]
+
+
+def check_sharepoint_toolshell(msg: ParsedMessage, body: bytes,
+                               cfg: WatchConfig = WATCH_DEFAULTS,
+                               stats: Optional[Dict[str, int]] = None
+                               ) -> List[Finding]:
+    """HTTP-088 over an HTTP/1.x request."""
+    return check_sharepoint_toolshell_fields(
+        msg.target or b"", msg.get(b"referer"), msg.method or b"", body,
+        True, cfg, stats)
+
+
+
+# ---------------------------------------------------------------------------
+# HTTP-089: phpAfterShell (CVE-2026-126714)
+# ---------------------------------------------------------------------------
+# PHP's file session handler rewrites an existing session file in place, so
+# an interrupted update can leave a mix of old and new bytes. The session
+# file is a concatenation of key|serialized-value records, so bytes that
+# realign as "key|O:8:\"stdClass\":0:{}" become an object on the next read.
+# Upload-progress handling is the unauthenticated way in: it writes session
+# state from a multipart request before the target script runs.
+#
+# This rule fires on the delivery, never on the torn write or on a
+# deserialization - neither is on the wire. What makes it zero-FP is that
+# the object header has to survive PHP's own parameter decoding verbatim and
+# satisfy PHP's own unserializer grammar, and both were measured against
+# real PHP rather than read off a spec.
+#
+# Every decoding rule below was measured on PHP 8.3.6 (php -S, upload
+# progress on, cleanup off, session file read back). The measurements that
+# matter, because each one is a route in or out of the rule:
+#
+#   accepted and stored verbatim
+#     - a quoted value with backslash-escaped quotes, after unescaping
+#     - a single-quoted value: ' is a quoting character too
+#     - an unquoted value, terminated by ';', space, tab or end of header
+#     - parameter names case-folded: FILENAME= works
+#     - the header name case-folded: CONTENT-DISPOSITION: works
+#     - an obs-folded Content-Disposition, joined
+#     - OWS after '=' and any amount of OWS after ';'
+#     - a ';' inside a quoted value
+#     - a full path: dir/sub\x|O:... is kept whole
+#     - an object header in a FILE part's field name, stored as field_name
+#   not stored, so not an attack that lands
+#     - OWS BEFORE '=' ("filename ="): PHP does not recognise the
+#       parameter, the part becomes a plain field, and plain fields
+#       contribute nothing
+#     - filename*= (RFC 2231) is ignored entirely
+#     - the name of a part with NO filename: never stored
+#     - a '|' in the progress token: the whole session write fails
+#   duplicates
+#     - LAST occurrence wins, for filename and for name alike
+#
+# And the storage precondition, measured symmetrically by reconfiguring the
+# server: a NON-FILE part, with a NON-EMPTY value, whose name equals the
+# server's configured session.upload_progress.name, must PRECEDE the file
+# part. A file part with that name does not arm it, an unrelated plain field
+# does not, an empty value does not, and after the file part does not.
+#
+# That gives two conditions of different strength, and they are kept apart
+# on purpose. The configured name is NOT on the wire, so gating on the
+# default literal would blind the rule on a server with a custom
+# session.upload_progress.name. But "some non-file part with a non-empty
+# value precedes the payload part" is necessary on EVERY configuration, so
+# gating on that cannot cause a false negative, and it is a real narrowing.
+PHP_PROGRESS_FIELD_DEFAULT = b"PHP_SESSION_UPLOAD_PROGRESS"
+# The serialized-value tokens of PHP's own format. Used by the corroborating
+# counter, never to alert.
+PHP_SCALAR_TOKENS = (
+    (b"s:", "string"), (b"i:", "int"), (b"d:", "float"),
+    (b"b:0;", "bool"), (b"b:1;", "bool"), (b"a:", "array"),
+    (b"N;", "null"), (b"E:", "enum"), (b"r:", "reference"),
+    (b"R:", "reference"),
+)
+_PHP_OBJ_OPEN = re.compile(rb'([OC]):(\+?)([0-9]{1,9}):"')
+# PHP's unserializer starts a class name with a letter, underscore or a
+# high byte; it is the first character that is constrained.
+_PHP_CLASS_FIRST = re.compile(rb'[A-Za-z_\x80-\xff]')
+
+
+def php_disposition_params(value: bytes) -> Tuple[Dict[bytes, bytes],
+                                                 Dict[str, Any]]:
+    """Decode Content-Disposition parameters the way PHP's RFC 1867 parser
+    does, which is NOT the way parse_content_type does.
+
+    Two measured divergences from the generic decoder, each one a route the
+    generic decoder would get wrong:
+
+      - duplicates: PHP takes the LAST occurrence, the generic decoder the
+        first. Taking the first would fire on a value PHP discards.
+      - OWS before '=': PHP does not recognise the parameter at all, while
+        the generic decoder accepts it. Accepting it would fire on a part
+        PHP never stores.
+
+    Returns the parameters plus meta recording what was rejected, so the
+    evidence can say why something is not storable instead of silently
+    dropping it.
+    """
+    out: Dict[bytes, bytes] = {}
+    meta: Dict[str, Any] = {"ows_before_eq": 0, "rfc2231_ignored": 0,
+                            "duplicates": 0}
+    if not value:
+        return out, meta
+    i = value.find(b";")
+    rest = value[i + 1:] if i >= 0 else b""
+    pos = 0
+    n = len(rest)
+    while pos < n:
+        while pos < n and rest[pos:pos + 1] in (b" ", b"\t"):
+            pos += 1
+        eq = rest.find(b"=", pos)
+        if eq < 0:
+            break
+        raw_name = rest[pos:eq]
+        name = raw_name.strip(b" \t").lower()
+        # OWS before '=' - PHP does not see this parameter at all
+        if raw_name != name and raw_name.rstrip(b" \t") != raw_name:
+            meta["ows_before_eq"] += 1
+            name = None
+        pos = eq + 1
+        while pos < n and rest[pos:pos + 1] in (b" ", b"\t"):
+            pos += 1            # OWS after '=' is accepted (measured)
+        quote = rest[pos:pos + 1]
+        if quote in (b'"', b"'"):
+            pos += 1
+            buf = bytearray()
+            while pos < n:
+                ch = rest[pos:pos + 1]
+                if ch == b"\\" and pos + 1 < n:
+                    buf += rest[pos + 1:pos + 2]
+                    pos += 2
+                    continue
+                if ch == quote:
+                    pos += 1
+                    break
+                buf += ch
+                pos += 1
+            val = bytes(buf)
+        else:
+            end = n
+            for sep in (b";", b" ", b"\t"):
+                k = rest.find(sep, pos)
+                if 0 <= k < end:
+                    end = k
+            val = rest[pos:end]
+            pos = end
+        if name:
+            if name.endswith(b"*"):
+                meta["rfc2231_ignored"] += 1    # PHP ignores filename*
+            else:
+                if name in out:
+                    meta["duplicates"] += 1
+                out[name] = val                 # LAST wins (measured)
+        semi = rest.find(b";", pos)
+        pos = n if semi < 0 else semi + 1
+    return out, meta
+
+
+def php_object_header(value: bytes) -> Optional[Dict[str, Any]]:
+    """Find a serialized-object header PHP's unserializer would parse.
+
+    Mirrors the unserializer rather than matching a string: O: or C:, an
+    optional '+', a decimal length, ':"', EXACTLY that many bytes of class
+    name whose first byte is a letter, underscore or high byte, then '":'.
+    The exact-length requirement is what rejects a truncated or
+    length-mismatched header such as O:12:"draft.
+
+    Measured on PHP 8.3.6: O:8:"stdClass":0:{} and C:11:"ArrayObject":...
+    are accepted; O:+8:, lowercase o:, O: 8: (a space) and a class name
+    containing '"; are rejected. The '+' spelling is still matched here and
+    reported with spelling_accepted=False, because the finding is that a
+    record was DELIVERED - whether this host's unserializer would take that
+    spelling is part of the deserialization step the rule explicitly does
+    not infer, and no legitimate filename carries it either way.
+    """
+    for m in _PHP_OBJ_OPEN.finditer(value):
+        kind, plus, digits = m.group(1), m.group(2), m.group(3)
+        declared = int(digits)
+        start = m.end()
+        cls = value[start:start + declared]
+        if len(cls) != declared:
+            continue                    # truncated: the length does not fit
+        if value[start + declared:start + declared + 2] != b'":':
+            continue                    # the length does not match the name
+        if not _PHP_CLASS_FIRST.match(cls[:1]):
+            continue
+        if b'";' in cls:
+            continue                    # PHP rejects this class name
+        return {
+            "kind": kind.decode("ascii"),
+            "class_name": cls.decode("latin-1")[:120],
+            "declared_length": declared,
+            "plus_length_form": bool(plus),
+            "spelling_accepted": not plus,
+            "offset": m.start(),
+        }
+    return None
+
+
+def php_scalar_record(value: bytes) -> Optional[str]:
+    """R2's shape: <name>| followed by a serialized scalar, array or ref.
+
+    Corroborating only, never a finding. A plain session variable can be
+    forged this way without an object, but the tokens are short enough that
+    a real upload corpus has to vouch for them first.
+    """
+    bar = value.find(b"|")
+    if bar <= 0:
+        return None
+    tail = value[bar + 1:]
+    for tok, label in PHP_SCALAR_TOKENS:
+        if tail.startswith(tok):
+            return label
+    return None
+
+
+def php_storage_armed(parts: Sequence[MultipartPart],
+                      upto: int) -> Dict[str, Any]:
+    """Could PHP store anything from a part at index `upto`?
+
+    Measured necessary condition, independent of the server's configured
+    session.upload_progress.name: a non-file part with a non-empty value
+    must precede it. Gating on a necessary condition cannot cause a false
+    negative, and it is what keeps a lone file part from alerting.
+    """
+    candidates = 0
+    default_named = False
+    for p in parts[:upto]:
+        if p.filename is not None:
+            continue                    # a file part does not arm it
+        if not p.content.strip(b"\r\n"):
+            continue                    # an empty value does not arm it
+        candidates += 1
+        if (p.name or b"").upper() == PHP_PROGRESS_FIELD_DEFAULT:
+            default_named = True
+    return {"armed": candidates > 0,
+            "preceding_field_parts": candidates,
+            "default_progress_field_precedes": default_named}
+
+
+def check_php_aftershell(msg: ParsedMessage,
+                         parts: Sequence[MultipartPart],
+                         cfg: WatchConfig = WATCH_DEFAULTS,
+                         stats: Optional[Dict[str, int]] = None
+                         ) -> List[Finding]:
+    """HTTP-089, plus R2's corroborating counter."""
+    findings: List[Finding] = []
+    for p in parts:
+        disp = None
+        for hname, hval in p.headers:
+            if hname == b"content-disposition":
+                disp = hval
+                break
+        if disp is None:
+            continue
+        params, pmeta = php_disposition_params(disp)
+        # Only these two parameters reach a stored string. A part with no
+        # recognised filename is a plain field, and PHP stores nothing of
+        # a plain field - measured, so `name` there is reported stored=False.
+        is_file = b"filename" in params
+        for pname in (b"filename", b"name"):
+            val = params.get(pname)
+            if not val:
+                continue
+            hit = php_object_header(val)
+            if hit is None:
+                if stats is not None and php_scalar_record(val):
+                    stats["php_scalar_record_shape"] = (
+                        stats.get("php_scalar_record_shape", 0) + 1)
+                continue
+            armed = php_storage_armed(parts, p.index)
+            stored = is_file and armed["armed"]
+            ev = dict(hit)
+            ev.update({
+                "attack": "phpAfterShell",
+                "param": pname.decode("ascii"),
+                "part_index": p.index,
+                "file_part": is_file,
+                "record_shape": b"|" in val[:hit["offset"]],
+                "stored": stored,
+                "value_length": len(val),
+                "value_digest": redact(val),
+                "session_cookie_present": any(
+                    n.lower() == b"phpsessid"
+                    for raw in msg.get_all(b"cookie")
+                    for n, _ in parse_cookie(raw)),
+                "rfc2231_ignored": pmeta["rfc2231_ignored"],
+                "duplicate_params": pmeta["duplicates"],
+                "ows_before_eq": pmeta["ows_before_eq"],
+            })
+            ev.update(armed)
+            ev["note"] = (
+                "A serialized-object header survives PHP's own RFC 1867 "
+                "parameter decoding verbatim and satisfies PHP's own "
+                "unserializer grammar, including the exact class-name "
+                "length. PHP's file session handler rewrites a session file "
+                "in place, so an interrupted update can realign these bytes "
+                "as a key|value record. This records the delivery only: "
+                "whether a torn write happened, and whether anything was "
+                "deserialized, is not on the wire and is not inferred. "
+                "stored reflects PHP's measured necessary conditions - a "
+                "recognised filename parameter, and a non-file part with a "
+                "non-empty value before it; the configured "
+                "session.upload_progress.name is not on the wire, so it is "
+                "reported rather than required. Fixed releases also default "
+                "session.upload_progress.enabled to off, which the wire "
+                "does not show either.")
+            if cfg.log_attack_payload:
+                ev["payload"] = val.decode("latin-1", "replace")[:512]
+            findings.append(make_finding("HTTP-089", ev))
+    return findings
+
+
+
+# ---------------------------------------------------------------------------
+# HTTP-091 / HTTP-092: the lookup-grammar walker
+# ---------------------------------------------------------------------------
+# Log4Shell and Text4Shell are both "a dangerous lookup reached the
+# library", and in both the obfuscation is the victim library's OWN
+# substitution grammar: ${${lower:j}ndi:...} is not a string to match, it is
+# an expression to evaluate. So this walks the grammar instead of matching
+# bytes, the same move as React2Shell's Flight decode and Spring4Shell's
+# property paths. No payload content is matched: not the JNDI target, not
+# the script body, not a fetched URL.
+#
+# Two named libraries, two profiles, one engine. This is not a general
+# payload-signature engine, and it runs on fixed carriers only (headers,
+# cookies, the request target and Basic credentials), never on bodies -
+# bodies are decoded in unbounded application-specific ways and are where
+# legitimate text quoting these strings lives.
+#
+# Every rule below was measured against the real engines with the dangerous
+# lookups replaced by recorders, so nothing resolved or executed:
+# Log4j 2.19.0 (real StrSubstitutor + Interpolator) and Commons Text 1.11.0
+# (real StringSubstitutor.createInterpolator()).
+#
+# On the oracle versions. Maven Central is unreachable from the build
+# sandbox, so the vulnerable 2.14.1 and 1.9 could not be run. Rather than
+# leave that as a caveat, the engines' own sources were diffed:
+#   - Commons Text: createInterpolator() is byte-identical between 1.9 and
+#     1.11.0, and enableSubstitutionInVariables is an uninitialised private
+#     boolean - false - in both. 1.10.0 disabled script, url and dns in the
+#     DEFAULT lookup set rather than changing the grammar, and the probe
+#     reinstates them as recorders. So 1.11.0 is a faithful grammar oracle.
+#   - Log4j: the only grammar-relevant change from 2.14.1 to 2.19.0 is the
+#     CVE-2021-45105 cycle fix - checkCyclicSubstitution (which threw)
+#     became isCyclicSubstitution (which returns a boolean and resolves to
+#     null), and priorVariables was extended into nested-name substitution.
+#     Both bite on CYCLIC input only. Every published obfuscation is
+#     acyclic, so the two versions agree on everything in scope, and
+#     CVE-2021-45105 is out of scope anyway.
+#
+# Measured to REACH a dangerous lookup (Log4j): the plain form; ${lower:j}
+# and ${upper:j} nested in the name; ${::-j} per character; ${env:UNSET:-j}
+# and ${sys:UNSET:-j}; ${date:'j'} and ${date:'J'}; ${JNDI: and ${jNdI:;
+# double nesting; a default holding a nested lookup; literal text plus
+# nesting; ${${lower:JNDI}:; a lookup inside a default; a nested lookup
+# inside the JNDI name; the dns scheme; embedded mid-string; and
+# ${jndi:ldap://h/a:-x}, where the default is stripped off the end.
+# Measured NOT to: $${jndi: (escaped); a space, tab or newline inside or
+# before the prefix; Turkish dotted I, dotless i, or fullwidth letters;
+# percent-encoded %24%7Bjndi; ${jndi:-fallback} (a default, not a lookup);
+# ${requestId}; and ${::-$}{jndi:...}, whose OUTPUT holds a literal
+# ${jndi:...} that Log4j never re-scans.
+#
+# Measured for Commons Text: plain ${script:...}, ${SCRIPT: and ${ScRiPt:,
+# a base64Decoder wrap, a urlDecoder wrap, two decoder layers,
+# ${url:UTF-8:...}, ${dns:address|...}, and embedded mid-string all reach a
+# lookup; a nested NAME (${${::-s}cript:) does not, because substitution in
+# variable names is off; nor does $${script:, a leading space,
+# ${env:UNSET:-${script:...}}, double URL-encoding, or ${url:-...}.
+#
+# The one model that explains every measurement: a resolved value - the
+# default included, when the default becomes the value - IS substituted
+# again, while text that merely ends up adjacent after substitution is NOT
+# re-scanned. Together with the two different variable-end rules that
+# accounts for ${env:UNSET:-${script:js:1}} being inert in Commons Text:
+# the variable ends at the FIRST brace, so the default is the unbalanced
+# "${script:js:1" and nothing completes.
+LOOKUP_OPEN = b"${"
+# A sentinel for a value the walker cannot know, such as an environment
+# variable or an unquoted date pattern. It carries a NUL so that it can
+# never be part of a dangerous prefix, which is the whole invariant: an
+# OPAQUE result must never be able to COMPLETE one. Neither library has a
+# substring function, so no amount of unknown text can be cut down into
+# "jndi" or "script" either.
+OPAQUE_MARK = b"\x00?\x00"
+LOG4J_DANGEROUS = {b"jndi": "jndi"}
+CTEXT_DANGEROUS = {b"script": "script", b"url": "url", b"dns": "dns"}
+# Budget caps. Hitting one emits walker_budget_exceeded and a counter,
+# never a silent pass - the lesson from ldapwatch's filter-depth cap.
+LOOKUP_MAX_DEPTH = 24
+LOOKUP_MAX_EXPANSIONS = 512
+LOOKUP_MAX_OUTPUT = 16384
+LOOKUP_MIN_INTEREST = LOOKUP_OPEN      # no '${', no walk, no cost
+
+
+@dataclass
+class LookupProfile:
+    name: str
+    dangerous: Dict[bytes, str]
+    nested_names: bool          # is substitution in variable names on?
+    evaluable: Tuple[bytes, ...]
+
+
+LOG4J_PROFILE = LookupProfile(
+    "log4j", LOG4J_DANGEROUS, True, (b"lower", b"upper", b"date"))
+CTEXT_PROFILE = LookupProfile(
+    "commons_text", CTEXT_DANGEROUS, False,
+    (b"base64decoder", b"urldecoder", b"base64encoder", b"urlencoder"))
+
+
+@dataclass
+class LookupWalk:
+    hits: List[Dict[str, Any]] = field(default_factory=list)
+    features: Set[str] = field(default_factory=set)
+    # The NAMES of other lookups seen in the carrier. Names only: they show
+    # what the attacker tried to read (env, sys, java, ctx), which is the
+    # exfiltration half of the published chains, and a name is not a value.
+    lookups_seen: Set[str] = field(default_factory=set)
+    decoder_chain: List[str] = field(default_factory=list)
+    expansions: int = 0
+    budget_exceeded: bool = False
+
+    def spend(self) -> bool:
+        self.expansions += 1
+        if self.expansions > LOOKUP_MAX_EXPANSIONS:
+            self.budget_exceeded = True
+            return False
+        return True
+
+
+def _ascii_lower(data: bytes) -> bytes:
+    """Lowercase ASCII only.
+
+    Java's Locale.ROOT folding was measured NOT to fold Turkish dotted I,
+    dotless i or fullwidth letters into ASCII, so folding them here would
+    invent hits the library never produces.
+    """
+    return bytes(c + 32 if 65 <= c <= 90 else c for c in data)
+
+
+def _var_end(text: bytes, start: int, prof: LookupProfile) -> int:
+    """Where the variable that opened at `start` ends.
+
+    Log4j honours nesting, so ${${lower:j}ndi:x} ends at the LAST brace.
+    Commons Text does not, because substitution in variable names is off,
+    so it ends at the FIRST. Both measured.
+    """
+    if not prof.nested_names:
+        return text.find(b"}", start)
+    depth = 1
+    i = start
+    n = len(text)
+    while i < n:
+        # $${ is an escaped literal, so its brace opens nothing. Missing
+        # this let a self-referential ${${::-${::-$${::-j}}}ndi:...} close
+        # one brace early and fabricate a jndi hit the engine never
+        # produces - caught by the differential run against real Log4j.
+        if text[i:i + 3] == b"$" + LOOKUP_OPEN:
+            i += 3
+            continue
+        if text[i:i + 2] == LOOKUP_OPEN:
+            depth += 1
+            i += 2
+            continue
+        if text[i:i + 1] == b"}":
+            depth -= 1
+            if depth == 0:
+                return i
+            i += 1
+            continue
+        i += 1
+    return -1
+
+
+def _evaluate(prefix: bytes, arg: bytes, prof: LookupProfile,
+              walk: LookupWalk) -> Optional[bytes]:
+    """Evaluate a deterministic lookup, or None when the result is OPAQUE."""
+    if prof.name == "log4j":
+        if prefix == b"lower":
+            return _ascii_lower(arg)
+        if prefix == b"upper":
+            return bytes(c - 32 if 97 <= c <= 122 else c for c in arg)
+        if prefix == b"date":
+            # Only a fully quoted pattern is a known literal. Any unquoted
+            # pattern letter makes the result depend on the clock, so it is
+            # OPAQUE - it must not be allowed to complete a prefix.
+            body = arg.strip()
+            if len(body) >= 2 and body[:1] == b"'" and body[-1:] == b"'":
+                inner = body[1:-1]
+                if b"'" not in inner:
+                    walk.features.add("date_quoted_literal")
+                    return inner
+            return None
+        return None
+    if prefix == b"base64decoder":
+        try:
+            walk.features.add("base64Decoder")
+            walk.decoder_chain.append("base64Decoder")
+            return base64.b64decode(arg + b"=" * (-len(arg) % 4),
+                                    validate=False)
+        except (ValueError, binascii.Error):
+            return None
+    if prefix == b"urldecoder":
+        walk.features.add("urlDecoder")
+        walk.decoder_chain.append("urlDecoder")
+        return urldecode(arg)
+    if prefix == b"base64encoder":
+        return base64.b64encode(arg)
+    if prefix == b"urlencoder":
+        return arg
+    return None
+
+
+def _expand(text: bytes, prof: LookupProfile, walk: LookupWalk,
+            depth: int) -> bytes:
+    """Substitute every ${...} in `text` once, left to right.
+
+    The output is never re-scanned, which is what both libraries were
+    measured to do and is why ${::-$}{jndi:...} is inert.
+    """
+    if depth > LOOKUP_MAX_DEPTH:
+        walk.budget_exceeded = True
+        return OPAQUE_MARK
+    out = bytearray()
+    i = 0
+    n = len(text)
+    while i < n:
+        if len(out) > LOOKUP_MAX_OUTPUT:
+            walk.budget_exceeded = True
+            break
+        # the escape: $${ is a literal ${ and is not a variable
+        if text[i:i + 3] == b"$" + LOOKUP_OPEN:
+            walk.features.add("escaped_dollar")
+            out += LOOKUP_OPEN
+            i += 3
+            continue
+        if text[i:i + 2] != LOOKUP_OPEN:
+            out += text[i:i + 1]
+            i += 1
+            continue
+        end = _var_end(text, i + 2, prof)
+        if end < 0:
+            out += text[i:]
+            break
+        inner = text[i + 2:end]
+        i = end + 1
+        if not walk.spend():
+            out += OPAQUE_MARK
+            continue
+        out += _resolve(inner, prof, walk, depth + 1)
+    return bytes(out)
+
+
+def _resolve(inner: bytes, prof: LookupProfile, walk: LookupWalk,
+             depth: int) -> bytes:
+    """Resolve one variable's contents to the bytes it contributes."""
+    # Whether the ARGUMENT carried nesting has to be read off the raw text:
+    # by the time the name has been resolved the nesting is gone, so
+    # checking afterwards reports False for ${jndi:ldap://h/${sys:x}} and
+    # loses the exfiltration half of the published chains.
+    _raw_colon = inner.find(b":")
+    raw_arg_nested = (_raw_colon >= 0
+                      and LOOKUP_OPEN in inner[_raw_colon + 1:])
+    if prof.nested_names and LOOKUP_OPEN in inner:
+        walk.features.add("nested_name")
+        inner = _expand(inner, prof, walk, depth)
+    # Split the name from its default value exactly as the engines do. This
+    # is one positional scan with two guards, both read from source after
+    # the differential run against the real engines disagreed with a
+    # simpler reading:
+    #
+    #   - the scan stops at the first '${' when substitution in variable
+    #     names is off, so Commons Text hands ${dns:${::-a}ddress|h} the
+    #     argument "${::-a" rather than splitting a default off it
+    #     (StringSubstitutor 1.11.0 line 1491, StrSubstitutor 2.19.0 1057);
+    #   - Log4j also honours a ':\-' escape, which unescapes to ':-' inside
+    #     the NAME instead of starting a default, and then looks for a real
+    #     ':-' after it. Commons Text has no such matcher in 1.9 or 1.11.0;
+    #     Log4j has it in BOTH 2.14.1 and 2.19.0, so it is part of the
+    #     vulnerable grammar and not a post-patch addition.
+    name = inner
+    default: Optional[bytes] = None
+    n_in = len(inner)
+    i = 0
+    while i < n_in:
+        if not prof.nested_names and inner[i:i + 2] == LOOKUP_OPEN:
+            break
+        if prof.nested_names and inner[i:i + 3] == b":\\-":
+            walk.features.add("escaped_value_delimiter")
+            head = inner[:i] + b":"
+            name = head + inner[i + 2:]
+            for j in range(i + 3, n_in):
+                if inner[j:j + 2] == b":-":
+                    name = head + inner[i + 3:j]
+                    default = inner[j + 2:]
+                    walk.features.add("default_value")
+                    break
+            break
+        if inner[i:i + 2] == b":-":
+            name, default = inner[:i], inner[i + 2:]
+            walk.features.add("default_value")
+            break
+        i += 1
+    colon = name.find(b":")
+    if colon < 0:
+        # No prefix separator at all, so this is a lookup in the default
+        # map, never jndi or script. ${jndi:-fallback} lands here, which is
+        # why it was measured inert.
+        return _expand(default, prof, walk, depth) if default is not None \
+            else OPAQUE_MARK
+    prefix_raw, arg = name[:colon], name[colon + 1:]
+    prefix = _ascii_lower(prefix_raw)
+    if prefix != prefix_raw:
+        walk.features.add("case_folded_prefix")
+    if prefix not in prof.dangerous and prefix:
+        walk.lookups_seen.add(prefix.decode("latin-1")[:32])
+    if prefix in prof.dangerous:
+        # The argument may itself hold nested lookups (measured:
+        # ${jndi:${lower:L}DAP://h/a} reaches jndi with lDAP://h/a), and it
+        # may be OPAQUE without suppressing the hit - the prefix is what
+        # makes this dangerous, not the target.
+        target = _expand(arg, prof, walk, depth) if LOOKUP_OPEN in arg else arg
+        walk.hits.append({
+            "lookup": prof.dangerous[prefix],
+            "target_opaque": OPAQUE_MARK in target,
+            "target": target.replace(OPAQUE_MARK, b"?")
+                            .decode("latin-1")[:200],
+            "nested_in_argument": raw_arg_nested or LOOKUP_OPEN in arg,
+        })
+        return OPAQUE_MARK
+    if prefix in prof.evaluable:
+        value = _evaluate(prefix, arg, prof, walk)
+        if value is not None:
+            # a resolved value IS substituted again (measured on both)
+            return _expand(value, prof, walk, depth) \
+                if LOOKUP_OPEN in value else value
+        return default if default is not None else OPAQUE_MARK
+    # Any other lookup: an unset variable falls back to its default, which
+    # is what the published obfuscation relies on. Otherwise OPAQUE.
+    if default is not None:
+        walk.features.add("unset_lookup_default")
+        return _expand(default, prof, walk, depth)
+    return OPAQUE_MARK
+
+
+def walk_lookups(carrier: bytes, prof: LookupProfile) -> LookupWalk:
+    """Walk one carrier string under one profile."""
+    walk = LookupWalk()
+    if LOOKUP_MIN_INTEREST not in carrier:
+        return walk                 # the cheap gate: no '${', no work
+    _expand(carrier, prof, walk, 0)
+    return walk
+
+
+
+# --- the carriers (fixed decoding only) -----------------------------------
+# Header values, cookies, the request target and Basic credentials. Their
+# decoding is fixed, and they are where mass exploitation sprayed. Bodies
+# are excluded on purpose: applications decode them in unbounded ways, and
+# they are where legitimate text quoting these strings lives.
+LOOKUP_CARRIER_CAP = 8192
+LOOKUP_MAX_CARRIERS = 256
+
+
+def lookup_carriers(msg: ParsedMessage) -> List[Tuple[str, bytes]]:
+    """Every fixed-decoding carrier of one request, labelled."""
+    out: List[Tuple[str, bytes]] = []
+
+    def add(label: str, value: Optional[bytes]) -> None:
+        if not value or len(out) >= LOOKUP_MAX_CARRIERS:
+            return
+        if LOOKUP_OPEN not in value:
+            return          # the cheap gate, applied before anything else
+        out.append((label, value[:LOOKUP_CARRIER_CAP]))
+
+    for name, value in msg.headers:
+        low = name.lower()
+        if low == b"cookie":
+            # the whole header, then each cookie value, raw and decoded
+            add("header:cookie", value)
+            for cname, cval in parse_cookie(value):
+                tag = "cookie:" + cname.decode("latin-1")[:48]
+                add(tag, cval)
+                dec = urldecode(cval)
+                if dec != cval:
+                    add(tag + ":decoded", dec)
+            continue
+        if low == b"authorization":
+            continue        # handled below, and never logged
+        add("header:" + low.decode("latin-1")[:48], value.strip(b" \t"))
+
+    target = msg.target or b""
+    if target:
+        add("target_raw", target)
+        q = target.find(b"?")
+        path = target[:q] if q >= 0 else target
+        dec_path = urldecode(path)
+        if dec_path != path:
+            add("path_decoded", dec_path)
+        if q >= 0:
+            for pair in re.split(rb"[&;]", target[q + 1:]):
+                if not pair:
+                    continue
+                eq = pair.find(b"=")
+                pname = urldecode(pair[:eq] if eq >= 0 else pair)
+                tag = "query:" + pname.decode("latin-1")[:48]
+                if eq >= 0:
+                    add(tag, urldecode(pair[eq + 1:]))
+                else:
+                    add(tag, pname)
+
+    # Basic credentials are scanned and never logged: the carrier label
+    # says only that it was the credentials, and the payload knob cannot
+    # widen to them.
+    auth = msg.get(b"authorization")
+    if auth and auth[:6].lower() == b"basic ":
+        try:
+            raw = base64.b64decode(auth[6:].strip(), validate=False)
+        except (ValueError, binascii.Error):
+            raw = b""
+        if raw and LOOKUP_OPEN in raw:
+            out.append(("basic_credentials", raw[:LOOKUP_CARRIER_CAP]))
+    return out
+
+
+def _jndi_ioc(target: str) -> Dict[str, Any]:
+    """Pull the scheme and host:port out of a JNDI target, as an IOC."""
+    scheme = None
+    host = None
+    i = target.find("://")
+    if i > 0:
+        scheme = target[:i].lower()[:16]
+        rest = target[i + 3:]
+        cut = len(rest)
+        for ch in "/?#":
+            k = rest.find(ch)
+            if 0 <= k < cut:
+                cut = k
+        host = rest[:cut][:120] or None
+    elif ":" in target:
+        scheme = target.split(":", 1)[0].lower()[:16]
+    return {"scheme": scheme, "endpoint": host}
+
+
+def _lookup_findings(code: str, prof: LookupProfile, carrier: str,
+                     value: bytes, walk: LookupWalk,
+                     cfg: WatchConfig, flow_id: Optional[str]
+                     ) -> List[Finding]:
+    low = value.lower()
+    literal = any((b"${" + d) in low for d in prof.dangerous)
+    out: List[Finding] = []
+    for hit in walk.hits:
+        ev: Dict[str, Any] = {
+            "attack": "Log4Shell" if prof.name == "log4j" else "Text4Shell",
+            "profile": prof.name,
+            "carrier": carrier,
+            "lookup": hit["lookup"],
+            "obfuscated": not literal,
+            "features": sorted(walk.features),
+            "lookups_seen": sorted(walk.lookups_seen),
+            "target_opaque": hit["target_opaque"],
+            "nested_in_argument": hit["nested_in_argument"],
+            "carrier_length": len(value),
+            "carrier_digest": redact(value),
+            "walker_budget_exceeded": walk.budget_exceeded,
+            "walker_expansions": walk.expansions,
+        }
+        if prof.name == "log4j":
+            ev.update(_jndi_ioc(hit["target"]))
+            ev["severity_class"] = "high" if ev.get("scheme") == "dns" \
+                else "critical"
+        else:
+            ev["decoder_layers"] = ">".join(walk.decoder_chain) or None
+            ev["severity_class"] = {"script": "critical", "url": "high",
+                                    "dns": "medium"}[hit["lookup"]]
+            if hit["lookup"] == "url":
+                ev.update(_jndi_ioc(hit["target"]))
+            elif hit["lookup"] == "script":
+                # the engine name only; a script body is never logged
+                eng = hit["target"].split(":", 1)[0]
+                ev["script_engine"] = eng[:32] or None
+            else:
+                ev["dns_query"] = hit["target"][:120]
+        ev["note"] = (
+            "A dangerous lookup was delivered in a field these libraries "
+            "commonly interpolate. The obfuscation is the library's own "
+            "lookup grammar, so this is walked rather than string-matched, "
+            "and the walker is held against the real engine over a 24,000-"
+            "case differential corpus. Whether THIS server logs or "
+            "interpolates this field with a vulnerable library is not "
+            "visible, so the finding is a delivery attempt and nothing "
+            "more. No payload content is matched or logged: not the JNDI "
+            "target's contents, not a script body, not a fetched URL. "
+            "Log4Shell scanning has run continuously for years, so an "
+            "internet-facing tap will ring on background noise.")
+        # the carrier text only on the operator's explicit say-so, and
+        # never for Basic credentials whatever the knob says
+        if cfg.log_attack_payload and carrier != "basic_credentials":
+            ev["payload"] = value.decode("latin-1", "replace")[:512]
+        out.append(make_finding(code, ev, flow=flow_id))
+    return out
+
+
+def check_lookup_grammar_fields(carriers: Sequence[Tuple[str, bytes]],
+                                cfg: WatchConfig = WATCH_DEFAULTS,
+                                stats: Optional[Dict[str, int]] = None,
+                                flow_id: Optional[str] = None
+                                ) -> List[Finding]:
+    """HTTP-091 and HTTP-092 over already-extracted carriers."""
+    out: List[Finding] = []
+    for carrier, value in carriers:
+        for code, prof in (("HTTP-091", LOG4J_PROFILE),
+                           ("HTTP-092", CTEXT_PROFILE)):
+            walk = walk_lookups(value, prof)
+            if walk.budget_exceeded and stats is not None:
+                stats["walker_budget_exceeded"] = (
+                    stats.get("walker_budget_exceeded", 0) + 1)
+            if not walk.hits:
+                continue
+            out.extend(_lookup_findings(code, prof, carrier, value, walk,
+                                        cfg, flow_id))
+    return out
+
+
+def check_lookup_grammar(msg: ParsedMessage,
+                         cfg: WatchConfig = WATCH_DEFAULTS,
+                         stats: Optional[Dict[str, int]] = None
+                         ) -> List[Finding]:
+    """HTTP-091 and HTTP-092 over an HTTP/1.x request."""
+    return check_lookup_grammar_fields(lookup_carriers(msg), cfg, stats)
+
+
+# ---------------------------------------------------------------------------
+# Struts parameter-name rules: HTTP-093, HTTP-094, HTTP-095
+# ---------------------------------------------------------------------------
+# All three test a parameter NAME against Struts' own grammar. None of them
+# looks at a value for detection, and none reintroduces a payload-signature
+# engine: the question each one asks is "would Struts itself have treated
+# this name as an instruction", which is answerable from the name alone.
+#
+# The shared carrier set is query-string names, urlencoded body names and
+# multipart field names, over HTTP/1.x and h2c. Values are reported only
+# where the preflight asks for them as evidence, never to decide.
+#
+# Servlet parameter decoding, measured against the JDK's own URLDecoder in
+# both UTF-8 and ISO-8859-1:
+#   - a single percent-decode, with '+' meaning space
+#   - %2524%7B decodes to "%24{", NOT "${", so a double-encoded payload is
+#     not an attack Struts would see, and must not fire
+#   - a MALFORMED escape (%ZZ, or a trailing %) makes URLDecoder throw
+#     IllegalArgumentException. The container then never hands Struts a
+#     parameter at all, so there is nothing to fire on. That is a real
+#     narrowing and it is enforced below rather than assumed.
+#   - the two charsets differ only for non-ASCII bytes, and every token
+#     these rules key on is ASCII, so the charset cannot change a verdict
+STRUTS_PCT = re.compile(rb"%([0-9A-Fa-f]{2})")
+
+
+def servlet_decode(name: bytes) -> Optional[bytes]:
+    """Decode a parameter name the way a servlet container does.
+
+    Returns None when the container would have thrown instead, which is
+    what the JDK's URLDecoder was measured to do on a malformed escape.
+    None means "there is no such parameter", not "no match".
+    """
+    out = bytearray()
+    i = 0
+    n = len(name)
+    while i < n:
+        c = name[i:i + 1]
+        if c == b"+":
+            out += b" "
+            i += 1
+            continue
+        if c == b"%":
+            m = STRUTS_PCT.match(name, i)
+            if not m:
+                return None          # URLDecoder raises here
+            out.append(int(m.group(1), 16))
+            i = m.end()
+            continue
+        out += c
+        i += 1
+    return bytes(out)
+
+
+# --- Commons FileUpload's Content-Disposition reading ---------------------
+# Measured against the real jar (commons-fileupload 1.5 with commons-io,
+# parsed offline through RequestContext, no server and no network). This is
+# NOT the same as php_disposition_params, and reusing that one would be
+# wrong in both directions. Where they differ:
+#
+#   - a single quote does NOT quote. name='Upload' yields the six-character
+#     value 'Upload' with the quotes still on it; PHP strips them.
+#   - OWS before '=' IS accepted. name ="Upload" yields Upload; PHP does
+#     not see the parameter at all.
+#   - name*= with no plain name drops the PART ENTIRELY: the jar returns no
+#     item for it, rather than an item with a decoded name.
+#
+# Where they agree: the last duplicate wins, obs-folded headers are joined,
+# parameter names fold case, filename* is ignored, a quoted ';' stays in
+# the value, and a backslash escapes the next character.
+_FU_PCT_UNUSED = None
+
+
+def fileupload_disposition_params(value: bytes
+                                  ) -> Optional[Dict[bytes, bytes]]:
+    """Content-Disposition parameters as Commons FileUpload reads them.
+
+    Returns None when the jar would drop the part, which it was measured to
+    do when the only name parameter is an RFC 2231 name*= form.
+    """
+    out: Dict[bytes, bytes] = {}
+    if not value:
+        return out
+    i = value.find(b";")
+    rest = value[i + 1:] if i >= 0 else b""
+    pos = 0
+    n = len(rest)
+    saw_name_star = False
+    while pos < n:
+        while pos < n and rest[pos:pos + 1] in (b" ", b"\t"):
+            pos += 1
+        eq = rest.find(b"=", pos)
+        if eq < 0:
+            break
+        # OWS before '=' is accepted, so the name is simply trimmed
+        name = rest[pos:eq].strip(b" \t").lower()
+        pos = eq + 1
+        while pos < n and rest[pos:pos + 1] in (b" ", b"\t"):
+            pos += 1
+        if rest[pos:pos + 1] == b'"':
+            # Measured against the jar, and it is NOT an unescaping parser.
+            # It captures the raw token WITH its quotes, honouring a
+            # backslash only so that the next character cannot close the
+            # string, and then strips one leading and one trailing quote.
+            # That single model explains both measurements that a simple
+            # unescaper gets wrong:
+            #     name="Up\"load"   ->  Up\"load     (backslash retained)
+            #     name="Upload\"    ->  Upload\      (quote consumed by
+            #                                          the trailing strip)
+            # PHP's parser unescapes instead, so reusing it would change the
+            # base name a file part contributes, and with it the property
+            # comparison this rule turns on.
+            tok = bytearray(b'"')
+            pos += 1
+            while pos < n:
+                ch = rest[pos:pos + 1]
+                if ch == b"\\" and pos + 1 < n:
+                    tok += rest[pos:pos + 2]
+                    pos += 2
+                    continue
+                tok += ch
+                pos += 1
+                if ch == b'"':
+                    break
+            raw_tok = bytes(tok)
+            if raw_tok[:1] == b'"':
+                raw_tok = raw_tok[1:]
+            if raw_tok[-1:] == b'"':
+                raw_tok = raw_tok[:-1]
+            val = raw_tok
+        else:
+            # a bare value ends at the next ';'. A single quote is NOT a
+            # quoting character here, unlike PHP's parser.
+            end = rest.find(b";", pos)
+            if end < 0:
+                end = n
+            val = rest[pos:end].strip(b" \t")
+            pos = end
+        if name.endswith(b"*"):
+            saw_name_star = saw_name_star or name == b"name*"
+        elif name:
+            out[name] = val          # the LAST duplicate wins
+        semi = rest.find(b";", pos)
+        pos = n if semi < 0 else semi + 1
+    if b"name" not in out and saw_name_star:
+        return None                  # the jar drops the part
+    return out
+
+
+def fileupload_part_names(parts: Sequence[MultipartPart]
+                          ) -> Tuple[List[bytes], List[Tuple[int, bytes]]]:
+    """Split parts the way FileUpload does, into file parts and fields.
+
+    A part counts as a FILE part when a filename parameter is present, even
+    when it is empty: filename="" was measured to still yield
+    isFormField()==false. A part with no filename parameter is a form
+    field, so it can only ever be an overriding parameter.
+    """
+    files: List[bytes] = []
+    fields: List[Tuple[int, bytes]] = []
+    for p in parts:
+        disp = None
+        for hname, hval in p.headers:
+            if hname == b"content-disposition":
+                disp = hval
+                break
+        if disp is None:
+            continue
+        params = fileupload_disposition_params(disp)
+        if params is None:
+            continue                 # the jar dropped this part
+        name = params.get(b"name")
+        if name is None:
+            continue
+        if b"filename" in params:
+            files.append(name)
+        else:
+            fields.append((p.index, name))
+    return files, fields
+
+
+# ---------------------------------------------------------------------------
+# HTTP-093: Struts file-upload parameter override (S2-066 / S2-067)
+# ---------------------------------------------------------------------------
+# FileUploadInterceptor turns a file part named F into three properties - F,
+# F+"ContentType" and F+"FileName" - and sets them on the action. The
+# exploit has to send a SECOND parameter that overwrites one of them, and a
+# legitimate client never sends those properties at all, because the server
+# is what sets them. That is the whole rule, and it is why no payload
+# signature is needed.
+#
+# The attacker can vary exactly two things, and both are covered:
+#   - casing, which is S2-066: uploadFileName against a part named Upload
+#   - an OGNL path prefix, which is S2-067: top.UploadFileName, or any
+#     x.y. or [n]. prefix
+STRUTS_UPLOAD_SUFFIXES = (b"filename", b"contenttype")
+_STRUTS_INDEX = re.compile(rb"\[[0-9]{1,9}\]$")
+STRUTS_JSP_SUFFIXES = (b".jsp", b".jspx", b".jspf")
+
+
+def struts_param_leaf(name: bytes) -> bytes:
+    """The leaf OGNL segment of a parameter name.
+
+    Strips a trailing [n] index and takes the segment after the last dot,
+    which is what makes top.UploadFileName and [0].UploadFileName the same
+    property as UploadFileName.
+    """
+    leaf = _STRUTS_INDEX.sub(b"", name)
+    dot = leaf.rfind(b".")
+    if dot >= 0:
+        leaf = leaf[dot + 1:]
+    return _STRUTS_INDEX.sub(b"", leaf)
+
+
+def struts_upload_override(file_names: Sequence[bytes],
+                           param: bytes) -> Optional[Dict[str, Any]]:
+    """Does `param` overwrite a property Struts sets for a file part?"""
+    leaf = struts_param_leaf(param).lower()
+    if not leaf:
+        return None
+    for f in file_names:
+        base = struts_param_leaf(f).lower()
+        if not base:
+            continue
+        for suffix in STRUTS_UPLOAD_SUFFIXES:
+            if leaf == base + suffix:
+                return {
+                    "file_field": f.decode("latin-1")[:120],
+                    "overridden_property": (base + suffix).decode("latin-1")[:160],
+                    "property_kind": ("FileName" if suffix == b"filename"
+                                      else "ContentType"),
+                    # an OGNL path prefix (S2-067) versus a plain case
+                    # variant (S2-066): the two things an attacker can vary
+                    "prefixed": param != struts_param_leaf(param),
+                    "case_variant": (struts_param_leaf(param)[:len(base)]
+                                     != struts_param_leaf(f)),
+                }
+    return None
+
+
+def struts_override_escalation(value: Optional[bytes]) -> Dict[str, Any]:
+    """Traversal or a JSP target raises severity. Detection never depends
+    on it: the override alone is the attack."""
+    v = value or b""
+    low = v.lower()
+    absolute = bool(v[:1] == b"/" or re.match(rb"^[A-Za-z]:[\\/]", v))
+    return {
+        "traversal": b"../" in v or b"..\\" in v,
+        "absolute_path": absolute,
+        "jsp_target": low.endswith(STRUTS_JSP_SUFFIXES),
+    }
+
+
+
+# ---------------------------------------------------------------------------
+# HTTP-094: Struts navigation-prefix OGNL (S2-016)
+# ---------------------------------------------------------------------------
+# DefaultActionMapper treats a parameter name beginning action:, redirect:
+# or redirectAction: as a navigation instruction, matching those prefixes as
+# CASE-SENSITIVE text, and puts the remainder through variable translation,
+# which evaluates ${...} and %{...}.
+#
+# Legitimate traffic really does use these prefixes: Struts submit tags
+# generate action:foo, and older applications used redirect:/path. Neither
+# ever contains ${ or %{, which is what makes this separable.
+STRUTS_NAV_PREFIXES = (b"redirectAction:", b"redirect:", b"action:")
+STRUTS_OGNL_OPENERS = (b"${", b"%{")
+# These show an attempt to run code rather than to probe for the flaw.
+STRUTS_CODE_MARKERS = (b"#", b"@", b"(")
+
+
+def struts_nav_verdict(name: bytes) -> Optional[Dict[str, Any]]:
+    """One decoded parameter name, judged as DefaultActionMapper would."""
+    for prefix in STRUTS_NAV_PREFIXES:
+        if not name.startswith(prefix):
+            continue                 # case-sensitive, as Struts matches it
+        rest = name[len(prefix):]
+        opener = next((o for o in STRUTS_OGNL_OPENERS if o in rest), None)
+        if opener is None:
+            return None              # action:foo and redirect:/path are real
+        markers = sorted({bytes([c]).decode("latin-1")
+                          for c in rest if c in b"#@("})
+        return {
+            "prefix": prefix.decode("ascii"),
+            "opener": opener.decode("ascii"),
+            "code_markers": markers,
+            "severity_class": "critical" if markers else "high",
+        }
+    return None
+
+
+# ---------------------------------------------------------------------------
+# HTTP-095: Struts DMI method: OGNL (S2-032)
+# ---------------------------------------------------------------------------
+# With Dynamic Method Invocation enabled, a parameter name beginning
+# method: names the method to call, and vulnerable versions evaluated the
+# remainder as OGNL. A legitimate DMI button always puts a Java method name
+# there. Running code needs #, @ or ( - and none of those can appear in a
+# Java identifier. So the grammar does the work: a remainder that is not a
+# valid Java identifier is either an attack or a broken client.
+#
+# The predicate has to be JAVA's, not Python's. Python's str.isidentifier()
+# disagrees in both directions: Java accepts '$' as a start where Python
+# does not, and accepts U+200B ZERO WIDTH SPACE as a PART where Python does
+# not. So Java's documented rules are implemented here and held against the
+# JDK's own Character methods in the cross-check tier.
+#
+# Measured over all 1,112,064 scalar code points against JDK 21: agreement
+# everywhere except 622 points in CJK Extension I (U+2EBF0-U+2EE5D), which
+# Unicode 15.1 added and Java 21's tables do not carry. Every one of those
+# is Python-MORE-permissive, so it yields FEWER findings, and none of them
+# is a character an OGNL payload needs. The skew is therefore in the
+# false-positive-safe direction by construction, and the cross-check tier
+# asserts that rather than asserting an exact match that a Unicode bump
+# would break.
+STRUTS_DMI_PREFIX = b"method:"
+_JAVA_ID_LETTER = frozenset({"Lu", "Ll", "Lt", "Lm", "Lo"})
+
+
+def _java_ignorable(cp: int) -> bool:
+    """Character.isIdentifierIgnorable: ISO control characters that are not
+    whitespace, plus the FORMAT category."""
+    if 0x00 <= cp <= 0x08 or 0x0E <= cp <= 0x1B or 0x7F <= cp <= 0x9F:
+        return True
+    return unicodedata.category(chr(cp)) == "Cf"
+
+
+def java_identifier_start(cp: int) -> bool:
+    cat = unicodedata.category(chr(cp))
+    return cat in _JAVA_ID_LETTER or cat in ("Nl", "Sc", "Pc")
+
+
+def java_identifier_part(cp: int) -> bool:
+    cat = unicodedata.category(chr(cp))
+    return (cat in _JAVA_ID_LETTER
+            or cat in ("Nl", "Nd", "Mc", "Mn", "Sc", "Pc")
+            or _java_ignorable(cp))
+
+
+def is_java_identifier(text: str) -> bool:
+    """Java's own identifier test, over CODE POINTS.
+
+    Code points, not UTF-16 units: an astral letter such as U+1D49C is a
+    valid Java identifier start, and iterating UTF-16 surrogates would
+    reject it.
+    """
+    if not text:
+        return False
+    if not java_identifier_start(ord(text[0])):
+        return False
+    return all(java_identifier_part(ord(ch)) for ch in text[1:])
+
+
+def struts_dmi_verdict(name: bytes) -> Optional[Dict[str, Any]]:
+    """One decoded parameter name, judged against Java's grammar."""
+    if not name.startswith(STRUTS_DMI_PREFIX):
+        return None                  # case-sensitive, as Struts matches it
+    rest = name[len(STRUTS_DMI_PREFIX):]
+    try:
+        text = rest.decode("utf-8")
+    except UnicodeDecodeError:
+        # Not decodable as UTF-8, so it cannot be a Java identifier either.
+        # Reported as undecodable rather than silently treated as an attack.
+        return {"remainder_length": len(rest), "undecodable": True,
+                "code_markers": sorted({bytes([c]).decode("latin-1")
+                                        for c in rest if c in b"#@("}),
+                "member_access": b"#_memberAccess" in rest,
+                "severity_class": "high"}
+    if is_java_identifier(text):
+        return None                  # method:save, method:$init, method:déjà
+    markers = sorted({ch for ch in text if ch in "#@("})
+    return {
+        "remainder_length": len(rest),
+        "undecodable": False,
+        "code_markers": markers,
+        "member_access": "#_memberAccess" in text,
+        "empty_remainder": not text,
+        "severity_class": "critical" if (markers or "#_memberAccess" in text)
+                          else "high",
+    }
+
+
+# --- the shared carrier set for all three Struts rules -------------------
+STRUTS_MAX_PARAMS = 512
+
+
+def struts_param_names(target: bytes, body: bytes, body_ctype: bytes,
+                       parts: Sequence[MultipartPart]
+                       ) -> List[Tuple[str, bytes, Optional[bytes]]]:
+    """Every parameter NAME Struts could see, with its carrier and value.
+
+    The value rides along only as evidence for HTTP-093's escalation; no
+    rule uses it to decide. Bodies are read for names only.
+    """
+    out: List[Tuple[str, bytes, Optional[bytes]]] = []
+
+    def add_pairs(label: str, blob: bytes) -> None:
+        for pair in re.split(rb"[&;]", blob):
+            if not pair or len(out) >= STRUTS_MAX_PARAMS:
+                continue
+            eq = pair.find(b"=")
+            raw_name = pair[:eq] if eq >= 0 else pair
+            name = servlet_decode(raw_name)
+            if name is None:
+                continue        # the container would have thrown
+            value = servlet_decode(pair[eq + 1:]) if eq >= 0 else None
+            out.append((label, name, value))
+
+    q = target.find(b"?")
+    if q >= 0:
+        add_pairs("query", target[q + 1:])
+    if body and body_ctype == b"application/x-www-form-urlencoded":
+        add_pairs("body_urlencoded", body)
+    for _, name in parts:
+        if len(out) >= STRUTS_MAX_PARAMS:
+            break
+        out.append(("multipart_field", name, None))
+    return out
+
+
+def check_struts_param_rules(msg: ParsedMessage, body: bytes,
+                             cfg: WatchConfig = WATCH_DEFAULTS,
+                             stats: Optional[Dict[str, int]] = None,
+                             flow_id: Optional[str] = None,
+                             parts: Optional[Sequence[MultipartPart]] = None,
+                             body_ctype: bytes = b"") -> List[Finding]:
+    """HTTP-093, HTTP-094 and HTTP-095 over one request."""
+    findings: List[Finding] = []
+    file_names: List[bytes] = []
+    fields: List[Tuple[int, bytes]] = []
+    if parts:
+        file_names, fields = fileupload_part_names(parts)
+    # multipart field values, for HTTP-093's escalation evidence only
+    field_values: Dict[bytes, bytes] = {}
+    if parts:
+        for p in parts:
+            for _, nm in fields:
+                pass
+        by_index = {p.index: p for p in parts}
+        for idx, nm in fields:
+            part = by_index.get(idx)
+            if part is not None:
+                field_values[nm] = part.content[:512]
+
+    names = struts_param_names(msg.target or b"", body, body_ctype, fields)
+    method = (msg.method or b"").decode("latin-1")
+    target_path = (msg.target or b"").split(b"?")[0].decode("latin-1")[:200]
+
+    for carrier, name, value in names:
+        if carrier == "multipart_field" and value is None:
+            value = field_values.get(name)
+        # --- HTTP-093 ------------------------------------------------
+        if file_names:
+            hit = struts_upload_override(file_names, name)
+            if hit is not None:
+                esc = struts_override_escalation(value)
+                ev = dict(hit)
+                ev.update(esc)
+                ev.update({
+                    "attack": "Struts S2-066/S2-067",
+                    "carrier": carrier,
+                    "param": name.decode("latin-1")[:200],
+                    "method": method,
+                    "target": target_path,
+                    "file_fields": [f.decode("latin-1")[:120]
+                                    for f in file_names[:8]],
+                    "value_length": len(value) if value is not None else None,
+                    "value_digest": redact(value) if value else None,
+                    "severity_class": (
+                        "critical" if (esc["traversal"] or esc["jsp_target"]
+                                       or esc["absolute_path"]) else "high"),
+                    "note": "FileUploadInterceptor sets the properties F, "
+                            "F+ContentType and F+FileName itself from a file "
+                            "part named F, so a client has no reason to send "
+                            "one of them. This parameter overwrites one, "
+                            "which is the whole of S2-066 and S2-067; the "
+                            "comparison folds case and strips an OGNL path "
+                            "prefix or [n] index, which are the only two "
+                            "things the attacker can vary. Traversal or a "
+                            "JSP target only raises severity - detection "
+                            "does not depend on either. Whether this server "
+                            "still uses the old interceptor is not on the "
+                            "wire, and 6.4.0 alone does not settle it, so "
+                            "this records an attempt.",
+                })
+                if cfg.log_attack_payload and value:
+                    ev["payload"] = value.decode("latin-1", "replace")[:512]
+                findings.append(make_finding("HTTP-093", ev, flow=flow_id))
+        # --- HTTP-094 ------------------------------------------------
+        nav = struts_nav_verdict(name)
+        if nav is not None:
+            ev = dict(nav)
+            ev.update({
+                "attack": "Struts S2-016",
+                "carrier": carrier,
+                "param": name.decode("latin-1")[:200],
+                "method": method,
+                "target": target_path,
+                "param_length": len(name),
+                "param_digest": redact(name),
+                "note": "DefaultActionMapper reads a parameter name "
+                        "beginning action:, redirect: or redirectAction: as "
+                        "a navigation instruction and puts the remainder "
+                        "through variable translation, which evaluates "
+                        "${...} and %{...}. Struts matches those prefixes "
+                        "case-sensitively, so this does too. The legitimate "
+                        "forms this rule has to live beside - action:foo "
+                        "from a Struts submit tag, redirect:/path from an "
+                        "older application - never contain an OGNL opener. "
+                        "The name is the attack, so no value is inspected. "
+                        "An attempt: whether this server is vulnerable is "
+                        "not visible.",
+            })
+            if cfg.log_attack_payload:
+                ev["payload"] = name.decode("latin-1", "replace")[:512]
+            findings.append(make_finding("HTTP-094", ev, flow=flow_id))
+        # --- HTTP-095 ------------------------------------------------
+        dmi = struts_dmi_verdict(name)
+        if dmi is not None:
+            ev = dict(dmi)
+            ev.update({
+                "attack": "Struts S2-032",
+                "carrier": carrier,
+                "param": name.decode("latin-1")[:200],
+                "method": method,
+                "target": target_path,
+                "param_length": len(name),
+                "param_digest": redact(name),
+                "note": "With Dynamic Method Invocation enabled a parameter "
+                        "name beginning method: names the method to call, "
+                        "and the remainder was evaluated as OGNL. The "
+                        "remainder here is not a valid Java identifier, so "
+                        "it is not a method name: running code needs #, @ "
+                        "or (, and none of those can appear in an "
+                        "identifier. The predicate is Java's own, held "
+                        "against the JDK's Character methods rather than "
+                        "Python's str.isidentifier(), which disagrees in "
+                        "both directions. Whether DMI is enabled is not on "
+                        "the wire, so this is attack detection only.",
+            })
+            if cfg.log_attack_payload:
+                ev["payload"] = name.decode("latin-1", "replace")[:512]
+            findings.append(make_finding("HTTP-095", ev, flow=flow_id))
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# HTTP-096: Rack::MethodOverride _method grammar (Ruby2Shell, CVE-2026-132825)
+# ---------------------------------------------------------------------------
+# Ruby before 3.3.14 / 3.4.13 / 4.0.10 writes one byte past a buffer when it
+# upcases a string tagged with a single-byte legacy encoding in which the
+# case conversion GROWS. In a stock Rails or classic Sinatra app the only
+# pre-auth route to that conversion is Rack::MethodOverride, whose source
+# (measured, rack 2.2.7) settles the rule's gates rather than leaving them
+# to inference:
+#
+#     ALLOWED_METHODS = %w[POST]          -> POST only
+#     METHOD_OVERRIDE_PARAM_KEY = "_method"
+#     method_override_param(req) -> req.POST[...]   -> body only, never the
+#                                                      query string
+#     method.to_s.upcase  THEN  HTTP_METHODS.include?(method)
+#
+# The conversion runs BEFORE the allowlist check, so the allowlist is no
+# protection and the rule must not expect the value to resemble a method.
+#
+# The rule is a grammar test, not a payload hunt: a legitimate _method is an
+# RFC 9110 5.6.2 method token and nothing else, so any byte outside tchar
+# means the field cannot be a method name.
+
+RACK_METHOD_OVERRIDE_FIELD = b"_method"
+
+# RFC 9110 5.6.2 tchar. Deliberately the full token set and not just ASCII
+# letters: real method names outside Rack's own nine-entry list exist
+# (M-SEARCH, PROPFIND, X-MS-ENUMATTS), and narrowing this to letters would
+# make a legitimate extension method fire.
+METHOD_TCHAR = frozenset(
+    b"!#$%&'*+-.^_|~`"
+    b"0123456789"
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    b"abcdefghijklmnopqrstuvwxyz"
+)
+
+# The byte whose case conversion grows. Measured over all 64 encodings ruby
+# 3.3.6 offers: in every one of the 14 encodings below 0xDF is the ONLY byte
+# whose upcase grows, so keying escalation on it is complete rather than a
+# signature that a different byte could evade.
+RUBY_GROWING_BYTE = 0xDF
+
+# The encodings in which upcase(0xDF) grows, measured rather than taken from
+# the advisory's "ISO-8859-x and Windows-125x". That generic reading is
+# over-broad: in ISO-8859-5/6/7/8/11 and Windows-1251/1253/1255/1256/1258
+# the byte 0xDF is not sharp s and the conversion is flat, so escalating on
+# them would be a false positive. Labels are every alias Ruby's
+# Encoding.find accepts for these 14, matched case-insensitively.
+RUBY_GROWING_ENCODINGS: Dict[bytes, bytes] = {}
+for _n in (1, 2, 3, 4, 9, 10, 13, 14, 15, 16):
+    _canon = b"ISO-8859-%d" % _n
+    RUBY_GROWING_ENCODINGS[b"iso-8859-%d" % _n] = _canon
+    RUBY_GROWING_ENCODINGS[b"iso8859-%d" % _n] = _canon
+for _n in (1250, 1252, 1254, 1257):
+    _canon = b"Windows-%d" % _n
+    RUBY_GROWING_ENCODINGS[b"windows-%d" % _n] = _canon
+    RUBY_GROWING_ENCODINGS[b"cp%d" % _n] = _canon
+del _n, _canon
+
+# Rack tags a part's body with a declared charset only when the part's media
+# type is EXACTLY this, compared case-sensitively (rack 2.2.7
+# tag_multipart_encoding: `if TEXT_PLAIN == type_subtype`). Measured:
+# "TEXT/PLAIN" and "Text/Plain" are NOT tagged and fall back to UTF-8, so
+# folding case here would escalate where Rack does not.
+RACK_TAGGED_MEDIA_TYPE = b"text/plain"
+
+
+def rack_part_encoding(part: MultipartPart) -> Optional[bytes]:
+    """The legacy encoding Rack would tag this part's body with, or None.
+
+    Mirrors rack 2.2.7 Multipart::Parser#tag_multipart_encoding, which was
+    measured rather than inferred. Each condition below is one Rack
+    behaviour that the module's own generic Content-Type parser would have
+    got wrong, and every one of them is a false-positive route:
+
+      * a part carrying a filename is never tagged - Rack returns before the
+        charset branch, and req.POST then yields a Hash whose inspect gets
+        upcased, so no legacy conversion can happen;
+      * the media type must be exactly "text/plain", compared
+        CASE-SENSITIVELY. "TEXT/PLAIN" and "Text/Plain" measured as UTF-8;
+      * the parameter name must be exactly "charset", also CASE-SENSITIVE.
+        "CHARSET=" and "Charset=" measured as UTF-8;
+      * the value may be quoted and may carry OWS, both stripped, and the
+        last charset parameter wins;
+      * a label Ruby cannot resolve ("ISO-8859-1extra", an empty value)
+        raises out of the parser, so the request 500s and never reaches the
+        application. Treating it as untagged is therefore right as well as
+        safe.
+
+    The raw part header is re-read here on purpose: parse_content_type folds
+    the media type to lower case, which would escalate a "TEXT/PLAIN" part
+    that Rack leaves as UTF-8.
+
+    Returns a canonical name only for the 14 encodings whose upcase of 0xDF
+    grows; everything else cannot reach the overflow.
+    """
+    if part.filename is not None:
+        return None
+    raw: Optional[bytes] = None
+    for hname, hval in part.headers:
+        if hname == b"content-type":
+            raw = hval
+    if raw is None:
+        return None
+    pieces = raw.split(b";")
+    if pieces[0].strip(b" \t") != RACK_TAGGED_MEDIA_TYPE:
+        return None
+    found: Optional[bytes] = None
+    for param in pieces[1:]:
+        eq = param.find(b"=")
+        if eq < 0:
+            # Rack calls strip! on a nil value here and raises, so the
+            # request never reaches the application.
+            return None
+        key = param[:eq].strip(b" \t")
+        if key != b"charset":
+            continue
+        val = param[eq + 1:].strip(b" \t")
+        if len(val) >= 2 and val.startswith(b'"') and val.endswith(b'"'):
+            val = val[1:-1]
+        found = val
+    if not found:
+        return None
+    return RUBY_GROWING_ENCODINGS.get(found.lower())
+
+
+def method_token_violations(value: bytes) -> List[int]:
+    """Byte values in `value` that no RFC 9110 method token may contain."""
+    return sorted({b for b in value if b not in METHOD_TCHAR})
+
+
+def rack_method_override_values(
+        body: bytes, body_ctype: bytes,
+        parts: Optional[Sequence[MultipartPart]],
+) -> List[Tuple[str, bytes, Optional[bytes], Optional[bytes]]]:
+    """Every _method value Rack::MethodOverride would read, last-wins.
+
+    Returns (carrier, value, declared_charset, growing_encoding) tuples. The
+    query string is absent by construction: method_override_param reads
+    req.POST, which measured as body-only. The X-HTTP-Method-Override header
+    is absent too - it is a real fallback carrier in Rack's source, but
+    header strings were measured to arrive as ASCII-8BIT, where upcase is
+    flat (4->4 bytes), so the conversion cannot grow. Forcing that same
+    header to ISO-8859-1 made it grow 4->5, which is what proves the binary
+    tagging is the whole of the protection.
+    """
+    out: List[Tuple[str, bytes, Optional[bytes], Optional[bytes]]] = []
+    ctype, cparams = parse_content_type(body_ctype)
+    ctype = ctype.strip(b" \t").lower()
+    if parts:
+        chosen: Optional[MultipartPart] = None
+        for part in parts:
+            if part.name == RACK_METHOD_OVERRIDE_FIELD:
+                chosen = part          # duplicates: measured last-wins
+        if chosen is not None and chosen.filename is None:
+            out.append(("multipart_field", chosen.content,
+                        chosen.charset, rack_part_encoding(chosen)))
+    elif ctype == b"application/x-www-form-urlencoded" and body:
+        value: Optional[bytes] = None
+        for pair in body.split(b"&"):
+            if not pair:
+                continue
+            eq = pair.find(b"=")
+            name = urldecode(pair[:eq] if eq >= 0 else pair)
+            if name == RACK_METHOD_OVERRIDE_FIELD:
+                value = urldecode(pair[eq + 1:]) if eq >= 0 else b""
+        if value is not None:
+            # Never legacy-tagged: a charset on the request Content-Type was
+            # measured NOT to reach a urlencoded value, which arrives UTF-8
+            # either way. So this carrier can only ever reach the base tier.
+            out.append(("urlencoded", value,
+                        cparams.get(b"charset"), None))
+    return out
+
+
+def check_rack_method_override(
+        msg: ParsedMessage, body: bytes,
+        cfg: WatchConfig = WATCH_DEFAULTS,
+        stats: Optional[Dict[str, int]] = None,
+        flow_id: Optional[str] = None,
+        parts: Optional[Sequence[MultipartPart]] = None,
+        body_ctype: bytes = b"") -> List[Finding]:
+    """HTTP-096 over one request."""
+    findings: List[Finding] = []
+    if (msg.method or b"") != b"POST":
+        # ALLOWED_METHODS is %w[POST]; every other method skips the
+        # middleware entirely, so a bad _method elsewhere is inert.
+        return findings
+    # The raw header, not the media type dispatch already split off: the
+    # charset parameter is reported as evidence and would otherwise be lost.
+    raw_ctype = msg.get(b"content-type") or body_ctype
+    for carrier, value, declared, growing in rack_method_override_values(
+            body, raw_ctype, parts):
+        bad = method_token_violations(value)
+        if not bad:
+            continue
+        df_count = value.count(bytes((RUBY_GROWING_BYTE,)))
+        escalated = growing is not None and df_count > 0
+        ev = {
+            "attack": "Ruby2Shell",
+            "carrier": carrier,
+            "field": RACK_METHOD_OVERRIDE_FIELD.decode("ascii"),
+            "method": (msg.method or b"").decode("latin-1"),
+            "target": (msg.target or b"").split(b"?")[0]
+                      .decode("latin-1")[:200],
+            "declared_charset": (declared.decode("latin-1", "replace")[:40]
+                                 if declared else None),
+            "tagged_encoding": (growing.decode("ascii")
+                                if growing else None),
+            "growing_byte_count": df_count,
+            "non_token_bytes": ["0x%02X" % b for b in bad[:8]],
+            "value_length": len(value),
+            "value_digest": redact(value),
+            "severity_class": "critical" if escalated else "medium",
+            "note": "Rack::MethodOverride upcases the _method form field "
+                    "before testing it against its own nine-entry method "
+                    "list, so the conversion runs whatever the value is. A "
+                    "legitimate _method is an RFC 9110 method token; this "
+                    "one is not, so it cannot be a method name. "
+                    + ("The part is tagged with a legacy single-byte "
+                       "encoding whose upcase of 0xDF grows by one byte "
+                       "each time, which is the overflow. The published "
+                       "overflow point is 21 of them, but the escalation "
+                       "does not depend on that count."
+                       if escalated else
+                       "No growing legacy encoding is in play - the value "
+                       "arrives UTF-8, where upcase of a lone 0xDF raises "
+                       "ArgumentError and the conversion never runs - so "
+                       "this is a malformed field, not a near miss of the "
+                       "overflow.")
+                    + " Whether this server runs an affected Ruby is not "
+                      "on the wire: patched and unpatched builds answer "
+                      "identically, so this is an attempt.",
+        }
+        if cfg.log_attack_payload:
+            ev["payload"] = value.decode("latin-1", "replace")[:512]
+        if stats is not None and escalated:
+            stats["ruby2shell_growing_encoding"] = (
+                stats.get("ruby2shell_growing_encoding", 0) + 1)
+        findings.append(make_finding(
+            "HTTP-096", ev,
+            severity=CRITICAL if escalated else WARN, flow=flow_id))
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# HTTP-097 / HTTP-098: inbound SOAP Fault and DOCTYPE (Axis 1.x,
+# CVE-2026-90436)
+# ---------------------------------------------------------------------------
+# Apache Axis 1.x deserializes an INBOUND SOAP Fault. The vendor's own fix
+# commit (41f3b4e8, "Prevent arbitrary class instantiation from SOAP fault
+# exceptionName") states the mechanism: a <Fault> whose <detail> carries an
+# <exceptionName> made the fault deserializer load the named class and
+# invoke its constructor "before any type check", and it is reachable
+# pre-authentication "because the engine force-parses the request body
+# during service dispatch". The fix gates the load on AxisFault
+# assignability, so the rule is that patch check inverted: a Fault arriving
+# in a REQUEST, carrying an exceptionName, in the position Axis reads.
+#
+# Faults travel server -> client. A Fault in a request is the protocol
+# running backwards, which is what makes this detectable without a payload
+# signature: the class name inside is the attacker's choice and is never
+# keyed on.
+#
+# Every structural condition below was measured against the real Axis 1.4
+# jar with a recording class loader (oracles/AxisFaultOracle.java), and
+# several of them contradict the obvious reading:
+#
+#   exceptionName  local name only, ANY namespace, case-sensitive, and a
+#                  DIRECT child of detail. Keying on a namespace or a prefix
+#                  would be an evasion route; folding case would be a false
+#                  positive. Nesting it deeper does not reach the loader.
+#   detail         SOAP 1.1: local name "detail", any namespace, lower case.
+#                  SOAP 1.2: the exact QName {SOAP12}Detail. Measured:
+#                  "Detail" unqualified and "env:detail" both fail to reach.
+#                  A direct child of Fault.
+#   Fault          the exact QName {SOAP11}Fault or {SOAP12}Fault, a direct
+#                  child of Body. A bare <Fault>, a foreign-namespace Fault
+#                  and a lower-case <fault> were all measured not to reach.
+#   multiRef/href  NOT followed. Axis was measured not to resolve an
+#                  href="#id0" indirection on exceptionName, so the rule
+#                  does not chase references either.
+#   header Faults  NOT honoured, so only Body is considered.
+#   CDATA and &#46; DO resolve into the class name, so the scanner resolves
+#                  character references and CDATA - neither of which
+#                  involves a DTD - while general entity expansion stays
+#                  off entirely.
+#
+# The XML scanner below is hand-rolled rather than taken from a library.
+# That is the whole of the passive guarantee: there is no entity resolver to
+# misconfigure, no DTD fetch to disable and no parser flag whose default can
+# change under the module. It never expands a general entity and never
+# dereferences a SYSTEM or PUBLIC identifier.
+
+SOAP11_NS = b"http://schemas.xmlsoap.org/soap/envelope/"
+SOAP12_NS = b"http://www.w3.org/2003/05/soap-envelope"
+SOAP_NAMESPACES = {SOAP11_NS: "1.1", SOAP12_NS: "1.2"}
+
+# Content types that carry a SOAP envelope. Axis is mounted at different
+# paths in different products, so neither rule gates on path or port.
+SOAP_MEDIA_TYPES = frozenset((b"text/xml", b"application/soap+xml"))
+
+XML_SCAN_MAX_BYTES = 4 * 1024 * 1024
+XML_SCAN_MAX_DEPTH = 96
+XML_SCAN_MAX_ELEMENTS = 50000
+
+
+@dataclass
+class XmlDoctype:
+    """A document type declaration, recorded and never acted on."""
+    name: bytes = b""
+    external_kind: Optional[bytes] = None      # b"SYSTEM" or b"PUBLIC"
+    public_id: Optional[bytes] = None
+    system_id: Optional[bytes] = None
+    declares_entity: bool = False
+    declares_parameter_entity: bool = False
+    declares_external_entity: bool = False
+    declares_element_or_attlist: bool = False
+    internal_subset_bytes: int = 0
+
+
+def xml_detect_encoding(data: bytes,
+                        declared: Optional[bytes] = None,
+                        ) -> Tuple[str, Optional[bytes], int]:
+    """Pick the codec an XML processor would, and report the BOM length.
+
+    Order follows XML 1.0 appendix F, which is what Axis was measured to
+    follow: a BOM wins, then a BOM-less UTF-16/32 byte pattern, then the XML
+    declaration's own encoding, then the transport's charset, then UTF-8.
+    Ignoring the BOM makes a UTF-16 body invisible, which is why the bite
+    tier mutates exactly this function.
+    """
+    boms = (
+        (b"\x00\x00\xfe\xff", "utf-32-be"), (b"\xff\xfe\x00\x00", "utf-32-le"),
+        (b"\xef\xbb\xbf", "utf-8"),
+        (b"\xfe\xff", "utf-16-be"), (b"\xff\xfe", "utf-16-le"),
+    )
+    for marker, codec in boms:
+        if data.startswith(marker):
+            return codec, marker, len(marker)
+    head = data[:4]
+    if head.startswith(b"\x00\x00\x00<"):
+        return "utf-32-be", None, 0
+    if head.startswith(b"<\x00\x00\x00"):
+        return "utf-32-le", None, 0
+    if head.startswith(b"\x00<\x00"):
+        return "utf-16-be", None, 0
+    if head.startswith(b"<\x00?") or head.startswith(b"<\x00"):
+        return "utf-16-le", None, 0
+    decl = data[:256]
+    m = re.search(rb"""<\?xml[^>]*?encoding\s*=\s*["']([A-Za-z0-9._\-]+)["']""",
+                  decl)
+    label = m.group(1) if m else (declared or b"")
+    codec = _xml_codec_for(label)
+    return codec, None, 0
+
+
+def _xml_codec_for(label: bytes) -> str:
+    """Map a charset label to a Python codec, defaulting to UTF-8.
+
+    Unknown labels fall back to UTF-8 rather than raising: a passive
+    observer that refused to look at a body it could not name would be
+    giving an evasion route away for free.
+    """
+    text = label.strip(b' \t"\'').lower().decode("ascii", "replace")
+    if not text:
+        return "utf-8"
+    aliases = {
+        "utf8": "utf-8", "utf-8": "utf-8",
+        "utf16": "utf-16", "utf-16": "utf-16",
+        "utf-16le": "utf-16-le", "utf-16be": "utf-16-be",
+        "utf32": "utf-32", "utf-32": "utf-32",
+        "utf-32le": "utf-32-le", "utf-32be": "utf-32-be",
+        "us-ascii": "ascii", "ascii": "ascii",
+    }
+    if text in aliases:
+        return aliases[text]
+    try:
+        import codecs as _codecs
+        return _codecs.lookup(text).name
+    except Exception:
+        return "utf-8"
+
+
+def xml_decode_body(data: bytes, declared: Optional[bytes] = None
+                    ) -> Tuple[str, str]:
+    """Decode an XML body to text for scanning. Returns (text, codec)."""
+    if len(data) > XML_SCAN_MAX_BYTES:
+        data = data[:XML_SCAN_MAX_BYTES]
+    codec, _, skip = xml_detect_encoding(data, declared)
+    try:
+        text = data[skip:].decode(codec, "replace")
+    except (LookupError, UnicodeDecodeError):
+        text = data[skip:].decode("utf-8", "replace")
+        codec = "utf-8"
+    # A BOM that survived the codec (utf-16 without endianness, say).
+    if text[:1] == "﻿":
+        text = text[1:]
+    return text, codec
+
+
+_XML_NAME_CHARS = re.compile(r"[^\s/>]+")
+
+
+def _xml_attrs(chunk: str) -> List[Tuple[str, str]]:
+    """Attributes of a start tag, quoted either way. No entity expansion."""
+    out: List[Tuple[str, str]] = []
+    for m in re.finditer(r"""([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""",
+                         chunk):
+        out.append((m.group(1),
+                    m.group(2) if m.group(2) is not None else m.group(3)))
+    return out
+
+
+def xml_scan_doctype(text: str) -> Tuple[Optional[XmlDoctype], bool]:
+    """Find a document type declaration in the prolog.
+
+    Returns (doctype, saw_root). Comments, processing instructions and CDATA
+    are skipped properly, so a "<!DOCTYPE" inside any of them is not one -
+    and text content is never examined at all, which is what makes an
+    escaped "&lt;!DOCTYPE" in a string parameter content rather than markup.
+    """
+    i, n = 0, len(text)
+    while i < n:
+        lt = text.find("<", i)
+        if lt < 0:
+            return None, False
+        if text.startswith("<!--", lt):
+            end = text.find("-->", lt + 4)
+            i = n if end < 0 else end + 3
+            continue
+        if text.startswith("<?", lt):
+            end = text.find("?>", lt + 2)
+            i = n if end < 0 else end + 2
+            continue
+        if text.startswith("<![CDATA[", lt):
+            end = text.find("]]>", lt + 9)
+            i = n if end < 0 else end + 3
+            continue
+        if text.startswith("<!DOCTYPE", lt):
+            return _xml_parse_doctype(text, lt), False
+        if text.startswith("<!", lt):
+            end = text.find(">", lt + 2)
+            i = n if end < 0 else end + 1
+            continue
+        return None, True            # the root element
+    return None, False
+
+
+def _xml_parse_doctype(text: str, start: int) -> XmlDoctype:
+    """Record a DOCTYPE's shape. Nothing here is ever dereferenced."""
+    dt = XmlDoctype()
+    i = start + len("<!DOCTYPE")
+    n = len(text)
+    while i < n and text[i].isspace():
+        i += 1
+    m = _XML_NAME_CHARS.match(text, i)
+    if m:
+        dt.name = m.group(0)[:120].encode("utf-8", "replace")
+        i = m.end()
+    # external identifier, then an optional internal subset
+    head_end = i
+    depth_subset = ""
+    bracket = text.find("[", i)
+    gt = text.find(">", i)
+    if bracket >= 0 and (gt < 0 or bracket < gt):
+        head = text[i:bracket]
+        close = text.find("]", bracket)
+        depth_subset = text[bracket + 1:close if close >= 0 else n]
+    else:
+        head = text[i:gt if gt >= 0 else n]
+    del head_end
+    hm = re.search(r"""\b(SYSTEM|PUBLIC)\b\s*((?:"[^"]*"|'[^']*')"""
+                   r"""(?:\s*(?:"[^"]*"|'[^']*'))?)?""", head)
+    if hm:
+        dt.external_kind = hm.group(1).encode("ascii")
+        literals = re.findall(r"""(?:"([^"]*)"|'([^']*)')""", hm.group(2) or "")
+        vals = [a or b for a, b in literals]
+        if dt.external_kind == b"PUBLIC":
+            if vals:
+                dt.public_id = vals[0][:200].encode("utf-8", "replace")
+            if len(vals) > 1:
+                dt.system_id = vals[1][:200].encode("utf-8", "replace")
+        elif vals:
+            dt.system_id = vals[0][:200].encode("utf-8", "replace")
+    if depth_subset:
+        dt.internal_subset_bytes = len(depth_subset)
+        if re.search(r"<!ENTITY\s", depth_subset):
+            dt.declares_entity = True
+        if re.search(r"<!ENTITY\s+%\s", depth_subset):
+            dt.declares_parameter_entity = True
+        if re.search(r"<!ENTITY\s[^>]*\b(SYSTEM|PUBLIC)\b", depth_subset):
+            dt.declares_external_entity = True
+        if re.search(r"<!(ELEMENT|ATTLIST)\s", depth_subset):
+            dt.declares_element_or_attlist = True
+    return dt
+
+
+_XML_CHARREF = re.compile(r"&#(?:[xX]([0-9A-Fa-f]{1,6})|([0-9]{1,7}));")
+_XML_NAMED = {"amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'"}
+
+
+def xml_text_value(raw: str) -> str:
+    """Resolve the references a SOAP processor resolves without a DTD.
+
+    Character references and the five predefined entities only. A general
+    entity reference is left EXACTLY as written: expanding one is the whole
+    of the XXE mechanism, and this module never does it. Axis was measured
+    to resolve "&#46;" into the class name, which is why character
+    references are handled rather than ignored.
+    """
+    def _cr(m: "re.Match[str]") -> str:
+        try:
+            cp = int(m.group(1), 16) if m.group(1) else int(m.group(2), 10)
+        except ValueError:
+            return m.group(0)
+        if cp in (0x9, 0xA, 0xD) or 0x20 <= cp <= 0x10FFFF:
+            try:
+                return chr(cp)
+            except ValueError:
+                return m.group(0)
+        return m.group(0)
+    out = _XML_CHARREF.sub(_cr, raw)
+    for name, ch in _XML_NAMED.items():
+        out = out.replace("&" + name + ";", ch)
+    return out
+
+
+@dataclass
+class SoapFaultHit:
+    soap_version: str
+    class_name: str
+    detail_local: str
+    exception_prefix: str
+    exception_namespace: str
+
+
+def soap_envelope_version(text: str) -> Tuple[Optional[str], Optional[str]]:
+    """The SOAP version of the root element, and its namespace.
+
+    Returns (version, namespace) or (None, None) when the root is not a SOAP
+    Envelope. The root element's own namespace decides the version: Axis was
+    measured to honour the envelope's namespace over the MessageContext it
+    was handed, so this is both what Axis does and all a passive observer
+    can see.
+    """
+    for ev, qname, attrs, _depth in xml_walk(text, limit=1):
+        if ev != "start":
+            continue
+        prefix, local = _split_qname(qname)
+        if local != "Envelope":
+            return None, None
+        ns = _ns_of(prefix, attrs)
+        if ns is None:
+            return None, None
+        key = ns.encode("utf-8", "replace")
+        version = SOAP_NAMESPACES.get(key)
+        return version, ns
+    return None, None
+
+
+def _split_qname(qname: str) -> Tuple[str, str]:
+    idx = qname.find(":")
+    if idx < 0:
+        return "", qname
+    return qname[:idx], qname[idx + 1:]
+
+
+def _ns_of(prefix: str, attrs: Sequence[Tuple[str, str]]) -> Optional[str]:
+    want = ("xmlns:" + prefix) if prefix else "xmlns"
+    for name, value in attrs:
+        if name == want:
+            return value
+    return None
+
+
+def xml_walk(text: str, limit: int = XML_SCAN_MAX_ELEMENTS):
+    """Walk elements non-validatingly, yielding (event, qname, attrs, depth).
+
+    Events are "start", "end" and "text". Namespace bindings are NOT
+    resolved here; callers that need them track their own scope, which keeps
+    this walk allocation-light on bodies that are mostly text.
+    """
+    i, n, depth, count = 0, len(text), 0, 0
+    while i < n and count < limit and depth <= XML_SCAN_MAX_DEPTH:
+        lt = text.find("<", i)
+        if lt < 0:
+            tail = text[i:]
+            if tail.strip():
+                yield "text", "", (), depth
+            return
+        if lt > i:
+            chunk = text[i:lt]
+            if chunk.strip():
+                yield "text", chunk, (), depth
+        if text.startswith("<!--", lt):
+            end = text.find("-->", lt + 4)
+            i = n if end < 0 else end + 3
+            continue
+        if text.startswith("<?", lt):
+            end = text.find("?>", lt + 2)
+            i = n if end < 0 else end + 2
+            continue
+        if text.startswith("<![CDATA[", lt):
+            end = text.find("]]>", lt + 9)
+            body = text[lt + 9:end if end >= 0 else n]
+            if body:
+                yield "cdata", body, (), depth
+            i = n if end < 0 else end + 3
+            continue
+        if text.startswith("<!", lt):
+            # A DOCTYPE's internal subset may contain '>', so step over the
+            # bracketed section before looking for the close.
+            br = text.find("[", lt)
+            gt = text.find(">", lt + 2)
+            if br >= 0 and (gt < 0 or br < gt):
+                close = text.find("]", br)
+                gt = text.find(">", close if close >= 0 else br)
+            i = n if gt < 0 else gt + 1
+            continue
+        if text.startswith("</", lt):
+            gt = text.find(">", lt + 2)
+            if gt < 0:
+                return
+            depth -= 1
+            yield "end", text[lt + 2:gt].strip(), (), depth
+            i = gt + 1
+            continue
+        gt = _xml_tag_end(text, lt)
+        if gt < 0:
+            return
+        inner = text[lt + 1:gt]
+        self_closing = inner.rstrip().endswith("/")
+        if self_closing:
+            inner = inner.rstrip()[:-1]
+        m = _XML_NAME_CHARS.match(inner)
+        if not m:
+            i = gt + 1
+            continue
+        qname = m.group(0)
+        attrs = tuple(_xml_attrs(inner[m.end():]))
+        count += 1
+        yield "start", qname, attrs, depth
+        if self_closing:
+            yield "end", qname, (), depth
+        else:
+            depth += 1
+        i = gt + 1
+
+
+def _xml_tag_end(text: str, lt: int) -> int:
+    """The '>' closing a start tag, honouring quoted attribute values."""
+    i, n = lt + 1, len(text)
+    quote = ""
+    while i < n:
+        ch = text[i]
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in ('"', "'"):
+            quote = ch
+        elif ch == ">":
+            return i
+        i += 1
+    return -1
+
+
+def soap_fault_exception_names(text: str) -> List[SoapFaultHit]:
+    """Every exceptionName Axis would read, in the position Axis reads it.
+
+    The containment chain is Axis's own, measured: Envelope > Body > Fault >
+    detail > exceptionName, each a DIRECT child of the one before it.
+    """
+    version, env_ns = soap_envelope_version(text)
+    if version is None or env_ns is None:
+        return []
+    hits: List[SoapFaultHit] = []
+    # prefix scopes, innermost last
+    scopes: List[Dict[str, str]] = [{}]
+    # the chain of (local, namespace) we are inside, root first
+    chain: List[Tuple[str, str]] = []
+    pending: Optional[Dict[str, Any]] = None
+
+    def resolve(prefix: str) -> str:
+        for scope in reversed(scopes):
+            if prefix in scope:
+                return scope[prefix]
+        return ""
+
+    for ev, qname, attrs, _depth in xml_walk(text):
+        if ev == "start":
+            bindings: Dict[str, str] = {}
+            for name, value in attrs:
+                if name == "xmlns":
+                    bindings[""] = value
+                elif name.startswith("xmlns:"):
+                    bindings[name[6:]] = value
+            scopes.append(bindings)
+            prefix, local = _split_qname(qname)
+            ns = resolve(prefix)
+            chain.append((local, ns))
+            if pending is not None:
+                # exceptionName's content must be text, not an element
+                pending = None
+            if _soap_fault_position(chain, version, env_ns):
+                pending = {"local": local, "prefix": prefix, "ns": ns,
+                           "text": []}
+        elif ev == "end":
+            if pending is not None and chain and chain[-1][0] == pending["local"]:
+                raw = "".join(pending["text"])
+                if not raw:
+                    # An exceptionName with no text content carries no class
+                    # name. Axis was measured NOT to resolve a SOAP-encoding
+                    # href="#id0" indirection here, so an empty element -
+                    # which is the only shape that indirection takes - asks
+                    # for nothing and must not fire.
+                    pending = None
+                    if chain:
+                        chain.pop()
+                    if len(scopes) > 1:
+                        scopes.pop()
+                    continue
+                hits.append(SoapFaultHit(
+                    soap_version=version,
+                    class_name=xml_text_value(raw)[:200],
+                    detail_local=chain[-2][0] if len(chain) >= 2 else "",
+                    exception_prefix=pending["prefix"],
+                    exception_namespace=pending["ns"],
+                ))
+                pending = None
+            if chain:
+                chain.pop()
+            if len(scopes) > 1:
+                scopes.pop()
+        elif ev in ("text", "cdata") and pending is not None:
+            pending["text"].append(qname)
+    return hits
+
+
+def _soap_fault_position(chain: Sequence[Tuple[str, str]],
+                         version: str, env_ns: str) -> bool:
+    """True when `chain` is exactly the path Axis reads exceptionName from.
+
+    Envelope > Body > Fault > detail > exceptionName, five deep, each a
+    direct child. The namespace rules differ per element and per SOAP
+    version, and each one of them was measured:
+      Body, Fault  the envelope's own namespace, exact casing
+      detail       1.1: local name "detail", ANY namespace
+                   1.2: the exact QName {SOAP12}Detail
+      exceptionName  local name only, ANY namespace
+    """
+    if len(chain) != 5:
+        return False
+    (env_l, env_n), (body_l, body_n), (fault_l, fault_n), \
+        (detail_l, detail_n), (exc_l, _exc_n) = chain
+    if env_l != "Envelope" or env_n != env_ns:
+        return False
+    if body_l != "Body" or body_n != env_ns:
+        return False
+    if fault_l != "Fault" or fault_n != env_ns:
+        return False
+    if version == "1.2":
+        if detail_l != "Detail" or detail_n != env_ns:
+            return False
+    else:
+        if detail_l != "detail":
+            return False
+    return exc_l == "exceptionName"
+
+
+def _external_id_scheme_host(system_id: Optional[bytes]
+                             ) -> Tuple[Optional[str], Optional[str]]:
+    """Scheme and host of an external identifier. NEVER dereferenced.
+
+    Split with a regex over bytes already in hand. The module resolves
+    nothing and opens nothing: there is no DTD fetch to disable because
+    there is no fetch.
+    """
+    if not system_id:
+        return None, None
+    m = re.match(rb"\s*([A-Za-z][A-Za-z0-9+.\-]*):(?://([^/?#]*))?",
+                 system_id)
+    if not m:
+        return None, None
+    scheme = m.group(1).decode("ascii", "replace").lower()[:16]
+    authority = (m.group(2) or b"").decode("utf-8", "replace")
+    host = authority.split("@")[-1]
+    return scheme, (host[:120] or None)
+
+
+def check_soap_axis(msg: "ParsedMessage", body: bytes,
+                    body_info: Optional[Dict[str, Any]] = None,
+                    cfg: WatchConfig = WATCH_DEFAULTS,
+                    stats: Optional[Dict[str, int]] = None,
+                    flow_id: Optional[str] = None) -> List[Finding]:
+    """HTTP-097 and HTTP-098 over one request body."""
+    findings: List[Finding] = []
+    if msg.kind != "request" or not body:
+        return findings
+    ctype, cparams = parse_content_type(msg.get(b"content-type"))
+    if ctype not in SOAP_MEDIA_TYPES:
+        return findings
+    text, codec = xml_decode_body(body, cparams.get(b"charset"))
+    version, env_ns = soap_envelope_version(text)
+    if version is None:
+        return findings
+    target_path = (msg.target or b"").split(b"?")[0].decode("latin-1")[:200]
+    complete = bool((body_info or {}).get("complete", True))
+    base = {
+        "soap_version": version,
+        "endpoint_path": target_path,
+        "method": (msg.method or b"").decode("latin-1"),
+        "content_type": ctype.decode("latin-1")[:60],
+        "body_encoding": codec,
+        "body_complete": complete,
+    }
+
+    # --- HTTP-097: an inbound Fault carrying an Axis exceptionName -------
+    for hit in soap_fault_exception_names(text)[:8]:
+        ev = dict(base)
+        ev.update({
+            "attack": "Axis 1.x inbound SOAP Fault",
+            "detail_element": hit.detail_local,
+            "exception_prefix": hit.exception_prefix or None,
+            "exception_namespace": hit.exception_namespace or None,
+            "class_name": hit.class_name,
+            "class_name_length": len(hit.class_name),
+            "note": "A SOAP Fault is a server-to-client message; this one "
+                    "arrived in a request, which is the protocol running "
+                    "backwards. Axis 1.x reads <exceptionName> out of the "
+                    "Fault's detail and loads that class before any type "
+                    "check, pre-authentication, because the engine "
+                    "force-parses the request body during dispatch - the "
+                    "vendor's own fix commit says so and gates the load on "
+                    "AxisFault assignability. The class name is the "
+                    "attacker's choice and is reported as evidence only, "
+                    "never matched against a gadget list. The containment "
+                    "chain tested here is Axis's own, measured against the "
+                    "1.4 jar: Envelope > Body > Fault > detail > "
+                    "exceptionName, each a direct child, with "
+                    "exceptionName matched by local name in any namespace "
+                    "and case-sensitively. Axis 1.x is end of life and "
+                    "Apache does not expect to ship a 1.x fix, so an "
+                    "affected endpoint stays affected. Whether a usable "
+                    "gadget is on this server's classpath is not on the "
+                    "wire: this is an attempt.",
+        })
+        if cfg.log_attack_payload:
+            ev["payload"] = hit.class_name[:512]
+        if stats is not None:
+            stats["axis_inbound_fault"] = stats.get("axis_inbound_fault", 0) + 1
+        findings.append(make_finding("HTTP-097", ev, flow=flow_id))
+
+    # --- HTTP-098: a DOCTYPE in a SOAP envelope ---------------------------
+    doctype, _root = xml_scan_doctype(text)
+    if doctype is not None:
+        scheme, host = _external_id_scheme_host(doctype.system_id)
+        external = doctype.external_kind is not None
+        escalate = (external or doctype.declares_external_entity
+                    or doctype.declares_parameter_entity)
+        ev = dict(base)
+        ev.update({
+            "attack": "DOCTYPE in a SOAP request",
+            "doctype_name": doctype.name.decode("latin-1")[:120] or None,
+            "external_kind": (doctype.external_kind.decode("ascii")
+                              if doctype.external_kind else None),
+            "external_scheme": scheme,
+            "external_host": host,
+            "public_id": (doctype.public_id.decode("latin-1")[:200]
+                          if doctype.public_id else None),
+            "declares_entity": doctype.declares_entity,
+            "declares_parameter_entity": doctype.declares_parameter_entity,
+            "declares_external_entity": doctype.declares_external_entity,
+            "declares_element_or_attlist":
+                doctype.declares_element_or_attlist,
+            "internal_subset_bytes": doctype.internal_subset_bytes,
+            "severity_class": "critical" if escalate else "high",
+            "note": "SOAP 1.1 and SOAP 1.2 both forbid a document type "
+                    "declaration in a SOAP message, so any DOCTYPE in a "
+                    "request envelope breaks the protocol grammar whatever "
+                    "the product is. "
+                    + ("It carries an external identifier or declares "
+                       "external or parameter entities, which is the shape "
+                       "an XXE takes."
+                       if escalate else
+                       "It declares no external or parameter entities, so "
+                       "it is a grammar violation without a retrieval in "
+                       "it.")
+                    + " The external identifier is reported by scheme and "
+                      "host and is never dereferenced: this module's XML "
+                      "scanner is hand-written, expands no general entity "
+                      "and has no DTD retrieval to disable. Axis 1.4 "
+                      "itself was measured to REJECT a DOCTYPE outright, "
+                      "so against an Axis endpoint this is a failed "
+                      "attempt rather than a successful retrieval; it is "
+                      "reported because other XML stacks behind the same "
+                      "content type do not all reject it, and because the "
+                      "attempt itself is worth seeing.",
+        })
+        if cfg.log_attack_payload and doctype.system_id:
+            ev["payload"] = doctype.system_id.decode("latin-1",
+                                                     "replace")[:512]
+        if stats is not None:
+            stats["soap_doctype"] = stats.get("soap_doctype", 0) + 1
+        findings.append(make_finding(
+            "HTTP-098", ev,
+            severity=CRITICAL if escalate else HIGH, flow=flow_id))
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# HTTP-099: N-central semicolon + Forwarded access-control bypass
+# (CVE-2026-86206)
+# ---------------------------------------------------------------------------
+# Two parser disagreements have to land in the same request, and the
+# published analysis says neither half works alone:
+#
+#   the path    a ';' path parameter on the first segment, so Envoy's
+#               /dms/services prefix rule does not match. Jetty then strips
+#               the parameter and routes the request to the protected SOAP
+#               servlet anyway.
+#   the header  a Forwarded header whose for= value is a quoted string
+#               containing a backslash escape. Jetty unescapes it to a
+#               loopback address; N-central's own check keeps the backslash
+#               and fails open.
+#
+# Both halves were measured against Jetty 9.4.53 through an in-process
+# LocalConnector (oracles/JettyForwardedOracle.java), and three of the
+# measurements changed the rule:
+#
+#   %3B does NOT work.  "/dms%3Bx=1/services/ServerUI" decodes to the path
+#       "/dms;x=1/services/ServerUI", which no longer matches
+#       "/dms/services/..." at all, so the request never reaches the
+#       protected servlet. Matching %3B here would be a false positive, so
+#       only a raw ';' counts. The Envoy half rests on RFC 3986, whose
+#       grammar makes ';' an ordinary sub-delims pchar with no special
+#       meaning (section 3.3), so the normalization Envoy documents -
+#       normalize_path_rfc_3986 and merge_slashes - cannot strip it.
+#   Jetty honours the FIRST Forwarded element, not the last: with
+#       "for=1.2.3.4" ahead of the escaped value, remoteAddr stayed
+#       1.2.3.4. The rule still scans every instance and every element,
+#       because scanning only the first would be an evasion route, and it
+#       reports which position carried the escape so a non-first hit can be
+#       read as the attempt it is.
+#   X-Forwarded-For does NOT produce the disagreement: Jetty handed back
+#       the literal '"12\\7.0.0.1"' with quotes and backslash intact, so it
+#       is not unescaped and stays out of the rule.
+#
+# Quoted-pair unescaping was measured to happen ANYWHERE in the value:
+# leading, embedded and mid-value escapes all resolved to 127.0.0.1.
+#
+# Each half has a legitimate look-alike on its own - ;jsessionid= path
+# parameters are ordinary Java, and proxies quote for= values for IPv6 - so
+# the rule requires both. No real proxy backslash-escapes a character inside
+# a for node, which is what keeps the combination clean.
+
+NCENTRAL_GUARDED_SEGMENT = b"dms"
+
+
+def target_first_segment_param(target: bytes
+                               ) -> Optional[Tuple[bytes, bytes]]:
+    """First path segment and its raw path parameter, or None.
+
+    Only a raw ';' counts, measured: Jetty strips a raw parameter and routes
+    to the mapped servlet, while a %3B stays a literal character in the
+    segment and the prefix no longer matches anything.
+    """
+    path = target.split(b"?", 1)[0].split(b"#", 1)[0]
+    if path.startswith(b"/"):
+        path = path[1:]
+    if not path:
+        return None
+    first = path.split(b"/", 1)[0]
+    semi = first.find(b";")
+    if semi < 0:
+        return None
+    return first[:semi], first[semi + 1:]
+
+
+def split_quoted_csv(value: bytes) -> List[bytes]:
+    """Split a header value on commas that are not inside a quoted string.
+
+    A quoted for= node can legitimately contain a comma, so a naive split
+    would cut an element in half and lose the escape inside it.
+    """
+    out: List[bytes] = []
+    buf = bytearray()
+    in_quotes = False
+    i, n = 0, len(value)
+    while i < n:
+        ch = value[i:i + 1]
+        if in_quotes:
+            if ch == b"\\" and i + 1 < n:
+                buf += value[i:i + 2]
+                i += 2
+                continue
+            if ch == b'"':
+                in_quotes = False
+            buf += ch
+        elif ch == b'"':
+            in_quotes = True
+            buf += ch
+        elif ch == b",":
+            out.append(bytes(buf))
+            buf = bytearray()
+        else:
+            buf += ch
+        i += 1
+    out.append(bytes(buf))
+    return [e.strip(b" \t") for e in out if e.strip(b" \t")]
+
+
+def forwarded_for_nodes(values: Sequence[bytes]
+                        ) -> List[Tuple[int, int, bytes]]:
+    """Every for= node across all header instances and all elements.
+
+    Returns (instance_index, element_index, raw_value) with the raw value
+    exactly as it appeared, quotes and backslashes intact, because the
+    escape is the thing being detected and unescaping first would destroy
+    the evidence.
+    """
+    out: List[Tuple[int, int, bytes]] = []
+    for hi, value in enumerate(values):
+        for ei, element in enumerate(split_quoted_csv(value)):
+            for param in split_quoted_csv_semicolons(element):
+                eq = param.find(b"=")
+                if eq < 0:
+                    continue
+                if param[:eq].strip(b" \t").lower() != b"for":
+                    continue
+                out.append((hi, ei, param[eq + 1:].strip(b" \t")))
+    return out
+
+
+def split_quoted_csv_semicolons(element: bytes) -> List[bytes]:
+    """Split one Forwarded element into parameters on unquoted ';'."""
+    out: List[bytes] = []
+    buf = bytearray()
+    in_quotes = False
+    i, n = 0, len(element)
+    while i < n:
+        ch = element[i:i + 1]
+        if in_quotes:
+            if ch == b"\\" and i + 1 < n:
+                buf += element[i:i + 2]
+                i += 2
+                continue
+            if ch == b'"':
+                in_quotes = False
+            buf += ch
+        elif ch == b'"':
+            in_quotes = True
+            buf += ch
+        elif ch == b";":
+            out.append(bytes(buf))
+            buf = bytearray()
+        else:
+            buf += ch
+        i += 1
+    out.append(bytes(buf))
+    return [p for p in (x.strip(b" \t") for x in out) if p]
+
+
+def forwarded_escaped_quoted(raw: bytes) -> Optional[bytes]:
+    """Resolve a quoted for= node that contains a backslash escape.
+
+    Returns the unescaped value, or None when the node is not a quoted
+    string or carries no escape. Quoted-pair handling matches Jetty, which
+    was measured to unescape anywhere in the value rather than only in
+    certain positions, so a legitimate quoted IPv6 node such as
+    for="[2001:db8::1]:4711" returns None and cannot fire.
+    """
+    if len(raw) < 2 or not raw.startswith(b'"') or not raw.endswith(b'"'):
+        return None
+    inner = raw[1:-1]
+    if b"\\" not in inner:
+        return None
+    out = bytearray()
+    i, n = 0, len(inner)
+    saw_escape = False
+    while i < n:
+        ch = inner[i:i + 1]
+        if ch == b"\\" and i + 1 < n:
+            out += inner[i + 1:i + 2]
+            saw_escape = True
+            i += 2
+            continue
+        out += ch
+        i += 1
+    if not saw_escape:
+        return None
+    return bytes(out)
+
+
+def _is_loopback_node(resolved: bytes) -> bool:
+    """Does an unescaped for node name a loopback address?
+
+    Reported, never required: requiring it would be an evasion route,
+    because which addresses N-central's own check treats as internal is not
+    published. A bare host:port and a bracketed IPv6 node are both handled.
+    The literal tests are the module's own hand-written ones, so this adds
+    no network import to a module that must not have one.
+    """
+    text = resolved.strip().decode("latin-1", "replace")
+    if text.startswith("["):
+        close = text.find("]")
+        if close > 0:
+            host = text[1:close]
+            return _is_ipv6_literal(host) and _ipv6_is_loopback(host)
+        return False
+    host = text.rsplit(":", 1)[0] if text.count(":") == 1 else text
+    if _is_ipv4_literal(host):
+        return host.startswith("127.")
+    if _is_ipv6_literal(host):
+        return _ipv6_is_loopback(host)
+    return False
+
+
+def _ipv6_is_loopback(host: str) -> bool:
+    """::1 in any of its spellings, without importing a network library."""
+    text = host.lower()
+    if "%" in text:
+        text = text.split("%", 1)[0]
+    if "::" not in text:
+        groups = text.split(":")
+    else:
+        head, _, tail = text.partition("::")
+        hg = [g for g in head.split(":") if g]
+        tg = [g for g in tail.split(":") if g]
+        if len(hg) + len(tg) > 8:
+            return False
+        groups = hg + ["0"] * (8 - len(hg) - len(tg)) + tg
+    if len(groups) != 8:
+        return False
+    try:
+        vals = [int(g or "0", 16) for g in groups]
+    except ValueError:
+        return False
+    if any(v < 0 or v > 0xFFFF for v in vals):
+        return False
+    return vals == [0, 0, 0, 0, 0, 0, 0, 1]
+
+
+def check_ncentral_forwarded_bypass(
+        msg: "ParsedMessage",
+        cfg: WatchConfig = WATCH_DEFAULTS,
+        stats: Optional[Dict[str, int]] = None,
+        flow_id: Optional[str] = None,
+        target_override: Optional[bytes] = None,
+        forwarded_override: Optional[Sequence[bytes]] = None,
+        transport: str = "http/1.1") -> List[Finding]:
+    """HTTP-099 over one request's target and headers."""
+    findings: List[Finding] = []
+    if msg is not None and msg.kind != "request" and target_override is None:
+        return findings
+    target = target_override if target_override is not None else (
+        msg.target or b"")
+    seg = target_first_segment_param(target)
+    if seg is None:
+        return findings
+    segment, param = seg
+    if segment != NCENTRAL_GUARDED_SEGMENT:
+        return findings
+    values = (list(forwarded_override) if forwarded_override is not None
+              else list(msg.get_all(b"forwarded")))
+    if not values:
+        return findings
+    for hi, ei, raw in forwarded_for_nodes(values):
+        resolved = forwarded_escaped_quoted(raw)
+        if resolved is None:
+            continue
+        if stats is not None:
+            stats["ncentral_forwarded_escape"] = (
+                stats.get("ncentral_forwarded_escape", 0) + 1)
+        ev = {
+            "attack": "N-central access-control bypass",
+            "transport": transport,
+            "path_segment": segment.decode("latin-1")[:40],
+            "path_parameter": param.decode("latin-1")[:120],
+            "target": target.split(b"?")[0].decode("latin-1")[:200],
+            "forwarded_instance": hi,
+            "forwarded_element": ei,
+            "honoured_by_jetty": hi == 0 and ei == 0,
+            "for_raw": raw.decode("latin-1", "replace")[:120],
+            "for_resolved": resolved.decode("latin-1", "replace")[:120],
+            "resolves_to_loopback": _is_loopback_node(resolved),
+            "note": "Two parser disagreements in one request. The ';' on "
+                    "the first path segment means the proxy's "
+                    "/dms/services prefix rule does not match, while Jetty "
+                    "strips the parameter and routes to the protected SOAP "
+                    "servlet - measured, and only for a raw ';': a %3B "
+                    "stays a literal character in the segment and reaches "
+                    "nothing. The Forwarded for= node is a quoted string "
+                    "carrying a backslash escape, which Jetty unescapes "
+                    "anywhere in the value while N-central's own check "
+                    "keeps the backslash and fails open. Each half has a "
+                    "legitimate look-alike - ;jsessionid= path parameters, "
+                    "and quoted for= nodes for IPv6 - but no real proxy "
+                    "backslash-escapes a character inside a for node, so "
+                    "the combination is the detection. Jetty was measured "
+                    "to honour only the FIRST element, so a hit in a later "
+                    "position is an attempt this Jetty would not have "
+                    "acted on; every position is still scanned, because "
+                    "reading only the first would be an evasion route and "
+                    "which element N-central's own check reads is not "
+                    "published. X-Forwarded-For is deliberately absent: it "
+                    "was measured NOT to be unescaped, so it cannot "
+                    "produce this disagreement. This is the entry point "
+                    "CVE-2026-86207 needs.",
+        }
+        if cfg.log_attack_payload:
+            ev["payload"] = raw.decode("latin-1", "replace")[:512]
+        findings.append(make_finding("HTTP-099", ev, flow=flow_id))
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Tier G: content-coding validation
+# ---------------------------------------------------------------------------
+# HTTP-090 Node2Shell / HTTP2Shell / Brotli2Shell (CVE-2026-111497).
+#
+# One bug under four names: an out-of-bounds write in Google's reference
+# Brotli decoder. A block-switch command for a block category that declares
+# only one block type has nothing to switch to; the vulnerable decoder
+# returned the same status for that case as for "needs more input", kept
+# buffering, and overran (CWE-252). The fixing commit, 0ed4268a, makes
+# DecodeBlockTypeAndLength return BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH
+# when the block type count is one or less.
+#
+# That error code IS the detection. We never need the trigger's internals,
+# so nothing here goes near the disclosure ceiling: a patched decoder tells
+# us what a vulnerable one would have done, and the stream is simply handed
+# to it with the output thrown away.
+#
+# ARMING. A vulnerable decoder inside the sensor would make Ragnar
+# exploitable by the traffic it watches, so HTTP-090 refuses to arm unless
+# the decoder it is about to use is demonstrably patched. The obvious test -
+# a version floor - is WRONG IN BOTH DIRECTIONS, measured here on
+# 2026-11-22 against three real compiled libraries:
+#
+#   upstream 1.1.0, unpatched      version 1.1.0   errstr(-17) = "INVALID"
+#   upstream 1.2.1, patched        version 1.2.1   errstr(-17) = BLOCK_SWITCH
+#   Ubuntu 1.1.0-2ubuntu0.1        version 1.1.0   errstr(-17) = BLOCK_SWITCH
+#
+# The third is a distro security update dated 2026-10-25 that backports the
+# fix and keeps the old version string. A floor of 1.0.10/1.1.1/1.2.1 would
+# refuse to arm on a perfectly safe sensor and run blind, and "1.1.0" on its
+# own says nothing either way - the same backport trap this module already
+# records for X-Powered-By version posture.
+#
+# So the gate is a direct probe of the COMPILED library: upstream introduced
+# the -17 code in the fixing commit, replacing a reserved slot, so a library
+# that names it has the fix and one that answers "INVALID" does not. The
+# version is recorded as an attribute and never gates. It also means a host
+# whose distro has patched libbrotli needs no vendored build at all; a
+# vendored one is the remedy when the probe fails, not the default.
+BROTLI_BLOCK_SWITCH_CODE = -17
+BROTLI_BLOCK_SWITCH_NAME = "BLOCK_SWITCH"
+BROTLI_RESULT_ERROR, BROTLI_RESULT_SUCCESS = 0, 1
+BROTLI_RESULT_NEEDS_MORE_INPUT, BROTLI_RESULT_NEEDS_MORE_OUTPUT = 2, 3
+BROTLI_PARAM_LARGE_WINDOW = 1
+BROTLI_OUT_CHUNK = 64 * 1024          # output is discarded; this never grows
+BROTLI_TIME_BUDGET = 2.0              # seconds per stream, then abandoned
+BROTLI_SONAMES = ("libbrotlidec.so.1", "libbrotlidec.so", "libbrotlidec.dylib")
+
+
+def brotli_patched(error_string_for_minus_17: str) -> bool:
+    """Does this library carry the CVE-2026-111497 fix?
+
+    The whole arming decision, as one pure function, because that is the
+    only way to test it without an unpatched library to hand. Upstream
+    introduced BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH for code -17 in the
+    fixing commit, replacing a reserved slot, so naming it is the evidence
+    and the version is not.
+    """
+    return BROTLI_BLOCK_SWITCH_NAME in (error_string_for_minus_17 or "")
+
+
+class BrotliArmingError(RuntimeError):
+    """The decoder available is not demonstrably patched, so HTTP-090 stays
+    disarmed. Raised rather than returning a flag, because a silent pass
+    here is the one outcome that must not be possible."""
+
+
+class BrotliProbe:
+    """A libbrotli that has passed the arming probe."""
+
+    def __init__(self, lib: Any, path: str, version: Tuple[int, int, int]):
+        self.lib = lib
+        self.path = path
+        self.version = version
+        self.decodes = 0
+        self.abandoned = 0
+
+    @property
+    def version_string(self) -> str:
+        return "%d.%d.%d" % self.version
+
+    def decode_status(self, data: bytes,
+                      budget: float = BROTLI_TIME_BUDGET) -> Dict[str, Any]:
+        """Stream `data` through the decoder and report only how it ended.
+
+        The output is written into one fixed buffer that is reused every
+        iteration and never read, so a 23 MB body costs 64 KiB of output
+        memory. The large-window extension is refused, which holds the
+        window at the RFC 7932 maximum.
+        """
+        lib = self.lib
+        state = lib.BrotliDecoderCreateInstance(None, None, None)
+        if not state:
+            return {"status": "no_instance"}
+        self.decodes += 1
+        started = time.monotonic()
+        try:
+            lib.BrotliDecoderSetParameter(state, BROTLI_PARAM_LARGE_WINDOW, 0)
+            inbuf = (ctypes.c_ubyte * max(len(data), 1)).from_buffer_copy(
+                data or b"\x00")
+            next_in = ctypes.cast(inbuf, ctypes.POINTER(ctypes.c_ubyte))
+            avail_in = ctypes.c_size_t(len(data))
+            outbuf = (ctypes.c_ubyte * BROTLI_OUT_CHUNK)()
+            total_out = ctypes.c_size_t(0)
+            while True:
+                if time.monotonic() - started > budget:
+                    self.abandoned += 1
+                    return {"status": "abandoned_time_budget",
+                            "seconds": round(time.monotonic() - started, 3),
+                            "bytes_consumed": len(data) - avail_in.value}
+                next_out = ctypes.cast(outbuf, ctypes.POINTER(ctypes.c_ubyte))
+                avail_out = ctypes.c_size_t(BROTLI_OUT_CHUNK)
+                res = lib.BrotliDecoderDecompressStream(
+                    state, ctypes.byref(avail_in), ctypes.byref(next_in),
+                    ctypes.byref(avail_out), ctypes.byref(next_out),
+                    ctypes.byref(total_out))
+                consumed = len(data) - avail_in.value
+                if res == BROTLI_RESULT_ERROR:
+                    code = int(lib.BrotliDecoderGetErrorCode(state))
+                    name = lib.BrotliDecoderErrorString(code)
+                    return {"status": "error", "error_code": code,
+                            "error_name": (name or b"").decode("latin-1"),
+                            "bytes_consumed": consumed,
+                            "bytes_out": total_out.value}
+                if res == BROTLI_RESULT_SUCCESS:
+                    return {"status": "success", "bytes_consumed": consumed,
+                            "bytes_out": total_out.value}
+                if res == BROTLI_RESULT_NEEDS_MORE_INPUT:
+                    # The captured body ended mid-stream. Truncation is
+                    # ordinary on a tap and is never a finding.
+                    return {"status": "needs_more_input",
+                            "bytes_consumed": consumed,
+                            "bytes_out": total_out.value}
+                # NEEDS_MORE_OUTPUT: loop, reusing the same buffer.
+        finally:
+            lib.BrotliDecoderDestroyInstance(state)
+
+
+def arm_brotli(path: Optional[str] = None) -> BrotliProbe:
+    """Load a libbrotli and prove it is patched, or refuse.
+
+    `path` pins an explicit library; without it the host's own is tried,
+    which is the right default now that distros have backported the fix.
+    """
+    candidates = [path] if path else list(BROTLI_SONAMES)
+    errors: List[str] = []
+    for cand in candidates:
+        if not cand:
+            continue
+        try:
+            lib = ctypes.CDLL(cand)
+        except OSError as exc:
+            errors.append(f"{cand}: {exc}")
+            continue
+        try:
+            lib.BrotliDecoderVersion.restype = ctypes.c_uint32
+            lib.BrotliDecoderErrorString.restype = ctypes.c_char_p
+            lib.BrotliDecoderErrorString.argtypes = [ctypes.c_int]
+            lib.BrotliDecoderGetErrorCode.restype = ctypes.c_int
+            lib.BrotliDecoderGetErrorCode.argtypes = [ctypes.c_void_p]
+            lib.BrotliDecoderCreateInstance.restype = ctypes.c_void_p
+            lib.BrotliDecoderDestroyInstance.argtypes = [ctypes.c_void_p]
+            lib.BrotliDecoderSetParameter.argtypes = [
+                ctypes.c_void_p, ctypes.c_int, ctypes.c_uint32]
+            lib.BrotliDecoderDecompressStream.restype = ctypes.c_int
+            raw = int(lib.BrotliDecoderVersion())
+            version = (raw >> 24, (raw >> 12) & 0xFFF, raw & 0xFFF)
+            name = (lib.BrotliDecoderErrorString(
+                BROTLI_BLOCK_SWITCH_CODE) or b"").decode("latin-1")
+        except (AttributeError, OSError) as exc:
+            errors.append(f"{cand}: missing symbol ({exc})")
+            continue
+        if not brotli_patched(name):
+            errors.append(
+                f"{cand}: version %d.%d.%d does not name the block-switch "
+                f"error code (errstr(-17) = {name!r}); this decoder has not "
+                f"been patched for CVE-2026-111497" % version)
+            continue
+        return BrotliProbe(lib, cand, version)
+    raise BrotliArmingError(
+        "HTTP-090 not armed: no patched libbrotli found. "
+        + "; ".join(errors[:4])
+        + ". A patched decoder names BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH "
+          "for code -17; note a distro backport keeps its old version "
+          "string, so the version is not the test.")
+
+
+def has_brotli_coding(msg: ParsedMessage) -> Optional[str]:
+    """Is `br` anywhere in this message's Content-Encoding coding list?"""
+    for raw in msg.get_all(b"content-encoding"):
+        for token in raw.split(b","):
+            if token.strip().lower() == b"br":
+                return raw.decode("latin-1")[:80]
+    return None
+
+
+def check_brotli(msg: ParsedMessage, body: bytes, body_info: Dict[str, Any],
+                 probe: Optional[BrotliProbe],
+                 stats: Optional[Dict[str, int]] = None) -> List[Finding]:
+    """HTTP-090. Nothing happens unless a patched decoder is armed."""
+    if probe is None:
+        return []
+    coding = has_brotli_coding(msg)
+    if coding is None or not body:
+        return []
+    if stats is not None:
+        stats["brotli_bodies"] = stats.get("brotli_bodies", 0) + 1
+    result = probe.decode_status(body)
+    status = result.get("status")
+    if status != "error":
+        # Truncation, success and a time-budget abandon are all ordinary.
+        if stats is not None:
+            stats["brotli_" + str(status)] = (
+                stats.get("brotli_" + str(status), 0) + 1)
+        return []
+    if result.get("error_code") != BROTLI_BLOCK_SWITCH_CODE:
+        # Every other format error is legitimate traffic or recon. The
+        # published checker sends valid streams and padded malformed bodies
+        # that produce other codes, and neither is pathognomonic.
+        if stats is not None:
+            stats["brotli_other_format_error"] = (
+                stats.get("brotli_other_format_error", 0) + 1)
+        return []
+    ev = {
+        "direction": "request" if msg.kind == "request" else "response",
+        "method": (msg.method or b"").decode("latin-1") or None,
+        "target": (msg.target or b"").decode("latin-1")[:200] or None,
+        "status": msg.status,
+        "content_encoding": coding,
+        "bytes_consumed_at_error": result.get("bytes_consumed"),
+        "body_length_observed": len(body),
+        "body_complete": bool(body_info.get("complete")),
+        "body_truncated_at_cap": bool(body_info.get("truncated")),
+        "framing": body_info.get("framing"),
+        "decoder_error": result.get("error_name"),
+        "decoder_version": probe.version_string,
+        "decoder_path": probe.path,
+        "body_digest": redact(body),
+        "note": "A patched decoder rejected this stream as a block switch "
+                "for a category declaring one block type - the exact "
+                "condition an unpatched decoder mistook for 'needs more "
+                "input' before overrunning. No encoder produces it. The "
+                "decompressed output is discarded and never logged. This "
+                "records an attack on the wire, not a compromised host.",
+    }
+    return [make_finding("HTTP-090", ev)]
+
+
+# ---------------------------------------------------------------------------
 # Tier A + B + C: rules over one HTTP/1 message
 # ---------------------------------------------------------------------------
 
@@ -1337,6 +6886,8 @@ def check_credentials(msg: ParsedMessage, body: bytes,
 def analyse_http1_message(msg: ParsedMessage, raw: bytes,
                           service: Optional[str] = None,
                           server_banner: Optional[bytes] = None,
+                          cfg: WatchConfig = WATCH_DEFAULTS,
+                          stats: Optional[Dict[str, int]] = None,
                           ) -> List[Finding]:
     """Run every Tier A/B/C rule over one parsed message."""
     findings: List[Finding] = []
@@ -1470,6 +7021,47 @@ def analyse_http1_message(msg: ParsedMessage, raw: bytes,
         findings.extend(check_range_overflow(msg))
         findings.extend(check_accept_encoding(msg))
         findings.extend(check_credentials(msg, body, service))
+        # --- Tier E ---
+        findings.extend(check_shellshock(msg, cfg))
+        findings.extend(check_java4shell(msg))
+        findings.extend(check_struts_s2045(msg, cfg))
+        findings.extend(check_exchange_proxylogon(msg, cfg))
+        findings.extend(check_ncentral_forwarded_bypass(msg, cfg, stats))
+        findings.extend(check_lookup_grammar(msg, cfg, stats))
+        # --- Tier F ---
+        # The decoded body is built once and shared: dechunking a 23 MB
+        # body twice would be the kind of cost that gets a rule disabled.
+        decoded, body_info = request_body(msg, raw, cfg.body_cap)
+        findings.extend(check_react2shell(msg, decoded, body_info, cfg,
+                                          stats))
+        findings.extend(check_spring4shell(msg, decoded, body_info, cfg))
+        findings.extend(check_struts_s2046(msg, decoded, body_info, cfg))
+        findings.extend(check_exchange_proxyshell(msg, decoded, cfg))
+        findings.extend(check_sharepoint_toolshell(msg, decoded, cfg, stats))
+        php_ctype, php_cparams = parse_content_type(msg.get(b"content-type"))
+        struts_parts: Sequence[MultipartPart] = ()
+        if php_ctype == b"multipart/form-data":
+            php_parts, _ = parse_multipart(
+                decoded, php_cparams.get(b"boundary", b""))
+            findings.extend(check_php_aftershell(msg, php_parts, cfg, stats))
+            struts_parts = php_parts
+        findings.extend(check_struts_param_rules(
+            msg, decoded, cfg, stats, parts=struts_parts,
+            body_ctype=php_ctype or b""))
+        findings.extend(check_rack_method_override(
+            msg, decoded, cfg, stats, parts=struts_parts,
+            body_ctype=php_ctype or b""))
+        findings.extend(check_soap_axis(msg, decoded, body_info, cfg, stats))
+        # --- Tier G ---
+        findings.extend(check_brotli(msg, decoded, body_info, cfg.brotli,
+                                     stats))
+    elif cfg.brotli is not None and cfg.brotli_scan_responses:
+        # Outbound fetches: a client library decoding a br response is the
+        # other half of this CVE. Most outbound traffic is TLS, so this is
+        # off unless an operator turns it on.
+        decoded, body_info = request_body(msg, raw, cfg.body_cap)
+        findings.extend(check_brotli(msg, decoded, body_info, cfg.brotli,
+                                     stats))
 
     return findings
 
@@ -1495,9 +7087,14 @@ class H2Stream:
 class H2ConnectionState:
     """Per-connection HTTP/2 state for the Tier D rules."""
 
-    def __init__(self, flow_id: str, synced: bool = True):
+    def __init__(self, flow_id: str, synced: bool = True,
+                 cfg: WatchConfig = WATCH_DEFAULTS,
+                 php_cfg: Optional[PhpCookieConfig] = None):
         self.flow_id = flow_id
         self.synced = synced
+        if php_cfg is not None:
+            cfg = replace(cfg, php=php_cfg)
+        self.cfg = cfg
         self.dec_client = HpackDecoder(synced=synced)
         self.dec_server = HpackDecoder(synced=synced)
         self.streams: Dict[int, H2Stream] = {}
@@ -1683,6 +7280,116 @@ class H2ConnectionState:
         if is_gnmi:
             self.gnmi_seen = True
 
+        # --- Tier E over decoded h2 request headers ---
+        # _finish_block has already run HPACK, so every rule that reads
+        # only headers and the request line gets h2c coverage for free.
+        # The rules that need a body (the rest of Tier F, and Tier G) do
+        # not: DATA frames reach no body sink, which the README states as a
+        # gap. HTTP-086/087/088 are here because they read no body either -
+        # over-approximation on a leg Exchange and SharePoint cannot
+        # actually serve, since IIS supports HTTP/2 only over TLS.
+        if from_client:
+            findings.extend(check_shellshock_fields(
+                headers, obs_fold=False, cfg=self.cfg, flow_id=self.flow_id))
+            findings.extend(check_java4shell_fields(
+                headers, flow_id=self.flow_id))
+            cookies = [v for n, v in headers if n.lower() == b"cookie"]
+            authority = hmap.get(b":authority") or hmap.get(b"host") or b"host"
+            method = hmap.get(b":method", b"")
+            findings.extend(check_exchange_proxylogon_fields(
+                cookies, method, path, cfg=self.cfg, flow_id=self.flow_id))
+            findings.extend(check_exchange_proxyshell_fields(
+                path, authority, method, hmap.get(b"authorization"), cookies,
+                cfg=self.cfg, flow_id=self.flow_id))
+            # stats is None here: the h2 connection state carries no
+            # counter dict, and the R2 counter is corroborating only, so it
+            # is left un-plumbed rather than threading a new field through
+            # for it. R1 is unaffected.
+            findings.extend(check_sharepoint_toolshell_fields(
+                path, hmap.get(b"referer"), method, b"", body_visible=False,
+                cfg=self.cfg, stats=None, flow_id=self.flow_id))
+            # The lookup walker reads only headers and the request target,
+            # so h2c costs nothing. HTTP-089 is not here: it needs the
+            # multipart body, and DATA frames reach no body sink, which the
+            # README states as a gap.
+            h2_carriers: List[Tuple[str, bytes]] = []
+            for hn, hv in headers:
+                hl = hn.lower()
+                if hl == b":path":
+                    continue
+                if hl == b"cookie":
+                    if LOOKUP_OPEN in hv:
+                        h2_carriers.append(("header:cookie", hv))
+                    for cn, cv in parse_cookie(hv):
+                        if LOOKUP_OPEN in cv:
+                            h2_carriers.append(
+                                ("cookie:" + cn.decode("latin-1")[:48], cv))
+                    continue
+                if hl == b"authorization":
+                    continue
+                if LOOKUP_OPEN in hv:
+                    h2_carriers.append(
+                        ("header:" + hl.decode("latin-1")[:48],
+                         hv.strip(b" \t")))
+            if LOOKUP_OPEN in path:
+                h2_carriers.append(("target_raw", path))
+                q = path.find(b"?")
+                if q >= 0:
+                    for pair in re.split(rb"[&;]", path[q + 1:]):
+                        if not pair:
+                            continue
+                        eq = pair.find(b"=")
+                        pn = urldecode(pair[:eq] if eq >= 0 else pair)
+                        pv = urldecode(pair[eq + 1:]) if eq >= 0 else pn
+                        if LOOKUP_OPEN in pv:
+                            h2_carriers.append(
+                                ("query:" + pn.decode("latin-1")[:48], pv))
+            if h2_carriers:
+                findings.extend(check_lookup_grammar_fields(
+                    h2_carriers, cfg=self.cfg, stats=self.cfg and None,
+                    flow_id=self.flow_id))
+            # HTTP-099 rides :path plus the decoded Forwarded header, so
+            # unlike the body-carried rules it gets full h2c coverage.
+            fwd_h2 = [hv.strip(b" \t") for hl, hv in headers
+                      if hl.lower() == b"forwarded"]
+            if fwd_h2:
+                findings.extend(check_ncentral_forwarded_bypass(
+                    None, self.cfg, None, self.flow_id,
+                    target_override=path, forwarded_override=fwd_h2,
+                    transport="h2c"))
+            # HTTP-094 and HTTP-095 read parameter NAMES only, so the query
+            # string in :path gives them h2c coverage for nothing. HTTP-093
+            # is not here: it needs the multipart file parts to know which
+            # properties Struts would have set, and DATA frames reach no
+            # body sink - stated in the README as a gap.
+            if b"?" in path:
+                for carrier, pname, _ in struts_param_names(
+                        path, b"", b"", ()):
+                    nav = struts_nav_verdict(pname)
+                    if nav is not None:
+                        ev = dict(nav)
+                        ev.update({
+                            "attack": "Struts S2-016",
+                            "carrier": carrier, "transport": "h2c",
+                            "param": pname.decode("latin-1")[:200],
+                            "param_length": len(pname),
+                            "param_digest": redact(pname),
+                        })
+                        findings.append(make_finding("HTTP-094", ev,
+                                                     flow=self.flow_id))
+                    dmi = struts_dmi_verdict(pname)
+                    if dmi is not None:
+                        ev = dict(dmi)
+                        ev.update({
+                            "attack": "Struts S2-032",
+                            "carrier": carrier, "transport": "h2c",
+                            "param": pname.decode("latin-1")[:200],
+                            "param_length": len(pname),
+                            "param_digest": redact(pname),
+                        })
+                        findings.append(make_finding("HTTP-095", ev,
+                                                     flow=self.flow_id))
+
         if from_client and self._once("h2c_posture"):
             findings.append(make_finding("HTTP-060", {
                 "grpc": is_grpc,
@@ -1715,6 +7422,17 @@ class H2ConnectionState:
                             "violation is posture.",
                 }, severity=HIGH if total > 8192 else WARN,
                     flow=self.flow_id))
+
+        # --- HTTP-048 PHP session-cookie leak, response direction ---
+        # _finish_block decodes server header blocks with dec_server, so the
+        # fields are already here; only the rules above happened to be
+        # client-side. A mid-stream join leaves the decoder unsynced and
+        # _finish_block returns before this point - a stated blind spot, not
+        # a silent one.
+        if not from_client:
+            findings.extend(php_cookie_findings(
+                php_cookie_hits_fields(headers, self.cfg.php),
+                flow_id=self.flow_id, http_version=b"2"))
 
         # --- HTTP-065 credentials in gRPC metadata ---
         if from_client:
@@ -1815,6 +7533,12 @@ class SlowTracker:
 # ---------------------------------------------------------------------------
 
 FLOW_IDLE_TIMEOUT = 120.0
+# How often feed() reaps idle state. Nothing called expire() until this was
+# wired in: a sensor that runs for weeks under systemd was accumulating a
+# Flow for every connection it had ever seen, and the HTTP-048 dedup table
+# would have joined it. Reaping on a timer inside feed() means every entry
+# point gets it - live capture, a pcap read and a replay alike.
+EXPIRE_INTERVAL = 30.0
 
 
 @dataclass
@@ -1824,17 +7548,26 @@ class Direction:
     first_byte_at: float = 0.0
     bytes_seen: int = 0
     head_analysed: bool = False
+    # HTTP-048 state for the head currently in buf: how many hits have
+    # already been reported, and the buffer length at the last scan.
+    php_reported: int = 0
+    php_scanned_len: int = -1
 
 
 class Flow:
     """One TCP flow, classified by its first bytes rather than by port."""
 
     def __init__(self, flow_id: str, src: str, dst: str,
-                 service: Optional[str] = None, now: float = 0.0):
+                 service: Optional[str] = None, now: float = 0.0,
+                 port: int = 0):
         self.flow_id = flow_id
         self.src = src
         self.dst = dst
         self.service = service
+        # dissect_packet normalises src to the client and dst to the server,
+        # so (dst, port) is the server identity HTTP-048 dedups on.
+        self.port = port
+        self.upload_progress_seen = False
         self.created = now
         self.last_seen = now
         self.protocol: Optional[str] = None    # "http1" | "h2c" | None
@@ -1876,12 +7609,27 @@ class HttpWatch:
     """The analyzer. Fed TCP payload; returns findings. Emits nothing."""
 
     def __init__(self, tcp_ports: Sequence[int] = DEFAULT_TCP_PORTS,
-                 slow_tracker: Optional[SlowTracker] = None):
+                 slow_tracker: Optional[SlowTracker] = None,
+                 cfg: WatchConfig = WATCH_DEFAULTS,
+                 php_cfg: Optional[PhpCookieConfig] = None):
         self.tcp_ports = tuple(tcp_ports)
         self.flows: Dict[str, Flow] = {}
         self.slow = slow_tracker or SlowTracker()
+        # php_cfg is kept as a convenience for callers that only want to set
+        # the HTTP-048 threshold; it folds into the one config object.
+        if php_cfg is not None:
+            cfg = replace(cfg, php=php_cfg)
+        self.cfg = cfg
+        self.leak_dedup = LeakDedup()
+        self.attack_dedup = LeakDedup(ATTACK_DEDUP_WINDOW)
+        self._last_expire = 0.0
         self.stats: Dict[str, int] = {
             "flows": 0, "http1_messages": 0, "h2_frames": 0, "findings": 0,
+            "leaks_suppressed": 0, "tierf_inspect_truncated": 0,
+            "attacks_suppressed": 0,
+            "toolshell_signout_nonallowlisted": 0,
+            "php_scalar_record_shape": 0,
+            "walker_budget_exceeded": 0,
         }
 
     # -- lifecycle --------------------------------------------------------
@@ -1889,7 +7637,8 @@ class HttpWatch:
               now: float) -> Flow:
         fl = self.flows.get(flow_id)
         if fl is None:
-            fl = Flow(flow_id, src, dst, SERVICE_PORTS.get(dport), now)
+            fl = Flow(flow_id, src, dst, SERVICE_PORTS.get(dport), now,
+                      port=dport)
             self.flows[flow_id] = fl
             self.stats["flows"] += 1
         fl.last_seen = now
@@ -1900,6 +7649,8 @@ class HttpWatch:
                 if now - f.last_seen > FLOW_IDLE_TIMEOUT]
         for k in dead:
             del self.flows[k]
+        self.leak_dedup.expire(now)
+        self.attack_dedup.expire(now)
 
     # -- the feed ---------------------------------------------------------
     def feed(self, flow_id: str, src: str, dst: str, dport: int,
@@ -1908,6 +7659,9 @@ class HttpWatch:
         now = time.time() if now is None else now
         if not payload:
             return []
+        if now - self._last_expire > EXPIRE_INTERVAL:
+            self._last_expire = now
+            self.expire(now)
         fl = self._flow(flow_id, src, dst, dport, now)
         d = fl.direction(from_client)
         if not d.bytes_seen:
@@ -1923,12 +7677,76 @@ class HttpWatch:
                 return []
             fl.protocol = proto
             if proto == "h2c":
-                fl.h2 = H2ConnectionState(flow_id, synced=True)
+                fl.h2 = H2ConnectionState(flow_id, synced=True,
+                                          cfg=self.cfg)
                 del d.buf[:len(H2_PREFACE)]
 
         if fl.protocol == "h2c":
-            return self._feed_h2(fl, d, from_client, now)
-        return self._feed_http1(fl, d, from_client, now)
+            out = self._feed_h2(fl, d, from_client, now)
+        else:
+            out = self._feed_http1(fl, d, from_client, now)
+        return self._dedup_attacks(self._dedup_leaks(out, fl, now), fl, now)
+
+    def _dedup_attacks(self, findings: List[Finding], fl: Flow,
+                       now: float) -> List[Finding]:
+        """Rate-limit each attack-class code per client/server pair."""
+        if not any(f.code in ATTACK_CODES for f in findings):
+            return findings
+        kept: List[Finding] = []
+        for f in findings:
+            if f.code not in ATTACK_CODES:
+                kept.append(f)
+                continue
+            allowed, suppressed = self.attack_dedup.allow(
+                (f"{f.code}|{fl.src}|{fl.dst}", fl.port), now)
+            if not allowed:
+                self.stats["attacks_suppressed"] += 1
+                continue
+            if suppressed:
+                f.evidence["suppressed_since_last"] = suppressed
+                f.evidence["dedup_window_seconds"] = self.attack_dedup.window
+            kept.append(f)
+        self.stats["findings"] -= len(findings) - len(kept)
+        return kept
+
+    def _dedup_leaks(self, findings: List[Finding], fl: Flow,
+                     now: float) -> List[Finding]:
+        """Rate-limit HTTP-048 to one per server address:port per window."""
+        if not any(f.code == "HTTP-048" for f in findings):
+            return findings
+        key = (fl.dst, fl.port)
+        kept: List[Finding] = []
+        for f in findings:
+            if f.code != "HTTP-048":
+                kept.append(f)
+                continue
+            allowed, suppressed = self.leak_dedup.allow(key, now)
+            if not allowed:
+                self.stats["leaks_suppressed"] += 1
+                continue
+            if suppressed:
+                f.evidence["suppressed_since_last"] = suppressed
+                f.evidence["dedup_window_seconds"] = self.leak_dedup.window
+            kept.append(f)
+        self.stats["findings"] -= len(findings) - len(kept)
+        return kept
+
+    def _php_scan(self, fl: Flow, d: Direction, section: bytes,
+                  http_version: Optional[bytes],
+                  partial: bool = False) -> List[Finding]:
+        """Run R1 over a response header section and report what is new.
+
+        Called on the head still arriving as well as on the complete one, so
+        it reports only hits beyond those already reported for this head.
+        """
+        hits = php_cookie_hits(section, self.cfg.php)
+        new = hits[d.php_reported:]
+        d.php_reported = len(hits)
+        if not new:
+            return []
+        return php_cookie_findings(
+            new, flow_id=fl.flow_id, http_version=http_version,
+            upload_progress=fl.upload_progress_seen, partial=partial)
 
     def join_midstream(self, flow_id: str) -> None:
         """Mark a flow as joined mid-connection.
@@ -1974,13 +7792,48 @@ class HttpWatch:
                     f = self.slow.record(fl.src, "headers", now, fl.flow_id)
                     if f:
                         findings.append(f)
+                # --- HTTP-048 on a head that can no longer complete ---
+                # A leak larger than MAX_HEADER_SECTION never produces a
+                # terminated header section, so a rule that waited for one
+                # would miss exactly the largest leaks. Below that cap the
+                # head still has every chance of completing, and the
+                # complete-head scan measures the real length instead of a
+                # floor - so the early scan deliberately starts only once
+                # the head is already past the cap. The scan is throttled to
+                # once per PHP_SCAN_GROWTH bytes and stops at
+                # PHP_SCAN_CEILING, which bounds the work on a head that
+                # never terminates at all.
+                if (not from_client
+                        and MAX_HEADER_SECTION < len(raw) <= PHP_SCAN_CEILING
+                        and len(raw) - d.php_scanned_len >= PHP_SCAN_GROWTH):
+                    d.php_scanned_len = len(raw)
+                    findings.extend(
+                        self._php_scan(fl, d, raw, None, partial=True))
+                if len(d.buf) > HEAD_BUFFER_CEILING:
+                    # This head will never complete. Stop growing the buffer,
+                    # keeping the prefix so nothing is re-anchored partway
+                    # through a stream; the flow leaves on the idle timer.
+                    del d.buf[HEAD_BUFFER_CEILING:]
                 break
             msg = parse_message(raw, kind)
             if msg is None or not msg.complete:
                 break
             self.stats["http1_messages"] += 1
 
+            if from_client and not fl.upload_progress_seen:
+                # Annotation source for HTTP-048, never a gate: PHP's
+                # upload-progress field must precede the file part, so the
+                # head of the body is where it is if it is anywhere.
+                ctype = (msg.get(b"content-type") or b"").lower()
+                if ctype.startswith(b"multipart/form-data"):
+                    window = raw[msg.body_offset:
+                                 msg.body_offset + UPLOAD_PROGRESS_WINDOW]
+                    if PHP_UPLOAD_PROGRESS_FIELD in window:
+                        fl.upload_progress_seen = True
+
             if not from_client:
+                findings.extend(self._php_scan(
+                    fl, d, raw[:msg.body_offset], msg.version))
                 banner = msg.get(b"server")
                 if banner:
                     fl.server_banner = banner
@@ -1990,7 +7843,8 @@ class HttpWatch:
                     consumed = msg.body_offset
                     del d.buf[:consumed]
                     fl.protocol = "h2c"
-                    fl.h2 = H2ConnectionState(fl.flow_id, synced=True)
+                    fl.h2 = H2ConnectionState(fl.flow_id, synced=True,
+                                              cfg=self.cfg)
                     other = fl.direction(True)
                     if bytes(other.buf).startswith(H2_PREFACE):
                         del other.buf[:len(H2_PREFACE)]
@@ -2026,14 +7880,18 @@ class HttpWatch:
                     d.head_analysed = True
                     findings.extend(analyse_http1_message(
                         msg, raw, service=fl.service,
-                        server_banner=fl.server_banner))
+                        server_banner=fl.server_banner, cfg=self.cfg,
+                        stats=self.stats))
                 break
 
             if not d.head_analysed:
                 findings.extend(analyse_http1_message(
                     msg, raw, service=fl.service,
-                    server_banner=fl.server_banner))
+                    server_banner=fl.server_banner, cfg=self.cfg,
+                        stats=self.stats))
             d.head_analysed = False
+            d.php_reported = 0
+            d.php_scanned_len = -1
             del d.buf[:consumed]
             if not d.buf:
                 break
@@ -2136,7 +7994,54 @@ def dissect_packet(pkt, ports: Sequence[int]) -> Optional[Dict[str, Any]]:
             "payload": payload, "from_client": from_client, "family": family}
 
 
+def php_cfg_from_args(args) -> PhpCookieConfig:
+    return php_cookie_config(
+        threshold=getattr(args, "php_cookie_max", PHP_COOKIE_MAX),
+        extra_names=getattr(args, "php_session_cookie_name", None) or ())
+
+
+def cfg_from_args(args) -> Tuple[WatchConfig, List[Dict[str, Any]]]:
+    """Build the config, and the health records that must be emitted.
+
+    Arming failure is returned as a record rather than swallowed: a Tier G
+    that quietly did not arm is the one outcome that must not be possible,
+    because it looks exactly like a segment with no attacks on it.
+    """
+    notices: List[Dict[str, Any]] = []
+    probe = None
+    if getattr(args, "brotli", False) or getattr(args, "brotli_lib", None):
+        try:
+            probe = arm_brotli(getattr(args, "brotli_lib", None))
+            notices.append({
+                "module": MODULE, "version": __version__, "type": "notice",
+                "status": "ok", "tier": "G", "code": "HTTP-090",
+                "armed": True, "decoder_path": probe.path,
+                "decoder_version": probe.version_string,
+                "reason": "libbrotli names the block-switch error code, so "
+                          "it carries the CVE-2026-111497 fix. The version "
+                          "is recorded but is not the test: a distro "
+                          "backport keeps its old version string.",
+            })
+        except BrotliArmingError as exc:
+            notices.append({
+                "module": MODULE, "version": __version__, "type": "notice",
+                "status": "error", "tier": "G", "code": "HTTP-090",
+                "armed": False, "reason": str(exc),
+            })
+    cfg = WatchConfig(
+        php=php_cfg_from_args(args),
+        log_attack_payload=bool(getattr(args, "log_attack_payload", False)),
+        body_cap=int(getattr(args, "body_cap", WATCH_DEFAULTS.body_cap)),
+        internal_cidrs=tuple(getattr(args, "internal_cidr", None) or ()),
+        brotli=probe,
+        brotli_scan_responses=bool(
+            getattr(args, "brotli_scan_responses", False)),
+    )
+    return cfg, notices
+
+
 def run_live(args) -> int:
+    _cfg, _notices = cfg_from_args(args)
     try:
         from scapy.all import sniff, IP, IPv6, TCP  # noqa: F401
     except ImportError:
@@ -2146,7 +8051,7 @@ def run_live(args) -> int:
 
     from scapy.all import IP as _IP, IPv6 as _IPv6, TCP as _TCP
 
-    watch = HttpWatch(tcp_ports=args.tcp_ports)
+    watch = HttpWatch(tcp_ports=args.tcp_ports, cfg=_cfg)
     bpf = args.bpf or build_bpf(args.tcp_ports)
     ports = set(args.tcp_ports)
 
@@ -2160,9 +8065,23 @@ def run_live(args) -> int:
         for f in findings:
             emit(finding_record(f, flow))
 
+    # systemd stops the unit with SIGTERM. Without this the run summary -
+    # packet counts, finding counts, how many duplicate leaks were
+    # suppressed - is lost on every normal stop, which is exactly when an
+    # operator wants it.
+    def _stop(signum, frame):
+        raise KeyboardInterrupt
+    try:
+        import signal
+        signal.signal(signal.SIGTERM, _stop)
+    except (ImportError, ValueError):
+        pass
+
     emit({"module": MODULE, "version": __version__, "type": "start",
           "status": "ok", "bpf": bpf, "iface": args.iface,
           "tcp_ports": list(args.tcp_ports)})
+    for notice in _notices:
+        emit(notice)
     try:
         sniff(iface=args.iface, filter=bpf, prn=handle, store=False,
               timeout=args.timeout or None)
@@ -2199,13 +8118,14 @@ def run_pcap(args) -> int:
     kernel has no IPv6 stack, and it is useful operationally for triaging
     a capture someone hands you.
     """
+    _cfg, _notices = cfg_from_args(args)
     try:
         from scapy.all import sniff
     except ImportError:
         print("scapy is required to read a capture file", file=sys.stderr)
         return 2
 
-    watch = HttpWatch(tcp_ports=args.tcp_ports)
+    watch = HttpWatch(tcp_ports=args.tcp_ports, cfg=_cfg)
     ports = list(args.tcp_ports)
     bpf = args.bpf or build_bpf(args.tcp_ports)
     seen = {"packets": 0, "dissected": 0, "ipv4": 0, "ipv6": 0}
@@ -2226,6 +8146,8 @@ def run_pcap(args) -> int:
     emit({"module": MODULE, "version": __version__, "type": "start",
           "status": "ok", "bpf": bpf, "pcap": args.pcap,
           "tcp_ports": ports})
+    for notice in _notices:
+        emit(notice)
     try:
         sniff(offline=args.pcap, filter=bpf, prn=handle, store=False)
     except Exception as exc:
@@ -2283,6 +8205,41 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--pcap", metavar="FILE",
                    help="read a capture file through the real BPF filter "
                         "and dissector instead of capturing live")
+    p.add_argument("--php-cookie-max", type=int, default=PHP_COOKIE_MAX,
+                   metavar="BYTES",
+                   help=f"HTTP-048 threshold (default {PHP_COOKIE_MAX}, the "
+                        f"RFC 6265 6.1 figure). Values at or below the "
+                        f"measured {PHP_COOKIE_NATIVE_CEILING}-byte native "
+                        f"generator ceiling are refused")
+    p.add_argument("--php-session-cookie-name", action="append", default=None,
+                   metavar="NAME",
+                   help="additional PHP session cookie name for HTTP-048 "
+                        "(a host with session.name changed); repeatable")
+    p.add_argument("--log-attack-payload", action="store_true",
+                   help="include the attacker-authored value on HTTP-080. "
+                        "Off by default: the text is the attacker's own, but "
+                        "it carries URLs, tokens and staging hosts an "
+                        "operator may not want in syslog")
+    p.add_argument("--body-cap", type=int, default=WATCH_DEFAULTS.body_cap,
+                   metavar="BYTES",
+                   help=f"how much decoded request body the Tier F rules "
+                        f"inspect (default {WATCH_DEFAULTS.body_cap})")
+    p.add_argument("--internal-cidr", action="append", default=None,
+                   metavar="CIDR",
+                   help="raise the priority of a Tier E finding whose source "
+                        "is inside this range; never gates a finding; "
+                        "repeatable")
+    p.add_argument("--brotli", action="store_true",
+                   help="arm HTTP-090. Refuses unless the decoder it would "
+                        "use demonstrably carries the CVE-2026-111497 fix")
+    p.add_argument("--brotli-lib", default=None, metavar="PATH",
+                   help="pin the libbrotlidec HTTP-090 uses instead of the "
+                        "host's own. Only needed when the host library "
+                        "fails the arming probe")
+    p.add_argument("--brotli-scan-responses", action="store_true",
+                   help="also validate br-coded RESPONSE bodies (outbound "
+                        "client fetches). Off by default: almost all "
+                        "outbound traffic is TLS and invisible here")
     p.add_argument("--print-bpf", action="store_true",
                    help="print the generated capture filter and exit")
     p.add_argument("--registry", action="store_true",
@@ -2290,6 +8247,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--version", action="version",
                    version=f"%(prog)s {__version__}")
     args = p.parse_args(argv)
+
+    try:
+        php_cfg_from_args(args)
+    except ValueError as exc:
+        print(f"httpwatch: {exc}", file=sys.stderr)
+        return 2
 
     if args.print_bpf:
         print(args.bpf or build_bpf(args.tcp_ports))

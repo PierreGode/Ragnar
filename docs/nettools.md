@@ -743,7 +743,7 @@ hosts already sent and transmits nothing (no Range test request, no h2 PING, no 
 HTTP over TLS is ciphertext after the handshake, so SNI / ALPN / JA4 / certificates stay with
 [TLS Watch](#tls-watch) and Cert Watch; the http.sys-over-TLS record flood (CVE-2026-47291) is TLS
 Watch's. One bounded `tcpdump` window (full snaplen, `-p`, packet cap), each packet dissected and fed
-through the vendored engine (`python/httpwatch.py`). **28 codes** in four tiers, each with a
+through the vendored engine (`python/httpwatch.py`, v7). **49 codes** in seven tiers, each with a
 confidence class — `exact` (the observation is the condition), `shape` (the malformation is read
 directly; whether the receiver is vulnerable is not observable), `heuristic` (a threshold or a
 name-matched field) or `posture`:
@@ -777,7 +777,12 @@ name-matched field) or `posture`:
   concurrently slow flows come from one source in 60 s. **No finding ever carries a usable secret** —
   usernames are reported, passwords / tokens / cookie values become an 8-hex SHA-256 tag (enough to
   spot the same secret twice). `HTTP-040` / `HTTP-041` stand down on TCP/5985, where RPC Watch owns
-  WinRM authentication posture.
+  WinRM authentication posture. **v3** adds `HTTP-048` (high): a PHP session cookie in a
+  `Set-Cookie` past any size a cookie can work at (4096 bytes, RFC 6265) — the **PHP2Shell**
+  memory-disclosure stage (`CVE-2026-109618` / `CVE-2026-109619`), where reclaimed worker heap leaks
+  into the cookie. It reports lengths, escape counts and a digest, never the leaked bytes, and fires
+  even before an oversized header section ends (marked as a lower bound). One finding per server per
+  5 minutes. Blind to TLS and to nginx → PHP-FPM over FastCGI.
 - **Tier D — h2c / gRPC** (`HTTP-060..065`): cleartext HTTP/2 in use (warn on gNMI / gNOI paths);
   **HTTP/2 Rapid Reset** (`CVE-2023-44487`, CISA KEV) counting only streams reset before the server
   sent any frame, against twice the server's own advertised `MAX_CONCURRENT_STREAMS` within 1 s;
@@ -787,6 +792,138 @@ name-matched field) or `posture`:
   `grpclb_client_stats` abort (`CVE-2023-1428`); and credentials in gRPC metadata. A connection joined
   mid-stream cannot rebuild the HPACK dynamic table, so header-content rules are skipped there rather
   than guessed; frame-level rules still run.
+- **Tier E — attack-shaped request headers** (*v3*; `HTTP-080`, `081`, `084`). **Attempt** findings:
+  they say trigger-shaped input crossed the segment, never that the target is vulnerable.
+  `HTTP-080` (high) — **Shellshock**: a header value that starts with the bash function-import prefix
+  `() {` (`CVE-2014-6271`, CISA KEV, and its siblings `CVE-2014-7169` / `-6277` / `-6278` / `-7186` /
+  `-7187`). The command text is the attacker's but carries URLs and tokens, so only a digest is
+  kept. `HTTP-081` (high) — **Java4Shell**: an authentication header with Base64 padding no encoder
+  produces, at the length that reaches the JDK intrinsic (`CVE-2026-114938`). `HTTP-084` (critical) —
+  **Struts S2-045**: a Content-Type that meets all three conditions Struts needs to evaluate it as
+  OGNL — the `multipart/form-data` literal, a value that does not start with `multipart/`, and an
+  OGNL opener (`CVE-2017-5638`). A single opener in a free-form field is deliberately not enough
+  (the Confluence `CVE-2022-26134` false-positive class), so S2-057 / S2-061 / `CVE-2017-9791` stay
+  named-but-deferred.
+- **Exchange and SharePoint** (*v4*; `HTTP-086` / `HTTP-088` in Tier E, `HTTP-087` in Tier F, all
+  critical, attempt findings). Each rule is the vendor's own check, inverted, so it has no benign
+  reading:
+  - `HTTP-086` — **ProxyLogon** (`CVE-2021-26855`, CISA KEV): an `X-BEResource` back-end cookie that
+    splits on `~` into exactly two parts with an integer version (what Exchange's own parser
+    accepts) and whose host part fails `Uri.CheckHostName` (the check the March 2021 patch added).
+    The raw and percent-decoded values are both judged. A plain host name, FQDN or IP literal
+    (bracketed or bare IPv6 included) stays silent, and so does a value Exchange itself rejects (two tildes, no version). The sibling
+    `X-AnonResource-Backend` cookie gets the host check on its whole value.
+  - `HTTP-087` — **ProxyShell / ProxyNotShell** (`CVE-2021-34473` / `CVE-2022-41040`, both CISA
+    KEV): a request routed to the autodiscover handler whose explicit-logon strip (the `Email`
+    parameter, duplicate keys comma-joined, case-folded) leaves it pointing at a different handler.
+    It keys on that mismatch, never on the back-end target, so the re-encoded targets that defeated
+    Microsoft's two URL-rewrite mitigations change nothing, and dot segments in the path are
+    resolved the way `Url.AbsoluteUri` does. An `Authorization` header or auth cookie marks the
+    authenticated ProxyNotShell form; a stripped target under `/powershell` marks the RCE stage.
+  - `HTTP-088` — **ToolShell** (`CVE-2025-49706`, CISA KEV, and its patch bypass `CVE-2025-53771`):
+    a SharePoint sign-out-page `Referer` (`/_layouts[/14|/15]/SignOut.aspx`, compared after
+    `System.Uri`-style normalisation, which keeps `//`) on a request that reaches the `ToolPane`
+    handler, matched by path segment so the trailing-slash bypass of the first patch is covered. A
+    sign-out Referer reaching any other page off the default allowlist is returned as the
+    `toolshell_signout_nonallowlisted` counter, never an alert, because administrators can extend
+    the allowlist.
+
+  **Vantage:** IIS serves HTTP/2 only over TLS, so these see only the **cleartext hop between a
+  TLS-offloading load balancer and the Exchange / SharePoint front end** (and run over h2c anyway).
+  They are blind to TLS end to end, which is the default on Exchange 2019 CU14+ with Extended
+  Protection, so **no finding there is not evidence of safety**. Patch state is never on the wire.
+  On these products the surrounding headers are live credentials, so a finding carries the 5-tuple,
+  method, canonical paths and a digest of the matched value — never other cookies,
+  `Authorization`, `FedAuth`, the canary or the body. Named but not matched (free-form content, or a
+  different endpoint): the chained `CVE-2021-27065`, `CVE-2021-31207`, `CVE-2021-34523` and
+  `CVE-2022-41082`, OWASSRF `CVE-2022-41080`, and the ToolShell deserialization half
+  `CVE-2025-53770` (its `__VIEWSTATE` / `ExcelDataSet` payload is free-form, so stolen-machine-key
+  persistence is not detected).
+- **Log4Shell and Text4Shell** (*v5*; `HTTP-091` / `HTTP-092` in Tier E, critical, attempt findings).
+  `HTTP-091` — **Log4Shell** (`CVE-2021-44228`, CISA KEV, and the incomplete fix `CVE-2021-45046`):
+  a `jndi` lookup reaching a field Log4j interpolates. `HTTP-092` — **Text4Shell**
+  (`CVE-2022-42889`): a `script`, `url` or `dns` lookup reaching a field Apache Commons Text
+  interpolates. The obfuscation is the library's own substitution grammar, so
+  `${${lower:j}ndi:…}`, `${::-j}`-style defaults and decoder chains are **evaluated** by a walker
+  rather than string-matched; the module author held that walker against the real
+  `StrSubstitutor` / `StringSubstitutor` engines with every dangerous lookup replaced by a
+  recorder. Values the walker cannot know (environment variables) can never complete a
+  dangerous prefix. Carriers are fixed-decoding only: header values, cookies (raw and
+  percent-decoded), the request-target and decoded path, query names and values, and Basic
+  credentials (scanned, never logged). **Request bodies are never scanned** — legitimate text
+  quoting these strings lives there. A walk that hits the nesting / expansion cap is reported
+  as `walker_budget_exceeded`, never passed silently. Internet-facing taps will see years of
+  Log4Shell scanning noise; every hit is a delivery attempt. Out of scope and named only:
+  the recursion DoS `CVE-2021-45105` (below the 6.5 bar) and the JDBC appender `CVE-2021-44832`
+  (needs the logging configuration). [LDAP Watch](#ldap-watch) sees the other leg — the
+  directory's JNDI answer.
+- **More back ends** (*v7*; `HTTP-093`…`HTTP-099`). Each rule tests a parameter **name** or the
+  message structure against the target's own grammar — no payload signatures — and each is an
+  attempt finding:
+  - **Apache Struts**, parameter names decoded the way the servlet container does (one percent-
+    decode; a malformed escape means the container never hands Struts the parameter):
+    `HTTP-093` (critical) — a parameter overwriting a file-upload property Struts sets itself
+    (`<file>FileName` / `ContentType`), by case variant or OGNL prefix (`top.UploadFileName`):
+    S2-066 / S2-067 (`CVE-2023-50164` / `CVE-2024-53677`). Multipart part headers are parsed the
+    way Commons FileUpload does (a single quote does not quote, OWS before `=` is accepted, the
+    backslash is kept). `HTTP-094` (critical) — an OGNL opener after a case-sensitive `action:` /
+    `redirect:` / `redirectAction:` prefix: S2-016 (`CVE-2013-2251`, CISA KEV); `action:save` and
+    `redirect:/login` stay silent. `HTTP-095` (high) — a `method:` remainder that is not a Java
+    identifier (Java's own rules, over code points): S2-032 DMI (`CVE-2016-3081`, CISA KEV).
+    S2-017 / S2-033 / S2-037 are named, not walked.
+  - `HTTP-096` — **Rack `_method` grammar (Ruby2Shell, `CVE-2026-132825`)**: a `_method` form field
+    that is not an RFC 9110 method token (`M-SEARCH` and `PROPFIND` are valid) is warn; it is
+    critical when the value carries byte `0xDF` on a `text/plain` part tagged with one of the 14
+    legacy encodings whose upcase grows (measured against rack 2.2.7 and Ruby 3.3). The
+    `X-HTTP-Method-Override` header and query string are excluded, because Rack hands them over
+    as binary or never reads them.
+  - `HTTP-097` (critical) — **Apache Axis 1.x inbound SOAP Fault** (`CVE-2026-90436`, CISA KEV):
+    a SOAP Fault in a **request** whose `detail` carries an `exceptionName` in exactly the
+    position Axis loads the class from. Faults travel server to client, so one in a request is
+    the protocol running backwards; the class name is evidence only, no gadget list.
+  - `HTTP-098` — **DOCTYPE in a SOAP request** (no CVE): both SOAP versions forbid it. High; critical
+    with an external `SYSTEM` / `PUBLIC` identifier or external / parameter entities. A
+    hand-written scanner never resolves an entity and never fetches the DTD — it reports its
+    scheme and host. Axis 1.4 itself rejects a DOCTYPE, so against Axis this is a failed attempt.
+  - `HTTP-099` (critical) — **N-central access-control bypass** (`CVE-2026-86206`): a raw `;` path
+    parameter on the guarded first segment **and** a `Forwarded` `for=` quoted string with a
+    backslash escape, which Jetty unescapes to a loopback address while N-central's own check
+    fails open. Each half alone is legitimate (`;jsessionid=`, quoted IPv6 `for=`), so both are
+    required; an encoded `%3B` is silent because it reaches nothing. It also covers the doorway
+    for the second-stage `CVE-2026-86207`. Rides headers and the target, so h2c is covered.
+
+  The body-carried rules (093, 096, 097, 098) are blind to h2c bodies and, like the rest, to TLS.
+- **Tier F — attack-shaped request bodies** (*v3*; `HTTP-082`, `083`, `085`). Bodies are dechunked
+  and parsed as multipart (each part decoded with its declared charset, UTF-8 and the wide
+  encodings) or as form / query parameters, so a body any affected server accepts cannot slip past.
+  `HTTP-082` (critical) — **React2Shell** (`CVE-2025-55182`, CISA KEV, and Next.js
+  `CVE-2025-66478`): an RSC Flight reply that carries a property-path reference, which a real
+  encoder never emits. `HTTP-083` (critical) — **Spring4Shell** (`CVE-2022-22965`, and the original
+  `CVE-2010-1622`): a bean property path that runs through `class` into JVM internals
+  (`class.module.classLoader…`, bracket forms included). `HTTP-085` (critical) — **Struts S2-046**: a
+  multipart filename carrying a NUL and an OGNL opener (`CVE-2017-5638`). `HTTP-089` (critical,
+  *v5*) — **phpAfterShell** (`CVE-2026-126714`): a PHP serialized-object header
+  (`key|O:8:"stdClass":0:{}`, class-name length checked against PHP's own unserializer grammar)
+  in a multipart parameter that PHP's upload-progress handler writes into the session — the
+  unauthenticated route to a torn session write. Parameters are decoded the way PHP was
+  measured to decode them: the last duplicate wins, OWS before `=` hides the parameter
+  entirely, `filename*` is ignored, `'` quotes too. `stored` records PHP's necessary storage
+  condition (a non-file part with a non-empty value precedes the payload), which holds on any
+  `session.upload_progress.name`. Delivery only — the torn write and the deserialization are
+  not on the wire, and the fixed PHP releases also turn upload progress off by default. A
+  serialized scalar instead of an object is the `php_scalar_record_shape` counter, never an
+  alert. Blind to the nginx/Apache → php-fpm FastCGI hop.
+- **Tier G — Brotli content-coding** (*v3*; `HTTP-090`, critical): a Brotli-coded request body
+  whose block-switch command names a category with only one block type — the out-of-bounds write
+  in Google's Brotli decoder (`CVE-2026-111497`, CISA KEV, the "Node2Shell" family). The body is
+  streamed through **the host's own libbrotli** with the output discarded, and the format error a
+  patched decoder raises is the finding. A vulnerable decoder inside the sensor would let the
+  traffic it watches exploit it, so the check **arms only when the host library is proven patched**:
+  it must name error code −17 (`BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH`), which the fix
+  introduced. The version is never the test — Debian and Ubuntu backport the fix and keep the old
+  `1.1.0` version string. Every result carries `brotli: {armed, decoder, version}` or
+  `{armed: false, reason}`, and the card says which, so an unarmed check never looks like a quiet
+  segment. On Debian 13 (`libbrotli1 1.1.0-2+deb13u1`) it arms.
 
 **Dual-stack.** Flows are classified by their first bytes (a request line, the h2 client preface, or
 `Upgrade: h2c` answered by `101`), so h2c on port 80 is read as h2c. The capture filter keeps IPv4
@@ -795,19 +932,29 @@ port-scoped and admits IPv6 with a bare `ip6` term — `(tcp port 80 or …) or 
 after dissection. Default ports: 80, 8080, 8000, 8888 (HTTP), 5985 (WinRM), 50051 (gRPC), 9339 /
 6030 / 57400 (gNMI); the card takes a custom comma-separated list.
 
-**Verdicts**: `attack` (a critical / high framing, HTTP.sys or h2c / gRPC finding) ·
+**Verdicts**: `attack` (a critical / high framing, HTTP.sys, PHP-leak, attack-shaped request,
+Brotli or h2c / gRPC finding) ·
 `credential-exposure` (high cleartext-credential findings) · `anomaly` (warn posture) · `observed`
 (info only — h2c in use, TRACE, bare LF) · `clean` · `no-traffic`. The same finding on the same
 client → server pair is folded into one row with a count. HTTP Watch runs in the **Network Integrity**
 rotation, and its HIGH / CRITICAL findings stream to **Watchtower** (`/var/log/ragnar/http_watch.jsonl`).
 The engine also states its considered-and-rejected CVEs (`DEFERRED_CVES`) — no wire artifact, below
-the 6.5 bar, a local-API defect, or another watcher's — so the CVE count never quietly overstates.
-Detector Self-Test runs the engine's 440-check suite plus smuggling, redaction, WinRM-suppression,
-Range-boundary and verdict scenarios and a Scapy pcap leg carrying an IPv6 Hop-by-Hop header.
+the 6.5 bar, a local-API defect, host configuration rather than wire bytes (the PHP
+session-handler `CVE-2026-115560`; phpAfterShell `CVE-2026-126714` was here until v5 found its
+wire shape), a free-form OGNL location (Struts
+`CVE-2017-9791` / `CVE-2018-11776` / `CVE-2020-17530`), or another watcher's — so the CVE count never
+quietly overstates. Detector Self-Test runs the engine's 2323-check suite plus smuggling, redaction,
+WinRM-suppression, Range-boundary, Shellshock / S2-045 / Spring4Shell, ProxyLogon / ProxyShell /
+ToolShell, phpAfterShell / Log4Shell / Text4Shell and Struts / Rack / Axis / SOAP / N-central
+trigger-and-near-miss, Brotli-arming and verdict scenarios, and a Scapy pcap leg carrying an IPv6
+Hop-by-Hop header.
 
 - Endpoint: `GET /api/net/http-watch` (`?interface=<nic>&seconds=5..60&ports=80,8080,…`) — returns
   `verdict`, `findings` (code, tier, severity, confidence, CVEs + KEV flag, redacted evidence,
-  client / server / port / address family, count), `by_severity` and flow / message counts
+  client / server / port / address family, count), `by_severity`, flow / message counts,
+  `brotli` (Tier G arming status), the corroborating counters `toolshell_signout_nonallowlisted`
+  and `php_scalar_record_shape`, and `walker_budget_exceeded` (Log4Shell / Text4Shell values the
+  walker could not finish)
 
 ### MAC Watch
 **Detection-only** MAC-spoofing + randomization monitor — it *never spoofs or
@@ -1692,7 +1839,7 @@ export to CSV.
 hadn't covered, and arguably the highest-value one after DNS: whoever answers
 DHCP hands you your gateway and DNS, so a rogue DHCP server is a turnkey
 man-in-the-middle. **Detection-only** — it never runs a DHCP server or hands out
-leases. Three signals, rolled into a **clean / suspicious / rogue / starvation** verdict:
+leases. Three signals, rolled into a **clean / suspicious / rogue / attack / starvation** verdict:
 
 - **Rogue / fake DHCP server** — an active `broadcast-dhcp-discover` provokes
   *every* DHCP server on the segment to OFFER. More than one distinct server, a
@@ -1716,6 +1863,25 @@ leases. Three signals, rolled into a **clean / suspicious / rogue / starvation**
   `$(`, `|`, `;`, quote+`&`) inside an RFC-text option like hostname/domain-name (→
   **rogue**, unambiguous). The two Microsoft heap-overflow CVEs (CVE-2026-50518 /
   CVE-2026-56159) are deferred — no published trigger, so no passive signature exists.
+- **Shellshock via DHCP (v4)** — `dhcp-shellshock`: the bash function-import prefix `() {` at
+  the start of a DHCP field (**CVE-2014-6271**, CISA KEV, and its siblings CVE-2014-7169 /
+  -6277 / -6278 / -7186 / -7187). DHCP software hands option values to shell hooks as
+  environment variables (`dhclient-script`, the NetworkManager dispatcher, dnsmasq
+  `--dhcp-script`), so a vulnerable bash imports a function from any of them. Only those exact
+  four bytes are imported — `(){`, a double space, a leading space, a tab or a mid-value
+  occurrence are all rejected by bash — so the match is exact and has no variant to hide
+  behind. The capture now covers **DHCPv4 and DHCPv6** (udp 67/68 and 546/547), and every
+  field a hook can export is walked: every DHCPv4 option, options moved into `sname`/`file` by
+  option 52 overload (and their plain text otherwise), the option 82 relay-agent and option 125
+  vendor sub-options dnsmasq exports, the decoded names of option 119, and every DHCPv6 option at
+  any depth — through Relay-Forward/Relay-Reply (34-byte header) and IA_NA / IA_TA / IA_PD /
+  IAADDR / IAPREFIX containers — plus the vendor data behind option 16/17's enterprise number and
+  the decoded option 24 / 39 names. Raw UDP payloads are parsed directly, so relayed DHCPv6 is not
+  missed. Sent **by a server** to clients it is **critical** and the verdict is **rogue**; sent
+  **by a client** at the server's script hooks it is **high** and the verdict is **attack**. The
+  finding reports the field path, direction, family, length and SHA-256 — never the payload, which
+  can carry staging hosts and tokens — and is an attempt on the wire, not evidence that a host
+  ran a bash hook.
 
 The result shows the verdict, every DHCP server that answered (server-id,
 offered gateway/DNS, lease, and a trusted / new / rogue badge), the starvation
@@ -2624,7 +2790,8 @@ subscription endpoints. Three further CVEs (`CVE-2021-36936 / CVE-2021-36947 / C
 
 ### LDAP Watch
 A **passive** Active-Directory / LDAP observer — **detection-only, it never
-transmits**. It sniffs LDAP (**tcp/389**, Global Catalog **tcp/3268**), LDAPS /
+transmits**. It sniffs LDAP (**tcp/389**, Global Catalog **tcp/3268**, and **tcp/1389**, the
+default rogue-JNDI listener port), LDAPS /
 GC-S (**636 / 3269**, seen only as encrypted flows — the LDAP inside is TLS Watch's
 job), and connectionless **CLDAP** (**udp/389**). TCP byte streams are reassembled
 per flow and the **BER/ASN.1 `LDAPMessage`** envelope is decoded by a **hand-rolled
@@ -2689,6 +2856,27 @@ names total enough wide chars to overrun that builder's 528-byte (264 wide-char)
 on the routing bits and the DC's **own** names — never on the attacker's length-capped `User` field,
 which cannot overflow — and reports exposure geometry, not patch state (a patched DC takes the identical
 path and refuses the over-long write). Both legs fire on CLDAP and TCP, IPv4 and IPv6.
+
+**v6** adds the **JNDI delivery leg** of **Log4Shell**-class attacks (`CVE-2021-44228` /
+`CVE-2021-45046`): a victim JVM resolves an attacker's `ldap://` JNDI name and the directory answers
+with an RFC 2713 Java object for it to instantiate. The shape is shared by the whole JNDI-injection
+class (rogue-jndi, marshalsec, JNDIExploit), so the finding is about delivery, not one tool. Read from
+the `SearchResultEntry` a server returns to a client (attribute names compared case-insensitively):
+
+- **jndi-codebase-delivered** — a `javaCodeBase` holding a fetchable `http://`, `https://`, `ftp://`
+  or `file://` URL. Remote codebase loading has been off by default since JDK 6u211 / 7u201 / 8u191,
+  so this has no working legitimate form on a supported JDK. The message names the codebase host (the
+  attacker's infrastructure to block) and the victim client. *(compromised)*
+- **jndi-serialized-object** — `javaSerializedData` that opens with the Java serialization magic
+  `AC ED 00 05`: the gadget-delivery shape. RFC 2713 allows serialized objects, so a genuine legacy
+  J2EE directory can produce one — confirmed against a real OpenLDAP capture — and this stays
+  *(suspicious)*, with the object's length and SHA-256 prefix.
+
+A `javaCodeBase` with no fetchable scheme, serialized data without the magic, and a naming reference
+with only a local `javaFactory` (nothing delivered) stay silent; the factory class is recorded as
+context, never matched against a gadget list. Both findings report that delivery crossed the wire,
+not that the client instantiated the object. Watching any TCP port for rogue JNDI servers (an egress
+tap) is not done in-app; the default listener port 1389 is covered.
 
 Hardening it drives: require **LDAPS/StartTLS** and reject simple binds on cleartext,
 **disable anonymous binds**, enforce **LDAP signing + channel binding (EPA)** on DCs,

@@ -116,7 +116,7 @@ ND_PREFIXES = [
     ('_RIP', 'RIP Watch'), ('_rip', 'RIP Watch'), ('do_rip', 'RIP Watch'),
     ('_igmp', 'IGMP / MLD Watch'), ('_parse_igmp', 'IGMP / MLD Watch'),
     ('_decode_mld', 'IGMP / MLD Watch'),
-    ('_dhcp', 'DHCP Guardian'), ('do_dhcp', 'DHCP Guardian'),
+    ('_dhcp', 'DHCP Guardian'), ('do_dhcp', 'DHCP Guardian'), ('_DHCP', 'DHCP Guardian'),
     ('_dns_dnssec', 'DNS Doctor (active)'), ('_dns_selftest', 'DNS Doctor (active)'),
     ('do_dns_doctor', 'DNS Doctor (active)'), ('do_dns_watch', 'DNS Watch'),
     ('_ssdp', 'SSDP/UPnP Watch'), ('_SSDP', 'SSDP/UPnP Watch'), ('do_ssdp', 'SSDP/UPnP Watch'),
@@ -174,9 +174,31 @@ IGNORED_CVES = {'CVE-2024-99999',
 FILE_CONTEXT_CVES = {
     # httpwatch: CVE-2018-0732 is cited as TLS Watch's catalog discipline; CVE-2026-41417
     # is named in the CVE-2026-42580 note and the self-test only to record that it was
-    # once mis-attributed to HTTP-004 and is deferred (see DEFERRED_CVES).
-    'python/httpwatch.py': {'CVE-2018-0732', 'CVE-2026-41417'},
-    'python/httpwatch_selftest.py': {'CVE-2026-41417'},
+    # once mis-attributed to HTTP-004 and is deferred (see DEFERRED_CVES). v3: Confluence
+    # CVE-2022-26134 is named beside the Struts gate as the contrast that stays OUT, and
+    # the self-test asserts phpAfterShell CVE-2026-126714 / CVE-2026-115560 stay deferred.
+    # v4: the Exchange chain CVEs (CVE-2021-27065 / -31207 / -34523, CVE-2022-41082),
+    # OWASSRF (CVE-2022-41080) and the ToolShell deserialization terminus CVE-2025-53770
+    # sit in CVE_CATALOG notes and self-test asserts as deliberately NOT matched.
+    # v5: phpAfterShell CVE-2026-126714 is now DETECTED (HTTP-089), so it left this list;
+    # the Log4j recursion DoS CVE-2021-45105 (below the 6.5 bar) and JDBC-appender
+    # CVE-2021-44832 (needs the logging config, not the wire) are named as out of scope.
+    'python/httpwatch.py': {'CVE-2018-0732', 'CVE-2026-41417', 'CVE-2022-26134',
+                            'CVE-2021-27065', 'CVE-2021-31207', 'CVE-2021-34523',
+                            'CVE-2022-41082', 'CVE-2022-41080', 'CVE-2025-53770',
+                            'CVE-2021-45105', 'CVE-2021-44832',
+                            # v7: N-central's second stage, reached only through the
+                            # CVE-2026-86206 doorway HTTP-099 already detects.
+                            'CVE-2026-86207'},
+    'python/httpwatch_selftest.py': {'CVE-2026-41417', 'CVE-2026-115560',
+                                     'CVE-2021-27065', 'CVE-2021-31207',
+                                     'CVE-2021-34523', 'CVE-2022-41082',
+                                     'CVE-2022-41080', 'CVE-2025-53770',
+                                     'CVE-2021-45105', 'CVE-2021-44832',
+                                     # v7: Struts S2-017 / S2-033 / S2-037 asserted
+                                     # as deferred, not walked.
+                                     'CVE-2013-2248', 'CVE-2016-3087',
+                                     'CVE-2016-4438'},
 }
 # Per-CVE owner overrides where a shared helper names another vendor's CVE.
 CVE_OWNER_OVERRIDE = {'CVE-2021-0254': 'Juniper Guard'}
