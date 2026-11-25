@@ -7,7 +7,10 @@ LDAPS/636, GC-S/3269) and connectionless LDAP (UDP/389) off the wire, reassemble
 TCP byte streams per flow, decodes the BER/ASN.1 LDAPMessage envelope with a
 hand-rolled definite-length decoder, and raises findings for insecure transport,
 weak/absent authentication, STARTTLS stripping, directory enumeration, filter
-injection, brute force, and CLDAP reflection/amplification.
+injection, brute force, CLDAP reflection/amplification, and (v6) the JNDI delivery
+leg of Log4Shell-class attacks: a directory answering a client with an RFC 2713
+Java object - a remote javaCodeBase or a serialized Java object - on TCP/389, 3268
+or 1389 (the default rogue-JNDI listener port).
 
 Design conventions (shared across the Ragnar suite):
   * Passive-only Scapy capture. No sockets are opened for transmit; no packet is
@@ -26,7 +29,8 @@ RFCs: 4511 (LDAPv3 protocol), 4513 (authentication methods & security),
 
 # Cleartext LDAP / Global Catalog (parsed) vs. TLS-wrapped LDAPS / GC-S (only
 # counted as "encrypted flow present" - the LDAP inside is TLS Watch's job).
-LDAP_CLEARTEXT_PORTS = (389, 3268)
+JNDI_ALT_PORT = 1389                 # marshalsec / JNDIExploit default rogue listener
+LDAP_CLEARTEXT_PORTS = (389, 3268, JNDI_ALT_PORT)
 LDAPS_PORTS = (636, 3269)
 CLDAP_PORT = 389                     # connectionless LDAP rides UDP/389
 
@@ -347,23 +351,60 @@ def _decode_filter(buf, tag_off, hard_end, raw_values, depth=0, meta=None,
     return '(?)'
 
 
-def _entry_netlogon_vals(buf, attr_seq):
-    """Raw AttributeValue bytes of the 'netlogon' attribute in a SearchResultEntry's
-    PartialAttributeList (the entry's second child). Returns [] when absent. Used for
-    the CVE-2026-41089 overflow-precondition check; binary-safe (no string decode)."""
-    out = []
+# RFC 2713 Java-object attributes (the JNDI delivery leg). LDAP attribute
+# descriptions are case-insensitive (RFC 4512 2.5), so names are compared lowercased.
+JNDI_ATTRS = frozenset({'objectclass', 'javacodebase', 'javaserializeddata',
+                        'javaclassname', 'javafactory', 'javareferenceaddress'})
+JAVA_SERIAL_MAGIC = b'\xac\xed\x00\x05'      # ObjectStreamConstants magic + version
+_CODEBASE_SCHEMES = ('http://', 'https://', 'ftp://', 'file://')
+
+
+def _entry_attrs(buf, attr_seq, wanted):
+    """{lowercased attribute name: [raw value bytes]} for the attributes in `wanted`,
+    from a SearchResultEntry's PartialAttributeList (the entry's second child).
+    Binary-safe: values are never string-decoded here."""
+    out = {}
     try:
         for _at, pvs, pve in ber_children(buf, attr_seq[1], attr_seq[2]):
             pk = list(ber_children(buf, pvs, pve))
             if len(pk) < 2:
                 continue
-            if ber_str(buf, pk[0][1], pk[0][2]).lower() != 'netlogon':
+            name = ber_str(buf, pk[0][1], pk[0][2]).lower()
+            if name not in wanted:
                 continue
             for _vt, vvs, vve in ber_children(buf, pk[1][1], pk[1][2]):
-                out.append(bytes(buf[vvs:vve]))
+                out.setdefault(name, []).append(bytes(buf[vvs:vve]))
     except BERError:
         pass
     return out
+
+
+def _entry_netlogon_vals(buf, attr_seq):
+    """Raw AttributeValue bytes of the 'netlogon' attribute in a SearchResultEntry's
+    PartialAttributeList (the entry's second child). Returns [] when absent. Used for
+    the CVE-2026-41089 overflow-precondition check; binary-safe (no string decode)."""
+    return _entry_attrs(buf, attr_seq, ('netlogon',)).get('netlogon', [])
+
+
+def codebase_urls(values):
+    """javaCodeBase values that are fetchable URLs. RFC 2713 allows a space-separated
+    list, so each value is split; a value with no fetchable scheme is not a remote
+    class-load vector and is ignored (an attribute merely NAMED javaCodeBase is not a
+    delivery payload)."""
+    out = []
+    for v in values:
+        for tok in v.decode('utf-8', 'replace').split():
+            if tok.lower().startswith(_CODEBASE_SCHEMES):
+                out.append(tok)
+    return out
+
+
+def _url_host(url):
+    """Host[:port] of a fetchable URL (userinfo stripped) - the attacker
+    infrastructure an operator pivots on."""
+    rest = url.split('://', 1)[1] if '://' in url else url
+    hostport = rest.split('/', 1)[0]
+    return hostport.rsplit('@', 1)[-1]
 
 
 def parse_ldap_message(buf, start, end):
@@ -398,6 +439,8 @@ def parse_ldap_message(buf, start, end):
             msg['dn'] = ber_str(buf, ek[0][1], ek[0][2]) if ek else ''
             msg['netlogon_vals'] = (_entry_netlogon_vals(buf, ek[1])
                                     if len(ek) >= 2 else [])
+            msg['jndi_attrs'] = (_entry_attrs(buf, ek[1], JNDI_ATTRS)
+                                 if len(ek) >= 2 else {})
         elif op_tag == OP_SEARCH_DONE:
             msg['op'] = 'search-done'
             msg['result_code'] = _first_enum(buf, ops, ope)
@@ -570,7 +613,8 @@ _VERDICT_RANK = {'clean': 0, 'suspicious': 1, 'compromised': 2}
 _COMPROMISED_CODES = {'cleartext-bind-credentials', 'sasl-plaintext-cleartext',
                       'cleartext-password-modify', 'starttls-stripped',
                       'filter-injection', 'brute-force', 'cldap-amplification',
-                      'external-referral', 'filter-nest-dos'}
+                      'external-referral', 'filter-nest-dos',
+                      'jndi-codebase-delivered'}
 
 
 class LdapDetector:
@@ -627,6 +671,9 @@ class LdapDetector:
         elif op == 'search-entry':
             # CVE-2026-41089 response leg (a netlogon ping can also ride TCP/389).
             self._check_netlogon_precond(flowkey, msg, server_ip=src)
+            # Log4Shell-class JNDI delivery: the directory (src) hands a Java object
+            # to the client (dst) that resolved an ldap:// JNDI name.
+            self._check_jndi_delivery(flowkey, msg)
         elif op == 'search-req':
             self.stats['searches'] += 1
             self.searches[src] = self.searches.get(src, 0) + 1
@@ -643,6 +690,60 @@ class LdapDetector:
                           'password crosses the wire unprotected; require LDAPS/StartTLS')
         elif op == 'ext-resp':
             self._check_starttls_response(flowkey, msg)
+
+    def _check_jndi_delivery(self, flowkey, msg):
+        """CVE-2021-44228 / CVE-2021-45046 (Log4Shell) attack class, delivery stage:
+        a SearchResultEntry returned BY a server TO a client carrying an RFC 2713 Java
+        object the client is meant to instantiate. The shape is shared by the whole
+        JNDI-injection class (rogue-jndi, marshalsec, JNDIExploit). Attack OBSERVED:
+        delivery is on the wire, whether the client instantiated it is not.
+          * jndi-codebase-delivered - a fetchable javaCodeBase URL. Remote codebase
+            loading is off by default since JDK 6u211 / 7u201 / 8u191, so this has no
+            working legitimate form on a supported JDK.
+          * jndi-serialized-object - javaSerializedData opening with the Java
+            serialization magic AC ED 00 05. RFC 2713 permits this, so a genuine
+            legacy J2EE directory can produce it: reported, but not compromise-class.
+        A javaNamingReference with a javaFactory (the local-factory bypass shape) is
+        recorded as context only, never matched against a gadget list."""
+        attrs = msg.get('jndi_attrs') or {}
+        if not attrs:
+            return
+        server, sport, client, _cport = flowkey
+        codebases = codebase_urls(attrs.get('javacodebase', ()))
+        serial = [v for v in attrs.get('javaserializeddata', ())
+                  if v[:4] == JAVA_SERIAL_MAGIC]
+        if not codebases and not serial:
+            return                       # nothing delivered; a naming ref alone never fires
+        ocs = {v.decode('utf-8', 'replace').lower() for v in attrs.get('objectclass', ())}
+        cls = (attrs.get('javaclassname') or [b''])[0].decode('utf-8', 'replace')
+        factory = (attrs.get('javafactory') or [b''])[0].decode('utf-8', 'replace')
+        extra = ''
+        if cls:
+            extra += '; javaClassName %s' % _clip(cls)
+        if factory and 'javanamingreference' in ocs:
+            extra += '; naming reference with javaFactory %s (local-factory shape)' \
+                     % _clip(factory)
+        port_note = (' on the default rogue-JNDI port 1389' if sport == JNDI_ALT_PORT
+                     else ' on LDAP port %s' % sport)
+        if codebases:
+            self._add(flowkey, 'high', 'jndi-codebase-delivered',
+                      'LDAP server %s returned a remote javaCodeBase (%s) to %s%s - '
+                      'JNDI remote class-load delivery, the Log4Shell callback leg '
+                      '(CVE-2021-44228 / CVE-2021-45046)%s. Delivery observed; whether '
+                      'the client loaded the class is not visible. Check %s for Log4j '
+                      'and JNDI lookups, and block egress to %s'
+                      % (server, _clip(_url_host(codebases[0])), client, port_note,
+                         extra, client, _clip(_url_host(codebases[0]))))
+        if serial:
+            import hashlib
+            self._add(flowkey, 'high', 'jndi-serialized-object',
+                      'LDAP server %s returned a serialized Java object (%d bytes, '
+                      'sha256 %s) to %s%s - JNDI gadget delivery shape '
+                      '(CVE-2021-44228 / CVE-2021-45046 class)%s. RFC 2713 allows this, '
+                      'so a legacy J2EE directory can produce it; anything else is a '
+                      'deserialization payload'
+                      % (server, len(serial[0]), hashlib.sha256(serial[0]).hexdigest()[:16],
+                         client, port_note, extra))
 
     def _check_bind(self, flowkey, msg, cleartext):
         auth = msg.get('auth')
@@ -1378,6 +1479,44 @@ def selftest():
                                      'dc01.corp.example.com'))
     r = detect([], cldap=[('10.0.0.1', 389, '10.0.0.9', 50000, short_entry, True, None)])
     ck('netlogon_short_names_clean', 'netlogon-overflow-precond' not in codes(r))
+
+    # 13b. v6 JNDI delivery (Log4Shell class): a directory returns an RFC 2713 Java
+    # object. Built as a SearchResultEntry from the server side (src = server).
+    def _entry(dn, attrs):
+        partial = b''.join(_tlv(_T_SEQUENCE, _octet(n) + _tlv(0x31, b''.join(
+            _octet(v) for v in vals))) for n, vals in attrs)
+        return _ldap_message(2, _tlv(OP_SEARCH_ENTRY, _octet(dn) + _tlv(_T_SEQUENCE, partial)))
+
+    srv1389 = ('203.0.113.7', 1389, '10.0.0.9', 55000)
+    ref = _entry('cn=Exploit', [('objectClass', ['javaNamingReference']),
+                                ('javaClassName', ['Exploit']),
+                                ('javaCodeBase', ['http://203.0.113.7:8000/']),
+                                ('javaFactory', ['Exploit'])])
+    r = detect([ref], flowkey=srv1389)
+    ck('jndi_codebase_delivered', 'jndi-codebase-delivered' in codes(r))
+    ck('jndi_codebase_verdict', r['verdict'], 'compromised')
+    ck('jndi_codebase_host_named',
+       any('203.0.113.7:8000' in f['message'] for f in r['findings']))
+    ck('jndi_codebase_ipv6', 'jndi-codebase-delivered' in codes(detect(
+        [ref], flowkey=('2001:db8::7', 389, '2001:db8::9', 55000))))
+    ck('jndi_codebase_case_insensitive', 'jndi-codebase-delivered' in codes(detect(
+        [_entry('cn=x', [('JAVACODEBASE', ['http://evil.example/'])])], flowkey=srv1389)))
+    ser = _entry('cn=Gadget', [('objectClass', ['javaSerializedObject']),
+                               ('javaClassName', ['java.util.HashMap']),
+                               ('javaSerializedData', [b'\xac\xed\x00\x05sr\x00\x11x'])])
+    r = detect([ser], flowkey=srv1389)
+    ck('jndi_serialized_object', 'jndi-serialized-object' in codes(r))
+    ck('jndi_serialized_verdict', r['verdict'], 'suspicious')
+    # Near-misses: a javaCodeBase with no fetchable scheme, serialized data without the
+    # magic, and a naming reference with a factory but nothing delivered stay quiet.
+    quiet = _entry('cn=Legacy', [('objectClass', ['javaNamingReference']),
+                                 ('javaCodeBase', ['ldap-only-marker']),
+                                 ('javaFactory', ['com.example.Factory']),
+                                 ('javaSerializedData', [b'\x00\x01notjava'])])
+    r = detect([quiet], flowkey=srv1389)
+    ck('jndi_near_miss_quiet', codes(r) & {'jndi-codebase-delivered',
+                                         'jndi-serialized-object'}, set())
+    ck('jndi_port_1389_captured', 'tcp port 1389' in _bpf())
 
     # 14. PASSIVE proof: this source contains no packet-transmit primitives.
     ck('no_transmit_primitives', _scan_for_transmit_primitives(), [])
