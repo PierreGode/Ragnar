@@ -24,6 +24,46 @@ from db_manager import get_db
 from wifi_interfaces import gather_wifi_interfaces, get_active_ethernet_interface
 
 
+def find_wifi_profile_uuid(ssid):
+    """UUID of a saved client (infrastructure) profile that joins ``ssid``, or None.
+
+    Matches on the profile's SSID, never its name. Names are labels that can
+    repeat: a box ended up with nine profiles all named "Hobnet", so every
+    name-based ``nmcli connection show/modify/up <name>`` was ambiguous, and
+    ``nmcli -g 802-11-wireless.ssid connection show Hobnet`` returned the SSID
+    nine times over, which became a phantom "Hobnet Hobnet ..." network store.
+    Callers should address the profile as ``uuid <UUID>``.
+    """
+    if not ssid:
+        return None
+    try:
+        listing = subprocess.run(['nmcli', '-t', '-f', 'UUID,TYPE', 'connection', 'show'],
+                                 capture_output=True, text=True, timeout=10)
+        if listing.returncode != 0:
+            return None
+        for line in listing.stdout.splitlines():
+            uuid, _, ctype = line.partition(':')
+            if ctype != '802-11-wireless' or not uuid:
+                continue
+            detail = subprocess.run(
+                ['nmcli', '-t', '-f', '802-11-wireless.ssid,802-11-wireless.mode',
+                 'connection', 'show', 'uuid', uuid],
+                capture_output=True, text=True, timeout=10)
+            if detail.returncode != 0:
+                continue
+            fields = {}
+            for dl in detail.stdout.splitlines():
+                key, _, val = dl.partition(':')
+                fields[key] = val.replace('\\:', ':').replace('\\\\', '\\')
+            if fields.get('802-11-wireless.mode') == 'ap':
+                continue
+            if fields.get('802-11-wireless.ssid') == ssid:
+                return uuid
+    except Exception:
+        pass
+    return None
+
+
 class WiFiManager:
     """Manages Wi-Fi connections, AP mode, and configuration for Ragnar"""
     
@@ -1734,6 +1774,10 @@ class WiFiManager:
         joining the SAME network look like a switch to a different one — the
         client radio moves to the dongle, its profile name differs, and after
         the debounce every host was marked degraded (issue #818).
+
+        ``name`` may also be a UUID, which is unambiguous. A NAME shared by
+        several profiles makes nmcli print one SSID per profile, separated by
+        blank lines, so only the first is used.
         """
         if not name:
             return None
@@ -1742,7 +1786,8 @@ class WiFiManager:
                 ['nmcli', '-g', '802-11-wireless.ssid', 'connection', 'show', name],
                 capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
-                ssid = result.stdout.strip()
+                lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
+                ssid = lines[0] if lines else ''
                 if ssid and ssid != '--':
                     return ssid
         except Exception as e:
@@ -1777,12 +1822,13 @@ class WiFiManager:
             # Method 1: the connection active on the CLIENT radio — the dongle
             # when one is fitted, since the built-in may be hosting the AP and
             # would report the AP's own name instead. Resolve its SSID; the
-            # connection NAME is not the SSID (see _ssid_of_connection).
-            result = subprocess.run(['nmcli', '-t', '-f', 'GENERAL.CONNECTION', 'dev', 'show', client_iface],
+            # connection NAME is not the SSID (see _ssid_of_connection). Look it
+            # up by UUID: names can be shared by several profiles.
+            result = subprocess.run(['nmcli', '-t', '-f', 'GENERAL.CON-UUID', 'dev', 'show', client_iface],
                                   capture_output=True, text=True, timeout=10)
             if result.returncode == 0 and result.stdout.strip():
                 for line in result.stdout.strip().split('\n'):
-                    if line.startswith('GENERAL.CONNECTION:'):
+                    if line.startswith('GENERAL.CON-UUID:'):
                         conn = line.split(':', 1)[1].strip()
                         if conn and conn != '--':
                             ssid = (self._ssid_of_connection(conn)
@@ -2415,23 +2461,24 @@ class WiFiManager:
                 self._rescan_and_wait(ssid, timeout=25)
             
             # IMPORTANT: NEVER delete existing NetworkManager profiles!
-            # Check if a connection profile already exists
-            check_result = subprocess.run(['nmcli', 'con', 'show', ssid], 
-                                         capture_output=True, text=True)
-            profile_exists = check_result.returncode == 0
-            
-            if profile_exists:
+            # Check if a connection profile already exists for this SSID. Match on
+            # the SSID and address it by UUID: a name lookup misses profiles
+            # named differently and is ambiguous when names repeat.
+            profile_uuid = find_wifi_profile_uuid(ssid)
+
+            if profile_uuid:
                 self.logger.info(f"Found existing connection profile for {ssid}")
-                
+
                 # If password is provided and profile exists, try to update the password
                 if password:
                     self.logger.info(f"Updating password for existing profile {ssid}")
-                    update_cmd = ['sudo', 'nmcli', 'con', 'modify', ssid, 'wifi-sec.psk', password]
+                    update_cmd = ['sudo', 'nmcli', 'con', 'modify', 'uuid', profile_uuid,
+                                  'wifi-sec.psk', password]
                     subprocess.run(update_cmd, capture_output=True, text=True)
-                
+
                 # Try to activate the existing connection
                 self.logger.info(f"Activating existing connection profile for {ssid}")
-                cmd = ['sudo', 'nmcli', 'con', 'up', ssid]
+                cmd = ['sudo', 'nmcli', 'con', 'up', 'uuid', profile_uuid]
             else:
                 # No existing profile - create a new one
                 self.logger.info(f"No existing profile found for {ssid}, creating new connection")

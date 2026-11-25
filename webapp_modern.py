@@ -21987,14 +21987,17 @@ def _save_wifi_profile(ssid, password=None):
     operator's credentials — a reboot then auto-joins. Idempotent.
     """
     try:
-        exists = subprocess.run(['nmcli', '-t', '-f', 'NAME', 'con', 'show', ssid],
-                                capture_output=True, text=True, timeout=15).returncode == 0
-        if exists:
+        # The old check, `nmcli -t -f NAME con show <ssid>`, always failed
+        # ("invalid field 'NAME'" for a single profile), so every connect added
+        # another profile with the same name.
+        from wifi_manager import find_wifi_profile_uuid
+        profile_uuid = find_wifi_profile_uuid(ssid)
+        if profile_uuid:
             if password:
-                subprocess.run(['sudo', 'nmcli', 'con', 'modify', ssid,
+                subprocess.run(['sudo', 'nmcli', 'con', 'modify', 'uuid', profile_uuid,
                                 'wifi-sec.key-mgmt', 'wpa-psk', 'wifi-sec.psk', password],
                                capture_output=True, timeout=15)
-            subprocess.run(['sudo', 'nmcli', 'con', 'modify', ssid,
+            subprocess.run(['sudo', 'nmcli', 'con', 'modify', 'uuid', profile_uuid,
                             'connection.autoconnect', 'yes'], capture_output=True, timeout=15)
         else:
             cmd = ['sudo', 'nmcli', 'con', 'add', 'type', 'wifi', 'con-name', ssid,
