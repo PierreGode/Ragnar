@@ -2,6 +2,21 @@
 
 ## Releases
 
+### 2026-11-25
+
+#### fix(system): zram swap actually switched on — Kali/Ulfberht Pi Zero 2 W no longer reset by the watchdog
+*branch `fix/zram-swap-everywhere`*
+
+- **The bug.** The installer wrote `/etc/systemd/zram-generator.conf.d/override.conf` (zram0 = twice the RAM), but only the `systemd-zram-generator` package reads it. Raspberry Pi OS trixie ships it; Kali (so Ulfberht) and plain Debian do not, so those installs had no swap at all. On a 512 MB Pi Zero 2 W the box then stalled under memory pressure and the 15 s hardware watchdog reset it every 7–17 minutes, with no under-voltage and no OOM kill in the log. The step was also install-only, so updating never repaired it.
+- **New `scripts/ensure_zram_swap.sh`**, run by `install_ragnar.sh`, `update_ragnar.sh` (new Step 6.91) and `scripts/post_update.sh` (the in-app Update button). Idempotent and never fatal:
+  - writes the config only when missing (an edited file is kept);
+  - stops there when zram swap is already active (Raspberry Pi OS trixie), or when `zram-tools` manages swap;
+  - otherwise switches a zram swap on **first**, with the kernel module and `zramctl` (no package needed), so apt cannot be reset by the watchdog mid-install; then repairs an interrupted dpkg run and installs `systemd-zram-generator` so zram returns on every boot;
+  - skips containers, needs root, `--no-start` for image builds (chroot);
+  - opt out with `/etc/ragnar/zram.disabled` (all paths) or `RAGNAR_ZRAM=0` (installer / CLI updater).
+- **Docs:** [INSTALL.md](INSTALL.md#a-pi-zero-keeps-rebooting-or-freezing--swap-zram) (new swap section), [ragnar-os-ulfberht.md](ragnar-os-ulfberht.md), [README (root)](../README.md).
+- **Validation:** on a Kali-based Pi Zero 2 W (416 MB, no swap) that had been resetting every 7–17 minutes: the zram swap came on first (833 MB) and carried the board through a 57-minute repair of an interrupted upgrade and the generator install with no reset; after a reboot `/dev/zram0` (832 MB) came up from the generator by itself, and the board then ran Ragnar for 31 minutes on one boot with 0 service restarts and the web UI answering throughout (swap in use 390–580 MB). That run also showed apt exiting non-zero for an unrelated half-configured package while the generator installed fine, so success is now judged by the package state. On Raspberry Pi OS trixie (zram already active) the script only writes a missing config and reports the active swap; re-runs, an edited config, the opt-outs and the non-root guard checked; `bash -n` on all four scripts; the 7 test files that read the install/update scripts pass (311 passed, 2 skipped).
+
 ### 2026-11-24
 
 #### feat(net): HTTP Watch v5 — Log4Shell, Text4Shell and phpAfterShell

@@ -1047,6 +1047,19 @@ if ! grep -qE '^SystemMaxUse=' /etc/systemd/journald.conf 2>/dev/null; then
 fi
 systemctl restart systemd-journald >/dev/null 2>&1 || true
 
+echo -e "${BLUE}Step 6.91: Ensuring compressed swap (zram)...${NC}"
+# The installer's zram config needs the systemd-zram-generator package to do
+# anything. Raspberry Pi OS trixie ships it; Kali/Ulfberht and plain Debian do
+# not, so those boxes ran with no swap - a Pi Zero 2 W then stalls under memory
+# pressure and the 15 s hardware watchdog resets it every few minutes. Same
+# script as install_ragnar.sh and the in-app updater; idempotent, never fatal.
+# Opt out: RAGNAR_ZRAM=0 or /etc/ragnar/zram.disabled.
+if [ -f "$ragnar_PATH/scripts/ensure_zram_swap.sh" ]; then
+    bash "$ragnar_PATH/scripts/ensure_zram_swap.sh" || true
+else
+    echo -e "  ${YELLOW}⚠${NC} scripts/ensure_zram_swap.sh missing — skipped"
+fi
+
 echo -e "${BLUE}Step 6.95: Checking Ragnar Mesh prerequisites...${NC}"
 # Mesh setup must run on the update path too, not only at install: most users
 # only ever update, so an installer-only change never reaches the units that

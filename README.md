@@ -118,6 +118,7 @@ Every feature below has a full guide in [`docs/`](docs). Short version here, det
 - Username and hostname set to `ragnar`
 - 2.13-inch e-Paper HAT connected to GPIO pins (for display mode)
 - For 32-bit systems, use Ragnar's predecessor [Bjorn](https://github.com/infinition/Bjorn)
+- Compressed swap in RAM (zram, twice the RAM) is set up and switched on by the installer and both updaters, including on Kali/Debian where it used to stay off — it is what keeps a 512 MB Pi Zero 2 W from stalling and being reset by the watchdog. See [swap (zram)](docs/INSTALL.md#a-pi-zero-keeps-rebooting-or-freezing--swap-zram).
 
 **Recommendation:** Edit `~/.config/labwc/autostart` and comment out `/usr/bin/lwrespawn /usr/bin/wf-panel-pi &` to free up resources, or run `sudo pkill wf-panel-pi` temporarily.
 

@@ -152,6 +152,16 @@ if [ -f /usr/local/bin/ragnar-kiosk-run ] && [ -f "$REPO/scripts/ragnar_kiosk_ru
     fi
 fi
 
+# --- zram swap self-heal ----------------------------------------------------
+# The installer's zram config is inert without systemd-zram-generator, which
+# Kali/Ulfberht and plain Debian lack - a 512 MB Pi Zero 2 W there ran with no
+# swap and the hardware watchdog reset it every few minutes. The CLI updater
+# does this in its Step 6.91; mirror it here. A cheap no-op once zram is active.
+if [ -f "$REPO/scripts/ensure_zram_swap.sh" ] && ! grep -q '^/dev/zram' /proc/swaps 2>/dev/null; then
+    step "zram swap"
+    bash "$REPO/scripts/ensure_zram_swap.sh" || fail "ensure_zram_swap.sh reported errors"
+fi
+
 # --- data files -------------------------------------------------------------
 if [ -f "$REPO/init_data_files.sh" ]; then
     step "data file templates"
