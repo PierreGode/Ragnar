@@ -4,8 +4,22 @@
 
 ### 2026-11-25
 
-#### fix(system): zram swap actually switched on — Kali/Ulfberht Pi Zero 2 W no longer reset by the watchdog
+#### feat(hw): HackerGadgets Pwnagotchi HAT support + zram swap actually switched on (Kali/Ulfberht Pi Zero 2 W no longer reset by the watchdog)
 *branch `fix/zram-swap-everywhere`*
+
+**HackerGadgets Pwnagotchi HAT** (UPS, GPS, AC Wi-Fi, USB hub and RTC under a Pi Zero):
+
+- **New `hg_hat.py`**: detects the HAT's power controller on I2C 0x50 and puts its battery percentage, charger state and USB mode (hub / OTG) on the display header, the System tab Battery card and `/api/system/status`, through the same `battery_source()` slot as PiSugar and the Waveshare UPS HAT (order: PiSugar, Waveshare, this HAT, built-in gauge). Read-only, plain `/dev/i2c-1` combined reads, no smbus needed.
+- **Low-battery shutdown**: on battery (no charger) below `hg_hat_lowbatt_percent` (default 10 %) for a full minute of fresh readings, Ragnar powers off cleanly. On by default (`hg_hat_lowbatt_shutdown`); a charger or a recovered reading restarts the minute; fires once.
+- **Power-off hook** (`/usr/lib/systemd/system-shutdown/ragnar-hg-hat-poweroff`): at the very end of a power-off, file systems already read-only, it asks the HAT to switch its output off 10 s later, so the SD card is never written when the power goes and the halted Pi does not drain the cell. Reboots untouched. Writes only after the identity and a plausible power block check out. Dry run: `RAGNAR_HG_HAT_DRYRUN=1`.
+- **RTC**: `dtoverlay=i2c-rtc,pcf85063a` (an existing i2c-rtc line is kept). The kernel sets the clock from the RTC as the driver loads and writes NTP time back to it, so the time is right at boot without a network.
+- **New `scripts/hg_hat_setup.sh`** installs the overlay and hook only when the HAT answers; run by the installer, `update_ragnar.sh` (Step 6.92), the in-app updater, and by Ragnar the first time it sees the HAT (I2C is only up after a fresh install's reboot). Opt out: `/etc/ragnar/hg_hat.disabled`, `/etc/ragnar/hg_hat_poweroff.disabled`.
+- **Pi I2C clock-stretch quirk handled**: the controller stretches the clock and the Pi reads bit 7 of the first byte as 1 at times (identity 0xEC for 0x6C, voltage 0x90D1 for 0x10D1). That bit is masked on the first byte only; every other byte is checked strictly.
+- **Settings** (Config → Display): HackerGadgets Pwnagotchi HAT Battery, Shut Down on Low Battery, Low-Battery Threshold (%). Cache-bust `ragnar_modern.js?v=20261125-hg-hat`.
+- **Docs:** [hg-hat.md](hg-hat.md) (new: wiring, setup, low battery, power-off, RTC, troubleshooting incl. the no-boot-on-battery fix), [knowledgebase.md](knowledgebase.md) (2 answers), [INSTALL.md](INSTALL.md), [docs index](README.md), [README (root)](../README.md).
+- **Validation (HAT):** on the real board, 10/10 readings and detections after the masking fix (before it every read in a 30-read run was rejected for the misread bit); setup script installs on the first run and changes nothing on the next; hook dry run found the HAT 5/5 and does nothing on `reboot`; after the overlay reboot `rtc-pcf85063 1-0051` registered as rtc0, NTP time was written to it within 80 s, and on the next boot the kernel set the system clock from it 3.8 s into boot. `tests/test_hg_hat.py` (33) covers decoding with the captured bytes, the masked bit, foreign chips on 0x50, failure handling, the low-battery window and the source order. The real power-off (HAT switching off) is not yet exercised on hardware.
+
+**zram swap:**
 
 - **The bug.** The installer wrote `/etc/systemd/zram-generator.conf.d/override.conf` (zram0 = twice the RAM), but only the `systemd-zram-generator` package reads it. Raspberry Pi OS trixie ships it; Kali (so Ulfberht) and plain Debian do not, so those installs had no swap at all. On a 512 MB Pi Zero 2 W the box then stalled under memory pressure and the 15 s hardware watchdog reset it every 7–17 minutes, with no under-voltage and no OOM kill in the log. The step was also install-only, so updating never repaired it.
 - **New `scripts/ensure_zram_swap.sh`**, run by `install_ragnar.sh`, `update_ragnar.sh` (new Step 6.91) and `scripts/post_update.sh` (the in-app Update button). Idempotent and never fatal:

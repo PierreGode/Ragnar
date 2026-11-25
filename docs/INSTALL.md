@@ -29,6 +29,7 @@ Use Raspberry Pi OS Lite (64-bit) Debian Trixie with no desktop environment.
 - Username and hostname set to `ragnar`.
 - 2.13-inch e-Paper HAT connected to GPIO pins.
 - **Optional:** a Waveshare UPS HAT (C) is detected automatically and its battery percentage shown on the display and the System tab, with nothing to install. See [ups-hat.md](ups-hat.md).
+- **Optional:** the HackerGadgets Pwnagotchi HAT (UPS, GPS, Wi-Fi, USB hub, RTC) is detected automatically too: battery percentage, a clean shutdown on low battery, and its real-time clock. See [hg-hat.md](hg-hat.md).
 - **Optional:** [PiSugar UPS](https://www.pisugar.com/) for battery power, battery monitoring, and hardware button support. The installer will prompt you to install `pisugar-server` if you have one attached. You can also install it manually later:
   ```bash
   curl http://cdn.pisugar.com/release/pisugar-power-manager.sh | sudo bash

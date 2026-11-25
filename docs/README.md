@@ -61,7 +61,7 @@ browse than search.
 - [Gen 2 Hardware](hardware-gen2.md) — reference-build BOM & assembly
 - [Flipper One](flipper-one.md) — feasibility / porting notes
 - [Pwnagotchi Bridge](PWNAGOTCHI.md) — side-by-side install & mode switching
-- [Ragnar Mobile over Bluetooth](bluetooth.md) · [Power (badge, Pi 5 USB limit, power test)](power.md) · [Cooling fan (status, manual speed, fan curve)](fan.md) · [UPS integration](UPS_INTEGRATION.md)
+- [Ragnar Mobile over Bluetooth](bluetooth.md) · [Power (badge, Pi 5 USB limit, power test)](power.md) · [Cooling fan (status, manual speed, fan curve)](fan.md) · [UPS integration](UPS_INTEGRATION.md) · [Waveshare UPS HAT](ups-hat.md) · [HackerGadgets Pwnagotchi HAT (battery, low-battery shutdown, RTC)](hg-hat.md)
 
 ## Platform & safety
 - [Uplink IP stability](uplink-stability.md) — why a Red-Team box used to keep changing its own IP, and the stable-MAC / DHCP fix that pins it

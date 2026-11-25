@@ -1060,6 +1060,15 @@ else
     echo -e "  ${YELLOW}⚠${NC} scripts/ensure_zram_swap.sh missing — skipped"
 fi
 
+echo -e "${BLUE}Step 6.92: HackerGadgets Pwnagotchi HAT (RTC + power-off)...${NC}"
+# Only acts when the HAT's power controller answers on I2C (0x50): enables the
+# board's RTC (dtoverlay=i2c-rtc,pcf85063a, after a reboot) and a
+# systemd-shutdown hook that switches the HAT off after a clean power-off.
+# Idempotent. Opt out: /etc/ragnar/hg_hat.disabled.
+if [ -f "$ragnar_PATH/scripts/hg_hat_setup.sh" ]; then
+    bash "$ragnar_PATH/scripts/hg_hat_setup.sh" || true
+fi
+
 echo -e "${BLUE}Step 6.95: Checking Ragnar Mesh prerequisites...${NC}"
 # Mesh setup must run on the update path too, not only at install: most users
 # only ever update, so an installer-only change never reaches the units that

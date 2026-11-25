@@ -3202,6 +3202,13 @@ except:
             # Apply the Simple Guide: Increase ZRAM Swap instructions before reboot prompt
             configure_zram_swap
 
+    # HackerGadgets Pwnagotchi HAT: RTC overlay + power-off hook, only when the
+    # HAT answers on I2C. On a fresh image I2C only comes up after the reboot,
+    # so Ragnar runs the same script the first time it sees the HAT.
+    if [ "$IMAGE_BUILD" != true ] && [ -f "$ragnar_PATH/scripts/hg_hat_setup.sh" ]; then
+        bash "$ragnar_PATH/scripts/hg_hat_setup.sh" || true
+    fi
+
     log "SUCCESS" "ragnar installation completed!"
     log "INFO" "Please reboot your system to apply all changes."
     if [ "$SPLASH_STATE" = "yes" ] && [ -z "$SPLASH_DRY_RUN" ]; then

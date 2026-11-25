@@ -146,6 +146,16 @@ Yes. A UPS HAT (C) is detected over I2C at start and its percentage shows in the
 Source: ups-hat.md
 <!-- proof: docs/ups-hat.md | The card stays hidden when no battery is detected -->
 
+### Does Ragnar support the HackerGadgets Pwnagotchi HAT?
+Yes. It is detected over I2C at start: its battery percentage and charger state show in the display header and the **System** tab Battery card, a low battery shuts Ragnar down cleanly, and its real-time clock is enabled after one reboot.
+Source: hg-hat.md
+<!-- proof: docs/hg-hat.md | shuts down cleanly when the battery runs low -->
+
+### My Pi Zero will not boot on the HackerGadgets HAT battery, only with USB power in the Pi
+The HAT feeds the Pi through spring pins on the underside of header pins 2/4 and 6/9. Tall, uneven or flux-covered solder joints there make poor contact. Clean them and file tall joints flat; when `sudo i2cdetect -y 1` lists 50 and 51 the springs are seated.
+Source: hg-hat.md
+<!-- proof: docs/hg-hat.md | clean the joints under pins 2–6 with isopropyl alcohol -->
+
 ### Where do I control the cooling fan?
 In the **System** tab. It appears only when a fan driver exists.
 Source: fan.md

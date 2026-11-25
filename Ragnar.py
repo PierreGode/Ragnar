@@ -73,6 +73,15 @@ class Ragnar:
         except Exception as e:
             logger.debug(f"UPS HAT monitor unavailable: {e}")
 
+        # HackerGadgets Pwnagotchi HAT battery monitor (controller at I2C 0x50,
+        # auto-detected; also shuts down cleanly on a low battery)
+        self.hg_hat_monitor = None
+        try:
+            from hg_hat import HgHatMonitor
+            self.hg_hat_monitor = HgHatMonitor(shared_data)
+        except Exception as e:
+            logger.debug(f"HackerGadgets HAT monitor unavailable: {e}")
+
         # CardputerZero: power the expansion header so a plugged-in Cap (GNSS,
         # LoRa, sub-GHz, NFC) is alive before GPS auto-detection looks for it.
         try:
@@ -121,6 +130,10 @@ class Ragnar:
         # Start the Waveshare UPS HAT battery monitor (idles if no HAT answers)
         if self.ups_hat_monitor:
             self.ups_hat_monitor.start()
+
+        # Start the HackerGadgets Pwnagotchi HAT monitor (idles if no HAT answers)
+        if self.hg_hat_monitor:
+            self.hg_hat_monitor.start()
 
         # Start the built-in battery monitor (idles if the board has none)
         if self.builtin_battery:
@@ -299,6 +312,8 @@ class Ragnar:
             self.pisugar_listener.stop()
         if getattr(self, 'ups_hat_monitor', None):
             self.ups_hat_monitor.stop()
+        if getattr(self, 'hg_hat_monitor', None):
+            self.hg_hat_monitor.stop()
         if getattr(self, 'builtin_battery', None):
             self.builtin_battery.stop()
 

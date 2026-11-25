@@ -162,6 +162,14 @@ if [ -f "$REPO/scripts/ensure_zram_swap.sh" ] && ! grep -q '^/dev/zram' /proc/sw
     bash "$REPO/scripts/ensure_zram_swap.sh" || fail "ensure_zram_swap.sh reported errors"
 fi
 
+# --- HackerGadgets Pwnagotchi HAT -------------------------------------------
+# RTC overlay + power-off hook, only when the HAT answers
+# on I2C. Mirrors update_ragnar.sh Step 6.92; a quick no-op on every other box.
+if [ -f "$REPO/scripts/hg_hat_setup.sh" ]; then
+    step "HackerGadgets HAT"
+    bash "$REPO/scripts/hg_hat_setup.sh" || fail "hg_hat_setup.sh reported errors"
+fi
+
 # --- data files -------------------------------------------------------------
 if [ -f "$REPO/init_data_files.sh" ]; then
     step "data file templates"
