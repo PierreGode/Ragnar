@@ -2,6 +2,26 @@
 
 ## Releases
 
+### 2026-11-25
+
+#### feat(net): HTTP Watch v7 — Struts, Ruby2Shell, Axis SOAP Fault, SOAP DOCTYPE, N-central bypass
+*branch `feature/http-watch-v7`*
+
+- **Seven new rules (42 → 49 codes).** Each checks a parameter name or the message structure against the target's own grammar, never a payload signature, and each reports an attempt:
+  - **Apache Struts:** HTTP-093, a parameter overwriting a file-upload property Struts sets itself, by case variant or OGNL prefix (S2-066 / S2-067, CVE-2023-50164 / CVE-2024-53677). HTTP-094, OGNL after an `action:` / `redirect:` / `redirectAction:` prefix (S2-016, CVE-2013-2251, CISA KEV). HTTP-095, a `method:` name that is not a Java identifier (S2-032, CVE-2016-3081, CISA KEV).
+  - **HTTP-096 Ruby2Shell** (CVE-2026-132825): a Rails / Rack `_method` field that is not a valid HTTP method. It is a warning by default and critical only with byte `0xDF` in one of the 14 legacy encodings whose upcase grows.
+  - **HTTP-097 Apache Axis 1.x** (CVE-2026-90436, CISA KEV): a SOAP Fault arriving in a *request*, with an `exceptionName` where Axis loads the class from.
+  - **HTTP-098 DOCTYPE in a SOAP request** (no CVE): forbidden by both SOAP versions. Critical with an external DTD, which is named but never fetched.
+  - **HTTP-099 N-central bypass** (CVE-2026-86206): a raw `;` path parameter together with an escaped `Forwarded` address. Both halves are required, because each alone is legitimate.
+- **CVE index 492 named / 410 detected → 506 / 417.** Seven are named as context only because the engine documents why they are not matched: the Struts siblings CVE-2013-2248 / CVE-2016-3087 / CVE-2016-4438, the N-central second stage CVE-2026-86207, and CVE-2026-18556 / CVE-2026-18577 / CVE-2026-86218, which have no published mechanism.
+- **Docs:** [nettools.md](nettools.md) (HTTP Watch), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [knowledgebase.md](knowledgebase.md) (+1 entry: Apache Struts), [README (root)](../README.md) (CVE figures), HTTP Watch card text.
+- **Validation:**
+  - HTTP self-test 53 → 71 scenarios, all passing. Each new rule has a trigger and a near-miss, and the pcap leg sends the N-central bypass over IPv6 behind an extension header.
+  - Aggregate self-test 62/62; pytest 2070 passed.
+  - Module tiers on this box: self-test 2323/2323, conformance 519/519, IPv6 parity 506/506, cross-check 776/776 (with the real-PHP and JDK oracles), bite 221/222.
+  - 18 cross-checks were skipped because the Java jars (Commons FileUpload, Axis, Jetty, Log4j), the `rack` gem and Mono are not installed.
+  - The one bite escape is the bare-IPv6 ProxyLogon case only the .NET check covers, which Ragnar's own scenario still catches on v7.
+
 ### 2026-11-24
 
 #### feat(net): HTTP Watch v5 — Log4Shell, Text4Shell and phpAfterShell

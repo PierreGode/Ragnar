@@ -743,7 +743,7 @@ hosts already sent and transmits nothing (no Range test request, no h2 PING, no 
 HTTP over TLS is ciphertext after the handshake, so SNI / ALPN / JA4 / certificates stay with
 [TLS Watch](#tls-watch) and Cert Watch; the http.sys-over-TLS record flood (CVE-2026-47291) is TLS
 Watch's. One bounded `tcpdump` window (full snaplen, `-p`, packet cap), each packet dissected and fed
-through the vendored engine (`python/httpwatch.py`, v5). **42 codes** in seven tiers, each with a
+through the vendored engine (`python/httpwatch.py`, v7). **49 codes** in seven tiers, each with a
 confidence class — `exact` (the observation is the condition), `shape` (the malformation is read
 directly; whether the receiver is vulnerable is not observable), `heuristic` (a threshold or a
 name-matched field) or `posture`:
@@ -857,6 +857,42 @@ name-matched field) or `posture`:
   the recursion DoS `CVE-2021-45105` (below the 6.5 bar) and the JDBC appender `CVE-2021-44832`
   (needs the logging configuration). [LDAP Watch](#ldap-watch) sees the other leg — the
   directory's JNDI answer.
+- **More back ends** (*v7*; `HTTP-093`…`HTTP-099`). Each rule tests a parameter **name** or the
+  message structure against the target's own grammar — no payload signatures — and each is an
+  attempt finding:
+  - **Apache Struts**, parameter names decoded the way the servlet container does (one percent-
+    decode; a malformed escape means the container never hands Struts the parameter):
+    `HTTP-093` (critical) — a parameter overwriting a file-upload property Struts sets itself
+    (`<file>FileName` / `ContentType`), by case variant or OGNL prefix (`top.UploadFileName`):
+    S2-066 / S2-067 (`CVE-2023-50164` / `CVE-2024-53677`). Multipart part headers are parsed the
+    way Commons FileUpload does (a single quote does not quote, OWS before `=` is accepted, the
+    backslash is kept). `HTTP-094` (critical) — an OGNL opener after a case-sensitive `action:` /
+    `redirect:` / `redirectAction:` prefix: S2-016 (`CVE-2013-2251`, CISA KEV); `action:save` and
+    `redirect:/login` stay silent. `HTTP-095` (high) — a `method:` remainder that is not a Java
+    identifier (Java's own rules, over code points): S2-032 DMI (`CVE-2016-3081`, CISA KEV).
+    S2-017 / S2-033 / S2-037 are named, not walked.
+  - `HTTP-096` — **Rack `_method` grammar (Ruby2Shell, `CVE-2026-132825`)**: a `_method` form field
+    that is not an RFC 9110 method token (`M-SEARCH` and `PROPFIND` are valid) is warn; it is
+    critical when the value carries byte `0xDF` on a `text/plain` part tagged with one of the 14
+    legacy encodings whose upcase grows (measured against rack 2.2.7 and Ruby 3.3). The
+    `X-HTTP-Method-Override` header and query string are excluded, because Rack hands them over
+    as binary or never reads them.
+  - `HTTP-097` (critical) — **Apache Axis 1.x inbound SOAP Fault** (`CVE-2026-90436`, CISA KEV):
+    a SOAP Fault in a **request** whose `detail` carries an `exceptionName` in exactly the
+    position Axis loads the class from. Faults travel server to client, so one in a request is
+    the protocol running backwards; the class name is evidence only, no gadget list.
+  - `HTTP-098` — **DOCTYPE in a SOAP request** (no CVE): both SOAP versions forbid it. High; critical
+    with an external `SYSTEM` / `PUBLIC` identifier or external / parameter entities. A
+    hand-written scanner never resolves an entity and never fetches the DTD — it reports its
+    scheme and host. Axis 1.4 itself rejects a DOCTYPE, so against Axis this is a failed attempt.
+  - `HTTP-099` (critical) — **N-central access-control bypass** (`CVE-2026-86206`): a raw `;` path
+    parameter on the guarded first segment **and** a `Forwarded` `for=` quoted string with a
+    backslash escape, which Jetty unescapes to a loopback address while N-central's own check
+    fails open. Each half alone is legitimate (`;jsessionid=`, quoted IPv6 `for=`), so both are
+    required; an encoded `%3B` is silent because it reaches nothing. It also covers the doorway
+    for the second-stage `CVE-2026-86207`. Rides headers and the target, so h2c is covered.
+
+  The body-carried rules (093, 096, 097, 098) are blind to h2c bodies and, like the rest, to TLS.
 - **Tier F — attack-shaped request bodies** (*v3*; `HTTP-082`, `083`, `085`). Bodies are dechunked
   and parsed as multipart (each part decoded with its declared charset, UTF-8 and the wide
   encodings) or as form / query parameters, so a body any affected server accepts cannot slip past.
@@ -907,10 +943,11 @@ the 6.5 bar, a local-API defect, host configuration rather than wire bytes (the 
 session-handler `CVE-2026-115560`; phpAfterShell `CVE-2026-126714` was here until v5 found its
 wire shape), a free-form OGNL location (Struts
 `CVE-2017-9791` / `CVE-2018-11776` / `CVE-2020-17530`), or another watcher's — so the CVE count never
-quietly overstates. Detector Self-Test runs the engine's 1748-check suite plus smuggling, redaction,
+quietly overstates. Detector Self-Test runs the engine's 2323-check suite plus smuggling, redaction,
 WinRM-suppression, Range-boundary, Shellshock / S2-045 / Spring4Shell, ProxyLogon / ProxyShell /
-ToolShell and phpAfterShell / Log4Shell / Text4Shell trigger-and-near-miss, Brotli-arming and
-verdict scenarios, and a Scapy pcap leg carrying an IPv6 Hop-by-Hop header.
+ToolShell, phpAfterShell / Log4Shell / Text4Shell and Struts / Rack / Axis / SOAP / N-central
+trigger-and-near-miss, Brotli-arming and verdict scenarios, and a Scapy pcap leg carrying an IPv6
+Hop-by-Hop header.
 
 - Endpoint: `GET /api/net/http-watch` (`?interface=<nic>&seconds=5..60&ports=80,8080,…`) — returns
   `verdict`, `findings` (code, tier, severity, confidence, CVEs + KEV flag, redacted evidence,

