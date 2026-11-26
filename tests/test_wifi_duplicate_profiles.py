@@ -162,3 +162,24 @@ def test_connect_on_radio_reuses_shared_profile_when_idle(wm):
 
     assert ['sudo', 'nmcli', 'con', 'up', 'uuid', 'u-home', 'ifname', 'wlan1'] in calls
     assert not any(c[:4] == ['sudo', 'nmcli', 'con', 'add'] for c in calls)
+
+
+def test_interface_ssid_comes_from_profile_not_its_name():
+    """Reported live: 'DamselflyCreative (wlan2)' became a 'damselflycreative_wlan2' store."""
+    import wifi_interfaces
+
+    def run(cmd, *a, **k):
+        if cmd[:4] == ['nmcli', '-t', '-f', 'DEVICE,TYPE,STATE,CON-UUID,CONNECTION']:
+            out = ('wlan0:wifi:connected:u0:netplan-wlan0-Damselfly\n'
+                   'wlan2:wifi:connected:u2:Damselfly (wlan2)\n')
+            return subprocess.CompletedProcess(cmd, 0, out, '')
+        if cmd[:3] == ['nmcli', '-g', '802-11-wireless.ssid']:
+            return subprocess.CompletedProcess(cmd, 0, 'Damselfly\n', '')
+        return subprocess.CompletedProcess(cmd, 1, '', '')   # iw/iwgetid/ip all miss
+
+    with patch('wifi_interfaces.subprocess.run', side_effect=run):
+        found = {i['name']: i for i in wifi_interfaces.gather_wifi_interfaces('wlan0')}
+
+    assert found['wlan0']['connected_ssid'] == 'Damselfly'
+    assert found['wlan2']['connected_ssid'] == 'Damselfly'
+    assert found['wlan2']['connection'] == 'Damselfly (wlan2)'

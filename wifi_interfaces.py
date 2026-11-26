@@ -148,6 +148,23 @@ def _get_interface_link_details(interface_name: str) -> Dict[str, Optional[str]]
     return details
 
 
+def _ssid_of_profile(con_uuid: Optional[str]) -> Optional[str]:
+    """SSID stored in a NetworkManager profile, looked up by UUID."""
+    if not con_uuid or con_uuid == '--':
+        return None
+    try:
+        result = subprocess.run(
+            ['nmcli', '-g', '802-11-wireless.ssid', 'connection', 'show', 'uuid', con_uuid],
+            capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            ssid = result.stdout.strip().replace('\\:', ':')
+            if ssid and ssid != '--':
+                return ssid
+    except Exception as exc:
+        logger.debug(f"SSID lookup for profile {con_uuid} failed: {exc}")
+    return None
+
+
 def gather_wifi_interfaces(default_interface: str = 'wlan0') -> List[Dict]:
     """Collect Wi-Fi interface metadata using nmcli + ip link fallbacks."""
     # Resolve 'auto' to actual interface name
@@ -157,8 +174,10 @@ def gather_wifi_interfaces(default_interface: str = 'wlan0') -> List[Dict]:
     interfaces: Dict[str, Dict] = {}
 
     try:
+        # CON-UUID before CONNECTION: the name is last so a ':' in it can't
+        # shift the other fields.
         nmcli_result = subprocess.run(
-            ['nmcli', '-t', '-f', 'DEVICE,TYPE,STATE,CONNECTION', 'dev', 'status'],
+            ['nmcli', '-t', '-f', 'DEVICE,TYPE,STATE,CON-UUID,CONNECTION', 'dev', 'status'],
             capture_output=True,
             text=True,
             timeout=5
@@ -167,18 +186,22 @@ def gather_wifi_interfaces(default_interface: str = 'wlan0') -> List[Dict]:
             for line in nmcli_result.stdout.strip().split('\n'):
                 if not line:
                     continue
-                parts = line.split(':', 3)
-                if len(parts) < 4:
+                parts = line.split(':', 4)
+                if len(parts) < 5:
                     continue
-                device, dev_type, state, connection = parts
+                device, dev_type, state, con_uuid, connection = parts
                 if dev_type != 'wifi':
                     continue
                 normalized_connection = connection if connection and connection != '--' else None
+                # The profile NAME is a label, not the SSID ("Hobnet (wlan1)",
+                # "netplan-wlan0-Hobnet"). Used as the SSID it filed hosts under
+                # phantom per-interface stores whenever iw/iwgetid missed a poll.
+                ssid = _ssid_of_profile(con_uuid) if normalized_connection else None
                 interfaces[device] = {
                     'name': device,
                     'state': state or 'UNKNOWN',
                     'is_default': device == default_interface,
-                    'connected_ssid': normalized_connection,
+                    'connected_ssid': ssid,
                     'connection': normalized_connection,
                     'connected': (state or '').lower() == 'connected' and bool(normalized_connection),
                 }
@@ -233,7 +256,6 @@ def gather_wifi_interfaces(default_interface: str = 'wlan0') -> List[Dict]:
         link_details = _get_interface_link_details(iface['name'])
         if link_details.get('ssid'):
             iface['connected_ssid'] = link_details['ssid']
-            iface['connection'] = link_details['ssid']
             iface['connected'] = True
             if not iface.get('state') or iface['state'] in ('UNKNOWN', 'DISCONNECTED', 'DOWN'):
                 iface['state'] = 'CONNECTED'
