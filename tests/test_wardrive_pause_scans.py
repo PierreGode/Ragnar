@@ -77,6 +77,7 @@ def test_nmap_scanner_skips_when_wardriving(monkeypatch):
     class FakeSD:
         wardriving_session_active = True
         ragnarorch_status = ""
+        config = {}
 
     scanner = nmap_vuln_scanner.NmapVulnScanner.__new__(
         nmap_vuln_scanner.NmapVulnScanner)
