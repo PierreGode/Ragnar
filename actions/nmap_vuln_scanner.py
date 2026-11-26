@@ -467,6 +467,14 @@ class NmapVulnScanner:
         if getattr(self.shared_data, 'wardriving_session_active', False):
             logger.info(f"⏸ Skipping nmap vuln scan of {ip}: wardriving active")
             return 'skipped'
+        # Honour the scan blacklist before probing, not only when saving
+        # results: -sV/banner probes print garbage on raw-print (9100) hosts.
+        mac = str(row.get("MAC Address", "")).lower().strip()
+        if self.shared_data.config.get('blacklistcheck', True) and (
+                mac in self.shared_data.config.get('mac_scan_blacklist', [])
+                or ip in self.shared_data.config.get('ip_scan_blacklist', [])):
+            logger.info(f"⏭️ Skipping nmap vuln scan of blacklisted host {ip} ({mac})")
+            return 'skipped'
         self.shared_data.ragnarorch_status = "NmapVulnScanner"
         ports = row.get("Ports", "")
         scan_result = self.scan_vulnerabilities(ip, row["Hostnames"], row["MAC Address"], ports)

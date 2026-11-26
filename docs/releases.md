@@ -2,6 +2,14 @@
 
 ## Releases
 
+### 2026-11-26
+
+#### [#1118](https://github.com/PierreGode/Ragnar/pull/1118) — docs(wardriving): flash HuginnESP from the web flasher
+*Merged 2026-11-26 · branch `docs/huginn-web-flasher` · 2 file(s), +9 / −1*
+
+- **Wardriving setup, step 1:** the HuginnESP row said to build it with `cd HuginnESP && pio run --target upload`. HuginnESP's public repository now carries only the web flasher and the app's support pages, so the row points at the browser flasher instead, lists the boards it offers, and notes that later updates come over Bluetooth from the HuginnESP phone app.
+- **Docs:** [wardriving.md](wardriving.md)
+
 ### 2026-11-25
 
 #### feat(net): HTTP Watch v7 — Struts, Ruby2Shell, Axis SOAP Fault, SOAP DOCTYPE, N-central bypass
