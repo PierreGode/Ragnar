@@ -230,8 +230,8 @@ import subprocess as _sp
 
 def _nmcli_stub(conn_name, ssid, iw_ssid=None):
     def run(cmd, *a, **k):
-        if cmd[:2] == ['nmcli', '-t'] and 'GENERAL.CONNECTION' in cmd:
-            return _sp.CompletedProcess(cmd, 0, stdout=f'GENERAL.CONNECTION:{conn_name}\n', stderr='')
+        if cmd[:2] == ['nmcli', '-t'] and 'GENERAL.CON-UUID' in cmd:
+            return _sp.CompletedProcess(cmd, 0, stdout=f'GENERAL.CON-UUID:{conn_name}\n', stderr='')
         if cmd[:3] == ['nmcli', '-g', '802-11-wireless.ssid']:
             return _sp.CompletedProcess(cmd, 0 if ssid else 10, stdout=(ssid or '') + '\n', stderr='')
         if cmd[:2] == ['iw', 'dev']:

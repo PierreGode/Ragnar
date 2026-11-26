@@ -21803,7 +21803,8 @@ async function connectToWifiNetwork() {
         const data = await postAPI('/api/wifi/connect', {
             ssid: ssid,
             password: password,
-            save: saveNetwork
+            save: saveNetwork,
+            interface: getActiveWifiInterface()
         });
         
         if (data.success) {

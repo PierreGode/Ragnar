@@ -21987,14 +21987,17 @@ def _save_wifi_profile(ssid, password=None):
     operator's credentials — a reboot then auto-joins. Idempotent.
     """
     try:
-        exists = subprocess.run(['nmcli', '-t', '-f', 'NAME', 'con', 'show', ssid],
-                                capture_output=True, text=True, timeout=15).returncode == 0
-        if exists:
+        # The old check, `nmcli -t -f NAME con show <ssid>`, always failed
+        # ("invalid field 'NAME'" for a single profile), so every connect added
+        # another profile with the same name.
+        from wifi_manager import find_wifi_profile_uuid
+        profile_uuid = find_wifi_profile_uuid(ssid)
+        if profile_uuid:
             if password:
-                subprocess.run(['sudo', 'nmcli', 'con', 'modify', ssid,
+                subprocess.run(['sudo', 'nmcli', 'con', 'modify', 'uuid', profile_uuid,
                                 'wifi-sec.key-mgmt', 'wpa-psk', 'wifi-sec.psk', password],
                                capture_output=True, timeout=15)
-            subprocess.run(['sudo', 'nmcli', 'con', 'modify', ssid,
+            subprocess.run(['sudo', 'nmcli', 'con', 'modify', 'uuid', profile_uuid,
                             'connection.autoconnect', 'yes'], capture_output=True, timeout=15)
         else:
             cmd = ['sudo', 'nmcli', 'con', 'add', 'type', 'wifi', 'con-name', ssid,
@@ -22021,6 +22024,10 @@ def connect_wifi():
         password = data.get('password')
         priority = data.get('priority', 1)
         save_network = data.get('save', True)
+        try:
+            interface = _parse_wifi_interface_arg(data.get('interface'))
+        except ValueError as invalid_iface:
+            return jsonify({'success': False, 'error': str(invalid_iface)}), 400
         # Optional: enable an attached display as part of onboarding (from the
         # captive portal's "Attached display" dropdown). 'headless'/empty = leave
         # as-is. Applied only after a successful connect, so the screen comes up
@@ -22043,13 +22050,15 @@ def connect_wifi():
         # AP->client hand-off flakes: a reboot alone then joins Wi-Fi and comes up
         # in display mode. 1) save the Wi-Fi profile (autoconnect); 2) persist the
         # display choice without restarting yet (we're mid-request).
-        _save_wifi_profile(ssid, password)
+        # An explicit interface gets its own bound profile in connect_to_network.
+        if not interface:
+            _save_wifi_profile(ssid, password)
         want_display = bool(req_display and req_display != 'headless')
         if want_display:
             _apply_display_mode('display', req_display, restart=False)
 
         # Try to connect
-        success = wifi_manager.wifi_manager.connect_to_network(ssid, password)
+        success = wifi_manager.wifi_manager.connect_to_network(ssid, password, interface=interface)
         
         if success:
             logger.info(f"API: Successfully connected to {ssid}")
