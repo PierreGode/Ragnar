@@ -331,7 +331,10 @@ class ServerCapabilities:
         #     rest of the tab stays usable.
         # Advanced Vuln needs nmap, which Ragnar already uses.
         caps.advanced_vuln_enabled = caps.available_tools.get('nmap', False)
-        caps.zap_enabled = caps.total_ram_gb >= self.ZAP_MIN_RAM_GB
+        # A configured remote ZAP endpoint offloads the RAM cost to another host,
+        # so the local ZAP RAM floor no longer applies. Opt in via
+        # RAGNAR_ZAP_REMOTE_URL (see advanced_vuln_scanner.py).
+        caps.zap_enabled = bool(os.environ.get('RAGNAR_ZAP_REMOTE_URL', '').strip()) or caps.total_ram_gb >= self.ZAP_MIN_RAM_GB
         # Nuclei is the other memory-hungry scanner: greys out below ~900MB so
         # a Pi Zero 2 W can't crash on it (see NUCLEI_MIN_RAM_MB).
         caps.nuclei_enabled = (caps.total_ram_gb * 1024) >= self.NUCLEI_MIN_RAM_MB
