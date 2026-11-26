@@ -12484,7 +12484,7 @@ const _HTTP_VERDICT_STYLE = {
     observed:              ['bg-sky-950/40 border-sky-900 text-sky-300', 'ℹ Informational — h2c in use, a TRACE request or bare-LF line endings'],
     anomaly:               ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ HTTP posture issue — CL+TE in one message, obs-fold, Host conflict, slow-read, h2c on gNMI or trailers toward http.sys'],
     'credential-exposure': ['bg-red-950/60 border-red-800 text-red-300', '🛑 Credentials in the clear — Basic / form / cookie / URL / gRPC metadata secrets on cleartext HTTP (values redacted)'],
-    attack:                ['bg-red-950/60 border-red-800 text-red-300', '🛑 HTTP attack shape — request smuggling / desync, HTTP.sys exploit, attack-shaped request (Log4Shell, Exchange, SharePoint, Struts, Shellshock…) or h2c/gRPC abuse'],
+    attack:                ['bg-red-950/60 border-red-800 text-red-300', '🛑 HTTP attack shape — request smuggling / desync, HTTP.sys exploit, attack-shaped request (Log4Shell, Struts, Exchange, SharePoint, SOAP, Shellshock…) or h2c/gRPC abuse'],
     unknown:               ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
 const _HTTP_SEV_COLOR = { critical: 'text-red-400', high: 'text-red-300', warn: 'text-amber-300', info: 'text-sky-300' };
@@ -13013,7 +13013,7 @@ async function runRoutingSelftest() {
             : 'Scapy: <span class="text-amber-300">not installed</span> — end-to-end leg skipped';
         if (instBtn) instBtn.classList.toggle('hidden', !!d.scapy_available);
 
-        const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory / JNDI delivery)', ssh: 'SSH Watch (regreSSHion / Terrapin)', telnet: 'Telnet Watch (CVE-2026-24061 / 32746)', ftp: 'FTP Watch (ProFTPD mod_copy / quoted verb)', smtp: 'SMTP Watch (Exim expansion / SNI / AUTH b64)', http: 'HTTP Watch (smuggling / HTTP.sys / cleartext creds / attack-shaped requests / Exchange + SharePoint / Log4Shell + Text4Shell / Brotli / h2c-gRPC)', ble: 'BLE Watch (Bluetooth LE clone/spoof/MITM)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', lldp: 'LLDP Watch (802.1AB malformed TLV / CVE screening)', oam: 'OAM Watch (802.3ah Link OAM loopback / flag forgery)', cfm: 'CFM Watch (802.1ag / Y.1731 service OAM)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
+        const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory / JNDI delivery)', ssh: 'SSH Watch (regreSSHion / Terrapin)', telnet: 'Telnet Watch (CVE-2026-24061 / 32746)', ftp: 'FTP Watch (ProFTPD mod_copy / quoted verb)', smtp: 'SMTP Watch (Exim expansion / SNI / AUTH b64)', http: 'HTTP Watch (smuggling / HTTP.sys / cleartext creds / attack-shaped requests / Exchange + SharePoint / Log4Shell + Text4Shell / Struts / SOAP / Brotli / h2c-gRPC)', ble: 'BLE Watch (Bluetooth LE clone/spoof/MITM)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', lldp: 'LLDP Watch (802.1AB malformed TLV / CVE screening)', oam: 'OAM Watch (802.3ah Link OAM loopback / flag forgery)', cfm: 'CFM Watch (802.1ag / Y.1731 service OAM)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
                         arp: 'ARP Poisoning (incl. HSRP/VRRP virtual-MAC awareness)', dns: 'DNS Doctor (poison parser / anchors / ASN)',
                         mac: 'MAC Watch (spoof / vendor-OUI / randomization / HSRP-VRRP virtual-MAC)', dhcp: 'DHCP Guardian (rogue server / starvation / TunnelVision / DynoRoot / Shellshock)',
                         lacp: 'LACP Watch (802.1AX LAG-hijack / flapping)', rpc: 'RPC/NetLogon Watch (Zerologon / DCSync / WinRM)',
@@ -21815,7 +21815,8 @@ async function connectToWifiNetwork() {
         const data = await postAPI('/api/wifi/connect', {
             ssid: ssid,
             password: password,
-            save: saveNetwork
+            save: saveNetwork,
+            interface: getActiveWifiInterface()
         });
         
         if (data.success) {

@@ -1040,7 +1040,7 @@ You only need a companion for modes 2–5. Standalone mode (1) works without one
 
 | Mode | Companion | Flash with |
 |------|-----------|-----------|
-| 2 | HuginnESP | `cd HuginnESP && pio run --target upload` (COM8 on Windows, `/dev/ttyACM*` on Linux) |
+| 2 | HuginnESP | Browser-flash from [pierregode.github.io/HuginnESP/](https://pierregode.github.io/HuginnESP/) — pick the board (Waveshare ESP32-C5 or ESP32-S3, Seeed XIAO ESP32-C5, ESP32-C5-WROOM-1/1U, LilyGO T-Dongle C5); later firmware updates come over Bluetooth from the HuginnESP phone app |
 | 3 | Piglet (plain) | Piglet's own flasher / Arduino IDE — see the [Piglet repo](https://github.com/Hamspiced/piglet) |
 | 4 | Piglet Coordinator (dedicated) | Browser-flash from [pierregode.github.io/Ragnar/](https://pierregode.github.io/Ragnar/) |
 | 5 | Piglet Core | Flash Piglet as in mode 3, then set `meshModeOnBoot=core` in `wardriver.cfg` |

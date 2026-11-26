@@ -488,6 +488,11 @@ Yes, as attempts, with **HTTP Watch**. It sees only the cleartext hop between a 
 Source: nettools.md
 <!-- proof: docs/nettools.md | **Exchange and SharePoint** (*v4*; -->
 
+### Does Ragnar detect Apache Struts attacks?
+Yes, as attempts, with **HTTP Watch**. It flags the S2-045 / S2-046 OGNL shapes, file-upload property overwrites (S2-066 / S2-067), and OGNL in `redirect:` / `action:` / `method:` parameter names (S2-016 / S2-032) in cleartext HTTP. It cannot tell whether the server runs a vulnerable Struts.
+Source: nettools.md
+<!-- proof: docs/nettools.md | Apache Struts**, parameter names decoded the way the servlet -->
+
 ### Does Ragnar detect Shellshock?
 Yes, as attempts. **HTTP Watch** flags the bash `() {` prefix at the start of any request header, and **DHCP Guardian** flags it in DHCPv4 and DHCPv6 fields. Neither can tell whether the target runs a vulnerable bash.
 Source: nettools.md

@@ -25,7 +25,14 @@
 set -u
 
 RAGNAR_USER="ragnar"
-RAGNAR_PATH="${RAGNAR_PATH:-/home/${RAGNAR_USER}/Ragnar}"
+# Default to the install this script lives in (scripts/..), not a hardcoded
+# /home/ragnar/Ragnar: vendored installs (e.g. RaspyJack's vendor/ragnar) would
+# otherwise get a unit pointing at an empty path and crash-loop.
+# An explicit RAGNAR_PATH from the caller is always honoured as-is.
+if [ -z "${RAGNAR_PATH:-}" ]; then
+    RAGNAR_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+    [ -f "$RAGNAR_PATH/Ragnar.py" ] || RAGNAR_PATH="/home/${RAGNAR_USER}/Ragnar"
+fi
 UNIT="${RAGNAR_UNIT:-/etc/systemd/system/ragnar.service}"
 LOG_TAG="ragnar-display-mode"
 

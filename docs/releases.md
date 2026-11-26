@@ -2,9 +2,9 @@
 
 ## Releases
 
-### 2026-11-25
+### 2026-11-26
 
-#### feat(hw): HackerGadgets Pwnagotchi HAT support + zram swap actually switched on (Kali/Ulfberht Pi Zero 2 W no longer reset by the watchdog)
+#### [#1114](https://github.com/PierreGode/Ragnar/pull/1114) — feat(hw): HackerGadgets Pwnagotchi HAT support + zram swap actually switched on (Kali/Ulfberht Pi Zero 2 W no longer reset by the watchdog)
 *branch `fix/zram-swap-everywhere`*
 
 **HackerGadgets Pwnagotchi HAT** (UPS, GPS, AC Wi-Fi, USB hub and RTC under a Pi Zero):
@@ -15,7 +15,7 @@
 - **RTC**: `dtoverlay=i2c-rtc,pcf85063a` (an existing i2c-rtc line is kept). The kernel sets the clock from the RTC as the driver loads and writes NTP time back to it, so the time is right at boot without a network.
 - **New `scripts/hg_hat_setup.sh`** installs the overlay and hook only when the HAT answers; run by the installer, `update_ragnar.sh` (Step 6.92), the in-app updater, and by Ragnar the first time it sees the HAT (I2C is only up after a fresh install's reboot). Opt out: `/etc/ragnar/hg_hat.disabled`, `/etc/ragnar/hg_hat_poweroff.disabled`.
 - **Pi I2C clock-stretch quirk handled**: the controller stretches the clock and the Pi reads bit 7 of the first byte as 1 at times (identity 0xEC for 0x6C, voltage 0x90D1 for 0x10D1). That bit is masked on the first byte only; every other byte is checked strictly.
-- **Settings** (Config → Display): HackerGadgets Pwnagotchi HAT Battery, Shut Down on Low Battery, Low-Battery Threshold (%). Cache-bust `ragnar_modern.js?v=20261125-hg-hat`.
+- **Settings** (Config → Display): HackerGadgets Pwnagotchi HAT Battery, Shut Down on Low Battery, Low-Battery Threshold (%). Cache-bust `ragnar_modern.js?v=20261126-hg-hat`.
 - **Docs:** [hg-hat.md](hg-hat.md) (new: wiring, setup, low battery, power-off, RTC, troubleshooting incl. the no-boot-on-battery fix), [knowledgebase.md](knowledgebase.md) (2 answers), [INSTALL.md](INSTALL.md), [docs index](README.md), [README (root)](../README.md).
 - **Validation (HAT):** on the real board, 10/10 readings and detections after the masking fix (before it every read in a 30-read run was rejected for the misread bit); setup script installs on the first run and changes nothing on the next; hook dry run found the HAT 5/5 and does nothing on `reboot`; after the overlay reboot `rtc-pcf85063 1-0051` registered as rtc0, NTP time was written to it within 80 s, and on the next boot the kernel set the system clock from it 3.8 s into boot. `tests/test_hg_hat.py` (33) covers decoding with the captured bytes, the masked bit, foreign chips on 0x50, failure handling, the low-battery window and the source order. The real power-off (HAT switching off) is not yet exercised on hardware.
 
@@ -30,6 +30,32 @@
   - opt out with `/etc/ragnar/zram.disabled` (all paths) or `RAGNAR_ZRAM=0` (installer / CLI updater).
 - **Docs:** [INSTALL.md](INSTALL.md#a-pi-zero-keeps-rebooting-or-freezing--swap-zram) (new swap section), [ragnar-os-ulfberht.md](ragnar-os-ulfberht.md), [README (root)](../README.md).
 - **Validation:** on a Kali-based Pi Zero 2 W (416 MB, no swap) that had been resetting every 7–17 minutes: the zram swap came on first (833 MB) and carried the board through a 57-minute repair of an interrupted upgrade and the generator install with no reset; after a reboot `/dev/zram0` (832 MB) came up from the generator by itself, and the board then ran Ragnar for 31 minutes on one boot with 0 service restarts and the web UI answering throughout (swap in use 390–580 MB). That run also showed apt exiting non-zero for an unrelated half-configured package while the generator installed fine, so success is now judged by the package state. On Raspberry Pi OS trixie (zram already active) the script only writes a missing config and reports the active swap; re-runs, an edited config, the opt-outs and the non-root guard checked; `bash -n` on all four scripts; the 7 test files that read the install/update scripts pass (311 passed, 2 skipped).
+
+#### [#1118](https://github.com/PierreGode/Ragnar/pull/1118) — docs(wardriving): flash HuginnESP from the web flasher
+*Merged 2026-11-26 · branch `docs/huginn-web-flasher` · 2 file(s), +9 / −1*
+
+- **Wardriving setup, step 1:** the HuginnESP row said to build it with `cd HuginnESP && pio run --target upload`. HuginnESP's public repository now carries only the web flasher and the app's support pages, so the row points at the browser flasher instead, lists the boards it offers, and notes that later updates come over Bluetooth from the HuginnESP phone app.
+- **Docs:** [wardriving.md](wardriving.md)
+
+### 2026-11-25
+
+#### feat(net): HTTP Watch v7 — Struts, Ruby2Shell, Axis SOAP Fault, SOAP DOCTYPE, N-central bypass
+*branch `feature/http-watch-v7`*
+
+- **Seven new rules (42 → 49 codes).** Each checks a parameter name or the message structure against the target's own grammar, never a payload signature, and each reports an attempt:
+  - **Apache Struts:** HTTP-093, a parameter overwriting a file-upload property Struts sets itself, by case variant or OGNL prefix (S2-066 / S2-067, CVE-2023-50164 / CVE-2024-53677). HTTP-094, OGNL after an `action:` / `redirect:` / `redirectAction:` prefix (S2-016, CVE-2013-2251, CISA KEV). HTTP-095, a `method:` name that is not a Java identifier (S2-032, CVE-2016-3081, CISA KEV).
+  - **HTTP-096 Ruby2Shell** (CVE-2026-132825): a Rails / Rack `_method` field that is not a valid HTTP method. It is a warning by default and critical only with byte `0xDF` in one of the 14 legacy encodings whose upcase grows.
+  - **HTTP-097 Apache Axis 1.x** (CVE-2026-90436, CISA KEV): a SOAP Fault arriving in a *request*, with an `exceptionName` where Axis loads the class from.
+  - **HTTP-098 DOCTYPE in a SOAP request** (no CVE): forbidden by both SOAP versions. Critical with an external DTD, which is named but never fetched.
+  - **HTTP-099 N-central bypass** (CVE-2026-86206): a raw `;` path parameter together with an escaped `Forwarded` address. Both halves are required, because each alone is legitimate.
+- **CVE index 492 named / 410 detected → 506 / 417.** Seven are named as context only because the engine documents why they are not matched: the Struts siblings CVE-2013-2248 / CVE-2016-3087 / CVE-2016-4438, the N-central second stage CVE-2026-86207, and CVE-2026-18556 / CVE-2026-18577 / CVE-2026-86218, which have no published mechanism.
+- **Docs:** [nettools.md](nettools.md) (HTTP Watch), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [knowledgebase.md](knowledgebase.md) (+1 entry: Apache Struts), [README (root)](../README.md) (CVE figures), HTTP Watch card text.
+- **Validation:**
+  - HTTP self-test 53 → 71 scenarios, all passing. Each new rule has a trigger and a near-miss, and the pcap leg sends the N-central bypass over IPv6 behind an extension header.
+  - Aggregate self-test 62/62; pytest 2070 passed.
+  - Module tiers on this box: self-test 2323/2323, conformance 519/519, IPv6 parity 506/506, cross-check 776/776 (with the real-PHP and JDK oracles), bite 221/222.
+  - 18 cross-checks were skipped because the Java jars (Commons FileUpload, Axis, Jetty, Log4j), the `rack` gem and Mono are not installed.
+  - The one bite escape is the bare-IPv6 ProxyLogon case only the .NET check covers, which Ragnar's own scenario still catches on v7.
 
 ### 2026-11-24
 

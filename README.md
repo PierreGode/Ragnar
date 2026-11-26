@@ -154,7 +154,7 @@ The installer auto-detects your platform and configures everything — distro de
 
 ## 🖥️ Server Mode: Advanced Features (8GB+ RAM)
 
-On 8GB+ systems Ragnar automatically unlocks OWASP ZAP and parallel scanning. The rest of the Adv Scan tab (Nuclei, Nikto, SQLMap, WhatWeb, Nmap vuln scripts) and Traffic Analysis run on any board — see [Advanced Vulnerability Scanning](docs/adv-scan.md) for the full breakdown of what runs where, RAM gating, and mesh delegation. Fresh 8GB+ installs get the advanced tools automatically; on an existing box:
+On 8GB+ systems Ragnar automatically unlocks OWASP ZAP and parallel scanning. The rest of the Adv Scan tab (Nuclei, Nikto, SQLMap, WhatWeb, Nmap vuln scripts) and Traffic Analysis run on any board — see [Advanced Vulnerability Scanning](docs/adv-scan.md) for the full breakdown of what runs where, RAM gating, and mesh delegation. A smaller board can also use **ZAP running on another host**, such as a NetHunter Pro phone that runs its own Ragnar too, through `RAGNAR_ZAP_REMOTE_URL` — see [Remote ZAP](docs/adv-scan.md#remote-zap-offload-to-another-host). Fresh 8GB+ installs get the advanced tools automatically; on an existing box:
 
 ```bash
 cd /home/ragnar/Ragnar
@@ -213,7 +213,7 @@ Ragnar is built on the shoulders of great work by others:
 | [RuView](https://github.com/ruvnet/ruview) | ruvnet | WiFi-CSI sensing engine and ESP32 CSI-node firmware behind [RuSense](docs/rusense.md) — camera-free presence, motion, people-count, pose and vital-sign sensing. Ragnar vendors bins from the [PierreGode/RuView](https://github.com/PierreGode/RuView) fork |
 | Networking and more | [Solarflere](https://www.instagram.com/solarflere) | Co-author of the [Authority Verification](docs/nettools.md) suite (Diagnostics by OSI layer, Interfaces) |
 
-> **[CREDITS.md](docs/CREDITS.md)** — Solarflere identified and curated the CVE corpus behind Ragnar's passive detection suite — **410 CVEs detected** from the wire, 492 named (CVE-1999-0113 → CVE-2026-126714). See the full writeup and numbers there, and the **[CVE Index](docs/CVE.md)** for every CVE with its detector and status.
+> **[CREDITS.md](docs/CREDITS.md)** — Solarflere identified and curated the CVE corpus behind Ragnar's passive detection suite — **417 CVEs detected** from the wire, 506 named (CVE-1999-0113 → CVE-2026-132825). See the full writeup and numbers there, and the **[CVE Index](docs/CVE.md)** for every CVE with its detector and status.
 
 ---
 

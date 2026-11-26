@@ -191,11 +191,11 @@ class AIService:
             # key and each fans out concurrent dashboard calls) would otherwise
             # hang for minutes — well past any client timeout — instead of
             # failing fast and letting the rest of the insights render. One retry
-            # keeps the worst-case bounded (~40s/call) so the background insights
-            # run resolves quickly even on a slow board.
+            # keeps the worst-case bounded (~6min/call, long enough for slow local models)
+            # so the background insights run still resolves on a slow board.
             client_kwargs = {
                 "api_key": self.api_token or "ragnar-local",
-                "timeout": 20.0,
+                "timeout": 180.0,
                 "max_retries": 1,
             }
             if self.base_url:
@@ -606,7 +606,7 @@ class AIService:
         if not token:
             return None
         try:
-            self._fallback_client = OpenAI(api_key=token, timeout=20.0, max_retries=1)
+            self._fallback_client = OpenAI(api_key=token, timeout=180.0, max_retries=1)
             self._fallback_model = (
                 str(self.shared_data.config.get("ai_fallback_model", "") or "").strip()
                 or "gpt-5.4-nano"
