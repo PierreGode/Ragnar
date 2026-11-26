@@ -26,6 +26,7 @@ PROFILES = {
 
 
 def _nmcli(calls=None, extra=None):
+    # PROFILES values: (type, ssid, mode[, bound interface])
     def run(cmd, *a, **k):
         if calls is not None:
             calls.append(cmd)
@@ -34,12 +35,14 @@ def _nmcli(calls=None, extra=None):
             if res is not None:
                 return res
         if cmd[:4] == ['nmcli', '-t', '-f', 'UUID,TYPE']:
-            out = '\n'.join(f'{u}:{t}' for u, (t, _, _) in PROFILES.items())
+            out = '\n'.join(f'{u}:{p[0]}' for u, p in PROFILES.items())
             return subprocess.CompletedProcess(cmd, 0, out + '\n', '')
         if cmd[:3] == ['nmcli', '-t', '-f'] and cmd[-2] == 'uuid':
-            _, ssid, mode = PROFILES[cmd[-1]]
+            _, ssid, mode = PROFILES[cmd[-1]][:3]
+            bound = PROFILES[cmd[-1]][3] if len(PROFILES[cmd[-1]]) > 3 else ''
             out = (f"802-11-wireless.ssid:{ssid.replace(':', chr(92) + ':')}\n"
-                   f"802-11-wireless.mode:{mode}\n")
+                   f"802-11-wireless.mode:{mode}\n"
+                   f"connection.interface-name:{bound}\n")
             return subprocess.CompletedProcess(cmd, 0, out, '')
         return subprocess.CompletedProcess(cmd, 0, '', '')
     return run
@@ -113,3 +116,49 @@ def test_web_presave_modifies_existing_profile_instead_of_adding():
     assert not any('add' in c for c in calls)
     assert ['sudo', 'nmcli', 'con', 'modify', 'uuid', 'u-home',
             'connection.autoconnect', 'yes'] in calls
+
+
+def _active_on(device):
+    """GENERAL.DEVICES for any profile: active on ``device`` ('' = inactive)."""
+    def extra(cmd):
+        if cmd[:3] == ['nmcli', '-g', 'GENERAL.DEVICES']:
+            return subprocess.CompletedProcess(cmd, 0, device + '\n', '')
+        if cmd[:3] == ['sudo', 'nmcli', '-s']:
+            return subprocess.CompletedProcess(cmd, 0, 'savedpsk\n', '')
+        return None
+    return extra
+
+
+def test_interface_lookup_only_matches_profiles_bound_to_it():
+    with patch.dict(PROFILES, {'u-w1': ('802-11-wireless', 'Hobnet', 'infrastructure', 'wlan1')}), \
+         patch('wifi_manager.subprocess.run', side_effect=_nmcli()):
+        assert find_wifi_profile_uuid('Hobnet', 'wlan1') == 'u-w1'
+        assert find_wifi_profile_uuid('Hobnet', 'wlan0') is None
+        assert find_wifi_profile_uuid('Hobnet') == 'u-home'   # unbound preferred
+
+
+def test_connect_on_second_radio_adds_bound_copy_and_leaves_first_alone(wm):
+    """Reported live: picking wlan1 re-activated Hobnet on wlan2 and said 'connected'."""
+    calls = []
+    with patch('wifi_manager.subprocess.run', side_effect=_nmcli(calls, _active_on('wlan2'))), \
+         patch('wifi_manager.time.sleep'), \
+         patch.object(type(wm), '_interface_has_profile_up', return_value=False):
+        wm.connect_to_network('Hobnet', None, interface='wlan1')
+
+    adds = [c for c in calls if c[:4] == ['sudo', 'nmcli', 'con', 'add']]
+    assert len(adds) == 1
+    add = adds[0]
+    assert add[add.index('ifname') + 1] == 'wlan1'
+    assert add[add.index('wifi-sec.psk') + 1] == 'savedpsk'     # creds from the shared profile
+    assert not any(c[:4] == ['sudo', 'nmcli', 'con', 'up'] and 'u-home' in c for c in calls)
+
+
+def test_connect_on_radio_reuses_shared_profile_when_idle(wm):
+    calls = []
+    with patch('wifi_manager.subprocess.run', side_effect=_nmcli(calls, _active_on(''))), \
+         patch('wifi_manager.time.sleep'), \
+         patch.object(type(wm), '_interface_has_profile_up', return_value=False):
+        wm.connect_to_network('Hobnet', None, interface='wlan1')
+
+    assert ['sudo', 'nmcli', 'con', 'up', 'uuid', 'u-home', 'ifname', 'wlan1'] in calls
+    assert not any(c[:4] == ['sudo', 'nmcli', 'con', 'add'] for c in calls)

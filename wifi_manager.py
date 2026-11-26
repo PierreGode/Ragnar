@@ -24,7 +24,7 @@ from db_manager import get_db
 from wifi_interfaces import gather_wifi_interfaces, get_active_ethernet_interface
 
 
-def find_wifi_profile_uuid(ssid):
+def find_wifi_profile_uuid(ssid, interface=None):
     """UUID of a saved client (infrastructure) profile that joins ``ssid``, or None.
 
     Matches on the profile's SSID, never its name. Names are labels that can
@@ -33,9 +33,13 @@ def find_wifi_profile_uuid(ssid):
     ``nmcli -g 802-11-wireless.ssid connection show Hobnet`` returned the SSID
     nine times over, which became a phantom "Hobnet Hobnet ..." network store.
     Callers should address the profile as ``uuid <UUID>``.
+
+    With ``interface``, only a profile bound to that interface matches. Without
+    it, a profile not bound to any interface is preferred.
     """
     if not ssid:
         return None
+    bound_elsewhere = None
     try:
         listing = subprocess.run(['nmcli', '-t', '-f', 'UUID,TYPE', 'connection', 'show'],
                                  capture_output=True, text=True, timeout=10)
@@ -46,7 +50,8 @@ def find_wifi_profile_uuid(ssid):
             if ctype != '802-11-wireless' or not uuid:
                 continue
             detail = subprocess.run(
-                ['nmcli', '-t', '-f', '802-11-wireless.ssid,802-11-wireless.mode',
+                ['nmcli', '-t', '-f',
+                 '802-11-wireless.ssid,802-11-wireless.mode,connection.interface-name',
                  'connection', 'show', 'uuid', uuid],
                 capture_output=True, text=True, timeout=10)
             if detail.returncode != 0:
@@ -57,11 +62,21 @@ def find_wifi_profile_uuid(ssid):
                 fields[key] = val.replace('\\:', ':').replace('\\\\', '\\')
             if fields.get('802-11-wireless.mode') == 'ap':
                 continue
-            if fields.get('802-11-wireless.ssid') == ssid:
+            if fields.get('802-11-wireless.ssid') != ssid:
+                continue
+            bound_to = fields.get('connection.interface-name', '')
+            if bound_to in ('', '--'):
+                bound_to = None
+            if interface:
+                if bound_to == interface:
+                    return uuid
+            elif bound_to is None:
                 return uuid
+            elif bound_elsewhere is None:
+                bound_elsewhere = uuid
     except Exception:
         pass
-    return None
+    return bound_elsewhere
 
 
 class WiFiManager:
@@ -2440,10 +2455,64 @@ class WiFiManager:
             "trying the connect anyway (a saved profile can still auto-join)")
         return False
 
-    def connect_to_network(self, ssid, password=None):
-        """Connect to a specific Wi-Fi network - NEVER deletes existing system profiles"""
+    def _interface_profile(self, ssid, password, interface):
+        """UUID of a profile for ``ssid`` bound to ``interface``, adding one if needed.
+
+        A profile is active on one device at a time, so bringing up the shared
+        profile on a second radio moves it off the first. A per-interface copy
+        lets each radio join on its own. Credentials come from ``password`` or
+        the existing unbound profile.
+        """
+        uuid = find_wifi_profile_uuid(ssid, interface)
+        if uuid:
+            if password:
+                subprocess.run(['sudo', 'nmcli', 'con', 'modify', 'uuid', uuid,
+                                'wifi-sec.key-mgmt', 'wpa-psk', 'wifi-sec.psk', password],
+                               capture_output=True, text=True, timeout=15)
+            return uuid
+        psk = password
+        base = find_wifi_profile_uuid(ssid)
+        if base:
+            res = subprocess.run(['nmcli', '-g', 'GENERAL.DEVICES', 'connection', 'show', 'uuid', base],
+                                 capture_output=True, text=True, timeout=10)
+            if res.returncode == 0 and res.stdout.strip() in ('', interface):
+                # Not active on another radio: use it as is.
+                if password:
+                    subprocess.run(['sudo', 'nmcli', 'con', 'modify', 'uuid', base,
+                                    'wifi-sec.key-mgmt', 'wpa-psk', 'wifi-sec.psk', password],
+                                   capture_output=True, text=True, timeout=15)
+                return base
+        if not psk and base:
+            res = subprocess.run(['sudo', 'nmcli', '-s', '-g', '802-11-wireless-security.psk',
+                                  'connection', 'show', 'uuid', base],
+                                 capture_output=True, text=True, timeout=15)
+            psk = res.stdout.strip() if res.returncode == 0 else None
+        cmd = ['sudo', 'nmcli', 'con', 'add', 'type', 'wifi', 'ifname', interface,
+               'con-name', f'{ssid} ({interface})', 'ssid', ssid,
+               'connection.autoconnect', 'yes']
+        if psk:
+            cmd += ['wifi-sec.key-mgmt', 'wpa-psk', 'wifi-sec.psk', psk]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if res.returncode != 0:
+            self.logger.error(f"Could not add profile for {ssid} on {interface}: {res.stderr.strip()}")
+            return None
+        return find_wifi_profile_uuid(ssid, interface)
+
+    def _interface_has_profile_up(self, interface, uuid):
+        res = subprocess.run(['nmcli', '-g', 'GENERAL.STATE,GENERAL.CON-UUID', 'dev', 'show', interface],
+                             capture_output=True, text=True, timeout=10)
+        lines = res.stdout.splitlines()
+        return (res.returncode == 0 and len(lines) >= 2
+                and lines[0].startswith('100') and lines[1].strip() == uuid)
+
+    def connect_to_network(self, ssid, password=None, interface=None):
+        """Connect to a specific Wi-Fi network - NEVER deletes existing system profiles
+
+        ``interface`` joins on that radio only, leaving the others alone.
+        """
+        profile_uuid = None
         try:
-            self.logger.info(f"Connecting to network: {ssid}")
+            self.logger.info(f"Connecting to network: {ssid}" + (f" on {interface}" if interface else ""))
             if password:
                 self.logger.info(f"Password provided: {'*' * len(password)} (length: {len(password)})")
             else:
@@ -2464,9 +2533,12 @@ class WiFiManager:
             # Check if a connection profile already exists for this SSID. Match on
             # the SSID and address it by UUID: a name lookup misses profiles
             # named differently and is ambiguous when names repeat.
-            profile_uuid = find_wifi_profile_uuid(ssid)
-
-            if profile_uuid:
+            if interface:
+                profile_uuid = self._interface_profile(ssid, password, interface)
+                if not profile_uuid:
+                    return False
+                cmd = ['sudo', 'nmcli', 'con', 'up', 'uuid', profile_uuid, 'ifname', interface]
+            elif (profile_uuid := find_wifi_profile_uuid(ssid)):
                 self.logger.info(f"Found existing connection profile for {ssid}")
 
                 # If password is provided and profile exists, try to update the password
@@ -2486,7 +2558,7 @@ class WiFiManager:
                 if password:
                     cmd.extend(['password', password])
             
-            self.logger.info(f"Executing: {' '.join(cmd[:3])} {ssid} {'password ***' if password else ''}")
+            self.logger.info(f"Executing: {' '.join(cmd[:4])} {ssid}" + (f" on {interface}" if interface else ""))
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
             # Get signal strength if available
@@ -2503,7 +2575,10 @@ class WiFiManager:
                 # Wait a moment and verify connection
                 self.logger.info(f"Connection command succeeded, verifying connection...")
                 time.sleep(5)
-                connected = self.check_wifi_connection()
+                if interface:
+                    connected = self._interface_has_profile_up(interface, profile_uuid)
+                else:
+                    connected = self.check_wifi_connection()
                 
                 # Log connection attempt to database
                 if self.db:
@@ -2513,7 +2588,7 @@ class WiFiManager:
                             success=connected,
                             failure_reason=None if connected else "Verification failed",
                             signal_strength=signal_strength,
-                            network_profile_existed=profile_exists,
+                            network_profile_existed=bool(profile_uuid),
                             from_ap_mode=self.ap_mode_active
                         )
                         if connected:
@@ -2554,7 +2629,7 @@ class WiFiManager:
                             success=False,
                             failure_reason=failure_reason,
                             signal_strength=signal_strength,
-                            network_profile_existed=profile_exists,
+                            network_profile_existed=bool(profile_uuid),
                             from_ap_mode=self.ap_mode_active
                         )
                     except Exception as db_err:
@@ -2570,7 +2645,7 @@ class WiFiManager:
                         ssid=ssid,
                         success=False,
                         failure_reason="Connection timeout",
-                        network_profile_existed=profile_exists,
+                        network_profile_existed=bool(profile_uuid),
                         from_ap_mode=self.ap_mode_active
                     )
                 except:
@@ -2586,7 +2661,7 @@ class WiFiManager:
                         ssid=ssid,
                         success=False,
                         failure_reason=f"Exception: {str(e)}",
-                        network_profile_existed=profile_exists,
+                        network_profile_existed=bool(profile_uuid),
                         from_ap_mode=self.ap_mode_active
                     )
                 except:
