@@ -2048,26 +2048,34 @@ EOF
     check_success "Services setup completed"
 }
 
-# Configure ZRAM swap override to increase available swap space
+# Configure compressed swap in RAM (zram0 = twice the RAM) and make sure it is
+# actually active. The config file alone does nothing without the
+# systemd-zram-generator package: Raspberry Pi OS trixie ships it, Kali/Ulfberht
+# and plain Debian do not, so a Pi Zero 2 W there ran with no swap, stalled under
+# memory pressure and was reset by the hardware watchdog every few minutes.
+# scripts/ensure_zram_swap.sh does config + package + start, idempotently; the
+# CLI and in-app updaters run the same script. Opt out: RAGNAR_ZRAM=0 or
+# /etc/ragnar/zram.disabled.
 configure_zram_swap() {
-    log "INFO" "Configuring ZRAM swap override (ram * 2)..."
+    log "INFO" "Configuring ZRAM swap (ram * 2)..."
 
+    local zram_script="$ragnar_PATH/scripts/ensure_zram_swap.sh"
+    if [ -f "$zram_script" ]; then
+        if [ "$IMAGE_BUILD" = true ]; then
+            bash "$zram_script" --no-start
+        else
+            bash "$zram_script"
+        fi
+        log "SUCCESS" "ZRAM swap step finished"
+        return 0
+    fi
+
+    # Fallback for a checkout without the script: write the config only.
     local zram_conf_dir="/etc/systemd/zram-generator.conf.d"
-    local zram_conf_file="$zram_conf_dir/override.conf"
-
     mkdir -p "$zram_conf_dir"
-    check_success "Ensured ZRAM override directory exists"
-
-    cat > "$zram_conf_file" << 'EOF'
-[zram0]
-zram-size = ram * 2
-EOF
-    check_success "Updated ZRAM override configuration"
-
-    systemctl daemon-reload
-    check_success "Reloaded systemd daemon for ZRAM override"
-
-    log "SUCCESS" "ZRAM swap configured to twice the physical RAM"
+    printf '[zram0]\nzram-size = ram * 2\n' > "$zram_conf_dir/override.conf"
+    [ "$IMAGE_BUILD" = true ] || systemctl daemon-reload >/dev/null 2>&1 || true
+    log "WARNING" "ensure_zram_swap.sh not found - wrote the zram config only"
 }
 
 # Configure USB Gadget
@@ -3193,6 +3201,13 @@ except:
 
             # Apply the Simple Guide: Increase ZRAM Swap instructions before reboot prompt
             configure_zram_swap
+
+    # HackerGadgets Pwnagotchi HAT: RTC overlay + power-off hook, only when the
+    # HAT answers on I2C. On a fresh image I2C only comes up after the reboot,
+    # so Ragnar runs the same script the first time it sees the HAT.
+    if [ "$IMAGE_BUILD" != true ] && [ -f "$ragnar_PATH/scripts/hg_hat_setup.sh" ]; then
+        bash "$ragnar_PATH/scripts/hg_hat_setup.sh" || true
+    fi
 
     log "SUCCESS" "ragnar installation completed!"
     log "INFO" "Please reboot your system to apply all changes."

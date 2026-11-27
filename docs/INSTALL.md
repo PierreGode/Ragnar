@@ -29,6 +29,7 @@ Use Raspberry Pi OS Lite (64-bit) Debian Trixie with no desktop environment.
 - Username and hostname set to `ragnar`.
 - 2.13-inch e-Paper HAT connected to GPIO pins.
 - **Optional:** a Waveshare UPS HAT (C) is detected automatically and its battery percentage shown on the display and the System tab, with nothing to install. See [ups-hat.md](ups-hat.md).
+- **Optional:** the HackerGadgets Pwnagotchi HAT (UPS, GPS, Wi-Fi, USB hub, RTC) is detected automatically too: battery percentage, a clean shutdown on low battery, and its real-time clock. See [hg-hat.md](hg-hat.md).
 - **Optional:** [PiSugar UPS](https://www.pisugar.com/) for battery power, battery monitoring, and hardware button support. The installer will prompt you to install `pisugar-server` if you have one attached. You can also install it manually later:
   ```bash
   curl http://cdn.pisugar.com/release/pisugar-power-manager.sh | sudo bash
@@ -290,6 +291,45 @@ failing is a common first symptom of a state broken during the main install.
 `install_ragnar.sh`, `update_ragnar.sh` and `scripts/install_pwnagotchi.sh` all
 detect and repair this automatically before their first apt call, so it should
 no longer need doing by hand.
+
+#### A Pi Zero keeps rebooting or freezing — swap (zram)
+
+Ragnar runs with compressed swap in RAM (zram, sized at twice the RAM). On a
+512 MB Pi Zero 2 W it is what keeps the box responsive: without any swap, memory
+pressure makes Linux keep re-reading program code from the SD card, the box
+stalls for many seconds, and the 15-second hardware watchdog Ragnar enables
+resets it — every few minutes, with nothing in the logs except the boot stopping
+mid-activity.
+
+Check it with:
+
+```bash
+swapon --show        # should list /dev/zram0
+```
+
+The zram size is set in `/etc/systemd/zram-generator.conf.d/override.conf`, but
+that file is only read by the `systemd-zram-generator` package. Raspberry Pi OS
+trixie ships it; **Kali (and so Ulfberht) and plain Debian do not**, so those
+installs used to have no swap at all. `scripts/ensure_zram_swap.sh` fixes that,
+and the installer, `update_ragnar.sh` and the in-app Update button all run it:
+
+- writes the config if it is missing (an edited file is kept);
+- does nothing more when zram swap is already active, or when `zram-tools`
+  manages swap;
+- otherwise switches a zram swap on immediately (kernel module + `zramctl`, no
+  package needed), then repairs an interrupted dpkg run and installs
+  `systemd-zram-generator` so zram comes back on every boot.
+
+The order matters: a no-swap 512 MB board can be reset by the watchdog while apt
+loads its package list, so swap goes on first. If dpkg was left half-finished by
+earlier resets, finishing it can take a long time on a Zero — let it run.
+
+Run it by hand with `sudo /home/ragnar/Ragnar/scripts/ensure_zram_swap.sh`.
+To opt out, create the marker file `sudo mkdir -p /etc/ragnar && sudo touch
+/etc/ragnar/zram.disabled` (covers the installer, `update_ragnar.sh` and the
+in-app Update button), or set `RAGNAR_ZRAM=0` when running the installer or
+`update_ragnar.sh` from a shell. Opting out never removes swap that is already
+configured.
 
 #### Updates in general
 

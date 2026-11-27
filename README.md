@@ -90,7 +90,7 @@ Every feature below has a full guide in [`docs/`](docs). Short version here, det
 - **On-Screen Kiosk** (Pi server only) — drives an attached HDMI/DSI screen as a fullscreen Chromium dashboard, with a handheld escape hatch (Hackberry Pi CM5). Needs 2GB+ RAM. See [Kiosk Mode](docs/kiosk.md).
 - **WiFi Pineapple Pager** — deploy Ragnar to the Pager as a native payload with a full-color LCD, buttons and LED status. Based on **brAinphreAk**'s [PagerBjorn / Loki](https://github.com/pineapple-pager-projects/pineapple_pager_loki). See [Pager Guide](docs/pager.md).
 - **PiSugar 3 button** — physical button to swap between Ragnar and Pwnagotchi modes (see below).
-- **Battery percentage on screen** — PiSugar, or a Waveshare UPS HAT (C) on a Pi Zero (auto-detected over I2C, nothing to install). See [UPS HAT](docs/ups-hat.md).
+- **Battery percentage on screen** — PiSugar, a Waveshare UPS HAT (C), or the HackerGadgets Pwnagotchi HAT on a Pi Zero (auto-detected over I2C, nothing to install). The HackerGadgets HAT also gets a clean shutdown on low battery, a power-off that switches the HAT off once the SD card is safe, and its real-time clock. See [UPS HAT](docs/ups-hat.md) · [HackerGadgets HAT](docs/hg-hat.md).
 - **M5Stack CardputerZero** — colour 320×170 screen with the Viking or shieldmaiden, built-in battery percentage, `F` `X` `Z` `C` arrow-key paging, the camera (photos and video, in the browser or on its own screen with the `P` key), and Cap modules (GNSS, LoRa as a Meshtastic node, CC1101 sub-GHz sweep). See [M5Stack CardputerZero](docs/M5StackCardputerZero.md).
 
 ### Platform, safety & storage
@@ -118,6 +118,7 @@ Every feature below has a full guide in [`docs/`](docs). Short version here, det
 - Username and hostname set to `ragnar`
 - 2.13-inch e-Paper HAT connected to GPIO pins (for display mode)
 - For 32-bit systems, use Ragnar's predecessor [Bjorn](https://github.com/infinition/Bjorn)
+- Compressed swap in RAM (zram, twice the RAM) is set up and switched on by the installer and both updaters, including on Kali/Debian where it used to stay off — it is what keeps a 512 MB Pi Zero 2 W from stalling and being reset by the watchdog. See [swap (zram)](docs/INSTALL.md#a-pi-zero-keeps-rebooting-or-freezing--swap-zram).
 
 **Recommendation:** Edit `~/.config/labwc/autostart` and comment out `/usr/bin/lwrespawn /usr/bin/wf-panel-pi &` to free up resources, or run `sudo pkill wf-panel-pi` temporarily.
 

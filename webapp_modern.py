@@ -28787,7 +28787,7 @@ def get_system_status_api():
         except:
             temperature_data = {}
         
-        # Battery (PiSugar or Waveshare UPS HAT - only if connected)
+        # Battery (PiSugar, Waveshare UPS HAT or HackerGadgets HAT - only if connected)
         battery_data = None
         try:
             pisugar = battery_source(shared_data)
@@ -28801,6 +28801,10 @@ def get_system_status_api():
                         'voltage': round(voltage, 2) if voltage is not None else None,
                         'model': pisugar.get_model(),
                     }
+                    # HackerGadgets HAT: the USB slide switch (hub or OTG)
+                    usb_mode = getattr(pisugar, 'get_usb_mode', lambda: None)()
+                    if usb_mode:
+                        battery_data['usb_mode'] = usb_mode
         except Exception:
             pass
 

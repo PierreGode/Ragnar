@@ -655,6 +655,9 @@ class SharedData:
             "distro_cve_enrichment": False,  # opt-in: check Debian/Ubuntu security trackers before surfacing a CVE (issue #1051)
             "distro_cve_cache_hours": 24,
             "ups_hat_monitor": True,  # auto-detect a Waveshare INA219 UPS HAT (C at 0x43, B at 0x42) and show its battery % (issue #1049)
+            "hg_hat_monitor": True,  # auto-detect a HackerGadgets Pwnagotchi HAT (controller at I2C 0x50) and show its battery %
+            "hg_hat_lowbatt_shutdown": True,  # on battery below hg_hat_lowbatt_percent for 60 s: clean shutdown, then the HAT switches off
+            "hg_hat_lowbatt_percent": 10,  # low-battery shutdown threshold in % (3-50)
             "builtin_battery_monitor": True,  # show a built-in fuel gauge (kernel power-supply battery; the CardputerZero's BQ27220)
             "cardputer_cap_power": True,  # CardputerZero: switch the expansion header's 5 V rail on at start so a Cap works
             "meshtastic_share_gps": True,  # hand Ragnar's GPS fix to the Meshtastic node running on this unit (it has no GPS of its own)

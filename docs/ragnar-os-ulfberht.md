@@ -45,6 +45,12 @@ Same arm64 range as the standard image:
 | Pi Zero 2 W | ✅ arm64 |
 | Pi 1 / original Pi Zero / Zero W | ❌ ARMv6 — Kali dropped ARMel |
 
+On a **Pi Zero 2 W** (512 MB) the compressed swap in RAM (zram) matters: the Kali
+base ships no `systemd-zram-generator`, so older installs ran with no swap and
+the hardware watchdog reset the board every few minutes under load. Ragnar's
+installer and updaters now switch zram on and install the generator — see
+[A Pi Zero keeps rebooting or freezing — swap (zram)](INSTALL.md#a-pi-zero-keeps-rebooting-or-freezing--swap-zram).
+
 ## The "hidden switch" — edition detection
 
 The extended capabilities belong to the **official Ulfberht image only**, not to

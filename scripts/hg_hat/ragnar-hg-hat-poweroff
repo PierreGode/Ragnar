@@ -1,0 +1,96 @@
+#!/usr/bin/python3 -I
+# ragnar-hg-hat-poweroff
+#
+# systemd-shutdown hook for the HackerGadgets Pwnagotchi HAT, installed to
+# /usr/lib/systemd/system-shutdown/ by scripts/hg_hat_setup.sh.
+#
+# systemd runs every executable in that directory at the very end of a shutdown,
+# after all services have stopped and the file systems are read-only, with the
+# verb as the first argument (poweroff, halt, reboot, kexec). On "poweroff" this
+# asks the HAT's power controller to switch its output off a few seconds later,
+# once the kernel has halted. So the SD card is never written to when the power
+# goes, and a halted Pi no longer drains the battery. Reboots are left alone.
+#
+# Safety: acts only when 0x50 answers with the HAT's identity AND a plausible
+# power block, so a different chip on that address is never written to.
+# Opt out: create /etc/ragnar/hg_hat_poweroff.disabled
+# Test without cutting power: RAGNAR_HG_HAT_DRYRUN=1 ragnar-hg-hat-poweroff poweroff
+
+import ctypes
+import fcntl
+import os
+import sys
+
+HAT = 0x50
+REG_SIGNATURE = 0x08
+REG_DELAY = 0x14       # seconds until the cut, 5..255
+REG_ENABLE = 0x13      # write 1 to start the timer
+CUT_DELAY_S = 10
+I2C_RDWR = 0x0707
+I2C_M_RD = 0x0001
+
+
+class Msg(ctypes.Structure):
+    _fields_ = [("addr", ctypes.c_uint16), ("flags", ctypes.c_uint16),
+                ("len", ctypes.c_uint16), ("buf", ctypes.POINTER(ctypes.c_uint8))]
+
+
+class Rdwr(ctypes.Structure):
+    _fields_ = [("msgs", ctypes.POINTER(Msg)), ("nmsgs", ctypes.c_uint32)]
+
+
+def xfer(fd, msgs):
+    arr = (Msg * len(msgs))(*msgs)
+    fcntl.ioctl(fd, I2C_RDWR, Rdwr(arr, len(msgs)))
+
+
+def read(fd, reg, n):
+    w = (ctypes.c_uint8 * 1)(reg)
+    r = (ctypes.c_uint8 * n)()
+    xfer(fd, [Msg(HAT, 0, 1, w), Msg(HAT, I2C_M_RD, n, r)])
+    data = list(r)
+    # The controller stretches the clock before answering and the Pi's I2C
+    # hardware can read bit 7 of that first byte as 1. Neither first byte read
+    # here (identity 0x6C, battery mV high byte <= 0x12) has it set for real.
+    data[0] &= 0x7F
+    return data
+
+
+def write(fd, reg, value):
+    w = (ctypes.c_uint8 * 2)(reg, value)
+    xfer(fd, [Msg(HAT, 0, 2, w)])
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] != "poweroff":
+        return 0
+    if os.path.exists("/etc/ragnar/hg_hat_poweroff.disabled"):
+        return 0
+    try:
+        fd = os.open("/dev/i2c-1", os.O_RDWR)
+    except OSError:
+        return 0
+    try:
+        if read(fd, REG_SIGNATURE, 1)[0] != 0x6C:
+            return 0
+        hi, lo, charge, usb, soc, adapter = read(fd, 0x00, 6)
+        volts = ((hi << 8) | lo) / 1000.0
+        if charge not in (0, 1) or usb not in (0, 1) or adapter not in (0, 1) \
+                or soc > 100 or not 2.5 <= volts <= 4.6:
+            return 0
+        if os.environ.get("RAGNAR_HG_HAT_DRYRUN") == "1":
+            print(f"ragnar: dry run - HAT found ({volts:.2f} V, {soc}%); would write "
+                  f"0x{REG_DELAY:02x}={CUT_DELAY_S} then 0x{REG_ENABLE:02x}=1")
+            return 0
+        write(fd, REG_DELAY, CUT_DELAY_S)
+        write(fd, REG_ENABLE, 1)
+        print(f"ragnar: HackerGadgets HAT switches its power off in {CUT_DELAY_S} s")
+    except Exception:
+        pass
+    finally:
+        os.close(fd)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
