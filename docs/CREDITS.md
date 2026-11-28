@@ -14,9 +14,9 @@ behind them is Solarflere's work.
 
 ### By the numbers
 
-- **417 CVEs detected from the wire.** 506 distinct CVE IDs are named across Ragnar's
-  code; 417 of them a passive detector actually identifies. The rest are named, not detected:
-  80 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
+- **419 CVEs detected from the wire.** 509 distinct CVE IDs are named across Ragnar's
+  code; 419 of them a passive detector actually identifies. The rest are named, not detected:
+  81 as context (the four Juniper ARP control-plane CVEs attached to a shared request-rate
   shape, the SR-MPLS `CVE_REFERENCES` table, the BGP / OSPF **malformed-attribute posture
   advisories** — byte-level parser CVEs the passive text watchers name for patch guidance but
   cannot reconstruct on the wire — the Ripple20 IPv6 bug CVE-2020-11897, which APC Guard
@@ -256,6 +256,19 @@ behind them is Solarflere's work.
   (CVE-2023-31490 / CVE-2024-31948) and OSPF SR opaque-LSA (CVE-2024-31950 / CVE-2024-31951)
   — with a further `CVE_REFERENCES` table recording the SR-plane CVEs that are disputed or
   owned by the BGP/IS-IS/OSPF watchers rather than claimed here.
+
+- **AD CS and credential-dump wave** — five modules updated together, each owning the half of an
+  attack it can see on the wire. **RPC / NetLogon Watch v9** reads AD CS abuse from unsealed
+  certificate requests — ESC1 / ESC3 / ESC6 / ESC17 and **ESC15** (**CVE-2024-49019**) — plus
+  DCSync / DCShadow by host role, LSA secret access (the real DPAPI backup-key path) and the
+  registry hive save secretsdump uses. **SMB Watch v6** sees that hive read back over `ADMIN$` and
+  deleted, shadow-copy enumeration and direct credential-store reads (no CVE). **LDAP Watch v9**
+  adds the AD CS object writes (ESC4 / ESC5 / ESC10 / ESC13 / ESC14) and a Kerberos tier: AS-REP
+  roastable accounts decided on the reply, S4U2Self / S4U2Proxy, and the unkeyed S4U checksum
+  **CVE-2025-60704**; CVE-2025-26647 is named only to record that it does not make `X509SKI` a weak
+  mapping. **TLS Watch v12** reads the client certificate in TLS 1.2 mutual authentication for the
+  ESC9 / ESC16 missing-SID condition, and **HTTP Watch v8** (52 codes) the ESC8 landing on the AD CS
+  web enrollment pages (no CVE).
 
 - **LAN / directory / first-hop wave** — **LACP Watch** correlates a malformed LACPDU
   with a member flap into `LACP-MALFORMED-INDUCED-FLAP` (CVE-2024-30388 class, effect not

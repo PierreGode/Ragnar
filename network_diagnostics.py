@@ -14004,14 +14004,80 @@ def _krb_analyze(krb_events, baseline, learn=True):
 _SMB_SEVERITY = {
     'clean': 0, 'name-exposure': 2, 'smbv1-offered': 3, 'krb-exposure': 3,
     'ntlm-workstation-mismatch': 3, 'krb-downgrade': 4, 'spoof-conflict': 5,
+    'shadow-copy-enum': 6,
     'smbv1-active': 6, 'smbghost-exposure': 7, 'poisoning': 7, 'asrep-roast': 7,
     'krb-recon': 7, 'eternalblue-probe': 8, 'kerberoast': 8, 'krb-rc4md4': 9,
     'responder-challenge': 9, 'smb-reflection': 10, 'smbghost-exploit': 10,
+    'credential-dump': 10,
 }
 
 
 def _smb_worse_verdict(a, b):
     return a if _SMB_SEVERITY.get(a, 0) >= _SMB_SEVERITY.get(b, 0) else b
+
+
+# ---- SMB file operations (v6 F-series): secretsdump's SMB half ------------------
+# RPC Watch sees secretsdump's registry path save a hive to a file (winreg 20); the
+# step that moves the credentials off the box is reading that file back over SMB.
+# The module author's engine (python/smbwatch.py, v6) parses SMB2 TREE_CONNECT /
+# CREATE / IOCTL from reassembled messages and grades it; it is run over the same
+# packets and only its F-series is taken (every other rule this watcher already
+# implements in-app). F1: Temp\<8 letters>.tmp on ADMIN$/C$ read (high) then deleted
+# (critical); F2: Temp\__output; F3: FSCTL_SRV_ENUMERATE_SNAPSHOTS (VSS enumeration,
+# which backup software also does); F4: a credential store read by name (SAM,
+# SECURITY, SYSTEM, ntds.dit, a shadow-copy path); F5: SMB3 encryption seen, so
+# F1-F4 are blind to that server. Pipe traffic (IPC$, \pipe\) is RPC Watch's.
+_SMB_FTIER_RULES = ('F1', 'F2', 'F3', 'F4', 'F5')
+
+
+def _smb_ftier(packets):
+    """Run the vendored v6 engine over the captured packets; return its F-series
+    findings as plain dicts (rule, severity, subject, title, detail, evidence).
+    Best-effort: [] when the engine is unavailable."""
+    pydir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+    if pydir not in sys.path:
+        sys.path.insert(0, pydir)
+    try:
+        import smbwatch
+    except Exception:
+        return []
+    w = smbwatch.SMBWatch(smbwatch.Config())
+    for p in packets:
+        try:
+            w.process_packet(p)
+        except Exception:
+            continue                      # one odd frame must never kill the scan
+    out = []
+    for f in w.findings:
+        if f.rule in _SMB_FTIER_RULES:
+            out.append({'rule': f.rule, 'severity': f.severity.name.lower(),
+                        'subject': f.subject, 'title': f.title, 'detail': f.detail,
+                        'evidence': {k: str(v) for k, v in (f.evidence or {}).items()}})
+    return out
+
+
+def _smb_fold_ftier(result, ff):
+    """Fold F-series findings into the combined SMB result: F1/F2/F4 -> the
+    credential-dump verdict, F3 at high -> shadow-copy-enum, F5 -> a note only."""
+    if not ff:
+        return result
+    base = result.get('reasons') or []
+    if base == ['No SMB or LLMNR/NBT-NS/mDNS traffic seen on this segment'] or \
+       base == ['No SMBv1 and no name-resolution poisoning detected '
+                '(SMB2/3 + legit mDNS only)']:
+        base = []
+    for f in ff:
+        if f['rule'] in ('F1', 'F2', 'F4'):
+            result['verdict'] = _smb_worse_verdict(result.get('verdict', 'clean'),
+                                                   'credential-dump')
+        elif f['rule'] == 'F3' and f['severity'] in ('high', 'critical'):
+            result['verdict'] = _smb_worse_verdict(result.get('verdict', 'clean'),
+                                                   'shadow-copy-enum')
+        base = base + ['%s (%s) %s: %s' % (f['rule'], f['severity'].upper(),
+                                            f['title'], f['subject'])]
+    result['reasons'] = base
+    result['file_ops'] = ff
+    return result
 
 
 def _smb_capture(interface, seconds):
@@ -14048,6 +14114,7 @@ def _smb_capture(interface, seconds):
 _SMB_WT_SEV = {
     'responder-challenge': 'critical', 'smbghost-exploit': 'critical',
     'smb-reflection': 'critical', 'krb-rc4md4': 'critical',
+    'credential-dump': 'critical', 'shadow-copy-enum': 'high',
     'poisoning': 'high', 'smbv1-active': 'high', 'spoof-conflict': 'high',
     'kerberoast': 'high', 'asrep-roast': 'high', 'krb-downgrade': 'high',
     'krb-recon': 'high', 'smbghost-exposure': 'high', 'eternalblue-probe': 'high',
@@ -14160,6 +14227,9 @@ def do_smb_watch(interface=None, seconds=20, learn=True):
                                f"marshalled CREDENTIAL_TARGET_INFORMATION blob "
                                f"(CVE-2025-33073 reflective-relay primitive)"]
             result['reasons'] = base
+
+        # v6 F-series: secretsdump's SMB half (hive read-back / credential-store reads).
+        _smb_fold_ftier(result, _smb_ftier(packets))
 
         if result['verdict'] != 'clean':
             b = _smb_watch_load()
@@ -14586,6 +14656,85 @@ def _smb_selftest():
     scenarios.append({'name': 'krb-parse', 'expect': 'tgs-req/MSSQLSvc/rc4',
                       'got': f"trunc={tev and tev['kind']} sname={fev and fev['sname']}",
                       'pass': bool(kp_ok)})
+
+    # -- v6 F-series (secretsdump's SMB half) via the vendored engine, with the
+    # engine's own SMB2 builders; then the fold into the combined verdict.
+    pydir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+    if pydir not in sys.path:
+        sys.path.insert(0, pydir)
+    try:
+        import io as _io
+        import contextlib as _cl
+        import smbwatch as SW
+        sink = _io.StringIO()
+        with _cl.redirect_stdout(sink), _cl.redirect_stderr(sink):
+            rc = SW._run_self_tests()
+        scenarios.append({'name': 'ftier-vendored-suite', 'expect': 'rc 0',
+                          'got': 'rc %s' % rc, 'pass': rc == 0})
+        cli, srv, tid = '10.0.0.66', '10.0.0.5', 7
+
+        def fpk(raw, src=cli, dst=srv, sport=50123, dport=445):
+            return (Ether() / IP(src=src, dst=dst)
+                    / TCP(sport=sport, dport=dport, flags='PA') / Raw(raw))
+
+        def ft(seq):
+            return _smb_ftier([fpk(r) if d == 'c2s' else
+                               fpk(r, src=srv, dst=cli, sport=445, dport=50123)
+                               for d, r in seq])
+
+        tree = [('c2s', SW._build_tree_connect_req('ADMIN$', message_id=1)),
+                ('s2c', SW._build_tree_connect_resp(tid, message_id=1))]
+        rd = ('c2s', SW._build_create_req('Temp\\ABCDefgh.tmp', tid,
+                                          desired=SW.FILE_READ_DATA, message_id=2))
+        dl = ('c2s', SW._build_create_req('Temp\\ABCDefgh.tmp', tid,
+                                          desired=SW.ACCESS_DELETE | 0x80,
+                                          options=0x40 | SW.FILE_DELETE_ON_CLOSE,
+                                          message_id=3))
+        f = ft(tree + [rd])
+        scenarios.append({'name': 'ftier-f1-read-high', 'expect': 'F1 high',
+                          'got': [(x['rule'], x['severity']) for x in f],
+                          'pass': any(x['rule'] == 'F1' and x['severity'] == 'high'
+                                      for x in f)})
+        f = ft(tree + [rd, dl])
+        scenarios.append({'name': 'ftier-f1-read-delete-critical', 'expect': 'F1 critical',
+                          'got': [(x['rule'], x['severity']) for x in f],
+                          'pass': any(x['rule'] == 'F1' and x['severity'] == 'critical'
+                                      for x in f)})
+        res = _smb_fold_ftier({'verdict': 'clean', 'reasons': []}, f)
+        scenarios.append({'name': 'ftier-verdict-credential-dump', 'expect': 'credential-dump',
+                          'got': res['verdict'], 'pass': res['verdict'] == 'credential-dump'})
+        f = ft(tree + [('c2s', SW._build_create_req('Windows\\System32\\config\\SAM', tid,
+                                                    desired=SW.FILE_READ_DATA,
+                                                    message_id=4))])
+        scenarios.append({'name': 'ftier-f4-sam-read', 'expect': 'F4',
+                          'got': [x['rule'] for x in f],
+                          'pass': any(x['rule'] == 'F4' for x in f)})
+        f = ft(tree + [('c2s', SW._build_ioctl_req(SW.FSCTL_SRV_ENUMERATE_SNAPSHOTS, tid))])
+        res = _smb_fold_ftier({'verdict': 'clean', 'reasons': []}, f)
+        scenarios.append({'name': 'ftier-f3-vss-enum', 'expect': 'shadow-copy-enum',
+                          'got': res['verdict'], 'pass': res['verdict'] == 'shadow-copy-enum'})
+        # near-misses: a GetTempFileName-style name (has hex digits), and a non-admin share
+        f = ft(tree + [('c2s', SW._build_create_req('Temp\\TMP4A2F.tmp', tid,
+                                                    desired=SW.FILE_READ_DATA,
+                                                    message_id=5))])
+        scenarios.append({'name': 'ftier-windows-temp-name-silent', 'expect': 'no F1',
+                          'got': [x['rule'] for x in f],
+                          'pass': not any(x['rule'] == 'F1' for x in f)})
+        share = [('c2s', SW._build_tree_connect_req('Public', message_id=1)),
+                 ('s2c', SW._build_tree_connect_resp(tid, message_id=1))]
+        f = ft(share + [rd])
+        scenarios.append({'name': 'ftier-non-admin-share-silent', 'expect': 'no F1',
+                          'got': [x['rule'] for x in f],
+                          'pass': not any(x['rule'] == 'F1' for x in f)})
+        f = ft(tree + [('c2s', SW._build_smb2_transform())])
+        res = _smb_fold_ftier({'verdict': 'clean', 'reasons': []}, f)
+        scenarios.append({'name': 'ftier-f5-encrypted-note-only', 'expect': 'F5, verdict clean',
+                          'got': ([x['rule'] for x in f], res['verdict']),
+                          'pass': any(x['rule'] == 'F5' for x in f)
+                          and res['verdict'] == 'clean'})
+    except Exception as e:
+        scenarios.append({'name': 'ftier', 'expect': 'ran', 'got': '%s: %s'
+                          % (type(e).__name__, e), 'pass': False})
 
     passed = all(s['pass'] for s in scenarios)
     scapy_result = {'ran': True, 'pass': passed,
@@ -16592,9 +16741,9 @@ def _ssdp_selftest():
 # --------------------------------------------------------------------------
 # Layer 7, cleartext only: once TLS completes the HTTP layer is ciphertext, so SNI /
 # ALPN / JA3 / certificates stay TLS Watch's and Cert Watch's. Engine vendored as
-# python/httpwatch.py (+ httpwatch_selftest.py, 2323 checks; v7); this adapter owns the
+# python/httpwatch.py (+ httpwatch_selftest.py, 2494 checks; v8); this adapter owns the
 # capture (one bounded tcpdump window, -w only, never a probe) and feeds each scapy
-# packet through the engine's own dissect_packet() + HttpWatch.feed(). 49 codes:
+# packet through the engine's own dissect_packet() + HttpWatch.feed(). 52 codes:
 #   A  HTTP/1.x framing ambiguity (request smuggling / desync, HTTP-001..011): one
 #      RFC 9112 grammar engine runs a Content-Length framer and a Transfer-Encoding
 #      framer side by side; HTTP-009 (critical) fires when they end the message at
@@ -16641,6 +16790,14 @@ def _ssdp_selftest():
 #      a backslash escape (Jetty unescapes it to loopback, the app's check fails open);
 #      neither half alone fires (jsessionid paths and quoted IPv6 for= are legitimate),
 #      and a %3B path is deliberately silent (measured: it reaches nothing).
+#      v8: AD CS Web Enrollment over NTLM - the ESC8 landing. HTTP-100: NTLM to a
+#      /certsrv/ endpoint where a healthy domain enrolls over Kerberos (critical for a
+#      Type 3 POST to certfnsh.asp carrying a certificate request); HTTP-101: the
+#      submission names a privileged template (CertAttrib "CertificateTemplate:<name>",
+#      colon-separated, measured from Certipy); HTTP-102 (Tier C): Web Enrollment reached
+#      over cleartext at all. The NTLM account is reported (an identifier, not a
+#      credential); the challenge-response never leaves the parser. RPC Watch sees the
+#      coercion half; neither module claims the chain. Blind on 443 (the usual case).
 #   F  (v3) attack-shaped request bodies (dechunked, multipart and urlencoded, every
 #      part decoded every plausible way): React2Shell Flight property-path reference
 #      (HTTP-082, CVE-2025-55182 / CVE-2025-66478), Spring4Shell class.* bean path
@@ -16923,7 +17080,8 @@ def do_http_watch(interface=None, seconds=20, ports=None, pcap=None, quick=False
     React2Shell, Exchange ProxyLogon / ProxyShell / ProxyNotShell, SharePoint
     ToolShell, phpAfterShell, Log4Shell, Text4Shell, Struts S2-016 / S2-032 / S2-066 /
     S2-067, Rack Ruby2Shell, Axis inbound SOAP Fault, SOAP DOCTYPE, N-central
-    Forwarded bypass), Brotli block-switch violations (armed only on a patched host
+    Forwarded bypass), AD CS Web Enrollment over NTLM (ESC8), Brotli block-switch
+    violations (armed only on a patched host
     libbrotli; see result['brotli']) and h2c / gRPC abuse (Rapid Reset,
     CONTINUATION, HPACK, gRPC header and metadata). Dual-stack. HIGH / CRITICAL
     findings feed Watchtower unless quick or replaying a pcap."""
@@ -16970,13 +17128,13 @@ def do_http_watch(interface=None, seconds=20, ports=None, pcap=None, quick=False
 
 
 def _http_selftest():
-    """Self-test HTTP Watch: the vendored engine's own 2323-check suite, focused
+    """Self-test HTTP Watch: the vendored engine's own 2494-check suite, focused
     smuggling / clean / credential-redaction / WinRM-suppression / HTTP.sys Range
     boundary scenarios, the v3 attack-shaped request rules (Shellshock, Struts
     S2-045, Spring4Shell), the v4 Exchange / SharePoint rules (ProxyLogon,
     ProxyShell / ProxyNotShell, ToolShell), the v5 phpAfterShell / Log4Shell /
-    Text4Shell rules and the v7 Struts / Rack / Axis / SOAP / N-central rules, each
-    with a near-miss, Brotli arming, the
+    Text4Shell rules, the v7 Struts / Rack / Axis / SOAP / N-central rules and the
+    v8 AD CS ESC8 rules, each with a near-miss, Brotli arming, the
     verdict ladder,
     the catalog shape, the Watchtower normalizer, and a Scapy pcap end-to-end leg
     through do_http_watch carrying an IPv6 extension header."""
@@ -17291,6 +17449,49 @@ def _http_selftest():
        'HTTP-099' not in {f.code for f in feed(nc(b'/dms%3Bx=1/services/ServerUI',
                                                  b'Forwarded: for="12\\7.0.0.1"'))})
 
+    # v8: AD CS Web Enrollment over NTLM (ESC8). A real MS-NLMP Type 3 and a
+    # Certipy-shaped certfnsh.asp submission; Kerberos auth and an ordinary template
+    # are the near-misses. The NTLM response bytes must never reach the finding.
+    import base64 as _b64e
+    import struct as _st
+    import urllib.parse as _up
+
+    def ntlm3(user='DC01$', domain='CORP', host='WS1', nt=b'\xaa' * 24):
+        parts, off, sbs = [], 72, []
+        for data in (b'', nt, domain.encode('utf-16-le'), user.encode('utf-16-le'),
+                     host.encode('utf-16-le'), b''):
+            sbs.append(_st.pack('<HHI', len(data), len(data), off))
+            off += len(data)
+            parts.append(data)
+        return (b'NTLMSSP\x00' + _st.pack('<I', 3) + b''.join(sbs)
+                + _st.pack('<I', 1) + b'\x00' * 8 + b''.join(parts))
+
+    def certsrv(auth, template='DomainController'):
+        body = _up.urlencode({'Mode': 'newreq',
+                              'CertAttrib': 'CertificateTemplate:' + template,
+                              'CertRequest': '-----BEGIN CERTIFICATE REQUEST-----\nMIIB\n'
+                                             '-----END CERTIFICATE REQUEST-----\n',
+                              'TargetStoreFlags': '0', 'SaveCert': 'yes'}).encode()
+        return (b'POST /certsrv/certfnsh.asp HTTP/1.1\r\nHost: ca01.corp.local\r\n'
+                b'Authorization: ' + auth + b'\r\nContent-Type: '
+                b'application/x-www-form-urlencoded\r\nContent-Length: %d\r\n\r\n'
+                % len(body)) + body
+    t3 = b'NTLM ' + _b64e.b64encode(ntlm3())
+    fs = feed(certsrv(t3))
+    codes8 = {f.code for f in fs}
+    ck('http100_esc8_ntlm_enroll',
+       any(f.code == 'HTTP-100' and f.severity == 'critical' for f in fs))
+    ck('http101_esc8_privileged_template', 'HTTP-101' in codes8)
+    ck('http102_adcs_enroll_cleartext', 'HTTP-102' in codes8)
+    ck('http100_ntlm_response_not_logged',
+       fs and 'qqqqqqqq' not in json.dumps([f.to_dict() for f in fs], default=str)
+       and _b64e.b64encode(b'\xaa' * 24).decode() not in
+       json.dumps([f.to_dict() for f in fs], default=str))
+    fk = feed(certsrv(b'Negotiate ' + _b64e.b64encode(b'\x60\x82\x01\x00kerberos-token')))
+    ck('http100_kerberos_enroll_silent', 'HTTP-100' not in {f.code for f in fk})
+    ck('http101_ordinary_template_silent',
+       'HTTP-101' not in {f.code for f in feed(certsrv(t3, template='User'))})
+
     # Tier G (v3): Brotli arming is always reported; a refused library raises. When
     # the host decoder is patched, a valid br body decodes clean and stays silent.
     _probe, _bst = _http_brotli()
@@ -17329,11 +17530,11 @@ def _http_selftest():
        and _http_verdict([], True) == 'clean'
        and _http_verdict([], False) == 'no-traffic')
 
-    # catalog shape: 49 codes over tiers A-G (v7); every attributed CVE is pinned in
+    # catalog shape: 52 codes over tiers A-G (v8); every attributed CVE is pinned in
     # the catalog with a score; nothing deferred is also attributed.
     attributed = {c for d in hw.FINDING_REGISTRY.values() for c in d.cves}
     ck('catalog_shape',
-       len(hw.FINDING_REGISTRY) == 49
+       len(hw.FINDING_REGISTRY) == 52
        and {d.tier for d in hw.FINDING_REGISTRY.values()}
        == {'A', 'B', 'C', 'D', 'E', 'F', 'G'}
        and all(hw.CVE_CATALOG.get(c, {}).get('score') for c in attributed)
@@ -17347,7 +17548,7 @@ def _http_selftest():
        nrm['severity'] == 'HIGH' and nrm['klass'] == 'EXPOSURE'
        and nrm['src'] == '192.168.1.9' and nrm['code'] == 'HTTP-040')
 
-    # the vendored engine's own full suite (2323 checks). Its counters are module
+    # the vendored engine's own full suite (2494 checks). Its counters are module
     # globals, so reset them first or a second panel run would accumulate; it
     # prints a report, so capture that so do_routing_selftest stays quiet.
     try:

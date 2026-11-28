@@ -31,7 +31,8 @@ import sys
 import unicodedata
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import (Any, Callable, Dict, FrozenSet, Iterable, List,
+                    Optional, Sequence, Tuple)
 
 __version__ = "0.1.0-dev"
 MODULE = "httpwatch"
@@ -127,6 +128,9 @@ FINDING_REGISTRY: Dict[str, FindingDef] = {
            "Set-Cookie PHP session value past any size a cookie can work at "
            "(PHP2Shell memory-disclosure stage)",
            ["CVE-2026-109618", "CVE-2026-109619"]),
+        _f("HTTP-102", "adcs_enroll_cleartext", "C", HIGH, EXACT,
+           "AD CS Web Enrollment reached over cleartext HTTP (the ESC8 "
+           "precondition)"),
         # ---- Tier D: h2c / gRPC -------------------------------------------
         _f("HTTP-060", "h2c_cleartext", "D", INFO, EXACT,
            "Cleartext HTTP/2 (h2c) in use; warn when the path is gNMI/gNOI"),
@@ -216,6 +220,12 @@ FINDING_REGISTRY: Dict[str, FindingDef] = {
            "Path parameter on the guarded first segment together with a "
            "Forwarded for= quoted string carrying a backslash escape",
            ["CVE-2026-86206"]),
+        _f("HTTP-100", "adcs_esc8_ntlm_enroll", "E", HIGH, EXACT,
+           "NTLM authentication to an AD CS Web Enrollment endpoint where a "
+           "healthy domain uses Kerberos (ESC8 landing)"),
+        _f("HTTP-101", "adcs_esc8_template_claim", "F", CRITICAL, EXACT,
+           "Web Enrollment submission names a privileged certificate "
+           "template (ESC8 outcome)"),
         _f("HTTP-087", "exchange_proxyshell_logon_strip", "F", CRITICAL, EXACT,
            "Explicit-logon strip moves the request off the autodiscover "
            "handler it was routed by (ProxyShell / ProxyNotShell)",
@@ -1730,7 +1740,12 @@ ATTACK_CODES = frozenset({
     "HTTP-089", "HTTP-090", "HTTP-091", "HTTP-092",
     "HTTP-093", "HTTP-094", "HTTP-095",
     "HTTP-096", "HTTP-097", "HTTP-098", "HTTP-099",
+    "HTTP-100", "HTTP-101",
 })
+
+# Codes whose claim is about the server, not the request. Rate-limited per
+# server address:port rather than per client/server pair.
+POSTURE_DEDUP_CODES = frozenset({"HTTP-048", "HTTP-102"})
 
 _PCT_ESCAPE_RE = re.compile(rb"%([0-9A-Fa-f]{2})")
 
@@ -1742,6 +1757,19 @@ class PhpCookieConfig:
 
 
 PHP_COOKIE_DEFAULTS = PhpCookieConfig()
+
+
+# Templates whose issuance is a domain compromise rather than an enrollment.
+# Configurable because deployments rename them: a site with a renamed DC
+# template would otherwise be silently uncovered, which is worse than a
+# list an operator has to maintain.
+ADCS_PRIVILEGED_TEMPLATES: Tuple[bytes, ...] = (
+    b"domaincontroller",
+    b"domaincontrollerauthentication",
+    b"kerberosauthentication",
+    b"machine",
+    b"subca",
+)
 
 
 @dataclass(frozen=True)
@@ -1769,9 +1797,37 @@ class WatchConfig:
     # capitalisation fallback is not measurable here, so the rule compares
     # case-insensitively, which can only widen matching.
     spring_case_insensitive: bool = True
+    # HTTP-101: templates whose issuance is a domain compromise. Lowercased
+    # for comparison. Configurable because deployments rename them.
+    adcs_privileged_templates: Tuple[bytes, ...] = ADCS_PRIVILEGED_TEMPLATES
+    # HTTP-100: accounts an operator has declared legitimate for HTTP+NTLM
+    # enrollment. Lowercased "user" or "domain\\user". Empty by default:
+    # an allowlist nobody filled in must not silence the rule.
+    adcs_enroll_allow: FrozenSet[str] = frozenset()
 
 
 WATCH_DEFAULTS = WatchConfig()
+
+
+def adcs_template_config(
+        extra: Optional[Sequence[str]] = None) -> Tuple[bytes, ...]:
+    """Build the HTTP-101 privileged-template list.
+
+    Operator names ADD to the built-in list rather than replacing it, the
+    same way --php-session-cookie-name extends its defaults: an operator
+    naming their renamed DC template almost never means "and stop watching
+    SubCA". Names are lowercased once here so the rule compares against a
+    list that is already in its comparison form, and AD cn matching is
+    case-insensitive, so that loses nothing.
+    """
+    names = list(ADCS_PRIVILEGED_TEMPLATES)
+    for n in extra or ():
+        if not n or not n.strip():
+            continue
+        b = n.strip().lower().encode("latin-1", "replace")
+        if b not in names:
+            names.append(b)
+    return tuple(names)
 
 
 def php_cookie_config(threshold: int = PHP_COOKIE_MAX,
@@ -6389,6 +6445,603 @@ def check_ncentral_forwarded_bypass(
 
 
 # ---------------------------------------------------------------------------
+# HTTP-100 / HTTP-101 / HTTP-102: AD CS Web Enrollment over NTLM (ESC8)
+# ---------------------------------------------------------------------------
+# ESC8 relays a coerced NTLM authentication to the AD CS Web Enrollment
+# application and enrolls a certificate as the relayed account. rpcwatch
+# already detects the coercion half (RPC-COERCION-CALL,
+# RPC-LSA-ANONYMOUS-COERCION) and the RPC sibling ESC11; httpwatch sees
+# where that coerced authentication LANDS. Neither module claims the whole
+# chain. An operator correlating the two by timestamp gets a picture that
+# neither finding asserts on its own, and that split is deliberate.
+#
+# WHAT MAKES IT WORK IS WHAT MAKES IT VISIBLE. Web Enrollment accepts NTLM
+# over HTTP with no Extended Protection for Authentication by default. On
+# tcp/80 the headers and body are cleartext and readable. On tcp/443 the
+# whole exchange is inside TLS and this tier is blind without termination.
+# Most production deployments are 443, so the honest claim is: useful on
+# port 80 or where the operator terminates TLS, silent otherwise. That is
+# smaller than "we detect ESC8" and it is the true one.
+#
+# EPA state is server configuration and is NOT on the wire at all. No rule
+# here reports whether EPA is on; they report that NTLM was used where
+# Kerberos should have been. Nor is relay itself detectable: a relayed
+# Type 3 is byte-identical to a legitimate one, and the MIC and
+# channel-binding story does not separate them from the HTTP side. So
+# nothing here says "relay detected" - HTTP-100 says NTLM reached the CA's
+# web endpoint, which in a healthy domain enrolling over
+# Negotiate-with-Kerberos should not happen.
+#
+# MEASURED, not transcribed. The submission body was read out of Certipy
+# 5.1.0 (certipy/lib/req.py web_request, certipy/lib/certificate.py:1019)
+# rather than assumed:
+#
+#   POST /certsrv/certfnsh.asp
+#   Content-Type: application/x-www-form-urlencoded
+#   Mode=newreq&CertAttrib=CertificateTemplate%3A<name>&CertRequest=<PEM>
+#   &TargetStoreFlags=0&SaveCert=yes&ThumbPrint=
+#
+# Two corrections to the preflight fall out of that reading. The template
+# does NOT arrive as a "CertificateTemplate=" form field: it is one
+# NEWLINE-separated attribute inside the CertAttrib field, and the
+# name/value separator is a COLON, not '='. Multiple attributes are joined
+# with "\n" (Certipy: "\n".join(attributes_list)), so SAN and
+# CertificateTemplate can share the field.
+#
+# Certipy relays to certfnsh.asp (submission) and certrqxt.asp (template
+# enumeration) only - confirmed in certipy/commands/relay.py - so no rule
+# here is built for the CES/CEP service.svc endpoints on its account.
+#
+# MS-WCCE does not state whether enrollment attribute NAMES are compared
+# case-insensitively (szENROLLMENT_NAME_VALUE_PAIR documents the pairs and
+# is silent on name case), so that is unresolved rather than assumed. Both
+# directions are unsafe in different ways: matching case-sensitively is an
+# evasion route, matching case-insensitively could flag a request a
+# case-sensitive CA would refuse. HTTP-101 matches case-insensitively and
+# is worded as a CLAIM - the request named a privileged template - which is
+# true whichever way the CA compares, and leaves "was it issued" to the
+# response and to the operator. IIS paths genuinely are case-insensitive
+# and percent-decoded before routing, so the path matching below
+# over-approximates nothing the real server does not.
+
+ADCS_ENROLL_PREFIX = b"/certsrv"
+ADCS_SUBMIT_PATH = b"/certsrv/certfnsh.asp"
+ADCS_TEMPLATE_PAGE = b"/certsrv/certrqxt.asp"
+
+# MS-NLMP 2.2.1. Signature is 7 ASCII bytes and a NUL.
+NTLMSSP_SIGNATURE = b"NTLMSSP\x00"
+NTLM_TYPE_NEGOTIATE, NTLM_TYPE_CHALLENGE, NTLM_TYPE_AUTHENTICATE = 1, 2, 3
+# MS-NLMP 2.2.2.5. Bit 0: strings are UTF-16LE rather than OEM.
+NTLMSSP_NEGOTIATE_UNICODE = 0x00000001
+# The HTTP auth schemes that can carry an NTLMSSP blob (RFC 4559 Negotiate
+# wraps it in SPNEGO; bare NTLM carries it raw). Compared lowercase.
+ADCS_NTLM_SCHEMES = (b"ntlm", b"negotiate")
+# Certipy's own field names, read from the source above.
+ADCS_FIELD_ATTRIB = b"certattrib"
+ADCS_FIELD_REQUEST = b"certrequest"
+ADCS_FIELD_MODE = b"mode"
+ADCS_ATTR_TEMPLATE = b"certificatetemplate"
+ADCS_PEM_CSR_ARMOR = b"-----BEGIN CERTIFICATE REQUEST-----"
+ADCS_PEM_NEW_ARMOR = b"-----BEGIN NEW CERTIFICATE REQUEST-----"
+
+# ADCS_PRIVILEGED_TEMPLATES is defined above WatchConfig, which takes it as
+# a default; the rules that read it live here.
+
+
+def _ntlm_security_buffer(blob: bytes, off: int) -> Optional[Tuple[int, int]]:
+    """One MS-NLMP 2.2.2.x security buffer: Len, MaxLen, BufferOffset.
+
+    Returns (offset, length) only when the described range is wholly inside
+    the blob. Every field here is attacker-authored, so a declared length is
+    never trusted and never used to size anything - it is range-checked
+    against the bytes actually present and dropped if it does not fit.
+    """
+    if off + 8 > len(blob):
+        return None
+    length = int.from_bytes(blob[off:off + 2], "little")
+    buf_off = int.from_bytes(blob[off + 4:off + 8], "little")
+    if length == 0:
+        return (buf_off, 0)
+    if buf_off > len(blob) or length > len(blob) - buf_off:
+        return None
+    return (buf_off, length)
+
+
+def _ntlm_string(blob: bytes, span: Optional[Tuple[int, int]],
+                 unicode_flag: bool) -> Optional[str]:
+    """Decode one NTLMSSP string field.
+
+    The UNICODE negotiate flag decides UTF-16LE against OEM; a blob that
+    lies about its own encoding yields replacement characters rather than an
+    exception, because a malformed field is evidence and must not be able to
+    stop the rule that found it.
+    """
+    if span is None:
+        return None
+    off, length = span
+    if length == 0:
+        return ""
+    raw = blob[off:off + length]
+    if unicode_flag:
+        return raw.decode("utf-16-le", "replace")
+    return raw.decode("latin-1", "replace")
+
+
+def parse_ntlmssp(blob: bytes) -> Optional[Dict[str, Any]]:
+    """Dissect an NTLMSSP message (MS-NLMP 2.2.1.1 - 2.2.1.3).
+
+    Written from the specification: rpcwatch's parse_ntlmssp is the sibling
+    implementation but is not importable from here, so this is an
+    independent reading rather than a copy, and the conformance tier pins it
+    to MS-NLMP known-answer vectors for that reason.
+
+    Returns None for anything that is not an NTLMSSP message. A truncated or
+    self-contradictory message still returns a dict with whatever fields
+    survived range checking: the message type alone carries the finding, and
+    discarding a malformed Type 3 would discard exactly the evidence an
+    attacker has most reason to malform.
+    """
+    if len(blob) < 12 or not blob.startswith(NTLMSSP_SIGNATURE):
+        return None
+    msg_type = int.from_bytes(blob[8:12], "little")
+    if msg_type not in (NTLM_TYPE_NEGOTIATE, NTLM_TYPE_CHALLENGE,
+                        NTLM_TYPE_AUTHENTICATE):
+        return None
+    out: Dict[str, Any] = {"message_type": msg_type, "length": len(blob)}
+
+    if msg_type == NTLM_TYPE_NEGOTIATE:
+        # 2.2.1.1: flags at 12, then DomainName and Workstation buffers.
+        #
+        # These two fields are ALWAYS OEM. The spec is explicit - both
+        # "MUST be encoded using the OEM character set" - and says nothing
+        # about NTLMSSP_NEGOTIATE_UNICODE, which for a NEGOTIATE_MESSAGE
+        # advertises what the client can do rather than describing what
+        # this message carries. The two flags that do apply here,
+        # NTLMSSP_NEGOTIATE_OEM_DOMAIN_SUPPLIED and
+        # ..._OEM_WORKSTATION_SUPPLIED, govern presence, not encoding.
+        #
+        # Consulting the UNICODE flag here was a real defect, caught by the
+        # impacket xcheck oracle: a normal Windows client sets UNICODE and
+        # still sends OEM bytes, so the flag-driven decode turned "Domain"
+        # into mojibake in HTTP-100's Type 1 evidence. The Challenge and
+        # Authenticate messages DO follow the negotiated character set,
+        # which is why only this branch is pinned to OEM.
+        if len(blob) >= 16:
+            flags = int.from_bytes(blob[12:16], "little")
+            out["negotiate_flags"] = flags
+            out["domain"] = _ntlm_string(
+                blob, _ntlm_security_buffer(blob, 16), False)
+            out["workstation"] = _ntlm_string(
+                blob, _ntlm_security_buffer(blob, 24), False)
+        return out
+
+    if msg_type == NTLM_TYPE_CHALLENGE:
+        # 2.2.1.2: TargetName at 12, flags at 20, ServerChallenge at 24.
+        if len(blob) >= 24:
+            flags = int.from_bytes(blob[20:24], "little")
+            out["negotiate_flags"] = flags
+            out["target_name"] = _ntlm_string(
+                blob, _ntlm_security_buffer(blob, 12),
+                bool(flags & NTLMSSP_NEGOTIATE_UNICODE))
+        return out
+
+    # 2.2.1.3 AUTHENTICATE_MESSAGE. Flags live at 60, after six security
+    # buffers, so the encoding of the name fields is not known until the
+    # fixed part is complete - a short Type 3 therefore yields the type and
+    # nothing else rather than a guessed decode.
+    if len(blob) >= 64:
+        flags = int.from_bytes(blob[60:64], "little")
+        out["negotiate_flags"] = flags
+        uni = bool(flags & NTLMSSP_NEGOTIATE_UNICODE)
+        lm_span = _ntlm_security_buffer(blob, 12)
+        nt_span = _ntlm_security_buffer(blob, 20)
+        out["domain"] = _ntlm_string(
+            blob, _ntlm_security_buffer(blob, 28), uni)
+        out["username"] = _ntlm_string(
+            blob, _ntlm_security_buffer(blob, 36), uni)
+        out["workstation"] = _ntlm_string(
+            blob, _ntlm_security_buffer(blob, 44), uni)
+        # The NT and LM responses are the challenge-response material. They
+        # are never reported: a finding that carried them would hand a
+        # reader something crackable offline. Lengths and a digest are
+        # enough to correlate two sightings of the same authentication.
+        out["nt_response_length"] = nt_span[1] if nt_span else None
+        out["lm_response_length"] = lm_span[1] if lm_span else None
+        if nt_span and nt_span[1]:
+            out["nt_response_digest"] = redact(
+                blob[nt_span[0]:nt_span[0] + nt_span[1]])
+        # Anonymous: a Type 3 with no NT and no LM response. Worth marking
+        # because it is NOT an ESC8 landing, and separating it keeps the
+        # rule from grading a null session as a relayed account.
+        out["anonymous"] = bool(
+            (not nt_span or not nt_span[1]) and (not lm_span or not lm_span[1]))
+    return out
+
+
+def adcs_ntlm_from_headers(
+        values: Sequence[bytes]) -> List[Tuple[bytes, Dict[str, Any]]]:
+    """Every NTLMSSP message carried by one header's values.
+
+    The SPNEGO case is handled by searching the decoded bytes for the
+    signature rather than walking the GSS-API DER: RFC 4559 Negotiate wraps
+    the same NTLMSSP message in a token whose framing varies by client, and
+    the signature plus a message type is the invariant all of them share.
+    Scanning for it over-approximates the wrapper and cannot miss a message
+    a real server would accept.
+    """
+    out: List[Tuple[bytes, Dict[str, Any]]] = []
+    for raw in values:
+        parts = raw.split(None, 1)
+        if len(parts) != 2:
+            continue
+        scheme = parts[0].lower()
+        if scheme not in ADCS_NTLM_SCHEMES:
+            continue
+        token = parts[1].strip(b" \t")
+        if not token:
+            continue
+        try:
+            blob = base64.b64decode(token + b"=" * (-len(token) % 4),
+                                    validate=False)
+        except Exception:
+            continue
+        idx = blob.find(NTLMSSP_SIGNATURE)
+        if idx < 0:
+            continue
+        info = parse_ntlmssp(blob[idx:])
+        if info is not None:
+            info["scheme"] = scheme.decode("ascii")
+            info["spnego_wrapped"] = idx > 0
+            out.append((scheme, info))
+    return out
+
+
+def adcs_request_path(target: Optional[bytes]) -> bytes:
+    """The routed path of a request target, lowercased.
+
+    IIS percent-decodes and compares case-insensitively before routing, so
+    both are done here. The query string is cut first: '?' cannot appear in
+    a routed path, and leaving it on would let a query parameter spelling
+    '/certsrv/certfnsh.asp' decide the rule.
+    """
+    if not target:
+        return b""
+    path = target
+    if path[:1] not in (b"/", b""):
+        # An absolute-form target (RFC 9112 3.2.2). Cut the authority.
+        scheme_end = path.find(b"://")
+        if scheme_end >= 0:
+            slash = path.find(b"/", scheme_end + 3)
+            path = path[slash:] if slash >= 0 else b"/"
+    q = path.find(b"?")
+    if q >= 0:
+        path = path[:q]
+    frag = path.find(b"#")
+    if frag >= 0:
+        path = path[:frag]
+    return urldecode(path).lower()
+
+
+def adcs_submission_fields(body: bytes) -> Dict[str, Any]:
+    """The Web Enrollment submission fields, from a urlencoded body.
+
+    Only the three fields the rules need are read, and CertRequest's value
+    is reduced to a length and an armor verdict rather than kept: a CSR is
+    the attacker's own bytes but it carries a public key and subject an
+    operator may not want copied into syslog, and nothing here needs it.
+
+    Duplicates resolve last-wins, matching the ASP's Request.Form
+    behaviour for a repeated field.
+
+    The separator is '&' ALONE, deliberately unlike urlencoded_names()
+    above, which also splits on ';'. A ';' is an ordinary query-string
+    convention and the module treats it as a separator when reading
+    parameter NAMES, where over-approximating only widens a name set. Here
+    it would create a false positive with a critical severity attached: a
+    body of "Mode=newreq;CertAttrib=CertificateTemplate:DomainController"
+    is ONE field to a form-urlencoded parser - the WHATWG
+    application/x-www-form-urlencoded parsing rule splits on 0x26 and
+    nothing else - so the CA never sees a CertAttrib field at all, and
+    HTTP-101 would report a privileged-template claim that was never
+    parsed as one. Splitting on '&' only is also safe in the other
+    direction: a template value that swallows ";x=1" is not a template the
+    CA can resolve either, so there is nothing to miss.
+    """
+    out: Dict[str, Any] = {
+        "mode": None, "attrib": None,
+        "csr_present": False, "csr_length": 0, "csr_armor": None,
+    }
+    for pair in body.split(b"&"):
+        if not pair:
+            continue
+        eq = pair.find(b"=")
+        name = urldecode(pair[:eq] if eq >= 0 else pair).lower()
+        value = urldecode(pair[eq + 1:]) if eq >= 0 else b""
+        if name == ADCS_FIELD_MODE:
+            out["mode"] = value.decode("latin-1", "replace")[:32]
+        elif name == ADCS_FIELD_ATTRIB:
+            out["attrib"] = value
+        elif name == ADCS_FIELD_REQUEST:
+            out["csr_present"] = bool(value)
+            out["csr_length"] = len(value)
+            if ADCS_PEM_NEW_ARMOR in value:
+                out["csr_armor"] = "pem_new_certificate_request"
+            elif ADCS_PEM_CSR_ARMOR in value:
+                out["csr_armor"] = "pem_certificate_request"
+            elif value:
+                # certreq and the ASP both accept a bare base64 PKCS#10 or
+                # PKCS#7 with no armor, so an unarmored value is still a
+                # submission and is recorded as one rather than dropped.
+                out["csr_armor"] = "unarmored"
+    return out
+
+
+def adcs_attributes(attrib: Optional[bytes]) -> List[Tuple[bytes, bytes]]:
+    """Split a CertAttrib value into (name, value) pairs.
+
+    Certipy joins attributes with "\\n" and separates name from value with a
+    COLON. Both CR and LF are accepted as separators here because the field
+    survives a round trip through form encoding and a client that sends
+    CRLF is indistinguishable to the CA. The name is lowercased for
+    comparison; the value keeps its case, since a template cn is what gets
+    reported.
+    """
+    pairs: List[Tuple[bytes, bytes]] = []
+    if not attrib:
+        return pairs
+    for line in re.split(rb"[\r\n]+", attrib):
+        line = line.strip(b" \t")
+        if not line:
+            continue
+        colon = line.find(b":")
+        if colon < 0:
+            continue
+        pairs.append((line[:colon].strip().lower(),
+                      line[colon + 1:].strip()))
+    return pairs
+
+
+def _adcs_account(
+        info: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """The reported account and domain for one NTLMSSP message.
+
+    An NTLM account name is an IDENTIFIER, not a credential, and httpwatch
+    already reports one in cleartext for HTTP-040 Basic while digesting the
+    token beside it. The same split applies here: the account and domain go
+    out readable, because knowing WHICH machine account was authenticated is
+    the whole triage value of this finding and a digest of "DC01$" tells an
+    operator nothing, while the challenge-response bytes never leave
+    parse_ntlmssp. The preflight asked for an rpcwatch-style
+    --no-identities; httpwatch has no such flag and does not need one, since
+    its redact()/log_attack_payload split already draws this line, and
+    adding a second mechanism for the same question would leave an operator
+    guessing which one governs. That is why this takes no cfg: there is
+    nothing here for an operator to turn.
+    """
+    return (info.get("username"), info.get("domain"))
+
+
+def adcs_account_allowed(info: Dict[str, Any], cfg: WatchConfig) -> bool:
+    """Is this account one the operator has declared legitimate here?
+
+    Some environments really do enroll over HTTP with NTLM - a legacy
+    appliance, a non-Windows client using certsrv deliberately. Where that
+    is true, HTTP-100 would fire on it every time, and a rule an operator
+    silences wholesale is worse than one that takes an allowlist. The
+    comparison is case-insensitive on both DOMAIN\\user and the bare user,
+    because an operator writing the list should not have to guess which
+    form the client sends.
+    """
+    allow = cfg.adcs_enroll_allow
+    if not allow:
+        return False
+    user = (info.get("username") or "").lower()
+    domain = (info.get("domain") or "").lower()
+    if not user:
+        return False
+    return (user in allow) or (f"{domain}\\{user}" in allow)
+
+
+def check_adcs_esc8_fields(
+        path: bytes, method: bytes, auth_values: Sequence[bytes],
+        body: bytes = b"", body_ctype: bytes = b"",
+        body_visible: bool = True,
+        host: Optional[bytes] = None,
+        cfg: WatchConfig = WATCH_DEFAULTS,
+        stats: Optional[Dict[str, int]] = None,
+        flow_id: Optional[str] = None,
+        transport: str = "http/1.1") -> List[Finding]:
+    """HTTP-100, HTTP-101 and HTTP-102 over one request's fields."""
+    findings: List[Finding] = []
+    routed = adcs_request_path(path)
+    if not routed.startswith(ADCS_ENROLL_PREFIX):
+        return findings
+    # A path that merely begins with the prefix is not enough: /certsrvfoo
+    # is a different application. Require the prefix to end at a boundary.
+    if len(routed) > len(ADCS_ENROLL_PREFIX) \
+            and routed[len(ADCS_ENROLL_PREFIX):len(ADCS_ENROLL_PREFIX) + 1] != b"/":
+        return findings
+    if stats is not None:
+        stats["adcs_enroll_paths_seen"] = \
+            stats.get("adcs_enroll_paths_seen", 0) + 1
+
+    messages = adcs_ntlm_from_headers(auth_values)
+    # Parsed once, not per message: a request can carry both Authorization
+    # and Proxy-Authorization, and re-splitting a body that may be a
+    # megabyte for each is the kind of cost that gets a rule disabled.
+    fields = (adcs_submission_fields(body)
+              if (body and body_visible
+                  and body_ctype == b"application/x-www-form-urlencoded")
+              else None)
+    is_submit = routed == ADCS_SUBMIT_PATH
+    is_template_page = routed == ADCS_TEMPLATE_PAGE
+    path_label = routed.decode("latin-1", "replace")[:128]
+    host_label = host.decode("latin-1", "replace")[:128] if host else None
+
+    # ---- HTTP-102: posture. The precondition for everything above it ----
+    # No port gate and no TLS test: httpwatch only ever parses cleartext,
+    # so a parsed /certsrv/ request IS cleartext by construction - the same
+    # reasoning HTTP-040 already runs on. The one case that breaks it is an
+    # operator feeding TLS-terminated traffic, where the exchange was
+    # protected on the wire and this finding would overstate it. That is
+    # recorded in the README as the tier's standing caveat rather than
+    # guessed at here, and the transport is reported so a reader can tell.
+    posture_ev: Dict[str, Any] = {
+        "path": path_label,
+        "host": host_label,
+        "transport": transport,
+        "ntlm_observed": bool(messages),
+        "ntlm_message_types": sorted({m["message_type"] for _, m in messages}),
+        "note": "AD CS Web Enrollment reached over cleartext HTTP. This is "
+                "the precondition ESC8 needs: Web Enrollment accepts NTLM "
+                "over HTTP with no Extended Protection for Authentication "
+                "by default. EPA state is server configuration and is not "
+                "on the wire, so it is not reported either way. If this "
+                "sensor is fed TLS-terminated traffic the exchange was "
+                "encrypted on the wire and only the NTLM-rather-than-"
+                "Kerberos part of this finding stands.",
+    }
+    findings.append(make_finding("HTTP-102", posture_ev, flow=flow_id))
+
+    for _scheme, info in messages:
+        mtype = info["message_type"]
+        if mtype == NTLM_TYPE_AUTHENTICATE and info.get("anonymous"):
+            # A null session is not a relayed account. Counter, not alert.
+            if stats is not None:
+                stats["adcs_anonymous_type3"] = \
+                    stats.get("adcs_anonymous_type3", 0) + 1
+            continue
+        if mtype == NTLM_TYPE_CHALLENGE:
+            # A Type 2 is a server challenge and cannot appear in a request
+            # direction; if one does, it is not an enrollment attempt.
+            continue
+        if mtype == NTLM_TYPE_AUTHENTICATE \
+                and adcs_account_allowed(info, cfg):
+            if stats is not None:
+                stats["adcs_allowlisted_account"] = \
+                    stats.get("adcs_allowlisted_account", 0) + 1
+            continue
+
+        submitted = bool(fields and fields["csr_present"])
+        user, domain = _adcs_account(info)
+
+        if mtype == NTLM_TYPE_AUTHENTICATE and is_submit \
+                and method.upper() == b"POST" and submitted:
+            severity = CRITICAL
+            grade = "type3_submission"
+            note = ("NTLM Type 3 on a POST to the Web Enrollment submission "
+                    "endpoint carrying a certificate request. This is where "
+                    "an ESC8 relay lands. Whether the authentication was "
+                    "relayed is NOT decidable here - a relayed Type 3 is "
+                    "byte-identical to a legitimate one - so the claim is "
+                    "that NTLM reached the CA's web endpoint where a healthy "
+                    "domain enrolls over Negotiate-with-Kerberos. rpcwatch's "
+                    "coercion findings are the other half; correlate by "
+                    "timestamp.")
+        elif mtype == NTLM_TYPE_AUTHENTICATE:
+            severity = HIGH
+            grade = ("type3_submission_endpoint_no_body" if is_submit
+                     else "type3_other_certsrv_path")
+            note = ("NTLM Type 3 to AD CS Web Enrollment. "
+                    + ("The submission endpoint was reached but no "
+                       "certificate request was observed in the body: the "
+                       "relay may have failed, or the capture may have "
+                       "missed or truncated the body."
+                       if is_submit else
+                       "This is not the submission endpoint, so it is "
+                       "enrollment-adjacent activity rather than an "
+                       "observed submission.")
+                    + " Relay is not decidable from the HTTP side.")
+        else:
+            severity = HIGH
+            grade = "type1_negotiation"
+            note = ("NTLM negotiation begun against AD CS Web Enrollment "
+                    "with no submission observed. A Type 1 proves the "
+                    "client offered NTLM where Kerberos was expected; it "
+                    "does not prove an account authenticated.")
+
+        ev: Dict[str, Any] = {
+            "grade": grade,
+            "path": path_label,
+            "host": host_label,
+            "method": method.decode("latin-1", "replace")[:16],
+            "transport": transport,
+            "scheme": info.get("scheme"),
+            "spnego_wrapped": info.get("spnego_wrapped"),
+            "ntlm_message_type": mtype,
+            "account": user,
+            "account_domain": domain,
+            "workstation": info.get("workstation"),
+            "nt_response_length": info.get("nt_response_length"),
+            "lm_response_length": info.get("lm_response_length"),
+            "nt_response_digest": info.get("nt_response_digest"),
+            "submission_observed": submitted,
+            "submission_mode": fields["mode"] if fields else None,
+            "csr_length": fields["csr_length"] if fields else None,
+            "csr_armor": fields["csr_armor"] if fields else None,
+            "template_page": is_template_page,
+            "note": note,
+        }
+        findings.append(make_finding("HTTP-100", ev, severity=severity,
+                                     flow=flow_id))
+
+        # ---- HTTP-101: the privileged-template claim ----
+        if fields and fields["attrib"]:
+            for aname, avalue in adcs_attributes(fields["attrib"]):
+                if aname != ADCS_ATTR_TEMPLATE or not avalue:
+                    continue
+                template = avalue.decode("latin-1", "replace")[:128]
+                if avalue.lower() not in cfg.adcs_privileged_templates:
+                    if stats is not None:
+                        stats["adcs_template_claims"] = \
+                            stats.get("adcs_template_claims", 0) + 1
+                    continue
+                findings.append(make_finding("HTTP-101", {
+                    "path": path_label,
+                    "host": host_label,
+                    "transport": transport,
+                    "template": template,
+                    "account": user,
+                    "account_domain": domain,
+                    "ntlm_message_type": mtype,
+                    "submission_observed": submitted,
+                    "csr_armor": fields["csr_armor"],
+                    "note": "The submitted request names a privileged "
+                            "certificate template. A relayed machine "
+                            "account asking for a domain-controller "
+                            "template is the full ESC8 outcome rather than "
+                            "the attempt. The template arrives as one "
+                            "newline-separated CertificateTemplate:<name> "
+                            "attribute inside the CertAttrib field - "
+                            "measured against Certipy 5.1.0, not assumed. "
+                            "MS-WCCE does not state whether the CA compares "
+                            "attribute names case-insensitively, so this is "
+                            "the claim the request made, not proof the "
+                            "certificate issued.",
+                }, flow=flow_id))
+    return findings
+
+
+def check_adcs_esc8(msg: ParsedMessage, body: bytes,
+                    body_info: Optional[Dict[str, Any]] = None,
+                    cfg: WatchConfig = WATCH_DEFAULTS,
+                    stats: Optional[Dict[str, int]] = None,
+                    flow_id: Optional[str] = None) -> List[Finding]:
+    """HTTP-100 / HTTP-101 / HTTP-102 over one HTTP/1 request."""
+    if msg.kind != "request":
+        return []
+    ctype, _ = parse_content_type(msg.get(b"content-type"))
+    visible = True
+    if body_info is not None:
+        visible = not body_info.get("inspect_truncated", False)
+    return check_adcs_esc8_fields(
+        msg.target or b"", msg.method or b"",
+        msg.get_all(b"authorization") + msg.get_all(b"proxy-authorization"),
+        body=body, body_ctype=ctype or b"", body_visible=visible,
+        host=msg.get(b"host"), cfg=cfg, stats=stats, flow_id=flow_id)
+
+
+# ---------------------------------------------------------------------------
 # Tier G: content-coding validation
 # ---------------------------------------------------------------------------
 # HTTP-090 Node2Shell / HTTP2Shell / Brotli2Shell (CVE-2026-111497).
@@ -7052,6 +7705,12 @@ def analyse_http1_message(msg: ParsedMessage, raw: bytes,
             msg, decoded, cfg, stats, parts=struts_parts,
             body_ctype=php_ctype or b""))
         findings.extend(check_soap_axis(msg, decoded, body_info, cfg, stats))
+        # HTTP-100/101/102 in one call: all three key on the same routed
+        # path, so splitting them by tier label would parse it three
+        # times. They are dispatched here rather than with Tier E because
+        # HTTP-100's critical grade needs the decoded body.
+        findings.extend(check_adcs_esc8(msg, decoded, body_info, cfg,
+                                        stats, flow_id=None))
         # --- Tier G ---
         findings.extend(check_brotli(msg, decoded, body_info, cfg.brotli,
                                      stats))
@@ -7357,6 +8016,24 @@ class H2ConnectionState:
                     None, self.cfg, None, self.flow_id,
                     target_override=path, forwarded_override=fwd_h2,
                     transport="h2c"))
+            # HTTP-100 and HTTP-102 ride :path and the Authorization
+            # header, so they get h2c coverage for nothing, the same way
+            # HTTP-099 does. HTTP-101 is not here: the CertAttrib field
+            # needs the request body and DATA frames reach no body sink -
+            # the same gap the README records for HTTP-089/093/096/097/098.
+            # In practice this leg is near-dead for AD CS either way, since
+            # IIS serves HTTP/2 only over TLS; it is wired because it is
+            # free and because a reverse proxy in front of the CA can
+            # speak h2c to it, which is exactly how HTTP-086/087 are
+            # treated two blocks up.
+            adcs_auth = [hv.strip(b" \t") for hn, hv in headers
+                         if hn.lower() in (b"authorization",
+                                           b"proxy-authorization")]
+            if adcs_auth:
+                findings.extend(check_adcs_esc8_fields(
+                    path, method, adcs_auth, body=b"", body_ctype=b"",
+                    body_visible=False, host=authority, cfg=self.cfg,
+                    stats=None, flow_id=self.flow_id, transport="h2c"))
             # HTTP-094 and HTTP-095 read parameter NAMES only, so the query
             # string in :path gives them h2c coverage for nothing. HTTP-093
             # is not here: it needs the multipart file parts to know which
@@ -7627,6 +8304,7 @@ class HttpWatch:
             "flows": 0, "http1_messages": 0, "h2_frames": 0, "findings": 0,
             "leaks_suppressed": 0, "tierf_inspect_truncated": 0,
             "attacks_suppressed": 0,
+            "posture_suppressed": 0,
             "toolshell_signout_nonallowlisted": 0,
             "php_scalar_record_shape": 0,
             "walker_budget_exceeded": 0,
@@ -7711,18 +8389,35 @@ class HttpWatch:
 
     def _dedup_leaks(self, findings: List[Finding], fl: Flow,
                      now: float) -> List[Finding]:
-        """Rate-limit HTTP-048 to one per server address:port per window."""
-        if not any(f.code == "HTTP-048" for f in findings):
+        """Rate-limit the per-server posture codes to one per address:port.
+
+        HTTP-048 and HTTP-102 both make a claim about the SERVER rather than
+        about one request - that this host leaks session memory, that this
+        host offers Web Enrollment over cleartext - so one finding per
+        server:port per window is the whole truth and a finding per request
+        would bury it. HTTP-102 is deliberately not in ATTACK_CODES: it is
+        posture, and the attack dedup keys on the client, which would let
+        one CA emit a finding per enrolling host.
+        """
+        if not any(f.code in POSTURE_DEDUP_CODES for f in findings):
             return findings
         key = (fl.dst, fl.port)
         kept: List[Finding] = []
         for f in findings:
-            if f.code != "HTTP-048":
+            if f.code not in POSTURE_DEDUP_CODES:
                 kept.append(f)
                 continue
-            allowed, suppressed = self.leak_dedup.allow(key, now)
+            allowed, suppressed = self.leak_dedup.allow(
+                (f.code,) + key, now)
             if not allowed:
-                self.stats["leaks_suppressed"] += 1
+                # Counted per code, not into one bucket. leaks_suppressed
+                # keeps meaning HTTP-048 and nothing else: folding
+                # HTTP-102's suppressions into it made the lab's HTTP-048
+                # assertion read 18 where the rule's own behaviour was
+                # still exactly 1, which is a counter that hides the thing
+                # it exists to show.
+                self.stats["leaks_suppressed" if f.code == "HTTP-048"
+                           else "posture_suppressed"] += 1
                 continue
             if suppressed:
                 f.evidence["suppressed_since_last"] = suppressed
@@ -8031,6 +8726,12 @@ def cfg_from_args(args) -> Tuple[WatchConfig, List[Dict[str, Any]]]:
     cfg = WatchConfig(
         php=php_cfg_from_args(args),
         log_attack_payload=bool(getattr(args, "log_attack_payload", False)),
+        adcs_privileged_templates=adcs_template_config(
+            getattr(args, "adcs_privileged_template", None)),
+        adcs_enroll_allow=frozenset(
+            a.strip().lower()
+            for a in (getattr(args, "adcs_enroll_allow", None) or ())
+            if a and a.strip()),
         body_cap=int(getattr(args, "body_cap", WATCH_DEFAULTS.body_cap)),
         internal_cidrs=tuple(getattr(args, "internal_cidr", None) or ()),
         brotli=probe,
@@ -8240,6 +8941,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                    help="also validate br-coded RESPONSE bodies (outbound "
                         "client fetches). Off by default: almost all "
                         "outbound traffic is TLS and invisible here")
+    p.add_argument("--adcs-privileged-template", action="append",
+                   default=None, metavar="NAME",
+                   help="HTTP-101: add a certificate template whose "
+                        "issuance is a domain compromise (repeatable). "
+                        "Deployments rename the built-ins, so the default "
+                        "list is a starting point, not a complete one")
+    p.add_argument("--adcs-enroll-allow", action="append", default=None,
+                   metavar="ACCOUNT",
+                   help="HTTP-100: an account legitimately enrolling over "
+                        "HTTP with NTLM, as 'user' or 'DOMAIN\\user' "
+                        "(repeatable). Use this instead of disabling the "
+                        "rule where a legacy client really does this")
     p.add_argument("--print-bpf", action="store_true",
                    help="print the generated capture filter and exit")
     p.add_argument("--registry", action="store_true",

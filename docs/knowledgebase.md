@@ -488,6 +488,11 @@ Yes, as attempts, with **HTTP Watch**. It sees only the cleartext hop between a 
 Source: nettools.md
 <!-- proof: docs/nettools.md | **Exchange and SharePoint** (*v4*; -->
 
+### Does Ragnar detect secretsdump, DCSync or AD CS certificate abuse?
+Yes, in pieces, each watcher seeing its own half on the wire. **RPC / NetLogon Watch** flags DCSync, the registry hive save, LSA secret reads and AD CS certificate requests for another identity (ESC1 / ESC3 / ESC6 / ESC15 / ESC17). **SMB Watch** flags the saved hive being read back over ADMIN$. **LDAP Watch** flags AD CS template and mapping writes (ESC4 / ESC5 / ESC10 / ESC13 / ESC14). **HTTP Watch** flags ESC8 and **TLS Watch** ESC9 / ESC16. Encrypted traffic hides all of it.
+Source: nettools.md
+<!-- proof: docs/nettools.md | **v6 — SMB file operations, secretsdump's SMB half.** -->
+
 ### Does Ragnar detect Apache Struts attacks?
 Yes, as attempts, with **HTTP Watch**. It flags the S2-045 / S2-046 OGNL shapes, file-upload property overwrites (S2-066 / S2-067), and OGNL in `redirect:` / `action:` / `method:` parameter names (S2-016 / S2-032) in cleartext HTTP. It cannot tell whether the server runs a vulnerable Struts.
 Source: nettools.md

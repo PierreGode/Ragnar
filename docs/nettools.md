@@ -743,7 +743,7 @@ hosts already sent and transmits nothing (no Range test request, no h2 PING, no 
 HTTP over TLS is ciphertext after the handshake, so SNI / ALPN / JA4 / certificates stay with
 [TLS Watch](#tls-watch) and Cert Watch; the http.sys-over-TLS record flood (CVE-2026-47291) is TLS
 Watch's. One bounded `tcpdump` window (full snaplen, `-p`, packet cap), each packet dissected and fed
-through the vendored engine (`python/httpwatch.py`, v7). **49 codes** in seven tiers, each with a
+through the vendored engine (`python/httpwatch.py`, v8). **52 codes** in seven tiers, each with a
 confidence class — `exact` (the observation is the condition), `shape` (the malformation is read
 directly; whether the receiver is vulnerable is not observable), `heuristic` (a threshold or a
 name-matched field) or `posture`:
@@ -893,6 +893,20 @@ name-matched field) or `posture`:
     for the second-stage `CVE-2026-86207`. Rides headers and the target, so h2c is covered.
 
   The body-carried rules (093, 096, 097, 098) are blind to h2c bodies and, like the rest, to TLS.
+- **AD CS Web Enrollment over NTLM — the ESC8 landing** (*v8*; `HTTP-100` / `HTTP-101` / `HTTP-102`,
+  no CVE: ESC8 is a default-configuration class). ESC8 relays a coerced NTLM authentication to the
+  Certificate Services web enrollment pages and enrolls a certificate as the relayed account. RPC
+  Watch sees the coercion; this is where it lands, and neither module claims the whole chain.
+  `HTTP-100` — NTLM to a `/certsrv/` endpoint, where a healthy domain enrolls over
+  Negotiate-with-Kerberos: critical for an NTLM Type 3 `POST` to `certfnsh.asp` carrying a
+  certificate request, high for Type 3 with no body seen, Type 3 to any other `/certsrv/` path, or a
+  Type 1 negotiation. The NTLM account and domain are reported (an identifier, not a credential); the
+  challenge-response bytes never leave the parser. `HTTP-101` (critical) — the submission names a
+  privileged template (`DomainController`, `KerberosAuthentication`, …) in `CertAttrib` as
+  `CertificateTemplate:<name>` — colon-separated, as measured from Certipy. `HTTP-102` (high, Tier
+  C) — Web Enrollment reached over cleartext at all. Relay itself is not distinguishable from a
+  legitimate Type 3 and is not claimed. Useful on port 80 or wherever TLS is terminated; silent on
+  443, which is most deployments.
 - **Tier F — attack-shaped request bodies** (*v3*; `HTTP-082`, `083`, `085`). Bodies are dechunked
   and parsed as multipart (each part decoded with its declared charset, UTF-8 and the wide
   encodings) or as form / query parameters, so a body any affected server accepts cannot slip past.
@@ -943,9 +957,9 @@ the 6.5 bar, a local-API defect, host configuration rather than wire bytes (the 
 session-handler `CVE-2026-115560`; phpAfterShell `CVE-2026-126714` was here until v5 found its
 wire shape), a free-form OGNL location (Struts
 `CVE-2017-9791` / `CVE-2018-11776` / `CVE-2020-17530`), or another watcher's — so the CVE count never
-quietly overstates. Detector Self-Test runs the engine's 2323-check suite plus smuggling, redaction,
+quietly overstates. Detector Self-Test runs the engine's 2494-check suite plus smuggling, redaction,
 WinRM-suppression, Range-boundary, Shellshock / S2-045 / Spring4Shell, ProxyLogon / ProxyShell /
-ToolShell, phpAfterShell / Log4Shell / Text4Shell and Struts / Rack / Axis / SOAP / N-central
+ToolShell, phpAfterShell / Log4Shell / Text4Shell, Struts / Rack / Axis / SOAP / N-central and ESC8
 trigger-and-near-miss, Brotli-arming and verdict scenarios, and a Scapy pcap leg carrying an IPv6
 Hop-by-Hop header.
 
@@ -2120,6 +2134,23 @@ handshake, yields:
   `cert_not_yet_valid`, `cert_self_signed`, `cert_short_chain`, `cert_weak_sig`,
   and **`sni_cert_mismatch`** — SNI not covered by the presented certificate, the
   passive **interception** signal.
+- **AD CS certificate mapping, the Schannel half — ESC9 / ESC10 / ESC16 *(new in v12)*** — in TLS
+  1.2 mutual authentication the **client's** Certificate message is cleartext too, and it is now
+  parsed and kept apart from the server chain (so no server-certificate rule ever runs on it). The
+  session reports `cert_requested` (the server's CertificateRequest — the only on-wire statement that
+  mutual auth was asked for) and `client_cert` (subject, issuer, serial, UPN SANs, whether the SID
+  extension is present) whether or not a rule fires, for correlation with LDAP Watch.
+  **`clientcert_no_sid_extension`** — **high** when the certificate asserts a UPN `otherName` SAN
+  (`1.3.6.1.4.1.311.20.2.3`) but carries no `szOID_NTDS_CA_SECURITY_EXT` (`1.3.6.1.4.1.311.25.2`): a
+  certificate that authenticates as a named principal with no SID binding, the **ESC9 / ESC16**
+  condition (attributed as a cluster: the wire cannot tell a template-level omission from a CA-level
+  one). **warn** with no UPN, only on a directory port (636 / 3269 / 389) — elsewhere that would be
+  every non-AD mutual-TLS deployment. **`clientcert_protected_upn`** (the ESC10 / ESC14 end state:
+  a protected principal authenticating by certificate) needs an operator's protected-user list,
+  which the in-app watcher does not have, so it is disarmed. Whether the DC accepts any of this
+  depends on `StrongCertificateBindingEnforcement` and `CertificateMappingMethods`, which are
+  registry state and are never inferred. TLS 1.3 encrypts the client Certificate, so this tier is
+  silent there by protocol; no CVE.
 
 **The one hard constraint:** the Certificate message is passively observable
 **only for TLS 1.2 over TCP**. TLS 1.3 encrypts it under the handshake secret and
@@ -2648,6 +2679,21 @@ kerberoast, AS-REP-roast, krb-downgrade, krb-recon, responder-challenge) is appe
 **API:** `GET /api/net/smb-watch`, `POST /api/net/smb-baseline`.
 **CLI:** `smb-watch`, `smb-selftest`.
 
+**v6 — SMB file operations, secretsdump's SMB half.** [RPC Watch](#rpc--netlogon-watch) sees the
+registry hive saved to a file; the step that moves the credentials off the machine is reading that
+file back over SMB. The module author's engine (vendored as `python/smbwatch.py`) parses SMB2
+TREE_CONNECT / CREATE / IOCTL from reassembled messages and is run over the same capture; only its
+F-series is taken. **F1** — a file named `Temp\<8 ASCII letters>.tmp` on `ADMIN$` / `C$` opened:
+high read-only, **critical** read then deleted (the delete is itself a CREATE with delete-on-close).
+Measured by the author against 6,000 real Windows temp names: none match, because
+`GetTempFileName` always includes hex digits. **F2** — `Temp\__output`. **F3** —
+`FSCTL_SRV_ENUMERATE_SNAPSHOTS` (shadow-copy enumeration, the first step of copying `ntds.dit`;
+backup software also does it). **F4** — a read of `SAM`, `SECURITY`, `SYSTEM`, `ntds.dit`,
+`ntds.jfm`, `EDB*.log` or a shadow-copy path. **F5** — SMB3 encryption seen, so F1–F4 are blind to
+that server (a note, not an alert). F1 / F2 / F4 set the **`credential-dump`** verdict (critical,
+paged); F3 sets **`shadow-copy-enum`**. `IPC$` and `\pipe\` traffic is RPC Watch's and is never
+double-reported. No CVE.
+
 ### Relay/Coercion Watch
 A **passive** NTLM-relay + authentication-coercion scanner — the **defensive
 counterpart** to [SMB Watch](#smb-watch). Where SMB Watch catches the *harvest* (a host
@@ -2781,6 +2827,26 @@ subscription endpoints. Three further CVEs (`CVE-2021-36936 / CVE-2021-36947 / C
 **evaluated and deliberately not claimed** — no observable mechanism, or a local-only vector — so the
 [CVE index](CVE.md) does not count them.
 
+**v9** re-vendors the engine again (52 → **64 codes**) for the AD CS and credential-theft surface:
+
+- **AD CS enrollment abuse**, read from an **unsealed** MS-ICPR request (below `PKT_PRIVACY`; a
+  sealed request is invisible, so silence there is not safety): **ESC1** (a SAN with a client-auth
+  EKU in the CSR), **ESC3** (the Certificate Request Agent EKU), **ESC6** (a SAN in the request
+  attributes string — the only form whose requested identity is readable text, compared with who
+  authenticated), **ESC15** (`CVE-2024-49019`, application policies injected into the request) and
+  **ESC17** (a DNS identity with a server-auth EKU) → the new **`adcs-abuse`** verdict. **MS-CSRA**
+  remote CA administration (`RPC-CERTADMIN-REMOTE`) is reported as exposure. ESC9 / ESC16 are not on
+  the DCERPC wire — they are visible in the issued certificate, which [TLS Watch](#tls-watch) reads.
+- **DCSync / DCShadow** by host role: `RPC-DRS-DCSYNC` (`IDL_DRSGetNCChanges` from a host that is
+  not a known DC) and `RPC-DRS-DCSHADOW` (a non-DC acting as a replication source). **Armed only when
+  DCs are declared** (`dcs`); with none it stays silent rather than guess. DRSUAPI runs on a dynamic
+  port, so a snapshot only sees it if that port is in the capture.
+- **LSA secret access** (`RPC-LSA-SECRET-READ` / `-WRITE`) — `LsarRetrievePrivateData` on
+  `G$BCKUPKEY_*` is how the DPAPI domain backup key is actually taken (critical) — and the **MS-RRP
+  hive save** (`RPC-WINREG-HIVE-SAVE`): `BaseRegSaveKey` writing `SAM` / `SECURITY` / `SYSTEM` to a
+  file, secretsdump's registry path (critical for a credential hive). Both feed the
+  `credential-exposure` verdict. [SMB Watch](#smb-watch) sees that file being read back.
+
 **API:** `GET /api/net/rpc-watch` (query: `interface`, `seconds`, `dcs`).
 
 > **Watchtower feed.** HIGH/CRITICAL RPC/NetLogon/WinRM findings (coercion excluded) are
@@ -2877,6 +2943,29 @@ with only a local `javaFactory` (nothing delivered) stay silent; the factory cla
 context, never matched against a gadget list. Both findings report that delivery crossed the wire,
 not that the client instantiated the object. Watching any TCP port for rogue JNDI servers (an egress
 tap) is not done in-app; the default listener port 1389 is covered.
+
+**v9** adds two tiers by running the module author's own engine (vendored as `python/ldapwatch.py`)
+over the same packets and keeping only its new code families, so nothing is reported twice. The
+capture adds **Kerberos (tcp + udp/88)**; Kerberos traffic is kept out of the CLDAP checks.
+
+- **AD CS object writes** (`LDAP-ADCS-*`), from decoded modify / add requests on unsealed LDAP:
+  **ESC4** (a `pKICertificateTemplate` write — the name-flag word is decoded, so
+  `ENROLLEE_SUPPLIES_SUBJECT` set reads as the ESC1 conversion and `PEND_ALL_REQUESTS` cleared as
+  manager approval removed), **ESC5** (writes to NTAuthCertificates, AIA, CDP, Enrollment Services or
+  a CA object — a `cACertificate` write is a CA planted in the trust store), **ESC13**
+  (`msDS-OIDToGroupLink`, the linked group reported), **ESC14** (`altSecurityIdentities`, critical
+  for a weak mapping form, high for a strong one) and **ESC10** (`userPrincipalName` swapped and
+  reverted, or colliding with another object's UPN; a lone write is medium).
+- **Kerberos** (`LDAP-KRB-*`): **AS-REP roastable** — decided on the KDC's *reply*, so the normal
+  pre-auth-less AS-REQ answered by `KRB-ERROR 25` stays silent; roasting-tool KDC options
+  (`canonicalize` clear); RC4 requested for a user SPN (posture); **S4U2Self** and **S4U2Proxy**
+  delegation; and **`CVE-2025-60704`** — a `PA-S4U-X509-USER` under a checksum type that takes no
+  key, keyed on the checksum type, never on padata 130's presence — with its RC4 precondition.
+  Rules needing operator input (a KDC list for SPN-search-then-roast correlation, decoy SPNs for the
+  honeytoken, a protected-user list) stay disarmed, as the engine itself does without them.
+
+Critical-graded engine findings count as **compromised**. The engine's own 353-check suite runs
+inside the Detector Self-Test, followed by end-to-end cases through the real capture path.
 
 Hardening it drives: require **LDAPS/StartTLS** and reject simple binds on cleartext,
 **disable anonymous binds**, enforce **LDAP signing + channel binding (EPA)** on DCs,

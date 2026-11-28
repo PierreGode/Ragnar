@@ -10,7 +10,12 @@ weak/absent authentication, STARTTLS stripping, directory enumeration, filter
 injection, brute force, CLDAP reflection/amplification, and (v6) the JNDI delivery
 leg of Log4Shell-class attacks: a directory answering a client with an RFC 2713
 Java object - a remote javaCodeBase or a serialized Java object - on TCP/389, 3268
-or 1389 (the default rogue-JNDI listener port).
+or 1389 (the default rogue-JNDI listener port). v9 adds two tiers by running the
+module author's vendored engine (python/ldapwatch.py) over the same packets and
+keeping only its new code families: AD CS ESC4 / ESC5 / ESC10 / ESC13 / ESC14 from
+decoded LDAP modify / add requests (LDAP-ADCS-*), and a Kerberos tier on tcp+udp/88
+(LDAP-KRB-*: AS-REP roastable, roasting-tool KDC options, S4U2Self / S4U2Proxy, the
+CVE-2025-60704 unkeyed S4U-X509 checksum and its RC4 precondition).
 
 Design conventions (shared across the Ragnar suite):
   * Passive-only Scapy capture. No sockets are opened for transmit; no packet is
@@ -638,10 +643,13 @@ class LdapDetector:
         self._netlogon_flagged = set()   # DCs already reported for the overflow precond
 
     # -- helpers --------------------------------------------------------------
-    def _add(self, flowkey, sev, code, message):
+    def _add(self, flowkey, sev, code, message, compromised=False):
         bucket = self.flow_findings.setdefault(flowkey, [])
         if not any(f['code'] == code for f in bucket):   # one per code per flow
-            bucket.append({'severity': sev, 'code': code, 'message': message})
+            f = {'severity': sev, 'code': code, 'message': message}
+            if compromised:
+                f['compromised'] = True      # v9 engine: a critical-graded finding
+            bucket.append(f)
 
     @staticmethod
     def _cleartext(dport, sport):
@@ -983,7 +991,7 @@ class LdapDetector:
             for f in findings:
                 all_findings.append(dict(f, src='%s:%s' % (src, sport),
                                          dst='%s:%s' % (dst, dport)))
-                if f['code'] in _COMPROMISED_CODES:
+                if f['code'] in _COMPROMISED_CODES or f.get('compromised'):
                     v = 'compromised'
                 elif f['severity'] in ('warn', 'high'):
                     v = 'suspicious'
@@ -1075,9 +1083,112 @@ def _syn_flowkey(ip):
 # =============================================================================
 # Capture (passive Scapy sniff) -> records -> detector -> result
 # =============================================================================
-def _bpf():
+KRB_PORT = 88                        # v9: the Kerberos tier of the vendored engine
+
+
+def _bpf(kerberos=True):
+    """Capture filter. kerberos=True (the snapshot path) also admits tcp+udp/88 for
+    the v9 engine's Kerberos tier; the streaming daemon does not run that engine,
+    so it keeps the LDAP-only filter."""
     tcp = ' or '.join('tcp port %d' % p for p in LDAP_CLEARTEXT_PORTS + LDAPS_PORTS)
-    return '(%s) or (udp port %d)' % (tcp, CLDAP_PORT)
+    bpf = '(%s) or (udp port %d)' % (tcp, CLDAP_PORT)
+    if kerberos:
+        bpf += ' or (tcp port %d) or (udp port %d)' % (KRB_PORT, KRB_PORT)
+    return bpf
+
+
+# --- v9: the vendored engine's AD CS + Kerberos tiers -------------------------
+# The module author's own engine (python/ldapwatch.py, v9) decodes LDAP modify/add
+# requests and Kerberos messages and grades AD CS ESC4/5/10/13/14 and Kerberos
+# roasting / S4U abuse. It also implements every older rule, under UPPERCASE codes,
+# which this module already reports under its own lowercase ones, so only the two
+# new families are taken from it - nothing is reported twice.
+_V9_FAMILIES = ('LDAP-ADCS-', 'LDAP-KRB-')
+_V9_SEV = {'critical': 'high', 'high': 'high', 'medium': 'warn', 'low': 'low',
+           'info': 'info'}
+
+
+def _v9_engine():
+    """Import the vendored v9 engine from python/, or None if unavailable."""
+    import os
+    import sys
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python')
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        import logging
+        import ldapwatch
+        # The engine logs "rule disarmed" notices meant for its own CLI; in-app the
+        # disarmed state is documented, so keep them out of Ragnar's service log.
+        logging.getLogger(getattr(ldapwatch, 'MODULE', 'ldapwatch')).setLevel(logging.ERROR)
+        return ldapwatch
+    except Exception:
+        return None
+
+
+def _v9_findings(packets, local_nets=None):
+    """Run the vendored engine over the same scapy packets and return its new-tier
+    records (LDAP-ADCS-* / LDAP-KRB-*). Config is the engine's defaults: the rules
+    that need operator input (--kdc for SPN-enum-then-roast, --krb-honeypot-spn,
+    --protected-user) stay disarmed, as the engine itself does without them."""
+    L = _v9_engine()
+    if L is None:
+        return []
+    from scapy.layers.inet import IP, TCP, UDP
+    try:
+        from scapy.layers.inet6 import IPv6
+    except Exception:
+        IPv6 = None
+    cfg = L.Config()
+    if local_nets:
+        cfg.local_nets = list(local_nets)
+    engine = L.LDAPEngine(cfg)
+    out = []
+
+    class _Sink:
+        def emit(self, rec):
+            if str(rec.get('finding', '')).startswith(_V9_FAMILIES):
+                out.append(rec)
+
+    flows = L.FlowManager(cfg, engine, _Sink())
+    for p in packets:
+        try:
+            ipl = p.getlayer(IP) or (IPv6 and p.getlayer(IPv6))
+            if not ipl:
+                continue
+            ts = float(getattr(p, 'time', 0.0) or 0.0)
+            if p.haslayer(TCP):
+                t = p[TCP]
+                pl = t.payload
+                orig = getattr(pl, 'original', b'')
+                pay = bytes(orig) if orig else bytes(pl)
+                flows.handle_tcp(ts, ipl.src, int(t.sport), ipl.dst, int(t.dport),
+                                 pay, int(t.flags))
+            elif p.haslayer(UDP):
+                u = p[UDP]
+                pl = u.payload
+                orig = getattr(pl, 'original', b'')
+                pay = bytes(orig) if orig else bytes(pl)
+                sp, dp = int(u.sport), int(u.dport)
+                if sp in cfg.krb_ports or dp in cfg.krb_ports:
+                    flows.handle_krb_udp(ts, ipl.src, sp, ipl.dst, dp, pay)
+        except Exception:
+            continue                     # one odd frame must never kill the scan
+    return out
+
+
+def _v9_message(rec):
+    """One readable line for a vendored-engine record: its title, the summary when
+    present, and the grade it was given."""
+    msg = rec.get('title') or rec.get('finding')
+    if rec.get('summary'):
+        msg = '%s - %s' % (msg, rec['summary'])
+    d = rec.get('detail') or {}
+    if d.get('base_severity') and d.get('base_severity') != rec.get('severity'):
+        msg += ' (graded %s)' % rec.get('severity')
+    if d.get('cve'):
+        msg += ' [%s]' % d['cve']
+    return msg
 
 
 def _record(pkt):
@@ -1155,14 +1266,23 @@ def analyze_packets(packets, local_nets=None):
             pl = u.payload
             orig = getattr(pl, 'original', b'')
             pay = bytes(orig) if orig else bytes(pl)
-            if pay:
+            if pay and KRB_PORT not in (int(u.sport), int(u.dport)):
                 det.feed_cldap(ipl.src, int(u.sport), ipl.dst, int(u.dport), pay,
                                int(u.sport) == CLDAP_PORT, local_nets)
     for key, segs in tcp.items():
+        if 88 in (key[1], key[3]):
+            continue                      # Kerberos: the v9 engine's tier, not LDAP
         stream = b''.join(segs[s] for s in sorted(segs))
         msgs, _ = split_ldap_messages(stream)
         for m in msgs:
             det.feed_message(key, m)
+    # v9: AD CS (ESC4/5/10/13/14) and Kerberos (roasting, S4U, CVE-2025-60704) from
+    # the vendored engine, over the same packets, new families only.
+    for rec in _v9_findings(packets, local_nets):
+        key = (rec.get('src'), rec.get('sport') or 0, rec.get('dst'),
+               rec.get('dport') or 0)
+        det._add(key, _V9_SEV.get(rec.get('severity'), 'warn'), rec['finding'],
+                 _v9_message(rec), compromised=(rec.get('severity') == 'critical'))
     return det.result()
 
 
@@ -1230,6 +1350,8 @@ def run_daemon(interface, out_path=None, local_nets=None):
         if not rec:
             return
         src, sport, dst, dport, payload, is_tcp = rec
+        if KRB_PORT in (sport, dport):
+            return                               # Kerberos is the snapshot path's tier
         key = (src, sport, dst, dport)
         if is_tcp:
             r = reasm.get(key)
@@ -1243,7 +1365,7 @@ def run_daemon(interface, out_path=None, local_nets=None):
         det.finalize_rates()                     # re-evaluate per-source rate findings
         flush_new()
 
-    sniff(iface=interface, filter=_bpf(), prn=handle, store=False)
+    sniff(iface=interface, filter=_bpf(kerberos=False), prn=handle, store=False)
 
 
 # =============================================================================
@@ -1517,6 +1639,102 @@ def selftest():
     ck('jndi_near_miss_quiet', codes(r) & {'jndi-codebase-delivered',
                                          'jndi-serialized-object'}, set())
     ck('jndi_port_1389_captured', 'tcp port 1389' in _bpf())
+
+    # 13c. v9: the vendored engine's own suite, then the AD CS + Kerberos tiers end
+    # to end through analyze_packets (the real capture path), built with the suite's
+    # own encoders so Ragnar keeps no second copy of them.
+    L = _v9_engine()
+    if L is None:
+        ck('v9_engine_available', False)
+    else:
+        try:
+            import contextlib
+            import io
+            import os
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                '_ldapwatch_v9_suite', os.path.join(os.path.dirname(L.__file__),
+                                                    'ldapwatch_selftest.py'))
+            T = importlib.util.module_from_spec(spec)
+            sink = io.StringIO()
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                spec.loader.exec_module(T)
+                rc = T.run_selftest()
+            ck('v9_vendored_suite', rc, 0)
+        except Exception as e:
+            ck('v9_vendored_suite', 'error: %s' % e, 0)
+            T = None
+        try:
+            from scapy.all import Ether, IP, IPv6, TCP, UDP, Raw
+            cl, dc = '10.10.0.5', '10.10.0.10'
+
+            def tcp_pkt(payload, sport=45000, dport=389, src=cl, dst=dc, v6=False):
+                l3 = IPv6(src=src, dst=dst) if v6 else IP(src=src, dst=dst)
+                return Ether() / l3 / TCP(sport=sport, dport=dport, flags='PA',
+                                          seq=1000) / Raw(payload)
+
+            def udp_pkt(payload, sport, dport, src, dst):
+                return Ether() / IP(src=src, dst=dst) / UDP(sport=sport, dport=dport) \
+                    / Raw(payload)
+
+            tpl = ('CN=User,CN=Certificate Templates,CN=Public Key Services,'
+                   'CN=Services,CN=Configuration,DC=corp,DC=local')
+            esc4 = T.ldap_message(2, T.modify_request(
+                tpl, [('replace', 'msPKI-Certificate-Name-Flag', ['1'])]))
+            r = analyze_packets([tcp_pkt(esc4)])
+            ck('v9_esc4_template_write',
+               'LDAP-ADCS-ESC4-TEMPLATE-WRITE' in codes(r))
+            ck('v9_esc4_verdict', r['verdict'], 'compromised')
+            r6 = analyze_packets([tcp_pkt(esc4, src='2001:db8::5', dst='2001:db8::10',
+                                          v6=True)])
+            ck('v9_esc4_ipv6', 'LDAP-ADCS-ESC4-TEMPLATE-WRITE' in codes(r6))
+            weak = T.ldap_message(3, T.modify_request(
+                'CN=svc-web,CN=Users,DC=corp,DC=local',
+                [('replace', 'altSecurityIdentities',
+                  ['X509:<I>DC=local,DC=corp,CN=CORP-CA<S>CN=Administrator'])]))
+            ck('v9_esc14_weak_altsecid', 'LDAP-ADCS-ESC14-WEAK-ALT-SEC-ID'
+               in codes(analyze_packets([tcp_pkt(weak)])))
+            benign = T.ldap_message(4, T.modify_request(
+                'CN=alice,CN=Users,DC=corp,DC=local',
+                [('replace', 'telephoneNumber', ['555-0100'])]))
+            ck('v9_ordinary_modify_silent', not any(
+                c.startswith('LDAP-ADCS-') for c in codes(analyze_packets([tcp_pkt(benign)]))))
+            # Kerberos: AS-REP roastable is decided on the REPLY; the ordinary
+            # pre-auth-less AS-REQ answered by KRB-ERROR 25 must stay silent.
+            areq = T.as_req(padata=[L.PA_PAC_REQUEST])
+            r = analyze_packets([udp_pkt(areq, 51000, 88, cl, dc),
+                                 udp_pkt(T.as_rep(), 88, 51000, dc, cl)])
+            ck('v9_krb_asrep_roastable', 'LDAP-KRB-ASREP-ROASTABLE' in codes(r))
+            r = analyze_packets([udp_pkt(areq, 51000, 88, cl, dc),
+                                 udp_pkt(T.krb_error(), 88, 51000, dc, cl)])
+            ck('v9_krb_normal_preauth_silent',
+               'LDAP-KRB-ASREP-ROASTABLE' not in codes(r))
+            # With local subnets declared that exclude the client, a Kerberos request
+            # mis-scored as CLDAP would read as an off-subnet CLDAP query (reflection).
+            import ipaddress as _ipa
+            r = analyze_packets([udp_pkt(areq, 51000, 88, cl, dc),
+                                 udp_pkt(T.krb_error(), 88, 51000, dc, cl)],
+                                local_nets=[_ipa.ip_network('192.168.0.0/16')])
+            ck('v9_krb_not_scored_as_cldap', not (codes(r) & {
+                'cldap-amplification', 'cldap-reflection'}))
+            # CVE-2025-60704: S4U-X509 under an UNKEYED checksum; a keyed one is silent.
+            s4u = T.tgs_req(('http', 'web1.corp.local'), opts=T.KDCOPT_WINDOWS,
+                            padata=[(L.PA_S4U_X509_USER,
+                                     T.pa_s4u_x509_user(cksumtype=L.CKSUM_RSA_MD4))])
+            ck('v9_krb_s4u_x509_unkeyed_cve_2025_60704', 'LDAP-KRB-S4U-X509-UNKEYED-CKSUM'
+               in codes(analyze_packets([udp_pkt(s4u, 51000, 88, cl, dc)])))
+            s4uk = T.tgs_req(('http', 'web1.corp.local'), opts=T.KDCOPT_WINDOWS,
+                             padata=[(L.PA_S4U_X509_USER,
+                                      T.pa_s4u_x509_user(
+                                          cksumtype=L.CKSUM_HMAC_SHA1_96_AES256))])
+            ck('v9_krb_s4u_x509_keyed_silent', 'LDAP-KRB-S4U-X509-UNKEYED-CKSUM'
+               not in codes(analyze_packets([udp_pkt(s4uk, 51000, 88, cl, dc)])))
+            ck('v9_kerberos_captured', 'udp port 88' in _bpf()
+               and 'port 88' not in _bpf(kerberos=False))
+        except ImportError as e:
+            ck('v9_e2e_scapy_skip', True)
+        except Exception as e:
+            ck('v9_e2e', 'error: %s: %s' % (type(e).__name__, e), None)
 
     # 14. PASSIVE proof: this source contains no packet-transmit primitives.
     ck('no_transmit_primitives', _scan_for_transmit_primitives(), [])

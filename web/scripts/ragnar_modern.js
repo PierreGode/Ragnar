@@ -7932,7 +7932,7 @@ const _NETINT_STYLE = {
 // else non-clean — a suspicious finding (amber). Mirrors the server's _ni_rank so the
 // chips colour every scanner's verdicts without enumerating them all.
 const _NETINT_CLEAN = new Set(['clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a', 'no-traffic', 'disabled', 'not-applicable', 'randomization', 'fhrp', 'observed', 'learning']);
-const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'responder-challenge', 'krb-recon', 'eternalblue-probe', 'krb-rc4md4', 'smbghost-exploit', 'smb-reflection', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn', 'autokey-exploit', 'crash-exploit', 'auth-bypass', 'lag-hijack', 'zerologon', 'dcsync', 'credential-exposure', 'failover-manipulation', 'segment-injection', 'modcopy-exploited', 'payload-queued', 'plc-abuse', 'exploit', 'attack']);
+const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'responder-challenge', 'krb-recon', 'eternalblue-probe', 'krb-rc4md4', 'smbghost-exploit', 'smb-reflection', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn', 'autokey-exploit', 'crash-exploit', 'auth-bypass', 'lag-hijack', 'zerologon', 'dcsync', 'credential-exposure', 'failover-manipulation', 'segment-injection', 'modcopy-exploited', 'payload-queued', 'plc-abuse', 'exploit', 'attack', 'adcs-abuse', 'credential-dump']);
 function _netintRank(verdict) {
     const v = verdict || 'unknown';
     if (_NETINT_CLEAN.has(v)) return 0;
@@ -10257,8 +10257,9 @@ const _RPC_VERDICT_STYLE = {
     clean:                 ['bg-green-950/40 border-green-900 text-green-400', '✓ No Zerologon, NetLogon-posture, DCERPC-auth, DCSync/EPM or WinRM exposure'],
     posture:               ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Weak authentication posture (NTLM/WinRM/EPM) observed on the wire'],
     exposure:              ['bg-red-950/60 border-red-800 text-red-300', '🛑 High-severity RPC/NetLogon/NTLM exposure observed'],
-    'credential-exposure': ['bg-red-950/60 border-red-800 text-red-300', '🛑 CREDENTIAL EXPOSURE — DPAPI backup-key / NetLogon password / WinRM Basic'],
-    dcsync:                ['bg-red-950/60 border-red-800 text-red-300', '🛑 DCSYNC — DRSUAPI directory-replication pull (credential theft)'],
+    'credential-exposure': ['bg-red-950/60 border-red-800 text-red-300', '🛑 CREDENTIAL EXPOSURE — DPAPI backup key / LSA secret / registry hive save / NetLogon password / WinRM Basic'],
+    dcsync:                ['bg-red-950/60 border-red-800 text-red-300', '🛑 DCSYNC / DCSHADOW — directory replication by a host that is not a domain controller'],
+    'adcs-abuse':          ['bg-red-950/60 border-red-800 text-red-300', '🛑 AD CS ABUSE — certificate request asking for another identity or a privileged EKU (ESC1 / ESC3 / ESC6 / ESC15 / ESC17)'],
     zerologon:             ['bg-red-950/60 border-red-800 text-red-300', '🛑 ZEROLOGON (CVE-2020-1472) — NetLogon zero-cred / unsigned bind / brute-force'],
     unknown:               ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
@@ -11487,6 +11488,8 @@ const _SMB_VERDICT_STYLE = {
     'krb-rc4md4':     ['bg-red-950/60 border-red-800 text-red-300', '🛑 KERBEROS RC4-MD4 — etype -128 offered/granted/advertised (CVE-2022-33679 downgrade)'],
     'smbghost-exploit': ['bg-red-950/60 border-red-800 text-red-300', '🛑 SMBGhost EXPLOIT — compression-transform 32-bit overflow (CVE-2020-0796) — patch now'],
     'smb-reflection': ['bg-red-950/60 border-red-800 text-red-300', '🛑 REFLECTIVE RELAY — client == server / marshalled target (CVE-2025-33073)'],
+    'credential-dump': ['bg-red-950/60 border-red-800 text-red-300', '🛑 CREDENTIAL DUMP OVER SMB — a saved registry hive or credential store read back from ADMIN$ / C$ (secretsdump)'],
+    'shadow-copy-enum': ['bg-red-950/60 border-red-800 text-red-300', '🛑 SHADOW COPIES ENUMERATED OVER SMB — the first step of copying ntds.dit (backup software also does this)'],
     unknown:          ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
 const _KRB_FINDING_STYLE = {
