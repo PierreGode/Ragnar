@@ -2,6 +2,45 @@
 
 ## Releases
 
+### 2026-11-28
+
+#### feat(net): AD CS and credential-dump wave — RPC / NetLogon Watch v9, LDAP Watch v9, HTTP Watch v8, SMB Watch v6, TLS Watch v12
+*branch `feature/rpc9-ldap9-http8-smb6-tls12`*
+
+Five modules updated together. Each watches the half of an attack it can see on the wire, and none claims the whole chain.
+
+- **RPC / NetLogon Watch v9** (engine re-vendored, 52 → 64 codes):
+  - AD CS abuse read from unsealed certificate requests: ESC1, ESC3, ESC6, ESC15 (CVE-2024-49019) and ESC17, plus remote CA administration.
+  - DCSync and DCShadow by a host that is not a domain controller. These fire only when DCs are declared.
+  - LSA secret reads and writes (how the DPAPI domain backup key is really taken) and the registry hive save secretsdump uses.
+  - New **`adcs-abuse`** verdict (critical, paged). `dcsync` now also covers DCShadow, and `credential-exposure` covers LSA secrets and the hive save.
+- **SMB Watch v6** — secretsdump's SMB half, from the module author's engine (vendored as `python/smbwatch.py`) run over the same capture:
+  - a saved hive (`Temp\<8 letters>.tmp`) read back from `ADMIN$` / `C$` and deleted;
+  - `Temp\__output`, shadow-copy enumeration, and direct `SAM` / `SECURITY` / `SYSTEM` / `ntds.dit` reads;
+  - SMB3 encryption reported as the reason those checks are blind.
+  - New verdicts **`credential-dump`** (critical, paged) and **`shadow-copy-enum`**.
+- **LDAP Watch v9** — the author's engine (vendored as `python/ldapwatch.py`) runs beside the existing detector; only its new families are kept, so nothing is reported twice:
+  - AD CS object writes: ESC4, ESC5, ESC10, ESC13 and ESC14.
+  - A Kerberos tier on tcp+udp/88: AS-REP roastable accounts decided on the KDC's reply, roasting-tool options, S4U2Self / S4U2Proxy, and the unkeyed S4U checksum CVE-2025-60704.
+  - Kerberos traffic is kept out of the CLDAP checks, and the streaming daemon stays LDAP-only.
+- **TLS Watch v12** — the client certificate in TLS 1.2 mutual authentication is now parsed and kept apart from the server chain.
+  - `clientcert_no_sid_extension`: a certificate naming a user with no SID binding (the ESC9 / ESC16 condition) is high. With no user named, it is a warning, and only on directory ports.
+  - Every session also reports `cert_requested` and the client principal.
+- **HTTP Watch v8** (49 → 52 codes) — the ESC8 landing: NTLM to the AD CS web enrollment pages, a privileged template in the submission, and enrollment over cleartext.
+- **CVE index 506 named / 417 detected → 509 / 419.** CVE-2024-49019 and CVE-2025-60704 are newly detected. CVE-2025-26647 is context only: the LDAP engine names it to record that it does not make `X509SKI` a weak mapping.
+- **Docs:** [nettools.md](nettools.md) (all five sections), [CREDITS.md](CREDITS.md), [CVE.md](CVE.md), [knowledgebase.md](knowledgebase.md) (+1 entry), [README (root)](../README.md) (CVE figures), card text for all five modules.
+- **Validation:**
+  - Detector self-tests: RPC 50 → 60, LDAP 40 → 52, SMB 42 → 51, TLS 158 → 168, HTTP 71 → 77, all passing.
+  - The vendored LDAP (353) and SMB (261) suites run inside the Detector Self-Test.
+  - Mutation checks on the new Ragnar integration code caught 5/5 for LDAP and 6/6 for TLS.
+  - Module tiers on this box:
+    - RPC: 912 unit / 997 conformance / 194 pcap / 595 README.
+    - LDAP: 357 / 602 / 13 pcap / 136 README.
+    - SMB: 261.
+    - TLS: 786 conformance / 637 self-test.
+    - HTTP: 2494 / 554 conformance / 776 cross-check / 543 parity.
+  - Skipped because a test oracle is not installed here: impacket (RPC and LDAP cross-checks), GnuTLS CLI / aioquic / scapy QUIC (4 TLS cross-check checks), and the Java jars / rack / Mono (HTTP).
+
 ### 2026-11-26
 
 #### [#1114](https://github.com/PierreGode/Ragnar/pull/1114) — feat(hw): HackerGadgets Pwnagotchi HAT support + zram swap actually switched on (Kali/Ulfberht Pi Zero 2 W no longer reset by the watchdog)

@@ -2230,9 +2230,18 @@ def test_struts_attack_dedup():
                               "HTTP-088", "HTTP-089", "HTTP-090", "HTTP-091",
                               "HTTP-092", "HTTP-093", "HTTP-094",
                               "HTTP-095", "HTTP-096", "HTTP-097",
-                              "HTTP-098", "HTTP-099"})
+                              "HTTP-098", "HTTP-099",
+                              "HTTP-100", "HTTP-101"})
     check("attack dedup: and no posture code is",
-          not (hw.ATTACK_CODES & {"HTTP-045", "HTTP-048", "HTTP-060"}))
+          not (hw.ATTACK_CODES & {"HTTP-045", "HTTP-048", "HTTP-060",
+                                  "HTTP-102"}))
+    # HTTP-102 is server-scoped posture: it belongs to the per-server
+    # dedup, not the per-client attack dedup, or one CA would emit a
+    # finding for every host that enrolls against it.
+    check("posture dedup: the server-scoped codes and no others",
+          hw.POSTURE_DEDUP_CODES == {"HTTP-048", "HTTP-102"})
+    check("posture dedup: disjoint from the attack codes",
+          not (hw.POSTURE_DEDUP_CODES & hw.ATTACK_CODES))
 
     # The rate limit is for the attack-class codes and nothing else. A
     # request that also trips an ordinary rule must keep reporting it every
@@ -2253,7 +2262,7 @@ def test_struts_attack_dedup():
           w3.stats["attacks_suppressed"] == 2)
 
 def test_registry():
-    check("registry: 49 codes", len(hw.FINDING_REGISTRY) == 49)
+    check("registry: 52 codes", len(hw.FINDING_REGISTRY) == 52)
     for code, d in hw.FINDING_REGISTRY.items():
         check(f"registry: {code} code matches key", d.code == code)
         check(f"registry: {code} has a summary", len(d.summary) > 20)
@@ -5764,6 +5773,656 @@ def test_099_h2c_parity():
     check("099 h2c: a legitimate quoted IPv6 node is silent",
           "HTTP-099" not in codes(h2(b"/dms;x=1/services/ServerUI",
                                      [b'for="[2001:db8::1]:4711"'])))
+
+
+# ---------------------------------------------------------------------------
+# HTTP-100 / HTTP-101 / HTTP-102: AD CS Web Enrollment over NTLM (ESC8)
+# ---------------------------------------------------------------------------
+
+def _ntlm_type3(user="DC01$", domain="CORP", host="WS1",
+                nt=b"\xAA" * 24, lm=b"", unicode_flag=True,
+                with_mic=False, trunc=None):
+    """Build an MS-NLMP 2.2.1.3 AUTHENTICATE_MESSAGE.
+
+    Built here rather than pasted as a constant so the encoding, the
+    security-buffer offsets and the flag can each be varied independently -
+    a fixture that can only produce one shape cannot test a parser whose
+    whole risk is in the other shapes.
+    """
+    import struct
+    enc = ((lambda x: x.encode("utf-16-le")) if unicode_flag
+           else (lambda x: x.encode("latin-1")))
+    du, uu, wu = enc(domain), enc(user), enc(host)
+    base = 72 + (16 if with_mic else 0)
+    off = base
+    parts = []
+
+    def sb(data):
+        nonlocal off
+        s = struct.pack("<HHI", len(data), len(data), off)
+        off += len(data)
+        parts.append(data)
+        return s
+
+    lm_sb, nt_sb = sb(lm), sb(nt)
+    d_sb, u_sb, w_sb, k_sb = sb(du), sb(uu), sb(wu), sb(b"")
+    flags = 0x00000001 if unicode_flag else 0x00000002
+    blob = (b"NTLMSSP\x00" + struct.pack("<I", 3) + lm_sb + nt_sb + d_sb
+            + u_sb + w_sb + k_sb + struct.pack("<I", flags) + b"\x00" * 8
+            + (b"\x11" * 16 if with_mic else b"") + b"".join(parts))
+    return blob[:trunc] if trunc is not None else blob
+
+
+def _ntlm_type1(domain="CORP", host="WS1", flags=0x00000002):
+    import struct
+    du, wu = domain.encode("latin-1"), host.encode("latin-1")
+    off = 32
+    parts = []
+
+    def sb(data):
+        nonlocal off
+        s = struct.pack("<HHI", len(data), len(data), off)
+        off += len(data)
+        parts.append(data)
+        return s
+
+    d_sb, w_sb = sb(du), sb(wu)
+    return (b"NTLMSSP\x00" + struct.pack("<I", 1)
+            + struct.pack("<I", flags) + d_sb + w_sb + b"".join(parts))
+
+
+def _ntlm_type2(target="CORP"):
+    import struct
+    tu = target.encode("utf-16-le")
+    # The fixed part is 56 bytes with the Version field present: signature 8,
+    # type 4, TargetNameFields 8, flags 4, ServerChallenge 8, Reserved 8,
+    # TargetInfoFields 8, Version 8. The payload therefore starts at 56, not
+    # 48 - declaring 48 points the buffer into Version, which the parser will
+    # faithfully decode as NULs rather than guessing what was meant.
+    t_sb = struct.pack("<HHI", len(tu), len(tu), 56)
+    return (b"NTLMSSP\x00" + struct.pack("<I", 2) + t_sb
+            + struct.pack("<I", 0x00000001) + b"\x01" * 8 + b"\x00" * 8
+            + struct.pack("<HHI", 0, 0, 56 + len(tu)) + b"\x00" * 8 + tu)
+
+
+def _auth(blob, scheme=b"NTLM"):
+    import base64
+    return scheme + b" " + base64.b64encode(blob)
+
+
+def _adcs_body(template="DomainController", csr=True, mode="newreq",
+               extra_attrs=(), sep="\n", attr_name="CertificateTemplate"):
+    import urllib.parse
+    attrs = ([f"{attr_name}:{template}"] if template is not None else [])
+    attrs.extend(extra_attrs)
+    fields = {"Mode": mode, "CertAttrib": sep.join(attrs),
+              "TargetStoreFlags": "0", "SaveCert": "yes", "ThumbPrint": ""}
+    if csr:
+        fields["CertRequest"] = (
+            "-----BEGIN CERTIFICATE REQUEST-----\nMIIBde\n"
+            "-----END CERTIFICATE REQUEST-----\n")
+    return urllib.parse.urlencode(fields).encode()
+
+
+URLENC = b"application/x-www-form-urlencoded"
+
+
+def _esc8(path=b"/certsrv/certfnsh.asp", method=b"POST", auth=None,
+          body=None, ctype=URLENC, cfg=None, visible=True, stats=None,
+          transport="http/1.1"):
+    return hw.check_adcs_esc8_fields(
+        path, method,
+        [_auth(_ntlm_type3())] if auth is None else auth,
+        body=_adcs_body() if body is None else body,
+        body_ctype=ctype, body_visible=visible, host=b"ca01.corp.local",
+        cfg=cfg or hw.WATCH_DEFAULTS, stats=stats, transport=transport)
+
+
+def test_ntlmssp_parser():
+    # --- the three message types round-trip ---
+    t1 = hw.parse_ntlmssp(_ntlm_type1())
+    check("ntlmssp: Type 1 recognised", t1 and t1["message_type"] == 1)
+    check("ntlmssp: Type 1 OEM domain decoded", t1["domain"] == "CORP")
+    t2 = hw.parse_ntlmssp(_ntlm_type2())
+    check("ntlmssp: Type 2 recognised", t2 and t2["message_type"] == 2)
+    check("ntlmssp: Type 2 unicode target decoded", t2["target_name"] == "CORP")
+    t3 = hw.parse_ntlmssp(_ntlm_type3())
+    check("ntlmssp: Type 3 recognised", t3 and t3["message_type"] == 3)
+    check("ntlmssp: Type 3 unicode user decoded", t3["username"] == "DC01$")
+    check("ntlmssp: Type 3 domain decoded", t3["domain"] == "CORP")
+    check("ntlmssp: Type 3 workstation decoded", t3["workstation"] == "WS1")
+    check("ntlmssp: Type 3 NT response length recorded",
+          t3["nt_response_length"] == 24)
+    check("ntlmssp: Type 3 is not anonymous", t3["anonymous"] is False)
+
+    # --- the UNICODE flag, not a guess, decides the encoding ---
+    oem = hw.parse_ntlmssp(_ntlm_type3(unicode_flag=False))
+    check("ntlmssp: the OEM flag selects a single-byte decode",
+          oem["username"] == "DC01$" and oem["domain"] == "CORP")
+    # A UTF-16LE name read as OEM would carry interleaved NULs. That is the
+    # exact bug a flag-ignoring parser produces, so it is asserted against.
+    check("ntlmssp: unicode names carry no NUL padding",
+          "\x00" not in (t3["username"] or ""))
+
+    # --- the MIC shifts every payload offset by 16 bytes ---
+    mic = hw.parse_ntlmssp(_ntlm_type3(with_mic=True))
+    check("ntlmssp: a MIC-bearing Type 3 still decodes its names",
+          mic["username"] == "DC01$" and mic["domain"] == "CORP")
+
+    # --- anonymous: no NT and no LM response ---
+    anon = hw.parse_ntlmssp(_ntlm_type3(nt=b"", lm=b""))
+    check("ntlmssp: a null session is marked anonymous",
+          anon["anonymous"] is True)
+    check("ntlmssp: an LM-only response is not anonymous",
+          hw.parse_ntlmssp(_ntlm_type3(nt=b"", lm=b"\x01" * 24))["anonymous"]
+          is False)
+
+    # --- 2.2.1.1: a NEGOTIATE's names are ALWAYS OEM ---
+    # A real Windows client sets NTLMSSP_NEGOTIATE_UNICODE in its Type 1 to
+    # advertise what it can do, and still sends OEM bytes in these two
+    # fields. A parser that consults the flag here turns "CORP" into
+    # mojibake; that was a real defect, found by the impacket xcheck oracle
+    # after this fixture's cleared flag and the conformance vector's
+    # zero-length DomainName both failed to expose it. Pinned locally so
+    # the regression is caught with or without impacket installed.
+    uni_t1 = hw.parse_ntlmssp(_ntlm_type1(flags=0x00088207))
+    check("ntlmssp: a Type 1 with UNICODE set still decodes OEM names",
+          uni_t1["domain"] == "CORP" and uni_t1["workstation"] == "WS1")
+    check("ntlmssp: and the flag itself is still reported",
+          uni_t1["negotiate_flags"] == 0x00088207)
+    check("ntlmssp: a Type 1 with the flag clear decodes the same way",
+          hw.parse_ntlmssp(_ntlm_type1())["domain"] == "CORP")
+
+    # --- rejection ---
+    check("ntlmssp: a foreign blob is rejected",
+          hw.parse_ntlmssp(b"NOTNTLM\x00" + b"\x01\x00\x00\x00") is None)
+    check("ntlmssp: an unknown message type is rejected",
+          hw.parse_ntlmssp(b"NTLMSSP\x00" + (9).to_bytes(4, "little")) is None)
+    check("ntlmssp: a blob shorter than the header is rejected",
+          hw.parse_ntlmssp(b"NTLMSSP\x00") is None)
+    check("ntlmssp: an empty blob is rejected",
+          hw.parse_ntlmssp(b"") is None)
+
+    # --- truncation yields the type and no invented fields ---
+    short = hw.parse_ntlmssp(_ntlm_type3(trunc=40))
+    check("ntlmssp: a truncated Type 3 still reports its type",
+          short and short["message_type"] == 3)
+    check("ntlmssp: a truncated Type 3 invents no username",
+          short.get("username") is None)
+
+    # --- a declared length past the end of the blob is dropped, not read ---
+    import struct
+    liar = bytearray(_ntlm_type3())
+    struct.pack_into("<HHI", liar, 36, 4096, 4096, 64)   # UserName fields
+    lied = hw.parse_ntlmssp(bytes(liar))
+    check("ntlmssp: an out-of-range security buffer yields no string",
+          lied is not None and lied.get("username") is None)
+    check("ntlmssp: and the message is still reported",
+          lied["message_type"] == 3)
+    far = bytearray(_ntlm_type3())
+    struct.pack_into("<HHI", far, 36, 8, 8, 0xFFFFFF00)
+    check("ntlmssp: an offset past the blob yields no string",
+          hw.parse_ntlmssp(bytes(far)).get("username") is None)
+
+    # --- the challenge-response bytes never leave the parser ---
+    secret = b"\xDE\xAD\xBE\xEF" * 6
+    got = hw.parse_ntlmssp(_ntlm_type3(nt=secret))
+    check("ntlmssp: the NT response is digested, not carried",
+          got.get("nt_response_digest", "").startswith("sha256:"))
+    check("ntlmssp: no field holds the raw NT response",
+          not any(isinstance(v, (bytes, bytearray)) and secret in v
+                  for v in got.values()))
+
+
+def test_adcs_header_extraction():
+    # Both schemes that can carry a blob, and nothing else.
+    check("adcs: an NTLM scheme is read",
+          len(hw.adcs_ntlm_from_headers([_auth(_ntlm_type3())])) == 1)
+    check("adcs: a Negotiate scheme is read",
+          len(hw.adcs_ntlm_from_headers(
+              [_auth(_ntlm_type3(), b"Negotiate")])) == 1)
+    check("adcs: the scheme is matched case-insensitively",
+          len(hw.adcs_ntlm_from_headers(
+              [_auth(_ntlm_type3(), b"ntlm")])) == 1)
+    check("adcs: Basic is not an NTLM carrier",
+          hw.adcs_ntlm_from_headers([b"Basic QWxhZGRpbjpvcGVu"]) == [])
+    check("adcs: Bearer is not an NTLM carrier",
+          hw.adcs_ntlm_from_headers([b"Bearer abc.def.ghi"]) == [])
+    check("adcs: a scheme with no token is skipped",
+          hw.adcs_ntlm_from_headers([b"NTLM"]) == [])
+    check("adcs: a scheme with empty token is skipped",
+          hw.adcs_ntlm_from_headers([b"NTLM   "]) == [])
+    check("adcs: non-base64 is skipped rather than raising",
+          hw.adcs_ntlm_from_headers([b"NTLM !!!!not base64!!!!"]) == [])
+    check("adcs: valid base64 that is not NTLMSSP is skipped",
+          hw.adcs_ntlm_from_headers([b"NTLM QWxhZGRpbjpvcGVuIHNlc2FtZQ=="])
+          == [])
+
+    # The scheme gate is load-bearing and is NOT redundant with the
+    # signature search. A header carrying a real NTLMSSP blob under a
+    # scheme IIS does not treat as NTLM must not be read as an
+    # authentication: Basic credentials are attacker-chosen bytes, so
+    # anyone can put an NTLMSSP message in them, and a sensor that
+    # believed it would report an ESC8 landing that the CA never saw.
+    # Found by the bite tier - dropping the scheme gate escaped every
+    # test here until this case existed, because the ordinary Basic
+    # fixtures decode to text with no signature in them.
+    import base64 as _b64
+    smuggled = _b64.b64encode(_ntlm_type3())
+    for scheme in (b"Basic", b"Bearer", b"Digest", b"Kerberos"):
+        check(f"adcs: an NTLMSSP blob under {scheme.decode()} is not NTLM",
+              hw.adcs_ntlm_from_headers([scheme + b" " + smuggled]) == [])
+    check("adcs: and the same blob under NTLM still is",
+          len(hw.adcs_ntlm_from_headers([b"NTLM " + smuggled])) == 1)
+    # Through the rule, which is where it would have mattered.
+    check("100: a smuggled blob under Basic raises no ESC8 finding",
+          "HTTP-100" not in codes(_esc8(auth=[b"Basic " + smuggled])))
+
+    # SPNEGO: the same message inside a GSS-API wrapper. The signature is
+    # found by scanning, so an unparsed DER prefix must not hide it.
+    import base64
+    wrapped = b"\x60\x48\x06\x06\x2b\x06\x01\x05\x05\x02" + _ntlm_type3()
+    got = hw.adcs_ntlm_from_headers(
+        [b"Negotiate " + base64.b64encode(wrapped)])
+    check("adcs: an SPNEGO-wrapped Type 3 is found", len(got) == 1)
+    check("adcs: and the wrapping is recorded",
+          got[0][1]["spnego_wrapped"] is True)
+    check("adcs: a bare blob is not marked wrapped",
+          hw.adcs_ntlm_from_headers(
+              [_auth(_ntlm_type3())])[0][1]["spnego_wrapped"] is False)
+
+
+def test_adcs_path_routing():
+    r = hw.adcs_request_path
+    check("adcs path: lowercased", r(b"/CertSrv/CertFnsh.asp")
+          == b"/certsrv/certfnsh.asp")
+    check("adcs path: percent-decoded like IIS",
+          r(b"/certsrv/cert%66nsh.asp") == b"/certsrv/certfnsh.asp")
+    check("adcs path: the query string is cut",
+          r(b"/certsrv/certfnsh.asp?x=/certsrv/other")
+          == b"/certsrv/certfnsh.asp")
+    check("adcs path: a fragment is cut",
+          r(b"/certsrv/certfnsh.asp#frag") == b"/certsrv/certfnsh.asp")
+    check("adcs path: absolute-form targets lose the authority",
+          r(b"http://ca01/certsrv/certfnsh.asp")
+          == b"/certsrv/certfnsh.asp")
+    check("adcs path: an empty target is empty", r(None) == b"" and r(b"") == b"")
+
+    # A query parameter naming the endpoint must not decide the rule.
+    check("adcs: a query string naming certfnsh does not arm the rule",
+          codes(_esc8(path=b"/other.aspx?next=/certsrv/certfnsh.asp")) == [])
+    # And the prefix must end at a path boundary.
+    check("adcs: /certsrvfoo is a different application",
+          codes(_esc8(path=b"/certsrvfoo/certfnsh.asp")) == [])
+    check("adcs: /certsrv itself is in scope",
+          "HTTP-102" in codes(_esc8(path=b"/certsrv")))
+    check("adcs: /certsrv/ is in scope",
+          "HTTP-102" in codes(_esc8(path=b"/certsrv/")))
+    check("adcs: an unrelated path is wholly silent",
+          codes(_esc8(path=b"/owa/auth.owa")) == [])
+
+
+def test_adcs_esc8_grading():
+    # --- critical: the full landing ---
+    f = _esc8()
+    check("100: the full landing is critical",
+          [x for x in f if x.code == "HTTP-100"][0].severity == hw.CRITICAL)
+    hit = [x for x in f if x.code == "HTTP-100"][0]
+    check("100: the grade names the submission", hit.evidence["grade"]
+          == "type3_submission")
+    check("100: the account is readable", hit.evidence["account"] == "DC01$")
+    check("100: the domain is readable",
+          hit.evidence["account_domain"] == "CORP")
+    check("100: the submission is marked observed",
+          hit.evidence["submission_observed"] is True)
+    check("100: the CSR armor is recorded",
+          hit.evidence["csr_armor"] == "pem_certificate_request")
+    check("100: the mode is recorded",
+          hit.evidence["submission_mode"] == "newreq")
+
+    # --- high: submission endpoint, no body seen ---
+    nb = [x for x in _esc8(body=b"", ctype=b"") if x.code == "HTTP-100"][0]
+    check("100: no observed body downgrades to high",
+          nb.severity == hw.HIGH)
+    check("100: and the grade says why",
+          nb.evidence["grade"] == "type3_submission_endpoint_no_body")
+
+    # A truncated body must not be read as "no submission" silently.
+    tr = [x for x in _esc8(visible=False) if x.code == "HTTP-100"][0]
+    check("100: a truncated body does not reach critical",
+          tr.severity == hw.HIGH)
+
+    # --- high: a Type 3 to another certsrv path ---
+    other = [x for x in _esc8(path=b"/certsrv/certrqxt.asp", method=b"GET",
+                              body=b"", ctype=b"")
+             if x.code == "HTTP-100"][0]
+    check("100: another certsrv path is high",
+          other.severity == hw.HIGH)
+    check("100: and is graded as such",
+          other.evidence["grade"] == "type3_other_certsrv_path")
+    check("100: the template page is flagged",
+          other.evidence["template_page"] is True)
+
+    # --- high: Type 1 negotiation only ---
+    t1 = [x for x in _esc8(auth=[_auth(_ntlm_type1())], body=b"", ctype=b"")
+          if x.code == "HTTP-100"][0]
+    check("100: a Type 1 is high, not critical", t1.severity == hw.HIGH)
+    check("100: and is graded as negotiation",
+          t1.evidence["grade"] == "type1_negotiation")
+
+    # --- a POST to the submit path by GET cannot be the landing ---
+    getsub = [x for x in _esc8(method=b"GET") if x.code == "HTTP-100"][0]
+    check("100: the submission endpoint reached by GET is not critical",
+          getsub.severity == hw.HIGH)
+
+    # --- the method is compared case-insensitively ---
+    check("100: a lowercase post still reaches critical",
+          [x for x in _esc8(method=b"post")
+           if x.code == "HTTP-100"][0].severity == hw.CRITICAL)
+
+
+def test_adcs_esc8_silence():
+    # No NTLM at all: posture only, never an attack finding.
+    only = codes(_esc8(auth=[]))
+    check("adcs: with no NTLM only the posture code fires",
+          only == ["HTTP-102"])
+    check("adcs: Basic auth to certsrv raises no ESC8 finding",
+          codes(_esc8(auth=[b"Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="]))
+          == ["HTTP-102"])
+
+    # A null session is not a relayed account.
+    anon = codes(_esc8(auth=[_auth(_ntlm_type3(nt=b"", lm=b""))]))
+    check("100: an anonymous Type 3 raises no finding",
+          "HTTP-100" not in anon)
+    st = {}
+    _esc8(auth=[_auth(_ntlm_type3(nt=b"", lm=b""))], stats=st)
+    check("100: and it is counted instead",
+          st.get("adcs_anonymous_type3") == 1)
+
+    # A Type 2 cannot appear in a request direction.
+    check("100: a Type 2 in a request raises no finding",
+          "HTTP-100" not in codes(_esc8(auth=[_auth(_ntlm_type2())])))
+
+    # The allowlist: a declared-legitimate account stands the rule down.
+    cfg = hw.WatchConfig(adcs_enroll_allow=frozenset({"corp\\svc_enroll"}))
+    allowed = _esc8(auth=[_auth(_ntlm_type3(user="svc_enroll"))], cfg=cfg)
+    check("100: an allowlisted DOMAIN\\user is silent",
+          "HTTP-100" not in codes(allowed))
+    check("100: and so is its template claim",
+          "HTTP-101" not in codes(allowed))
+    check("100: the posture finding survives the allowlist",
+          "HTTP-102" in codes(allowed))
+    bare = hw.WatchConfig(adcs_enroll_allow=frozenset({"svc_enroll"}))
+    check("100: a bare allowlisted user is silent",
+          "HTTP-100" not in codes(
+              _esc8(auth=[_auth(_ntlm_type3(user="svc_enroll"))], cfg=bare)))
+    check("100: the allowlist is case-insensitive",
+          "HTTP-100" not in codes(
+              _esc8(auth=[_auth(_ntlm_type3(user="SVC_Enroll"))], cfg=bare)))
+    check("100: a non-allowlisted account still fires",
+          "HTTP-100" in codes(
+              _esc8(auth=[_auth(_ntlm_type3(user="other"))], cfg=bare)))
+    check("100: an empty allowlist silences nothing",
+          "HTTP-100" in codes(_esc8()))
+    st2 = {}
+    _esc8(auth=[_auth(_ntlm_type3(user="svc_enroll"))], cfg=bare, stats=st2)
+    check("100: an allowlist hit is counted",
+          st2.get("adcs_allowlisted_account") == 1)
+
+
+def test_adcs_template_claim():
+    def tpl(**kw):
+        f = _esc8(body=_adcs_body(**kw))
+        return [x for x in f if x.code == "HTTP-101"]
+
+    check("101: a DC template is claimed", len(tpl()) == 1)
+    check("101: the template name is reported",
+          tpl()[0].evidence["template"] == "DomainController")
+    check("101: it is critical", tpl()[0].severity == hw.CRITICAL)
+    for name in ("DomainControllerAuthentication", "KerberosAuthentication",
+                 "Machine", "SubCA"):
+        check(f"101: {name} is privileged", len(tpl(template=name)) == 1)
+    check("101: the template value is matched case-insensitively",
+          len(tpl(template="domaincontroller")) == 1)
+    check("101: an ordinary template is silent",
+          tpl(template="User") == [])
+    st = {}
+    _esc8(body=_adcs_body(template="User"), stats=st)
+    check("101: and an ordinary template is counted",
+          st.get("adcs_template_claims") == 1)
+
+    # The separator is a COLON, measured against Certipy. An '=' is the
+    # preflight's assumed form and must NOT match, or the rule would be
+    # keyed on a shape the tool does not send.
+    import urllib.parse
+    eq_body = urllib.parse.urlencode({
+        "Mode": "newreq", "CertAttrib": "CertificateTemplate=DomainController",
+        "CertRequest": "-----BEGIN CERTIFICATE REQUEST-----\nX\n"}).encode()
+    check("101: an '=' separator is not the wire form",
+          [x for x in _esc8(body=eq_body) if x.code == "HTTP-101"] == [])
+
+    # Attributes are newline-separated and may be several.
+    multi = tpl(extra_attrs=["SAN:upn=admin@corp.local"])
+    check("101: a template beside another attribute is still found",
+          len(multi) == 1)
+    check("101: CRLF separators work too",
+          len(tpl(extra_attrs=["SAN:upn=a@b"], sep="\r\n")) == 1)
+    check("101: a template listed after another attribute is found",
+          len([x for x in _esc8(body=_adcs_body(
+              template=None, extra_attrs=["SAN:upn=a@b",
+                                          "CertificateTemplate:SubCA"]))
+               if x.code == "HTTP-101"]) == 1)
+
+    # The attribute NAME is matched case-insensitively: MS-WCCE does not
+    # settle the CA's comparison, and the finding is worded as a claim.
+    check("101: the attribute name is matched case-insensitively",
+          len(tpl(attr_name="CERTIFICATETEMPLATE")) == 1)
+    check("101: an unrelated attribute name is not a template",
+          tpl(attr_name="NotATemplate") == [])
+    check("101: an empty template value is not a claim",
+          tpl(template="") == [])
+    check("101: a nameless attribute line is skipped",
+          [x for x in _esc8(body=_adcs_body(
+              template=None, extra_attrs=["justtext"]))
+           if x.code == "HTTP-101"] == [])
+
+    # The configurable list extends rather than replaces.
+    cfg = hw.WatchConfig(
+        adcs_privileged_templates=hw.adcs_template_config(["OurDCTemplate"]))
+    check("101: an operator-named template is privileged",
+          len([x for x in _esc8(body=_adcs_body(template="OurDCTemplate"),
+                                cfg=cfg) if x.code == "HTTP-101"]) == 1)
+    check("101: and the built-ins still are",
+          len([x for x in _esc8(body=_adcs_body(template="SubCA"), cfg=cfg)
+               if x.code == "HTTP-101"]) == 1)
+    check("config: the template list extends the defaults",
+          set(hw.ADCS_PRIVILEGED_TEMPLATES)
+          <= set(hw.adcs_template_config(["x"])))
+    check("config: blank template names are dropped",
+          hw.adcs_template_config(["", "   "])
+          == hw.ADCS_PRIVILEGED_TEMPLATES)
+    check("config: a duplicate name is not added twice",
+          hw.adcs_template_config(["SubCA"])
+          == hw.ADCS_PRIVILEGED_TEMPLATES)
+
+    # A template claim needs a readable body: no body, no claim.
+    check("101: a non-urlencoded body yields no claim",
+          [x for x in _esc8(ctype=b"text/plain") if x.code == "HTTP-101"] == [])
+    check("101: a truncated body yields no claim",
+          [x for x in _esc8(visible=False) if x.code == "HTTP-101"] == [])
+
+
+def test_adcs_submission_fields():
+    sf = hw.adcs_submission_fields
+    got = sf(_adcs_body())
+    check("adcs fields: the mode is read", got["mode"] == "newreq")
+    check("adcs fields: the CSR is seen", got["csr_present"] is True)
+    check("adcs fields: PEM armor is identified",
+          got["csr_armor"] == "pem_certificate_request")
+    check("adcs fields: the NEW armor variant is identified",
+          sf(b"CertRequest=" + __import__("urllib.parse", fromlist=["x"])
+             .quote("-----BEGIN NEW CERTIFICATE REQUEST-----\nX\n").encode()
+             )["csr_armor"] == "pem_new_certificate_request")
+    check("adcs fields: an unarmored request still counts",
+          sf(b"CertRequest=MIIBdeadbeef")["csr_armor"] == "unarmored")
+    check("adcs fields: an empty CertRequest is not a submission",
+          sf(b"CertRequest=&Mode=newreq")["csr_present"] is False)
+    check("adcs fields: a missing CertRequest is not a submission",
+          sf(b"Mode=newreq")["csr_present"] is False)
+    check("adcs fields: field names are case-insensitive",
+          sf(b"certrequest=MIIB&mode=newreq")["mode"] == "newreq")
+    check("adcs fields: a duplicate field is last-wins",
+          sf(b"Mode=a&Mode=newreq")["mode"] == "newreq")
+
+    # A form-urlencoded body splits on '&' and nothing else. A ';' is one
+    # field's bytes, not a separator, so a body that smuggles CertAttrib
+    # behind a semicolon must yield NO attribute field - otherwise
+    # HTTP-101 reports a privileged template the CA never parsed, at
+    # critical severity.
+    semi = sf(b"Mode=newreq;CertAttrib=CertificateTemplate:DomainController")
+    check("adcs fields: ';' is not a field separator",
+          semi["attrib"] is None)
+    check("adcs fields: the whole run lands in the one field it belongs to",
+          semi["mode"].startswith("newreq;"))
+    check("101: a semicolon-smuggled template raises no claim",
+          [x for x in _esc8(
+              body=b"Mode=newreq;CertAttrib=CertificateTemplate"
+                   b":DomainController&CertRequest=MIIB")
+           if x.code == "HTTP-101"] == [])
+    check("adcs fields: the CSR body itself is never returned",
+          "CERTIFICATE" not in repr(got.get("csr_armor"))
+          and not any(isinstance(v, bytes) and b"MIIBde" in v
+                      for v in got.values()))
+
+    # The attribute splitter.
+    at = hw.adcs_attributes
+    check("adcs attrs: a colon pair splits",
+          at(b"CertificateTemplate:User")
+          == [(b"certificatetemplate", b"User")])
+    check("adcs attrs: the value keeps its case",
+          at(b"CertificateTemplate:DomainController")[0][1]
+          == b"DomainController")
+    check("adcs attrs: a value containing a colon keeps the remainder",
+          at(b"SAN:upn=a:b")[0][1] == b"upn=a:b")
+    check("adcs attrs: None is empty", at(None) == [])
+    check("adcs attrs: blank lines are skipped",
+          at(b"\n\nCertificateTemplate:User\n\n")
+          == [(b"certificatetemplate", b"User")])
+
+
+def test_adcs_evidence_hygiene():
+    """The challenge-response bytes must not reach a finding, ever."""
+    import json
+    secret = b"\xC0\xFF\xEE\x11" * 6
+    f = _esc8(auth=[_auth(_ntlm_type3(nt=secret))])
+    blob = json.dumps([hw.finding_record(x) for x in f], default=repr)
+    check("adcs hygiene: the NT response does not appear in a finding",
+          secret.hex() not in blob.lower()
+          and repr(secret)[2:-1] not in blob)
+    check("adcs hygiene: a digest is carried instead",
+          any(x.evidence.get("nt_response_digest", "").startswith("sha256:")
+              for x in f if x.code == "HTTP-100"))
+    check("adcs hygiene: the CSR bytes do not appear in a finding",
+          "MIIBde" not in blob)
+    check("adcs hygiene: every finding is JSON-serialisable",
+          isinstance(blob, str))
+    check("adcs hygiene: the posture finding names no account",
+          all("account" not in x.evidence
+              for x in f if x.code == "HTTP-102"))
+
+
+def test_adcs_posture_dedup():
+    """HTTP-102 is one per server:port, not one per request or per client."""
+    req = (b"GET /certsrv/ HTTP/1.1\r\nHost: ca01\r\n\r\n")
+    w = hw.HttpWatch()
+    first = w.feed("a", "10.0.0.1", "10.0.0.9", 80, req, True, now=1.0)
+    check("102: the posture finding fires on a bare certsrv GET",
+          "HTTP-102" in codes(first))
+    again = w.feed("b", "10.0.0.1", "10.0.0.9", 80, req, True, now=2.0)
+    check("102: a second request on the same server is suppressed",
+          "HTTP-102" not in codes(again))
+    # A different CLIENT against the same CA is the same server claim.
+    third = w.feed("c", "10.0.0.2", "10.0.0.9", 80, req, True, now=3.0)
+    check("102: another client against the same CA is still suppressed",
+          "HTTP-102" not in codes(third))
+    # A different server is a different claim.
+    other = w.feed("d", "10.0.0.1", "10.0.0.8", 80, req, True, now=4.0)
+    check("102: another CA reports separately", "HTTP-102" in codes(other))
+    # HTTP-048 must not share HTTP-102's bucket.
+    check("102: the two posture codes are keyed apart",
+          hw.POSTURE_DEDUP_CODES == {"HTTP-048", "HTTP-102"})
+
+
+def test_adcs_end_to_end():
+    """The whole ESC8 landing through the HTTP/1 pipeline."""
+    import base64
+    body = _adcs_body()
+    req = (b"POST /certsrv/certfnsh.asp HTTP/1.1\r\n"
+           b"Host: ca01.corp.local\r\n"
+           b"Authorization: NTLM " + base64.b64encode(_ntlm_type3()) + b"\r\n"
+           b"Content-Type: application/x-www-form-urlencoded\r\n"
+           b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+    w = hw.HttpWatch()
+    got = w.feed("a", "10.0.0.5", "10.0.0.9", 80, req, True, now=1.0)
+    c = codes(got)
+    check("esc8 e2e: all three codes fire together",
+          {"HTTP-100", "HTTP-101", "HTTP-102"} <= set(c))
+    check("esc8 e2e: the landing is critical",
+          [x for x in got if x.code == "HTTP-100"][0].severity
+          == hw.CRITICAL)
+    check("esc8 e2e: the account survives the pipeline",
+          [x for x in got if x.code == "HTTP-100"][0].evidence["account"]
+          == "DC01$")
+    check("esc8 e2e: the template survives the pipeline",
+          [x for x in got if x.code == "HTTP-101"][0].evidence["template"]
+          == "DomainController")
+    check("esc8 e2e: the host is recorded",
+          [x for x in got if x.code == "HTTP-100"][0].evidence["host"]
+          == "ca01.corp.local")
+    check("esc8 e2e: the transport is recorded",
+          [x for x in got if x.code == "HTTP-100"][0].evidence["transport"]
+          == "http/1.1")
+
+    # A clean Kerberos enrollment is the control: Negotiate carrying a
+    # Kerberos AP-REQ, not NTLMSSP. Posture only, no attack finding.
+    krb = (b"POST /certsrv/certfnsh.asp HTTP/1.1\r\n"
+           b"Host: ca01.corp.local\r\n"
+           b"Authorization: Negotiate YIIGxgYGKwYBBQUCoIIGujCCBra\r\n"
+           b"Content-Type: application/x-www-form-urlencoded\r\n"
+           b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+    w2 = hw.HttpWatch()
+    kc = codes(w2.feed("a", "10.0.0.5", "10.0.0.9", 80, krb, True, now=1.0))
+    check("esc8 e2e: a Kerberos enrollment raises no ESC8 attack finding",
+          "HTTP-100" not in kc and "HTTP-101" not in kc)
+
+
+def test_adcs_h2c():
+    """HTTP-100 and HTTP-102 ride :path and Authorization, so h2c is free."""
+    import base64
+
+    def h2(path, auth=None, method=b"POST"):
+        hdrs = [(b":method", method), (b":path", path),
+                (b":authority", b"ca01.corp.local")]
+        if auth:
+            hdrs.append((b"authorization", auth))
+        return hw.check_adcs_esc8_fields(
+            path, method, [auth] if auth else [], body=b"", body_ctype=b"",
+            body_visible=False, host=b"ca01.corp.local",
+            cfg=hw.WATCH_DEFAULTS, stats=None, transport="h2c")
+
+    got = h2(b"/certsrv/certfnsh.asp", _auth(_ntlm_type3()))
+    check("adcs h2c: the Type 3 is seen over h2c",
+          "HTTP-100" in codes(got))
+    check("adcs h2c: the transport is recorded",
+          [x for x in got if x.code == "HTTP-100"][0].evidence["transport"]
+          == "h2c")
+    check("adcs h2c: with no body it cannot reach critical",
+          [x for x in got if x.code == "HTTP-100"][0].severity == hw.HIGH)
+    check("adcs h2c: HTTP-101 needs a body and does not fire",
+          "HTTP-101" not in codes(got))
+    check("adcs h2c: posture still fires", "HTTP-102" in codes(got))
+    check("adcs h2c: an unrelated path is silent",
+          codes(h2(b"/favicon.ico", _auth(_ntlm_type3()))) == [])
 
 
 def test_record_shape():

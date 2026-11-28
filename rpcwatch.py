@@ -181,6 +181,14 @@ IF_WKSSVC = "6bffd098-a112-3610-9833-46c3f87e345a"
 # MS-ICPR and MS-WCCE for ESC11, MS-DNSP for the ServerLevelPluginDll path.
 IF_ICPR = "91ae6020-9e3c-11cf-8d7c-00aa00c091be"
 IF_WCCE_CERTREQD = "d99e6e70-fc88-11d0-b498-00a0c90312f3"
+# MS-CSRA, the CA REMOTE ADMINISTRATION interfaces.  Neither was catalogued
+# before: MS-CSRA has its own IF_ENFORCEENCRYPTICERTADMIN, which demands
+# PKT_PRIVACY exactly as IF_ENFORCEENCRYPTICERTREQUEST does for enrollment.
+# So an admin bind below privacy is the ESC11 condition on the CA MANAGEMENT
+# interface - strictly more powerful than enrollment, and unnumbered by the
+# ESC catalogue.
+IF_CSRA_ADMIND = "d99e6e71-fc88-11d0-b498-00a0c90312f3"
+IF_CSRA_ADMIND2 = "7fe0d935-dda6-443f-85d0-1cfb58fe41dd"
 IF_DNSSERVER = "50abc2a4-574d-40b3-9d66-ee4fd5fba076"
 # MS-TSTS TermSrvEnumeration, reached over \pipe\LSM_API_service.  Opnum 8
 # RpcGetSessionIds is an unimplemented stub on Win11/Server 2025 that crashes
@@ -195,6 +203,10 @@ IF_LSM_CONTAINER = "c938b419-5092-4385-8360-7cdc9625976a"
 
 INTERFACES = {
     IF_ICPR: ("icertpassage", "certenroll", "MS-ICPR ICertPassage"),
+    IF_CSRA_ADMIND: ("certadmin", "certenroll",
+                     "MS-CSRA ICertAdminD (CA remote administration)"),
+    IF_CSRA_ADMIND2: ("certadmin2", "certenroll",
+                      "MS-CSRA ICertAdminD2 (CA remote administration)"),
     IF_WCCE_CERTREQD: ("icertrequestd", "certenroll",
                        "MS-WCCE ICertRequestD"),
     IF_DNSSERVER: ("dnsserver", "dnsadmin", "MS-DNSP DNS Server Management"),
@@ -405,6 +417,278 @@ EXEC_CALLS = {
 }
 
 EPM_LOOKUP_OPNUMS = (2, 3)  # ept_lookup, ept_map
+
+# --- MS-RRP registry hive save / load -------------------------------------
+# How impacket's secretsdump.py takes credentials when it is NOT doing DCSync:
+# enable and start RemoteRegistry over svcctl, OpenLocalMachine, open the SAM /
+# SECURITY / SYSTEM hive with BaseRegCreateKey, then BaseRegSaveKey the hive out
+# to a file and read it back over SMB.  The service start and the HKLM open were
+# already reported as lateral-movement primitives, but the call that actually
+# writes the credential hives out was not watched - so the dump was detected
+# without being characterised.
+#   https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rrp/
+# Opnums confirmed against impacket's own MS-RRP table; transcribed again in
+# the conformance harness.  Each is in the cleartext REQUEST header, so these
+# rules hold at PKT_PRIVACY and the destination path grades rather than gates.
+WINREG_SAVE_KEY = 20            # BaseRegSaveKey      - what secretsdump calls
+WINREG_SAVE_KEY_EX = 31         # BaseRegSaveKeyEx
+WINREG_LOAD_KEY = 13            # BaseRegLoadKey      - the write direction
+WINREG_RESTORE_KEY = 19         # BaseRegRestoreKey   - the write direction
+WINREG_CREATE_KEY = 6           # BaseRegCreateKey    - names the hive
+WINREG_OPEN_KEY = 15            # BaseRegOpenKey      - names the hive
+
+WINREG_HIVE_OPNAMES = {
+    WINREG_SAVE_KEY: "BaseRegSaveKey",
+    WINREG_SAVE_KEY_EX: "BaseRegSaveKeyEx",
+    WINREG_LOAD_KEY: "BaseRegLoadKey",
+    WINREG_RESTORE_KEY: "BaseRegRestoreKey",
+}
+WINREG_SAVE_OPNUMS = (WINREG_SAVE_KEY, WINREG_SAVE_KEY_EX)
+WINREG_LOAD_OPNUMS = (WINREG_LOAD_KEY, WINREG_RESTORE_KEY)
+# Opnums that NAME a key rather than moving one.  These only latch: opnum 6 is
+# already reported as an exec primitive, so emitting here too would double-fire
+# on one call.
+WINREG_KEY_NAME_OPNUMS = (WINREG_CREATE_KEY, WINREG_OPEN_KEY)
+# The three hives that hold credentials.  SAM has the local account hashes,
+# SECURITY holds the LSA secrets and cached domain credentials, and SYSTEM
+# carries the boot key needed to decrypt either.
+WINREG_CREDENTIAL_HIVES = ("sam", "security", "system")
+WINREG_HIVE_STAGE_SEVERITY = {"save": "high", "load": "high"}
+# OS Credential Dumping: Security Account Manager.  Behaviour, not a CVE - a
+# hive save is a legitimate backup operation performed by the wrong principal.
+WINREG_TECHNIQUE = "T1003.002"
+WINREG_TOOL_UNATTRIBUTABLE = "not attributable"
+
+# --- AD CS escalations that are visible in the REQUEST ----------------------
+# Every ESC misconfiguration lives somewhere a tap cannot see: a certificate
+# template attribute, the CA's registry, or an object ACL.  What IS visible is
+# the request, and only while the association is below PKT_PRIVACY - which is
+# itself the ESC11 condition this module already reports.
+#
+# Four distinct wire shapes, which is why these get four codes rather than one
+# with stages:
+#   ESC6  - the SAN arrives in the ICPR ATTRIBUTES string (CA EditFlags)
+#   ESC1  - subjectAltName inside the CSR, with a client-auth EKU
+#   ESC17 - subjectAltName inside the CSR, with a server-auth EKU
+#   ESC3  - the Certificate Request Agent EKU (on-behalf-of enrollment)
+# and ESC15 injects Application Policies into the CSR (CVE-2024-49019).
+#
+# Out of scope here, recorded so the boundary is explicit: ESC2/ESC9/ESC12/
+# ESC16 put nothing distinctive on the wire; ESC4/ESC5/ESC13/ESC14 are LDAP
+# writes; ESC8 is NTLM relay over HTTP; ESC10 authenticates over Schannel.
+ESC_OUT_OF_SCOPE = {
+    "ESC2": "template EKU state; the request is indistinguishable",
+    "ESC4": "AD ACL write on the template object - LDAP",
+    "ESC5": "AD ACL write on PKI container objects - LDAP",
+    "ESC8": "NTLM relay to the HTTP web-enrollment endpoint",
+    "ESC9": "absent SID extension in the ISSUED certificate, not the request",
+    "ESC10": "Schannel certificate mapping; authentication is over TLS",
+    "ESC12": "HSM/key-storage weakness on the CA host",
+    "ESC13": "msDS-OIDToGroupLink on the OID object - LDAP",
+    "ESC14": "altSecurityIdentities on user/computer objects - LDAP",
+    "ESC16": "CA DisableExtensionList; same shape as ESC9",
+}
+
+# Request attributes are LPWSTR, so every marker needs both encodings - the
+# trap the Certighost chase attribute fell into once already.
+ESC_SAN_ATTR = b"san:"
+ESC_SAN_ATTR_W = "san:".encode("utf-16-le")
+ESC_UPN_ATTR = b"upn="
+ESC_UPN_ATTR_W = "upn=".encode("utf-16-le")
+ESC_DNS_ATTR = b"dns="
+ESC_DNS_ATTR_W = "dns=".encode("utf-16-le")
+ESC_TEMPLATE_ATTR = b"certificatetemplate:"
+ESC_TEMPLATE_ATTR_W = "certificatetemplate:".encode("utf-16-le")
+
+# DER-encoded OID CONTENT bytes (no tag, no length), computed from the dotted
+# forms and transcribed again in the conformance harness.  This module has no
+# BER parser by design - DCERPC is NDR, not ASN.1 - so the CSR is SCANNED for
+# these rather than decoded, and every finding says so through
+# field_confidence: "oid-scan".
+OID_CLIENT_AUTH = bytes.fromhex("2b06010505070302")             # 1.3.6.1.5.5.7.3.2
+OID_SERVER_AUTH = bytes.fromhex("2b06010505070301")             # 1.3.6.1.5.5.7.3.1
+OID_ANY_PURPOSE = bytes.fromhex("2b0601040182370a0c01")         # 311.10.12.1
+OID_CERT_REQUEST_AGENT = bytes.fromhex("2b060104018237140201")  # 311.20.2.1
+OID_UPN_OTHERNAME = bytes.fromhex("2b060104018237140203")       # 311.20.2.3
+OID_APP_POLICIES = bytes.fromhex("2b060104018237150a")          # 311.21.10
+OID_SUBJECT_ALT_NAME = bytes.fromhex("551d11")                  # 2.5.29.17
+
+ESC15_CVE = "CVE-2024-49019"
+# Steal or Forge Authentication Certificates.  These are legitimate
+# enrollment operations asking for an identity the requester does not own, so
+# they are attributed by behaviour and not by CVE - except ESC15, which is one.
+ESC_TECHNIQUE = "T1649"
+ESC_TOOL_UNATTRIBUTABLE = "not attributable"
+ESC_SAN_VALUE_MAX = 256
+# Characters legal in a UPN or DNS SAN value, spelled out as EXPLICIT ASCII.
+# str.isalnum() is Unicode-aware, so UTF-16LE-decoding the binary that follows
+# an attributes string yields letters like U+0100 that pass it - which is how
+# a DER byte ended up glued to a reported name.
+ESC_SAN_VALUE_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789.-_@$")
+
+# --- MS-CSRA opnums --------------------------------------------------------
+# ICertAdminD occupies 3-30 and ICertAdminD2 31-48.  The ICertAdminD table is
+# stated outright by MS-CSRA 3.1.4.1.  Five ICertAdminD2 values are confirmed
+# by Microsoft's own section titles: 37 SetCASecurity, 40 GetAuditFilter,
+# 42 GetOfficerRights, 44 GetConfigEntry, 45 SetConfigEntry.
+#
+# CSRA_SET_OFFICER_RIGHTS = 43 is DERIVED, not directly sourced.  It is the one
+# method the full IDL places between the confirmed 42 and 44, so there is no
+# room for another value - but it is flagged derived the same way
+# TLSRpcConnect opnum 1 is, and the conformance harness asserts the flag.
+CSRA_SET_EXTENSION = 3
+CSRA_SET_ATTRIBUTES = 4
+CSRA_RESUBMIT_REQUEST = 5
+CSRA_DENY_REQUEST = 6
+CSRA_SERVER_CONTROL = 17
+CSRA_SET_CA_PROPERTY = 33
+CSRA_SET_CA_SECURITY = 37
+CSRA_SET_AUDIT_FILTER = 41
+CSRA_SET_OFFICER_RIGHTS = 43          # derived; see above
+CSRA_SET_CONFIG_ENTRY = 45
+CSRA_IMPORT_KEY = 46
+
+CSRA_OPNAMES = {
+    CSRA_SET_EXTENSION: "SetExtension",
+    CSRA_SET_ATTRIBUTES: "SetAttributes",
+    CSRA_RESUBMIT_REQUEST: "ResubmitRequest",
+    CSRA_DENY_REQUEST: "DenyRequest",
+    CSRA_SERVER_CONTROL: "ServerControl",
+    CSRA_SET_CA_PROPERTY: "SetCAProperty",
+    CSRA_SET_CA_SECURITY: "SetCASecurity",
+    CSRA_SET_AUDIT_FILTER: "SetAuditFilter",
+    CSRA_SET_OFFICER_RIGHTS: "SetOfficerRights",
+    CSRA_SET_CONFIG_ENTRY: "SetConfigEntry",
+    CSRA_IMPORT_KEY: "ImportKey",
+}
+# Manipulating a PENDING request - the Manage Certificates half of ESC7.
+CSRA_REQUEST_OPNUMS = (CSRA_SET_EXTENSION, CSRA_SET_ATTRIBUTES,
+                       CSRA_RESUBMIT_REQUEST, CSRA_DENY_REQUEST)
+# Reconfiguring the CA - the Manage CA half, and how ESC6 and ESC11 get
+# ENABLED in the first place.  SetAuditFilter is here because turning off CA
+# auditing is an anti-forensic step, not a tuning change.
+CSRA_CONFIG_OPNUMS = (CSRA_SET_CA_PROPERTY, CSRA_SET_CA_SECURITY,
+                      CSRA_SET_AUDIT_FILTER, CSRA_SET_OFFICER_RIGHTS,
+                      CSRA_SET_CONFIG_ENTRY, CSRA_IMPORT_KEY)
+CSRA_DERIVED_OPNUMS = (CSRA_SET_OFFICER_RIGHTS,)
+CSRA_INTERFACES = (IF_CSRA_ADMIND, IF_CSRA_ADMIND2)
+# MS-CSRA 3.1.4.1: with IF_ENFORCEENCRYPTICERTADMIN set the CA refuses any
+# call below PKT_PRIVACY.  Same bar as enrollment, same reasoning as ESC11.
+CSRA_REQUIRED_LEVEL = 6               # RPC_C_AUTHN_LEVEL_PKT_PRIVACY
+CSRA_STAGE_SEVERITY = {
+    "bind-below-privacy": "high",
+    "request-manipulation": "critical",
+    "config-write": "critical",
+    "server-control": "high",
+}
+
+# MS-LSAD secret access.  This is how the DPAPI domain backup key is actually
+# taken: mimikatz lsadump::backupkeys, SharpDPAPI backupkey and DSInternals
+# Get-LsaBackupKey all call LsarRetrievePrivateData for the LSA secret
+# G$BCKUPKEY_*.  None of them use MS-BKRP, which is the LEGITIMATE protocol for
+# the same key material - so watching BKRP alone misses every one of them.
+#   https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-lsad/
+#     2c6f3cf9-d792-4e8b-9af5-5470f636c20a   (3.1.4 opnum table)
+# Every opnum below is in the cleartext REQUEST header, so these rules hold at
+# PKT_PRIVACY; the secret NAME is NDR in the body and grades, never gates.
+# The conformance harness carries its own transcribed copy of each value.
+LSA_CREATE_SECRET = 16          # LsarCreateSecret
+LSA_OPEN_SECRET = 28            # LsarOpenSecret  (names the secret; latch only)
+LSA_SET_SECRET = 29             # LsarSetSecret   (handle-based write)
+LSA_QUERY_SECRET = 30           # LsarQuerySecret (handle-based read)
+LSA_STORE_PRIVATE_DATA = 42     # LsarStorePrivateData    (names the secret)
+LSA_RETRIEVE_PRIVATE_DATA = 43  # LsarRetrievePrivateData (names the secret)
+
+LSA_SECRET_OPNAMES = {
+    LSA_CREATE_SECRET: "LsarCreateSecret",
+    LSA_OPEN_SECRET: "LsarOpenSecret",
+    LSA_SET_SECRET: "LsarSetSecret",
+    LSA_QUERY_SECRET: "LsarQuerySecret",
+    LSA_STORE_PRIVATE_DATA: "LsarStorePrivateData",
+    LSA_RETRIEVE_PRIVATE_DATA: "LsarRetrievePrivateData",
+}
+# Opnums that act on a handle opened earlier; the name comes from the
+# association latch set by LsarOpenSecret, when that was readable.
+LSA_SECRET_HANDLE = (LSA_SET_SECRET, LSA_QUERY_SECRET)
+LSA_SECRET_READ_OPNUMS = (LSA_RETRIEVE_PRIVATE_DATA, LSA_QUERY_SECRET)
+LSA_SECRET_WRITE_OPNUMS = (LSA_STORE_PRIVATE_DATA, LSA_SET_SECRET,
+                           LSA_CREATE_SECRET)
+# RPC_UNICODE_STRING buffers are UTF-16LE, so an ASCII-only marker would never
+# match - the same trap the Certighost chase attribute fell into.
+LSA_DPAPI_BACKUP_MARKER = "G$BCKUPKEY"
+LSA_DPAPI_BACKUP_MARKER_W = LSA_DPAPI_BACKUP_MARKER.encode("utf-16-le")
+LSA_POLICY_HANDLE_LEN = 20      # [MS-DTYP] context handle: attributes + GUID
+LSA_SECRET_NAME_MAX = 512       # sanity bound on the conformant array count
+# Behaviour, not a CVE: retrieving an LSA secret is a legitimate privileged
+# operation performed by the wrong principal.  T1003.004 is LSA Secrets.
+LSA_TECHNIQUE_CREDS = "T1003.004"
+LSA_TOOL_UNATTRIBUTABLE = "not attributable"
+
+# MS-BKRP BackuprKey (opnum 0) selects its operation with pguidActionAgent, an
+# [in] GUID* in the NDR stub - NOT in the cleartext header.
+#   https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-bkrp/
+#     7accb903-3863-4385-9c99-11af8c18d656
+BKRP_BACKUP_GUID = "7f752b10-178e-11d1-ab8f-00805f14db40"
+BKRP_RESTORE_GUID_WIN2K = "7fe94d50-178e-11d1-ab8f-00805f14db40"
+BKRP_RETRIEVE_BACKUP_KEY_GUID = "018ff48a-eaba-40c6-8f6d-72370240e967"
+BKRP_RESTORE_GUID = "47270c64-2fc7-499b-ac5b-0e37cdce899a"
+# guid -> (stage, severity).  The wrap and public-key fetches are what every
+# ordinary domain client does on a master-key backup, which is why Windows own
+# event 4692 is documented as noisy; they are recorded, not alerted on.  Only
+# the unwraps decrypt somebody's secret.
+BKRP_ACTIONS = {
+    BKRP_BACKUP_GUID: ("wrap", "low"),
+    BKRP_RETRIEVE_BACKUP_KEY_GUID: ("public-key", "low"),
+    BKRP_RESTORE_GUID_WIN2K: ("unwrap", "high"),
+    BKRP_RESTORE_GUID: ("unwrap", "high"),
+}
+BKRP_GUID_SCAN_BYTES = 24   # referent id + GUID, however the stub marshals it
+
+# MS-DRSR, the directory replication interface.  Every opnum below is in the
+# cleartext REQUEST header, so these rules hold at PKT_PRIVACY; the stub - DSA
+# GUID, naming context, extended operation, and the secrets themselves - is
+# NDR inside the sealed body and is never mined.
+#   https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-drsr/
+# The conformance harness carries its own transcribed copy of each value.
+DRS_BIND = 0                   # IDL_DRSBind
+DRS_GET_NC_CHANGES = 3         # IDL_DRSGetNCChanges - the DCSync pull
+DRS_REPLICA_ADD = 5            # IDL_DRSReplicaAdd - the DCShadow push trigger
+DRS_CRACK_NAMES = 12           # IDL_DRSCrackNames - benign; member servers call it
+DRS_OPNAMES = {
+    DRS_BIND: "IDL_DRSBind",
+    DRS_GET_NC_CHANGES: "IDL_DRSGetNCChanges",
+    DRS_REPLICA_ADD: "IDL_DRSReplicaAdd",
+    DRS_CRACK_NAMES: "IDL_DRSCrackNames",
+}
+# Only these two decide anything.  Bind and CrackNames are what every member
+# server, Exchange box and admin tool does all day, and they stay silent.
+DRS_WATCHED_OPNUMS = (DRS_GET_NC_CHANGES, DRS_REPLICA_ADD)
+DRS_SILENT_OPNUMS = (DRS_BIND, DRS_CRACK_NAMES)
+
+# Neither technique has a CVE - they are abuse of a working feature - so the
+# findings carry ATT&CK ids for ticketing instead, and say outright that the
+# tool cannot be named from the wire.
+DRS_STAGE_SEVERITY = {
+    "call": "critical",             # non-DC pulling from a known DC
+    "unlisted-server": "high",      # neither end listed: config gap or rogue pair
+    "trigger": "high",              # ReplicaAdd from a non-DC
+    "rogue-source": "critical",     # a DC pulling from a non-DC
+}
+DRS_TECHNIQUE_DCSYNC = "T1003.006"
+DRS_TECHNIQUE_ROGUE_DC = "T1207"
+DRS_TOOL_UNATTRIBUTABLE = "not attributable"
+
+# ept_map's REPLY carries a tower: floor 4 is the TCP port, floor 5 an IPv4
+# address.  Only the port is taken.  An IPv4 host floor cannot carry a v6
+# address and how Windows fills the tower over v6 is unmeasured here, so the
+# learned port is keyed to the server of the 5-TUPLE THE REPLY RODE ON, never
+# to the tower's own host floor.
+EPM_MAP_OPNUM = 3
+EPM_TOWER_TCP_PROTO = 0x07     # protocol identifier for TCP in a floor
+EPM_TOWER_MAX_FLOORS = 8
 
 # ---------------------------------------------------------------------------
 # NTLMSSP -- [MS-NLMP]
@@ -617,6 +901,18 @@ FINDINGS = {
     "RPC-COERCION-CALL": (
         "critical", "interface",
         "Coercion opnum invoked with a remote UNC listener path"),
+    "RPC-DRS-PORT-LEARNED": (
+        "info", "interface",
+        "DRSUAPI's dynamic port learned from an ept_map reply - the port to "
+        "pin with --rpc-port so replication is captured without a range"),
+    "RPC-DRS-DCSYNC": (
+        "critical", "interface",
+        "DRSUAPI replication pull (IDL_DRSGetNCChanges) with an end that is "
+        "not a known DC - the DCSync behaviour; no CVE, technique T1003.006"),
+    "RPC-DRS-DCSHADOW": (
+        "critical", "interface",
+        "DRSUAPI replication involving a host that is not a known DC - the "
+        "DCShadow behaviour; no CVE, technique T1207"),
     "RPC-DCSYNC-CALL": (
         "critical", "interface",
         "DRSUAPI DRSGetNCChanges - directory replication (DCSync) request"),
@@ -626,6 +922,33 @@ FINDINGS = {
     "RPC-BACKUPKEY-ACCESS": (
         "high", "interface",
         "MS-BKRP BackuprKey - DPAPI domain backup key access"),
+    "RPC-LSA-SECRET-READ": (
+        "high", "interface",
+        "MS-LSAD secret read - LSA private data / secret value retrieved"),
+    "RPC-LSA-SECRET-WRITE": (
+        "high", "interface",
+        "MS-LSAD secret write - LSA private data / secret value stored"),
+    "RPC-CERTENROLL-ESC1-SAN": (
+        "critical", "interface",
+        "ESC1 - enrollment request carries a subjectAltName with a client-auth EKU"),
+    "RPC-CERTENROLL-ESC3-AGENT": (
+        "high", "interface",
+        "ESC3 - enrollment request carries the Certificate Request Agent EKU"),
+    "RPC-CERTENROLL-ESC6-SAN-ATTR": (
+        "critical", "interface",
+        "ESC6 - SAN supplied in the ICPR request attributes string"),
+    "RPC-CERTENROLL-ESC15-APP-POLICY": (
+        "critical", "interface",
+        "ESC15 - Application Policies injected into the certificate request"),
+    "RPC-CERTENROLL-ESC17-DNS": (
+        "high", "interface",
+        "ESC17 - enrollment request names a DNS identity with a server-auth EKU"),
+    "RPC-CERTADMIN-REMOTE": (
+        "high", "interface",
+        "MS-CSRA CA remote administration - posture or mutating call"),
+    "RPC-WINREG-HIVE-SAVE": (
+        "high", "interface",
+        "MS-RRP registry hive written to or loaded from a caller-named file"),
     "RPC-EPM-SWEEP": (
         "medium", "interface",
         "Endpoint mapper lookups at a rate consistent with RPC interface enumeration"),
@@ -907,6 +1230,213 @@ def parse_bind_nak(pdu: bytes, hdr: dict) -> dict:
         "reject_reason": reason,
         "reject_reason_name": NAK_REASONS.get(reason, f"unknown({reason})"),
     }
+
+
+def lsa_secret_name(stub: bytes) -> tuple:
+    """
+    Pull the secret name out of an LsarRetrievePrivateData /
+    LsarStorePrivateData / LsarOpenSecret / LsarCreateSecret stub.
+
+    After the 20-byte policy context handle comes an RPC_UNICODE_STRING whose
+    buffer is a conformant varying array:
+
+        Length(2) MaximumLength(2) referent(4) MaxCount(4) Offset(4)
+        ActualCount(4) then ActualCount UTF-16LE code units
+
+    The Buffer is [size_is(MaximumLength/2), length_is(Length/2)] WCHAR*, so
+    it is a conformant VARYING array and carries three counts, not one: the
+    chars begin 20 bytes past the string header, not 16.  Getting that wrong
+    is the NDR-alignment bug all over again, and it was caught here only
+    because the test encoder does not share this model.
+
+    Returns (name, field_confidence).  The exact walk is tried first and a
+    marker scan is the LABELLED fallback - never silently substituted, the
+    lesson from the NetLogon tail-anchor bug.
+    """
+    name = handle_then_unicode_string(stub)
+    if name:
+        return name, "exact"
+    if LSA_DPAPI_BACKUP_MARKER_W in stub:
+        return LSA_DPAPI_BACKUP_MARKER + "*", "marker-scan"
+    return None, "unreadable"
+
+
+def handle_then_unicode_string(stub: bytes):
+    """
+    The leading "20-byte context handle, then one RPC_UNICODE_STRING" shape.
+
+    MS-LSAD's LsarRetrievePrivateData and MS-RRP's BaseRegSaveKey,
+    BaseRegOpenKey and BaseRegCreateKey all begin this way, confirmed against
+    impacket's own structures.  One implementation serves all of them, because
+    the three-count conformant VARYING array is exactly the detail this module
+    got wrong once and should not get wrong again in a second copy.
+    """
+    off = LSA_POLICY_HANDLE_LEN
+    if len(stub) < off + 20:
+        return None
+    length = int.from_bytes(stub[off:off + 2], "little")
+    referent = int.from_bytes(stub[off + 4:off + 8], "little")
+    actual = int.from_bytes(stub[off + 16:off + 20], "little")
+    start = off + 20
+    if not (referent and 0 < actual <= LSA_SECRET_NAME_MAX
+            and length <= actual * 2
+            and start + actual * 2 <= len(stub)):
+        return None
+    try:
+        name = stub[start:start + actual * 2].decode("utf-16-le")
+    except UnicodeDecodeError:
+        return None
+    return name.rstrip(chr(0)) or None
+
+
+def bkrp_action_guid(stub: bytes):
+    """
+    Find pguidActionAgent in a BackuprKey stub.
+
+    Whether the [in] GUID* marshals with a referent id first depends on the
+    IDL pointer_default, which MS-BKRP's method page does not state - so the
+    GUID is located by matching the four documented values rather than by
+    trusting a fixed offset.  The NDR cross-check tier pins the real offset
+    against impacket.
+    """
+    last = min(len(stub), BKRP_GUID_SCAN_BYTES) - 15
+    for off in range(0, max(last, 0)):
+        g = uuid_from_wire(stub, off, False)
+        if g in BKRP_ACTIONS:
+            return g
+    return None
+
+
+def _attr_value(low: bytes, marker: bytes, wide: bool,
+                original: bytes = b"") -> str:
+    """
+    Text following an attributes-string marker, to the next delimiter.
+
+    The marker is located in the case-folded copy but the value is sliced out
+    of the ORIGINAL bytes, so a mixed-case name is reported as it was sent
+    rather than silently lowercased.
+    """
+    i = low.find(marker)
+    if i < 0:
+        return ""
+    src = original if len(original) == len(low) else low
+    raw = src[i + len(marker):i + len(marker) + ESC_SAN_VALUE_MAX * (2 if wide else 1)]
+    try:
+        text = raw.decode("utf-16-le", "ignore") if wide else raw.decode("latin-1")
+    except UnicodeDecodeError:
+        return ""
+    # A WHITELIST, not a delimiter list.  An attributes string is followed
+    # immediately by the request blob in a real marshalled CertServerRequest,
+    # with no terminator between them, so anything that merely stops at known
+    # separators runs straight into binary and reports a name with DER glued
+    # to the end of it.  Found by the impacket cross-check, which lays the
+    # bytes out the way the wire really does.
+    out = []
+    for ch in text:
+        if ch in ESC_SAN_VALUE_CHARS:
+            out.append(ch)
+        else:
+            break
+    return "".join(out)[:ESC_SAN_VALUE_MAX].strip()
+
+
+def same_principal(account: str, san_value: str) -> bool:
+    """
+    Is a SAN value naming the account that authenticated the association?
+
+    account is DOMAIN\\user from NTLM; san_value may be a bare name or a UPN.
+    Only the account portion is compared, case-folded, with a trailing $
+    dropped so a machine account matches its own UPN.  This decides ESC6's
+    severity, so a wrong answer under-reports rather than over-reports: an
+    unmatched pair is treated as impersonation.
+    """
+    if not account or not san_value:
+        return False
+    user = account.split("\\")[-1].strip().lower().rstrip("$")
+    cand = san_value.strip().lower()
+    if "@" in cand:
+        cand = cand.split("@", 1)[0]
+    cand = cand.rstrip("$")
+    return bool(user) and user == cand
+
+
+def certenroll_request_shape(stub: bytes) -> dict:
+    """
+    What can be read out of an UNSEALED MS-ICPR CertServerRequest.
+
+    Two different places matter and they mean different things.  The
+    ATTRIBUTES string is LPWSTR name:value text, so a "san:" there is the
+    CA-level ESC6 path.  The CSR is DER, and this module has no BER parser by
+    design - DCERPC is NDR - so the request is SCANNED for known OID content
+    bytes rather than decoded.  Everything derived that way is reported with
+    field_confidence "oid-scan" so it is never mistaken for a parse.
+    """
+    if not stub:
+        return {}
+    low = stub.lower()
+
+    def has(ascii_m, wide_m):
+        return ascii_m in low or wide_m in low
+
+    san_attr = has(ESC_SAN_ATTR, ESC_SAN_ATTR_W)
+    wide = ESC_SAN_ATTR_W in low
+    out = {
+        "san_attribute": san_attr,
+        "template_named": has(ESC_TEMPLATE_ATTR, ESC_TEMPLATE_ATTR_W),
+        "attr_upn": has(ESC_UPN_ATTR, ESC_UPN_ATTR_W),
+        "attr_dns": has(ESC_DNS_ATTR, ESC_DNS_ATTR_W),
+        "csr_subject_alt_name": OID_SUBJECT_ALT_NAME in stub,
+        "csr_upn_othername": OID_UPN_OTHERNAME in stub,
+        "eku_client_auth": OID_CLIENT_AUTH in stub,
+        "eku_server_auth": OID_SERVER_AUTH in stub,
+        "eku_any_purpose": OID_ANY_PURPOSE in stub,
+        "eku_request_agent": OID_CERT_REQUEST_AGENT in stub,
+        "app_policies": OID_APP_POLICIES in stub,
+    }
+    out["san_value"] = ""
+    if san_attr:
+        for marker, wide_marker in ((ESC_UPN_ATTR, ESC_UPN_ATTR_W),
+                                    (ESC_DNS_ATTR, ESC_DNS_ATTR_W)):
+            v = _attr_value(low, wide_marker if wide else marker, wide, stub)
+            if v:
+                out["san_value"] = v
+                break
+    return out
+
+
+def parse_epm_tower(blob: bytes) -> dict:
+    r"""
+    Pull the interface UUID and the TCP port out of an ept_map tower.
+
+    A tower is a floor count followed by floors, each
+    `lhs_length(2) | protocol id + lhs data | rhs_length(2) | rhs data`
+    (MS-RPCE 2.2.1.2.5).  Rather than unmarshal the NDR wrapper around it -
+    conformant arrays behind a pointer behind a handle - this scans for the
+    two floors whose shapes are unambiguous:
+
+      interface : 13 00 0D <16-byte UUID LE> <major LE> 02 00 <minor LE>
+      TCP port  : 01 00 07 02 00 <port BIG-endian>
+
+    The port is BIG-endian inside an otherwise little-endian PDU; that is in
+    the spec and is the single easiest thing to get backwards, so the NDR
+    cross-check builds these towers with impacket and the conformance harness
+    carries its own copy of both floor shapes.
+
+    Floor 5 (`01 00 09 04 00 <IPv4>`) is deliberately NOT returned: an IPv4
+    host floor cannot carry a v6 address, and how Windows fills the tower
+    over v6 is unmeasured here, so the caller keys the learned port to the
+    5-tuple the PDU rode on instead.
+    """
+    out = {"interface": None, "tcp_port": None}
+    i = blob.find(b"\x13\x00\x0d")
+    if i >= 0 and i + 3 + 18 <= len(blob):
+        out["interface"] = uuid_from_wire(blob, i + 3, False)
+    j = blob.find(b"\x01\x00\x07\x02\x00")
+    if j >= 0 and j + 7 <= len(blob):
+        port = (blob[j + 5] << 8) | blob[j + 6]
+        if 1 <= port <= 65535:
+            out["tcp_port"] = port
+    return out
 
 
 def parse_request(pdu: bytes, hdr: dict) -> dict:
@@ -1365,6 +1895,10 @@ _RPC_PIPE_NAMES = {
     "atsvc", "winreg", "srvsvc", "wkssvc", "eventlog", "efsrpc",
     "fssagentrpc", "epmapper", "browser", "ntsvcs", "hydralspipe",
     "lsm_api_service",
+    # MS-BKRP rides \pipe\protected_storage, and that pipe over SMB is the
+    # path the DPAPI-backup-key hunting literature actually watches.  Without
+    # it the graded BackuprKey rule only ever fired on the epmapper TCP path.
+    "protected_storage",
 }
 
 
@@ -1719,6 +2253,8 @@ class Config:
         "ipv6_eh": False,
         "wsman_compat": False,
         "ca_hosts": (),
+        "drs_replicators": (),
+        "drs_epm_follow": True,
         "ntlm_from_smb": False,
         "record_identities": True,
     }
@@ -1742,6 +2278,8 @@ class Config:
         self.allow_interfaces = set(kw.get("allow_interfaces", []))
         self.wsman_compat = bool(kw.get("wsman_compat", False))
         self.ca_hosts = list(kw.get("ca_hosts", []))
+        self.drs_replicators = list(kw.get("drs_replicators", []))
+        self.drs_epm_follow = bool(kw.get("drs_epm_follow", True))
         ports = kw.get("rpc_ports") or [EPMAPPER_PORT, SMB_PORT, NBT_SESSION_PORT]
         self.rpc_ports = set(ports)
         self.dynamic_range = kw.get("dynamic_range", False)
@@ -1772,6 +2310,38 @@ class Config:
             elif addr == entry:
                 return True
         return False
+
+    def is_replicator(self, ip: str) -> bool:
+        """
+        True when the host is a declared legitimate DRS replication caller
+        (Entra Connect sync, an identity-backup or AD-audit appliance).
+
+        Unlike is_dc / is_ca this returns a plain bool, never None: an empty
+        replicator list is a meaningful answer ("nobody is exempt"), not an
+        undecidable one.  The DC list is what arms the tier.
+        """
+        if not self.drs_replicators:
+            return False
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        for entry in self.drs_replicators:
+            if isinstance(entry, (ipaddress.IPv4Network, ipaddress.IPv6Network)):
+                if addr in entry:
+                    return True
+            elif addr == entry:
+                return True
+        return False
+
+    @property
+    def drs_armed(self) -> bool:
+        """
+        The DRS tier needs a DC list to mean anything: every stage is a
+        statement about which end is or is not a domain controller.  With no
+        --dc it stays disarmed rather than guessing.
+        """
+        return bool(self.dc_hosts)
 
     def is_ca(self, ip: str) -> bool | None:
         if not self.ca_hosts:
@@ -1882,7 +2452,10 @@ class Association:
                  "tsl_connects", "tsl_spray_fired",
                  "elfr_open_offbox", "elfr_probe_paths", "elfr_backup_fired",
                  "elfr_probe_fired",
-                 "lsm_bind_reported", "lsm_call_count", "lsm_loop_fired")
+                 "lsm_bind_reported", "lsm_call_count", "lsm_loop_fired",
+                 "drs_calls", "drs_bytes", "drs_stages", "drs_outcome_fired",
+                 "lsa_secret_name", "ntlm_account", "csra_bind_reported",
+                 "winreg_key_name")
 
     def __init__(self, ts):
         self.contexts: dict[int, dict] = {}
@@ -1906,6 +2479,16 @@ class Association:
         self.lsm_bind_reported = False  # latch the LSM container bind
         self.lsm_call_count = 0         # calls on the LSM container assoc
         self.lsm_loop_fired = False     # latch the sustained-loop escalation
+        self.lsa_secret_name = None     # LsarOpenSecret name, when readable
+        self.ntlm_account = None        # domain\\user from NTLM AUTHENTICATE
+        self.csra_bind_reported = False  # latch the CA-admin bind posture
+        self.winreg_key_name = None     # last registry key named on this assoc
+        # DRS: a full DCSync is a run of paged GetNCChanges calls on ONE
+        # handle, so the stage latches and these counters carry the volume.
+        self.drs_calls = 0
+        self.drs_bytes = 0
+        self.drs_stages = set()         # stages already reported here
+        self.drs_outcome_fired = False  # latch the answer-graded emission
 
 
 class NetlogonPeer:
@@ -2198,6 +2781,13 @@ class RPCEngine:
         # named by --ca-hosts is always eligible, with no prior-enrollment
         # requirement.  Keyed by server IP -> last-enrollment timestamp.
         self.ca_enroll_seen: dict[str, float] = {}
+        # --drs-epm-follow: server IP -> the DRSUAPI port(s) its epmapper
+        # handed out, learned from ept_map replies.  Keyed on the 5-tuple's
+        # server, never on the tower's own host floor.
+        self.learned_drs_ports: dict[str, set] = {}
+        self.drs_port_logged: set = set()
+        # ept_map call_id -> the interface UUID that request asked to map.
+        self.epm_pending_map: dict[tuple, str] = {}
         self.chase_fired: set[tuple[str, str]] = set()
 
     # -- helpers ---------------------------------------------------------
@@ -2394,6 +2984,10 @@ class RPCEngine:
             if uuid == IF_LSARPC:
                 self._adcs_chase_bind(ts, subject, base, client_ip, server_ip)
 
+            # MS-CSRA: CA remote administration below packet privacy.
+            if uuid in CSRA_INTERFACES and new_level < CSRA_REQUIRED_LEVEL:
+                self._certadmin_bind(ts, subject, base, assoc, new_level)
+
             # LSM container interface: any bind we see is over the network
             # (local hvsocket/ALPC never reaches the tap), which is never
             # legitimate for this interface.
@@ -2536,16 +3130,32 @@ class RPCEngine:
             self._eventlog_backup(ts, subject, base, assoc, stub, opnum,
                                   sealed, server_ip)
 
+        if (uuid == IF_DRSUAPI and opnum in DRS_WATCHED_OPNUMS
+                and self.config.drs_armed):
+            self._drs_call(ts, subject, base, assoc, opnum, client_ip,
+                           server_ip, hdr["call_id"])
+
         if uuid == IF_TSTS_ENUM and opnum == TSTS_GET_SESSION_IDS:
             self._tsts_getsessionids(ts, subject, base, assoc, hdr["call_id"])
 
         if uuid == IF_LSM_CONTAINER:
             self._lsm_container_call(ts, subject, base, assoc, opnum)
 
+        if uuid == IF_LSARPC and opnum in LSA_SECRET_OPNAMES:
+            self._lsa_secret_call(ts, subject, base, assoc, stub, opnum,
+                                  sealed)
+
+        if uuid == IF_BKRP and opnum == 0:
+            self._backupkey_call(ts, subject, base, stub, sealed)
+
         # On an unsealed legacy CA, the enrollment request attributes are
         # readable, so the chase-directing attribute can be seen outright.
         if uuid in CERTENROLL_ENROLL_INTERFACES and not sealed:
             self._adcs_chase_attr(ts, subject, base, stub)
+            self._certenroll_content(ts, subject, base, assoc, stub)
+
+        if uuid in CSRA_INTERFACES:
+            self._certadmin_call(ts, subject, base, opnum)
 
         if uuid in COERCION_CALLS and opnum in COERCION_CALLS[uuid]:
             self._coercion_call(ts, subject, base, stub, uuid, opnum, sealed,
@@ -2553,10 +3163,27 @@ class RPCEngine:
             if assoc.anonymous and uuid in LSA_PIPE_INTERFACES:
                 self._lsa_anonymous_coercion(ts, subject, base, assoc, uuid,
                                              opnum)
+        # MS-RRP: latch the key being named, then grade the hive move.  The
+        # latch runs before the exec-primitive dispatch so a save that follows
+        # a create on the same association can name its hive.
+        if uuid == IF_WINREG:
+            if opnum in WINREG_KEY_NAME_OPNUMS and not sealed:
+                named = handle_then_unicode_string(stub)
+                if named:
+                    assoc.winreg_key_name = named
+            if opnum in WINREG_SAVE_OPNUMS + WINREG_LOAD_OPNUMS:
+                self._winreg_hive(ts, subject, base, assoc, stub, opnum,
+                                  sealed, server_ip)
+
         if uuid in EXEC_CALLS and opnum in EXEC_CALLS[uuid]:
             self._exec_call(ts, subject, base, uuid, opnum)
         if uuid == IF_EPM and opnum in EPM_LOOKUP_OPNUMS:
             self._epm_call(ts, subject, base, client_ip)
+            if (opnum == EPM_MAP_OPNUM and self.config.drs_epm_follow
+                    and not sealed):
+                asked = parse_epm_tower(stub).get("interface")
+                if asked:
+                    self.epm_pending_map[(server_ip, hdr["call_id"])] = asked
 
     def _netlogon_call(self, ts, subject, base, stub, opnum, sealed,
                        client_ip, server_ip):
@@ -2657,6 +3284,131 @@ class RPCEngine:
             d["pipe"] = assoc.pipe_name
         self.emitter.emit(ts, "RPC-INTERFACE-UNCATALOGUED", subject, d,
                           key_extra=(uuid,))
+
+    def _drs_stage(self, opnum, client_ip, server_ip):
+        """
+        Decide the stage from the four cleartext facts: interface, opnum,
+        client address, server address.  Returns (code, stage, severity) or
+        None.  Membership is set logic only - nothing here reads the stub,
+        and nothing depends on the address family.
+
+        Order matters.  A DC pulling FROM a non-DC is checked first: that is
+        the DCShadow tell, and it would otherwise fall through to the
+        "neither end listed" arm and be graded down.
+        """
+        dc_client = self.config.is_dc(client_ip) is True
+        dc_server = self.config.is_dc(server_ip) is True
+        rep_client = self.config.is_replicator(client_ip)
+        listed_client = dc_client or rep_client
+        listed_server = dc_server or self.config.is_replicator(server_ip)
+
+        if opnum == DRS_REPLICA_ADD:
+            # ReplicaAdd is the push trigger.  --drs-replicators exempts
+            # hosts from the opnum-3 PULL only, by its own definition, so a
+            # replicator calling ReplicaAdd is still reported.
+            if not dc_client and dc_server:
+                return ("RPC-DRS-DCSHADOW", "trigger",
+                        DRS_STAGE_SEVERITY["trigger"])
+            return None
+
+        # opnum 3, the replication pull.
+        if dc_client and not dc_server:
+            return ("RPC-DRS-DCSHADOW", "rogue-source",
+                    DRS_STAGE_SEVERITY["rogue-source"])
+        if not listed_client and dc_server:
+            return ("RPC-DRS-DCSYNC", "call", DRS_STAGE_SEVERITY["call"])
+        if not listed_client and not listed_server:
+            return ("RPC-DRS-DCSYNC", "unlisted-server",
+                    DRS_STAGE_SEVERITY["unlisted-server"])
+        return None
+
+    def _drs_call(self, ts, subject, base, assoc, opnum, client_ip,
+                  server_ip, call_id):
+        """
+        DCSync and DCShadow, from the cleartext request header.
+
+        No CVE exists for either: both are abuse of directory replication
+        working exactly as designed, so the finding names the behaviour and
+        carries an ATT&CK id for ticketing.  What separates impacket from
+        mimikatz from an agent sits in the sealed stub or in a runtime default
+        anyone can change, so the tool is reported as not attributable rather
+        than guessed at.
+
+        A passive sensor cannot stop the call.  The value is the alert landing
+        while the dump is still paging, which is why the first qualifying call
+        emits immediately instead of waiting for the run to finish.
+        """
+        decided = self._drs_stage(opnum, client_ip, server_ip)
+        assoc.drs_calls += 1
+        if decided is None:
+            return
+        code, stage, severity = decided
+        technique = (DRS_TECHNIQUE_ROGUE_DC if code == "RPC-DRS-DCSHADOW"
+                     else DRS_TECHNIQUE_DCSYNC)
+        # Register the pending call so the server's answer can grade it; the
+        # answer never gates the finding, which is already out.
+        assoc.pending_calls[call_id] = (IF_DRSUAPI, opnum, ts)
+        if stage in assoc.drs_stages:
+            # Latched.  Later pages of the same run only raise the counters.
+            return
+        assoc.drs_stages.add(stage)
+        d = dict(base, call=DRS_OPNAMES.get(opnum, str(opnum)), stage=stage,
+                 technique=technique, tool=DRS_TOOL_UNATTRIBUTABLE,
+                 outcome="unanswered", calls=assoc.drs_calls,
+                 bytes_from_server=assoc.drs_bytes)
+        if stage == "unlisted-server":
+            d["note"] = ("neither end is in --dc or --drs-replicators: "
+                         "either a DC is missing from --dc, or this is a "
+                         "rogue replication pair")
+        elif stage == "rogue-source":
+            d["note"] = ("a domain controller is pulling changes from a host "
+                         "that is not a known DC - the second half of "
+                         "lsadump::dcshadow; a healthy domain never does this")
+        elif stage == "trigger":
+            d["note"] = ("ReplicaAdd from a host that is not a known DC - "
+                         "the DCShadow push trigger")
+        else:
+            d["note"] = ("directory replication pull from a host that is "
+                         "neither a DC nor a declared replicator")
+        self.emitter.emit(ts, code, subject, d, severity=severity,
+                          key_extra=(stage,))
+
+    def _drs_outcome(self, ts, subject, assoc, pending, accepted):
+        """
+        Grade the run by the server's answer, once per association.
+
+        The Win32 return code lives inside the sealed stub, so a response
+        proves the server answered, NOT that the dump succeeded - the detail
+        says so rather than implying it.  Latched, because a paged dump
+        answers many times and one graded line per run is the useful one.
+        """
+        uuid, opnum, _ = pending
+        if uuid != IF_DRSUAPI or opnum not in DRS_WATCHED_OPNUMS:
+            return
+        if assoc.drs_outcome_fired or not assoc.drs_stages:
+            return
+        assoc.drs_outcome_fired = True
+        stage = sorted(assoc.drs_stages)[0]
+        code = ("RPC-DRS-DCSHADOW" if stage in ("trigger", "rogue-source")
+                else "RPC-DRS-DCSYNC")
+        # Severity is the STAGE's, unchanged by the answer.  An answer grades
+        # what happened, it does not re-rank the behaviour, and the preflight
+        # fixes severity per stage.
+        severity = DRS_STAGE_SEVERITY[stage]
+        self.emitter.emit(
+            ts, code, subject,
+            {"interface": "drsuapi", "opnum": opnum,
+             "call": DRS_OPNAMES.get(opnum, str(opnum)), "stage": stage,
+             "outcome": "response" if accepted else "fault",
+             "calls": assoc.drs_calls,
+             "bytes_from_server": assoc.drs_bytes,
+             "technique": (DRS_TECHNIQUE_ROGUE_DC
+                           if code == "RPC-DRS-DCSHADOW"
+                           else DRS_TECHNIQUE_DCSYNC),
+             "tool": DRS_TOOL_UNATTRIBUTABLE,
+             "note": ("the Win32 result is inside the sealed stub, so an "
+                      "answer does not prove the dump succeeded")},
+            severity=severity, key_extra=(stage, "outcome"))
 
     def _eventlog_backup(self, ts, subject, base, assoc, stub, opnum, sealed,
                          server_ip):
@@ -3036,6 +3788,245 @@ class RPCEngine:
                       "attribute directly"),
             severity="critical", key_extra=("attr",))
 
+    def _winreg_hive(self, ts, subject, base, assoc, stub, opnum, sealed,
+                     server_ip):
+        """
+        MS-RRP hive save and load - secretsdump's non-DCSync path.
+
+        impacket's secretsdump enables and starts RemoteRegistry over svcctl,
+        calls OpenLocalMachine, opens the SAM / SECURITY / SYSTEM hive with
+        BaseRegCreateKey, then BaseRegSaveKey writes that hive to a file which
+        it reads back over SMB.  The service start and the HKLM open were
+        already reported as exec primitives; this is the call that says the
+        CREDENTIAL HIVES were dumped, which is the part that was missing.
+
+        Attributed by behaviour (T1003.002), not by CVE: saving a hive is a
+        legitimate backup operation performed by the wrong principal.
+
+        The opnum is cleartext so this fires at PKT_PRIVACY.  The destination
+        path and the hive name grade the finding; when the stub is sealed the
+        finding says so rather than guessing.  The hive name comes from the
+        BaseRegCreateKey / BaseRegOpenKey that preceded the save on the same
+        association - those only latch, never emit, so one dump is one
+        finding and not three.
+
+        The dedup key carries the HIVE, not just the opnum.  The subject is
+        client -> server, so without it a run that takes SAM, then SECURITY,
+        then SYSTEM - which is exactly what secretsdump does - would collapse
+        into a single finding naming only the first.
+        """
+        stage = "save" if opnum in WINREG_SAVE_OPNUMS else "load"
+        d = dict(base, call=WINREG_HIVE_OPNAMES[opnum], stage=stage,
+                 technique=WINREG_TECHNIQUE, tool=WINREG_TOOL_UNATTRIBUTABLE)
+        hive = assoc.winreg_key_name
+        if hive:
+            d["key"] = hive
+        is_cred = bool(hive and hive.strip("\\").split("\\")[0].lower()
+                       in WINREG_CREDENTIAL_HIVES)
+        d["credential_hive"] = is_cred
+
+        if sealed:
+            self.emitter.emit(
+                ts, "RPC-WINREG-HIVE-SAVE", subject,
+                dict(d, confidence="opnum-only", path_visible=False,
+                     note="stub sealed; destination path not observable"),
+                severity="critical" if is_cred else "high",
+                key_extra=(opnum, "sealed", hive or ""))
+            return
+
+        path = handle_then_unicode_string(stub)
+        if path:
+            d["path"] = path
+        remote = [p for p in extract_unc_paths(stub)
+                  if unc_host(p) and unc_host(p) != server_ip]
+        if remote:
+            external = [p for p in remote
+                        if self.config.in_local(unc_host(p)) is not True]
+            self.emitter.emit(
+                ts, "RPC-WINREG-HIVE-SAVE", subject,
+                dict(d, unc_paths=remote, external_source=bool(external),
+                     path_visible=True, confidence="off-box-path"),
+                severity="critical",
+                key_extra=(opnum, "unc", hive or "", path or ""))
+            return
+
+        # A local destination is what secretsdump actually uses - it writes to
+        # ..\Temp\<random>.tmp and reads it back over SMB - so a local path
+        # is not a mitigating factor when the hive is a credential store.
+        self.emitter.emit(
+            ts, "RPC-WINREG-HIVE-SAVE", subject,
+            dict(d, path_visible=bool(path), external_source=False,
+                 confidence="local-path",
+                 note=("credential hive written to a local file; this is the "
+                       "shape secretsdump uses before reading it back over "
+                       "SMB" if is_cred else
+                       "hive written to a local file")),
+            severity="critical" if is_cred else
+            WINREG_HIVE_STAGE_SEVERITY[stage],
+            key_extra=(opnum, "local", hive or "", path or ""))
+
+    def _certenroll_content(self, ts, subject, base, assoc, stub):
+        """
+        The AD CS escalations that are visible in an UNSEALED enrollment
+        request: ESC1, ESC3, ESC6, ESC15 and ESC17.
+
+        None of their misconfigurations are observable - they live in template
+        attributes, the CA registry and object ACLs.  What is observable is the
+        request asking for an identity or a capability, and only below
+        PKT_PRIVACY, which is the ESC11 condition this module already reports.
+        Four codes rather than one with stages because the wire shapes are
+        genuinely different: ESC6 puts the SAN in the ATTRIBUTES string while
+        ESC1 and ESC17 put it in the CSR and differ by EKU.
+
+        Everything taken from the CSR is an OID scan, not a parse, and says so.
+        """
+        shape = certenroll_request_shape(stub)
+        if not shape:
+            return
+        common = dict(technique=ESC_TECHNIQUE, tool=ESC_TOOL_UNATTRIBUTABLE)
+
+        # --- ESC6: the SAN arrives in the attributes string ---------------
+        if shape["san_attribute"]:
+            kind = ("upn" if shape["attr_upn"]
+                    else "dns" if shape["attr_dns"] else "unknown")
+            d = dict(base, **common, esc="ESC6", san_kind=kind,
+                     field_confidence="attribute-text")
+            value = shape.get("san_value") or ""
+            acct = assoc.ntlm_account
+            if acct and value:
+                if same_principal(acct, value):
+                    d["requester_match"] = "self"
+                    sev = "high"
+                    d["note"] = ("the CA accepts attribute SANs at all, which "
+                                 "needs EDITF_ATTRIBUTESUBJECTALTNAME2; this "
+                                 "request names its own requester")
+                else:
+                    d["requester_match"] = "other"
+                    sev = "critical"
+                    d["note"] = ("request names a principal other than the "
+                                 "authenticated requester")
+            else:
+                d["requester_match"] = "unknown"
+                sev = "critical"
+                d["note"] = ("requester identity not observable (Kerberos, or "
+                             "no NTLM AUTHENTICATE seen)")
+            # Honour --no-identities: report the verdict, never the names.
+            if value and self.config.record_identities:
+                d["san"] = value
+            if self.config.record_identities and acct:
+                d["requester"] = acct
+            self.emitter.emit(ts, "RPC-CERTENROLL-ESC6-SAN-ATTR", subject, d,
+                              severity=sev, key_extra=("esc6",))
+
+        # --- ESC1: a UPN subjectAltName in the CSR with client auth -------
+        if (shape["csr_subject_alt_name"] and shape["csr_upn_othername"]
+                and (shape["eku_client_auth"] or shape["eku_any_purpose"])):
+            self.emitter.emit(
+                ts, "RPC-CERTENROLL-ESC1-SAN", subject,
+                dict(base, **common, esc="ESC1", field_confidence="oid-scan",
+                     eku=("any-purpose" if shape["eku_any_purpose"]
+                          else "client-auth"),
+                     note="CSR carries a UPN subjectAltName and an EKU that "
+                          "authenticates; the name itself is DER and is not "
+                          "extracted"),
+                key_extra=("esc1",))
+
+        # --- ESC17: a DNS identity with server auth -----------------------
+        if (shape["csr_subject_alt_name"] and shape["eku_server_auth"]
+                and not shape["csr_upn_othername"]):
+            self.emitter.emit(
+                ts, "RPC-CERTENROLL-ESC17-DNS", subject,
+                dict(base, **common, esc="ESC17", field_confidence="oid-scan",
+                     note="CSR names a DNS identity with a server-auth EKU: "
+                          "the shape used to impersonate a host"),
+                key_extra=("esc17",))
+
+        # --- ESC3: the enrollment-agent EKU -------------------------------
+        if shape["eku_request_agent"]:
+            self.emitter.emit(
+                ts, "RPC-CERTENROLL-ESC3-AGENT", subject,
+                dict(base, **common, esc="ESC3", field_confidence="oid-scan",
+                     note="Certificate Request Agent EKU: enrolling on behalf "
+                          "of another principal, or obtaining the agent "
+                          "certificate that permits it"),
+                key_extra=("esc3",))
+
+        # --- ESC15: Application Policies injected into the request --------
+        if shape["app_policies"] and (shape["eku_client_auth"]
+                                      or shape["eku_request_agent"]
+                                      or shape["eku_any_purpose"]):
+            self.emitter.emit(
+                ts, "RPC-CERTENROLL-ESC15-APP-POLICY", subject,
+                dict(base, **common, esc="ESC15", cve=ESC15_CVE,
+                     field_confidence="oid-scan",
+                     note="request supplies Application Policies alongside an "
+                          "authenticating EKU; on an unpatched CA a v1 "
+                          "template grants them"),
+                key_extra=("esc15",))
+
+    def _certadmin_bind(self, ts, subject, base, assoc, level):
+        """
+        MS-CSRA bound below PKT_PRIVACY.
+
+        MS-CSRA 3.1.4.1 says a CA with IF_ENFORCEENCRYPTICERTADMIN refuses any
+        admin call that is not at packet privacy - the same requirement
+        IF_ENFORCEENCRYPTICERTREQUEST places on enrollment, which is ESC11.
+        So this is the ESC11 condition on the CA MANAGEMENT interface, and the
+        ESC catalogue never gave it a number.  It is strictly worse than
+        ESC11: relaying into enrollment gets a certificate, relaying into
+        administration gets the CA.
+        """
+        if assoc.csra_bind_reported:
+            return
+        assoc.csra_bind_reported = True
+        self.emitter.emit(
+            ts, "RPC-CERTADMIN-REMOTE", subject,
+            dict(base, stage="bind-below-privacy",
+                 technique=ESC_TECHNIQUE, tool=ESC_TOOL_UNATTRIBUTABLE,
+                 level=AUTHN_LEVEL_NAMES.get(level, level),
+                 required_level=AUTHN_LEVEL_NAMES[CSRA_REQUIRED_LEVEL],
+                 note="CA remote administration below packet privacy; a "
+                      "patched CA with IF_ENFORCEENCRYPTICERTADMIN refuses "
+                      "this, so it is unpatched posture or a live relay"),
+            severity=CSRA_STAGE_SEVERITY["bind-below-privacy"],
+            key_extra=("csra-bind",))
+
+    def _certadmin_call(self, ts, subject, base, opnum):
+        """
+        A mutating MS-CSRA call - the ESC7 abuse step, and the step that
+        ENABLES ESC6 and ESC11 in the first place.
+
+        The opnum is in the cleartext REQUEST header, so these fire at
+        PKT_PRIVACY too.  Read-only methods (Ping, GetCRL, the EnumView and
+        BackupGet families) are never reported, the same way IDL_DRSBind and
+        IDL_DRSCrackNames stay silent on the replication interface.
+        """
+        if opnum == CSRA_SERVER_CONTROL:
+            stage = "server-control"
+        elif opnum in CSRA_REQUEST_OPNUMS:
+            stage = "request-manipulation"
+        elif opnum in CSRA_CONFIG_OPNUMS:
+            stage = "config-write"
+        else:
+            return
+        d = dict(base, stage=stage, call=CSRA_OPNAMES[opnum],
+                 technique=ESC_TECHNIQUE, tool=ESC_TOOL_UNATTRIBUTABLE)
+        if opnum in CSRA_DERIVED_OPNUMS:
+            d["opnum_provenance"] = "derived from the MS-CSRA IDL ordering"
+        if stage == "config-write":
+            d["note"] = ("CA configuration write: this is how EditFlags "
+                         "(ESC6) and InterfaceFlags (ESC11) get enabled, and "
+                         "how CA auditing gets turned off")
+        elif stage == "request-manipulation":
+            d["note"] = ("a pending certificate request was altered or "
+                         "resubmitted: the Manage Certificates half of ESC7")
+        else:
+            d["note"] = ("ServerControl unregisters ICertAdminD/D2: remote "
+                         "denial of CA administration")
+        self.emitter.emit(ts, "RPC-CERTADMIN-REMOTE", subject, d,
+                          severity=CSRA_STAGE_SEVERITY[stage],
+                          key_extra=("csra", opnum))
+
     def _printer_driver_call(self, ts, subject, base, stub, uuid, opnum,
                              sealed, server_ip):
         """
@@ -3081,6 +4072,93 @@ class RPCEngine:
                                confidence="local-paths-only",
                                note="no off-box driver path observed"),
                           severity="medium", key_extra=(uuid, opnum))
+
+    def _lsa_secret_call(self, ts, subject, base, assoc, stub, opnum, sealed):
+        """
+        MS-LSAD secret access - how the DPAPI domain backup key is stolen.
+
+        Mimikatz lsadump::backupkeys, SharpDPAPI backupkey and DSInternals
+        Get-LsaBackupKey all call LsarRetrievePrivateData (opnum 43) for the
+        LSA secret G$BCKUPKEY_PREFERRED / G$BCKUPKEY_<guid>.  None of them go
+        through MS-BKRP.  One domain backup key decrypts every DPAPI blob in
+        the domain, which is why that stage is critical and not high.
+
+        Attributed by behaviour, not CVE: there is nothing to patch here and
+        nothing to name.  The opnum is in the cleartext REQUEST header so the
+        call is seen at PKT_PRIVACY; the secret NAME is NDR in the body, so it
+        grades when readable and the finding says so when it is not.
+
+        LsarOpenSecret only LATCHES the name for the handle-based
+        LsarQuerySecret / LsarSetSecret that follows - it never emits, so an
+        open-then-query pair is one finding rather than two.
+        """
+        opname = LSA_SECRET_OPNAMES[opnum]
+        name, conf = (None, "sealed") if sealed else lsa_secret_name(stub)
+
+        if opnum == LSA_OPEN_SECRET:
+            assoc.lsa_secret_name = name
+            return
+
+        if opnum in LSA_SECRET_HANDLE and name is None and assoc.lsa_secret_name:
+            name, conf = assoc.lsa_secret_name, "handle-latched"
+
+        code = ("RPC-LSA-SECRET-READ" if opnum in LSA_SECRET_READ_OPNUMS
+                else "RPC-LSA-SECRET-WRITE")
+        d = dict(base, call=opname, technique=LSA_TECHNIQUE_CREDS,
+                 tool=LSA_TOOL_UNATTRIBUTABLE, field_confidence=conf)
+
+        if name and LSA_DPAPI_BACKUP_MARKER in name.upper():
+            self.emitter.emit(
+                ts, code, subject,
+                dict(d, secret=name, stage="dpapi-backup-key",
+                     note="DPAPI domain backup key; decrypts every DPAPI "
+                          "secret in the domain"),
+                severity="critical", key_extra=(opnum, "bckupkey"))
+            return
+        if name:
+            self.emitter.emit(ts, code, subject,
+                              dict(d, secret=name, stage="named"),
+                              key_extra=(opnum, "named"))
+            return
+        self.emitter.emit(
+            ts, code, subject,
+            dict(d, stage="sealed" if sealed else "name-unreadable",
+                 note="secret name not observable; the call itself is rare "
+                      "and privileged over the network"),
+            key_extra=(opnum, "unnamed"))
+
+    def _backupkey_call(self, ts, subject, base, stub, sealed):
+        """
+        MS-BKRP BackuprKey (opnum 0), graded by its action GUID.
+
+        The rule this replaces fired at high on EVERY call to this opnum,
+        which on a real domain means every DPAPI master-key backup - an
+        ordinary consequence of a user changing their password.  Windows own
+        event 4692 is documented as noisy for exactly that reason, so a
+        blanket high here is a false-positive generator.  Same shape as the
+        blunt RPC-DCSYNC-CALL that the graded DRS stages superseded.
+
+        pguidActionAgent is an [in] GUID* in the NDR stub: readable below
+        privacy, sealed at it.  The wrap and public-key fetches drop to low,
+        the unwraps stay high, and the sealed case is reported as sealed
+        rather than assumed to be either.
+        """
+        d = dict(base, call="BackuprKey")
+        guid = None if sealed else bkrp_action_guid(stub)
+        if guid is None:
+            self.emitter.emit(
+                ts, "RPC-BACKUPKEY-ACCESS", subject,
+                dict(d, stage="sealed" if sealed else "guid-unreadable",
+                     confidence="guid-sealed",
+                     note="action GUID not observable; cannot separate a "
+                          "routine master-key wrap from a secret unwrap"),
+                severity="medium", key_extra=("sealed",))
+            return
+        stage, sev = BKRP_ACTIONS[guid]
+        self.emitter.emit(ts, "RPC-BACKUPKEY-ACCESS", subject,
+                          dict(d, stage=stage, action_guid=guid,
+                               confidence="action-guid"),
+                          severity=sev, key_extra=(stage,))
 
     def _certenroll_level(self, ts, subject, base, uuid, level, trailer,
                           stage, call=None):
@@ -3202,16 +4280,74 @@ class RPCEngine:
         opname = EXEC_CALLS[uuid][opnum]
         d = dict(base, call=opname)
         if uuid == IF_DRSUAPI and opnum == 3:
-            self.emitter.emit(ts, "RPC-DCSYNC-CALL", subject, d)
+            # Superseded by the graded RPC-DRS-DCSYNC stages whenever the tier
+            # is armed.  The blunt code fired on EVERY GetNCChanges, which on
+            # a real domain means every legitimate DC-to-DC replication, so it
+            # is kept only as the disarmed fallback: a deployment with no --dc
+            # keeps the visibility it has today instead of going silent.
+            if not self.config.drs_armed:
+                self.emitter.emit(ts, "RPC-DCSYNC-CALL", subject, d)
             return
         if uuid == IF_BKRP:
-            self.emitter.emit(ts, "RPC-BACKUPKEY-ACCESS", subject, d)
+            # Superseded by the graded _backupkey_call, which reads the action
+            # GUID.  Returning keeps the generic exec-interface code off a
+            # call that now has a specific rule, so one condition still
+            # yields one finding.
             return
         if uuid == IF_DRSUAPI:
             return
         sev = "medium" if uuid == IF_WINREG else "high"
         self.emitter.emit(ts, "RPC-REMOTE-EXEC-INTERFACE", subject, d,
                           severity=sev, key_extra=(uuid, opnum))
+
+    def _epm_follow(self, ts, subject, assoc, pdu, hdr, body, trailer,
+                    server_ip):
+        """
+        Learn DRSUAPI's dynamic port from the ept_map reply.
+
+        The port is keyed to the SERVER OF THIS 5-TUPLE, not to the address
+        in the tower's host floor: floor 5 is an IPv4 address by construction
+        and cannot describe a v6 endpoint, so over IPv6 the host floor is
+        either absent or something this code has not measured.  The 5-tuple
+        is the one thing that is true in both families.
+
+        This is attribution and advice, not admission.  See _drs_port_note.
+        """
+        asked = self.epm_pending_map.pop((server_ip, hdr["call_id"]), None)
+        if asked != IF_DRSUAPI:
+            return
+        stub = extract_stub(pdu, hdr, body, trailer)
+        port = parse_epm_tower(stub).get("tcp_port")
+        if not port:
+            return
+        known = self.learned_drs_ports.setdefault(server_ip, set())
+        if port in known:
+            return
+        known.add(port)
+        self._drs_port_note(ts, subject, server_ip, port)
+
+    def _drs_port_note(self, ts, subject, server_ip, port):
+        """
+        Say the port out loud, once per (server, port).
+
+        A kernel BPF is compiled when the capture starts, so learning a port
+        mid-run CANNOT retroactively admit frames the filter already dropped
+        - and a DCSync client connects to the mapped port within
+        milliseconds of the reply, far faster than any filter could be
+        rebuilt.  So the follow does three honest things: it dissects that
+        port as DCERPC when the frames do reach us, it names the port in the
+        finding, and it tells the operator the one port to pin next run.
+        Admission still needs --dynamic-range or --rpc-port.
+        """
+        if (server_ip, port) in self.drs_port_logged:
+            return
+        self.drs_port_logged.add((server_ip, port))
+        self.emitter.emit(
+            ts, "RPC-DRS-PORT-LEARNED", subject,
+            {"interface": "epmapper", "drs_server": server_ip,
+             "drs_port": port, "source": "ept_map reply tower floor 4",
+             "note": f"pin with --rpc-port {port} to watch DRSUAPI on "
+                     f"{server_ip} without --dynamic-range"})
 
     def _epm_call(self, ts, subject, base, client_ip):
         q = self.epm_lookups.setdefault(client_ip, deque())
@@ -3231,8 +4367,19 @@ class RPCEngine:
                                      trailer["auth_value"], "rpc")
         if not pending:
             return
+        if (pending[0] == IF_EPM and pending[1] == EPM_MAP_OPNUM
+                and self.config.drs_epm_follow):
+            self._epm_follow(ts, subject, assoc, pdu, hdr, body, trailer,
+                             server_ip)
         self._tslicensing_outcome(ts, subject, pending, accepted=True)
         self._tsts_outcome(ts, subject, pending, accepted=True)
+        if pending[0] == IF_DRSUAPI:
+            # Volume of the dump, from the PDU header only - the stub stays
+            # sealed and unread.  CO_HEADER_LEN is the fixed 16-byte header
+            # plus the 8-byte response prologue.
+            assoc.drs_bytes += max(
+                0, hdr.get("frag_length", 0) - CO_HEADER_LEN - 8)
+            self._drs_outcome(ts, subject, assoc, pending, accepted=True)
         uuid, opnum, _ = pending
         if uuid != IF_NETLOGON or opnum not in NRPC_AUTH_OPNUMS:
             return
@@ -3255,6 +4402,8 @@ class RPCEngine:
         if pending:
             self._tslicensing_outcome(ts, subject, pending, accepted=False)
             self._tsts_outcome(ts, subject, pending, accepted=False)
+            if pending[0] == IF_DRSUAPI:
+                self._drs_outcome(ts, subject, assoc, pending, accepted=False)
 
     # -- NTLM / SPNEGO ---------------------------------------------------
     def _inspect_auth_value(self, ts, subject, assoc, auth_type, blob, transport):
@@ -3284,6 +4433,12 @@ class RPCEngine:
             base["pipe"] = assoc.pipe_name
 
         if mtype == NTLM_AUTHENTICATE:
+            # Remember who authenticated, so an enrollment request that names
+            # somebody else can be told from one that names its own requester.
+            user = (msg.get("user") or "").strip()
+            if user:
+                dom = (msg.get("domain") or "").strip()
+                assoc.ntlm_account = f"{dom}\\{user}" if dom else user
             if assoc.spnego_seen:
                 self.emitter.emit(ts, "RPC-NTLM-OVER-SPNEGO", subject, dict(
                     base, kerberos_offered=assoc.kerberos_seen))
@@ -3554,6 +4709,9 @@ class FlowManager:
 
     def server_port_for(self, sport: int, dport: int) -> int | None:
         watched = set(self.config.rpc_ports) | wsman_ports(self.config)
+        if self.config.drs_epm_follow:
+            for learned in self.rpc.learned_drs_ports.values():
+                watched |= learned
         if dport in watched:
             return dport
         if sport in watched:
@@ -3770,6 +4928,8 @@ def build_config(args) -> Config:
         local_nets=_parse_nets(args.local_net),
         dc_hosts=_parse_hosts(args.dc),
         ca_hosts=_parse_hosts(args.ca_host),
+        drs_replicators=_parse_hosts(args.drs_replicator),
+        drs_epm_follow=not args.no_drs_epm_follow,
         allow_clients=set(args.allow_client or []),
         allow_interfaces=set(u.lower() for u in (args.allow_interface or [])),
         rpc_ports=rpc_ports,
@@ -3914,10 +5074,24 @@ _ZEROLOGON_VERDICT_CODES = frozenset({
     "RPC-ZEROLOGON-ZERO-CHALLENGE", "RPC-ZEROLOGON-ZERO-CREDENTIAL",
     "RPC-ZEROLOGON-BRUTE-FORCE", "RPC-NETLOGON-PASSWORD-RESET-AFTER-BRUTE",
     "RPC-NETLOGON-UNSIGNED-BIND"})
-_DCSYNC_VERDICT_CODES = frozenset({"RPC-DCSYNC-CALL"})
+# v9: the DRSUAPI tier adds DCSync from a non-DC and DCShadow (a rogue replication
+# source). It is ARMED only when DCs are declared (Config.dc_hosts via `dcs`);
+# without them it stays silent rather than guessing which end is a DC.
+_DCSYNC_VERDICT_CODES = frozenset({"RPC-DCSYNC-CALL", "RPC-DRS-DCSYNC",
+                                   "RPC-DRS-DCSHADOW"})
+# v9: LSA secret access (how the DPAPI backup key is really taken) and the MS-RRP
+# hive save (secretsdump's registry path; SMB Watch sees the file read-back).
 _CREDTHEFT_VERDICT_CODES = frozenset({
     "RPC-BACKUPKEY-ACCESS", "RPC-NETLOGON-PASSWORD-GET",
-    "WINRM-BASIC-AUTH", "WINRM-UNENCRYPTED-PAYLOAD"})
+    "WINRM-BASIC-AUTH", "WINRM-UNENCRYPTED-PAYLOAD",
+    "RPC-LSA-SECRET-READ", "RPC-LSA-SECRET-WRITE", "RPC-WINREG-HIVE-SAVE"})
+# v9: AD CS escalations readable in an UNSEALED MS-ICPR enrollment request (ESC1 /
+# ESC3 / ESC6 / ESC15 (CVE-2024-49019) / ESC17). Sealed (PKT_PRIVACY) requests
+# are invisible, so silence there is not evidence of safety.
+_ADCS_VERDICT_CODES = frozenset({
+    "RPC-CERTENROLL-ESC1-SAN", "RPC-CERTENROLL-ESC3-AGENT",
+    "RPC-CERTENROLL-ESC6-SAN-ATTR", "RPC-CERTENROLL-ESC15-APP-POLICY",
+    "RPC-CERTENROLL-ESC17-DNS"})
 
 
 def _rpc_verdict(findings):
@@ -3930,6 +5104,8 @@ def _rpc_verdict(findings):
         return "zerologon", ranked
     if codes & _DCSYNC_VERDICT_CODES:
         return "dcsync", ranked
+    if codes & _ADCS_VERDICT_CODES:
+        return "adcs-abuse", ranked
     if codes & _CREDTHEFT_VERDICT_CODES:
         return "credential-exposure", ranked
     worst = max((SEVERITY_RANK.get(f.severity, 0) for f in kept), default=0)
@@ -4033,6 +5209,9 @@ def do_rpc_watch(interface=None, seconds=20, dcs=None, local_nets=None):
     weak crypto, unexpected DC), DCERPC auth-trailer posture (no-auth / no-integrity /
     downgrade), NTLM weaknesses (NTLMv1, no-MIC, no-signing, anonymous, LM key), DCSync /
     remote-exec / backup-key / EPM-sweep interface abuse, and WinRM/WS-Man posture.
+    v9 adds DCSync / DCShadow (armed by `dcs`), LSA secret read / write, MS-RRP hive
+    save, MS-CSRA CA administration and the AD CS ESC1 / ESC3 / ESC6 / ESC15 / ESC17
+    enrollment shapes in unsealed MS-ICPR requests.
     Authentication-COERCION is deferred to Relay/Coercion Watch. Never transmits."""
     if not interface:
         return {"success": False, "error": "no interface specified"}
@@ -4726,6 +5905,95 @@ def selftest():
           {"Host": "collector:5985", "Content-Length": "0"}), dport=5985)
     check("winrm-wec-subscription",
           "WINRM-WEC-SUBSCRIPTION" in h.codes, sorted(h.codes))
+
+    # 51-58. v9 tiers, built from the module author's own wire shapes.
+    def _st_ack(sec_addr):
+        sa = (sec_addr + "\x00").encode("ascii")
+        out = struct.pack("<HHI", 5840, 5840, 1) + struct.pack("<H", len(sa)) + sa
+        out += b"\x00" * ((4 - (len(out) % 4)) % 4)
+        out += struct.pack("<BBH", 1, 0, 0) + struct.pack("<HH", 0, 0)
+        return out + _st_uuid_wire(_NDR32) + struct.pack("<I", 2)
+
+    def _st_uni(value, handle=b"\x22" * 20):
+        body = (value + "\x00").encode("utf-16-le")
+        return (handle + struct.pack("<HHI", len(value.encode("utf-16-le")), len(body),
+                                     0x20000)
+                + struct.pack("<III", len(value) + 1, 0, len(value) + 1) + body)
+
+    def _st_assoc(h, iface, pipe, ops, ver=1, auth_type=None):
+        tr = _st_sec_trailer(auth_type or RPC_C_AUTHN_GSS_NEGOTIATE,
+                             RPC_C_AUTHN_LEVEL_CONNECT, _AUTH_TOKEN)
+        h.c2s(_st_co_pdu(PTYPE_BIND, _st_bind_body([(iface, ver)]), auth=tr))
+        h.s2c(_st_co_pdu(PTYPE_BIND_ACK, _st_ack(pipe)))
+        for i, (op, stub) in enumerate(ops):
+            h.c2s(_st_co_pdu(PTYPE_REQUEST, _st_request_body(op, stub),
+                             call_id=500 + i, auth=tr))
+
+    # MS-RRP hive save: secretsdump opens SAM then BaseRegSaveKey to a temp file.
+    h = _STHarness(client="10.0.0.9", server="10.0.0.1",
+                   local_nets=_parse_nets(["10.0.0.0/8"]))
+    _st_assoc(h, IF_WINREG, "\\PIPE\\winreg",
+              [(WINREG_CREATE_KEY, _st_uni("SAM")),
+               (WINREG_SAVE_KEY, _st_uni("..\\Temp\\AbCdEfGh.tmp"))])
+    hs = [f for f in h.watch.emitter.emitted if f.code == "RPC-WINREG-HIVE-SAVE"]
+    check("v9-winreg-hive-save", bool(hs) and hs[0].severity == "critical",
+          [(f.code, f.severity) for f in hs])
+    check("v9-hive-save-verdict-credential-exposure",
+          _rpc_verdict(h.watch.emitter.emitted)[0] == "credential-exposure",
+          _rpc_verdict(h.watch.emitter.emitted)[0])
+
+    # MS-LSAD secret read of the DPAPI domain backup key (G$BCKUPKEY_*).
+    h = _STHarness(client="10.0.0.9", server="10.0.0.1")
+    _st_assoc(h, IF_LSARPC, "\\PIPE\\lsarpc",
+              [(LSA_RETRIEVE_PRIVATE_DATA, _st_uni("G$BCKUPKEY_PREFERRED",
+                                                   handle=b"\x11" * 20))], ver=0)
+    rd = [f for f in h.watch.emitter.emitted if f.code == "RPC-LSA-SECRET-READ"]
+    check("v9-lsa-secret-read-backupkey", bool(rd) and rd[0].severity == "critical",
+          [(f.code, f.severity) for f in rd])
+
+    # DRSUAPI: DCSync (a non-DC pulling from a DC) and DCShadow (a non-DC acting as a
+    # replication source) - armed only when DCs are declared.
+    def _st_drs(opnum, client, server, dcs=("10.30.0.1", "10.30.0.2")):
+        cfg = {"rpc_ports": [135, 49200]}
+        if dcs:
+            cfg["dc_hosts"] = _parse_hosts(list(dcs))
+        w = RPCWatch(Config(**cfg))
+        w.feed(1.0, client, 40000, server, 49200,
+               _st_co_pdu(PTYPE_BIND, _st_bind_body([(IF_DRSUAPI, 1)])))
+        w.feed(1.1, server, 49200, client, 40000,
+               _st_co_pdu(PTYPE_BIND_ACK, _st_ack("\\PIPE\\drs")))
+        w.feed(2.0, client, 40000, server, 49200,
+               _st_co_pdu(PTYPE_REQUEST, _st_request_body(opnum, b"\x00" * 16),
+                          call_id=700))
+        return [f for f in w.emitter.emitted if f.code.startswith("RPC-DRS-DC")]
+    got = _st_drs(3, "10.30.0.66", "10.30.0.1")
+    check("v9-drs-dcsync-from-non-dc",
+          bool(got) and got[0].code == "RPC-DRS-DCSYNC" and got[0].severity == "critical",
+          [(f.code, f.severity) for f in got])
+    got = _st_drs(3, "10.30.0.1", "10.30.0.66")
+    check("v9-drs-dcshadow-rogue-source",
+          bool(got) and got[0].code == "RPC-DRS-DCSHADOW",
+          [(f.code, f.severity) for f in got])
+    check("v9-drs-dc-to-dc-silent", not _st_drs(3, "10.30.0.2", "10.30.0.1"))
+    check("v9-drs-disarmed-without-dcs", not _st_drs(3, "10.30.0.66", "10.30.0.1",
+                                                     dcs=()))
+
+    # MS-ICPR ESC6: a SAN supplied in the request ATTRIBUTES string.
+    h = _STHarness(client="10.0.0.9", server="10.0.0.1")
+    _st_assoc(h, IF_ICPR, "\\PIPE\\cert",
+              [(0, "CertificateTemplate:User\nsan:upn=Administrator@corp.local"
+                .encode("utf-16-le"))], auth_type=RPC_C_AUTHN_WINNT)
+    e6 = [f for f in h.watch.emitter.emitted if f.code == "RPC-CERTENROLL-ESC6-SAN-ATTR"]
+    check("v9-esc6-san-attr", bool(e6), sorted(h.codes))
+    check("v9-esc6-verdict-adcs-abuse",
+          _rpc_verdict(h.watch.emitter.emitted)[0] == "adcs-abuse",
+          _rpc_verdict(h.watch.emitter.emitted)[0])
+    h = _STHarness(client="10.0.0.9", server="10.0.0.1")
+    _st_assoc(h, IF_ICPR, "\\PIPE\\cert",
+              [(0, "CertificateTemplate:User".encode("utf-16-le"))],
+              auth_type=RPC_C_AUTHN_WINNT)
+    check("v9-plain-enrollment-silent",
+          not any(c.startswith("RPC-CERTENROLL-ESC") for c in h.codes), sorted(h.codes))
 
     # 27. Catalogue integrity: every declared code has a known severity.
     bad = [c for c, spec in FINDINGS.items() if spec[0] not in SEVERITY_RANK]

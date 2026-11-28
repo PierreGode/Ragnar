@@ -59,6 +59,10 @@ FILE_OWNERS = {
     'python/radiuswatch.py': 'RADIUS Watch',
     'python/ssdpwatch.py': 'SSDP/UPnP Watch',
     'python/certwatch.py': 'Cert Watch',
+    # v9 / v6: vendored engines run beside the in-app watchers for their new tiers.
+    'python/ldapwatch.py': 'LDAP Watch',
+    'python/ldapwatch_selftest.py': 'LDAP Watch',
+    'python/smbwatch.py': 'SMB / Kerberos Watch',
     'python/certwatch_selftest.py': 'Cert Watch',
     'python/ssdpwatch_selftest.py': 'SSDP/UPnP Watch',
     'python/httpwatch.py': 'HTTP Watch',
@@ -172,6 +176,10 @@ IGNORED_CVES = {'CVE-2024-99999',
 # Per-file CVEs that file only names (another detector's discipline, a corrected
 # mis-attribution), so they count as context there and never as a detection.
 FILE_CONTEXT_CVES = {
+    # LDAP Watch v9 engine: CVE-2025-26647 is named only to record that it does NOT
+    # reclassify X509SKI as a weak mapping (the ESC14 grading note) - nothing detects it.
+    'python/ldapwatch.py': {'CVE-2025-26647'},
+    'python/ldapwatch_selftest.py': {'CVE-2025-26647'},
     # httpwatch: CVE-2018-0732 is cited as TLS Watch's catalog discipline; CVE-2026-41417
     # is named in the CVE-2026-42580 note and the self-test only to record that it was
     # once mis-attributed to HTTP-004 and is deferred (see DEFERRED_CVES). v3: Confluence

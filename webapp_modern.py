@@ -2175,6 +2175,7 @@ _NI_CRITICAL = {
     'hijack',                                                           # fhrp/bgp
     'injection', 'rogue-router',                                        # ospf/eigrp/isis
     'poisoning', 'spoof-conflict', 'smbv1-active',                      # smb
+    'credential-dump',                                                  # smb v6 F-series (secretsdump hive read-back / credential store)
     'coercion-attempt', 'relay-suspected',                             # relay
     'rogue-speaker',                                                    # fhrp
     'rogue-redirect', 'rogue-ra', 'rogue-irdp',                         # ipv6/icmp
@@ -2183,6 +2184,7 @@ _NI_CRITICAL = {
     'crash-exploit',                                                   # ntp (oversize CVE-2016-9312 / mode-6 count overrun CVE-2019-6444/6443)
     'lag-hijack',                                                      # lacp (aggregation takeover: identity manip + member disruption)
     'zerologon', 'dcsync', 'credential-exposure',                     # rpc-netlogon (CVE-2020-1472 chain / DCSync / DPAPI backup-key / WinRM basic)
+    'adcs-abuse',                                                      # rpc-netlogon v9 (AD CS ESC1/3/6/15/17 enrollment request)
     'failover-manipulation',                                           # bfd (forged teardown / forced AdminDown / illegal state regression -> induced reconvergence)
     'segment-injection',                                               # sr-mpls (MPLS/SRH on a customer-facing port = label-injection / VRF-hopping primitive)
     'attack',                                                          # vendor guards: an exploitation primitive observed on the wire

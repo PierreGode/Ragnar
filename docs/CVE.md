@@ -10,9 +10,9 @@ detector works is in [nettools.md](nettools.md).
 
 ## Summary
 
-- **506** distinct CVE IDs
-- **417** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
-- **80** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
+- **509** distinct CVE IDs
+- **419** detected: a passive detector identifies the CVE's signature, exposure or exploit shape from traffic already on the wire
+- **81** context only: posture advisories and reference tables for byte-level parser bugs the text-based watchers cannot reconstruct, plus related CVEs attached to a shared attack shape (named for patch guidance, not identified per-CVE)
 - **6** active check: probed by the BLE Pentest action, which transmits (not part of the passive suite)
 - **3** card text only: named in a detector card's description as related context, not detected
 - Range **CVE-1999-0113** → **CVE-2026-132825**
@@ -40,8 +40,8 @@ detector works is in [nettools.md](nettools.md).
 | 2021 | 51 |
 | 2022 | 41 |
 | 2023 | 57 |
-| 2024 | 64 |
-| 2025 | 54 |
+| 2024 | 65 |
+| 2025 | 56 |
 | 2026 | 79 |
 
 ## By detector
@@ -73,7 +73,7 @@ detector works is in [nettools.md](nettools.md).
 | IS-IS Watch | 2 |
 | Juniper Guard | 9 |
 | LACP Watch | 1 |
-| LDAP Watch | 6 |
+| LDAP Watch | 8 |
 | Liebert Guard | 2 |
 | LLDP Watch | 30 |
 | MikroTik Guard | 19 |
@@ -86,7 +86,7 @@ detector works is in [nettools.md](nettools.md).
 | RDP Watch | 1 |
 | Relay / Coercion Watch | 2 |
 | RIP Watch | 5 |
-| RPC / NetLogon Watch | 23 |
+| RPC / NetLogon Watch | 24 |
 | SMB / Kerberos Watch | 5 |
 | SMTP Watch | 4 |
 | SNMP Watch | 5 |
@@ -473,6 +473,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2024-43532](https://nvd.nist.gov/vuln/detail/CVE-2024-43532) | RemoteRegistry NTLM relay | detected | RPC / NetLogon Watch | — |
 | [CVE-2024-44070](https://nvd.nist.gov/vuln/detail/CVE-2024-44070) | FRR bgp_attr_encap Tunnel-Encap crash | context only | BGP Path Watch | — |
 | [CVE-2024-47460](https://nvd.nist.gov/vuln/detail/CVE-2024-47460) |  | detected | Aruba Guard | — |
+| [CVE-2024-49019](https://nvd.nist.gov/vuln/detail/CVE-2024-49019) |  | detected | RPC / NetLogon Watch | — |
 | [CVE-2024-49112](https://nvd.nist.gov/vuln/detail/CVE-2024-49112) | LDAPNightmare | detected | LDAP Watch | — |
 | [CVE-2024-49113](https://nvd.nist.gov/vuln/detail/CVE-2024-49113) | LDAPNightmare | detected | LDAP Watch | — |
 | [CVE-2024-53677](https://nvd.nist.gov/vuln/detail/CVE-2024-53677) |  | detected | HTTP Watch | — |
@@ -503,6 +504,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2025-21595](https://nvd.nist.gov/vuln/detail/CVE-2025-21595) |  | card text only | Juniper Guard | — |
 | [CVE-2025-22474](https://nvd.nist.gov/vuln/detail/CVE-2025-22474) | Dell OS10 SSRF | detected | Dell Guard | — |
 | [CVE-2025-25613](https://nvd.nist.gov/vuln/detail/CVE-2025-25613) |  | detected | HTTP Watch | — |
+| [CVE-2025-26647](https://nvd.nist.gov/vuln/detail/CVE-2025-26647) |  | context only | LDAP Watch | — |
 | [CVE-2025-26651](https://nvd.nist.gov/vuln/detail/CVE-2025-26651) |  | detected | RPC / NetLogon Watch | — |
 | [CVE-2025-29969](https://nvd.nist.gov/vuln/detail/CVE-2025-29969) | EventLogin | detected | RPC / NetLogon Watch | — |
 | [CVE-2025-33073](https://nvd.nist.gov/vuln/detail/CVE-2025-33073) | SMB reflective relay | detected | SMB / Kerberos Watch | — |
@@ -520,6 +522,7 @@ detector works is in [nettools.md](nettools.md).
 | [CVE-2025-55182](https://nvd.nist.gov/vuln/detail/CVE-2025-55182) |  | detected | HTTP Watch | — |
 | [CVE-2025-58188](https://nvd.nist.gov/vuln/detail/CVE-2025-58188) |  | detected | Cert Watch | — |
 | [CVE-2025-59978](https://nvd.nist.gov/vuln/detail/CVE-2025-59978) |  | detected | Juniper Guard | — |
+| [CVE-2025-60704](https://nvd.nist.gov/vuln/detail/CVE-2025-60704) |  | detected | LDAP Watch | — |
 | [CVE-2025-61099](https://nvd.nist.gov/vuln/detail/CVE-2025-61099) |  | context only | OSPF Watch | — |
 | [CVE-2025-61101](https://nvd.nist.gov/vuln/detail/CVE-2025-61101) |  | context only | SR-MPLS Watch | — |
 | [CVE-2025-61103](https://nvd.nist.gov/vuln/detail/CVE-2025-61103) |  | context only | OSPF Watch, SR-MPLS Watch | — |

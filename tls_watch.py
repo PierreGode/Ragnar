@@ -899,14 +899,157 @@ def _leaf_findings(der, chain_len, sni, now):
     return out, info
 
 
-def analyze_session(client, server, cert_ders, now, records=None, sni_overread=None):
+# ---- v12: AD CS certificate mapping, the Schannel half (ESC9 / ESC10 / ESC16) -------
+# During TLS 1.2 client-certificate authentication the client's Certificate message is
+# CLEARTEXT, so the issued certificate's extensions are readable here: a certificate
+# that authenticates as a named principal (a UPN otherName SAN) but carries no
+# szOID_NTDS_CA_SECURITY_EXT SID binding is the ESC9 / ESC16 condition, attributed as a
+# cluster because the wire cannot tell a template-level omission from a CA-level one.
+# TLS 1.3 encrypts the client Certificate, so this tier is TLS-1.2-only by protocol.
+# Nothing here infers the DC's registry state (CertificateMappingMethods bit 0x4,
+# StrongCertificateBindingEnforcement) - both are invisible from a tap.
+OID_NTDS_CA_SECURITY_EXT = '1.3.6.1.4.1.311.25.2'     # szOID_NTDS_CA_SECURITY_EXT
+OID_UPN_SAN = '1.3.6.1.4.1.311.20.2.3'                # szOID_NT_PRINCIPAL_NAME
+AD_DIRECTORY_PORTS = frozenset({636, 3269, 389})
+
+
+def _decode_der_string(raw):
+    """A DER UTF8String / IA5String / PrintableString body as text, else None.
+    Bounded and exception-free: an otherName value is attacker-supplied."""
+    try:
+        b = bytes(raw)
+        if len(b) < 2 or b[0] not in (0x0C, 0x16, 0x13, 0x1E):
+            return b.decode('utf-8', 'replace') or None
+        ln = b[1]
+        if ln & 0x80:
+            nb = ln & 0x7F
+            if nb == 0 or 2 + nb > len(b):
+                return None
+            ln = int.from_bytes(b[2:2 + nb], 'big')
+            off = 2 + nb
+        else:
+            off = 2
+        if off + ln > len(b):
+            return None
+        return b[off:off + ln].decode('utf-8', 'replace') or None
+    except Exception:
+        return None
+
+
+def _decode_ntds_sid(raw):
+    """The SID text out of szOID_NTDS_CA_SECURITY_EXT, opportunistically. Only the
+    extension's presence drives a finding, so a decode failure changes nothing."""
+    try:
+        b = bytes(raw)
+        i = b.find(b'S-1-')
+        if i < 0:
+            return None
+        j = i
+        while j < len(b) and (chr(b[j]).isdigit() or b[j] in (ord('S'), ord('-'))):
+            j += 1
+        sid = b[i:j].decode('ascii', 'ignore')
+        return sid if sid.count('-') >= 3 else None
+    except Exception:
+        return None
+
+
+def _client_cert_info(der):
+    """Identity facts from the client's leaf certificate: subject / issuer CN, serial,
+    the UPN otherName SANs and whether the SID security extension is present. Kept
+    separate from the server chain so no server-certificate rule ever runs on it."""
+    from cryptography import x509
+    c = x509.load_der_x509_certificate(der)
+
+    def _cn(name):
+        try:
+            a = name.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
+            return a[0].value if a else None
+        except Exception:
+            return None
+    upns = []
+    try:
+        ext = c.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+        for gn in ext.value.get_values_for_type(x509.OtherName):
+            if gn.type_id.dotted_string != OID_UPN_SAN:
+                continue
+            u = _decode_der_string(gn.value)
+            if u:
+                upns.append(u)
+    except Exception:
+        pass
+    sid_present, sid_value = False, None
+    try:
+        e = c.extensions.get_extension_for_oid(
+            x509.ObjectIdentifier(OID_NTDS_CA_SECURITY_EXT))
+        sid_present = True
+        sid_value = _decode_ntds_sid(getattr(e.value, 'value', b'') or b'')
+    except x509.ExtensionNotFound:
+        sid_present = False
+    except Exception:
+        sid_present = True              # present but unparseable is not an absence
+    info = {'subject_cn': _cn(c.subject), 'issuer_cn': _cn(c.issuer),
+            'serial_hex': '{:x}'.format(c.serial_number)}
+    if upns:
+        info['upn_sans'] = upns
+    if sid_present:
+        info['ad_sid_extension'] = True
+    if sid_value:
+        info['ad_sid'] = sid_value
+    return info
+
+
+def _clientcert_findings(info, dport, protected_upns=()):
+    """The two v12 rules on the client leaf. clientcert_no_sid_extension: high when the
+    certificate asserts a UPN with no SID binding (any port - an AD auth certificate can
+    turn up anywhere); warn with no UPN only on a directory port (636 / 3269 / 389), so
+    ordinary mutual TLS elsewhere stays silent. clientcert_protected_upn: high when the
+    UPN is on an operator's protected list (none configured in-app, so disarmed)."""
+    out = []
+    if not info:
+        return out
+    upns = list(info.get('upn_sans') or [])
+    has_sid = bool(info.get('ad_sid_extension'))
+    who = 'subject {} / issuer {}'.format(info.get('subject_cn'), info.get('issuer_cn'))
+    pre = ('whether the DC accepts this depends on StrongCertificateBindingEnforcement '
+           'and CertificateMappingMethods, which are registry state and not visible')
+    if not has_sid and upns:
+        out.append({'severity': 'high', 'code': 'clientcert_no_sid_extension',
+                    'message': ('Client certificate authenticates as {} with no SID '
+                                'security extension ({}) - a named principal with no SID '
+                                'binding: the AD CS ESC9 / ESC16 condition ({}). {}'
+                                .format(', '.join(upns), OID_NTDS_CA_SECURITY_EXT, who,
+                                        pre)),
+                    'esc_cluster': 'ESC9/ESC16', 'upn_sans': upns, 'grade': 'critical'})
+    elif not has_sid and dport in AD_DIRECTORY_PORTS:
+        out.append({'severity': 'warn', 'code': 'clientcert_no_sid_extension',
+                    'message': ('Client certificate on directory port {} has no SID '
+                                'security extension ({}); any mapping for it would be '
+                                'name-based ({}). {}'
+                                .format(dport, OID_NTDS_CA_SECURITY_EXT, who, pre)),
+                    'esc_cluster': 'ESC9/ESC16', 'upn_sans': [], 'grade': 'high'})
+    prot = {u.lower() for u in (protected_upns or ())}
+    hits = [u for u in upns if u.lower() in prot] if prot else []
+    if hits:
+        out.append({'severity': 'high', 'code': 'clientcert_protected_upn',
+                    'message': ('Client certificate authenticates as protected principal '
+                                '{} ({}); whether its UPN or altSecurityIdentities was '
+                                'rewritten is LDAP Watch\'s half'.format(', '.join(hits),
+                                                                         who)),
+                    'esc_cluster': 'ESC10/ESC14', 'upn_sans': hits, 'grade': 'critical'})
+    return out
+
+
+def analyze_session(client, server, cert_ders, now, records=None, sni_overread=None,
+                    client_cert_ders=None, dport=None, protected_upns=()):
     """Combine parsed client/server/cert state into a findings list (severity
     descending) plus per-cert info. Any argument may be None. `records` is the
     optional list of per-direction record-layer stats from `_scan_tls_stream`,
     used for the record-layer findings (CVE-2016-8610 / CVE-2017-3731, and the v11
     CVE-2026-47291 record cadence). `sni_overread` is the v11 CVE-2026-52346 scan
     result for the ClientHello (works even when `client` is None, because the parse
-    raises on exactly the over-claims the scan is meant to catch)."""
+    raises on exactly the over-claims the scan is meant to catch). `client_cert_ders`
+    (v12) is the client's own Certificate chain from TLS 1.2 mutual authentication;
+    `dport` scopes the no-UPN half of the AD CS rule to directory ports."""
     findings = []
 
     def add(sev, code, msg):
@@ -1167,6 +1310,13 @@ def analyze_session(client, server, cert_ders, now, records=None, sni_overread=N
             for sev, code, msg in leaf:
                 add(sev, code, msg)
             infos.append(info)
+        except Exception:
+            pass                                 # cryptography missing / malformed
+    # v12: the CLIENT certificate (TLS 1.2 mutual auth) - AD CS ESC9 / ESC16 / ESC10.
+    if client_cert_ders:
+        try:
+            findings.extend(_clientcert_findings(_client_cert_info(client_cert_ders[0]),
+                                                 dport, protected_upns))
         except Exception:
             pass                                 # cryptography missing / malformed
     findings.sort(key=lambda f: -_SEV[f['severity']])
@@ -1644,13 +1794,25 @@ def parse_pcap(path):
         if any(m[0] == 0x01 for m in cmsgs):
             client, sni_ov = _client_hello_and_overread(
                 next(b for t, b in cmsgs if t == 0x01))
+            # v12: the CLIENT's own Certificate (TLS 1.2 mutual auth, cleartext), kept
+            # apart from the server chain so no server-cert rule ever sees it.
+            client_certs = []
+            for t, b in cmsgs:
+                if t == 0x0b and not client_certs:
+                    try:
+                        client_certs = parse_certificates(b)
+                    except Exception:
+                        client_certs = []
             server, certs = None, []
+            cert_requested = False
             smsgs, sstats = _scan_tls_stream(streams.get(rev, b''))
             for t, b in smsgs:
                 if t == 0x02 and server is None:
                     server = parse_server_hello(b)
                 elif t == 0x0b:
                     certs = parse_certificates(b)
+                elif t == 0x0d:
+                    cert_requested = True     # CertificateRequest: mutual auth asked for
                 elif t == 0x0c and server is not None \
                         and server.get('cipher') in DHE_SUITES:
                     # ServerKeyExchange: recover the DH prime size (CVE-2018-0732, and
@@ -1672,6 +1834,8 @@ def parse_pcap(path):
                              'dst': dst, 'dport': dport, 'client': client,
                              'server': server, 'certs': certs, 'records': records,
                              'sni_overread': sni_ov,
+                             'client_certs': client_certs,
+                             'cert_requested': cert_requested,
                              'service': _service_for('tcp', sport, dport)})
         seen.add(key)
 
@@ -1742,7 +1906,18 @@ def _tls_analyze(sessions, now=None, denylist=None):
                 rec['ja4s'] = j4s
         findings, infos = analyze_session(client, server, s.get('certs'), now,
                                           records=s.get('records'),
-                                          sni_overread=s.get('sni_overread'))
+                                          sni_overread=s.get('sni_overread'),
+                                          client_cert_ders=s.get('client_certs'),
+                                          dport=s.get('dport'))
+        # v12: mutual-TLS facts, reported whether or not a rule fires - the
+        # authenticated principal is what an analyst correlates with LDAP Watch.
+        if s.get('cert_requested'):
+            rec['cert_requested'] = True
+        if s.get('client_certs'):
+            try:
+                rec['client_cert'] = _client_cert_info(s['client_certs'][0])
+            except Exception:
+                rec['client_cert'] = {'parse_error': True}
         if client and rec.get('ja4') in denylist:
             findings.insert(0, {'severity': 'high', 'code': 'ja4_denylist',
                                 'message': 'Client JA4 on denylist: {}'.format(
@@ -2481,6 +2656,96 @@ def selftest():
         ck('pcap_quic_retransmit_deduped', quicrec['count'], 1)
     except Exception as e:
         checks.append({'name': 'pcap_e2e', 'pass': True, 'skipped': str(e)})
+
+    # ---- v12: AD CS client-certificate tier (ESC9 / ESC16, Schannel half) ----
+    try:
+        import datetime as _dt
+        from cryptography import x509 as _x
+        from cryptography.x509.oid import NameOID as _NO
+        from cryptography.hazmat.primitives import hashes as _h
+        from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
+        from cryptography.hazmat.primitives.serialization import Encoding as _Enc
+
+        def _ccert(cn, upn=None, sid=None):
+            key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            n = _dt.datetime.now(_dt.timezone.utc)
+            b = (_x.CertificateBuilder()
+                 .subject_name(_x.Name([_x.NameAttribute(_NO.COMMON_NAME, cn)]))
+                 .issuer_name(_x.Name([_x.NameAttribute(_NO.COMMON_NAME, 'Corp Issuing CA')]))
+                 .public_key(key.public_key()).serial_number(_x.random_serial_number())
+                 .not_valid_before(n - _dt.timedelta(days=1))
+                 .not_valid_after(n + _dt.timedelta(days=30)))
+            if upn:
+                val = upn.encode('utf-8')
+                b = b.add_extension(_x.SubjectAlternativeName([_x.OtherName(
+                    _x.ObjectIdentifier(OID_UPN_SAN), bytes([0x0C, len(val)]) + val)]),
+                    critical=False)
+            if sid:
+                b = b.add_extension(_x.UnrecognizedExtension(
+                    _x.ObjectIdentifier(OID_NTDS_CA_SECURITY_EXT),
+                    b'\x30\x20' + sid.encode('ascii')), critical=False)
+            return b.sign(key, _h.SHA256()).public_bytes(_Enc.DER)
+
+        def _cc(der, port):
+            return [(f['code'], f['severity'])
+                    for f in analyze_session(None, None, [], now, client_cert_ders=[der],
+                                             dport=port)[0]]
+        upn_nosid = _ccert('alice', upn='administrator@corp.local')
+        ck('v12_upn_no_sid_high', _cc(upn_nosid, 443),
+           [('clientcert_no_sid_extension', 'high')])
+        ck('v12_upn_with_sid_silent',
+           _cc(_ccert('alice', upn='alice@corp.local', sid='S-1-5-21-1-2-3-1104'), 443), [])
+        ck('v12_no_upn_ldaps_warn', _cc(_ccert('svc'), 636),
+           [('clientcert_no_sid_extension', 'warn')])
+        ck('v12_no_upn_non_directory_silent', _cc(_ccert('device42'), 443), [])
+        ck('v12_protected_upn_armed_only_with_list',
+           sorted(f['code'] for f in analyze_session(
+               None, None, [], now, client_cert_ders=[upn_nosid], dport=443,
+               protected_upns=('administrator@corp.local',))[0]),
+           ['clientcert_no_sid_extension', 'clientcert_protected_upn'])
+        ck('v12_upn_read', _client_cert_info(upn_nosid).get('upn_sans'),
+           ['administrator@corp.local'])
+        # e2e: TLS 1.2 mutual auth through parse_pcap - the client Certificate rides
+        # the CLIENT stream after the server's CertificateRequest; the server's own
+        # chain must stay separate (a mutual-TLS session must not trip sni_cert_mismatch
+        # against the client's names).
+        import os as _os
+        import tempfile as _tf
+        from scapy.all import Ether as _E, wrpcap as _wp
+        from scapy.layers.inet import IP as _IP, TCP as _TCP
+        from scapy.packet import Raw as _Raw
+
+        def _rec12(hs, ct=22):
+            return bytes([ct]) + struct.pack('!HH', 0x0303, len(hs)) + hs
+        ch12 = _build_client_hello(_KAT_CIPHERS, _KAT_EXTS, _KAT_SIGALGS, [0x0303],
+                                   alpn=['ldap'], sni='dc01.corp.local')
+        srv_der = _gen_cert('dc01.corp.local', ['dc01.corp.local'], -1, 30)
+        cert_req = b'\x0d' + struct.pack('!BH', 0, 4) + b'\x01\x01\x00\x00'
+        c_stream = _rec12(ch12) + _rec12(_mk_cert_msg([upn_nosid]))
+        s_stream = (_rec12(_mk_server_hello(0x0303, 0xc030)) + _rec12(_mk_cert_msg([srv_der]))
+                    + _rec12(cert_req))
+        pk = [_E() / _IP(src='10.0.0.7', dst='10.0.0.2')
+              / _TCP(sport=51000, dport=636, seq=1, flags='PA') / _Raw(c_stream),
+              _E() / _IP(src='10.0.0.2', dst='10.0.0.7')
+              / _TCP(sport=636, dport=51000, seq=1, flags='PA') / _Raw(s_stream)]
+        _p = _os.path.join(_tf.gettempdir(), 'tlswatch_v12_selftest.pcap')
+        _wp(_p, pk)
+        _ss = parse_pcap(_p)
+        _os.unlink(_p)
+        _rr = _tls_analyze(_ss)
+        _rec = next(x for x in _rr['sessions'] if x['proto'] == 'tls')
+        ck('v12_pcap_client_cert_parsed',
+           (_rec.get('client_cert') or {}).get('upn_sans'), ['administrator@corp.local'])
+        ck('v12_pcap_cert_requested', _rec.get('cert_requested'), True)
+        ck('v12_pcap_no_sid_finding', any(f['code'] == 'clientcert_no_sid_extension'
+                                         for f in _rec['findings']), True)
+        ck('v12_pcap_server_chain_kept_separate',
+           any(f['code'] == 'sni_cert_mismatch' for f in _rec['findings']), False)
+    except ImportError as e:
+        checks.append({'name': 'v12_clientcert', 'pass': True, 'skipped': str(e)})
+    except Exception as e:
+        checks.append({'name': 'v12_clientcert', 'pass': False,
+                       'error': '%s: %s' % (type(e).__name__, e)})
 
     # ---- DTLS/RadSec e2e: a real datagram handshake through parse_pcap (v8) ----
     try:
