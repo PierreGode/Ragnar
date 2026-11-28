@@ -34,12 +34,13 @@ Five modules updated together. Each watches the half of an attack it can see on 
   - The vendored LDAP (353) and SMB (261) suites run inside the Detector Self-Test.
   - Mutation checks on the new Ragnar integration code caught 5/5 for LDAP and 6/6 for TLS.
   - Module tiers on this box:
-    - RPC: 912 unit / 997 conformance / 194 pcap / 595 README.
-    - LDAP: 357 / 602 / 13 pcap / 136 README.
+    - RPC: 912 unit / 997 conformance / 253 NDR cross-check against impacket / 194 pcap / 595 README.
+    - LDAP: 357 / 602 / 1704 BER cross-check against asn1crypto + pyasn1 / 13 pcap / 136 README.
     - SMB: 261.
     - TLS: 786 conformance / 637 self-test.
-    - HTTP: 2494 / 554 conformance / 776 cross-check / 543 parity.
-  - Skipped because a test oracle is not installed here: impacket (RPC and LDAP cross-checks), GnuTLS CLI / aioquic / scapy QUIC (4 TLS cross-check checks), and the Java jars / rack / Mono (HTTP).
+    - HTTP: 2494 / 554 conformance / 776 cross-check / 94 NTLM checks against impacket / 543 parity / bite 237 of 238. The one escape is the bare-IPv6 ProxyLogon case that only the .NET check covers; Ragnar's own scenario still catches it on v8.
+  - The cross-check libraries were installed in a scratch environment only, not on the system.
+  - Skipped because a test oracle is not installed here: GnuTLS CLI / aioquic / the scapy QUIC layer (4 TLS cross-check checks), and the Java jars / rack / Mono (HTTP).
 
 ### 2026-11-26
 
